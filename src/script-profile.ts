@@ -16,7 +16,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { type DebuggerMessage, DebuggerStream, framedCommand, type GodotValue } from './godot-variant.js';
 
 /** One function's totals, keyed by the signature the engine compiled into it. */
-export interface FunctionTotals {
+interface FunctionTotals {
   readonly calls: number;
   readonly selfSeconds: number;
   readonly totalSeconds: number;
@@ -70,7 +70,7 @@ export function readProfileFile(path: string): ProfileFile | null {
  * and clamps nothing on the game's side; this is its own buffer's default size
  * (`debug/settings/profiler/max_functions`), so a frame is never cut short of what was called.
  */
-export const FRAME_FUNCTIONS = 16384;
+const FRAME_FUNCTIONS = 16384;
 
 /** The command that switches the profiler on, as the editor sends it: `[true, [count, native]]`. */
 export function profilerOn(): Uint8Array {
@@ -157,7 +157,12 @@ export class ProfileAggregate {
     at += 1;
     for (let index = 0; index < values; index += 5) {
       const [id, calls, self, total] = data.slice(at + index, at + index + 4);
-      if (typeof id !== 'number' || typeof calls !== 'number' || typeof self !== 'number' || typeof total !== 'number') {
+      if (
+        typeof id !== 'number' ||
+        typeof calls !== 'number' ||
+        typeof self !== 'number' ||
+        typeof total !== 'number'
+      ) {
         return false;
       }
       const name = this.names.get(id) ?? `#${id}`;
@@ -234,7 +239,9 @@ export function profiledFunctions(
       };
     })
     .sort((a, b) => b.selfMs - a.selfMs || b.totalMs - a.totalMs || a.function.localeCompare(b.function));
-  const scriptMs = ms(Object.values(totals.functions).reduce((sum, one) => sum + (one.calls > 0 ? one.selfSeconds : 0), 0));
+  const scriptMs = ms(
+    Object.values(totals.functions).reduce((sum, one) => sum + (one.calls > 0 ? one.selfSeconds : 0), 0),
+  );
   return {
     functions: rows.slice(0, limit),
     omitted: Math.max(0, rows.length - limit),

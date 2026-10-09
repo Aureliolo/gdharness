@@ -81,15 +81,6 @@ import {
 } from '../src/editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
-import { DebuggerStream, decodeVariant, framedCommand } from '../src/godot-variant.js';
-import {
-  ProfileAggregate,
-  type ProfileTotals,
-  profiledFunctions,
-  profilerOn,
-  signatureParts,
-  withEngineArguments,
-} from '../src/script-profile.js';
 import { occurrencesOf, regionsOf, shapeOf as scriptShapeOf } from '../src/gdscript-source.js';
 import {
   anEditorIsStillComing,
@@ -100,6 +91,7 @@ import {
   mayYetConnect,
   theEditorHasComeBack,
 } from '../src/godot-bridge.js';
+import { DebuggerStream, decodeVariant, framedCommand } from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath } from '../src/harnesses.js';
 import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
@@ -189,6 +181,14 @@ import {
   untilDiscarded,
 } from '../src/scratch.js';
 import { type CheckScript, originsOf, withoutListed } from '../src/script-origins.js';
+import {
+  ProfileAggregate,
+  type ProfileTotals,
+  profiledFunctions,
+  profilerOn,
+  signatureParts,
+  withEngineArguments,
+} from '../src/script-profile.js';
 import {
   aboveTheRunner,
   captureDestinationRefusal,
@@ -797,7 +797,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   const text = (value: string, nul = false): void => {
     const encoded = [...new TextEncoder().encode(value), ...(nul ? [0] : [])];
     u32(encoded.length);
-    bytes.push(...encoded, ...new Array<number>((4 - (encoded.length % 4)) % 4).fill(0));
+    bytes.push(...encoded, ...Array.from({ length: (4 - (encoded.length % 4)) % 4 }, () => 0));
   };
   u32(28);
   u32(6);
@@ -837,7 +837,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
 
   // The command decodes back to what the game checks: a String name, thread 1, then the data.
   const command = profilerOn();
-  assert.equal(new DataView(command.buffer).getUint32(0, true), command.length - 4, 'its length, little-endian');
+  assert.equal(
+    new DataView(command.buffer).getUint32(0, true),
+    command.length - 4,
+    'its length, little-endian',
+  );
   assert.deepEqual(decodeVariant(command.subarray(4)), ['profiler:servers', 1, [true, [16384, false]]]);
 
   // Messages however the reads cut them, and one this reader cannot take skipped on its own.
@@ -864,15 +868,42 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   take('servers:function_signature', ['res://w.gd::6::Work.square', 0]);
   take('servers:function_signature', ['res://w.gd::10::Work.busy', 1]);
   const frame = (calls: number): unknown[] => [
-    7, 0.016, 0.01, 0, 0.016, 0.004, 1, 'physics_2d', 4, 'step', 0.001, 'flush', 0.0, 10,
-    0, calls, 0.002, 0.002, 0, 1, 1, 0.001, 0.003, 0,
+    7,
+    0.016,
+    0.01,
+    0,
+    0.016,
+    0.004,
+    1,
+    'physics_2d',
+    4,
+    'step',
+    0.001,
+    'flush',
+    0.0,
+    10,
+    0,
+    calls,
+    0.002,
+    0.002,
+    0,
+    1,
+    1,
+    0.001,
+    0.003,
+    0,
   ];
   take('servers:profile_frame', frame(100));
   take('servers:profile_frame', frame(50));
   take('servers:profile_frame', [1, 2, 3]);
   const summed = aggregate.snapshot();
   assert.deepEqual(
-    [summed.frames, summed.complete, summed.unreadable, summed.functions['res://w.gd::6::Work.square']?.calls],
+    [
+      summed.frames,
+      summed.complete,
+      summed.unreadable,
+      summed.functions['res://w.gd::6::Work.square']?.calls,
+    ],
     [2, false, 1, 150],
     JSON.stringify(summed),
   );
@@ -884,7 +915,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'the total is what the frames add up to, so it replaces them',
   );
 
-  assert.deepEqual(signatureParts('res://w.gd::10::Work.busy'), { script: 'res://w.gd', line: 10, function: 'Work.busy' });
+  assert.deepEqual(signatureParts('res://w.gd::10::Work.busy'), {
+    script: 'res://w.gd',
+    line: 10,
+    function: 'Work.busy',
+  });
   assert.deepEqual(signatureParts('res://s.tscn::GDScript_ab::7::f(lambda)'), {
     script: 'res://s.tscn::GDScript_ab',
     line: 7,
@@ -929,21 +964,39 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       { through: 'gdharness', running: false, totals: null, coveredMs: 0, runtimeAddon: true, ...reading },
       30,
     );
-  const say = (reading: Partial<Parameters<typeof profileAnswer>[0]>): string => String(answer(reading)['note']);
+  const say = (reading: Partial<Parameters<typeof profileAnswer>[0]>): string =>
+    String(answer(reading)['note']);
   assert.match(say({ running: true }), /^The game has not connected to the profiler yet/);
   assert.match(say({}), /^The game never connected to the profiler, so nothing was measured/);
-  assert.equal(answer({ totals: totals({}) })['note'], undefined, 'the engine’s own totals need nothing said');
+  assert.equal(
+    answer({ totals: totals({}) })['note'],
+    undefined,
+    'the engine’s own totals need nothing said',
+  );
   const partial = { ...totals({}), complete: false };
-  assert.match(say({ running: true, totals: partial }), /^The run is still going, so these are the 3 frames summed so far, written at most half a second behind\.$/);
+  assert.match(
+    say({ running: true, totals: partial }),
+    /^The run is still going, so these are the 3 frames summed so far, written at most half a second behind\.$/,
+  );
   assert.match(say({ running: true, totals: partial, through: 'editor' }), /summed so far\.$/);
   assert.match(say({ totals: { ...partial, frames: 1 } }), /^These are the one frame that arrived, summed/);
-  assert.doesNotMatch(say({ totals: partial }), /runtime addon/, 'a project with the addon is not told to install it');
+  assert.doesNotMatch(
+    say({ totals: partial }),
+    /runtime addon/,
+    'a project with the addon is not told to install it',
+  );
   assert.match(
     say({ totals: { ...partial, frames: 0 }, runtimeAddon: false, through: 'editor' }),
     /ended before a frame of the profile reached the editor.*This project has no gdharness runtime addon/,
   );
-  assert.match(say({ totals: { ...totals({}), unreadable: 1 } }), /^1 message from the game could not be read/);
-  assert.match(say({ totals: { ...totals({}), unreadable: 2 } }), /^2 messages from the game could not be read/);
+  assert.match(
+    say({ totals: { ...totals({}), unreadable: 1 } }),
+    /^1 message from the game could not be read/,
+  );
+  assert.match(
+    say({ totals: { ...totals({}), unreadable: 2 } }),
+    /^2 messages from the game could not be read/,
+  );
 }
 
 async function turnedAwayAtTheBridge(
@@ -10982,7 +11035,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 45, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 46, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -23996,9 +24049,13 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
     );
   };
   try {
-    cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
-      recursive: true,
-    });
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
     writeFileSync(join(project, 'project.godot'), settings(true));
     mkdirSync(join(project, 'harness'));
     writeFileSync(
@@ -24052,8 +24109,9 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
     try {
       await server.initialize('regression-test');
       const call = async (args: Record<string, unknown>): Promise<string> =>
-        textOf(await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ??
-        '';
+        textOf(
+          await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        ) ?? '';
       const profiledRun = async (sceneName: string, profile: boolean): Promise<unknown> => {
         const started = await call({
           op: 'start',
@@ -24079,7 +24137,11 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       const rows = asArray(get(whole, 'functions'));
       const row = (name: string): unknown => rows.find((one) => get(one, 'function') === name);
       assert.deepEqual(
-        [get(row('Work.square'), 'script'), get(row('Work.square'), 'line'), get(row('Work.square'), 'calls')],
+        [
+          get(row('Work.square'), 'script'),
+          get(row('Work.square'), 'line'),
+          get(row('Work.square'), 'calls'),
+        ],
         ['res://harness/work.gd', 6, 200000],
         `square, at the line its body starts, called once per round: ${wholeShown}`,
       );
@@ -24089,7 +24151,11 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         `busy, called once from _ready: ${wholeShown}`,
       );
       const selves = rows.map((one) => Number(get(one, 'selfMs')));
-      assert.deepEqual(selves, [...selves].sort((a, b) => b - a), `sorted by self time: ${wholeShown}`);
+      assert.deepEqual(
+        selves,
+        [...selves].sort((a, b) => b - a),
+        `sorted by self time: ${wholeShown}`,
+      );
       assert.ok(Number(get(whole, 'scriptMs')) > 0, wholeShown);
 
       const unprofiled = await profiledRun('once', false);
@@ -24115,7 +24181,11 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       const summedShown = JSON.stringify(summed);
       assert.equal(get(summed, 'complete'), false, summedShown);
       assert.ok(Number(get(summed, 'frames')) >= 25, `the frames that reached it: ${summedShown}`);
-      assert.match(String(get(summed, 'note')), /frames that arrived, summed, without the engine's own totals/, summedShown);
+      assert.match(
+        String(get(summed, 'note')),
+        /frames that arrived, summed, without the engine's own totals/,
+        summedShown,
+      );
       const perFrame = asArray(get(summed, 'functions')).find((one) => get(one, 'function') === 'each_frame');
       assert.ok(Number(get(perFrame, 'calls')) >= 25, `called once a frame: ${summedShown}`);
     } finally {
@@ -27374,8 +27444,9 @@ function testEveryToolNamedInProseIsATool(): void {
   const names = new Set(TOOL_SPECS.map((spec) => spec.name));
   const families = [...new Set(TOOL_SPECS.map((spec) => spec.name.split('_')[0]))];
   // Words this project owns or reads that are shaped like a tool and are not one: the fields the
-  // bridge sends the addon, the autoload the runtime installs, a section of project.godot, and the
-  // gdUnit4 setting a test run obeys on script errors. Named one
+  // bridge sends the addon, the autoload the runtime installs, a section of project.godot, the
+  // gdUnit4 setting a test run obeys on script errors, and the signal and the message the engine's
+  // debugger speaks in, which the profiler reads. Named one
   // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
   // and called a tool or called vocabulary.
   const notTools = new Set([
@@ -27396,6 +27467,8 @@ function testEveryToolNamedInProseIsATool(): void {
     'debug_adapter',
     'editor_plugins',
     'script_error',
+    'debug_data',
+    'debug_enter',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.

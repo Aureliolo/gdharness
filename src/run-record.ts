@@ -372,7 +372,9 @@ function recordAt(path: string): RunRecord | null {
       ? { servedBy: fields['servedBy'] }
       : {}),
     ...(typeof fields['keeper'] === 'string' && fields['keeper'] !== '' ? { keeper: fields['keeper'] } : {}),
-    ...(typeof fields['profile'] === 'string' && fields['profile'] !== '' ? { profile: fields['profile'] } : {}),
+    ...(typeof fields['profile'] === 'string' && fields['profile'] !== ''
+      ? { profile: fields['profile'] }
+      : {}),
     arguments: Array.isArray(args) ? args.filter((value): value is string => typeof value === 'string') : [],
     ...(typeof fields['command'] === 'string' ? { command: fields['command'] } : {}),
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
@@ -811,7 +813,10 @@ function ageMs(path: string, now: number): number {
 export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now()): void {
   const directory = runsDirectory();
   const kept = new Set(
-    everyRunRecord().flatMap((record) => [record.transcript, ...(record.profile === undefined ? [] : [record.profile])]),
+    everyRunRecord().flatMap((record) => [
+      record.transcript,
+      ...(record.profile === undefined ? [] : [record.profile]),
+    ]),
   );
   let entries: string[];
   try {

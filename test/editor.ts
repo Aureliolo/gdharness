@@ -4595,7 +4595,13 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
   await attempt('editor_run', { op: 'stop' });
   const twice = async (times: number): Promise<void> => {
     for (let round = 0; round < times; round += 1) {
-      await call('runtime_invoke', { projectPath: project, op: 'call', nodePath: '/root/Main', method: '_twice', args: [round] });
+      await call('runtime_invoke', {
+        projectPath: project,
+        op: 'call',
+        nodePath: '/root/Main',
+        method: '_twice',
+        args: [round],
+      });
     }
   };
   const callsOfTwice = async (): Promise<number> => {
@@ -4617,15 +4623,26 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     const first = await call('editor_run', { op: 'profile', limit: 100 });
     assert.equal(get(first, 'through'), 'editor', JSON.stringify(first));
     assert.equal(get(first, 'connected'), true, JSON.stringify(first));
-    assert.ok(asNumber(get(first, 'frames'), 'frames') > 0, `frames reached the editor: ${JSON.stringify(first)}`);
+    assert.ok(
+      asNumber(get(first, 'frames'), 'frames') > 0,
+      `frames reached the editor: ${JSON.stringify(first)}`,
+    );
     // The fixture's _ready calls _twice once itself, so the count shows the profile began before it.
-    assert.equal(await callsOfTwice(), 26, "every call of a play profiled from its start, _ready's own included");
+    assert.equal(
+      await callsOfTwice(),
+      26,
+      "every call of a play profiled from its start, _ready's own included",
+    );
 
     await attempt('editor_run', { op: 'stop' });
     await play();
     await twice(5);
     const switched = await call('editor_run', { op: 'profile' });
-    assert.equal(get(switched, 'started'), true, `asking switches the profiler on: ${JSON.stringify(switched)}`);
+    assert.equal(
+      get(switched, 'started'),
+      true,
+      `asking switches the profiler on: ${JSON.stringify(switched)}`,
+    );
     assert.match(String(get(switched, 'note')), /switched on now/, JSON.stringify(switched));
     await delay(500);
     await twice(10);

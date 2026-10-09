@@ -160,7 +160,6 @@ import { projectStructure, scriptsWithoutUid, searchProject } from './project-sc
 import { applyRewrites } from './rename.js';
 import { type NameTaken, type RenameOutcome, renameSymbol, writeLeftAloneDetail } from './rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
-import { type ProfileTotals, profiledFunctions, readProfileFile } from './script-profile.js';
 import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
   clearRunRecord,
@@ -208,6 +207,7 @@ import {
   unresolvedClassIn,
   withoutListed,
 } from './script-origins.js';
+import { type ProfileTotals, profiledFunctions, readProfileFile } from './script-profile.js';
 import type {
   GodotProcess,
   MCPToolDefinition,
@@ -8449,7 +8449,8 @@ class GodotServer {
     // Registered rather than on disk: the addon's files can be there with nothing bringing it up.
     const registered = run.projectPath === null ? null : inspectProject(run.projectPath);
     const runtimeAddon =
-      registered !== null && (registered.runtimeAutoloadPath !== null || registered.runtimeLoaderAutoload !== null);
+      registered !== null &&
+      (registered.runtimeAutoloadPath !== null || registered.runtimeLoaderAutoload !== null);
     if (run.throughEditor) {
       return await this.profileOfThePlayedGame(going, runtimeAddon, limit);
     }
@@ -8482,7 +8483,11 @@ class GodotServer {
     );
   }
 
-  private async profileOfThePlayedGame(going: boolean, runtimeAddon: boolean, limit: number): Promise<ToolResponse> {
+  private async profileOfThePlayedGame(
+    going: boolean,
+    runtimeAddon: boolean,
+    limit: number,
+  ): Promise<ToolResponse> {
     const read = await this.handleViaBridge('profile_read', {});
     if (read.isError === true) {
       return this.profilerRefusal(read);
@@ -8520,7 +8525,11 @@ class GodotServer {
                 const [calls, self, total] = Array.isArray(sum) ? (sum as unknown[]) : [];
                 return [
                   signature,
-                  { calls: Number(calls ?? 0), selfSeconds: Number(self ?? 0), totalSeconds: Number(total ?? 0) },
+                  {
+                    calls: Number(calls ?? 0),
+                    selfSeconds: Number(self ?? 0),
+                    totalSeconds: Number(total ?? 0),
+                  },
                 ];
               }),
             ),
@@ -8543,10 +8552,13 @@ class GodotServer {
   /** The editor addon's refusal to profile, with what to do when the addon predates the profiler. */
   private profilerRefusal(refused: ToolResponse): ToolResponse {
     const said = refused.content[0]?.text ?? '';
-    return /Unknown tool: profile_/.test(said)
+    return said.includes('Unknown tool: profile_')
       ? this.createErrorResponse(
           "The editor's gdharness addon is older than the profiler, so it cannot profile the game it plays.",
-          ['editor_launch restart loads the addon this server installed', 'editor_status says which addon the editor holds'],
+          [
+            'editor_launch restart loads the addon this server installed',
+            'editor_status says which addon the editor holds',
+          ],
         )
       : refused;
   }

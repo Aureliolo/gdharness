@@ -29,7 +29,12 @@ import {
 } from './outside.js';
 import { recordRunEnded, writeRunRecord } from './run-record.js';
 import { discard, scratchDirectory } from './scratch.js';
-import { ProfileListener, type ProfileTotals, withEngineArguments, writeProfileFile } from './script-profile.js';
+import {
+  ProfileListener,
+  type ProfileTotals,
+  withEngineArguments,
+  writeProfileFile,
+} from './script-profile.js';
 
 /**
  * The target started detached, so it is in no job object and no process group of this process;
@@ -263,7 +268,10 @@ async function keep(): Promise<void> {
   // The game's debugger for a profiled run, opened before the game so it is listening when the game
   // dials it: the engine dials once, as it starts, and runs with no debugger if nobody answers.
   const profiled = run?.profile === undefined ? null : await profiledBy(run.profile);
-  const toStart = profiled === null ? spec : { ...spec, args: withEngineArguments(spec.args, profiled.listener.engineArguments) };
+  const toStart =
+    profiled === null
+      ? spec
+      : { ...spec, args: withEngineArguments(spec.args, profiled.listener.engineArguments) };
   const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
   // Private to this keeper, for the file a helper watches for its stop.
   const own =

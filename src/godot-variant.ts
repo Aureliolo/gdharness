@@ -9,15 +9,22 @@
  */
 
 /** A decoded value. Containers and the engine's own types keep enough shape to be told apart. */
-export type GodotValue = null | boolean | number | string | readonly GodotValue[] | GodotDictionary | GodotOther;
+export type GodotValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly GodotValue[]
+  | GodotDictionary
+  | GodotOther;
 
-export interface GodotDictionary {
+interface GodotDictionary {
   readonly kind: 'dictionary';
   readonly entries: readonly (readonly [GodotValue, GodotValue])[];
 }
 
 /** A math type, a node path, an id or a callable: named by its type, with its parts in order. */
-export interface GodotOther {
+interface GodotOther {
   readonly kind: string;
   readonly values: readonly (number | string)[];
 }
@@ -31,7 +38,9 @@ const ARRAY = 28;
 const FLAG_64 = 1 << 16;
 
 /** How many reals or 32-bit integers each fixed-size math type holds, and which they are. */
-const MATH: Readonly<Record<number, { readonly name: string; readonly count: number; readonly ints?: true }>> = {
+const MATH: Readonly<
+  Record<number, { readonly name: string; readonly count: number; readonly ints?: true }>
+> = {
   5: { name: 'Vector2', count: 2 },
   6: { name: 'Vector2i', count: 2, ints: true },
   7: { name: 'Rect2', count: 4 },
@@ -66,7 +75,9 @@ class Reader {
 
   private need(bytes: number): void {
     if (bytes < 0 || bytes > this.remaining) {
-      throw new RangeError(`a value runs past the end of its message (${bytes} bytes wanted, ${this.remaining} left)`);
+      throw new RangeError(
+        `a value runs past the end of its message (${bytes} bytes wanted, ${this.remaining} left)`,
+      );
     }
   }
 
@@ -153,7 +164,9 @@ function decodeValue(reader: Reader, depth: number): GodotValue {
   if (math !== undefined) {
     return {
       kind: math.name,
-      values: Array.from({ length: math.count }, () => (math.ints === true ? reader.i32() : reader.real(wide))),
+      values: Array.from({ length: math.count }, () =>
+        math.ints === true ? reader.i32() : reader.real(wide),
+      ),
     };
   }
   const vectorWidth = PACKED_VECTORS[type];
@@ -288,7 +301,7 @@ function encodeInto(out: number[], value: SentValue): void {
     const bytes = new TextEncoder().encode(value);
     pushU32(out, STRING);
     pushU32(out, bytes.length);
-    out.push(...bytes, ...new Array<number>((4 - (bytes.length % 4)) % 4).fill(0));
+    out.push(...bytes, ...Array.from({ length: (4 - (bytes.length % 4)) % 4 }, () => 0));
   } else {
     pushU32(out, ARRAY);
     pushU32(out, value.length);
@@ -298,7 +311,7 @@ function encodeInto(out: number[], value: SentValue): void {
   }
 }
 
-export function encodeVariant(value: SentValue): Uint8Array {
+function encodeVariant(value: SentValue): Uint8Array {
   const out: number[] = [];
   encodeInto(out, value);
   return Uint8Array.from(out);
