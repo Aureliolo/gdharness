@@ -5,6 +5,7 @@ extends RefCounted
 
 const Menus = preload("runtime_menus.gd")
 const Read = preload("reading.gd")
+const Targets = preload("runtime_targets.gd")
 const Values = preload("runtime_values.gd")
 const Words = preload("runtime_words.gd")
 
@@ -251,7 +252,11 @@ func choose(params: Dictionary) -> Dictionary:
 	if holder != null and holder.disabled:
 		return {"type": "error", "message": "%s is disabled, so its menu cannot be opened" % node_path}
 	if holder != null and not holder.is_visible_in_tree():
-		return {"type": "error", "message": "%s is not visible, so its menu cannot be opened" % node_path}
+		return {
+			"type": "error",
+			"message":
+			"%s is not visible%s, so its menu cannot be opened" % [node_path, Targets.why_hidden(holder)]
+		}
 
 	# Shown first, because a menu nobody has opened has no focus to move and the press would go to
 	# whatever is behind it, and before the item is looked for, because opening is when a game fills

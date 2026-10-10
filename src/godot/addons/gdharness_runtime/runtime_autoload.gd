@@ -201,8 +201,8 @@ func _send_the_profile() -> void:
 ## What the script profiler costs per call in this game, measured once each time it is switched on.
 ##
 ## The profiler times every call it counts, and that bookkeeping lands in the self time of the
-## function called: a function doing almost nothing, called six hundred thousand times, read as a
-## second of its own, and inlining it saved nothing once the profiler was off. So an empty function
+## function called, so a function doing almost nothing, called six hundred thousand times, can read
+## as a second of its own that is mostly the profiler's. So an empty function
 ## is called here [constant PROFILER_PROBE_CALLS] times while the profiler watches, under the load
 ## the game is under, and the server reads its row as the cost of one call.
 func _calibrate_the_profiler() -> void:
