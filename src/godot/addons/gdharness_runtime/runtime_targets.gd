@@ -399,7 +399,7 @@ static func why_hidden(node: Node) -> String:
 	var control: Control = node as Control
 	var instead: Node = null if control == null else drawn_at(control)
 	if instead != null:
-		return " (%s; %s is drawn where it would be)" % [", and ".join(named), instead.get_path()]
+		return " (%s; a click where it would be reaches %s)" % [", and ".join(named), instead.get_path()]
 	var outermost: Node = hiding.back()
 	var beside: Array[String] = []
 	var parent: Node = outermost.get_parent()
