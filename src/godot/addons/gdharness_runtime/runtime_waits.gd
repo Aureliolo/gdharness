@@ -21,6 +21,11 @@ const MOST_FRAMES: int = 600
 ## gives looking about a tenth of the time.
 const LOOKS_APART: int = 9
 
+## How a property wait compares what it reads with the value: equality by default, and order for a
+## number that steps rather than lands, as a day counter on a fast clock goes from 31 to 34 between
+## two looks and a wait for 32 never sees it.
+const COMPARES: Array[String] = ["==", "!=", ">=", "<=", ">", "<"]
+
 var _host: Node
 var _values: Values
 
@@ -107,8 +112,10 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# path, a property compares one value on one node. Taking says and dropping the other left a
 	# caller watching a screen while believing they were watching a property, and the answer says
 	# which of them it is about only if you already know that says wins.
-	if not says.is_empty() and (not property.is_empty() or params.has("value")):
-		var other: String = property if not property.is_empty() else "value"
+	if not says.is_empty() and (not property.is_empty() or params.has("value") or params.has("compare")):
+		var other: String = (
+			property if not property.is_empty() else ("value" if params.has("value") else "compare")
+		)
 		return {
 			"type": "error",
 			"message":
@@ -123,10 +130,10 @@ func wait_until(params: Dictionary) -> Dictionary:
 	if not says.is_empty():
 		var include_hidden: bool = Read.as_bool(params.get("include_hidden", false))
 		return await _wait_until_said(node_path, says, timeout_ms, include_hidden)
-	if property.is_empty():
-		return {"type": "error", "message": "A property and a value, or says, are required"}
-	if not params.has("value"):
-		return {"type": "error", "message": "A value to wait for is required"}
+	var unasked: String = _property_wait_unasked(property, params)
+	if not unasked.is_empty():
+		return {"type": "error", "message": unasked}
+	var compare: String = str(params.get("compare", "=="))
 
 	var node: Node = standing["node"]
 
@@ -139,6 +146,8 @@ func wait_until(params: Dictionary) -> Dictionary:
 		return watched
 
 	var current: Variant = watched["value"]
+	if compare in [">=", "<=", ">", "<"]:
+		return await _wait_in_order(node, params, current, timeout_ms)
 	var wanted: Variant = _values.fitted(params["value"], typeof(current))
 	# Read against what the property is declared as, not only against what it holds this frame: an
 	# object property holding null holds nothing typed, so any value was taken as it came and compared
@@ -173,9 +182,10 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# At the precision the property keeps, as set compares: a float arrives as 64 bits and most
 	# engine properties keep 32, so h_offset waited on as -1.1 read -1.10000002384186 every frame and
 	# the wait ran out on a value the game had reached.
+	var differs: bool = compare == "!="
 	while (
 		Values.comparable(current, wanted)
-		and not Changes.held_already(wanted, current)
+		and Changes.held_already(wanted, current) == differs
 		and Time.get_ticks_msec() - started < timeout_ms
 	):
 		await _host.get_tree().process_frame
@@ -191,11 +201,109 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"type": "condition",
 		"path": node_path,
 		"property": property,
-		"met": Changes.held_already(wanted, current),
+		"compare": compare,
+		"met": Values.comparable(current, wanted) and Changes.held_already(wanted, current) != differs,
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 		"frames": frames,
 	}
+
+
+## What a property wait is missing or was given wrongly, or "" when it can go ahead.
+static func _property_wait_unasked(property: String, params: Dictionary) -> String:
+	if property.is_empty():
+		return "A property and a value, or says, are required"
+	if not params.has("value"):
+		return "A value to wait for is required"
+	var compare: String = str(params.get("compare", "=="))
+	if not COMPARES.has(compare):
+		return 'compare is one of %s, not "%s"' % [", ".join(COMPARES), compare]
+	return ""
+
+
+## [method wait_until] for a number compared by order: met on the first look at which the property
+## is past the value, or level with it at the precision the property keeps, as `==` compares.
+##
+## The value is read as the number it is rather than fitted to the property's type, since fitting
+## truncates: 31.5 on a whole-number property became 31, and a wait for "at least 31.5" was met at 31.
+func _wait_in_order(node: Node, params: Dictionary, current: Variant, timeout_ms: int) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	var property: String = str(params.get("property", ""))
+	var compare: String = str(params.get("compare", ""))
+	var given: Variant = params["value"]
+	# The property first: a string waited on in order is refused for being a string, whatever value
+	# came with it, since no number would make the wait answerable.
+	var unordered: String = _no_order(current, node_path, property, compare)
+	if not unordered.is_empty():
+		return {"type": "error", "message": unordered}
+	var number: Variant = given
+	if given is String:
+		var text: String = given
+		number = Read.json_or_null(text)
+	if typeof(number) != TYPE_INT and typeof(number) != TYPE_FLOAT:
+		return {
+			"type": "error",
+			"message":
+			(
+				"compare %s puts a number in order, and the value to wait for is %s: give a number."
+				% [compare, str(given)]
+			)
+		}
+	var limit: float = Read.as_float(number)
+
+	var started: int = Time.get_ticks_msec()
+	var frames: int = 0
+	while not _in_order(compare, limit, current) and Time.get_ticks_msec() - started < timeout_ms:
+		await _host.get_tree().process_frame
+		frames += 1
+		if not is_instance_valid(node):
+			return {"type": "error", "message": "%s was freed while waiting" % node_path}
+		var watched: Dictionary = _watched(node, node_path, property)
+		if watched.has("message"):
+			return watched
+		current = watched["value"]
+		unordered = _no_order(current, node_path, property, compare)
+		if not unordered.is_empty():
+			return {"type": "error", "message": unordered}
+
+	return {
+		"type": "condition",
+		"path": node_path,
+		"property": property,
+		"compare": compare,
+		"met": _in_order(compare, limit, current),
+		"value": _values.serialize(current),
+		"elapsed_ms": Time.get_ticks_msec() - started,
+		"frames": frames,
+	}
+
+
+## Why [param current] cannot be put in order, or "" when it is a number.
+static func _no_order(current: Variant, node_path: String, property: String, compare: String) -> String:
+	if typeof(current) == TYPE_INT or typeof(current) == TYPE_FLOAT:
+		return ""
+	return (
+		"%s.%s holds %s, which has no order, so compare %s cannot be asked of it: use == or !=."
+		% [node_path, property, type_string(typeof(current)), compare]
+	)
+
+
+## Whether [param current], a number, stands to [param limit] as [param compare] says. Level counts
+## at the precision the property keeps, so a 32-bit float holding 0.30000001 is at least 0.3.
+static func _in_order(compare: String, limit: float, current: Variant) -> bool:
+	var reading: float = Read.as_float(current)
+	var level: bool = (
+		reading == limit or (typeof(current) == TYPE_FLOAT and Changes.held_already(limit, current))
+	)
+	match compare:
+		">=":
+			return level or reading > limit
+		"<=":
+			return level or reading < limit
+		">":
+			return not level and reading > limit
+		_:
+			return not level and reading < limit
 
 
 ## Why [param given] would have to be cut to be waited on a whole number or a truth, or "" when not.

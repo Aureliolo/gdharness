@@ -1600,6 +1600,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           "until: the value to wait for, fitted to the property's type and compared at the precision the property keeps, so -1.1 meets a 32-bit float holding -1.10000002. A value the property would have to cut is refused: a fraction on a whole number, a number other than 0 or 1 on a bool. On a property holding an object, whether declared to or untyped and holding one or null, the text null means null. One declared to hold an object refuses any value other than null, since it can never hold it.",
       },
+      compare: {
+        type: 'string',
+        enum: ['==', '!=', '>=', '<=', '>', '<'],
+        ops: ['until'],
+        description:
+          'until, with a property: how what the property reads stands to value before the wait is met. Default ==. != waits for it to read as anything else. >=, <=, > and < put a number in order, met on the first look past the value or level with it at the precision the property keeps, which is how a counter that steps rather than lands is waited on: a day counter on a fast clock went from 31 to 34 between two looks, and a wait for 32 ran out. For these the value is the number it is rather than fitted to the property, so a fraction on a whole-number property is a threshold rather than refused, and a property holding anything but a number is refused.',
+      },
       says: {
         type: 'string',
         ops: ['until'],
