@@ -2208,7 +2208,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
   }
   if (table.overheadDominated > 0 && table.perCallUs !== null) {
     notes.push(
-      `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${table.overheadDominated === 1 ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${table.overheadDominated === 1 ? 'its' : 'their'} selfMs in it, under overheadMs: a function that does little and is called often looks expensive here and costs that much less once the profiler is off, so inlining it gains little.`,
+      `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${table.overheadDominated === 1 ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${table.overheadDominated === 1 ? 'its' : 'their'} selfMs in it, under overheadMs: that much of its time is the profiler's and goes once the profiler is off, whether the function is inlined or not. What inlining saves is the call itself, which costs something without the profiler too, not the work inside it.`,
     );
   }
   notes.push(...cappedNotes(totals));

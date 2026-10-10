@@ -48,6 +48,7 @@ func _everything() -> void:
 	typing = Typing.new(host)
 
 	await _check_a_button_that_presses_nothing()
+	await _check_a_button_something_hides()
 	await _check_typing_where_the_keys_go()
 	await _check_choosing()
 	await _check_choosing_by_what_it_says()
@@ -142,6 +143,93 @@ func _check_a_button_that_presses_nothing() -> void:
 		_fail("a button whose processing is off is refused as that: %s" % JSON.stringify(stopped))
 	off.queue_free()
 	on.queue_free()
+	await process_frame
+
+
+## A tab under a hidden hall, with a menu shown beside the hall: the tab's own visible reads true,
+## so a refusal saying only that it is not visible left nothing to unhide. Reported from
+## fantasy-guild-manager. The refusal names the hall and the menu, every hidden node when two hide
+## it, the tab itself when it is its own flag, and the canvas layer when that is what hides it.
+func _check_a_button_something_hides() -> void:
+	var main: Control = Control.new()
+	main.name = "Main"
+	root.add_child(main)
+	var hall: Control = Control.new()
+	hall.name = "Hall"
+	main.add_child(hall)
+	var menu: Control = Control.new()
+	menu.name = "Menu"
+	main.add_child(menu)
+	var rail: Control = Control.new()
+	rail.name = "Rail"
+	hall.add_child(rail)
+	var tab: Button = _button("Tab", Vector2(2, 2), rail, "Ledger")
+	await process_frame
+
+	hall.visible = false
+	var hidden: Dictionary = await input.click({"path": "/root/Main/Hall/Rail/Tab"})
+	var expected: String = (
+		"/root/Main/Hall/Rail/Tab is not visible (/root/Main/Hall is hidden;"
+		+ " /root/Main/Menu beside it is shown), so nothing can click it"
+	)
+	if not _says(hidden, expected) or _presses("Tab") != 0:
+		_fail("a tab under a hidden hall names the hall and what is shown: %s" % JSON.stringify(hidden))
+
+	main.visible = false
+	var both: Dictionary = await input.click({"path": "/root/Main/Hall/Rail/Tab"})
+	main.visible = true
+	if not _says(both, "(/root/Main/Hall is hidden, and /root/Main is hidden too)"):
+		_fail("both hidden nodes are named, nearest first: %s" % JSON.stringify(both))
+
+	hall.visible = true
+	tab.visible = false
+	var own: Dictionary = await input.click({"path": "/root/Main/Hall/Rail/Tab"})
+	tab.visible = true
+	if not _says(own, "/root/Main/Hall/Rail/Tab is not visible (its own visible is false)"):
+		_fail("a tab hidden by its own flag says so: %s" % JSON.stringify(own))
+
+	var shown: Dictionary = await input.click({"path": "/root/Main/Hall/Rail/Tab"})
+	if shown.get("landed") != true or _presses("Tab") != 1:
+		_fail("and the tab is pressed once nothing hides it: %s" % JSON.stringify(shown))
+
+	# A hidden control above a plain Node hides nothing below it by the engine's rule, so a button
+	# there hidden by its own flag names only that: naming the control would send a caller to
+	# unhide something that does not hide the button.
+	var cover: Control = Control.new()
+	cover.name = "Cover"
+	cover.visible = false
+	main.add_child(cover)
+	var plain: Node = Node.new()
+	plain.name = "Plain"
+	cover.add_child(plain)
+	var lone: Button = _button("Lone", Vector2(34, 34), plain, "Go")
+	lone.visible = false
+	await process_frame
+	var alone: Dictionary = await input.click({"path": "/root/Main/Cover/Plain/Lone"})
+	if not _says(alone, "/root/Main/Cover/Plain/Lone is not visible (its own visible is false), so"):
+		_fail("a hidden control above a plain Node is not named: %s" % JSON.stringify(alone))
+
+	var layer: CanvasLayer = CanvasLayer.new()
+	layer.name = "Layer"
+	root.add_child(layer)
+	var _drawn: Button = _button("Drawn", Vector2(34, 2), layer, "Go")
+	await process_frame
+	layer.visible = false
+	await process_frame
+	var on_layer: Dictionary = await input.click({"path": "/root/Layer/Drawn"})
+	var by_layer: String = (
+		"/root/Layer/Drawn is not visible (/root/Layer is hidden;"
+		+ " /root/Main beside it is shown), so nothing can click it"
+	)
+	if not _says(on_layer, by_layer) or _presses("Drawn") != 0:
+		_fail("a button on a hidden canvas layer names the layer: %s" % JSON.stringify(on_layer))
+	layer.visible = true
+	var on_shown_layer: Dictionary = await input.click({"path": "/root/Layer/Drawn"})
+	if on_shown_layer.get("landed") != true or _presses("Drawn") != 1:
+		_fail("and is pressed once the layer is shown: %s" % JSON.stringify(on_shown_layer))
+
+	main.queue_free()
+	layer.queue_free()
 	await process_frame
 
 

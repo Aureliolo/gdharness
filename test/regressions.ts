@@ -1548,8 +1548,9 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   // The profiler's own cost per call, read off the empty function the runtime addon calls as the
   // profiler goes on: it and its caller are the addon's, not the game's, so they are left out of the
   // rows, the count and scriptMs, and a row whose calls at that cost make up half its self time or
-  // more says how much. Reported from fantasy-guild-manager as #994: two predicates at 622,000 calls
-  // each read as over a second, and inlining them saved nothing once the profiler was off.
+  // more says how much. Reported from fantasy-guild-manager as #994. The note keeps two things
+  // apart that a reader took for one: the overhead goes with the profiler whether or not a function
+  // is inlined, and inlining removes only the call, which costs something unprofiled too.
   const calibrated = totals({
     'res://addons/gdharness_runtime/runtime_autoload.gd::310::_profiler_probe': {
       calls: 10_000,
@@ -1581,7 +1582,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   const costNote = String(answer({ totals: calibrated })['note']);
   assert.match(
     costNote,
-    /^The profiler costs about 2µs a call in this run, measured on an empty function the runtime addon calls as it goes on, .* One function has at least half its selfMs in it, under overheadMs: .*costs that much less once the profiler is off/,
+    /^The profiler costs about 2µs a call in this run, measured on an empty function the runtime addon calls as it goes on, .* One function has at least half its selfMs in it, under overheadMs: that much of its time is the profiler's and goes once the profiler is off, whether the function is inlined or not\. What inlining saves is the call itself, .* not the work inside it\.$/,
     costNote,
   );
   assert.equal(get(answer({ totals: calibrated }), 'perCallOverheadUs'), 2);
