@@ -1377,6 +1377,123 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'and a place in such a function says so beside its numbers',
   );
 
+  // A name that is something else where it is written is not the function: a parameter, a local in
+  // a block still open, a for variable, a match binding, a lambda's parameter, a class's own
+  // variable. Reported from ostinato as #989, where a helper's `lift: int` parameter was listed as
+  // `lift` handed on as a Callable. And a call through another class the project declares is that
+  // class's method when one class is asked about.
+  const lifting = [
+    'class_name Lifts',
+    'extends RefCounted',
+    '',
+    '',
+    'func placed(items: Array) -> int:',
+    '\tvar lift: int = 0',
+    '\tfor one in items:',
+    '\t\tlift += one',
+    '\treturn lift',
+    '',
+    '',
+    'func handed() -> void:',
+    '\tdone.connect(lift)',
+    '',
+    '',
+    'func scoped(flag: bool) -> void:',
+    '\tif flag:',
+    '\t\tvar lift := 1',
+    '\t\tprint(lift)',
+    '\tlift()',
+    '',
+    '',
+    'func looped() -> void:',
+    '\tfor lift in range(3):',
+    '\t\tprint(lift)',
+    '',
+    '',
+    'func matched(x: Array) -> void:',
+    '\tmatch x:',
+    '\t\t[var lift, ..]:',
+    '\t\t\tprint(lift)',
+    '',
+    '',
+    'func lambdas() -> void:',
+    '\tvar f := func(lift: int) -> int: return lift',
+    '\tvar g := func(lift: int) -> int:',
+    '\t\treturn lift',
+    '\tf.call(g.call(1))',
+    '',
+    '',
+    'func one_line(lift: int) -> int: return lift',
+    '',
+  ].join('\n');
+  const kiln = [
+    'extends Node',
+    '',
+    '',
+    'func _bare(lift: int) -> void:',
+    '\tvar made := Node.new()',
+    '\tmade.bare_lift = lift',
+    '',
+  ].join('\n');
+  const holding = [
+    'class_name Holder',
+    'extends Node',
+    '',
+    'var lift: int = 0',
+    '',
+    '',
+    'func use() -> void:',
+    '\tlift = 3',
+    '',
+  ].join('\n');
+  const pouched = [
+    'class_name Pouched',
+    'extends Placed',
+    '',
+    '',
+    'func go(loadout: Variant) -> void:',
+    '\tApported.lift(loadout)',
+    '\tPlaced.lift(loadout)',
+    '\tself.lift(loadout)',
+    '\tlift(loadout)',
+    '',
+  ].join('\n');
+  const declaring = (name: string): string =>
+    `class_name ${name}\n\n\nstatic func lift(x: Variant) -> void:\n\tprint(x)\n`;
+  const project = [
+    ['res://core/lifts.gd', lifting],
+    ['res://tests/kiln_test.gd', kiln],
+    ['res://core/holder.gd', holding],
+    ['res://core/pouched.gd', pouched],
+    ['res://core/apported.gd', declaring('Apported')],
+    ['res://core/placed.gd', declaring('Placed')],
+  ] as const;
+  const placedAt = (name: string): unknown[] =>
+    callersOf(totals({}), name, project).sites.map((one) => [one.script, one.line, one.called]);
+  assert.deepEqual(
+    placedAt('Placed.lift'),
+    [
+      ['res://core/lifts.gd', 13, false],
+      ['res://core/lifts.gd', 20, true],
+      ['res://core/pouched.gd', 7, true],
+      ['res://core/pouched.gd', 8, true],
+      ['res://core/pouched.gd', 9, true],
+    ],
+    'the Callable handed on and the calls, and none of the locals, the member variable or the call through Apported',
+  );
+  assert.deepEqual(
+    placedAt('lift'),
+    [
+      ['res://core/lifts.gd', 13, false],
+      ['res://core/lifts.gd', 20, true],
+      ['res://core/pouched.gd', 6, true],
+      ['res://core/pouched.gd', 7, true],
+      ['res://core/pouched.gd', 8, true],
+      ['res://core/pouched.gd', 9, true],
+    ],
+    'and with no class asked about, the call through another class is listed as the note says',
+  );
+
   // A script path comes from the game, so it is read only inside the project: a path climbing out of
   // it reads nothing, though the file it names is there, and nor does one built into a scene.
   const holder = mkdtempSync(join(tmpdir(), 'gdharness-sources-'));
