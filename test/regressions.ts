@@ -148,6 +148,7 @@ import {
   judgeRun,
   listeningPid,
   listeningPidInNetstat,
+  readLatestRun,
   readRunRecord,
   readWindowsCommandLine,
   recordRunEnded,
@@ -157,6 +158,7 @@ import {
   sweepTranscripts,
   whyNotTheRun,
   writeEditorRunNote,
+  writeLatestRun,
   writeRunRecord,
 } from '../src/run-record.js';
 import {
@@ -10753,6 +10755,12 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     const first = await serve();
     assert.equal(get(await status(first), 'game', 'run'), null, 'a status with no run names none');
     const kept = await start(first, true);
+    // Written down as the run this project's servers started last, which is what a successor adopts.
+    assert.deepEqual(
+      [readLatestRun(project, runtime)?.pid, resolve(readLatestRun(project, runtime)?.projectPath ?? '')],
+      [kept, resolve(project)],
+      'a spawned run is written down as the latest started',
+    );
     assert.equal(typeof note()['keeper'], 'string', `the note names the keeper: ${JSON.stringify(note())}`);
     await replace(first);
     assert.ok(isAlive(kept), `the run outlives its server: pid ${kept}`);
@@ -24298,6 +24306,104 @@ function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
  * no exit code anywhere, and saying so beats reporting a zero nobody collected.
  */
 /**
+ * A successor adopts the run its project's servers started last, not the newest note it can find.
+ *
+ * Reported from game-b on 1.2.3. A server of the project had started a run of its git worktree in
+ * the morning, which left a note under the worktree naming the project as its server; in the
+ * afternoon it started a run of its own and stopped it, and a stop takes the note away. The next
+ * server found the worktree's note the newest left and named that run, hours over, as the run.
+ */
+async function testTheRunAdoptedIsTheLatestStarted(): Promise<void> {
+  const ended = (): number => {
+    const gone: SpawnSyncReturns<string> = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+    assert.ok(gone.pid > 0, 'the fixture needs processes that have been and gone');
+    return gone.pid;
+  };
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-latest-run-'));
+  const project = join(runtimeDir, 'game-b');
+  const worktree = join(runtimeDir, 'game-b-next');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+  try {
+    mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+    const morning = Date.now() - 10 * 60 * 60 * 1000;
+    const afternoon = Date.now() - 60 * 60 * 1000;
+    const transcript = join(runtimeDir, 'runs', 'run-1.log');
+    writeFileSync(transcript, 'the worktree run\n');
+    const worktreeRun = ended();
+    writeRunRecord({
+      pid: worktreeRun,
+      transcript,
+      startedAt: morning,
+      projectPath: worktree,
+      servedBy: project,
+      arguments: ['--path', worktree],
+    });
+    const stopped = ended();
+    writeLatestRun(project, { projectPath: project, pid: stopped, startedAt: afternoon });
+    const env = { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project };
+    const runOf = async (call: (name: string, args: Record<string, unknown>) => Promise<string>) =>
+      get(jsonOf(await call('editor_status', {}), 'editor_status'), 'game', 'run');
+
+    await withStdioServer(async (call) => {
+      assert.equal(
+        await runOf(call),
+        null,
+        'the run started last was stopped and its note taken away, so there is no run to name',
+      );
+    }, env);
+
+    // The same with the stopped run's note still there: that run is the one named.
+    const ownTranscript = join(runtimeDir, 'runs', 'run-2.log');
+    writeFileSync(ownTranscript, 'the run of its own\n');
+    writeRunRecord({
+      pid: stopped,
+      transcript: ownTranscript,
+      startedAt: afternoon,
+      projectPath: project,
+      arguments: ['--path', project],
+    });
+    await withStdioServer(async (call) => {
+      const run = await runOf(call);
+      assert.deepEqual(
+        [get(run, 'pid'), get(run, 'startedAt')],
+        [stopped, new Date(afternoon).toISOString()],
+        `the run started last is the one named: ${JSON.stringify(run)}`,
+      );
+    }, env);
+
+    // A server that wrote down no latest run, as every one before this did, still adopts the
+    // newest note: the worktree's run, once the project's own note is gone.
+    clearRunRecord(project);
+    rmSync(join(runtimeDir, 'runs'), { recursive: true, force: true });
+    mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+    writeFileSync(transcript, 'the worktree run\n');
+    writeRunRecord({
+      pid: worktreeRun,
+      transcript,
+      startedAt: morning,
+      projectPath: worktree,
+      servedBy: project,
+      arguments: ['--path', worktree],
+    });
+    await withStdioServer(async (call) => {
+      assert.equal(
+        get(await runOf(call), 'pid'),
+        worktreeRun,
+        'with nothing written down, the newest note is the run',
+      );
+    }, env);
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * The ending another server wrote into the note is the one this server answers with, whether it
  * was a code or a signal. A signal read back as nothing would say nobody was waiting on the run.
  */
@@ -33012,6 +33118,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorHoldingAProjectIsNotARunOfIt,
   testACommandLineNotGivenInTimeIsAskedAgain,
   testARunEndedUnwatchedIsStillReadable,
+  testTheRunAdoptedIsTheLatestStarted,
   testARecordedEndingIsReadBack,
   testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,

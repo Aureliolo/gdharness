@@ -39,6 +39,7 @@ import { alive } from '../src/alive.js';
 import { readBreakpointNote } from '../src/breakpoint-note.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { NOT_INHERITED, RESOLVED_ELSEWHERE } from '../src/rename.js';
+import { readLatestRun } from '../src/run-record.js';
 import { frameFunctionsFor, queuedMessagesOf } from '../src/script-profile.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { RUNTIME_AUTOLOAD } from '../src/setup.js';
@@ -3566,6 +3567,14 @@ async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promis
     // spawned would answer `gdharness` here, have no debug adapter session behind it, and prove
     // nothing about the shape that went missing.
     assert.equal(get(started, 'through'), 'editor', `the editor should be the one playing: ${text(started)}`);
+    // Written down as the run this project's servers started last, with no pid since the editor
+    // holds it: a successor then adopts no spawned run's note the play has moved past.
+    const latest = readLatestRun(own.project, String(own.serverEnv['GDHARNESS_RUNTIME_DIR']));
+    assert.deepEqual(
+      [latest === null, latest?.pid],
+      [false, null],
+      `a played run is written down as the latest started: ${JSON.stringify(latest)}`,
+    );
     const pid = asNumber(get(started, 'runtime', 'pid'), 'the played run needs a process of its own');
     assert.ok(pid > 0 && alive(pid), `the run should be up before anything is replaced: ${text(started)}`);
 

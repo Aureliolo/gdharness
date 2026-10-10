@@ -153,6 +153,51 @@ export function runRecordPath(projectPath: string, directory = runtimeDirectory(
 }
 
 /**
+ * The run a server of a project started last, whichever project the run is of and however it was
+ * started: a spawned run names its pid, a played one none.
+ *
+ * What a successor adopts is decided by this rather than by the newest note it can find. A stop
+ * takes a run's note away, and a played run leaves none, so the newest note left could be one the
+ * predecessor had long since moved past: game-b's server named a run of its git worktree from the
+ * morning as the run, after the run it had started and stopped that afternoon.
+ */
+export interface LatestRun {
+  readonly projectPath: string;
+  readonly pid: number | null;
+  readonly startedAt: number;
+}
+
+function latestRunPath(servedBy: string, directory = runtimeDirectory()): string {
+  return join(directory, 'runs', `latest-${projectKey(servedBy)}.json`);
+}
+
+export function writeLatestRun(servedBy: string, latest: LatestRun): void {
+  try {
+    mkdirSync(runsDirectory(), { recursive: true });
+    writeFileSync(latestRunPath(servedBy), JSON.stringify(latest, null, 2), 'utf8');
+  } catch {
+    // Unwritable leaves the successor choosing by age, which is what it did before this was kept.
+  }
+}
+
+/** The run a server of [param servedBy] started last, or null when none has said. */
+export function readLatestRun(servedBy: string, directory = runtimeDirectory()): LatestRun | null {
+  try {
+    const fields: unknown = JSON.parse(readFileSync(latestRunPath(servedBy, directory), 'utf8'));
+    if (typeof fields !== 'object' || fields === null) {
+      return null;
+    }
+    const { projectPath, pid, startedAt } = fields as Record<string, unknown>;
+    if (typeof projectPath !== 'string' || typeof startedAt !== 'number') {
+      return null;
+    }
+    return { projectPath, pid: typeof pid === 'number' ? pid : null, startedAt };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The one note every project shared before notes were per project, read so a run a server of that
  * version started is still picked up and ended after the upgrade.
  */
