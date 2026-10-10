@@ -1493,6 +1493,55 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ],
     'and with no class asked about, the call through another class is listed as the note says',
   );
+  // A receiver declared as another class is that class's object, whichever way it was declared: a
+  // typed local, a new(), a cast, a typed parameter, a typed for variable, a variable of the class.
+  // Reported from ostinato on 1.1.61, `made.lift(...)` with `var made: Outcome` above it. What says
+  // nothing about the class stays: an untyped local, a receiver that is a member of something else,
+  // and a variable declared as the class asked about.
+  const paying = [
+    'class_name Payout',
+    'extends RefCounted',
+    '',
+    'var kept: Outcome = null',
+    'var placed: Placed = null',
+    '',
+    '',
+    'func pay(state: Variant, given: Outcome) -> void:',
+    '\tvar made: Outcome = state.scratch',
+    '\tmade.lift(1)',
+    '\tvar built := Outcome.new()',
+    '\tbuilt.lift(2)',
+    '\tvar cast = state.other as Outcome',
+    '\tcast.lift(3)',
+    '\tgiven.lift(4)',
+    '\tkept.lift(5)',
+    '\tplaced.lift(6)',
+    '\tstate.made.lift(7)',
+    '\tvar loose = state.thing',
+    '\tloose.lift(8)',
+    '\tfor each: Outcome in []:',
+    '\t\teach.lift(9)',
+    '',
+  ].join('\n');
+  const paid = [
+    ['res://core/payout.gd', paying],
+    ['res://core/outcome.gd', declaring('Outcome')],
+    ['res://core/placed.gd', declaring('Placed')],
+  ] as const;
+  const paidAt = (name: string): unknown[] =>
+    callersOf(totals({}), name, paid)
+      .sites.filter((one) => one.script === 'res://core/payout.gd')
+      .map((one) => one.line);
+  assert.deepEqual(
+    paidAt('Placed.lift'),
+    [17, 18, 20],
+    'the receivers declared as Outcome are left out, and the Placed, dotted and untyped ones kept',
+  );
+  assert.deepEqual(
+    paidAt('lift'),
+    [10, 12, 14, 15, 16, 17, 18, 20, 22],
+    'and asked by bare name, every one is listed',
+  );
 
   // A script path comes from the game, so it is read only inside the project: a path climbing out of
   // it reads nothing, though the file it names is there, and nor does one built into a scene.
