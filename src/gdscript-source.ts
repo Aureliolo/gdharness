@@ -616,26 +616,44 @@ function parametersOf(text: string, from: number): string[] {
   return names;
 }
 
+const DOTTED = `${NAME}(?:\\.${NAME})*`;
+
 /**
- * Whether [param name] is a local at zero-based [param index] of [param lines], the script's code
- * split by line: a parameter of the function or a lambda around it, a `for` variable, a `var` or
- * `const` declared earlier in a block still open, or a `var` a match pattern binds.
+ * The class [param text], a line declaring [param name], gives it: written after a colon, the class
+ * whose `new()` it is assigned, or the class it is cast to with `as`. Its last part for a dotted
+ * inner class, and null when the line says none.
+ */
+function declaredClass(text: string, name: string): string | null {
+  const word = `(?<![\\p{L}\\p{N}_.])${escapedForPattern(name)}`;
+  const found =
+    new RegExp(`${word}\\s*:\\s*(${DOTTED})`, 'u').exec(text)?.[1] ??
+    new RegExp(`${word}\\s*:=\\s*(${DOTTED})\\.new\\s*\\(`, 'u').exec(text)?.[1] ??
+    new RegExp(`${word}\\s*:?=[^\\n]*?\\bas\\s+(${DOTTED})\\s*$`, 'u').exec(text)?.[1];
+  return found === undefined ? null : found.slice(found.lastIndexOf('.') + 1);
+}
+
+/**
+ * [param name] as a local at zero-based [param index] of [param lines], the script's code split by
+ * line, with the class its declaration gives it; or null when it is not one. A local is a parameter
+ * of the function or a lambda around it, a `for` variable, a `var` or `const` declared earlier in a
+ * block still open, or a `var` a match pattern binds.
  *
  * Walked upwards: a line indented less than the last is a block holding this one, and a line at the
  * same depth is an earlier statement of the same block, whose declarations are in scope. Lines more
  * deeply indented belong to blocks already closed, so what they declare is not.
  */
-function isLocalAt(lines: readonly string[], index: number, name: string): boolean {
+function localAt(lines: readonly string[], index: number, name: string): { type: string | null } | null {
   const word = escapedForPattern(name);
   const declares = new RegExp(`(?<![\\p{L}\\p{N}_.])(?:var|const)\\s+${word}(?![\\p{L}\\p{N}_])`, 'u');
   const iterates = new RegExp(`^\\s*for\\s+${word}(?![\\p{L}\\p{N}_])`, 'u');
+  const local = (text: string): { type: string | null } => ({ type: declaredClass(text, name) });
   const own = lines[index] ?? '';
   const headerOnOwnLine = FUNC_LINE.exec(own) ?? LAMBDA_HEADER.exec(own);
   if (headerOnOwnLine !== null && parametersOf(own, headerOnOwnLine.index).includes(name)) {
-    return true;
+    return local(own);
   }
   if (FUNC_LINE.test(own)) {
-    return false;
+    return null;
   }
   let depth = indentOf(own);
   for (let at = index - 1; at >= 0; at -= 1) {
@@ -651,25 +669,28 @@ function isLocalAt(lines: readonly string[], index: number, name: string): boole
     if (indent < depth) {
       depth = indent;
       if (named !== null) {
-        return parametersOf(text, named.index).includes(name);
+        return parametersOf(text, named.index).includes(name) ? local(text) : null;
       }
       const lambda = LAMBDA_HEADER.exec(text);
       if ((lambda !== null && parametersOf(text, lambda.index).includes(name)) || iterates.test(text)) {
-        return true;
+        return local(text);
       }
     }
     if (named !== null || depth === 0) {
-      return false;
+      return null;
     }
     if (declares.test(text)) {
-      return true;
+      return local(text);
     }
   }
-  return false;
+  return null;
 }
 
-/** The identifier written before the dot that ends just before [param offset] in [param code]. */
-function receiverBefore(code: string, offset: number): string | null {
+/**
+ * The identifier written before the dot that ends just before [param offset] in [param code], and
+ * whether it is itself a member of something written before it.
+ */
+function receiverBefore(code: string, offset: number): { name: string; dotted: boolean } | null {
   let at = offset - 1;
   while (at >= 0 && /\s/.test(code[at] ?? '')) {
     at -= 1;
@@ -685,7 +706,14 @@ function receiverBefore(code: string, offset: number): string | null {
   while (start > 0 && isIdentifierPart(code[start - 1])) {
     start -= 1;
   }
-  return start <= at ? code.slice(start, at + 1) : null;
+  if (start > at) {
+    return null;
+  }
+  let before = start - 1;
+  while (before >= 0 && /\s/.test(code[before] ?? '')) {
+    before -= 1;
+  }
+  return { name: code.slice(start, at + 1), dotted: code[before] === '.' };
 }
 
 /** What a class declares by a name that, written bare in it, means that member and no function. */
@@ -705,8 +733,9 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * A bare name that is something else at that place is not the function: a parameter or local of
  * that name, or a variable, constant, signal or enum the class itself declares by it. Read as the
  * function, `made.bare_lift = lift` in a helper taking `lift: int` was listed as `lift` handed on
- * as a Callable. A member call whose receiver is one of [param otherClasses] is another class's
- * method, and is left out for a caller asking about one class.
+ * as a Callable. A member call whose receiver is one of [param otherClasses], or a local or a
+ * variable of the class declared as one, is another class's method and is left out for a caller
+ * asking about one class: `made.lift(by)` with `var made: Outcome` above it is Outcome's.
  */
 export function callSitesOf(
   source: string,
@@ -718,15 +747,35 @@ export function callSitesOf(
   const codeLines = code.split('\n');
   const lines = new Lines(source);
   const shape = shapeOf(source);
+  // The class a variable of the class body holding [at] is declared as, read off its own line.
+  const memberClass = (member: string, at: number): string | null => {
+    const declared = bodyHolding(shape.body, at).declarations.find(
+      (one) => one.name === member && (one.kind === 'var' || one.kind === 'const'),
+    );
+    return declared === undefined
+      ? null
+      : declaredClass(codeLines[lines.positionOf(declared.offset).line] ?? '', member);
+  };
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
     .filter((one) => {
+      const index = lines.positionOf(one.offset).line;
       if (one.afterDot) {
         const receiver = receiverBefore(code, one.offset);
-        return receiver === null || !otherClasses.has(receiver);
+        if (receiver === null || otherClasses.size === 0) {
+          return true;
+        }
+        if (otherClasses.has(receiver.name)) {
+          return false;
+        }
+        if (receiver.dotted) {
+          return true;
+        }
+        const typed =
+          localAt(codeLines, index, receiver.name)?.type ?? memberClass(receiver.name, one.offset);
+        return typed === null || !otherClasses.has(typed);
       }
-      const index = lines.positionOf(one.offset).line;
-      if (isLocalAt(codeLines, index, name)) {
+      if (localAt(codeLines, index, name) !== null) {
         return false;
       }
       return !bodyHolding(shape.body, one.offset).declarations.some(

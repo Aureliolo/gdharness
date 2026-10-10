@@ -2078,7 +2078,7 @@ type ProjectForProfile = Pick<ProfileReading, 'runtimeAddon' | 'sourceOf' | 'cal
 
 /** What a callers answer says about where its places come from. */
 const CALLERS_FOUND_BY_NAME =
-  "Found by name in the project's scripts, since the engine's profiler counts calls and time per function and records nothing about who made them: a method of the same name on another class is listed too, unless it is called through that class by name and one class was asked about. Each place carries the profile's numbers for the function it is written in.";
+  "Found by name in the project's scripts, since the engine's profiler counts calls and time per function and records nothing about who made them: a method of the same name on another class is listed too, unless one class was asked about and it is called through another class by name or through a variable declared as one. Each place carries the profile's numbers for the function it is written in.";
 
 /**
  * [param projectPath]'s scripts read off disk by `res://` path, null for one that is not a file
