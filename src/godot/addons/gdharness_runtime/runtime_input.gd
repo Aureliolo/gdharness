@@ -560,7 +560,7 @@ func click(params: Dictionary) -> Dictionary:
 ## that does not process while the game is paused is hovered and never handed the event.
 func _takes_no_click(control: Control, node_path: String) -> String:
 	if not control.is_visible_in_tree():
-		return "%s is not visible, so nothing can click it" % node_path
+		return "%s is not visible%s, so nothing can click it" % [node_path, Targets.why_hidden(control)]
 	var button: BaseButton = control as BaseButton
 	if button != null and button.disabled:
 		return "%s is disabled, so clicking it presses nothing" % node_path
@@ -681,7 +681,10 @@ func _press_button(viewport: Viewport, event: InputEventMouseButton) -> void:
 ## anything the engine can be asked, so it is not claimed.
 func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) -> Dictionary:
 	if not item.is_visible_in_tree():
-		return {"type": "error", "message": "%s is not visible, so nothing can click it" % node_path}
+		return {
+			"type": "error",
+			"message": "%s is not visible%s, so nothing can click it" % [node_path, Targets.why_hidden(item)]
+		}
 
 	var found: Dictionary = Queries.in_frame(item)
 	if found.is_empty():
