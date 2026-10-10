@@ -1005,7 +1005,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['profile'],
         description:
-          "profile: also answer, under callers, where the project's scripts name this function in code: its name, or Class.name for the functions of one class. Each place has its script, line, the named function it is written in (within), whether the function is called there or passed on as a Callable (called), and the profile's calls, self and total milliseconds for the function it is in, those taking the most time first, forty at most. Found by name in the source, since the engine's profiler records nothing about who made a call, so a method of the same name on another class is listed too and a call made through a string is not.",
+          "profile: also answer, under callers, where the project's scripts name this function in code: its name, or Class.name for the functions of one class. Each place has its script, line, the named function it is written in (within), whether the function is called there or passed on as a Callable (called), and the profile's calls, self and total milliseconds for the function it is in, those taking the most time first, forty at most. Found by name in the source, since the engine's profiler records nothing about who made a call, so a method of the same name on another class is listed too, except one called through another class of the project by name when Class.name was asked, and a call made through a string is not. A parameter, local or class variable of the same name is not the function and is not listed.",
       },
       limit: {
         type: 'integer',
