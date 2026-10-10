@@ -13,7 +13,15 @@
 
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
-import { bodyCallsSuper, type CallSite, callSitesOf, codeOf, enclosingFunction } from './gdscript-source.js';
+import {
+  bodyCallsSuper,
+  type CallSite,
+  type ClassBody,
+  callSitesOf,
+  codeOf,
+  enclosingFunction,
+  shapeOf,
+} from './gdscript-source.js';
 import { type DebuggerMessage, DebuggerStream, framedCommand, type GodotValue } from './godot-variant.js';
 import { parseProjectGodot } from './resources.js';
 
@@ -371,6 +379,14 @@ export interface ProfiledCallSite extends CallSite {
   readonly withinSelfIncludesSuper?: true;
 }
 
+/** The classes [param source] declares by name: its class_name and its inner classes, nested. */
+function classNamesOf(source: string): string[] {
+  const shape = shapeOf(source);
+  const inner = (body: ClassBody): string[] =>
+    body.inner.flatMap((one) => [...(one.name === null ? [] : [one.name]), ...inner(one)]);
+  return [...(shape.className === null ? [] : [shape.className.name]), ...inner(shape.body)];
+}
+
 /** How many places a callers answer lists before saying how many more there were. */
 const CALL_SITES = 40;
 
@@ -381,7 +397,8 @@ const CALL_SITES = 40;
  *
  * Found by name in the source, because the engine's profiler counts calls and time per function and
  * records nothing about who made them. A place is a caller only if the name there is this function:
- * a method of the same name on another class is found as well, which the answer says.
+ * a method of the same name on another class is found as well, which the answer says, except one
+ * called through another class the project declares by name when one class was asked about.
  */
 export function callersOf(
   totals: ProfileTotals,
@@ -395,9 +412,20 @@ export function callersOf(
   const target = rows.filter((row) =>
     name.includes('.') ? row.function === name : bareName(row.function) === bare,
   );
+  const asked = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : null;
+  const otherClasses = new Set<string>();
+  if (asked !== null) {
+    for (const [, source] of listed) {
+      for (const declared of classNamesOf(source)) {
+        if (declared !== asked) {
+          otherClasses.add(declared);
+        }
+      }
+    }
+  }
   const sites: ProfiledCallSite[] = [];
   for (const [script, source] of listed) {
-    for (const site of callSitesOf(source, bare)) {
+    for (const site of callSitesOf(source, bare, otherClasses)) {
       const within =
         site.within === null
           ? undefined

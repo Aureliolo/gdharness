@@ -586,17 +586,153 @@ export interface CallSite {
   readonly called: boolean;
 }
 
+/** The names a function or lambda header starting at [param from] in [param text] takes. */
+function parametersOf(text: string, from: number): string[] {
+  const open = text.indexOf('(', from);
+  if (open === -1) {
+    return [];
+  }
+  const names: string[] = [];
+  let depth = 0;
+  let start = open + 1;
+  for (let at = open; at < text.length; at += 1) {
+    const here = text[at];
+    if (here === '(' || here === '[' || here === '{') {
+      depth += 1;
+    } else if (here === ')' || here === ']' || here === '}') {
+      depth -= 1;
+    }
+    if ((here === ',' && depth === 1) || depth === 0) {
+      const named = new RegExp(`^\\s*(${NAME})`, 'u').exec(text.slice(start, at));
+      if (named?.[1] !== undefined) {
+        names.push(named[1]);
+      }
+      start = at + 1;
+      if (depth === 0) {
+        break;
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * Whether [param name] is a local at zero-based [param index] of [param lines], the script's code
+ * split by line: a parameter of the function or a lambda around it, a `for` variable, a `var` or
+ * `const` declared earlier in a block still open, or a `var` a match pattern binds.
+ *
+ * Walked upwards: a line indented less than the last is a block holding this one, and a line at the
+ * same depth is an earlier statement of the same block, whose declarations are in scope. Lines more
+ * deeply indented belong to blocks already closed, so what they declare is not.
+ */
+function isLocalAt(lines: readonly string[], index: number, name: string): boolean {
+  const word = escapedForPattern(name);
+  const declares = new RegExp(`(?<![\\p{L}\\p{N}_.])(?:var|const)\\s+${word}(?![\\p{L}\\p{N}_])`, 'u');
+  const iterates = new RegExp(`^\\s*for\\s+${word}(?![\\p{L}\\p{N}_])`, 'u');
+  const own = lines[index] ?? '';
+  const headerOnOwnLine = FUNC_LINE.exec(own) ?? LAMBDA_HEADER.exec(own);
+  if (headerOnOwnLine !== null && parametersOf(own, headerOnOwnLine.index).includes(name)) {
+    return true;
+  }
+  if (FUNC_LINE.test(own)) {
+    return false;
+  }
+  let depth = indentOf(own);
+  for (let at = index - 1; at >= 0; at -= 1) {
+    const text = lines[at] ?? '';
+    if (text.trim() === '') {
+      continue;
+    }
+    const indent = indentOf(text);
+    if (indent > depth) {
+      continue;
+    }
+    const named = FUNC_LINE.exec(text);
+    if (indent < depth) {
+      depth = indent;
+      if (named !== null) {
+        return parametersOf(text, named.index).includes(name);
+      }
+      const lambda = LAMBDA_HEADER.exec(text);
+      if ((lambda !== null && parametersOf(text, lambda.index).includes(name)) || iterates.test(text)) {
+        return true;
+      }
+    }
+    if (named !== null || depth === 0) {
+      return false;
+    }
+    if (declares.test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The identifier written before the dot that ends just before [param offset] in [param code]. */
+function receiverBefore(code: string, offset: number): string | null {
+  let at = offset - 1;
+  while (at >= 0 && /\s/.test(code[at] ?? '')) {
+    at -= 1;
+  }
+  if (code[at] !== '.') {
+    return null;
+  }
+  at -= 1;
+  while (at >= 0 && /\s/.test(code[at] ?? '')) {
+    at -= 1;
+  }
+  let start = at + 1;
+  while (start > 0 && isIdentifierPart(code[start - 1])) {
+    start -= 1;
+  }
+  return start <= at ? code.slice(start, at + 1) : null;
+}
+
+/** What a class declares by a name that, written bare in it, means that member and no function. */
+const MEMBER_KINDS: ReadonlySet<DeclarationKind> = new Set(['var', 'const', 'signal', 'enum', 'enumValue']);
+
+/** The innermost class body under [param body] holding [param offset]. */
+function bodyHolding(body: ClassBody, offset: number): ClassBody {
+  const inner = body.inner.find((one) => one.start <= offset && offset <= one.end);
+  return inner === undefined ? body : bodyHolding(inner, offset);
+}
+
 /**
  * Where [param source] names [param name] in code, other than declaring it: as a call, a member
  * call on anything, or a Callable handed to something that calls it later. Comments and strings are
  * not code, so a function named in prose or by a string is not found.
+ *
+ * A bare name that is something else at that place is not the function: a parameter or local of
+ * that name, or a variable, constant, signal or enum the class itself declares by it. Read as the
+ * function, `made.bare_lift = lift` in a helper taking `lift: int` was listed as `lift` handed on
+ * as a Callable. A member call whose receiver is one of [param otherClasses] is another class's
+ * method, and is left out for a caller asking about one class.
  */
-export function callSitesOf(source: string, name: string): CallSite[] {
+export function callSitesOf(
+  source: string,
+  name: string,
+  otherClasses: ReadonlySet<string> = new Set(),
+): CallSite[] {
   const regions = regionsOf(source);
   const code = codeOf(source, regions);
+  const codeLines = code.split('\n');
   const lines = new Lines(source);
+  const shape = shapeOf(source);
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
+    .filter((one) => {
+      if (one.afterDot) {
+        const receiver = receiverBefore(code, one.offset);
+        return receiver === null || !otherClasses.has(receiver);
+      }
+      const index = lines.positionOf(one.offset).line;
+      if (isLocalAt(codeLines, index, name)) {
+        return false;
+      }
+      return !bodyHolding(shape.body, one.offset).declarations.some(
+        (declared) => declared.name === name && MEMBER_KINDS.has(declared.kind),
+      );
+    })
     .map((one) => {
       const line = lines.positionOf(one.offset).line + 1;
       const after = code.slice(one.offset + name.length).trimStart();
