@@ -138,7 +138,7 @@ func _check_a_button_that_presses_nothing() -> void:
 	on.process_mode = Node.PROCESS_MODE_DISABLED
 	var stopped: Dictionary = await input.click({"path": "/root/On"})
 	on.process_mode = Node.PROCESS_MODE_INHERIT
-	if not _says(stopped, "has its processing disabled") or _presses("On") != 2:
+	if not _says(stopped, "/root/On does not process (its process_mode is DISABLED)") or _presses("On") != 2:
 		_fail("a button whose processing is off is refused as that: %s" % JSON.stringify(stopped))
 	off.queue_free()
 	on.queue_free()
