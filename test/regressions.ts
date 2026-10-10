@@ -231,7 +231,9 @@ import {
   testPathsIn,
   timedOutVerdict,
   uidsLeftNote,
+  withoutUidUnder,
   withPreviousCut,
+  withUidsMissing,
 } from '../src/server.js';
 import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
@@ -1541,6 +1543,59 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     paidAt('lift'),
     [10, 12, 14, 15, 16, 17, 18, 20, 22],
     'and asked by bare name, every one is listed',
+  );
+
+  // The profiler's own cost per call, read off the empty function the runtime addon calls as the
+  // profiler goes on: it and its caller are the addon's, not the game's, so they are left out of the
+  // rows, the count and scriptMs, and a row whose calls at that cost make up half its self time or
+  // more says how much. Reported from fantasy-guild-manager as #994: two predicates at 622,000 calls
+  // each read as over a second, and inlining them saved nothing once the profiler was off.
+  const calibrated = totals({
+    'res://addons/gdharness_runtime/runtime_autoload.gd::310::_profiler_probe': {
+      calls: 10_000,
+      selfSeconds: 0.02,
+      totalSeconds: 0.02,
+    },
+    'res://addons/gdharness_runtime/runtime_autoload.gd::300::_calibrate_the_profiler': {
+      calls: 1,
+      selfSeconds: 0.005,
+      totalSeconds: 0.025,
+    },
+    'res://crews.gd::40::Crews.fits': { calls: 600_000, selfSeconds: 1.3, totalSeconds: 1.3 },
+    'res://crews.gd::12::Crews.together': { calls: 10, selfSeconds: 0.5, totalSeconds: 1.8 },
+  });
+  const costed = profiledFunctions(calibrated, 10);
+  assert.deepEqual(
+    [costed.perCallUs, costed.counted, costed.scriptMs, costed.overheadDominated],
+    [2, 2, 1800, 1],
+    'two microseconds a call, and the two calibration rows counted nowhere',
+  );
+  assert.deepEqual(
+    costed.functions.map((one) => [one.function, one.overheadMs]),
+    [
+      ['Crews.fits', 1200],
+      ['Crews.together', undefined],
+    ],
+    'the hot predicate is mostly the profiler; the function doing the work is not',
+  );
+  const costNote = String(answer({ totals: calibrated })['note']);
+  assert.match(
+    costNote,
+    /^The profiler costs about 2µs a call in this run, measured on an empty function the runtime addon calls as it goes on, .* One function has at least half its selfMs in it, under overheadMs: .*costs that much less once the profiler is off/,
+    costNote,
+  );
+  assert.equal(get(answer({ totals: calibrated }), 'perCallOverheadUs'), 2);
+  assert.equal(
+    get(
+      answer({
+        totals: totals({
+          'res://crews.gd::40::Crews.fits': { calls: 600_000, selfSeconds: 1.3, totalSeconds: 1.3 },
+        }),
+      }),
+      'perCallOverheadUs',
+    ),
+    undefined,
+    'and without the runtime addon there is no measurement to report',
   );
 
   // A script path comes from the game, so it is read only inside the project: a path climbing out of
@@ -10810,6 +10865,102 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
  * windowed run on Windows is started there, and a headless run, started nowhere, answers the same
  * motion without the note.
  */
+/**
+ * A click refused because the control does not process names what turned processing off, and what
+ * is drawn over it.
+ *
+ * Reported from fantasy-guild-manager as #995: "has its processing disabled" said neither, and the
+ * game's menu was over the hall, which took a find, a full-screen read and a guess to learn. Three
+ * buttons: one inheriting DISABLED from the hall it is in, under a panel drawn over it; one set
+ * DISABLED itself with nothing over it; and one inheriting the root's pausable mode once the game is
+ * paused.
+ */
+async function testAClickThatDoesNotProcessSaysWhy(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('click that does not process regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unprocessed-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unprocessed-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Unprocessed"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Control\n\n\nfunc pause_now() -> void:\n\tget_tree().paused = true\n',
+    );
+    // Inside the 64 by 64 viewport a headless game draws.
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\nscript = ExtResource("1")\n\n' +
+        '[node name="Hall" type="Control" parent="."]\nprocess_mode = 4\n\n' +
+        '[node name="Go" type="Button" parent="Hall"]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Go"\n\n' +
+        '[node name="Menu" type="Panel" parent="."]\noffset_right = 40.0\noffset_bottom = 40.0\n\n' +
+        '[node name="Solo" type="Button" parent="."]\nprocess_mode = 4\noffset_left = 44.0\noffset_top = 2.0\noffset_right = 62.0\noffset_bottom = 20.0\ntext = "S"\n\n' +
+        '[node name="Later" type="Button" parent="."]\noffset_left = 44.0\noffset_top = 40.0\noffset_right = 62.0\noffset_bottom = 60.0\ntext = "L"\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+      textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+    const started = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.match(started, /"listening": true/, started);
+
+    assert.match(
+      await call('runtime_input', { op: 'click', nodePath: '/root/Main/Hall/Go' }),
+      /\/root\/Main\/Hall\/Go does not process \(\/root\/Main\/Hall\/Go inherits process_mode DISABLED from \/root\/Main\/Hall\), so clicking it does nothing; \/root\/Main\/Menu is drawn over it/,
+      'the hall that turned it off, and the menu over it',
+    );
+    const solo = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Solo' });
+    assert.match(
+      solo,
+      /\/root\/Main\/Solo does not process \(its process_mode is DISABLED\), so clicking it does nothing/,
+      solo,
+    );
+    assert.doesNotMatch(solo, /drawn over it/, `and nothing is said to be over it: ${solo}`);
+
+    // A button that clicks before the pause, so the refusal after it is the pause's doing.
+    assert.match(
+      await call('runtime_input', { op: 'click', nodePath: '/root/Main/Later' }),
+      /"type": "clicked"/,
+    );
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'pause_now' });
+    assert.match(
+      await call('runtime_input', { op: 'click', nodePath: '/root/Main/Later' }),
+      /the game is paused and \/root\/Main\/Later does not process while it is \(\/root\/Main\/Later inherits process_mode PAUSABLE from \/root\), so clicking it does nothing/,
+      'the pause, and the root it inherits pausable from',
+    );
+    await stopItsRun(server);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
 async function testAPointerOnTheHiddenDesktopIsNoted(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -25198,6 +25349,16 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         `sorted by self time: ${wholeShown}`,
       );
       assert.ok(Number(get(whole, 'scriptMs')) > 0, wholeShown);
+      // The runtime addon measured what a call costs the profiler as it went on, and its measuring is
+      // not among the game's functions.
+      assert.ok(Number(get(whole, 'perCallOverheadUs')) > 0, `the profiler's cost a call: ${wholeShown}`);
+      assert.deepEqual(
+        rows
+          .map((one) => String(get(one, 'function')))
+          .filter((name) => name === '_profiler_probe' || name === '_calibrate_the_profiler'),
+        [],
+        wholeShown,
+      );
       // The keeper answered the game's word that the totals were sent, so it did not wait out its
       // deadline and say it could not confirm them.
       const printed =
@@ -26980,6 +27141,43 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
     alone.content.map((part) => part.text),
     [cutTestRunNote(cut), answerJson({ passed: true, previousRunCut: cut })],
   );
+  // The scripts a run covered that have no .uid sidecar yet, which a gate tracking them fails on:
+  // a suite named, anything in a directory named, and nothing outside them or merely sharing a prefix.
+  assert.deepEqual(
+    withoutUidUnder(
+      [
+        'test/new_test.gd',
+        'test/deep/helper.gd',
+        'tests/other_test.gd',
+        'core/game.gd',
+        'suites/one_test.gd',
+      ],
+      ['res://test', 'res://suites/one_test.gd'],
+    ),
+    ['res://test/new_test.gd', 'res://test/deep/helper.gd', 'res://suites/one_test.gd'],
+  );
+  const flagged = withUidsMissing({ content: [{ type: 'text', text: '{"passed": true}' }] }, [
+    'res://test/a_test.gd',
+  ]);
+  assert.deepEqual(JSON.parse(flagged.content[0]?.text ?? ''), {
+    passed: true,
+    uidsMissing: ['res://test/a_test.gd'],
+    uidsNote:
+      'This script has no .uid sidecar yet: the engine writes one when it imports the project, which a test run does not, so a check that tracks the sidecars fails on it. project_import refresh_uids writes them.',
+  });
+  assert.match(
+    String(
+      get(
+        JSON.parse(
+          withUidsMissing({ content: [{ type: 'text', text: '{}' }] }, ['res://a.gd', 'res://b.gd'])
+            .content[0]?.text ?? '',
+        ),
+        'uidsNote',
+      ),
+    ),
+    /^These scripts have no \.uid sidecar yet: .* fails on them\./,
+  );
+
   const kept = mkdtempSync(join(tmpdir(), 'gdharness-cut-run-'));
   try {
     assert.equal(takeCutTestRun(kept), null, 'nothing kept in a project no run was cut in');
@@ -27175,6 +27373,19 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
     );
     assert.equal(get(after.json, 'verdict'), 'passed', after.note);
     assert.equal(get(after.json, 'previousRunCut'), undefined, 'handed back once');
+    // The suite was written here and never imported, so it has no .uid sidecar, which a gate that
+    // tracks them fails on later: the run names it, and stops once the sidecar is there.
+    assert.deepEqual(get(after.json, 'uidsMissing'), [a], after.note);
+    writeFileSync(join(projectDir, 'test', 'a_test.gd.uid'), 'uid://b1gdharnesstest\n');
+    const minted = answerOf(
+      await server.request(
+        'tools/call',
+        { name: 'project_test', arguments: { projectPath: projectDir, path: a } },
+        ENGINE_CALL_TIMEOUT_MS * 3,
+      ),
+    );
+    assert.equal(get(minted.json, 'verdict'), 'passed', minted.note);
+    assert.equal(get(minted.json, 'uidsMissing'), undefined, `and with the sidecar, nothing: ${minted.note}`);
   } finally {
     await server.stop();
     sweep(projectDir);
@@ -32700,6 +32911,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameSaysWhichRuntimeAddonItLoaded,
   testAWorktreeFindsItsMainCheckoutsEngine,
   testAPointerOnTheHiddenDesktopIsNoted,
+  testAClickThatDoesNotProcessSaysWhy,
   testTheKeeperAnswersAStop,
   testAStopGoesThroughTheKeeper,
   testAStartStopsWaitingForAGameThatIsOver,

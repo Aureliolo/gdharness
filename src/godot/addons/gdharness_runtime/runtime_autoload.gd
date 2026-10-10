@@ -39,6 +39,10 @@ const PROFILE_RECEIVED: String = "gdharness:profile_received"
 ## editor without the gdharness addon, holds every profiled exit this long.
 const PROFILE_CONFIRM_MS: int = 3000
 
+## How many times the empty function is called to measure what the profiler costs per call: enough
+## that the clock's microsecond steps are lost in the sum, and a few milliseconds of one frame.
+const PROFILER_PROBE_CALLS: int = 10000
+
 ## How many calls of `EngineDebugger.line_poll` read the debugger's messages once: it reads them
 ## on every 2048th call and only counts the others.
 const POLLS_PER_READ: int = 2048
@@ -103,6 +107,7 @@ var _commands: Dictionary = {}
 var _loaded_version: String = _read_marker(VERSION_MARKER)
 var _loaded_digest: String = _read_marker(DIGEST_MARKER)
 var _profile_received: bool = false
+var _profiler_calibrated: bool = false
 
 
 func _init() -> void:
@@ -193,6 +198,31 @@ func _send_the_profile() -> void:
 		)
 
 
+## What the script profiler costs per call in this game, measured once each time it is switched on.
+##
+## The profiler times every call it counts, and that bookkeeping lands in the self time of the
+## function called: a function doing almost nothing, called six hundred thousand times, read as a
+## second of its own, and inlining it saved nothing once the profiler was off. So an empty function
+## is called here [constant PROFILER_PROBE_CALLS] times while the profiler watches, under the load
+## the game is under, and the server reads its row as the cost of one call.
+func _calibrate_the_profiler() -> void:
+	var profiling: bool = EngineDebugger.is_active() and EngineDebugger.is_profiling("servers")
+	if not profiling:
+		_profiler_calibrated = false
+		return
+	if _profiler_calibrated:
+		return
+	_profiler_calibrated = true
+	for _call: int in PROFILER_PROBE_CALLS:
+		_profiler_probe()
+
+
+## Does nothing, so its time under the profiler is the profiler's own. Kept in step with
+## `PROFILER_PROBE` in src/script-profile.ts.
+func _profiler_probe() -> void:
+	pass
+
+
 func _on_debugger_message(message: String, _data: Array) -> bool:
 	if PROFILE_CAPTURE + ":" + message == PROFILE_RECEIVED:
 		_profile_received = true
@@ -223,6 +253,7 @@ func _process(_delta: float) -> void:
 	if not _enabled or _server == null:
 		return
 	_queries.note_frame(Time.get_ticks_usec())
+	_calibrate_the_profiler()
 
 	if _server.is_connection_available():
 		var client: StreamPeerTCP = _server.take_connection()
