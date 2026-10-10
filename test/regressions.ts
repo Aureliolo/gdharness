@@ -230,6 +230,7 @@ import {
   stopVerdict,
   testPathsIn,
   timedOutVerdict,
+  transcriptNote,
   uidsLeftNote,
   withoutUidUnder,
   withPreviousCut,
@@ -24433,10 +24434,17 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
         // second channel and found the engine's own log, which every engine start rotates away.
         const capped: unknown = JSON.parse(await call('editor_output', { limit: 1 }));
         assert.ok(asNumber(get(capped, 'omitted')) > 0, JSON.stringify(capped));
+        // Over, so the file is whole: reported from ostinato as a note on a run stopped a moment
+        // before that still said the transcript was being written, and told a caller to watch it.
         assert.match(
           text(get(capped, 'note')),
-          /Everything this run has printed is in .*run-1\.log/,
-          `a capped answer points at the uncapped file: ${JSON.stringify(capped)}`,
+          /Everything this run printed is in .*run-1\.log, uncapped and complete, since the run is over\./,
+          `a capped answer points at the uncapped file, whole now the run is over: ${JSON.stringify(capped)}`,
+        );
+        assert.match(
+          transcriptNote('run-2.log', true),
+          /^Everything this run has printed is in run-2\.log, uncapped and still being written\. Read it for output, not for whether the run is alive/,
+          'while the run goes on, the file is still being written and is no reading of whether it is alive',
         );
 
         const printed = asArray(get(output, 'entries')).map((entry) => text(get(entry, 'text')));

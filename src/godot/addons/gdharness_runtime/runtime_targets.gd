@@ -377,10 +377,15 @@ static func drawn_over(target: Control) -> Node:
 
 
 ## Why [param node], which is not visible in the tree, is not, as a parenthesis to follow its path:
-## which nodes hide it, nearest first, and what is shown beside the nearest. Reading visible off
-## the node itself says true when only an ancestor is hidden, so without this a caller had nothing
-## to unhide; every hidden one is named because unhiding only the nearest leaves the rest hiding it.
-## "" when nothing on the way up says so.
+## which nodes hide it, nearest first, and what has taken its place. Reading visible off the node
+## itself says true when only an ancestor is hidden, so without this a caller had nothing to unhide;
+## every hidden one is named because unhiding only the nearest leaves the rest hiding it.
+##
+## What has taken its place is what a click at its centre reaches now, which is the screen a game
+## shows instead. Without a control there, as for a 3D node, it is what is shown beside the
+## outermost hidden node: a game hides a screen by hiding the screen's root, and the nearest hidden
+## node can be a panel deep inside it whose siblings are hidden with it. "" when nothing on the way
+## up says the node is hidden.
 static func why_hidden(node: Node) -> String:
 	var hiding: Array[Node] = _hiding(node)
 	if hiding.is_empty():
@@ -391,27 +396,71 @@ static func why_hidden(node: Node) -> String:
 			named.append("its own visible is false")
 		else:
 			named.append("%s is hidden%s" % [one.get_path(), "" if named.is_empty() else " too"])
+	var control: Control = node as Control
+	var instead: Node = null if control == null else drawn_at(control)
+	if instead != null:
+		return " (%s; %s is drawn where it would be)" % [", and ".join(named), instead.get_path()]
+	var outermost: Node = hiding.back()
 	var beside: Array[String] = []
-	var parent: Node = hiding[0].get_parent()
+	var parent: Node = outermost.get_parent()
 	if parent != null:
 		for sibling: Node in parent.get_children():
-			if sibling != hiding[0] and _shown(sibling):
+			if sibling != outermost and _shown(sibling):
 				beside.append(str(sibling.get_path()))
-	return " (%s%s)" % [", and ".join(named), _shown_beside(beside)]
+	return " (%s%s)" % [", and ".join(named), _shown_beside(beside, outermost)]
 
 
-## "; A, B and C beside it are shown" for [param beside], naming three at most and counting the rest.
-static func _shown_beside(beside: Array[String]) -> String:
+## What a click at the centre of [param target], which is hidden, would reach instead, or null.
+##
+## The topmost thing there that takes the pointer, whatever order it is drawn in relative to the
+## target, since the target is not drawn at all; and never a node holding the target, which covers
+## its place by containing it and is not what took it.
+static func drawn_at(target: Control) -> Node:
+	var drawn: Array[Node] = _pointer_takers(target.get_tree().root)
+	var point: Vector2 = _centre_of(target)
+	var none: Dictionary[ScrollContainer, Vector2] = {}
+	var viewport: Viewport = target.get_viewport()
+	var best: Control = null
+	for each: Node in drawn:
+		var window: Window = each as Window
+		if window != null:
+			if _window_over(target, point, window):
+				return window
+			continue
+		var control: Control = each
+		if control.is_ancestor_of(target) or target.is_ancestor_of(control):
+			continue
+		if control.get_viewport() != viewport or not _holds(control, point):
+			continue
+		if _clipped_away(control, point, none):
+			continue
+		if best == null or _drawn_above(control, best):
+			best = control
+	return best
+
+
+## Whether [param control] is drawn above [param other]: on a higher canvas layer, or later on the
+## same one.
+static func _drawn_above(control: Control, other: Control) -> bool:
+	var layer: int = _layer_of(control)
+	var other_layer: int = _layer_of(other)
+	return layer > other_layer or (layer == other_layer and control.is_greater_than(other))
+
+
+## "; A, B and C are shown beside N" for [param beside] and the hidden node [param hidden], naming
+## three at most and counting the rest.
+static func _shown_beside(beside: Array[String], hidden: Node) -> String:
 	if beside.is_empty():
 		return ""
+	var at: String = str(hidden.get_path())
 	if beside.size() == 1:
-		return "; %s beside it is shown" % beside[0]
+		return "; %s is shown beside %s" % [beside[0], at]
 	var listed: Array[String] = beside.slice(0, 3)
 	var rest: int = beside.size() - listed.size()
 	if rest > 0:
-		return "; %s and %d more beside it are shown" % [", ".join(listed), rest]
+		return "; %s and %d more are shown beside %s" % [", ".join(listed), rest, at]
 	var last: String = listed.pop_back()
-	return "; %s and %s beside it are shown" % [", ".join(listed), last]
+	return "; %s and %s are shown beside %s" % [", ".join(listed), last, at]
 
 
 ## The nodes whose visible is false and keeps [param node] from being drawn, nearest first. Walked
