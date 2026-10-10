@@ -647,6 +647,19 @@ export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'
 }
 
 /**
+ * Where everything a run printed is, for an answer capped short of it.
+ *
+ * The advice on not reading the file for liveness is for a run still going, where a file that has
+ * stopped growing is a run between prints. Once the run is over the file is whole and nothing more
+ * is written to it, and saying it was still being written told a caller to keep watching it.
+ */
+export function transcriptNote(transcript: string, going: boolean): string {
+  return going
+    ? `Everything this run has printed is in ${transcript}, uncapped and still being written. Read it for output, not for whether the run is alive: a transcript that stops growing is a run between prints. running above is asked of the operating system while there is a process to ask about, and for an editor-played run that announced no runtime it is the editor's answer instead, which can lag after the game has gone.`
+    : `Everything this run printed is in ${transcript}, uncapped and complete, since the run is over.`;
+}
+
+/**
  * How long a stop waits for what it signalled to be gone before it answers.
  *
  * Ten seconds covers a windowed engine closing its renderer on a loaded machine; the kill is
@@ -9328,9 +9341,7 @@ class GodotServer {
     // the shape of every liveness proxy: it fails in the direction of the proxy rather than the
     // direction of the truth.
     if (run.transcript !== null && selected.omitted > 0) {
-      notes.push(
-        `Everything this run has printed is in ${run.transcript}, uncapped and still being written. Read it for output, not for whether the run is alive: a transcript that stops growing is a run between prints. running above is asked of the operating system while there is a process to ask about, and for an editor-played run that announced no runtime it is the editor's answer instead, which can lag after the game has gone.`,
-      );
+      notes.push(transcriptNote(run.transcript, going));
     }
     return this.jsonTextResponse({
       running: going,
