@@ -376,6 +376,93 @@ static func drawn_over(target: Control) -> Node:
 	return _cover_of(target, drawn, _areas_of(drawn))
 
 
+## Why [param node], which is not visible in the tree, is not, as a parenthesis to follow its path:
+## which nodes hide it, nearest first, and what is shown beside the nearest. Reading visible off
+## the node itself says true when only an ancestor is hidden, so without this a caller had nothing
+## to unhide; every hidden one is named because unhiding only the nearest leaves the rest hiding it.
+## "" when nothing on the way up says so.
+static func why_hidden(node: Node) -> String:
+	var hiding: Array[Node] = _hiding(node)
+	if hiding.is_empty():
+		return ""
+	var named: Array[String] = []
+	for one: Node in hiding:
+		if one == node:
+			named.append("its own visible is false")
+		else:
+			named.append("%s is hidden%s" % [one.get_path(), "" if named.is_empty() else " too"])
+	var beside: Array[String] = []
+	var parent: Node = hiding[0].get_parent()
+	if parent != null:
+		for sibling: Node in parent.get_children():
+			if sibling != hiding[0] and _shown(sibling):
+				beside.append(str(sibling.get_path()))
+	return " (%s%s)" % [", and ".join(named), _shown_beside(beside)]
+
+
+## "; A, B and C beside it are shown" for [param beside], naming three at most and counting the rest.
+static func _shown_beside(beside: Array[String]) -> String:
+	if beside.is_empty():
+		return ""
+	if beside.size() == 1:
+		return "; %s beside it is shown" % beside[0]
+	var listed: Array[String] = beside.slice(0, 3)
+	var rest: int = beside.size() - listed.size()
+	if rest > 0:
+		return "; %s and %d more beside it are shown" % [", ".join(listed), rest]
+	var last: String = listed.pop_back()
+	return "; %s and %s beside it are shown" % [", ".join(listed), last]
+
+
+## The nodes whose visible is false and keeps [param node] from being drawn, nearest first. Walked
+## the way the engine inherits visibility rather than by parent: an item under a plain Node is drawn
+## from its canvas layer, whatever a control above that Node says, so naming that control would send
+## a caller to unhide something that hides nothing.
+static func _hiding(node: Node) -> Array[Node]:
+	var hiding: Array[Node] = []
+	var at: Node = node
+	while at != null:
+		var item: CanvasItem = at as CanvasItem
+		var spatial: Node3D = at as Node3D
+		if item != null:
+			if not item.visible:
+				hiding.append(item)
+			var above: CanvasItem = item.get_parent() as CanvasItem
+			if above != null:
+				at = above
+				continue
+			var layer: CanvasLayer = item.get_canvas_layer_node()
+			if layer != null and not layer.visible:
+				hiding.append(layer)
+			at = item.get_viewport()
+		elif spatial != null:
+			if not spatial.visible:
+				hiding.append(spatial)
+			at = spatial.get_parent_node_3d()
+			if at == null:
+				at = spatial.get_viewport()
+		else:
+			var window: Window = at as Window
+			if window != null and not window.visible:
+				hiding.append(window)
+			at = null
+	return hiding
+
+
+## Whether [param node] is something drawn and on show, for naming what stands beside a hidden one.
+static func _shown(node: Node) -> bool:
+	var item: CanvasItem = node as CanvasItem
+	if item != null:
+		return item.is_visible_in_tree()
+	var spatial: Node3D = node as Node3D
+	if spatial != null:
+		return spatial.is_visible_in_tree()
+	var layer: CanvasLayer = node as CanvasLayer
+	if layer != null:
+		return layer.visible
+	return false
+
+
 ## Everything in the tree [param root] heads that a pointer can land on: each control on screen
 ## that does not let the pointer through, and each window embedded in another.
 static func _pointer_takers(root: Node) -> Array[Node]:

@@ -2208,7 +2208,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
   }
   if (table.overheadDominated > 0 && table.perCallUs !== null) {
     notes.push(
-      `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${table.overheadDominated === 1 ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${table.overheadDominated === 1 ? 'its' : 'their'} selfMs in it, under overheadMs: a function that does little and is called often looks expensive here and costs that much less once the profiler is off, so inlining it gains little.`,
+      `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${table.overheadDominated === 1 ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${table.overheadDominated === 1 ? 'its' : 'their'} selfMs in it, under overheadMs: that much of its time is the profiler's and goes once the profiler is off, whether the function is inlined or not. What inlining saves is the call itself, which costs something without the profiler too, not the work inside it.`,
     );
   }
   notes.push(...cappedNotes(totals));
@@ -6184,12 +6184,26 @@ class GodotServer {
     }
   }
 
-  /** The run a status answer is about, named the way editor_output names it. */
-  private runNamed(run: GodotProcess): { pid: number | null; project?: string; adopted?: true } {
+  /**
+   * The run a status answer is about, named the way editor_output names it.
+   *
+   * With when it started and ended, because the run stays named after it is over and a run picked
+   * up from another server's note can have ended hours before: a pid and adopted true read the same
+   * for a run that finished a moment ago and one from the morning.
+   */
+  private runNamed(run: GodotProcess): {
+    pid: number | null;
+    project?: string;
+    adopted?: true;
+    startedAt: string;
+    endedAt?: string;
+  } {
     return {
       pid: run.pid ?? this.announcedPidOf(run) ?? run.announcedPid ?? null,
       ...(run.throughEditor || run.projectPath === null ? {} : { project: run.projectPath }),
       ...(run.pickedUp === true ? { adopted: true as const } : {}),
+      startedAt: new Date(run.startedAt).toISOString(),
+      ...(run.endedAt === undefined ? {} : { endedAt: new Date(run.endedAt).toISOString() }),
     };
   }
 
@@ -7702,10 +7716,12 @@ class GodotServer {
       running.endedThrough = 'editor';
       // A game that announced no process is judged over by the editor saying so. Waiting on an empty
       // list of processes answered "gone" at once, whatever the editor was doing.
-      if (announced === undefined) {
-        return (await this.untilTheEditorStopsPlaying()) ? 'gone' : 'lingering';
+      const stopped =
+        announced === undefined ? await this.untilTheEditorStopsPlaying() : await untilGone([announced]);
+      if (stopped) {
+        running.endedAt = Date.now();
       }
-      return (await untilGone([announced])) ? 'gone' : 'lingering';
+      return stopped ? 'gone' : 'lingering';
     }
     if (running.pid === null) {
       return 'gone';
@@ -7778,6 +7794,7 @@ class GodotServer {
     if (landed && gone) {
       running.exitCode = null;
       running.exitSignal = 'SIGTERM';
+      running.endedAt ??= Date.now();
     }
     if (landed) {
       running.endedThrough = 'signal';
@@ -7824,6 +7841,7 @@ class GodotServer {
     if (asked === 'signalled' && gone) {
       run.exitCode = null;
       run.exitSignal = 'SIGTERM';
+      run.endedAt ??= Date.now();
     }
     run.log.record(
       gone ? 'info' : 'warning',
@@ -7893,6 +7911,7 @@ class GodotServer {
       this.logDebug(`Godot process exited with code ${code ?? 'none'}, signal ${signal ?? 'none'}`);
       started.exitCode = code;
       started.exitSignal = code === null ? signal : null;
+      started.endedAt = Date.now();
     });
     child.on('error', (err: Error) => {
       console.error('Failed to start Godot process:', err);
@@ -8475,6 +8494,9 @@ class GodotServer {
       // unknown rather than guessed at.
       adopted.exitCode = record.exitCode ?? null;
       adopted.exitSignal = record.exitSignal ?? null;
+      if (record.endedAt !== undefined) {
+        adopted.endedAt = record.endedAt;
+      }
       // Not settled for a game just gone with nothing recorded yet: its keeper writes the exit a
       // moment after the game ends, and settled here the run read as ended with no code while the
       // code was being written. The wait every answer makes for that write has it instead. A pid
@@ -9063,6 +9085,9 @@ class GodotServer {
       ) {
         run.exitCode = record.exitCode ?? null;
         run.exitSignal = record.exitSignal ?? null;
+        if (record.endedAt !== undefined) {
+          run.endedAt = record.endedAt;
+        }
         return true;
       }
       if (Date.now() >= until) {
@@ -9353,9 +9378,17 @@ class GodotServer {
       // that is wedged and a run that is merely slow look the same from outside, and processor
       // time is what separates them: elapsed climbing while it stands still is a game that has
       // stopped doing anything. Absent unless `cpu` asked, and absent where the platform will not
-      // say, rather than guessed at.
+      // say, rather than guessed at. For a run that is over, how long it ran, which needs the
+      // moment it ended: counted to now, a run that ended in the morning went on growing all day,
+      // so with nobody having seen the end it is left out rather than counted to the answer.
       startedAt: new Date(run.startedAt).toISOString(),
-      elapsedMs: Date.now() - run.startedAt,
+      endedAt:
+        stillRunning(run) || run.endedAt === undefined ? undefined : new Date(run.endedAt).toISOString(),
+      elapsedMs: stillRunning(run)
+        ? Date.now() - run.startedAt
+        : run.endedAt === undefined
+          ? undefined
+          : run.endedAt - run.startedAt,
       cpuSeconds,
       note: notes.length > 0 ? notes.join(' ') : undefined,
       omitted: selected.omitted,
