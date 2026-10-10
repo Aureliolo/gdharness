@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import {
   BOTH_SIDES_ALIKE_NOTE,
+  failedCases,
   hookFailuresPrinted,
   MalformedReportError,
   orphansPrinted,
@@ -217,6 +218,132 @@ function testASecondFailedAssertionIsNotAHook(): void {
     'a failed hook is counted once whatever its cases failed, and a case failing twice is no hook',
   );
   assert.equal(report.hookFailures, 2);
+}
+
+/**
+ * Every report a case carries (#1000), from the reports gdUnit4 v6.2.1 wrote on 4.7.2 for the
+ * suites below. It writes a case's error ahead of its failures, and only the first child was read,
+ * so a case that failed an assertion and then hit a runtime error answered the error alone with no
+ * failure counted, and a case failing twice lost its second.
+ *
+ *     func test_fails_then_errors() -> void:
+ *         assert_int(1).is_equal(2)
+ *         var empty: Dictionary[String, int] = {}
+ *         print(empty["missing"])
+ *     func test_fails_twice() -> void:
+ *         assert_int(1).is_equal(2)
+ *         assert_int(3).is_equal(4)
+ *     func test_errors_then_fails() -> void:
+ *         var empty: Dictionary[String, int] = {}
+ *         print(empty["missing"])
+ *         assert_int(1).is_equal(2)
+ */
+function testEveryReportOfACaseIsKept(): void {
+  const failure = (name: string, suite: string, line: number, expected: number, found: number): string =>
+    `<failure message="FAILED: res://tests/${suite}.gd:${line}" type="FAILURE">\n<![CDATA[\nExpecting:\n ${expected}\n but was\n ${found}\n\tat '${name}' in res://tests/${suite}.gd:${line}\n]]>\n</failure>`;
+  const error = (name: string, suite: string, line: number): string =>
+    `<error message="ERROR: res://tests/${suite}.gd:${line}" type="ABORT">\n<![CDATA[\nGodot Runtime Error !\n  'Invalid access to property or key 'missing' on a base object of type 'Dictionary[String, int]'.'\n\tat '${name}' in res://tests/${suite}.gd:${line}\n]]>\n</error>`;
+  const report = parseJUnit(`<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-10-10" name="report_1" tests="3" failures="3" skipped="0" flaky="0" time="0.000">
+\t<testsuite id="0" name="probe_test" package="tests" tests="1" failures="1" errors="1" skipped="0" flaky="0" time="0.040">
+\t\t<testcase name="test_fails_then_errors" classname="probe_test" time="0.014">
+${error('test_fails_then_errors', 'probe_test', 7)}
+${failure('test_fails_then_errors', 'probe_test', 5, 2, 1)}
+\t\t</testcase>
+\t</testsuite>
+\t<testsuite id="1" name="twice_test" package="tests" tests="2" failures="2" errors="0" skipped="0" flaky="0" time="0.040">
+\t\t<testcase name="test_fails_twice" classname="twice_test" time="0.011">
+${failure('test_fails_twice', 'twice_test', 5, 2, 1)}
+${failure('test_fails_twice', 'twice_test', 6, 4, 3)}
+\t\t</testcase>
+\t</testsuite>
+\t<testsuite id="2" name="late_test" package="tests" tests="1" failures="0" errors="1" skipped="0" flaky="0" time="0.037">
+\t\t<testcase name="test_errors_then_fails" classname="late_test" time="0.015">
+${error('test_errors_then_fails', 'late_test', 6)}
+\t\t</testcase>
+\t</testsuite>
+</testsuites>`);
+  assert.deepEqual(
+    [report.failures, report.errors, report.hookFailures, report.hookErrors],
+    [2, 2, 0, 0],
+    'a case that failed and then hit an error counts in both, and neither half is a hook',
+  );
+  assert.deepEqual(
+    report.suites.map((suite) => [suite.name, suite.failures, suite.errors]),
+    [
+      ['probe_test', 1, 1],
+      ['twice_test', 1, 0],
+      ['late_test', 0, 1],
+    ],
+  );
+  const failed = failedCases(report, '');
+  assert.deepEqual(
+    failed.map((entry) => [
+      entry.name,
+      entry.status,
+      entry.message,
+      entry.reports?.map((one) => [one.kind, one.message]),
+    ]),
+    [
+      [
+        'test_fails_then_errors',
+        'error',
+        'FAILED: res://tests/probe_test.gd:5',
+        [
+          ['failure', 'FAILED: res://tests/probe_test.gd:5'],
+          ['error', 'ERROR: res://tests/probe_test.gd:7'],
+        ],
+      ],
+      [
+        'test_fails_twice',
+        'failed',
+        'FAILED: res://tests/twice_test.gd:5',
+        [
+          ['failure', 'FAILED: res://tests/twice_test.gd:5'],
+          ['failure', 'FAILED: res://tests/twice_test.gd:6'],
+        ],
+      ],
+      ['test_errors_then_fails', 'error', 'ERROR: res://tests/late_test.gd:6', undefined],
+    ],
+    'each case leads with the first thing that went wrong in it, and lists every report when it has several',
+  );
+  assert.match(
+    failed[0]?.detail ?? '',
+    /^Expecting:\n 2\n but was\n 1\n\tat 'test_fails_then_errors' in res:\/\/tests\/probe_test\.gd:5$/,
+    `the failed assertion is the detail, not the error after it: ${failed[0]?.detail}`,
+  );
+  assert.equal(failed[2]?.path, 'res://tests/late_test.gd');
+
+  // A case with one report answers as it always did, without a list of one.
+  const single = failedCases(parseJUnit(GDUNIT_REPORT), '');
+  assert.deepEqual(
+    single.map((entry) => [entry.name, entry.status, entry.message, 'reports' in entry]),
+    [['test_two_and_two_is_not_five', 'failed', 'FAILED: res://test/sums_test.gd:9', false]],
+  );
+
+  // Each report has its value read back, in the order the run printed them: the second string
+  // equality of one case is the second diff, which reading the case's first report alone never met.
+  const e = String.fromCharCode(0x1b);
+  const at = `${e}[0m${e}[38;2;173;216;230m\tat 'test_each' in res://test/each_test.gd:7${e}[0m`;
+  const printed = [
+    ` but was`,
+    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255mabc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${at}`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255ma${e}[48;2;38;0;0m${e}[38;2;255;255;255mbc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${at}`,
+  ].join('\n');
+  const merged =
+    "<failure message=\"FAILED: res://test/each_test.gd:7\" type=\"FAILURE\"><![CDATA[Expecting:\n 'abc'\n but was\n 'abc'\n\tat 'test_each' in res://test/each_test.gd:7]]></failure>";
+  const [each] = failedCases(
+    parseJUnit(
+      `<testsuites><testsuite name="each_test" package="test" tests="1" failures="2"><testcase name="test_each">${merged}${merged}</testcase></testsuite></testsuites>`,
+    ),
+    printed,
+  );
+  assert.deepEqual(
+    each?.reports?.map((one) => / but was\n '(.*)'\n/.exec(one.detail ?? '')?.[1]),
+    ['', 'a'],
+    `both values read back, the second into the second report: ${JSON.stringify(each)}`,
+  );
 }
 
 function testASuiteWithASpaceInItsPathKeepsItsOrphans(): void {
@@ -760,6 +887,7 @@ testOneLineFailingTwiceKeepsEachValue();
 testASuiteWithASpaceInItsPathKeepsItsOrphans();
 testAFailedHookIsCountedAndNamed();
 testASecondFailedAssertionIsNotAHook();
+testEveryReportOfACaseIsKept();
 testAStringAfterAnArrayReadsItsOwnValue();
 testEveryShapeOfAStringEqualityReadsItsValue();
 testEntitiesAndShapes();
