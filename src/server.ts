@@ -108,6 +108,7 @@ import { engineExtras, type HeadlessOutcome, runImport, runOperation } from './h
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
+  failedCases,
   finishesASuite,
   hookFailuresPrinted,
   orphansPrinted,
@@ -118,7 +119,6 @@ import {
   type TestReport,
   testProgressMessage,
   whyNoReport,
-  withActualsPrinted,
 } from './junit.js';
 import { askTheKeeperToStop } from './keeper-channel.js';
 import {
@@ -5222,14 +5222,7 @@ class GodotServer {
       };
     }
 
-    const failed = withActualsPrinted(
-      report.suites.flatMap((suite) =>
-        suite.cases
-          .filter((entry) => entry.status === 'failed' || entry.status === 'error')
-          .map((entry) => ({ ...entry, path: suite.path })),
-      ),
-      Buffer.concat(console).toString('utf8'),
-    );
+    const failed = failedCases(report, Buffer.concat(console).toString('utf8'));
     // What the report cannot say. gdUnit4 decides the run's state on orphan nodes and writes none
     // of that into its XML, so a tier that passed every case and left nodes behind arrived as the
     // word "warnings" and nothing else: no failure, no entry, nothing naming a suite. Read off
