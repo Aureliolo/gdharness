@@ -25,6 +25,15 @@ const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
 ## everything that process starts. Kept in step with `DESKTOP_VARIABLE` in src/desktop.ts.
 const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
 
+## Node.ProcessMode as its names, for a refusal to say which one is in force.
+const PROCESS_MODES: Dictionary[int, String] = {
+	Node.PROCESS_MODE_INHERIT: "INHERIT",
+	Node.PROCESS_MODE_PAUSABLE: "PAUSABLE",
+	Node.PROCESS_MODE_WHEN_PAUSED: "WHEN_PAUSED",
+	Node.PROCESS_MODE_ALWAYS: "ALWAYS",
+	Node.PROCESS_MODE_DISABLED: "DISABLED",
+}
+
 ## Whether this run has had the pointer note in full; the game process is the run.
 static var _pointer_explained: bool = false
 
@@ -556,13 +565,33 @@ func _takes_no_click(control: Control, node_path: String) -> String:
 	if button != null and button.disabled:
 		return "%s is disabled, so clicking it presses nothing" % node_path
 	if not control.can_process():
+		var why: String = _why_it_does_not_process(control, node_path)
+		var over: Node = Targets.drawn_over(control)
+		var cover: String = "" if over == null else "; %s is drawn over it" % over.get_path()
 		if _host.get_tree().paused:
 			return (
-				"the game is paused and %s does not process while it is, so clicking it does nothing"
-				% node_path
+				"the game is paused and %s does not process while it is (%s), so clicking it does nothing%s"
+				% [node_path, why, cover]
 			)
-		return "%s has its processing disabled, so clicking it does nothing" % node_path
+		return "%s does not process (%s), so clicking it does nothing%s" % [node_path, why, cover]
 	return ""
+
+
+## Which node's process_mode keeps [param control] from processing, and what it is. A node set to
+## inherit takes its parent's, so the one deciding can be any node above it: the game turning a
+## whole screen off while a menu shows over it reads, on the button, as a button turned off.
+static func _why_it_does_not_process(control: Control, node_path: String) -> String:
+	var deciding: Node = control
+	while deciding.process_mode == Node.PROCESS_MODE_INHERIT and deciding.get_parent() != null:
+		deciding = deciding.get_parent()
+	# The root inherits from nothing, which processes as pausable.
+	var value: int = deciding.process_mode
+	if value == Node.PROCESS_MODE_INHERIT:
+		value = Node.PROCESS_MODE_PAUSABLE
+	var mode: String = PROCESS_MODES.get(value, str(value))
+	if deciding == control:
+		return "its process_mode is %s" % mode
+	return "%s inherits process_mode %s from %s" % [node_path, mode, deciding.get_path()]
 
 
 ## Why a click at [param control]'s centre would reach nothing, or "" when it would reach it: the

@@ -370,6 +370,12 @@ static func _pressed_through(control: Control) -> Control:
 	return control
 
 
+## What a pointer at [param target]'s centre would reach instead of it, drawn over it, or null.
+static func drawn_over(target: Control) -> Node:
+	var drawn: Array[Node] = _pointer_takers(target.get_tree().root)
+	return _cover_of(target, drawn, _areas_of(drawn))
+
+
 ## Everything in the tree [param root] heads that a pointer can land on: each control on screen
 ## that does not let the pointer through, and each window embedded in another.
 static func _pointer_takers(root: Node) -> Array[Node]:

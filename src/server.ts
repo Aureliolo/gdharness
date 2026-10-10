@@ -1707,6 +1707,42 @@ function nonEmpty<T extends Record<string, readonly unknown[]>>(lists: T): Parti
  * [param answer] carrying [param previous]: its sentence after the answer's own, and the record
  * under `previousRunCut` in the JSON the answer ends with.
  */
+/**
+ * The scripts of [param unminted], spelled from the project root, that are among [param paths]: a
+ * suite file named there, or anything inside a directory named there.
+ */
+export function withoutUidUnder(unminted: readonly string[], paths: readonly string[]): string[] {
+  return unminted
+    .map((script) => `res://${script}`)
+    .filter((script) =>
+      paths.some((path) => script === path || script.startsWith(path.endsWith('/') ? path : `${path}/`)),
+    );
+}
+
+/**
+ * [param answer] with [param missing], the scripts it ran that have no `.uid` sidecar yet, under
+ * uidsMissing. The engine writes one when it imports the project and a test run does not, so a suite
+ * written since the last import runs and passes here and then fails a gate that tracks the sidecars,
+ * which is where it was found downstream.
+ */
+export function withUidsMissing(answer: ToolResponse, missing: readonly string[]): ToolResponse {
+  const content = answer.content.map((part) => ({ ...part }));
+  const last = content.at(-1);
+  try {
+    const parsed: unknown = JSON.parse(last?.text ?? '');
+    if (last !== undefined && typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      last.text = answerJson({
+        ...parsed,
+        uidsMissing: missing,
+        uidsNote: `${missing.length === 1 ? 'This script has' : 'These scripts have'} no .uid sidecar yet: the engine writes one when it imports the project, which a test run does not, so a check that tracks the sidecars fails on ${missing.length === 1 ? 'it' : 'them'}. project_import refresh_uids writes them.`,
+      });
+    }
+  } catch {
+    // An answer that does not end in JSON is left as it is.
+  }
+  return { ...answer, content };
+}
+
 export function withPreviousCut(answer: ToolResponse, previous: CutTestRun): ToolResponse {
   const content = answer.content.map((part) => ({ ...part }));
   const last = content.at(-1);
@@ -2170,6 +2206,11 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       `${table.superCallers === 1 ? 'One function calls' : `${table.superCallers} functions call`} through super, marked selfIncludesSuper: the engine takes every other call out of the caller's self time, and not a super call, so ${table.superCallers === 1 ? 'its' : 'their'} selfMs holds the overridden function's time, which that function's own row counts again. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it.`,
     );
   }
+  if (table.overheadDominated > 0 && table.perCallUs !== null) {
+    notes.push(
+      `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${table.overheadDominated === 1 ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${table.overheadDominated === 1 ? 'its' : 'their'} selfMs in it, under overheadMs: a function that does little and is called often looks expensive here and costs that much less once the profiler is off, so inlining it gains little.`,
+    );
+  }
   notes.push(...cappedNotes(totals));
   if (totals.unreadable > 0) {
     notes.push(
@@ -2184,6 +2225,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     frames: totals.frames,
     coveredMs: reading.coveredMs,
     scriptMs: table.scriptMs,
+    perCallOverheadUs: table.perCallUs ?? undefined,
     functionsCounted: table.counted,
     omitted: table.omitted > 0 ? table.omitted : undefined,
     functions: table.functions,
@@ -4874,11 +4916,14 @@ class GodotServer {
    * it had itself just kept, and hand it to nobody.
    */
   private async handleRunTests(args: OperationParams): Promise<ToolResponse> {
-    const answer = await this.runTests(args);
+    const ran = await this.runTests(args);
     const project = this.project(args);
     if (!project.ok || callSignal()?.aborted === true) {
-      return answer;
+      return ran;
     }
+    const paths = testPathsIn(project.value.path, args['path']);
+    const unminted = paths.ok ? withoutUidUnder(scriptsWithoutUid(project.value.path), paths.value) : [];
+    const answer = unminted.length === 0 ? ran : withUidsMissing(ran, unminted);
     const previous = takeCutTestRun(project.value.path);
     return previous === null ? answer : withPreviousCut(answer, previous);
   }

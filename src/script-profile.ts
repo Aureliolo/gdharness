@@ -267,6 +267,11 @@ export interface ProfiledFunction {
    * overridden function's time is in its own row and again in this one.
    */
   readonly selfIncludesSuper?: true;
+  /**
+   * The part of selfMs that is the profiler's own cost of timing its calls, when that is at least
+   * half of it, from what one call cost an empty function in the same run.
+   */
+  readonly overheadMs?: number;
 }
 
 /** A script's source by its `res://` path, or null when it cannot be read. */
@@ -305,10 +310,16 @@ export function profiledFunctions(
   scriptMs: number;
   counted: number;
   superCallers: number;
+  perCallUs: number | null;
+  overheadDominated: number;
 } {
-  const rows = rowsOf(totals, sourceOf);
+  const perCallUs = perCallCostOf(totals);
+  const rows = rowsOf(totals, sourceOf).map((row) => withOverhead(row, perCallUs));
   const scriptMs = ms(
-    Object.values(totals.functions).reduce((sum, one) => sum + (one.calls > 0 ? one.selfSeconds : 0), 0),
+    Object.entries(totals.functions).reduce(
+      (sum, [signature, one]) => sum + (one.calls > 0 && !isCalibration(signature) ? one.selfSeconds : 0),
+      0,
+    ),
   );
   return {
     functions: rows.slice(0, limit).map((row) => placedLambda(row, sourceOf)),
@@ -316,7 +327,50 @@ export function profiledFunctions(
     scriptMs,
     counted: rows.length,
     superCallers: rows.filter((row) => row.selfIncludesSuper === true).length,
+    perCallUs,
+    overheadDominated: rows.filter((row) => row.overheadMs !== undefined).length,
   };
+}
+
+/** The runtime addon's script, and the empty function it calls to measure the profiler's cost. */
+const RUNTIME_SCRIPT = 'gdharness_runtime/runtime_autoload.gd';
+const PROFILER_PROBE = '_profiler_probe';
+const PROFILER_CALIBRATOR = '_calibrate_the_profiler';
+
+/** Whether [param signature] is the runtime addon measuring the profiler, which is not the game's. */
+function isCalibration(signature: string): boolean {
+  const parts = signatureParts(signature);
+  return (
+    parts.script.endsWith(RUNTIME_SCRIPT) &&
+    (parts.function === PROFILER_PROBE || parts.function === PROFILER_CALIBRATOR)
+  );
+}
+
+/**
+ * What one call costs the profiler in this run, in microseconds, read off the empty function the
+ * runtime addon calls when the profiler goes on; null without the addon, or before it has.
+ */
+function perCallCostOf(totals: ProfileTotals): number | null {
+  for (const [signature, sum] of Object.entries(totals.functions)) {
+    const parts = signatureParts(signature);
+    if (parts.script.endsWith(RUNTIME_SCRIPT) && parts.function === PROFILER_PROBE && sum.calls > 0) {
+      return Math.round((sum.selfSeconds / sum.calls) * 1e9) / 1000;
+    }
+  }
+  return null;
+}
+
+/**
+ * [param row] with the profiler's share of its self time, when that is at least half of it: its
+ * calls at [param perCallUs] each. A function that does little and is called often is mostly the
+ * profiler's bookkeeping, and costs that much less once the profiler is off.
+ */
+function withOverhead(row: ProfiledFunction, perCallUs: number | null): ProfiledFunction {
+  if (perCallUs === null || row.selfMs <= 0) {
+    return row;
+  }
+  const overheadMs = Math.round(row.calls * perCallUs) / 1000;
+  return overheadMs >= row.selfMs / 2 ? { ...row, overheadMs: Math.min(overheadMs, row.selfMs) } : row;
 }
 
 /** Every function [param totals] counts a call of, by self time, each marked if it calls super. */
@@ -330,7 +384,7 @@ function rowsOf(totals: ProfileTotals, sourceOf: SourceOf): ProfiledFunction[] {
     return codes.get(script) ?? null;
   };
   return Object.entries(totals.functions)
-    .filter(([, sum]) => sum.calls > 0)
+    .filter(([signature, sum]) => sum.calls > 0 && !isCalibration(signature))
     .map(([signature, sum]): ProfiledFunction => {
       const parts = signatureParts(signature);
       const code = codeOfScript(parts.script);
