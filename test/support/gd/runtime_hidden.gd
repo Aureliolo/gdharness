@@ -37,6 +37,7 @@ func _everything() -> void:
 	typing = Typing.new(host)
 
 	await _check_a_tab_under_a_hidden_hall()
+	await _check_a_screen_drawn_over_a_hidden_one()
 	await _check_a_button_on_a_hidden_layer()
 	await _check_a_dropdown_under_a_hidden_panel()
 	await _check_a_node_in_a_hidden_world()
@@ -101,7 +102,7 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 	var hidden: Dictionary = await input.click({"path": TAB})
 	var expected: String = (
 		"%s is not visible (/root/Main/Hall is hidden;" % TAB
-		+ " /root/Main/Menu beside it is shown), so nothing can click it"
+		+ " /root/Main/Menu is shown beside /root/Main/Hall), so nothing can click it"
 	)
 	if not _says(hidden, expected) or _presses("Tab") != 0:
 		_fail("a tab under a hidden hall names the hall and what is shown: %s" % JSON.stringify(hidden))
@@ -110,11 +111,12 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 		beside.append(_control(named, main))
 		if beside.size() == 1:
 			var two: Dictionary = await input.click({"path": TAB})
-			if not _says(two, "; /root/Main/Menu and /root/Main/Ledger beside it are shown)"):
+			if not _says(two, "; /root/Main/Menu and /root/Main/Ledger are shown beside /root/Main/Hall)"):
 				_fail("two shown beside the hall are both named: %s" % JSON.stringify(two))
 	var four: Dictionary = await input.click({"path": TAB})
 	var counted: String = (
-		"; /root/Main/Menu, /root/Main/Ledger, /root/Main/Purse" + " and 1 more beside it are shown)"
+		"; /root/Main/Menu, /root/Main/Ledger, /root/Main/Purse"
+		+ " and 1 more are shown beside /root/Main/Hall)"
 	)
 	if not _says(four, counted):
 		_fail("past three shown beside the hall, the rest are counted: %s" % JSON.stringify(four))
@@ -126,6 +128,19 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 	main.visible = true
 	if not _says(both, "(/root/Main/Hall is hidden, and /root/Main is hidden too)"):
 		_fail("both hidden nodes are named, nearest first: %s" % JSON.stringify(both))
+
+	# The rail hidden inside the hidden hall: what is shown beside the rail is hidden with it, and
+	# the menu is what stands beside the hall.
+	var rail: Control = root.get_node("Main/Hall/Rail")
+	rail.visible = false
+	var nested: Dictionary = await input.click({"path": TAB})
+	rail.visible = true
+	var outer: String = (
+		"(/root/Main/Hall/Rail is hidden, and /root/Main/Hall is hidden too;"
+		+ " /root/Main/Menu is shown beside /root/Main/Hall)"
+	)
+	if not _says(nested, outer):
+		_fail("what is shown is read beside the outermost hidden node: %s" % JSON.stringify(nested))
 
 	hall.visible = true
 	tab.visible = false
@@ -154,6 +169,52 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 	await process_frame
 
 
+## The shape fantasy-guild-manager reported on 1.2.1: the hall stays visible and a screen inside it is
+## hidden, while a menu beside the hall is drawn where the tab was. Named by what is drawn at the
+## tab's place, the topmost there: the menu's button over the menu, and not the hall, which covers
+## the place by holding the tab. The menu comes before the hall in the tree, so the hall is drawn
+## above it and only its holding the tab keeps it from being named.
+func _check_a_screen_drawn_over_a_hidden_one() -> void:
+	var shown: Control = _control("Shown", root)
+	shown.size = Vector2(64, 64)
+	var menu: Control = _control("Menu", shown)
+	menu.size = Vector2(64, 64)
+	var _resume: Button = _button("Resume", Vector2(0, 0), menu)
+	_resume.size = Vector2(20, 20)
+	var hall: Control = _control("Hall", shown)
+	hall.size = Vector2(64, 64)
+	var screen: Control = _control("Screen", hall)
+	screen.size = Vector2(64, 64)
+	var _books: Button = _button("Books", Vector2(2, 2), screen)
+	await process_frame
+	screen.visible = false
+	var covered: Dictionary = await input.click({"path": "/root/Shown/Hall/Screen/Books"})
+	var expected: String = (
+		"/root/Shown/Hall/Screen/Books is not visible (/root/Shown/Hall/Screen is hidden;"
+		+ " /root/Shown/Menu/Resume is drawn where it would be), so nothing can click it"
+	)
+	if not _says(covered, expected) or _presses("Books") != 0 or _presses("Resume") != 0:
+		_fail("a tab on a hidden screen names what is drawn in its place: %s" % JSON.stringify(covered))
+	# A dialog open over the place is above everything in the viewport holding it.
+	var dialog: Window = Window.new()
+	dialog.name = "Dialog"
+	dialog.position = Vector2i(0, 0)
+	dialog.size = Vector2i(30, 30)
+	root.add_child(dialog)
+	await process_frame
+	var under: Dictionary = await input.click({"path": "/root/Shown/Hall/Screen/Books"})
+	dialog.queue_free()
+	await process_frame
+	if not _says(under, "(/root/Shown/Hall/Screen is hidden; /root/Dialog is drawn where it would be)"):
+		_fail("a dialog over a hidden tab is what is drawn there: %s" % JSON.stringify(under))
+	screen.visible = true
+	var reached: Dictionary = await input.click({"path": "/root/Shown/Hall/Screen/Books"})
+	if reached.get("landed") != true or _presses("Books") != 1:
+		_fail("and is pressed once the screen is shown: %s" % JSON.stringify(reached))
+	shown.queue_free()
+	await process_frame
+
+
 ## A button straight on a hidden canvas layer, which is what hides it, with the control shown
 ## beside the layer named as well.
 func _check_a_button_on_a_hidden_layer() -> void:
@@ -168,7 +229,7 @@ func _check_a_button_on_a_hidden_layer() -> void:
 	var on_layer: Dictionary = await input.click({"path": "/root/Layer/Drawn"})
 	var by_layer: String = (
 		"/root/Layer/Drawn is not visible (/root/Layer is hidden;"
-		+ " /root/Beside beside it is shown), so nothing can click it"
+		+ " /root/Beside is shown beside /root/Layer), so nothing can click it"
 	)
 	if not _says(on_layer, by_layer) or _presses("Drawn") != 0:
 		_fail("a button on a hidden canvas layer names the layer: %s" % JSON.stringify(on_layer))
