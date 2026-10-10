@@ -217,6 +217,9 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
         case 'wait_signal':
           reply({ type: 'signal', id, fired: true, args: [3], elapsed_ms: 12, asked: params });
           break;
+        case 'wait_until':
+          reply({ type: 'condition', id, met: true, value: 34, asked: params });
+          break;
         case 'capture_screenshot':
         case 'capture_viewport': {
           const screenshotPath = text(params['output_path']);
@@ -626,6 +629,32 @@ async function main(): Promise<void> {
         get(waited, 'asked'),
         { path: '/root/Player', signal: 'died', timeout_ms: 250 },
         'the wait carries its timeout to the game',
+      );
+      // #1007: the comparison reaches the game under the name it reads, and only when one is given.
+      const ordered = await payload('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: '_game:run:day',
+        value: 32,
+        compare: '>=',
+        timeoutMs: 250,
+      });
+      assert.deepEqual(
+        get(ordered, 'asked'),
+        { path: '/root/Main', property: '_game:run:day', value: 32, compare: '>=', timeout_ms: 250 },
+        'a property wait carries its comparison to the game',
+      );
+      const plain = await payload('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'day',
+        value: 32,
+        timeoutMs: 250,
+      });
+      assert.equal(
+        get(plain, 'asked', 'compare'),
+        undefined,
+        `none is sent unless asked: ${JSON.stringify(plain)}`,
       );
 
       for (const args of [{}, { op: 'viewport', viewportPath: '/root' }] as const) {
