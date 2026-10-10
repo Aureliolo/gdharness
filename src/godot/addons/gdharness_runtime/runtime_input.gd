@@ -683,8 +683,7 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	if not item.is_visible_in_tree():
 		return {
 			"type": "error",
-			"message":
-			"%s is not visible%s, so nothing can click it" % [node_path, Targets.why_hidden(item)]
+			"message": "%s is not visible%s, so nothing can click it" % [node_path, Targets.why_hidden(item)]
 		}
 
 	var found: Dictionary = Queries.in_frame(item)

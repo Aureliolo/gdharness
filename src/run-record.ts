@@ -98,6 +98,8 @@ export interface RunRecord {
   readonly exitCode?: number;
   /** The signal that ended it instead, under the same conditions; a signalled run has no code. */
   readonly exitSignal?: string;
+  /** When it ended, written beside the code by the same keeper at the same moment. */
+  readonly endedAt?: number;
 }
 
 /** Where a run's note and its transcript are kept, beside the runtime's own announcements. */
@@ -291,6 +293,7 @@ export function recordRunEnded(
     ...record,
     ...(ending.exitCode === null ? {} : { exitCode: ending.exitCode }),
     ...(ending.exitSignal === null ? {} : { exitSignal: ending.exitSignal }),
+    endedAt: Date.now(),
   };
   try {
     writeFileSync(path, JSON.stringify(written, null, 2), 'utf8');
@@ -379,6 +382,7 @@ function recordAt(path: string): RunRecord | null {
     ...(typeof fields['command'] === 'string' ? { command: fields['command'] } : {}),
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
     ...(typeof fields['exitSignal'] === 'string' ? { exitSignal: fields['exitSignal'] } : {}),
+    ...(typeof fields['endedAt'] === 'number' ? { endedAt: fields['endedAt'] } : {}),
   };
 }
 

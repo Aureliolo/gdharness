@@ -10694,6 +10694,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
       await server.request('tools/call', { name: 'editor_status', arguments: {} }, ENGINE_CALL_TIMEOUT_MS),
     );
   const stop = async (server: ServerProcess, game: number, logged: string): Promise<void> => {
+    const asked = Date.now();
     const answered = await server.request(
       'tools/call',
       { name: 'editor_run', arguments: { op: 'stop' } },
@@ -10710,8 +10711,12 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
       logged.includes('through the keeper') ? 'keeper' : 'signal',
       `the answer says how: ${textOf(answered)}`,
     );
-    const output = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    const read = await server.request('tools/call', { name: 'editor_output', arguments: {} });
+    const output = textOf(read) ?? '';
     assert.ok(output.includes(logged), `the run says how it was ended, ${logged}: ${output}`);
+    // And when, from the keeper's note or the stop seen landing, whichever way it was ended.
+    const ended = Date.parse(String(get(parseTextContent(read), 'endedAt')));
+    assert.ok(ended >= asked && ended <= Date.now(), `the run says when the stop ended it: ${output}`);
     for (let waited = 0; waited < 10_000 && isAlive(game); waited += 250) {
       await delay(250);
     }
@@ -23925,10 +23930,15 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
       "another run's ending is not written into this note",
     );
 
+    const before = Date.now();
     recordRunEnded(project, 4242, { exitCode: 3, exitSignal: null });
     const after = readRunRecord(project);
     assert.ok(after !== null, 'the note should still be there to read');
     assert.equal(after.exitCode, 3, 'the code its own server saw is kept for whoever reads next');
+    assert.ok(
+      after.endedAt !== undefined && after.endedAt >= before && after.endedAt <= Date.now(),
+      `and the moment it ended, beside the code: ${JSON.stringify(after)}`,
+    );
     assert.equal(after.pid, 4242, 'and the rest of the note is still there');
     assert.equal(after.command, 'godot');
   } finally {
@@ -24297,6 +24307,11 @@ async function testARecordedEndingIsReadBack(): Promise<void> {
     { recorded: { exitSignal: 'SIGKILL' }, exitCode: null, exitSignal: 'SIGKILL', said: /sent it SIGKILL/ },
     { recorded: { exitCode: 3 }, exitCode: 3, exitSignal: undefined, said: /stopped on its own/ },
   ];
+  // Hours before this server starts, which is the state ostinato read: the run stays named after it
+  // is over, and a pid with adopted true reads the same for a run a moment old and one from the
+  // morning unless the answer says when. Counted to now, its elapsedMs grew all day.
+  const startedAt = Date.now() - 3 * 60 * 60 * 1000;
+  const endedAt = startedAt + 20_000;
   for (const ending of endings) {
     const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-recorded-ending-'));
     try {
@@ -24309,16 +24324,28 @@ async function testARecordedEndingIsReadBack(): Promise<void> {
         JSON.stringify({
           pid: ended.pid,
           transcript,
-          startedAt: Date.now() - 60_000,
+          startedAt,
           projectPath: join(runtimeDir, 'project'),
           arguments: ['--headless', '--path', join(runtimeDir, 'project')],
           ...ending.recorded,
+          endedAt,
         }),
         'utf8',
       );
       await withStdioServer(
         async (call) => {
           const output: unknown = jsonOf(await call('editor_output', { limit: 200 }), 'editor_output');
+          assert.deepEqual(
+            [get(output, 'startedAt'), get(output, 'endedAt'), get(output, 'elapsedMs')],
+            [new Date(startedAt).toISOString(), new Date(endedAt).toISOString(), 20_000],
+            `how long it ran, not how long ago it began: ${JSON.stringify(output)}`,
+          );
+          const run = get(jsonOf(await call('editor_status', {}), 'editor_status'), 'game', 'run');
+          assert.deepEqual(
+            [get(run, 'pid'), get(run, 'adopted'), get(run, 'startedAt'), get(run, 'endedAt')],
+            [ended.pid, true, new Date(startedAt).toISOString(), new Date(endedAt).toISOString()],
+            `the status says when the run it names began and ended: ${JSON.stringify(run)}`,
+          );
           assert.equal(get(output, 'running'), false, JSON.stringify(output));
           assert.equal(get(output, 'exitCode'), ending.exitCode, JSON.stringify(output));
           assert.equal(get(output, 'exitSignal'), ending.exitSignal, JSON.stringify(output));
@@ -24378,6 +24405,12 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
         const output: unknown = jsonOf(answered, 'editor_output');
         assert.equal(get(output, 'running'), false, JSON.stringify(output));
         assert.equal(get(output, 'endedUnwatched'), true, JSON.stringify(output));
+        // Nobody saw it end, so how long it ran is not known: left out rather than counted to now.
+        assert.deepEqual(
+          [typeof get(output, 'startedAt'), get(output, 'endedAt'), get(output, 'elapsedMs')],
+          ['string', undefined, undefined],
+          `a run whose end nobody saw has no length: ${JSON.stringify(output)}`,
+        );
         assert.equal(
           get(output, 'exitCode'),
           null,

@@ -68,6 +68,13 @@ export interface GodotProcess {
    */
   exitSignal: string | null;
   /**
+   * When the run ended, from whoever saw it end: the keeper that held it, the exit of a child this
+   * server held, or a stop this server watched land. Absent while it runs and wherever nobody saw
+   * the moment, since the time a server first noticed a run was over is not when it ended: a run
+   * picked up after a reconnect hours later would read as having just finished.
+   */
+  endedAt?: number;
+  /**
    * True for a run found over with no exit code collected here, because nothing here held it.
    *
    * The difference between this and a clean `exitCode` is the difference between "it exited 0"

@@ -255,10 +255,7 @@ func choose(params: Dictionary) -> Dictionary:
 		return {
 			"type": "error",
 			"message":
-			(
-				"%s is not visible%s, so its menu cannot be opened"
-				% [node_path, Targets.why_hidden(holder)]
-			)
+			"%s is not visible%s, so its menu cannot be opened" % [node_path, Targets.why_hidden(holder)]
 		}
 
 	# Shown first, because a menu nobody has opened has no focus to move and the press would go to

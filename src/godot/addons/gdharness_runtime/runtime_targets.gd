@@ -438,8 +438,9 @@ static func _hiding(node: Node) -> Array[Node]:
 		elif spatial != null:
 			if not spatial.visible:
 				hiding.append(spatial)
-			var above_3d: Node3D = spatial.get_parent_node_3d()
-			at = above_3d if above_3d != null else spatial.get_viewport()
+			at = spatial.get_parent_node_3d()
+			if at == null:
+				at = spatial.get_viewport()
 		else:
 			var window: Window = at as Window
 			if window != null and not window.visible:
