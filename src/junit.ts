@@ -169,15 +169,25 @@ function parseXml(source: string): XmlElement {
 
 type CaseStatus = 'passed' | 'failed' | 'error' | 'skipped';
 
+/** One thing that went wrong in a case: a failed assertion, the error that ended it, or a skip. */
+interface CaseReport {
+  readonly kind: 'failure' | 'error' | 'skipped';
+  /** The runner's one-line message, such as where the failing assertion is. */
+  readonly message: string | null;
+  /** What the runner said in full: the expected and actual values, the stack. */
+  readonly detail: string | null;
+}
+
 interface TestCase {
   readonly suite: string;
   readonly name: string;
   readonly status: CaseStatus;
   readonly time: number;
-  /** The runner's one-line message, such as where the failing assertion is. */
+  /** The first of [member reports], which is the first thing that went wrong in the case. */
   readonly message: string | null;
-  /** What the runner said in full: the expected and actual values, the stack. */
   readonly detail: string | null;
+  /** Everything the case reported, in the order the case met it. */
+  readonly reports: readonly CaseReport[];
 }
 
 interface TestSuite {
@@ -216,25 +226,46 @@ function count(attributes: Readonly<Record<string, string>>, name: string): numb
   return Number.isFinite(value) ? value : 0;
 }
 
+/**
+ * A case with every report gdUnit4 wrote for it.
+ *
+ * gdUnit4 goes on past a failed assertion and writes one child per report, so a case can carry
+ * several. Reading only the first dropped the rest: a case failing at two lines answered the first,
+ * and one that failed assertions and then hit a runtime error answered the error alone, with no
+ * failure counted, because gdUnit4 writes a case's error ahead of its failures. Measured on 4.7.2.
+ * An error ends the case, so in the order the case met them its failures come first and the error
+ * last, which is the order kept here; a case with an error is in error whatever failed before it.
+ */
 function caseOf(suite: XmlElement, element: XmlElement): TestCase {
-  const outcome = element.children.find((child) => ['failure', 'error', 'skipped'].includes(child.name));
-  const status: CaseStatus =
-    outcome === undefined
-      ? 'passed'
-      : outcome.name === 'failure'
-        ? 'failed'
-        : outcome.name === 'error'
-          ? 'error'
-          : 'skipped';
-  const detail = outcome?.text.trim() ?? '';
+  const of = (kind: CaseReport['kind']): CaseReport[] =>
+    element.children
+      .filter((child) => child.name === kind)
+      .map((child) => {
+        const detail = child.text.trim();
+        return { kind, message: child.attributes['message'] ?? null, detail: detail === '' ? null : detail };
+      });
+  const reports = [...of('failure'), ...of('error'), ...of('skipped')];
+  const status: CaseStatus = reports.some((report) => report.kind === 'error')
+    ? 'error'
+    : reports.some((report) => report.kind === 'failure')
+      ? 'failed'
+      : reports.length > 0
+        ? 'skipped'
+        : 'passed';
   return {
     suite: suite.attributes['name'] ?? '',
     name: element.attributes['name'] ?? '',
     status,
     time: count(element.attributes, 'time'),
-    message: outcome?.attributes['message'] ?? null,
-    detail: detail === '' ? null : detail,
+    message: reports[0]?.message ?? null,
+    detail: reports[0]?.detail ?? null,
+    reports,
   };
+}
+
+/** Whether [param entry] failed an assertion, which a case that then hit an error also did. */
+function failedAnAssertion(entry: TestCase): boolean {
+  return entry.reports.some((report) => report.kind === 'failure');
 }
 
 /** Where a suite's script is, when the report says: gdUnit4 writes the directory as `package`. */
@@ -262,7 +293,7 @@ export function parseJUnit(xml: string): TestReport {
     const cases = suite.children
       .filter((child) => child.name === 'testcase')
       .map((element) => caseOf(suite, element));
-    const failures = cases.filter((entry) => entry.status === 'failed').length;
+    const failures = cases.filter(failedAnAssertion).length;
     const errors = cases.filter((entry) => entry.status === 'error').length;
     // What the suite's own counts are counts of: one per failed assertion, and gdUnit4 goes on past
     // a failed assertion, so a case failing two writes two. Measured on 4.7.2: a suite of one case
@@ -294,7 +325,7 @@ export function parseJUnit(xml: string): TestReport {
   const all = suites.flatMap((suite) => suite.cases);
   return {
     tests: all.length,
-    failures: all.filter((entry) => entry.status === 'failed').length,
+    failures: all.filter(failedAnAssertion).length,
     errors: all.filter((entry) => entry.status === 'error').length,
     hookFailures: suites.reduce((sum, suite) => sum + suite.hookFailures, 0),
     hookErrors: suites.reduce((sum, suite) => sum + suite.hookErrors, 0),
@@ -572,6 +603,52 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
       detail = detail.slice(0, end).replaceAll(MASKED_BRACKET, '[') + detail.slice(end);
     }
     return detail === entry.detail ? entry : { ...entry, detail };
+  });
+}
+
+/** A failed case as the answer names it: its first report, and every report when it has several. */
+export interface FailedCase {
+  readonly suite: string;
+  readonly name: string;
+  readonly status: CaseStatus;
+  readonly time: number;
+  readonly path: string | null;
+  readonly message: string | null;
+  readonly detail: string | null;
+  readonly reports?: readonly CaseReport[];
+}
+
+/**
+ * Every case in [param report] that failed or hit an error, with the values [param printed] puts
+ * back into each of its reports.
+ *
+ * Read report by report rather than case by case, because the printed diffs are matched in the
+ * order the run met them, and a case failing two string equalities printed two.
+ */
+export function failedCases(report: TestReport, printed: string): FailedCase[] {
+  const cases = report.suites.flatMap((suite) =>
+    suite.cases
+      .filter((entry) => entry.status === 'failed' || entry.status === 'error')
+      .map((entry) => ({ entry, path: suite.path })),
+  );
+  const read = withActualsPrinted(
+    cases.flatMap(({ entry }) => entry.reports),
+    printed,
+  );
+  let next = 0;
+  return cases.map(({ entry, path }) => {
+    const reports = read.slice(next, next + entry.reports.length);
+    next += entry.reports.length;
+    return {
+      suite: entry.suite,
+      name: entry.name,
+      status: entry.status,
+      time: entry.time,
+      path,
+      message: reports[0]?.message ?? null,
+      detail: reports[0]?.detail ?? null,
+      ...(reports.length > 1 ? { reports } : {}),
+    };
   });
 }
 

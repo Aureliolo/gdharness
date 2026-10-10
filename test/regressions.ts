@@ -26475,6 +26475,41 @@ async function testGdUnitRunner(): Promise<void> {
           [1, undefined, undefined],
           `a case failing twice is one failure and no hook: ${JSON.stringify(twice, null, 2)}`,
         );
+        assert.deepEqual(
+          asArray(get(twice, 'failed', 0, 'reports') ?? []).map((report) => get(report, 'message')),
+          ['FAILED: res://test/twice_test.gd:5', 'FAILED: res://test/twice_test.gd:6'],
+          `and both its failed assertions are named: ${JSON.stringify(get(twice, 'failed'), null, 2)}`,
+        );
+        // #1000: a case that fails an assertion and then hits a runtime error. gdUnit4 writes the
+        // error ahead of the failure, and the answer was the error alone with no failure counted.
+        writeFileSync(
+          join(projectDir, 'test', 'then_errors_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_fails_then_errors() -> void:\n\tassert_int(1).is_equal(2)\n\tvar empty: Dictionary[String, int] = {}\n\tprint(empty["missing"])\n',
+        );
+        const thenErrors = await asked('then_errors_test');
+        assert.deepEqual(
+          [
+            get(thenErrors, 'failures'),
+            get(thenErrors, 'errors'),
+            get(thenErrors, 'failed', 0, 'status'),
+            get(thenErrors, 'failed', 0, 'message'),
+            asArray(get(thenErrors, 'failed', 0, 'reports') ?? []).map((report) => [
+              get(report, 'kind'),
+              get(report, 'message'),
+            ]),
+          ],
+          [
+            1,
+            1,
+            'error',
+            'FAILED: res://test/then_errors_test.gd:5',
+            [
+              ['failure', 'FAILED: res://test/then_errors_test.gd:5'],
+              ['error', 'ERROR: res://test/then_errors_test.gd:7'],
+            ],
+          ],
+          `the failed assertion is named and counted beside the error after it: ${JSON.stringify(thenErrors, null, 2)}`,
+        );
         // The same failing suite, run again and again. Reported downstream on 1.1.22 as a hook count
         // that changed between runs of one suite, which would be an earlier run's report being read
         // as well as #800's arithmetic; the answer has to be this run's alone, and the same each time.
