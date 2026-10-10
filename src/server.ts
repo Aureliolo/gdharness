@@ -169,18 +169,21 @@ import {
   couldStillBeTheRecordedRun,
   type EditorPlay,
   everyRunRecord,
+  type LatestRun,
   listeningPid,
   noteIsAbout,
   openTranscript,
   profilePath,
   type RunRecord,
   readEditorRunNote,
+  readLatestRun,
   readRunRecord,
   runningAs,
   stillTheAnnouncedGame,
   sweepTranscripts,
   whyNotStillTheRecordedRun,
   writeEditorRunNote,
+  writeLatestRun,
 } from './run-record.js';
 import {
   ANNOUNCE_BUDGET_MS,
@@ -7414,6 +7417,7 @@ class GodotServer {
       ...(which === null ? {} : { play: which }),
     };
     this.activeProcess = played;
+    this.noteTheLatestRun({ projectPath, pid: null, startedAt });
     this.watchThePlayedConsole();
     writeEditorRunNote({
       projectPath,
@@ -8001,6 +8005,7 @@ class GodotServer {
       return launched;
     }
     const startedBy = Date.now();
+    this.noteTheLatestRun({ projectPath, pid: launched.pid, startedAt });
     sweepTranscripts();
     // Written by the keeper before it handed the pid back.
     const noted = readRunRecord(projectPath);
@@ -8461,12 +8466,21 @@ class GodotServer {
    */
   private async adoptRecordedRun(): Promise<GodotProcess | null> {
     const project = this.ourProject();
-    // The newer of the two, since each is left behind once its run is over.
     const found = project === null ? [] : [readRunRecord(project), this.startedForUs(project)];
-    const record = found.reduce<RunRecord | null>(
-      (newest, one) => (one !== null && (newest === null || one.startedAt > newest.startedAt) ? one : newest),
-      null,
-    );
+    // The run a server of this project started last, when one said: a run it started earlier and
+    // moved past is not the run, however recently its note was the newest left.
+    const latest = project === null ? null : readLatestRun(project);
+    const record =
+      latest === null
+        ? // The newer of the two, since each is left behind once its run is over.
+          found.reduce<RunRecord | null>(
+            (newest, one) =>
+              one !== null && (newest === null || one.startedAt > newest.startedAt) ? one : newest,
+            null,
+          )
+        : (found.find(
+            (one) => one !== null && one.pid === latest.pid && one.startedAt === latest.startedAt,
+          ) ?? null);
     if (
       record === null ||
       !(this.couldBeOurs(record.projectPath) || this.couldBeOurs(record.servedBy ?? ''))
@@ -8522,6 +8536,14 @@ class GodotServer {
   private servedBy(): { servedBy?: string } {
     const mine = this.ourProject();
     return mine === null ? {} : { servedBy: mine };
+  }
+
+  /** Writes down [param latest] as the run this project's servers started last; see `LatestRun`. */
+  private noteTheLatestRun(latest: LatestRun): void {
+    const mine = this.ourProject();
+    if (mine !== null) {
+      writeLatestRun(mine, latest);
+    }
   }
 
   /**
