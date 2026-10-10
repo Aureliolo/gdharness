@@ -191,7 +191,7 @@ func _check_a_screen_drawn_over_a_hidden_one() -> void:
 	var covered: Dictionary = await input.click({"path": "/root/Shown/Hall/Screen/Books"})
 	var expected: String = (
 		"/root/Shown/Hall/Screen/Books is not visible (/root/Shown/Hall/Screen is hidden;"
-		+ " /root/Shown/Menu/Resume is drawn where it would be), so nothing can click it"
+		+ " a click where it would be reaches /root/Shown/Menu/Resume), so nothing can click it"
 	)
 	if not _says(covered, expected) or _presses("Books") != 0 or _presses("Resume") != 0:
 		_fail("a tab on a hidden screen names what is drawn in its place: %s" % JSON.stringify(covered))
@@ -205,7 +205,9 @@ func _check_a_screen_drawn_over_a_hidden_one() -> void:
 	var under: Dictionary = await input.click({"path": "/root/Shown/Hall/Screen/Books"})
 	dialog.queue_free()
 	await process_frame
-	if not _says(under, "(/root/Shown/Hall/Screen is hidden; /root/Dialog is drawn where it would be)"):
+	if not _says(
+		under, "(/root/Shown/Hall/Screen is hidden; a click where it would be reaches /root/Dialog)"
+	):
 		_fail("a dialog over a hidden tab is what is drawn there: %s" % JSON.stringify(under))
 	screen.visible = true
 	var reached: Dictionary = await input.click({"path": "/root/Shown/Hall/Screen/Books"})

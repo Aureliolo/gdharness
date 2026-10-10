@@ -563,7 +563,7 @@ stopped on its own and a bench this server stopped are otherwise the same silenc
 one afternoon were each worked out by hand for want of that distinction, and the reflex they
 produced, watching a log stop growing, is wrong on a run that prints only at the end.
 
-Two things guard that, because reading a note is also claiming the right to end what it names, and
+Three things guard that, because reading a note is also claiming the right to end what it names, and
 the runtime directory is one per user rather than one per project.
 
 **Whose run it is.** The note is only picked up by a server that can show the run is its own: the
@@ -573,6 +573,12 @@ claim on it, rather than taking the run. "I cannot name a project" once read as 
 mine", which is how a regression suite, whose servers are started with no project and no editor,
 adopted another project's bench and ended it to start its own: six times in fifty minutes, exit
 code 1 with nothing printed, while its owner bisected their own scenes looking for the cause.
+
+**Which run it is.** Every start, spawned or played, writes down which run the project's servers
+started last, and a successor picks up only the note of that run. A stop takes its run's note away
+and a played run leaves none, so the newest note left can be one the predecessor had long moved
+past: a server named a run of the project's git worktree from that morning as the run, after the
+run of its own it had started and stopped that afternoon.
 
 **Which process it is.** A pid is handed out again as soon as it is free, so before anything is
 signalled the process has to answer as the run the server holds, which it started or picked up from
