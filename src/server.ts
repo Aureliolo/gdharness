@@ -39,7 +39,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { alive } from './alive.js';
 import { answerJson } from './answer-json.js';
-import { halfAsLongAgain, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
+import { halfAsLongAgain, MAIN_SCENE, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import { type CallProgress, callProgress, callSignal, withCallSignal } from './call-signal.js';
@@ -1108,10 +1108,12 @@ export function endedToStartThis(ended: EndedRun | null): string {
   return ` ${which} was ended to start this one; its output is no longer what editor_output answers about.`;
 }
 
-/** The wait a start gives its game to announce, and the last boot it was sized to when it was. */
+/** The wait a start gives its game to announce, and the boot it was sized to when it was. */
 interface AnnounceBudget {
   readonly ms: number;
   readonly sizedToMs?: number;
+  /** The scene the start runs, as its boot is noted under: see `MAIN_SCENE`. */
+  readonly scene: string;
 }
 
 /**
@@ -1120,6 +1122,12 @@ interface AnnounceBudget {
  * without those arguments should not wait for it.
  */
 const LONGEST_BOOT_NOTED_MS = 5 * 60_000;
+
+/**
+ * How long a stop waits for a profiled game to send its totals: the runtime waits up to three
+ * seconds for its debugger to confirm them, and the request is given that and room to answer.
+ */
+const PROFILE_SEND_MS = 5000;
 
 /**
  * The most repeated message shapes an editor's console is grouped into for one answer.
@@ -1135,7 +1143,7 @@ interface AfterWaiting {
   /** Whether the addon is on disk at all, since a project without it can never announce. */
   readonly addon: boolean;
   readonly budgetMs: number;
-  /** The last boot the budget was sized to, when it was longer than usual for that reason. */
+  /** The slowest recent boot the budget was sized to, when it was longer than usual for that reason. */
   readonly sizedToMs?: number;
   readonly heldAt: StoppedAt | null;
   readonly running: boolean;
@@ -1200,8 +1208,8 @@ export function runtimeVerdict(
     after.sizedToMs === undefined
       ? ''
       : halfAsLongAgain(after.sizedToMs) > after.budgetMs
-        ? `, the longest a start waits unasked though its last game took ${after.sizedToMs}ms to announce,`
-        : `, half as long again as the ${after.sizedToMs}ms its last game took,`;
+        ? `, the longest a start waits unasked though the slowest of its last boots took ${after.sizedToMs}ms to announce,`
+        : `, half as long again as the ${after.sizedToMs}ms the slowest of its last boots took,`;
   return {
     listening: false,
     mayYetAnnounce: after.running,
@@ -2132,6 +2140,10 @@ function playedCap(
 /** What a profile answer reads from the run's project rather than from the profile. */
 type ProjectForProfile = Pick<ProfileReading, 'runtimeAddon' | 'sourceOf' | 'callersOf'>;
 
+/** What a callers answer for a property says its places are, which are not calls. */
+const PROPERTY_PLACES =
+  "It is a property, so each place says whether it writes it (access write), which runs its set block, or reads it (access read), which runs its get block: withinCalls on a read says nothing of the set block, nor on a write of the get block unless the write is a compound one such as +=. Inside the property's own blocks its name is the value stored, which the engine reads and writes without running them, so those lines are not listed.";
+
 /** What a callers answer says about where its places come from. */
 const CALLERS_FOUND_BY_NAME =
   "Found by name in the project's scripts, since the engine's profiler counts calls and time per function and records nothing about who made them: a method of the same name on another class is listed too, unless one class was asked about and it is called through another class by name or through a variable declared as one. Each place carries the profile's numbers for the function it is written in.";
@@ -2274,12 +2286,17 @@ function overheadRowsReturned(table: ReturnType<typeof profiledFunctions>, one: 
   if (shown === table.overheadDominated) {
     return one ? ' Its row carries that share as overheadMs.' : ' Their rows carry that share as overheadMs.';
   }
+  const theReturned = returned === 1 ? 'the one row returned' : `the ${returned} rows returned`;
   if (shown === 0) {
     return one
-      ? ` Its row, which carries that share as overheadMs, is not among the ${returned} returned; limit ${table.overheadReach} returns it.`
-      : ` Their rows, which carry that share as overheadMs, are none of the ${returned} returned; limit ${table.overheadReach} returns them all.`;
+      ? ` Its row, which carries that share as overheadMs, comes after ${theReturned}; limit ${table.overheadReach} returns it.`
+      : ` Their rows, which carry that share as overheadMs, come after ${theReturned}; limit ${table.overheadReach} returns them all.`;
   }
-  return ` Their rows carry that share as overheadMs, and ${shown} of them ${shown === 1 ? 'is' : 'are'} among the ${returned} returned; limit ${table.overheadReach} returns them all.`;
+  const among =
+    returned === 1
+      ? 'the one row returned is one of them'
+      : `${shown} of them ${shown === 1 ? 'is' : 'are'} among ${theReturned}`;
+  return ` Their rows carry that share as overheadMs, and ${among}; limit ${table.overheadReach} returns them all.`;
 }
 
 /**
@@ -2365,6 +2382,10 @@ function uncountedCallee(totals: ProfileTotals, name: string): string {
 
 function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading['callersOf']>) {
   const found = callersOf(totals, asked.name, asked.scripts());
+  const byName =
+    found.target.length === 0
+      ? `${CALLERS_FOUND_BY_NAME} ${uncountedCallee(totals, asked.name)}`
+      : CALLERS_FOUND_BY_NAME;
   return {
     of: asked.name,
     // The function's own rows beside its callers, so the calls the places share out are in view.
@@ -2374,9 +2395,9 @@ function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading[
     note:
       found.sites.length === 0
         ? `No script in the project names ${asked.name} in code, outside its declaration: a call made through a string, such as call("name"), is not found by name.`
-        : found.target.length === 0
-          ? `${CALLERS_FOUND_BY_NAME} ${uncountedCallee(totals, asked.name)}`
-          : CALLERS_FOUND_BY_NAME,
+        : found.property
+          ? `${byName} ${PROPERTY_PLACES}`
+          : byName,
   };
 }
 
@@ -7107,7 +7128,7 @@ class GodotServer {
       platform: process.platform,
       variables: process.env,
     });
-    const runtimeWaitMs = this.announceBudget(args, project.value.path);
+    const runtimeWaitMs = this.announceBudget(args, project.value.path, sceneArgument);
     const editorWouldPlay = !headless || editorPlaysHeadless(project.value.file);
     // A silent run is spawned for the reason a run with arguments is: silence is an engine flag,
     // `--audio-driver Dummy`, and the editor takes none for a game it plays. Only a windowed one:
@@ -7161,6 +7182,7 @@ class GodotServer {
     // For a game that announces after the start's wait under a number the run's does not have,
     // which the Windows console build does: the tie then falls to freshness, as a played run's.
     started.announcedBefore = alreadyPlaying;
+    started.bootScene = runtimeWaitMs.scene;
     // Kept after it exits rather than dropped, because a run that quits on its own is the whole
     // point of a headless one: a bench, a report, a tool scene. Dropping the reference on exit
     // threw its output away before anybody could read it, and left editor_output answering "no
@@ -7361,14 +7383,17 @@ class GodotServer {
    * The wait a start gives its game to announce: what the caller asked for, or else the usual
    * budget sized to the project's last boot, and which of the two it was.
    */
-  private announceBudget(args: OperationParams, projectPath: string): AnnounceBudget {
+  private announceBudget(args: OperationParams, projectPath: string, scene: string | null): AnnounceBudget {
+    const key = scene ?? MAIN_SCENE;
     const asked = readNonNegativeNumber(args, 'runtimeWaitMs');
     if (asked !== undefined) {
-      return { ms: asked };
+      return { ms: asked, scene: key };
     }
-    const lastBoot = readBootNote(projectPath);
+    const lastBoot = readBootNote(projectPath, key);
     const ms = waitSizedTo(lastBoot);
-    return lastBoot !== null && ms > ANNOUNCE_BUDGET_MS ? { ms, sizedToMs: lastBoot } : { ms };
+    return lastBoot !== null && ms > ANNOUNCE_BUDGET_MS
+      ? { ms, sizedToMs: lastBoot, scene: key }
+      : { ms, scene: key };
   }
 
   /**
@@ -7381,7 +7406,7 @@ class GodotServer {
    * not what the next start should be sized to.
    */
   private noteBootOf(run: GodotProcess, endpoint: RuntimeEndpoint): void {
-    if (run.projectPath === null) {
+    if (run.projectPath === null || run.bootScene === undefined) {
       return;
     }
     let announcedAt: number;
@@ -7395,7 +7420,7 @@ class GodotServer {
       `boot of pid ${endpoint.pid} announced ${Math.round(took)}ms after the start of ${run.projectPath}`,
     );
     if (took > 0 && took <= LONGEST_BOOT_NOTED_MS) {
-      writeBootNote(run.projectPath, took);
+      writeBootNote(run.projectPath, run.bootScene, took);
     }
   }
 
@@ -7499,6 +7524,7 @@ class GodotServer {
       announcedBefore: alreadyPlaying,
       seenPlaying: readBoolean(playAnswer, 'playing') === true,
       ...(which === null ? {} : { play: which }),
+      bootScene: runtimeWaitMs.scene,
     };
     this.activeProcess = played;
     this.noteTheLatestRun({ projectPath, pid: null, startedAt });
@@ -7794,6 +7820,7 @@ class GodotServer {
     running.endedHere = reason;
     // Read before anything is signalled, since the announcement goes with the game.
     const announced = this.announcedPidOf(running);
+    await this.sendTheProfileFirst(running, announced);
     if (running.throughEditor) {
       // The editor's answer read rather than thrown away: a bridge that was down, or a stop that
       // failed, was answered "stopped" about a game still playing, and the run then read as ended
@@ -7908,6 +7935,40 @@ class GodotServer {
             : `gdharness signalled pid ${running.pid} and it was already gone; the operating system had described it as ${described}.`,
     );
     return gone ? 'gone' : 'lingering';
+  }
+
+  /**
+   * Has a profiled run's game send its profiler's totals before a stop ends it.
+   *
+   * The engine sends them only when the profiler is switched off, and a game ended by its process,
+   * which is how the keeper, a signal and the editor all end one, never has it switched off: every
+   * stopped profile came back as the frames summed rather than the engine's own count. The runtime
+   * switches it off and waits for the debugger to confirm, which runs none of the game's own code,
+   * as quitting its tree would. A game that does not answer, as one held at a breakpoint does not,
+   * or a runtime without the command, is stopped as before.
+   */
+  private async sendTheProfileFirst(run: GodotProcess, announced: number | undefined): Promise<void> {
+    if (announced === undefined) {
+      return;
+    }
+    const profiled = run.throughEditor ? await this.theEditorIsProfiling() : run.profile !== undefined;
+    const endpoint = profiled ? runtimesAnnounced().running.find((one) => one.pid === announced) : undefined;
+    if (endpoint === undefined) {
+      return;
+    }
+    // Answered once the debugger has confirmed the totals, and the keeper writes what it holds once
+    // more as the game exits, so nothing need be waited for here beyond the answer.
+    await runtimeRequest(endpoint, 'send_profile', {}, PROFILE_SEND_MS);
+  }
+
+  /** Whether the editor's session is profiling the game it plays and has not had its totals. */
+  private async theEditorIsProfiling(): Promise<boolean> {
+    const read = await this.handleViaBridge('profile_read', {});
+    if (read.isError === true) {
+      return false;
+    }
+    const held = asParams(JSON.parse(read.content[0]?.text ?? '{}'));
+    return readBoolean(held, 'profiled') === true && readBoolean(held, 'complete') !== true;
   }
 
   /**
@@ -10976,7 +11037,8 @@ class GodotServer {
     // one call's timeout past that. A game that keeps its runtime off on purpose, as a project's
     // bench workers do, never announces, and every call against it would otherwise sit out the
     // whole timeout before saying so.
-    const comingUpUntil = run.startedAt + waitSizedTo(readBootNote(project)) + budgetMs;
+    const comingUpUntil =
+      run.startedAt + waitSizedTo(readBootNote(project, run.bootScene ?? MAIN_SCENE)) + budgetMs;
     const remaining = comingUpUntil - Date.now();
     if (remaining <= 0) {
       const seconds = Math.round((Date.now() - run.startedAt) / 1000);

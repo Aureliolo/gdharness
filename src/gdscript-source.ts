@@ -582,9 +582,17 @@ export interface CallSite {
   readonly line: number;
   /** The named function the place is in, or null at a class's own level. */
   readonly within: string | null;
-  /** True when it is called there; false when it is named without a call, as a Callable passed on. */
-  readonly called: boolean;
+  /**
+   * For a function: true when it is called there, false when it is named without a call, as a
+   * Callable passed on. Absent for a property, which is never called.
+   */
+  readonly called?: boolean;
+  /** For a property: whether the place assigns it, which runs its set block, or reads it. */
+  readonly access?: 'read' | 'write';
 }
+
+/** An assignment to what comes before it, compound ones included: `=` and `+=` but not `==`. */
+const ASSIGNED = /^(?:\*\*|<<|>>|[-+*/%&|^])?=(?!=)/;
 
 /** The names a function or lambda header starting at [param from] in [param text] takes. */
 function parametersOf(text: string, from: number): string[] {
@@ -739,7 +747,9 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  *
  * With [param property] the name is a variable's, whose get and set blocks run wherever it is read or
  * assigned, so the class's own variable of that name is what is being looked for rather than
- * something to pass over.
+ * something to pass over, and each place says which of the two it does. Inside those blocks the
+ * name is the value stored, which the engine reads and writes without running them again, so
+ * `sinks = value` in the set block of `sinks` is not a place that sets it.
  */
 export function callSitesOf(
   source: string,
@@ -761,10 +771,36 @@ export function callSitesOf(
       ? null
       : declaredClass(codeLines[lines.positionOf(declared.offset).line] ?? '', member);
   };
+  // The lines of the property's own get and set blocks: those indented under its declaration.
+  const blockUnder = (declared: number): readonly [number, number] => {
+    const indent = (codeLines[declared] ?? '').search(/\S|$/);
+    let last = declared;
+    for (let index = declared + 1; index < codeLines.length; index += 1) {
+      const text = codeLines[index] ?? '';
+      if (text.trim() === '') {
+        continue;
+      }
+      if (text.search(/\S/) <= indent) {
+        break;
+      }
+      last = index;
+    }
+    return [declared, last];
+  };
+  const accessorsIn = (body: ClassBody): (readonly [number, number])[] => [
+    ...body.declarations
+      .filter((one) => one.kind === 'var' && one.name === name)
+      .map((one) => blockUnder(lines.positionOf(one.offset).line)),
+    ...body.inner.flatMap(accessorsIn),
+  ];
+  const accessors = property ? accessorsIn(shape.body) : [];
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
     .filter((one) => {
       const index = lines.positionOf(one.offset).line;
+      if (!one.afterDot && accessors.some(([declared, last]) => index > declared && index <= last)) {
+        return false;
+      }
       if (one.afterDot) {
         const receiver = receiverBefore(code, one.offset);
         if (receiver === null || otherClasses.size === 0) {
@@ -791,7 +827,10 @@ export function callSitesOf(
     .map((one) => {
       const line = lines.positionOf(one.offset).line + 1;
       const after = code.slice(one.offset + name.length).trimStart();
-      return { line, within: enclosingFunction(source, line, code), called: after.startsWith('(') };
+      const within = enclosingFunction(source, line, code);
+      return property
+        ? { line, within, access: ASSIGNED.test(after) ? ('write' as const) : ('read' as const) }
+        : { line, within, called: after.startsWith('(') };
     });
 }
 
