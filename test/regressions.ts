@@ -25788,8 +25788,9 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
   }
   const project = mkdtempSync(join(tmpdir(), 'gdharness-profiled-'));
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-profiled-rt-'));
+  // Four workers, as a hosted runner has, so the fanned scene meets the same pool everywhere.
   const settings = (addon: boolean): string =>
-    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Profiled"\n' +
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Profiled"\n\n[threading]\n\nworker_pool/max_threads=4\n' +
     (addon ? '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n' : '');
   const scene = (name: string, script: string): void => {
     writeFileSync(
@@ -25956,7 +25957,10 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       ].join('\n'),
     );
     scene('kept', 'kept.gd');
-    // Eight tasks across the worker threads while the main thread waits on them, then quits.
+    // Eight tasks across the worker threads while the main thread waits on them, then quits. High
+    // priority, because the pool gives low-priority tasks threading/worker_pool/low_priority_thread_ratio
+    // of its threads, 0.3 by default: one thread on a four-core runner, which ran the eight in turn and
+    // summed to no more than the wait. Long enough that the fan-out outlasts the start before it.
     writeFileSync(
       join(project, 'harness', 'fanned.gd'),
       [
@@ -25967,14 +25971,14 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         '',
         'func spin(_index: int) -> void:',
         '\tvar sum := 0',
-        '\tfor i in 1000000:',
+        '\tfor i in 5000000:',
         '\t\tsum += i % 7',
         '\tif sum < 0:',
         '\t\tprint(sum)',
         '',
         '',
         'func fan_out() -> void:',
-        '\tWorkerThreadPool.wait_for_group_task_completion(WorkerThreadPool.add_group_task(spin, 8))',
+        '\tWorkerThreadPool.wait_for_group_task_completion(WorkerThreadPool.add_group_task(spin, 8, -1, true))',
         '',
         '',
         'func _process(_delta: float) -> void:',
@@ -26226,6 +26230,13 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       const fannedShown = JSON.stringify(fanned);
       const spin = asArray(get(fanned, 'functions')).find((one) => get(one, 'function') === 'spin');
       assert.equal(get(spin, 'calls'), 8, fannedShown);
+      // Side by side rather than in turn: one worker running the eight sums to the wait and no more,
+      // and the waiting function's own self time then carries scriptMs past coveredMs by itself.
+      const fanOut = asArray(get(fanned, 'functions')).find((one) => get(one, 'function') === 'fan_out');
+      assert.ok(
+        Number(get(spin, 'selfMs')) > 1.5 * Number(get(fanOut, 'selfMs')),
+        `the tasks ran on several workers at once: ${fannedShown}`,
+      );
       assert.ok(
         Number(get(fanned, 'scriptMs')) > Number(get(fanned, 'coveredMs')),
         `the threads' time summed is more than the time covered: ${fannedShown}`,
