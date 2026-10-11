@@ -736,11 +736,16 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * as a Callable. A member call whose receiver is one of [param otherClasses], or a local or a
  * variable of the class declared as one, is another class's method and is left out for a caller
  * asking about one class: `made.lift(by)` with `var made: Outcome` above it is Outcome's.
+ *
+ * With [param property] the name is a variable's, whose get and set blocks run wherever it is read or
+ * assigned, so the class's own variable of that name is what is being looked for rather than
+ * something to pass over.
  */
 export function callSitesOf(
   source: string,
   name: string,
   otherClasses: ReadonlySet<string> = new Set(),
+  property = false,
 ): CallSite[] {
   const regions = regionsOf(source);
   const code = codeOf(source, regions);
@@ -779,7 +784,8 @@ export function callSitesOf(
         return false;
       }
       return !bodyHolding(shape.body, one.offset).declarations.some(
-        (declared) => declared.name === name && MEMBER_KINDS.has(declared.kind),
+        (declared) =>
+          declared.name === name && MEMBER_KINDS.has(declared.kind) && !(property && declared.kind === 'var'),
       );
     })
     .map((one) => {

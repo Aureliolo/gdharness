@@ -44,6 +44,14 @@ export interface GodotProcess {
   /** Where the keeper holding a spawned run listens for a stop, as its note says. */
   keeper?: string;
   /**
+   * Where the keeper writes a profiled run's script profile.
+   *
+   * Held on the run as well as in its note, because a stop takes the note away and the profile is
+   * still wanted after the run has ended: read from the note alone, a run started with profile: true
+   * and then stopped was refused as one started without it.
+   */
+  profile?: string;
+  /**
    * How this server ended the run, when it did: through the keeper holding it, by a signal to its
    * pid, or by asking the editor playing it. Said in the stop's answer, because a caller checking a
    * stop looks there and not in the run's log.
