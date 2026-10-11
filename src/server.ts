@@ -2090,8 +2090,11 @@ export interface ProfileReading {
   /** Null while the game has not connected to the profiler, or never did. */
   readonly totals: ProfileTotals | null;
   readonly coveredMs: number;
-  /** Whether the project has the runtime addon, which sends the totals as a game quits. */
-  readonly runtimeAddon: boolean;
+  /**
+   * Whether the project has the runtime addon, which sends the totals as a game quits, or null when
+   * the project is no longer there to say.
+   */
+  readonly runtimeAddon: boolean | null;
   /** The project's scripts by `res://` path, for placing a lambda in the function it is written in. */
   readonly sourceOf?: SourceOf;
   /** The function whose callers were asked for, and the project's scripts to find them in. */
@@ -2188,13 +2191,17 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
   }
   const table = profiledFunctions(totals, limit, reading.sourceOf);
   const notes: string[] = [];
-  const addonNote = reading.runtimeAddon
-    ? ''
-    : ' This project has no gdharness runtime addon, which switches the profiler off as the game quits so the engine sends its totals: setup installs it.';
+  const addonNote =
+    reading.runtimeAddon === true
+      ? ''
+      : reading.runtimeAddon === null
+        ? " The run's project is no longer at its path, so whether it had the gdharness runtime addon, which switches the profiler off as the game quits so the engine sends its totals, cannot be read."
+        : ' This project has no gdharness runtime addon, which switches the profiler off as the game quits so the engine sends its totals: setup installs it.';
   // Said only of a run that has ended, whose totals will not come now.
-  const totalsWithheld = reading.runtimeAddon
-    ? ' The runtime addon switches the profiler off as the game quits, and did not here: either it was no longer running in this game by then, which a project can arrange for some scenes; or the game ended without taking its tree down, as a crash or a kill does; or the totals did not reach the debugger before the game exited, which the game then says in its output.'
-    : addonNote;
+  const totalsWithheld =
+    reading.runtimeAddon === true
+      ? ' The runtime addon switches the profiler off as the game quits, and did not here: either it was no longer running in this game by then, which a project can arrange for some scenes; or the game ended without taking its tree down, as a crash or a kill does; or the totals did not reach the debugger before the game exited, which the game then says in its output.'
+      : addonNote;
   if (totals.complete && reading.running) {
     notes.push(
       `The engine's totals arrived while the game is still running, which it sends only when the profiler is switched off, so ${reading.through === 'editor' ? "the editor's Profiler tab or the game itself, through EngineDebugger," : 'the game itself, through EngineDebugger,'} switched it off before the game ended. They cover the run up to then and nothing after.`,
@@ -2224,8 +2231,14 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     );
   }
   if (table.overheadDominated > 0 && table.perCallUs !== null) {
+    const one = table.overheadDominated === 1;
     notes.push(
-      `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${table.overheadDominated === 1 ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${table.overheadDominated === 1 ? 'its' : 'their'} selfMs in it, under overheadMs: ${namedFew(table.overheadNamed)}. That much of ${table.overheadDominated === 1 ? 'its' : 'their'} time is the profiler's and goes once the profiler is off, whether the function is inlined or not. What inlining saves is the call itself, which costs something without the profiler too, not the work inside it.`,
+      `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${one ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${one ? 'its' : 'their'} selfMs in it: ${namedFew(table.overheadNamed)}.${overheadRowsReturned(table, one)} That much of ${one ? 'its' : 'their'} time is the profiler's and goes once the profiler is off, whether the function is inlined or not. What inlining saves is the call itself, which costs something without the profiler too, not the work inside it.`,
+    );
+  }
+  if (reading.coveredMs > 0 && table.scriptMs > reading.coveredMs) {
+    notes.push(
+      `scriptMs, ${table.scriptMs}ms, is more than the ${reading.coveredMs}ms the profile covers.${table.superCallers > 0 ? ' The super calls above, counted twice, can account for some or all of that; whatever they do not is' : ' One thread cannot spend more time than passes, so that is'} functions running on several threads at once, through WorkerThreadPool or Thread. The engine adds every thread's time to the same function and does not say which thread a call ran on, so a function's selfMs is summed over every thread it ran on rather than taken out of frames, and a function that waits for the others, through wait_for_group_task_completion or wait_to_finish, has the wait in its own selfMs as well.`,
     );
   }
   notes.push(...cappedNotes(totals));
@@ -2249,6 +2262,24 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     callers: reading.callersOf === undefined ? undefined : callersAnswer(totals, reading.callersOf),
     note: notes.length > 0 ? notes.join(' ') : undefined,
   };
+}
+
+/**
+ * Where the rows marked overheadMs are among those returned, since a limit that leaves some or all of
+ * them out leaves the field the note speaks of out with them.
+ */
+function overheadRowsReturned(table: ReturnType<typeof profiledFunctions>, one: boolean): string {
+  const shown = table.functions.filter((row) => row.overheadMs !== undefined).length;
+  const returned = table.functions.length;
+  if (shown === table.overheadDominated) {
+    return one ? ' Its row carries that share as overheadMs.' : ' Their rows carry that share as overheadMs.';
+  }
+  if (shown === 0) {
+    return one
+      ? ` Its row, which carries that share as overheadMs, is not among the ${returned} returned; limit ${table.overheadReach} returns it.`
+      : ` Their rows, which carry that share as overheadMs, are none of the ${returned} returned; limit ${table.overheadReach} returns them all.`;
+  }
+  return ` Their rows carry that share as overheadMs, and ${shown} of them ${shown === 1 ? 'is' : 'are'} among the ${returned} returned; limit ${table.overheadReach} returns them all.`;
 }
 
 /**
@@ -2290,15 +2321,46 @@ function cappedNotes(totals: ProfileTotals): string[] {
       `${capped === totals.frames ? (capped === 1 ? 'The one frame' : `All ${capped} frames`) : `${capped} of the ${totals.frames} frames`} carried the most functions the profiler asks for in one, ${most}, so the functions with the least time in ${capped === 1 ? 'it' : 'them'} are not counted there: ${why}`,
     );
   }
-  const unnamed = Object.entries(totals.functions).filter(
-    ([name, sum]) => name.startsWith(UNNAMED_PREFIX) && sum.calls > 0,
-  ).length;
+  const unnamed = unnamedCalled(totals);
   if (unnamed > 0) {
     notes.push(
       `${unnamed === 1 ? 'One function' : `${unnamed} functions`} arrived without ${unnamed === 1 ? 'its name' : 'their names'}, shown as ${UNNAMED_PREFIX} and the number the engine gave ${unnamed === 1 ? 'it' : 'them'}: the engine names a function once, as it first appears, and the game's debugger queue was full when that message was sent. They are script functions of the game; which ones cannot be recovered from this profile.`,
     );
   }
   return notes;
+}
+
+/** How many functions with calls [param totals] holds whose name never arrived. */
+function unnamedCalled(totals: ProfileTotals): number {
+  return Object.entries(totals.functions).filter(
+    ([name, sum]) => name.startsWith(UNNAMED_PREFIX) && sum.calls > 0,
+  ).length;
+}
+
+/**
+ * Why the profile can hold no call of [param name] when places name it. withinCalls on those places
+ * reads as though they ran, and it says only that the function a place is in did.
+ */
+function uncountedCallee(totals: ProfileTotals, name: string): string {
+  const others: string[] = [];
+  const most = totals.frameFunctions;
+  const capped = totals.complete ? totals.totalCapped === true : (totals.cappedFrames ?? 0) > 0;
+  if (most !== undefined && capped) {
+    others.push(
+      `its calls took too little time to be among the ${most} functions ${totals.complete ? "the engine's totals" : 'a frame'} carried`,
+    );
+  }
+  const unnamed = unnamedCalled(totals);
+  if (unnamed > 0) {
+    others.push(
+      `it is ${unnamed === 1 ? 'the function' : `one of the ${unnamed} functions`} whose name never arrived`,
+    );
+  }
+  const ranNot =
+    'none of these places ran it while the profiler was on: withinCalls says the function a place is in ran, not that the line did';
+  return others.length === 0
+    ? `The profile counts no call of ${name}, so ${ranNot}.`
+    : `The profile counts no call of ${name}: either ${ranNot}, or ${others.join(', or ')}.`;
 }
 
 function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading['callersOf']>) {
@@ -2313,7 +2375,7 @@ function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading[
       found.sites.length === 0
         ? `No script in the project names ${asked.name} in code, outside its declaration: a call made through a string, such as call("name"), is not found by name.`
         : found.target.length === 0
-          ? `${CALLERS_FOUND_BY_NAME} The profile counts no call of ${asked.name}, so these places are where it would be called from.`
+          ? `${CALLERS_FOUND_BY_NAME} ${uncountedCallee(totals, asked.name)}`
           : CALLERS_FOUND_BY_NAME,
   };
 }
@@ -8012,6 +8074,7 @@ class GodotServer {
     // nobody's child here once the launcher has gone.
     // A profiled game is told so, and holds its start until the keeper's switch reaches it.
     const gameEnv = profiled ? { ...(env ?? process.env), [PROFILE_FROM_START]: '1' } : env;
+    const profile = profiled ? profilePath(startedAt) : undefined;
     const launched = await launchOutsideTheTree({
       command: godotPath,
       args: cmdArgs,
@@ -8021,7 +8084,7 @@ class GodotServer {
         startedAt,
         projectPath,
         ...this.servedBy(),
-        ...(profiled ? { profile: profilePath(startedAt) } : {}),
+        ...(profile === undefined ? {} : { profile }),
       },
       ...(desktop === undefined ? {} : { desktop }),
     });
@@ -8043,6 +8106,7 @@ class GodotServer {
       startedAt,
       startedBy,
       ...(keeper === undefined ? {} : { keeper }),
+      ...(profile === undefined ? {} : { profile }),
       command: godotPath,
       exitCode: null,
       exitSignal: null,
@@ -8520,6 +8584,7 @@ class GodotServer {
       startedAt: record.startedAt,
       ...(record.startedBy === undefined ? {} : { startedBy: record.startedBy }),
       ...(record.keeper === undefined ? {} : { keeper: record.keeper }),
+      ...(record.profile === undefined ? {} : { profile: record.profile }),
       ...(record.command === undefined ? {} : { command: record.command }),
       exitCode: null,
       exitSignal: null,
@@ -8880,7 +8945,13 @@ class GodotServer {
     }
     const limit = readPositiveNumber(args, 'limit') ?? PROFILE_FUNCTIONS;
     const callersName = readString(args, 'callersOf');
-    if (callersName !== undefined && !callersName.split('.').every(isIdentifier)) {
+    if (
+      callersName !== undefined &&
+      !callersName
+        .replace(/@([^.@]+)_(?:getter|setter)$/, '$1')
+        .split('.')
+        .every(isIdentifier)
+    ) {
       return this.createErrorResponse(
         `callersOf takes a function's name, or Class.name for the functions of one class, and ${JSON.stringify(callersName)} is neither.`,
         ['editor_run profile names each function as it answers; pass one of those'],
@@ -8888,21 +8959,31 @@ class GodotServer {
     }
     const going = await this.runStillGoing(run);
     const projectPath = run.projectPath;
+    // The profile outlives the project it was taken in: a git worktree removed after its run leaves
+    // the run's note and profile behind, and reading the project then threw.
+    const projectGone = projectPath !== null && !existsSync(join(projectPath, 'project.godot'));
+    if (projectGone && callersName !== undefined) {
+      return this.createErrorResponse(
+        `callersOf reads the project's scripts, and the run's project at ${projectPath} has no project.godot any more.`,
+        ['editor_run profile without callersOf answers with the profile itself'],
+      );
+    }
     const fromProject: ProjectForProfile =
       projectPath === null
         ? { runtimeAddon: false }
-        : {
-            runtimeAddon: runtimeAddonRegistered(projectPath),
-            sourceOf: projectSourceOf(projectPath),
-            ...(callersName === undefined
-              ? {}
-              : { callersOf: { name: callersName, scripts: () => projectScripts(projectPath) } }),
-          };
+        : projectGone
+          ? { runtimeAddon: null }
+          : {
+              runtimeAddon: runtimeAddonRegistered(projectPath),
+              sourceOf: projectSourceOf(projectPath),
+              ...(callersName === undefined
+                ? {}
+                : { callersOf: { name: callersName, scripts: () => projectScripts(projectPath) } }),
+            };
     if (run.throughEditor) {
       return await this.profileOfThePlayedGame(going, projectPath, fromProject, limit);
     }
-    const record = run.projectPath === null ? null : readRunRecord(run.projectPath);
-    const path = record !== null && record.pid === run.pid ? record.profile : undefined;
+    const path = run.profile;
     if (path === undefined) {
       return this.createErrorResponse(
         'This run was started without profile: true, and a game this server starts can be profiled only from its start: its debugger is whatever it dials as it starts, once.',
