@@ -97,7 +97,7 @@ import {
   theEditorHasComeBack,
 } from '../src/godot-bridge.js';
 import { DebuggerStream, decodeVariant, framedCommand } from '../src/godot-variant.js';
-import { mainCheckoutOf, recordedEnginePath } from '../src/harnesses.js';
+import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
 import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
@@ -277,7 +277,7 @@ import { withHome } from './support/cli-home.js';
 import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
-import { reservePort, ServerProcess } from './support/server.js';
+import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
 import {
   ENGINE_FIXTURES_SECONDS,
   REGRESSION_SECONDS,
@@ -2775,7 +2775,7 @@ async function withFramedPeer<T>(
     });
   });
 
-  await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+  await listenOnAReservedPort(server);
 
   try {
     return await handler(portOf(server));
@@ -5523,12 +5523,7 @@ async function testABadPortIsReported(): Promise<void> {
  */
 async function testAnEditorPortMovesOnlyWhenItIsHeld(): Promise<void> {
   const holder = createServer();
-  const held = await new Promise<number>((resolve) => {
-    holder.listen(0, '127.0.0.1', () => {
-      const bound = holder.address();
-      resolve(typeof bound === 'object' && bound !== null ? bound.port : 0);
-    });
-  });
+  const held = await listenOnAReservedPort(holder);
   try {
     const moved = await freePort(held);
     assert.notEqual(moved, held, 'a port somebody is holding is not the one handed back');
@@ -11143,6 +11138,25 @@ function testAWorktreeFindsItsMainCheckoutsEngine(): void {
     );
 
     assert.equal(mainCheckoutOf(join(root, 'main', 'game')), null, 'the main checkout is no worktree');
+
+    // The other way round: the main checkout finds the project in each of its worktrees, from the
+    // gitdir git writes under the entry, absolute or relative to it.
+    writeFileSync(join(entry, 'gitdir'), `${join(root, 'next', '.git').replaceAll('\\', '/')}\n`);
+    const absolute = worktreeCheckoutsOf(join(root, 'main', 'game'));
+    assert.ok(
+      absolute.length === 1 && isSameDirectory(absolute[0] ?? '', worktree),
+      `the main checkout names its worktree's project: ${JSON.stringify(absolute)}`,
+    );
+    writeFileSync(join(entry, 'gitdir'), '../../../../next/.git\n');
+    const relativeOnes = worktreeCheckoutsOf(join(root, 'main', 'game'));
+    assert.ok(
+      relativeOnes.length === 1 && isSameDirectory(relativeOnes[0] ?? '', worktree),
+      `and from a relative gitdir: ${JSON.stringify(relativeOnes)}`,
+    );
+    assert.deepEqual(worktreeCheckoutsOf(worktree), [], 'a worktree lists none of its own');
+    rmSync(join(root, 'next', 'game', 'project.godot'));
+    assert.deepEqual(worktreeCheckoutsOf(join(root, 'main', 'game')), [], 'nor one without the project');
+    writeFileSync(join(root, 'next', 'game', 'project.godot'), 'config_version=5\n');
     rmSync(join(root, 'main', 'game', 'project.godot'));
     assert.equal(mainCheckoutOf(worktree), null, 'a main checkout without the project');
     writeFileSync(join(root, 'main', 'game', 'project.godot'), 'config_version=5\n');
@@ -11269,12 +11283,10 @@ async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
       env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
     });
     try {
-      const up = await new Promise<Error | null>((ready) => {
-        answering.once('error', ready);
-        answering.listen(0, bound, () => {
-          ready(null);
-        });
-      });
+      const up = await listenOnAReservedPort(answering, bound).then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
+      );
       if (up !== null) {
         assert.equal(announced, '::', `binding ${bound} should work on every runner: ${up.message}`);
         console.log(
@@ -11351,7 +11363,7 @@ async function testRuntimeConnectedIsAboutThisProjectsGames(): Promise<void> {
       socket.on('error', () => {});
     });
     listening.push(answering);
-    await new Promise<void>((ready) => answering.listen(0, '127.0.0.1', ready));
+    await listenOnAReservedPort(answering);
     // A live process for the announcement to name, since one naming a process that is gone is swept.
     const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     children.push(holder);
@@ -17572,15 +17584,32 @@ async function withAPlayingEditor(
           mkdirSync(addon, { recursive: true });
           writeFileSync(join(addon, 'runtime_autoload.gd'), 'extends Node\n');
         }
+        const initialising = Date.now();
         await server.initialize('regression-test');
+        const initialised = Date.now() - initialising;
 
         const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
         editor.socket = socket;
+        // A failure to reach the bridge rejects with an Error that says so. Rejected with the bare
+        // event, it was reported as "[object ErrorEvent]" after two minutes on the Linux leg, twice,
+        // with nothing naming the port, the server's answer or what the server said meanwhile.
         await new Promise<void>((resolve, reject) => {
           socket.once('open', () => {
             resolve();
           });
-          socket.once('error', reject);
+          socket.once('error', (event: { message?: string }) => {
+            reject(
+              new Error(
+                `the fake editor could not reach the bridge on port ${port} (${event.message ?? 'no message'}), after the server took ${initialised}ms to initialise.\n${server.stderr.split('\n').slice(-40).join('\n')}`,
+              ),
+            );
+          });
+        });
+        // Kept for the rest of the case: a socket error with nobody listening is thrown out of the
+        // event loop, and one raised as the server goes down after a failed assertion was reported
+        // as "[object ErrorEvent]" in place of the assertion. Written to the log, so it is not lost.
+        socket.on('error', (error: Error) => {
+          console.error(`the fake editor's socket: ${error.message}`);
         });
         const answers = answer({ adapter, project, runtimeDir });
         socket.on('message', (raw: Buffer) => {
@@ -21686,12 +21715,31 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
       );
       // A game run straight off the files knows a script class only once the project has been
-      // imported, which is what writes the list of global classes an editor would have.
-      const imported = spawnSync(engine, ['--headless', '--path', project, '--import'], {
-        encoding: 'utf8',
-        timeout: 120_000,
+      // imported, which is what writes the list of global classes an editor would have. Run without
+      // blocking: the fake editor is on this process's event loop, and a synchronous import held it
+      // for as long as the import took. The time it took goes in the message, since a failure on a
+      // Linux runner took the two minutes the import is given and said nothing else.
+      const importing = Date.now();
+      const imported = await new Promise<{ status: number | null; output: string }>((resolveRun) => {
+        const run = spawn(engine, ['--headless', '--path', project, '--import']);
+        let output = '';
+        run.stdout.on('data', (chunk: Buffer) => {
+          output += String(chunk);
+        });
+        run.stderr.on('data', (chunk: Buffer) => {
+          output += String(chunk);
+        });
+        const limit = setTimeout(() => run.kill(), 120_000);
+        run.on('close', (status) => {
+          clearTimeout(limit);
+          resolveRun({ status, output });
+        });
       });
-      assert.equal(imported.status, 0, `the project imports: ${imported.stdout}${imported.stderr}`);
+      assert.equal(
+        imported.status,
+        0,
+        `the project imports, which took ${Date.now() - importing}ms: ${imported.output}`,
+      );
       const started = await start(20_000);
       assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
 
@@ -22598,7 +22646,7 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
       socket.on('error', () => {});
     });
     sockets.push(answering);
-    await new Promise<void>((ready) => answering.listen(0, '127.0.0.1', ready));
+    await listenOnAReservedPort(answering);
     return { pid: process_.pid, port: portOf(answering) };
   };
   const announce = (runtimeDir: string, project: string, game: { pid: number; port: number }): void => {
@@ -23744,7 +23792,7 @@ async function withAHeldGame(
     // Accepted and never answered, which is what a game sitting at a breakpoint does.
     connections += 1;
   });
-  await new Promise<void>((ready) => held.listen(0, '127.0.0.1', ready));
+  await listenOnAReservedPort(held);
   const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   const gamePid = game.pid;
   assert.ok(typeof gamePid === 'number' && alive(gamePid), 'the fixture needs a live process to announce');
@@ -27654,12 +27702,36 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
       rmSync(marker);
     }
 
+    // Two git worktrees of the project, which an upgrade here does not reach: one with addons
+    // releases behind, named with the command that upgrades it, and one already on this version,
+    // not named. Reported from ostinato, whose worktree sat on 1.1.32 behind a main checkout on 1.2.4.
+    const worktrees = mkdtempSync(join(tmpdir(), 'gdharness-vendored-worktrees-'));
+    const behind = join(worktrees, 'behind');
+    const level = join(worktrees, 'level');
+    for (const [checkout, marked] of [
+      [behind, '1.1.32'],
+      [level, SERVER_VERSION],
+    ] as const) {
+      const entry = join(projectDir, '.git', 'worktrees', basename(checkout));
+      mkdirSync(entry, { recursive: true });
+      writeFileSync(join(entry, 'gitdir'), `${join(checkout, '.git')}\n`);
+      mkdirSync(join(checkout, 'addons', 'gdharness_runtime'), { recursive: true });
+      writeFileSync(join(checkout, 'project.godot'), 'config_version=5\n');
+      writeFileSync(join(checkout, 'addons', 'gdharness_runtime', '.gdharness-version'), `${marked}\n`);
+    }
     const upgraded = cli('upgrade', projectDir);
+    rmSync(join(projectDir, '.git'), { recursive: true, force: true });
+    rmSync(worktrees, { recursive: true, force: true });
     assert.equal(
       upgraded.status,
       0,
       `upgrade should not refuse for a path it is holding: ${upgraded.output}`,
     );
+    assert.ok(
+      upgraded.output.includes(`  ${behind}: 1.1.32. Run  gdharness upgrade ${behind}`),
+      `a worktree whose addons trail is named with the command that upgrades it: ${upgraded.output}`,
+    );
+    assert.ok(!upgraded.output.includes(level), `and one already on this version is not: ${upgraded.output}`);
     assert.match(upgraded.output, /an unmarked copy -> /, upgraded.output);
     assert.match(upgraded.output, /replaced .*gdharness_editor/, upgraded.output);
     assert.match(upgraded.output, /Restart it with the\s+editor_launch restart/, upgraded.output);
@@ -28862,6 +28934,37 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
   // The real one still answers, so what is asserted above is not the only thing that runs.
   const real = await reservePort();
   assert.ok(real > 1024 && real < 65_536, `a real reservation should come back a port: ${real}`);
+
+  // A listener takes its port the same way, so it never sits on one a server has been given: the
+  // fake debug adapter on port zero took a reserved bridge port, and the fake editor dialling the
+  // bridge reached the adapter and timed out. 1100 is handed out above, so it is declined here.
+  const offered = [1100, 1102];
+  let next = 0;
+  const pool = (): Promise<number> => Promise.resolve(offered[Math.min(next++, offered.length - 1)] ?? 0);
+  const listeners = [createServer(), createServer(), createServer()];
+  try {
+    assert.equal(
+      await listenOnAReservedPort(listeners[0] ?? createServer(), '127.0.0.1', pool),
+      1102,
+      'a listener declines a port already handed out',
+    );
+    // 1107 held by something that took it before the listener could, as another process can take
+    // a reserved port before it is bound: given up for the next one offered.
+    await new Promise<void>((ready) => listeners[1]?.listen(1107, '127.0.0.1', ready));
+    const taken = [1107, 1108];
+    let offeredNext = 0;
+    assert.equal(
+      await listenOnAReservedPort(listeners[2] ?? createServer(), '127.0.0.1', () =>
+        Promise.resolve(taken[Math.min(offeredNext++, taken.length - 1)] ?? 0),
+      ),
+      1108,
+      'and takes the next port when one it reserved is in use',
+    );
+  } finally {
+    for (const listener of listeners) {
+      listener.close();
+    }
+  }
 }
 
 /**
@@ -33291,7 +33394,14 @@ async function main(): Promise<void> {
     } catch (error) {
       passed = false;
       failed.push(test.name);
-      console.error(`\n${test.name} failed\n${error instanceof Error ? error.stack : String(error)}\n`);
+      // A thrown event is not an Error and prints as "[object ErrorEvent]", so its message is added.
+      const said =
+        error instanceof Error
+          ? error.stack
+          : typeof error === 'object' && error !== null && 'message' in error
+            ? `${Object.prototype.toString.call(error)}: ${String(error.message)}`
+            : String(error);
+      console.error(`\n${test.name} failed\n${said}\n`);
     } finally {
       clearTimeout(deadline);
     }

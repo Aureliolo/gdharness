@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { type ChildProcess, spawn } from 'node:child_process';
 import { mkdtempSync, readdirSync, statSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -44,6 +44,43 @@ export async function reservePort(offer: () => Promise<number> = freePort): Prom
     }
   }
   throw new Error('could not reserve a port the kernel had not already offered');
+}
+
+/**
+ * [param listener] listening on a port from [method reservePort], which is the port it answers.
+ *
+ * A listener on port zero takes whatever the kernel offers, and the kernel offers ports this
+ * process has reserved and released for a server not yet bound to them. The fake debug adapter took
+ * a bridge port that way on the Linux leg: the server moved off it, the fake editor dialled it and
+ * reached the adapter, and the handshake it never got timed out after two minutes, twice, reported
+ * as "[object ErrorEvent]". Another process can still take a reserved port before it is bound here,
+ * so a port found in use is given up for the next.
+ */
+export async function listenOnAReservedPort(
+  listener: Server,
+  host = '127.0.0.1',
+  offer: () => Promise<number> = freePort,
+): Promise<number> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const port = await reservePort(offer);
+    const up = await new Promise<Error | null>((ready) => {
+      const failed = (error: Error): void => {
+        ready(error);
+      };
+      listener.once('error', failed);
+      listener.listen(port, host, () => {
+        listener.off('error', failed);
+        ready(null);
+      });
+    });
+    if (up === null) {
+      return port;
+    }
+    if ((up as NodeJS.ErrnoException).code !== 'EADDRINUSE') {
+      throw up;
+    }
+  }
+  throw new Error('no reserved port could be listened on');
 }
 
 function freePort(): Promise<number> {

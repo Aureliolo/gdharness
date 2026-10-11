@@ -28,6 +28,7 @@ import {
   recordedEnginePath,
   registered,
   servedProject,
+  worktreeCheckoutsOf,
 } from './harnesses.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
 import { defectReport } from './issues.js';
@@ -563,6 +564,22 @@ async function upgrade(): Promise<void> {
       serving === null ? null : { server: serving, isThisVersion: serving.version === version },
     ),
   );
+  // Named rather than upgraded: a worktree pins its own version in its own config and can be on a
+  // branch that wants the one it has, so the upgrade is the caller's to run there.
+  const trailing = worktreeCheckoutsOf(projectPath).flatMap((path) => {
+    const addon = inspectProject(path).addons.find((one) => one.installed);
+    return addon === undefined || addon.version === version ? [] : [{ path, version: addon.version }];
+  });
+  if (trailing.length > 0) {
+    console.log(
+      '\nGit worktrees of this project keep untracked addons of their own, which this upgrade does not reach:',
+    );
+    for (const worktree of trailing) {
+      console.log(
+        `  ${worktree.path}: ${worktree.version ?? 'an unmarked copy'}. Run  gdharness upgrade ${worktree.path}`,
+      );
+    }
+  }
 }
 
 function doctorReport(projectPath: string): void {

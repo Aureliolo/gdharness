@@ -24,7 +24,7 @@ import {
   type ToolContentBlock,
   textOf,
 } from './support/json-rpc.js';
-import { reservePort, ServerProcess } from './support/server.js';
+import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
 import { sweep } from './support/sweep.js';
 
 const BRIDGE_HOST = process.env['GDHARNESS_BRIDGE_HOST'] ?? '127.0.0.1';
@@ -235,7 +235,7 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
 
   return new Promise<MockRuntime>((resolve, reject) => {
     runtime.once('error', reject);
-    runtime.listen(0, '127.0.0.1', () => {
+    void listenOnAReservedPort(runtime).then(() => {
       const address = runtime.address();
       if (!address || typeof address === 'string') {
         reject(new Error('the mock runtime has no port'));
@@ -272,7 +272,7 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
             });
           }),
       });
-    });
+    }, reject);
   });
 }
 
