@@ -17601,6 +17601,12 @@ async function withAPlayingEditor(
           });
           socket.once('error', reject);
         });
+        // Kept for the rest of the case: a socket error with nobody listening is thrown out of the
+        // event loop, and one raised as the server goes down after a failed assertion was reported
+        // as "[object ErrorEvent]" in place of the assertion. Written to the log, so it is not lost.
+        socket.on('error', (error: Error) => {
+          console.error(`the fake editor's socket: ${error.message}`);
+        });
         const answers = answer({ adapter, project, runtimeDir });
         socket.on('message', (raw: Buffer) => {
           const message: unknown = JSON.parse(String(raw));
@@ -21705,12 +21711,31 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
       );
       // A game run straight off the files knows a script class only once the project has been
-      // imported, which is what writes the list of global classes an editor would have.
-      const imported = spawnSync(engine, ['--headless', '--path', project, '--import'], {
-        encoding: 'utf8',
-        timeout: 120_000,
+      // imported, which is what writes the list of global classes an editor would have. Run without
+      // blocking: the fake editor is on this process's event loop, and a synchronous import held it
+      // for as long as the import took. The time it took goes in the message, since a failure on a
+      // Linux runner took the two minutes the import is given and said nothing else.
+      const importing = Date.now();
+      const imported = await new Promise<{ status: number | null; output: string }>((resolveRun) => {
+        const run = spawn(engine, ['--headless', '--path', project, '--import']);
+        let output = '';
+        run.stdout?.on('data', (chunk: Buffer) => {
+          output += String(chunk);
+        });
+        run.stderr?.on('data', (chunk: Buffer) => {
+          output += String(chunk);
+        });
+        const limit = setTimeout(() => run.kill(), 120_000);
+        run.on('close', (status) => {
+          clearTimeout(limit);
+          resolveRun({ status, output });
+        });
       });
-      assert.equal(imported.status, 0, `the project imports: ${imported.stdout}${imported.stderr}`);
+      assert.equal(
+        imported.status,
+        0,
+        `the project imports, which took ${Date.now() - importing}ms: ${imported.output}`,
+      );
       const started = await start(20_000);
       assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
 
