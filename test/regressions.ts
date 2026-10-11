@@ -97,7 +97,7 @@ import {
   theEditorHasComeBack,
 } from '../src/godot-bridge.js';
 import { DebuggerStream, decodeVariant, framedCommand } from '../src/godot-variant.js';
-import { mainCheckoutOf, recordedEnginePath } from '../src/harnesses.js';
+import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
 import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
@@ -11143,6 +11143,25 @@ function testAWorktreeFindsItsMainCheckoutsEngine(): void {
     );
 
     assert.equal(mainCheckoutOf(join(root, 'main', 'game')), null, 'the main checkout is no worktree');
+
+    // The other way round: the main checkout finds the project in each of its worktrees, from the
+    // gitdir git writes under the entry, absolute or relative to it.
+    writeFileSync(join(entry, 'gitdir'), `${join(root, 'next', '.git').replaceAll('\\', '/')}\n`);
+    const absolute = worktreeCheckoutsOf(join(root, 'main', 'game'));
+    assert.ok(
+      absolute.length === 1 && isSameDirectory(absolute[0] ?? '', worktree),
+      `the main checkout names its worktree's project: ${JSON.stringify(absolute)}`,
+    );
+    writeFileSync(join(entry, 'gitdir'), '../../../../next/.git\n');
+    const relativeOnes = worktreeCheckoutsOf(join(root, 'main', 'game'));
+    assert.ok(
+      relativeOnes.length === 1 && isSameDirectory(relativeOnes[0] ?? '', worktree),
+      `and from a relative gitdir: ${JSON.stringify(relativeOnes)}`,
+    );
+    assert.deepEqual(worktreeCheckoutsOf(worktree), [], 'a worktree lists none of its own');
+    rmSync(join(root, 'next', 'game', 'project.godot'));
+    assert.deepEqual(worktreeCheckoutsOf(join(root, 'main', 'game')), [], 'nor one without the project');
+    writeFileSync(join(root, 'next', 'game', 'project.godot'), 'config_version=5\n');
     rmSync(join(root, 'main', 'game', 'project.godot'));
     assert.equal(mainCheckoutOf(worktree), null, 'a main checkout without the project');
     writeFileSync(join(root, 'main', 'game', 'project.godot'), 'config_version=5\n');
@@ -27654,12 +27673,36 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
       rmSync(marker);
     }
 
+    // Two git worktrees of the project, which an upgrade here does not reach: one with addons
+    // releases behind, named with the command that upgrades it, and one already on this version,
+    // not named. Reported from ostinato, whose worktree sat on 1.1.32 behind a main checkout on 1.2.4.
+    const worktrees = mkdtempSync(join(tmpdir(), 'gdharness-vendored-worktrees-'));
+    const behind = join(worktrees, 'behind');
+    const level = join(worktrees, 'level');
+    for (const [checkout, marked] of [
+      [behind, '1.1.32'],
+      [level, SERVER_VERSION],
+    ] as const) {
+      const entry = join(projectDir, '.git', 'worktrees', basename(checkout));
+      mkdirSync(entry, { recursive: true });
+      writeFileSync(join(entry, 'gitdir'), `${join(checkout, '.git')}\n`);
+      mkdirSync(join(checkout, 'addons', 'gdharness_runtime'), { recursive: true });
+      writeFileSync(join(checkout, 'project.godot'), 'config_version=5\n');
+      writeFileSync(join(checkout, 'addons', 'gdharness_runtime', '.gdharness-version'), `${marked}\n`);
+    }
     const upgraded = cli('upgrade', projectDir);
+    rmSync(join(projectDir, '.git'), { recursive: true, force: true });
+    rmSync(worktrees, { recursive: true, force: true });
     assert.equal(
       upgraded.status,
       0,
       `upgrade should not refuse for a path it is holding: ${upgraded.output}`,
     );
+    assert.ok(
+      upgraded.output.includes(`  ${behind}: 1.1.32. Run  gdharness upgrade ${behind}`),
+      `a worktree whose addons trail is named with the command that upgrades it: ${upgraded.output}`,
+    );
+    assert.ok(!upgraded.output.includes(level), `and one already on this version is not: ${upgraded.output}`);
     assert.match(upgraded.output, /an unmarked copy -> /, upgraded.output);
     assert.match(upgraded.output, /replaced .*gdharness_editor/, upgraded.output);
     assert.match(upgraded.output, /Restart it with the\s+editor_launch restart/, upgraded.output);
