@@ -277,7 +277,7 @@ import { withHome } from './support/cli-home.js';
 import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
-import { reservePort, ServerProcess } from './support/server.js';
+import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
 import {
   ENGINE_FIXTURES_SECONDS,
   REGRESSION_SECONDS,
@@ -2775,7 +2775,7 @@ async function withFramedPeer<T>(
     });
   });
 
-  await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+  await listenOnAReservedPort(server);
 
   try {
     return await handler(portOf(server));
@@ -5523,12 +5523,7 @@ async function testABadPortIsReported(): Promise<void> {
  */
 async function testAnEditorPortMovesOnlyWhenItIsHeld(): Promise<void> {
   const holder = createServer();
-  const held = await new Promise<number>((resolve) => {
-    holder.listen(0, '127.0.0.1', () => {
-      const bound = holder.address();
-      resolve(typeof bound === 'object' && bound !== null ? bound.port : 0);
-    });
-  });
+  const held = await listenOnAReservedPort(holder);
   try {
     const moved = await freePort(held);
     assert.notEqual(moved, held, 'a port somebody is holding is not the one handed back');
@@ -11288,12 +11283,10 @@ async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
       env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
     });
     try {
-      const up = await new Promise<Error | null>((ready) => {
-        answering.once('error', ready);
-        answering.listen(0, bound, () => {
-          ready(null);
-        });
-      });
+      const up = await listenOnAReservedPort(answering, bound).then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
+      );
       if (up !== null) {
         assert.equal(announced, '::', `binding ${bound} should work on every runner: ${up.message}`);
         console.log(
@@ -11370,7 +11363,7 @@ async function testRuntimeConnectedIsAboutThisProjectsGames(): Promise<void> {
       socket.on('error', () => {});
     });
     listening.push(answering);
-    await new Promise<void>((ready) => answering.listen(0, '127.0.0.1', ready));
+    await listenOnAReservedPort(answering);
     // A live process for the announcement to name, since one naming a process that is gone is swept.
     const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     children.push(holder);
@@ -17591,15 +17584,26 @@ async function withAPlayingEditor(
           mkdirSync(addon, { recursive: true });
           writeFileSync(join(addon, 'runtime_autoload.gd'), 'extends Node\n');
         }
+        const initialising = Date.now();
         await server.initialize('regression-test');
+        const initialised = Date.now() - initialising;
 
         const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
         editor.socket = socket;
+        // A failure to reach the bridge rejects with an Error that says so. Rejected with the bare
+        // event, it was reported as "[object ErrorEvent]" after two minutes on the Linux leg, twice,
+        // with nothing naming the port, the server's answer or what the server said meanwhile.
         await new Promise<void>((resolve, reject) => {
           socket.once('open', () => {
             resolve();
           });
-          socket.once('error', reject);
+          socket.once('error', (event: { message?: string }) => {
+            reject(
+              new Error(
+                `the fake editor could not reach the bridge on port ${port} (${event.message ?? 'no message'}), after the server took ${initialised}ms to initialise.\n${server.stderr.split('\n').slice(-40).join('\n')}`,
+              ),
+            );
+          });
         });
         // Kept for the rest of the case: a socket error with nobody listening is thrown out of the
         // event loop, and one raised as the server goes down after a failed assertion was reported
@@ -22642,7 +22646,7 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
       socket.on('error', () => {});
     });
     sockets.push(answering);
-    await new Promise<void>((ready) => answering.listen(0, '127.0.0.1', ready));
+    await listenOnAReservedPort(answering);
     return { pid: process_.pid, port: portOf(answering) };
   };
   const announce = (runtimeDir: string, project: string, game: { pid: number; port: number }): void => {
@@ -23788,7 +23792,7 @@ async function withAHeldGame(
     // Accepted and never answered, which is what a game sitting at a breakpoint does.
     connections += 1;
   });
-  await new Promise<void>((ready) => held.listen(0, '127.0.0.1', ready));
+  await listenOnAReservedPort(held);
   const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   const gamePid = game.pid;
   assert.ok(typeof gamePid === 'number' && alive(gamePid), 'the fixture needs a live process to announce');
@@ -28930,6 +28934,37 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
   // The real one still answers, so what is asserted above is not the only thing that runs.
   const real = await reservePort();
   assert.ok(real > 1024 && real < 65_536, `a real reservation should come back a port: ${real}`);
+
+  // A listener takes its port the same way, so it never sits on one a server has been given: the
+  // fake debug adapter on port zero took a reserved bridge port, and the fake editor dialling the
+  // bridge reached the adapter and timed out. 1100 is handed out above, so it is declined here.
+  const offered = [1100, 1102];
+  let next = 0;
+  const pool = (): Promise<number> => Promise.resolve(offered[Math.min(next++, offered.length - 1)] ?? 0);
+  const listeners = [createServer(), createServer(), createServer()];
+  try {
+    assert.equal(
+      await listenOnAReservedPort(listeners[0] ?? createServer(), '127.0.0.1', pool),
+      1102,
+      'a listener declines a port already handed out',
+    );
+    // 1107 held by something that took it before the listener could, as another process can take
+    // a reserved port before it is bound: given up for the next one offered.
+    await new Promise<void>((ready) => listeners[1]?.listen(1107, '127.0.0.1', ready));
+    const taken = [1107, 1108];
+    let offeredNext = 0;
+    assert.equal(
+      await listenOnAReservedPort(listeners[2] ?? createServer(), '127.0.0.1', () =>
+        Promise.resolve(taken[Math.min(offeredNext++, taken.length - 1)] ?? 0),
+      ),
+      1108,
+      'and takes the next port when one it reserved is in use',
+    );
+  } finally {
+    for (const listener of listeners) {
+      listener.close();
+    }
+  }
 }
 
 /**
@@ -33359,7 +33394,14 @@ async function main(): Promise<void> {
     } catch (error) {
       passed = false;
       failed.push(test.name);
-      console.error(`\n${test.name} failed\n${error instanceof Error ? error.stack : String(error)}\n`);
+      // A thrown event is not an Error and prints as "[object ErrorEvent]", so its message is added.
+      const said =
+        error instanceof Error
+          ? error.stack
+          : typeof error === 'object' && error !== null && 'message' in error
+            ? `${Object.prototype.toString.call(error)}: ${String(error.message)}`
+            : String(error);
+      console.error(`\n${test.name} failed\n${said}\n`);
     } finally {
       clearTimeout(deadline);
     }
