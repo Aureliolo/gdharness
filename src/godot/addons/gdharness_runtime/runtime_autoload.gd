@@ -140,6 +140,7 @@ func _init() -> void:
 		"wait_frames": _waits.wait_frames,
 		"wait_signal": _waits.wait_signal,
 		"wait_until": _waits.wait_until,
+		"send_profile": _send_profile_now,
 	}
 	_wait_for_the_profiler()
 
@@ -234,6 +235,16 @@ func _send_the_profile() -> void:
 				% PROFILE_CONFIRM_MS
 			)
 		)
+
+
+## The totals sent now, for a stop that is about to end the game without letting it quit: ended by
+## its process, a game takes the totals with it, and every stopped profile came back as the frames
+## summed. Nothing of the game's own runs, which quitting the tree would have done.
+func _send_profile_now(_params: Dictionary) -> Dictionary:
+	if not (EngineDebugger.is_active() and EngineDebugger.is_profiling("servers")):
+		return {"sent": false}
+	_send_the_profile()
+	return {"sent": true, "confirmed": _profile_received}
 
 
 ## What the script profiler costs per call in this game, measured once each time it is switched on.

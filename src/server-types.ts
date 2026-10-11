@@ -51,6 +51,8 @@ export interface GodotProcess {
    * and then stopped was refused as one started without it.
    */
   profile?: string;
+  /** The scene a start of this server ran, which its boot is noted and read under; see `MAIN_SCENE`. */
+  bootScene?: string;
   /**
    * How this server ended the run, when it did: through the keeper holding it, by a signal to its
    * pid, or by asking the editor playing it. Said in the stop's answer, because a caller checking a

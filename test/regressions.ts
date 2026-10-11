@@ -37,6 +37,7 @@ import {
   bootNotePath,
   halfAsLongAgain,
   LONGEST_SIZED_WAIT_MS,
+  MAIN_SCENE,
   readBootNote,
   waitSizedTo,
   writeBootNote,
@@ -82,6 +83,7 @@ import {
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
 import {
+  callSitesOf,
   enclosingFunction,
   occurrencesOf,
   regionsOf,
@@ -1371,58 +1373,137 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ].map(propertyOf),
     ['speed', 'speed', 'sinks_and_hexes', null, null, null],
   );
+  // The blocks name the property itself, as ostinato's do: inside them that is the value stored,
+  // which the engine reads and writes without running them, so those lines are not places. Each
+  // place says whether it writes, which runs the set block, or reads. Reported from ostinato as
+  // #1020: every place read called: false, the setter's own `sinks = value` among them.
   const clock = [
     'class_name GameClock',
     '',
-    'var _speed := 1',
-    'var speed: int:',
+    'var speed: int = 1:',
     '\tget:',
-    '\t\treturn _speed',
+    '\t\treturn speed',
     '\tset(value):',
-    '\t\t_speed = value',
+    '\t\tspeed = value',
     '',
     '',
     'func tick() -> int:',
-    '\tspeed = speed + 1',
-    '\treturn _speed',
+    '\tspeed += 1',
+    '\treturn speed',
+    '',
+  ].join('\n');
+  const hall = [
+    'func open(clock: GameClock) -> void:',
+    '\tclock.speed = 3',
+    '\tprint(clock.speed == 3)',
     '',
   ].join('\n');
   const clocked = totals({
-    'res://clock.gd::6::GameClock.@speed_getter': { calls: 40, selfSeconds: 0.001, totalSeconds: 0.001 },
-    'res://clock.gd::8::GameClock.@speed_setter': { calls: 40, selfSeconds: 0.002, totalSeconds: 0.002 },
-    'res://clock.gd::12::GameClock.tick': { calls: 40, selfSeconds: 0.01, totalSeconds: 0.013 },
+    'res://addons/gdharness_runtime/runtime_autoload.gd::310::_profiler_probe': {
+      calls: 10_000,
+      selfSeconds: 0.02,
+      totalSeconds: 0.02,
+    },
+    'res://clock.gd::5::GameClock.@speed_getter': { calls: 40, selfSeconds: 0.001, totalSeconds: 0.001 },
+    'res://clock.gd::7::GameClock.@speed_setter': { calls: 40_000, selfSeconds: 0.1, totalSeconds: 0.1 },
+    'res://clock.gd::11::GameClock.tick': { calls: 40, selfSeconds: 0.2, totalSeconds: 0.3 },
   });
   assert.deepEqual(
-    profiledFunctions(clocked, 10).functions.map((one) => [one.function, one.property]),
+    profiledFunctions(clocked, 10).functions.map((one) => [one.function, one.property, one.overheadMs]),
     [
-      ['GameClock.tick', undefined],
-      ['GameClock.@speed_setter', 'speed'],
-      ['GameClock.@speed_getter', 'speed'],
+      ['GameClock.tick', undefined, undefined],
+      ['GameClock.@speed_setter', 'speed', 80],
+      ['GameClock.@speed_getter', 'speed', undefined],
     ],
-    'each block carries its property',
+    'each block carries its property, and the setter is mostly the profiler',
   );
+  const scriptsOfTheClock: [string, string][] = [
+    ['res://clock.gd', clock],
+    ['res://hall.gd', hall],
+  ];
   for (const asked of ['GameClock.@speed_getter', 'GameClock.speed', '@speed_setter', 'speed']) {
-    const found = callersOf(clocked, asked, [['res://clock.gd', clock]]);
+    const found = callersOf(clocked, asked, scriptsOfTheClock);
     assert.deepEqual(
       [
-        found.target.map((one) => one.function),
-        found.sites.map((one) => [one.line, one.within, one.withinCalls]),
+        found.property,
+        // The rows as the table has them, the profiler's share included: #1019 had it dropped here.
+        found.target.map((one) => [one.function, one.overheadMs]),
+        found.sites.map((one) => [one.script, one.line, one.within, one.access, one.called, one.withinCalls]),
       ],
       [
-        ['GameClock.@speed_setter', 'GameClock.@speed_getter'],
+        true,
         [
-          [12, 'tick', 40],
-          [12, 'tick', 40],
+          ['GameClock.@speed_setter', 80],
+          ['GameClock.@speed_getter', undefined],
+        ],
+        [
+          ['res://clock.gd', 11, 'tick', 'write', undefined, 40],
+          ['res://clock.gd', 12, 'tick', 'read', undefined, 40],
+          ['res://hall.gd', 2, 'open', 'write', undefined, undefined],
+          ['res://hall.gd', 3, 'open', 'read', undefined, undefined],
         ],
       ],
       `asked as ${asked}`,
     );
   }
   assert.deepEqual(
-    callersOf(clocked, 'Other.speed', [['res://clock.gd', clock]]).target,
+    callersOf(clocked, 'Other.speed', scriptsOfTheClock).target,
     [],
     "another class's property of that name is not this one",
   );
+  // Every compound assignment writes, and a comparison does not. Inside the block, the name on
+  // another object is that object's property and runs its set block, so it is a place.
+  const assigned = [
+    'var level: int = 0:',
+    '\tset(value):',
+    '\t\tlevel = value',
+    '\t\ttwin.level = value',
+    'var twin: Node',
+    '',
+    '',
+    'func shift() -> void:',
+    ...['=', '+=', '-=', '*=', '/=', '%=', '**=', '<<=', '>>=', '&=', '|=', '^='].map(
+      (op) => `\tlevel ${op} 2`,
+    ),
+    '\tprint(level == 2, level != 2, level <= 2, level >= 2)',
+    '',
+  ].join('\n');
+  assert.deepEqual(
+    callSitesOf(assigned, 'level', new Set(), true).map((one) => [one.line, one.access]),
+    [
+      [4, 'write'],
+      ...Array.from({ length: 12 }, (_, index) => [index + 9, 'write']),
+      [21, 'read'],
+      [21, 'read'],
+      [21, 'read'],
+      [21, 'read'],
+    ],
+  );
+  // And a function asked about is still called or passed on, with no access.
+  assert.deepEqual(
+    callSitesOf('func a() -> void:\n\tb()\n\tvar c := b\n\n\nfunc b() -> void:\n\tpass\n', 'b').map((one) => [
+      one.line,
+      one.called,
+      one.access,
+    ]),
+    [
+      [2, true, undefined],
+      [3, false, undefined],
+    ],
+  );
+  const noteFor = (name: string): string =>
+    String(
+      get(
+        answer({ totals: clocked, callersOf: { name, scripts: () => scriptsOfTheClock } }),
+        'callers',
+        'note',
+      ),
+    );
+  assert.match(
+    noteFor('GameClock.speed'),
+    / It is a property, so each place says whether it writes it \(access write\), which runs its set block, or reads it \(access read\), which runs its get block: .* so those lines are not listed\.$/,
+  );
+  assert.doesNotMatch(noteFor('tick'), /It is a property/, 'a function is not said to be one');
 
   // A super call is in its caller's self time as well as in the overridden function's row, so the
   // rows calling super are marked: each way of writing one, and the places that only look like one.
@@ -1788,17 +1869,27 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     );
   assert.match(
     limited(7, 1),
-    /: Crews\.hot6, Crews\.hot5, Crews\.hot4, Crews\.hot3, Crews\.hot2 and 2 more\. Their rows, which carry that share as overheadMs, are none of the 1 returned; limit 8 returns them all\. That much/,
+    /: Crews\.hot6, Crews\.hot5, Crews\.hot4, Crews\.hot3, Crews\.hot2 and 2 more\. Their rows, which carry that share as overheadMs, come after the one row returned; limit 8 returns them all\. That much/,
   );
   assert.match(
     limited(7, 3),
-    / and 2 more\. Their rows carry that share as overheadMs, and 2 of them are among the 3 returned; limit 8 returns them all\. That much/,
+    / and 2 more\. Their rows carry that share as overheadMs, and 2 of them are among the 3 rows returned; limit 8 returns them all\. That much/,
   );
-  assert.match(limited(7, 2), / and 1 of them is among the 2 returned; limit 8 returns them all\./);
+  assert.match(limited(7, 2), / and 1 of them is among the 2 rows returned; limit 8 returns them all\./);
   assert.match(limited(7, 8), / and 2 more\. Their rows carry that share as overheadMs\. That much/);
   assert.match(
     limited(1, 1),
-    /One function has at least half its selfMs in it: Crews\.hot0\. Its row, which carries that share as overheadMs, is not among the 1 returned; limit 2 returns it\. That much of its time/,
+    /One function has at least half its selfMs in it: Crews\.hot0\. Its row, which carries that share as overheadMs, comes after the one row returned; limit 2 returns it\. That much of its time/,
+  );
+  // One row returned and it one of several: ostinato's limit 1 read "none of the 1 returned".
+  assert.match(
+    String(
+      profileAnswer(
+        { through: 'gdharness', running: false, totals: hot(7), coveredMs: 0, runtimeAddon: true },
+        1,
+      )['note'],
+    ),
+    / and 2 more\. Their rows carry that share as overheadMs, and the one row returned is one of them; limit 7 returns them all\./,
   );
 
   // Every thread's time is added to the same function, so script time beyond the time covered is
@@ -19268,7 +19359,7 @@ function testTheWaitSizedToABootIsSaid(): void {
   });
   assert.match(
     text(get(said, 'note')),
-    /within 12300ms, half as long again as the 8200ms its last game took, and the game is still running/,
+    /within 12300ms, half as long again as the 8200ms the slowest of its last boots took, and the game is still running/,
     `the note names the boot the wait was sized to: ${JSON.stringify(said)}`,
   );
   // A boot the ceiling cut short of half as long again: the wait is named as the ceiling and the
@@ -19286,7 +19377,7 @@ function testTheWaitSizedToABootIsSaid(): void {
   assert.match(
     text(get(capped, 'note')),
     new RegExp(
-      `within ${LONGEST_SIZED_WAIT_MS}ms, the longest a start waits unasked though its last game took 100000ms to announce, and the game is still running`,
+      `within ${LONGEST_SIZED_WAIT_MS}ms, the longest a start waits unasked though the slowest of its last boots took 100000ms to announce, and the game is still running`,
     ),
     `a capped wait is named as the ceiling, not as half as long again: ${JSON.stringify(capped)}`,
   );
@@ -19303,7 +19394,7 @@ function testTheWaitSizedToABootIsSaid(): void {
   assert.match(
     text(get(exact, 'note')),
     new RegExp(
-      `within ${LONGEST_SIZED_WAIT_MS}ms, half as long again as the 40000ms its last game took, and the game is no longer running`,
+      `within ${LONGEST_SIZED_WAIT_MS}ms, half as long again as the 40000ms the slowest of its last boots took, and the game is no longer running`,
     ),
     `a wait that is half as long again and the ceiling at once is half as long again: ${JSON.stringify(exact)}`,
   );
@@ -19319,13 +19410,41 @@ function testTheWaitSizedToABootIsSaid(): void {
 
   const project = mkdtempSync(join(tmpdir(), 'gdharness-boot-note-'));
   try {
-    assert.equal(readBootNote(project), null, 'a project with no note has no boot known');
-    writeBootNote(project, 8_200.4);
-    assert.equal(readBootNote(project), 8_200, 'the note round-trips, whole milliseconds');
+    assert.equal(readBootNote(project, MAIN_SCENE), null, 'a project with no note has no boot known');
+    writeBootNote(project, MAIN_SCENE, 8_200.4);
+    assert.equal(readBootNote(project, MAIN_SCENE), 8_200, 'the note round-trips, whole milliseconds');
+    writeBootNote(project, 'tests/bench.tscn', 900);
+    assert.deepEqual(
+      [
+        readBootNote(project, MAIN_SCENE),
+        readBootNote(project, 'tests/bench.tscn'),
+        readBootNote(project, 'x.tscn'),
+      ],
+      [8_200, 900, null],
+      'each scene its own, a second written beside the first',
+    );
+    // The slowest of the last five: one quiet boot does not undo a busy one, and the oldest goes
+    // when a sixth comes. Reported from fantasy-guild-manager: a menu announcing at 11.6 s on a
+    // quiet machine and at 20.1 s beside its sweeps, and the wait sized to the quiet one missed.
+    writeBootNote(project, MAIN_SCENE, 20_100);
+    writeBootNote(project, MAIN_SCENE, 11_600);
+    assert.equal(readBootNote(project, MAIN_SCENE), 20_100, 'a quiet boot after a busy one');
+    for (const quiet of [11_000, 11_100, 11_200]) {
+      writeBootNote(project, MAIN_SCENE, quiet);
+    }
+    assert.equal(readBootNote(project, MAIN_SCENE), 20_100, 'still among the last five');
+    writeBootNote(project, MAIN_SCENE, 11_300);
+    assert.equal(readBootNote(project, MAIN_SCENE), 11_600, 'and gone once five came after it');
     writeFileSync(bootNotePath(project), 'not json', 'utf8');
-    assert.equal(readBootNote(project), null, 'rubbish reads as no boot known');
-    writeFileSync(bootNotePath(project), JSON.stringify({ announcedAfterMs: -3 }), 'utf8');
-    assert.equal(readBootNote(project), null, 'and so does a boot that took less than nothing');
+    assert.equal(readBootNote(project, MAIN_SCENE), null, 'rubbish reads as no boot known');
+    writeFileSync(
+      bootNotePath(project),
+      JSON.stringify({ scenes: { [MAIN_SCENE]: { boots: [-3, 0] } } }),
+      'utf8',
+    );
+    assert.equal(readBootNote(project, MAIN_SCENE), null, 'and so do boots that took no time or less');
+    writeFileSync(bootNotePath(project), JSON.stringify({ announcedAfterMs: 8_000 }), 'utf8');
+    assert.equal(readBootNote(project, MAIN_SCENE), null, 'a note of no scene is no scene’s');
   } finally {
     sweep(project);
   }
@@ -19340,13 +19459,18 @@ function testTheWaitSizedToABootIsSaid(): void {
  * run's start, in the project's own `.godot`, and the next start without a `runtimeWaitMs` waits
  * half as long again as that, never less than the usual and never more than a minute.
  *
- * The game here announces 6.5 s after each play, from a live process. The first start is given a
- * second and does not find it; the status call after the announcement ties the run late and
- * writes the note; the second start names no wait, is given 9.75 s, and finds it. Disarmed to the
- * usual budget, the second start runs out at 5 s on a game that announces at 6.5.
+ * The game here announces 6.5 s after the first plays, from a live process. The first start is
+ * given the usual 5 s and does not find it; the status call after the announcement ties the run
+ * late and writes the note; the second start names no wait, is given 9.75 s, and finds it. Disarmed
+ * to the usual budget, the second start runs out at 5 s on a game that announces at 6.5.
+ *
+ * The note is the scene's. fantasy-guild-manager starts a harness scene that announces as it quits,
+ * a hundred seconds in, beside its menu, and one note for the project would size the menu's next
+ * start to the harness. So a start of another scene is given the usual wait rather than the main
+ * scene's, its boot is noted under its own name, and the main scene's 6.5 s stays where it was.
  */
 async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
-  const announcesAfterMs = 6_500;
+  let announcesAfterMs = 6_500;
   const games: ChildProcess[] = [];
   const openGame = (): number => {
     const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
@@ -19390,54 +19514,69 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
           }
           return { ok: true };
         },
-      async ({ server, project, runtimeDir, start }) => {
-        const first = await start(1_000);
+      async ({ server, project, runtimeDir }) => {
+        writeFileSync(
+          join(project, 'other.tscn'),
+          '[gd_scene format=3]\n\n[node name="Other" type="Node"]\n',
+        );
+        const startWith = async (asked: Record<string, unknown>): Promise<unknown> =>
+          parseTextContent(
+            await server.request(
+              'tools/call',
+              {
+                name: 'editor_run',
+                arguments: { projectPath: project, op: 'start', headless: false, ...asked },
+              },
+              60_000,
+            ),
+          );
+        const stop = (): Promise<unknown> =>
+          server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000);
+        // The status call is what ties a run to the game that announced after the wait, and the tie
+        // is what writes the note.
+        const tieTheLast = async (): Promise<void> => {
+          const pid = games.at(-1)?.pid;
+          assert.ok(
+            await cameTrue(
+              () => existsSync(join(runtimeDir, `runtime-${pid}.json`)),
+              announcesAfterMs + 5_000,
+            ),
+            'the game announces',
+          );
+          const seen = parseTextContent(
+            await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000),
+          );
+          assert.equal(
+            asArray(get(seen, 'game', 'runtimes')).length,
+            1,
+            `the game is listed once it has announced: ${JSON.stringify(seen)}`,
+          );
+        };
+        const notedFor = (scene: string): number | null => readBootNote(project, scene);
+
+        const first = await startWith({});
         assert.equal(
-          get(first.answer, 'runtime', 'listening'),
+          get(first, 'runtime', 'listening'),
           false,
-          `a second is not long enough for this game: ${JSON.stringify(first.answer)}`,
+          `the usual wait is not long enough for this game: ${JSON.stringify(first)}`,
         );
         assert.match(
-          text(get(first.answer, 'runtime', 'note')),
-          /within 1000ms and/,
-          `and the note says what the wait was, unsized: ${JSON.stringify(first.answer)}`,
+          text(get(first, 'runtime', 'note')),
+          /within 5000ms and/,
+          `and the note says what the wait was, unsized: ${JSON.stringify(first)}`,
         );
-        assert.equal(existsSync(join(project, '.godot', 'gdharness-boot.json')), false, 'nothing noted yet');
-        const firstPid = games[0]?.pid;
-        assert.ok(
-          await cameTrue(
-            () => existsSync(join(runtimeDir, `runtime-${firstPid}.json`)),
-            announcesAfterMs + 5_000,
-          ),
-          'the game announces after the wait',
-        );
-        // The status call is what ties the run to the game that announced after the wait, and
-        // the tie is what writes the note.
-        const seen = parseTextContent(
-          await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000),
-        );
-        assert.equal(
-          asArray(get(seen, 'game', 'runtimes')).length,
-          1,
-          `the game is listed once it has announced: ${JSON.stringify(seen)}`,
-        );
-        const noted: unknown = JSON.parse(readFileSync(bootNotePath(project), 'utf8'));
-        const took = asNumber(get(noted, 'announcedAfterMs'), 'the note says how long the boot took');
+        assert.equal(existsSync(bootNotePath(project)), false, 'nothing noted yet');
+        await tieTheLast();
+        const took = notedFor(MAIN_SCENE) ?? -1;
         assert.ok(
           took >= announcesAfterMs - 1_500 && took <= announcesAfterMs + 3_000,
           `the boot noted is the announcement's time against the run's start: ${took}ms for a game announcing at ${announcesAfterMs}ms`,
         );
-        await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000);
+        await stop();
 
         // The second start names no wait, so it is given what the last boot says it needs.
         const began = Date.now();
-        const second = parseTextContent(
-          await server.request(
-            'tools/call',
-            { name: 'editor_run', arguments: { projectPath: project, op: 'start', headless: false } },
-            60_000,
-          ),
-        );
+        const second = await startWith({});
         const waitedMs = Date.now() - began;
         assert.equal(
           get(second, 'runtime', 'listening'),
@@ -19446,6 +19585,23 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
         );
         assert.equal(get(second, 'runtime', 'pid'), games[1]?.pid, JSON.stringify(second));
         console.log(`sized wait: the second start found the game after ${waitedMs}ms`);
+        await stop();
+
+        // Another scene's boot is its own. Its first start has nothing noted, so it waits the usual
+        // 5 s and misses a game announcing at 7, where the main scene's note would have waited 9.75;
+        // then its boot is noted under its name, with the main scene's left alone.
+        announcesAfterMs = 7_000;
+        const mainBefore = notedFor(MAIN_SCENE);
+        const other = await startWith({ scene: 'other.tscn' });
+        assert.equal(get(other, 'runtime', 'listening'), false, JSON.stringify(other));
+        assert.match(text(get(other, 'runtime', 'note')), /within 5000ms and/, JSON.stringify(other));
+        await tieTheLast();
+        const otherTook = notedFor('other.tscn') ?? -1;
+        assert.ok(
+          otherTook >= announcesAfterMs - 1_500 && otherTook <= announcesAfterMs + 3_000,
+          `the other scene's boot, under its own name: ${otherTook}ms`,
+        );
+        assert.equal(notedFor(MAIN_SCENE), mainBefore, "and the main scene's is still its own");
       },
     );
   } finally {
@@ -22524,8 +22680,10 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
             .filter((line) => line.includes('boot of pid'))
             .join('\n')}`,
         );
-        const noted: unknown = JSON.parse(readFileSync(bootNotePath(project), 'utf8'));
-        const bootMs = asNumber(get(noted, 'announcedAfterMs'), `${shape}: the boot is noted`);
+        const bootMs = asNumber(
+          readBootNote(project, MAIN_SCENE),
+          `${shape}: the boot is noted for the main scene`,
+        );
         assert.ok(
           bootMs > 0 && bootMs < 60_000,
           `${shape}: the note is the announcement's time against the start: ${bootMs}ms`,
@@ -26277,6 +26435,10 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       assert.ok(after.trimStart().startsWith('{'), `the stopped run's profile: ${after}`);
       const afterRead = JSON.parse(after) as unknown;
       assert.equal(get(afterRead, 'running'), false, after);
+      // The stop has the runtime send the engine's totals before it ends the game, which ended by
+      // its process would otherwise take them with it. Reported from fantasy-guild-manager: every
+      // stopped profile came back complete false.
+      assert.equal(get(afterRead, 'complete'), true, `the engine's own totals: ${after}`);
       const afterRows = asArray(get(afterRead, 'functions'));
       assert.ok(
         Number(
@@ -28864,8 +29026,13 @@ function snakeCased(name: string): string {
 }
 
 /** The names in one table of a GDScript file, by the shape that table is written in. */
-function namesIn(path: string, pattern: RegExp, what: string, least: number): Set<string> {
-  const found = new Set([...readFileSync(path, 'utf8').matchAll(pattern)].map(captured));
+function namesIn(path: string, pattern: RegExp, what: string, least: number, within?: RegExp): Set<string> {
+  const source = readFileSync(path, 'utf8');
+  // A table read out of the part of the file that holds it, when its entries are written like other
+  // dictionaries in the same file: the runtime's commands and its announcement are both
+  // `"name": _member,`.
+  const text = within === undefined ? source : (within.exec(source)?.[1] ?? '');
+  const found = new Set([...text.matchAll(pattern)].map(captured));
   // The reader is a regex over source, so it can come back empty for a table that was merely
   // reformatted, and an empty set agrees with everything. A floor is what makes it speak up.
   //
@@ -28967,9 +29134,10 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
 
   const runtime = namesIn(
     'src/godot/addons/gdharness_runtime/runtime_autoload.gd',
-    /^\t\t"([a-z_]+)": (?:_ping|_[a-z]+\.[a-z_]+),$/gm,
+    /^\t\t"([a-z_]+)": _[a-z_]+(?:\.[a-z_]+)?,$/gm,
     'runtime commands',
-    21,
+    22,
+    /\t_commands = \{\n([\s\S]*?)\n\t\}/,
   );
   const asked = namesSent(
     /(?:handleRuntimeCommand|runtimeRequest)\([^,]*,?\s*'([a-z_]+)'/g,
