@@ -1109,6 +1109,26 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     say({ totals: { ...totals({}), frameFunctions: 1536, cappedFrames: 0, totalCapped: true } }),
     /^The engine's totals carried the most functions the profiler asks for, 1536, so the functions with the least time are not in them/,
   );
+  // At the cap with the last function kept timed, something with time can be past it; with it untimed,
+  // nothing past it took any. ostinato's totals reached 1536 with 324 functions counted, the rest
+  // compiled and never run, and the note said functions with time were missing.
+  const atTheCap = (lastSeconds: number): ProfileTotals => ({
+    ...totals({
+      'res://crews.gd::4::Crews.busy': { calls: 10, selfSeconds: 0.4, totalSeconds: 0.4 },
+      'res://crews.gd::9::Crews.idle': { calls: 0, selfSeconds: lastSeconds, totalSeconds: lastSeconds },
+    }),
+    frameFunctions: 1536,
+    cappedFrames: 0,
+    totalCapped: true,
+  });
+  assert.match(
+    say({ totals: atTheCap(0.001) }),
+    /1536, so the functions with the least time are not in them/,
+  );
+  assert.match(
+    say({ totals: atTheCap(0) }),
+    /^The engine's totals carried the most functions the profiler asks for, 1536, and the last of them took no measurable time, so neither did any left out: the time is all here/,
+  );
   assert.equal(
     answer({ totals: { ...totals({}), frameFunctions: 1536, cappedFrames: 4, totalCapped: false } })['note'],
     undefined,
@@ -1587,7 +1607,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   const costNote = String(answer({ totals: calibrated })['note']);
   assert.match(
     costNote,
-    /^The profiler costs about 2µs a call in this run, measured on an empty function the runtime addon calls as it goes on, .* One function has at least half its selfMs in it, under overheadMs: that much of its time is the profiler's and goes once the profiler is off, whether the function is inlined or not\. What inlining saves is the call itself, .* not the work inside it\.$/,
+    /^The profiler costs about 2µs a call in this run, measured on an empty function the runtime addon calls as it goes on, .* One function has at least half its selfMs in it, under overheadMs: Crews\.fits\. That much of its time is the profiler's and goes once the profiler is off, whether the function is inlined or not\. What inlining saves is the call itself, .* not the work inside it\.$/,
     costNote,
   );
   assert.equal(get(answer({ totals: calibrated }), 'perCallOverheadUs'), 2);
@@ -1602,6 +1622,30 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ),
     undefined,
     'and without the runtime addon there is no measurement to report',
+  );
+  // Named in the note, since a limit can return none of them: two by name, and seven as the five with
+  // the most self time and how many more. Reported from ostinato: nine counted, none in the rows.
+  const hot = (count: number): ProfileTotals =>
+    totals({
+      'res://addons/gdharness_runtime/runtime_autoload.gd::310::_profiler_probe': {
+        calls: 10_000,
+        selfSeconds: 0.02,
+        totalSeconds: 0.02,
+      },
+      ...Object.fromEntries(
+        Array.from({ length: count }, (_, index) => [
+          `res://crews.gd::${index + 1}::Crews.hot${index}`,
+          { calls: 100_000, selfSeconds: 0.2 + index * 0.01, totalSeconds: 0.2 + index * 0.01 },
+        ]),
+      ),
+    });
+  assert.match(
+    String(answer({ totals: hot(2) })['note']),
+    /2 functions have at least half their selfMs in it, under overheadMs: Crews\.hot1 and Crews\.hot0\. That much of their time/,
+  );
+  assert.match(
+    String(answer({ totals: hot(7) })['note']),
+    /7 functions have at least half their selfMs in it, under overheadMs: Crews\.hot6, Crews\.hot5, Crews\.hot4, Crews\.hot3, Crews\.hot2 and 2 more\./,
   );
 
   // A script path comes from the game, so it is read only inside the project: a path climbing out of
