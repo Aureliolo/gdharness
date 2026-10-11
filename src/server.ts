@@ -2273,8 +2273,16 @@ function cappedNotes(totals: ProfileTotals): string[] {
   const most = totals.frameFunctions;
   const why = `${most} is kept below the game's debugger queue (network/limits/debugger/max_queued_messages), which drops the message naming a function when one frame names more than it holds, and a function whose name is dropped is never named afterwards.`;
   if (most !== undefined && totals.complete && totals.totalCapped === true) {
+    // The engine sends its totals busiest first, measured on 4.7.2: of a hundred functions with
+    // rising work under a cap of 64, the busiest were kept. It lists every compiled function, called
+    // or not, so when the last one kept took no measurable time, nothing left out took any: no time
+    // is missing, only the calls of functions too quick for the clock, if any were made. ostinato's
+    // totals reached 1536 with 324 functions counted and were read as having lost some of their time.
+    const leastKept = Math.min(...Object.values(totals.functions).map((one) => one.totalSeconds));
     notes.push(
-      `The engine's totals carried the most functions the profiler asks for, ${most}, so the functions with the least time are not in them: ${why}`,
+      leastKept > 0
+        ? `The engine's totals carried the most functions the profiler asks for, ${most}, so the functions with the least time are not in them: ${why}`
+        : `The engine's totals carried the most functions the profiler asks for, ${most}, and the last of them took no measurable time, so neither did any left out: the time is all here, and only a function too quick for the clock can be missing, with its calls. The engine lists every function it has compiled, run or not, and sends them busiest first. ${why}`,
     );
   } else if (most !== undefined && !totals.complete && (totals.cappedFrames ?? 0) > 0) {
     const capped = totals.cappedFrames ?? 0;

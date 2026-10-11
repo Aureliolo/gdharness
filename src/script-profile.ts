@@ -190,13 +190,7 @@ export class ProfileAggregate {
         this.totals = whole;
         this.complete = true;
         this.lastFrameAt = now;
-        // Left out only if the last function kept had time: the engine sends its totals busiest
-        // first and lists every compiled function, called or not, so a project with more functions
-        // than the cap fills it with ones that never ran. Measured on 4.7.2: of a hundred functions
-        // with rising work under a cap of 64, the busiest were kept. ostinato's totals reached 1536
-        // with 324 functions called, and were said to have left some out.
-        const leastKept = Math.min(...[...whole.values()].map((one) => one.totalSeconds));
-        this.totalCapped = carried >= this.frameFunctions && leastKept > 0;
+        this.totalCapped = carried >= this.frameFunctions;
       }
     }
   }

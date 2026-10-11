@@ -978,14 +978,6 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
   into('servers:profile_total', [9, 0, 0, 0, 0, 0, 0, 10, 0, 2, 0.5, 0.5, 0, 1, 1, 0.1, 0.1, 0]);
   assert.equal(tight.snapshot().totalCapped, true, 'and totals at the cap are said to be');
-  // At the cap, but the last function kept never ran: the engine sends its totals busiest first, so
-  // everything past the cap had no time either, and nothing that ran was left out.
-  into('servers:profile_total', [9, 0, 0, 0, 0, 0, 0, 10, 0, 2, 0.5, 0.5, 0, 1, 0, 0, 0, 0]);
-  assert.equal(
-    tight.snapshot().totalCapped,
-    false,
-    'totals filled to the cap by a function that never ran have left nothing that ran out',
-  );
 
   assert.deepEqual(signatureParts('res://w.gd::10::Work.busy'), {
     script: 'res://w.gd',
@@ -1116,6 +1108,26 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   assert.match(
     say({ totals: { ...totals({}), frameFunctions: 1536, cappedFrames: 0, totalCapped: true } }),
     /^The engine's totals carried the most functions the profiler asks for, 1536, so the functions with the least time are not in them/,
+  );
+  // At the cap with the last function kept timed, something with time can be past it; with it untimed,
+  // nothing past it took any. ostinato's totals reached 1536 with 324 functions counted, the rest
+  // compiled and never run, and the note said functions with time were missing.
+  const atTheCap = (lastSeconds: number): ProfileTotals => ({
+    ...totals({
+      'res://crews.gd::4::Crews.busy': { calls: 10, selfSeconds: 0.4, totalSeconds: 0.4 },
+      'res://crews.gd::9::Crews.idle': { calls: 0, selfSeconds: lastSeconds, totalSeconds: lastSeconds },
+    }),
+    frameFunctions: 1536,
+    cappedFrames: 0,
+    totalCapped: true,
+  });
+  assert.match(
+    say({ totals: atTheCap(0.001) }),
+    /1536, so the functions with the least time are not in them/,
+  );
+  assert.match(
+    say({ totals: atTheCap(0) }),
+    /^The engine's totals carried the most functions the profiler asks for, 1536, and the last of them took no measurable time, so neither did any left out: the time is all here/,
   );
   assert.equal(
     answer({ totals: { ...totals({}), frameFunctions: 1536, cappedFrames: 4, totalCapped: false } })['note'],
