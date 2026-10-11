@@ -13,7 +13,7 @@
  * documentation too: a guessed shape writes a file that silently does nothing.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import process from 'node:process';
@@ -925,6 +925,40 @@ export function mainCheckoutOf(projectPath: string): string | null {
   }
   const main = join(dirname(common), relative(top, resolve(projectPath)));
   return isSameDirectory(main, projectPath) || !existsSync(join(main, 'project.godot')) ? null : main;
+}
+
+/**
+ * The same project in every linked git worktree of the main checkout [param projectPath] is in,
+ * the other way round from [method mainCheckoutOf]: none when it is not in a main checkout.
+ *
+ * Each worktree's untracked addons are its own, so an upgrade of the main checkout never reaches
+ * them: game-b's worktree stayed on 1.1.32 while the main checkout was on 1.2.4, with nothing
+ * saying so. Git lists each linked worktree under the main `.git`'s `worktrees`, with a `gitdir`
+ * naming the worktree's own `.git` file, absolute or relative to that entry.
+ */
+export function worktreeCheckoutsOf(projectPath: string): string[] {
+  let top = resolve(projectPath);
+  while (!existsSync(join(top, '.git'))) {
+    const up = dirname(top);
+    if (up === top) {
+      return [];
+    }
+    top = up;
+  }
+  const listed = join(top, '.git', 'worktrees');
+  if (!statSync(join(top, '.git')).isDirectory() || !existsSync(listed)) {
+    return [];
+  }
+  const below = relative(top, resolve(projectPath));
+  return readdirSync(listed).flatMap((name) => {
+    const pointer = join(listed, name, 'gitdir');
+    if (!existsSync(pointer)) {
+      return [];
+    }
+    const checkout = dirname(resolve(listed, name, readFileSync(pointer, 'utf8').trim()));
+    const project = join(checkout, below);
+    return existsSync(join(project, 'project.godot')) ? [project] : [];
+  });
 }
 
 /**
