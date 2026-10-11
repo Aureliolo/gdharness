@@ -47,6 +47,13 @@ const PROFILER_PROBE_CALLS: int = 10000
 ## on every 2048th call and only counts the others.
 const POLLS_PER_READ: int = 2048
 
+## Set in a game's environment by whatever starts it to be profiled from its start: the server for
+## a run it spawns, the editor for a play. Kept in step with `PROFILE_FROM_START` in the server.
+const PROFILE_FROM_START: String = "GDHARNESS_PROFILE_FROM_START"
+
+## How long such a game waits for its debugger to switch the profiler on before carrying on.
+const PROFILER_WAIT_MS: int = 5000
+
 ## How the engine is told to run a script instead of the game: `godot -s thing.gd`.
 const SCRIPT_FLAGS: PackedStringArray = ["-s", "--script"]
 
@@ -134,6 +141,37 @@ func _init() -> void:
 		"wait_signal": _waits.wait_signal,
 		"wait_until": _waits.wait_until,
 	}
+	_wait_for_the_profiler()
+
+
+## Holds the game's start until the profiler is on, when whatever started the game asked for a
+## profile from its start. The debugger switches the profiler on with a message the game reads only
+## on a poll, which comes every [constant POLLS_PER_READ] lines of script, so the main scene's _ready
+## could run first: a game played on a macOS runner counted 25 calls of a function called 26 times,
+## the first of them from _ready. Run at the autoload's construction, before the main scene loads.
+func _wait_for_the_profiler() -> void:
+	if OS.get_environment(PROFILE_FROM_START).is_empty():
+		return
+	# Read once: a process this game starts inherits its environment and must not wait as well.
+	OS.unset_environment(PROFILE_FROM_START)
+	if not EngineDebugger.is_active():
+		return
+	var deadline: int = Time.get_ticks_msec() + PROFILER_WAIT_MS
+	while not EngineDebugger.is_profiling("servers"):
+		if Time.get_ticks_msec() >= deadline:
+			push_warning(
+				(
+					(
+						"gdharness: this game was started to be profiled from its start, and the profiler"
+						+ " was not on %d ms later, so what ran before it is not counted"
+					)
+					% PROFILER_WAIT_MS
+				)
+			)
+			return
+		for _poll: int in POLLS_PER_READ:
+			EngineDebugger.line_poll()
+		OS.delay_msec(1)
 
 
 func _ready() -> void:

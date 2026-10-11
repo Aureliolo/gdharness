@@ -216,6 +216,7 @@ import {
 import {
   callersOf,
   frameFunctionsFor,
+  PROFILE_FROM_START,
   type ProfileTotals,
   profiledFunctions,
   queuedMessagesOf,
@@ -7988,10 +7989,12 @@ class GodotServer {
     // by killing its process tree at every reconnect, and a run spawned here went with it however
     // detached it was. The keeper is the game's parent, writes its record and its exit, and is
     // nobody's child here once the launcher has gone.
+    // A profiled game is told so, and holds its start until the keeper's switch reaches it.
+    const gameEnv = profiled ? { ...(env ?? process.env), [PROFILE_FROM_START]: '1' } : env;
     const launched = await launchOutsideTheTree({
       command: godotPath,
       args: cmdArgs,
-      ...(env === undefined ? {} : { env }),
+      ...(gameEnv === undefined ? {} : { env: gameEnv }),
       run: {
         transcript: transcript.path,
         startedAt,
