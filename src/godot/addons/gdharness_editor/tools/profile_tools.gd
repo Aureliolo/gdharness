@@ -22,6 +22,9 @@ const DEBUGGER_CLASS: String = "ScriptEditorDebugger"
 const PROFILE_CAPTURE: String = "gdharness"
 const PROFILE_SENT: String = "gdharness:profile_sent"
 const PROFILE_RECEIVED: String = "gdharness:profile_received"
+## Set in the environment a played game inherits, when the play is to be profiled from its start.
+## Kept in step with the runtime addon's runtime_autoload.gd.
+const PROFILE_FROM_START: String = "GDHARNESS_PROFILE_FROM_START"
 
 
 ## The editor's debugger sessions, numbered as the editor numbers its debugger tabs.
@@ -106,6 +109,10 @@ func profile_start(args: Dictionary) -> Dictionary:
 	_frame_functions = asked if asked > 0 else FRAME_FUNCTIONS
 	if Read.as_bool(args.get("arm", false)):
 		_armed = true
+		# The game the editor starts next inherits the editor's environment, and this tells its
+		# runtime addon to hold its start until the profiler is on, which the session's start
+		# switches on with a message the game reads only on a later poll.
+		OS.set_environment(PROFILE_FROM_START, "1")
 		return {"ok": true, "started": false, "armed": true, "session": -1}
 	var active: int = _active_session()
 	if active < 0:
@@ -137,6 +144,7 @@ func profile_read(_args: Dictionary) -> Dictionary:
 
 func _reset() -> void:
 	_armed = false
+	OS.unset_environment(PROFILE_FROM_START)
 	_session = -1
 	_frames = 0
 	_complete = false
@@ -172,6 +180,8 @@ func _on_session_started(session_id: int) -> void:
 		_reset()
 		return
 	_armed = false
+	# The game has started with it by now, and a later play must not.
+	OS.unset_environment(PROFILE_FROM_START)
 	if _hook() > 0:
 		_switch_on(session_id)
 
