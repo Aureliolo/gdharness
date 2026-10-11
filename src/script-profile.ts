@@ -484,10 +484,20 @@ export function callersOf(
   totals: ProfileTotals,
   name: string,
   scripts: Iterable<readonly [script: string, source: string]>,
-): { target: readonly ProfiledFunction[]; sites: readonly ProfiledCallSite[]; omitted: number } {
+): {
+  target: readonly ProfiledFunction[];
+  sites: readonly ProfiledCallSite[];
+  omitted: number;
+  /** Whether the name asked about is a property's, whose places read or write rather than call. */
+  property: boolean;
+} {
   const listed = [...scripts];
   const sources = new Map(listed);
-  const rows = rowsOf(totals, (script) => sources.get(script) ?? null);
+  // With the profiler's share, as the table's rows have it, so a row read here says the same.
+  const perCallUs = perCallCostOf(totals);
+  const rows = rowsOf(totals, (script) => sources.get(script) ?? null).map((row) =>
+    withOverhead(row, perCallUs),
+  );
   const asked = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : null;
   // A property's get and set blocks run wherever the property is named, so asked by either block's
   // name or by the property's, the places are the property's and so are the rows.
@@ -536,7 +546,12 @@ export function callersOf(
       a.script.localeCompare(b.script) ||
       a.line - b.line,
   );
-  return { target, sites: sites.slice(0, CALL_SITES), omitted: Math.max(0, sites.length - CALL_SITES) };
+  return {
+    target,
+    sites: sites.slice(0, CALL_SITES),
+    omitted: Math.max(0, sites.length - CALL_SITES),
+    property,
+  };
 }
 
 /**
