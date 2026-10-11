@@ -26162,10 +26162,12 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         burstRows.length > 1000 && burstRows.length <= frameFunctionsFor(queuedMessagesOf(null)),
         `the totals carry as many functions as were asked for: ${burstRows.length}, ${burstShown}`,
       );
+      // A sentence of the note rather than its start: the notes before it depend on timing, and on a
+      // fast runner a runtime function called a dozen times in two microseconds is mostly overhead.
       assert.match(
         String(get(burst, 'note')),
-        /^The engine's totals carried the most functions the profiler asks for, 1536/,
-        burstShown,
+        /(?:^|\. )The engine's totals carried the most functions the profiler asks for, 1536,/,
+        `the note: ${String(get(burst, 'note'))}`,
       );
 
       const unprofiled = await profiledRun('once', false);
