@@ -319,6 +319,8 @@ export function profiledFunctions(
   superCallers: number;
   perCallUs: number | null;
   overheadDominated: number;
+  /** Those functions by name, the most self time first, since the limit can leave all of them out. */
+  overheadNamed: readonly string[];
 } {
   const perCallUs = perCallCostOf(totals);
   const rows = rowsOf(totals, sourceOf).map((row) => withOverhead(row, perCallUs));
@@ -336,6 +338,7 @@ export function profiledFunctions(
     superCallers: rows.filter((row) => row.selfIncludesSuper === true).length,
     perCallUs,
     overheadDominated: rows.filter((row) => row.overheadMs !== undefined).length,
+    overheadNamed: rows.filter((row) => row.overheadMs !== undefined).map((row) => row.function),
   };
 }
 
