@@ -279,6 +279,17 @@ export interface ProfiledFunction {
    * half of it, from what one call cost an empty function in the same run.
    */
   readonly overheadMs?: number;
+  /** The property whose get or set block this is; see `propertyOf`. */
+  readonly property?: string;
+}
+
+/**
+ * The property [param fn] is the get or set block of, or null for any other function. The compiler
+ * names those blocks `@name_getter` and `@name_setter`, which no script can call by that name: a
+ * place reading or assigning the property runs them.
+ */
+export function propertyOf(fn: string): string | null {
+  return /^@(.+)_(?:getter|setter)$/.exec(bareName(fn))?.[1] ?? null;
 }
 
 /** A script's source by its `res://` path, or null when it cannot be read. */
@@ -321,6 +332,8 @@ export function profiledFunctions(
   overheadDominated: number;
   /** Those functions by name, the most self time first, since the limit can leave all of them out. */
   overheadNamed: readonly string[];
+  /** The smallest limit that returns every one of them, 0 when there are none. */
+  overheadReach: number;
 } {
   const perCallUs = perCallCostOf(totals);
   const rows = rowsOf(totals, sourceOf).map((row) => withOverhead(row, perCallUs));
@@ -339,6 +352,7 @@ export function profiledFunctions(
     perCallUs,
     overheadDominated: rows.filter((row) => row.overheadMs !== undefined).length,
     overheadNamed: rows.filter((row) => row.overheadMs !== undefined).map((row) => row.function),
+    overheadReach: rows.findLastIndex((row) => row.overheadMs !== undefined) + 1,
   };
 }
 
@@ -398,6 +412,7 @@ function rowsOf(totals: ProfileTotals, sourceOf: SourceOf): ProfiledFunction[] {
     .map(([signature, sum]): ProfiledFunction => {
       const parts = signatureParts(signature);
       const code = codeOfScript(parts.script);
+      const property = propertyOf(parts.function);
       return {
         script: parts.script,
         function: parts.function,
@@ -408,6 +423,7 @@ function rowsOf(totals: ProfileTotals, sourceOf: SourceOf): ProfiledFunction[] {
         ...(code !== null && bodyCallsSuper(code, parts.line, parts.function.endsWith('(lambda)'))
           ? { selfIncludesSuper: true as const }
           : {}),
+        ...(property === null ? {} : { property }),
       };
     })
     .sort((a, b) => b.selfMs - a.selfMs || b.totalMs - a.totalMs || a.function.localeCompare(b.function));
@@ -472,11 +488,17 @@ export function callersOf(
   const listed = [...scripts];
   const sources = new Map(listed);
   const rows = rowsOf(totals, (script) => sources.get(script) ?? null);
-  const bare = bareName(name);
-  const target = rows.filter((row) =>
-    name.includes('.') ? row.function === name : bareName(row.function) === bare,
-  );
   const asked = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : null;
+  // A property's get and set blocks run wherever the property is named, so asked by either block's
+  // name or by the property's, the places are the property's and so are the rows.
+  const bare = propertyOf(name) ?? bareName(name);
+  const ownerOf = (fn: string): string | null => (fn.includes('.') ? fn.slice(0, fn.lastIndexOf('.')) : null);
+  const target = rows.filter(
+    (row) =>
+      (bareName(row.function) === bare || row.property === bare) &&
+      (asked === null || ownerOf(row.function) === asked),
+  );
+  const property = propertyOf(name) !== null || target.some((row) => row.property === bare);
   const otherClasses = new Set<string>();
   if (asked !== null) {
     for (const [, source] of listed) {
@@ -489,7 +511,7 @@ export function callersOf(
   }
   const sites: ProfiledCallSite[] = [];
   for (const [script, source] of listed) {
-    for (const site of callSitesOf(source, bare, otherClasses)) {
+    for (const site of callSitesOf(source, bare, otherClasses, property)) {
       const within =
         site.within === null
           ? undefined
