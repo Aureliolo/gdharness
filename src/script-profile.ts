@@ -120,6 +120,13 @@ const PROFILE_RECEIVED = 'gdharness:profile_received';
 /** What a function is called when its name never arrived: `#` and the number the engine gave it. */
 export const UNNAMED_PREFIX = '#';
 
+/**
+ * Set in the environment of a game started to be profiled from its start, so its runtime addon
+ * holds the start until the profiler is on. Kept in step with the runtime addon's
+ * `runtime_autoload.gd`.
+ */
+export const PROFILE_FROM_START = 'GDHARNESS_PROFILE_FROM_START';
+
 /** The command that switches the profiler on, as the editor sends it: `[true, [count, native]]`. */
 export function profilerOn(frameFunctions: number): Uint8Array {
   return framedCommand('profiler:servers', [true, [frameFunctions, false]]);

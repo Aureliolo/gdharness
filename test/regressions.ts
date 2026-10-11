@@ -192,12 +192,14 @@ import { type CheckScript, originsOf, withoutListed } from '../src/script-origin
 import {
   callersOf,
   frameFunctionsFor,
+  PROFILE_FROM_START,
   ProfileAggregate,
   type ProfileTotals,
   profiledFunctions,
   profilerOn,
   queuedMessagesOf,
   signatureParts,
+  UNNAMED_PREFIX,
   withEngineArguments,
 } from '../src/script-profile.js';
 import {
@@ -25306,6 +25308,163 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
  * pass; and the overflow again with the project's gdUnit4 setting for script errors turned off.
  */
 /**
+ * A game started to be profiled from its start holds its start until the profiler is on.
+ *
+ * The debugger switches the profiler on with a message the game reads only on a poll, every 2048
+ * lines of script, so the main scene's _ready could run before it: a game played on a macOS runner
+ * counted 25 calls of a function called 26 times, the first from _ready. Here the debugger is a
+ * stand-in that sends the switch a second and a half after the game connects, which no _ready
+ * waits for. Told it is to be profiled from its start, the game counts the one call its _ready
+ * makes; not told, the same run misses it, which shows the switch arrived after _ready; and told,
+ * with a debugger that never sends the switch, it carries on after its wait and says so.
+ */
+async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('profile from the start regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-profile-start-'));
+  // Its own, so the games announce nowhere a server on this machine looks.
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-profile-start-rt-'));
+  try {
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="FromTheStart"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Node\n\nvar seen: int = 0\n\n\nfunc marker(times: int) -> int:\n\tfor index: int in times:\n' +
+        '\t\tseen += index\n\treturn seen\n\n\nfunc _ready() -> void:\n\tprint(marker(3))\n' +
+        '\tawait get_tree().process_frame\n\tget_tree().quit()\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    // One run under a stand-in debugger that sends the switch [param switchAfterMs] after the game
+    // connects, or never when null: the calls of marker it counted, and what the game printed.
+    const run = async (
+      fromTheStart: boolean,
+      switchAfterMs: number | null,
+    ): Promise<{ calls: number; said: string }> => {
+      const debuggerServer = createServer();
+      const port = await listenOnAReservedPort(debuggerServer);
+      // The cap the server asks for, from the engine's default debugger queue. A smaller one caps the
+      // totals the engine sends, in its own order, and the runtime addon's functions alone can fill it.
+      const cap = frameFunctionsFor(queuedMessagesOf(null));
+      const aggregate = new ProfileAggregate(Date.now(), cap);
+      // Read once the game has gone and its debugger connection has closed: the last messages, the
+      // totals among them, can still be arriving after the process has exited.
+      let connectionClosed: Promise<void> = Promise.resolve();
+      debuggerServer.on('connection', (socket) => {
+        const stream = new DebuggerStream();
+        if (switchAfterMs !== null) {
+          setTimeout(() => socket.write(profilerOn(cap)), switchAfterMs);
+        }
+        socket.on('data', (chunk: Buffer) => {
+          for (const received of stream.push(chunk)) {
+            if ('message' in received && received.message === 'debug_enter') {
+              socket.write(framedCommand('continue', []));
+            }
+            if ('message' in received && received.message === 'gdharness:profile_sent') {
+              socket.write(framedCommand('gdharness:profile_received', []));
+            }
+            aggregate.take(received, Date.now());
+          }
+        });
+        socket.on('error', () => undefined);
+        connectionClosed = new Promise<void>((closed) => {
+          socket.on('close', () => {
+            closed();
+          });
+        });
+      });
+      const { [PROFILE_FROM_START]: _unset, ...inherited } = process.env;
+      const game = spawn(
+        engine,
+        [
+          '--headless',
+          '--path',
+          project,
+          '--remote-debug',
+          `tcp://127.0.0.1:${port}`,
+          '--skip-breakpoints',
+          '--ignore-error-breaks',
+        ],
+        {
+          env: fromTheStart
+            ? { ...inherited, GDHARNESS_RUNTIME_DIR: runtimeDir, [PROFILE_FROM_START]: '1' }
+            : { ...inherited, GDHARNESS_RUNTIME_DIR: runtimeDir },
+        },
+      );
+      let said = '';
+      game.stdout.on('data', (chunk: Buffer) => {
+        said += String(chunk);
+      });
+      game.stderr.on('data', (chunk: Buffer) => {
+        said += String(chunk);
+      });
+      const limit = setTimeout(() => game.kill(), 30_000);
+      await new Promise<void>((done) =>
+        game.on('close', () => {
+          done();
+        }),
+      );
+      clearTimeout(limit);
+      await connectionClosed;
+      debuggerServer.close();
+      const totals = aggregate.snapshot();
+      const row = profiledFunctions(totals, 100).functions.find((one) => one.function === 'marker');
+      // What the debugger was sent, beside what the game printed, so a miss says whether the totals
+      // arrived at all or arrived without the call.
+      const sent = Object.entries(totals.functions).filter(
+        ([signature]) => signature.includes('main.gd') || signature.startsWith(UNNAMED_PREFIX),
+      );
+      return {
+        calls: row?.calls ?? 0,
+        said: `${said}\ntotals complete: ${totals.complete}, capped: ${totals.totalCapped}, functions: ${Object.keys(totals.functions).length}, frames: ${totals.frames}, main.gd: ${JSON.stringify(sent)}`,
+      };
+    };
+
+    const told = await run(true, 1500);
+    assert.equal(
+      told.calls,
+      1,
+      `told to profile from the start, the call _ready made is counted:\n${told.said}`,
+    );
+    const untold = await run(false, 1500);
+    assert.equal(
+      untold.calls,
+      0,
+      `not told, the same run misses it, so the switch did arrive after _ready:\n${untold.said}`,
+    );
+    const never = await run(true, null);
+    assert.match(
+      never.said,
+      /was started to be profiled from its start, and the profiler was not on 5000 ms later/,
+      `with no switch coming, the game carries on after its wait and says so:\n${never.said}`,
+    );
+  } finally {
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A run started with profile: true answers which GDScript functions took its time.
  *
  * The keeper is the game's debugger and sums the engine's own script profiler. Four runs, because
@@ -33233,6 +33392,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAStackOverflowIsNotAPass,
   testAProfiledRunNamesWhereItsTimeWent,
+  testAProfileFromTheStartWaitsForTheProfiler,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
   testCommandLineSetup,
   testUninstallLeavesAddonsItDidNotMake,
