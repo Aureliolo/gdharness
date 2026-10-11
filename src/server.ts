@@ -2225,7 +2225,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
   }
   if (table.overheadDominated > 0 && table.perCallUs !== null) {
     notes.push(
-      `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${table.overheadDominated === 1 ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${table.overheadDominated === 1 ? 'its' : 'their'} selfMs in it, under overheadMs: that much of its time is the profiler's and goes once the profiler is off, whether the function is inlined or not. What inlining saves is the call itself, which costs something without the profiler too, not the work inside it.`,
+      `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${table.overheadDominated === 1 ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${table.overheadDominated === 1 ? 'its' : 'their'} selfMs in it, under overheadMs: ${namedFew(table.overheadNamed)}. That much of ${table.overheadDominated === 1 ? 'its' : 'their'} time is the profiler's and goes once the profiler is off, whether the function is inlined or not. What inlining saves is the call itself, which costs something without the profiler too, not the work inside it.`,
     );
   }
   notes.push(...cappedNotes(totals));
@@ -2249,6 +2249,19 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     callers: reading.callersOf === undefined ? undefined : callersAnswer(totals, reading.callersOf),
     note: notes.length > 0 ? notes.join(' ') : undefined,
   };
+}
+
+/**
+ * [param names] as a sentence, the first five and how many more: the functions a note counts are
+ * named in it, since the rows a limit returns can leave every one of them out.
+ */
+function namedFew(names: readonly string[]): string {
+  const shown = names.slice(0, 5);
+  const more = names.length - shown.length;
+  if (more > 0) {
+    return `${shown.join(', ')} and ${more} more`;
+  }
+  return shown.length > 1 ? `${shown.slice(0, -1).join(', ')} and ${shown.at(-1) ?? ''}` : (shown[0] ?? '');
 }
 
 /**

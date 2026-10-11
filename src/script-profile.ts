@@ -190,7 +190,13 @@ export class ProfileAggregate {
         this.totals = whole;
         this.complete = true;
         this.lastFrameAt = now;
-        this.totalCapped = carried >= this.frameFunctions;
+        // Left out only if the last function kept had time: the engine sends its totals busiest
+        // first and lists every compiled function, called or not, so a project with more functions
+        // than the cap fills it with ones that never ran. Measured on 4.7.2: of a hundred functions
+        // with rising work under a cap of 64, the busiest were kept. ostinato's totals reached 1536
+        // with 324 functions called, and were said to have left some out.
+        const leastKept = Math.min(...[...whole.values()].map((one) => one.totalSeconds));
+        this.totalCapped = carried >= this.frameFunctions && leastKept > 0;
       }
     }
   }
@@ -319,6 +325,8 @@ export function profiledFunctions(
   superCallers: number;
   perCallUs: number | null;
   overheadDominated: number;
+  /** Those functions by name, the most self time first, since the limit can leave all of them out. */
+  overheadNamed: readonly string[];
 } {
   const perCallUs = perCallCostOf(totals);
   const rows = rowsOf(totals, sourceOf).map((row) => withOverhead(row, perCallUs));
@@ -336,6 +344,7 @@ export function profiledFunctions(
     superCallers: rows.filter((row) => row.selfIncludesSuper === true).length,
     perCallUs,
     overheadDominated: rows.filter((row) => row.overheadMs !== undefined).length,
+    overheadNamed: rows.filter((row) => row.overheadMs !== undefined).map((row) => row.function),
   };
 }
 
