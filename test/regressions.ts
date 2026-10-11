@@ -197,10 +197,13 @@ import {
   type ProfileTotals,
   profiledFunctions,
   profilerOn,
+  propertyOf,
   queuedMessagesOf,
+  type SourceOf,
   signatureParts,
   UNNAMED_PREFIX,
   withEngineArguments,
+  writeProfileFile,
 } from '../src/script-profile.js';
 import {
   aboveTheRunner,
@@ -1301,7 +1304,125 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     String(get(answer({ totals: crew, callersOf: { name, scripts: () => from } }), 'callers', 'note'));
   assert.match(withCallers('_ranked_by', scripts), /^Found by name in the project's scripts/);
   assert.match(withCallers('_ranked_by', []), /^No script in the project names _ranked_by in code/);
-  assert.match(withCallers('_strength', scripts), /The profile counts no call of _strength/);
+  assert.match(
+    withCallers('_strength', scripts),
+    /The profile counts no call of _strength, so none of these places ran it while the profiler was on: withinCalls says the function a place is in ran, not that the line did\.$/,
+  );
+  // Places in functions that ran, and still no row: the line did not run, or the function fell past
+  // the cap, or its name never arrived, each said only when this profile could have done it.
+  // Reported from fantasy-guild-manager: SkinImage.tinted, with callers at withinCalls 14 and 6.
+  const noted = (shaped: Partial<ProfileTotals>): string =>
+    String(
+      get(
+        answer({ totals: { ...crew, ...shaped }, callersOf: { name: '_strength', scripts: () => scripts } }),
+        'callers',
+        'note',
+      ),
+    );
+  assert.match(
+    noted({ complete: false, frameFunctions: 64, cappedFrames: 2 }),
+    /The profile counts no call of _strength: either none of these places ran it while the profiler was on: withinCalls says the function a place is in ran, not that the line did, or its calls took too little time to be among the 64 functions a frame carried\.$/,
+  );
+  assert.match(
+    noted({ frameFunctions: 64, totalCapped: true }),
+    /, or its calls took too little time to be among the 64 functions the engine's totals carried\.$/,
+  );
+  assert.match(
+    noted({ frameFunctions: 64, totalCapped: false, cappedFrames: 2 }),
+    /, so none of these places ran it/,
+    "the engine's totals stand in for the frames once they arrive, so only their cap counts",
+  );
+  const withUnnamed = (count: number): string =>
+    noted({
+      functions: {
+        ...crew.functions,
+        ...Object.fromEntries(
+          Array.from({ length: count }, (_, index) => [
+            `${UNNAMED_PREFIX}${index + 1}`,
+            { calls: 3, selfSeconds: 0.001, totalSeconds: 0.001 },
+          ]),
+        ),
+      },
+    });
+  assert.match(withUnnamed(1), /, or it is the function whose name never arrived\.$/);
+  assert.match(withUnnamed(3), /, or it is one of the 3 functions whose name never arrived\.$/);
+  assert.match(
+    noted({
+      complete: false,
+      frameFunctions: 64,
+      cappedFrames: 1,
+      functions: { ...crew.functions, [`${UNNAMED_PREFIX}9`]: { calls: 1, selfSeconds: 0, totalSeconds: 0 } },
+    }),
+    /the line did, or its calls took too little time to be among the 64 functions a frame carried, or it is the function whose name never arrived\.$/,
+  );
+
+  // A property's get and set blocks, as the compiler names them, which no script calls by name: a
+  // place naming the property runs them. Asked by either block's name or the property's, the rows
+  // are both blocks' and the places are the property's. Reported from fantasy-guild-manager and
+  // ostinato, whose tables named OutcomeReach.@sinks_setter and GameClock.@speed_getter.
+  assert.deepEqual(
+    [
+      '@speed_getter',
+      'GameClock.@speed_setter',
+      'Reach.@sinks_and_hexes_getter',
+      'speed',
+      'Clock.@speed',
+      'getter',
+    ].map(propertyOf),
+    ['speed', 'speed', 'sinks_and_hexes', null, null, null],
+  );
+  const clock = [
+    'class_name GameClock',
+    '',
+    'var _speed := 1',
+    'var speed: int:',
+    '\tget:',
+    '\t\treturn _speed',
+    '\tset(value):',
+    '\t\t_speed = value',
+    '',
+    '',
+    'func tick() -> int:',
+    '\tspeed = speed + 1',
+    '\treturn _speed',
+    '',
+  ].join('\n');
+  const clocked = totals({
+    'res://clock.gd::6::GameClock.@speed_getter': { calls: 40, selfSeconds: 0.001, totalSeconds: 0.001 },
+    'res://clock.gd::8::GameClock.@speed_setter': { calls: 40, selfSeconds: 0.002, totalSeconds: 0.002 },
+    'res://clock.gd::12::GameClock.tick': { calls: 40, selfSeconds: 0.01, totalSeconds: 0.013 },
+  });
+  assert.deepEqual(
+    profiledFunctions(clocked, 10).functions.map((one) => [one.function, one.property]),
+    [
+      ['GameClock.tick', undefined],
+      ['GameClock.@speed_setter', 'speed'],
+      ['GameClock.@speed_getter', 'speed'],
+    ],
+    'each block carries its property',
+  );
+  for (const asked of ['GameClock.@speed_getter', 'GameClock.speed', '@speed_setter', 'speed']) {
+    const found = callersOf(clocked, asked, [['res://clock.gd', clock]]);
+    assert.deepEqual(
+      [
+        found.target.map((one) => one.function),
+        found.sites.map((one) => [one.line, one.within, one.withinCalls]),
+      ],
+      [
+        ['GameClock.@speed_setter', 'GameClock.@speed_getter'],
+        [
+          [12, 'tick', 40],
+          [12, 'tick', 40],
+        ],
+      ],
+      `asked as ${asked}`,
+    );
+  }
+  assert.deepEqual(
+    callersOf(clocked, 'Other.speed', [['res://clock.gd', clock]]).target,
+    [],
+    "another class's property of that name is not this one",
+  );
 
   // A super call is in its caller's self time as well as in the overridden function's row, so the
   // rows calling super are marked: each way of writing one, and the places that only look like one.
@@ -1607,7 +1728,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   const costNote = String(answer({ totals: calibrated })['note']);
   assert.match(
     costNote,
-    /^The profiler costs about 2µs a call in this run, measured on an empty function the runtime addon calls as it goes on, .* One function has at least half its selfMs in it, under overheadMs: Crews\.fits\. That much of its time is the profiler's and goes once the profiler is off, whether the function is inlined or not\. What inlining saves is the call itself, .* not the work inside it\.$/,
+    /^The profiler costs about 2µs a call in this run, measured on an empty function the runtime addon calls as it goes on, .* One function has at least half its selfMs in it: Crews\.fits\. Its row carries that share as overheadMs\. That much of its time is the profiler's and goes once the profiler is off, whether the function is inlined or not\. What inlining saves is the call itself, .* not the work inside it\.$/,
     costNote,
   );
   assert.equal(get(answer({ totals: calibrated }), 'perCallOverheadUs'), 2);
@@ -1641,11 +1762,69 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     });
   assert.match(
     String(answer({ totals: hot(2) })['note']),
-    /2 functions have at least half their selfMs in it, under overheadMs: Crews\.hot1 and Crews\.hot0\. That much of their time/,
+    /2 functions have at least half their selfMs in it: Crews\.hot1 and Crews\.hot0\. Their rows carry that share as overheadMs\. That much of their time/,
   );
   assert.match(
     String(answer({ totals: hot(7) })['note']),
-    /7 functions have at least half their selfMs in it, under overheadMs: Crews\.hot6, Crews\.hot5, Crews\.hot4, Crews\.hot3, Crews\.hot2 and 2 more\./,
+    /7 functions have at least half their selfMs in it: Crews\.hot6, Crews\.hot5, Crews\.hot4, Crews\.hot3, Crews\.hot2 and 2 more\. Their rows carry/,
+  );
+  // And where those rows are, since the field the note speaks of goes with any row a limit leaves
+  // out. Reported from ostinato as #1016: at limit 5 none of the 29 rows came back, and the note
+  // pointed at overheadMs all the same. One function above them takes more time and is not mostly
+  // the profiler's, so a limit can return none, some or all of them.
+  const heavy = (count: number): ProfileTotals => ({
+    ...hot(count),
+    functions: {
+      ...hot(count).functions,
+      'res://crews.gd::90::Crews.heavy': { calls: 1, selfSeconds: 5, totalSeconds: 5 },
+    },
+  });
+  const limited = (count: number, limit: number): string =>
+    String(
+      profileAnswer(
+        { through: 'gdharness', running: false, totals: heavy(count), coveredMs: 0, runtimeAddon: true },
+        limit,
+      )['note'],
+    );
+  assert.match(
+    limited(7, 1),
+    /: Crews\.hot6, Crews\.hot5, Crews\.hot4, Crews\.hot3, Crews\.hot2 and 2 more\. Their rows, which carry that share as overheadMs, are none of the 1 returned; limit 8 returns them all\. That much/,
+  );
+  assert.match(
+    limited(7, 3),
+    / and 2 more\. Their rows carry that share as overheadMs, and 2 of them are among the 3 returned; limit 8 returns them all\. That much/,
+  );
+  assert.match(limited(7, 2), / and 1 of them is among the 2 returned; limit 8 returns them all\./);
+  assert.match(limited(7, 8), / and 2 more\. Their rows carry that share as overheadMs\. That much/);
+  assert.match(
+    limited(1, 1),
+    /One function has at least half its selfMs in it: Crews\.hot0\. Its row, which carries that share as overheadMs, is not among the 1 returned; limit 2 returns it\. That much of its time/,
+  );
+
+  // Every thread's time is added to the same function, so script time beyond the time covered is
+  // threads at work, which the note says, and with a super call marked, that the super call can be
+  // some of it. Reported from fantasy-guild-manager: a worker-thread function topped the table.
+  const crewsWithSuper = [
+    'class_name Crews',
+    'extends Base',
+    ...Array.from({ length: 8 }, () => ''),
+    'func together() -> void:',
+    '\tsuper()',
+    '',
+  ].join('\n');
+  const threaded = (coveredMs: number, sourceOf?: SourceOf): string =>
+    String(
+      answer({ totals: calibrated, coveredMs, ...(sourceOf === undefined ? {} : { sourceOf }) })['note'],
+    );
+  assert.match(
+    threaded(100),
+    / scriptMs, 1800ms, is more than the 100ms the profile covers\. One thread cannot spend more time than passes, so that is functions running on several threads at once, through WorkerThreadPool or Thread\. The engine adds every thread's time to the same function and does not say which thread a call ran on, so a function's selfMs is summed over every thread it ran on rather than taken out of frames, and a function that waits for the others, through wait_for_group_task_completion or wait_to_finish, has the wait in its own selfMs as well\./,
+  );
+  assert.doesNotMatch(threaded(1800), /is more than the/, 'no more than the time covered is one thread');
+  assert.match(threaded(1799), /scriptMs, 1800ms, is more than the 1799ms/);
+  assert.match(
+    threaded(100, (script) => (script === 'res://crews.gd' ? crewsWithSuper : null)),
+    /is more than the 100ms the profile covers\. The super calls above, counted twice, can account for some or all of that; whatever they do not is functions running on several threads at once/,
   );
 
   // A script path comes from the game, so it is read only inside the project: a path climbing out of
@@ -24498,6 +24677,85 @@ async function testTheRunAdoptedIsTheLatestStarted(): Promise<void> {
 }
 
 /**
+ * A profiled run picked up from its note keeps its profile: the run holds where the keeper writes
+ * it, since a stop takes the note away, so a run picked up has to take it from the note as it is.
+ */
+async function testAPickedUpRunKeepsItsProfile(): Promise<void> {
+  const gone: SpawnSyncReturns<string> = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.ok(gone.pid > 0, 'the fixture needs a process that has been and gone');
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-picked-up-profile-'));
+  const project = join(runtimeDir, 'project');
+  try {
+    mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+    mkdirSync(project);
+    const startedAt = Date.now() - 60_000;
+    const transcript = join(runtimeDir, 'runs', `run-${startedAt}.log`);
+    writeFileSync(transcript, 'a profiled run\n');
+    const profile = join(runtimeDir, 'runs', `run-${startedAt}.profile.json`);
+    writeProfileFile(profile, {
+      connected: true,
+      startedAt,
+      lastFrameAt: startedAt + 2000,
+      frames: 40,
+      complete: false,
+      unreadable: 0,
+      functions: {
+        'res://main.gd::12::Main.each_frame': { calls: 40, selfSeconds: 0.004, totalSeconds: 0.004 },
+      },
+    });
+    const had = process.env['GDHARNESS_RUNTIME_DIR'];
+    process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+    try {
+      writeRunRecord({
+        pid: gone.pid,
+        transcript,
+        startedAt,
+        projectPath: project,
+        profile,
+        arguments: ['--path', project],
+        exitCode: 0,
+        endedAt: startedAt + 2500,
+      });
+    } finally {
+      if (had === undefined) {
+        delete process.env['GDHARNESS_RUNTIME_DIR'];
+      } else {
+        process.env['GDHARNESS_RUNTIME_DIR'] = had;
+      }
+    }
+    await withStdioServer(
+      async (call) => {
+        const answered = jsonOf(await call('editor_run', { op: 'profile' }), 'editor_run profile');
+        const shown = JSON.stringify(answered);
+        assert.deepEqual(
+          [
+            get(answered, 'running'),
+            get(answered, 'frames'),
+            asArray(get(answered, 'functions')).map((one) => [get(one, 'function'), get(one, 'calls')]),
+          ],
+          [false, 40, [['Main.each_frame', 40]]],
+          `the profile the note named: ${shown}`,
+        );
+        // The project directory has no project.godot, as a git worktree removed after its run has
+        // none: the profile is still answered, and what only the project could say is said as unknown.
+        assert.match(
+          String(get(answered, 'note')),
+          /These are the 40 frames that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off\. The run's project is no longer at its path, so whether it had the gdharness runtime addon, .* cannot be read\./,
+          shown,
+        );
+        assert.match(
+          await call('editor_run', { op: 'profile', callersOf: 'each_frame' }),
+          /^callersOf reads the project's scripts, and the run's project at .* has no project\.godot any more\./,
+        );
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    );
+  } finally {
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * The ending another server wrote into the note is the one this server answers with, whether it
  * was a code or a signal. A signal read back as nothing would say nobody was waiting on the run.
  */
@@ -25530,8 +25788,9 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
   }
   const project = mkdtempSync(join(tmpdir(), 'gdharness-profiled-'));
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-profiled-rt-'));
+  // Four workers, as a hosted runner has, so the fanned scene meets the same pool everywhere.
   const settings = (addon: boolean): string =>
-    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Profiled"\n' +
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Profiled"\n\n[threading]\n\nworker_pool/max_threads=4\n' +
     (addon ? '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n' : '');
   const scene = (name: string, script: string): void => {
     writeFileSync(
@@ -25674,6 +25933,64 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       ].join('\n'),
     );
     scene('burst', 'burst.gd');
+    // A run that goes on until it is stopped, reading a property through its get block every frame.
+    writeFileSync(
+      join(project, 'harness', 'kept.gd'),
+      [
+        'extends Node',
+        '',
+        'var _pace := 3',
+        'var pace: int:',
+        '\tget:',
+        '\t\treturn _pace * 2',
+        'var frames := 0',
+        '',
+        '',
+        'func each_frame() -> int:',
+        '\tframes += 1',
+        '\treturn pace',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\teach_frame()',
+        '',
+      ].join('\n'),
+    );
+    scene('kept', 'kept.gd');
+    // Eight tasks across the worker threads while the main thread waits on them, then quits. High
+    // priority, because the pool gives low-priority tasks threading/worker_pool/low_priority_thread_ratio
+    // of its threads, 0.3 by default: one thread on a four-core runner, which ran the eight in turn and
+    // summed to no more than the wait. Long enough that the fan-out outlasts the start before it.
+    writeFileSync(
+      join(project, 'harness', 'fanned.gd'),
+      [
+        'extends Node',
+        '',
+        'var frames := 0',
+        '',
+        '',
+        'func spin(_index: int) -> void:',
+        '\tvar sum := 0',
+        '\tfor i in 5000000:',
+        '\t\tsum += i % 7',
+        '\tif sum < 0:',
+        '\t\tprint(sum)',
+        '',
+        '',
+        'func fan_out() -> void:',
+        '\tWorkerThreadPool.wait_for_group_task_completion(WorkerThreadPool.add_group_task(spin, 8, -1, true))',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\tframes += 1',
+        '\tif frames == 3:',
+        '\t\tfan_out()',
+        '\tif frames == 5:',
+        '\t\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    scene('fanned', 'fanned.gd');
     const server = new ServerProcess({
       env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
     });
@@ -25845,10 +26162,12 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         burstRows.length > 1000 && burstRows.length <= frameFunctionsFor(queuedMessagesOf(null)),
         `the totals carry as many functions as were asked for: ${burstRows.length}, ${burstShown}`,
       );
+      // A sentence of the note rather than its start: the notes before it depend on timing, and on a
+      // fast runner a runtime function called a dozen times in two microseconds is mostly overhead.
       assert.match(
         String(get(burst, 'note')),
-        /^The engine's totals carried the most functions the profiler asks for, 1536/,
-        burstShown,
+        /(?:^|\. )The engine's totals carried the most functions the profiler asks for, 1536,/,
+        `the note: ${String(get(burst, 'note'))}`,
       );
 
       const unprofiled = await profiledRun('once', false);
@@ -25906,6 +26225,90 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       const shedShown = JSON.stringify(shed);
       const shedEach = asArray(get(shed, 'functions')).find((one) => get(one, 'function') === 'each_frame');
       assert.ok(Number(get(shedEach, 'calls')) >= 25, `the frames after the runtime went: ${shedShown}`);
+
+      // Every thread's time is added to the same function, so eight tasks on the worker threads sum
+      // to more than the run lasted, and the note says why rather than leaving it to super calls.
+      const fanned = await profiledRun('fanned', true, { limit: 100 });
+      const fannedShown = JSON.stringify(fanned);
+      const spin = asArray(get(fanned, 'functions')).find((one) => get(one, 'function') === 'spin');
+      assert.equal(get(spin, 'calls'), 8, fannedShown);
+      // Side by side rather than in turn: one worker running the eight sums to the wait and no more,
+      // and the waiting function's own self time then carries scriptMs past coveredMs by itself.
+      const fanOut = asArray(get(fanned, 'functions')).find((one) => get(one, 'function') === 'fan_out');
+      assert.ok(
+        Number(get(spin, 'selfMs')) > 1.5 * Number(get(fanOut, 'selfMs')),
+        `the tasks ran on several workers at once: ${fannedShown}`,
+      );
+      assert.ok(
+        Number(get(fanned, 'scriptMs')) > Number(get(fanned, 'coveredMs')),
+        `the threads' time summed is more than the time covered: ${fannedShown}`,
+      );
+      assert.match(
+        String(get(fanned, 'note')),
+        /scriptMs, [\d.]+ms, is more than the \d+ms the profile covers\. One thread cannot spend more time than passes, so that is functions running on several threads at once/,
+        fannedShown,
+      );
+
+      // Stopped rather than quitting: the stop takes the run's note away, and the profile is still
+      // the run's. Read from the note, it was refused as a run started without profile: true.
+      const kept = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'harness/kept.tscn',
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(kept, /"started": true/, kept);
+      const framesBy = Date.now() + 60_000;
+      let going = '';
+      for (;;) {
+        going = await call({ op: 'profile', limit: 10 });
+        const read = going.trimStart().startsWith('{') ? (JSON.parse(going) as unknown) : null;
+        if (Number(get(read, 'frames')) >= 10) {
+          break;
+        }
+        assert.ok(Date.now() < framesBy, `ten frames of the profile within a minute: ${going}`);
+        await delay(250);
+      }
+      const stopped = await call({ op: 'stop' });
+      assert.match(stopped, /"endedThrough": "(keeper|signal)"/, stopped);
+      const after = await call({ op: 'profile', limit: 100, callersOf: '@pace_getter' });
+      assert.ok(after.trimStart().startsWith('{'), `the stopped run's profile: ${after}`);
+      const afterRead = JSON.parse(after) as unknown;
+      assert.equal(get(afterRead, 'running'), false, after);
+      const afterRows = asArray(get(afterRead, 'functions'));
+      assert.ok(
+        Number(
+          get(
+            afterRows.find((one) => get(one, 'function') === 'each_frame'),
+            'calls',
+          ),
+        ) >= 10,
+        `the frames summed before the stop: ${after}`,
+      );
+      // The get block, as the engine names it, with its property; asked about by that name, its
+      // places are where the property is read.
+      assert.deepEqual(
+        [
+          get(
+            afterRows.find((one) => get(one, 'function') === '@pace_getter'),
+            'property',
+          ),
+        ],
+        ['pace'],
+        after,
+      );
+      assert.deepEqual(
+        asArray(get(afterRead, 'callers', 'rows')).map((one) => get(one, 'function')),
+        ['@pace_getter'],
+        after,
+      );
+      assert.deepEqual(
+        asArray(get(afterRead, 'callers', 'sites')).map((one) => [get(one, 'line'), get(one, 'within')]),
+        [[12, 'each_frame']],
+        after,
+      );
     } finally {
       await server.stop();
     }
@@ -33425,6 +33828,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACommandLineNotGivenInTimeIsAskedAgain,
   testARunEndedUnwatchedIsStillReadable,
   testTheRunAdoptedIsTheLatestStarted,
+  testAPickedUpRunKeepsItsProfile,
   testARecordedEndingIsReadBack,
   testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,
