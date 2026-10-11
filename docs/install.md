@@ -225,6 +225,11 @@ because the old version keeps answering until they are done:
 upgrade left the editor code unchanged, because staleness is decided by the code the editor
 loaded, not by the version number on it.
 
+A git worktree of the project keeps its own untracked `addons/`, which an upgrade of the main
+checkout does not reach. `upgrade` names each worktree whose addons are on another version, with the
+command to run there; it does not upgrade them itself, since a worktree pins its own version and
+can be on a branch that wants the one it has.
+
 ## The rest of the CLI
 
 | Command              | What it does                                            |
