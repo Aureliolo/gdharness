@@ -21719,10 +21719,10 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       const imported = await new Promise<{ status: number | null; output: string }>((resolveRun) => {
         const run = spawn(engine, ['--headless', '--path', project, '--import']);
         let output = '';
-        run.stdout?.on('data', (chunk: Buffer) => {
+        run.stdout.on('data', (chunk: Buffer) => {
           output += String(chunk);
         });
-        run.stderr?.on('data', (chunk: Buffer) => {
+        run.stderr.on('data', (chunk: Buffer) => {
           output += String(chunk);
         });
         const limit = setTimeout(() => run.kill(), 120_000);
