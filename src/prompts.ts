@@ -14,7 +14,7 @@ import {
 import type { ProtocolServer } from './server-types.js';
 
 /** One call a prompt asks for: the tool, its op, the arguments to pass, and what it is for. */
-export interface PromptStep {
+interface PromptStep {
   readonly tool: string;
   readonly op?: string;
   /** Prompt arguments passed through under the same name, when the person gave them. */
@@ -113,7 +113,7 @@ export const PROMPT_SPECS: readonly PromptSpec[] = [
 ];
 
 /** The prompts as `prompts/list` carries them. */
-export function listedPrompts(): Prompt[] {
+function listedPrompts(): Prompt[] {
   return PROMPT_SPECS.map((spec) => ({
     name: spec.name,
     title: spec.title,
@@ -126,7 +126,7 @@ export function listedPrompts(): Prompt[] {
  * [spec] with [given] filled in, as the one user message `prompts/get` answers with, or the reason
  * it cannot be: an argument it needs is missing, or one it does not take was given.
  */
-export function renderedPrompt(
+function renderedPrompt(
   spec: PromptSpec,
   given: Readonly<Record<string, string>>,
 ): { ok: true; result: GetPromptResult } | { ok: false; reason: string } {
@@ -157,7 +157,7 @@ export function renderedPrompt(
     const arguments_ = withArguments.length > 0 ? ` with ${withArguments.join(', ')}` : '';
     return `${index + 1}. Call ${call}${arguments_}, to ${step.why}.`;
   });
-  const text = [`${spec.description}`, '', ...lines, '', spec.report].join('\n');
+  const text = [spec.description, '', ...lines, '', spec.report].join('\n');
   return {
     ok: true,
     result: { description: spec.description, messages: [{ role: 'user', content: { type: 'text', text } }] },

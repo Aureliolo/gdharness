@@ -155,9 +155,11 @@ const COMPLETION_LIMIT = 100;
 
 /**
  * The project's files a template's `path` could be, for a client's picker: those whose path holds
- * what has been typed, ignoring case, with the ones that start with it first.
+ * what has been typed, ignoring case. Ones whose path starts with it come first, then ones whose
+ * file name does, since `main` is usually a file somebody is naming rather than a directory, then
+ * the rest.
  */
-export function completeResourcePath(
+function completeResourcePath(
   uriTemplate: string,
   typed: string,
   getProjectPath: () => string | null,
@@ -173,8 +175,13 @@ export function completeResourcePath(
   const matching = projectFiles(resolve(projectPath), EXTENSIONS[kind]).filter((path) =>
     path.toLowerCase().includes(wanted),
   );
-  const starting = matching.filter((path) => path.toLowerCase().startsWith(wanted));
-  const ordered = [...starting, ...matching.filter((path) => !path.toLowerCase().startsWith(wanted))];
+  const rank = (path: string): number => {
+    const lower = path.toLowerCase();
+    if (lower.startsWith(wanted)) return 0;
+    return (lower.split('/').at(-1) ?? '').startsWith(wanted) ? 1 : 2;
+  };
+  // Sorted already, and a stable sort keeps that order within each rank.
+  const ordered = matching.toSorted((a, b) => rank(a) - rank(b));
   return {
     values: ordered.slice(0, COMPLETION_LIMIT),
     total: ordered.length,

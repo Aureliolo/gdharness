@@ -6541,8 +6541,8 @@ async function testAResourcePathCompletesToTheProjectsFiles(): Promise<void> {
     const scenes = await complete('godot://scene/{path}', 'main');
     assert.deepEqual(
       get(scenes, 'values'),
-      ['scenes/main.tscn', 'scenes/menu/main_menu.tscn'],
-      `scenes holding the words, none from .godot or a .gdignore directory: ${JSON.stringify(scenes)}`,
+      ['scenes/main.tscn', 'scenes/menu/main_menu.tscn', 'levels/domain.tscn'],
+      `scenes named starting with the words, then any holding them, none from .godot or a .gdignore directory: ${JSON.stringify(scenes)}`,
     );
     const started = await complete('godot://scene/{path}', 'le');
     assert.deepEqual(get(started, 'values'), ['levels/domain.tscn'], JSON.stringify(started));

@@ -269,6 +269,13 @@ The agent's side is MCP over stdio, in either protocol era: the 2026-07-28 revis
 with `server/discover` and carries an envelope on every request, and the 2025 revisions, which open
 with `initialize`. The client's first message decides which, and the tools answer the same in both.
 
+Beside the tools it offers the `godot://` resources, with their paths completed from the project,
+three prompts written as the tool calls they make, and a few lines of instructions a client puts in
+front of its agent. Each tool tells a client whether it reads, adds or can destroy, worked out from
+its ops, which is what a client decides from whether to ask before a call. Results carry no
+`structuredContent`: Claude Code hands the model that field alone when a result has it, and every
+answer here that leads with prose or carries a notice would lose them.
+
 `gdharness_editor`, the language server and the debug adapter are all inside the Godot editor you
 have open. `gdharness_runtime` is inside the running game. The spawned engine opens nothing and
 exits when the call is answered.
