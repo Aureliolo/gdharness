@@ -10,7 +10,7 @@ import { PROMPT_SPECS } from '../src/prompts.js';
 import { RESOURCE_COUNT } from '../src/resources.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { isRecord } from './support/json-rpc.js';
-import { ServerProcess } from './support/server.js';
+import { ServerProcess, serverIdentity } from './support/server.js';
 
 assert.equal(serverManifest.version, pkg.version, 'server.json version should match package.json');
 // How the registry decides this repository owns the name it is publishing: it reads `mcpName`
@@ -175,18 +175,29 @@ assert.equal(
   'CLI version output should stay in sync with package.json',
 );
 
-const server = new ServerProcess({ entry: './build/cli.js' });
-try {
-  const init = await server.initialize('metadata-test');
-  assert.equal(init.error, undefined, `initialize failed: ${JSON.stringify(init.error)}`);
-  const result = isRecord(init.result) ? init.result : {};
-  const serverInfo = isRecord(result['serverInfo']) ? result['serverInfo'] : {};
-  assert.equal(serverInfo['name'], pkg.name, 'initialize should report package-aligned server name');
-  assert.equal(serverInfo['version'], pkg.version, 'initialize should report package-aligned server version');
-  const capabilities = isRecord(result['capabilities']) ? result['capabilities'] : {};
-  const tools = isRecord(capabilities['tools']) ? capabilities['tools'] : {};
-  // The list never changes, so a client is not told to expect it to.
-  assert.equal(tools['listChanged'], undefined, 'initialize should not advertise a changing tool list');
-} finally {
-  await server.stop();
+// In both eras, since each puts the identity in a different place and a client of either reads it.
+for (const era of ['modern', 'legacy'] as const) {
+  const server = new ServerProcess({ entry: './build/cli.js', era });
+  try {
+    const init = await server.initialize('metadata-test');
+    assert.equal(init.error, undefined, `the ${era} opening failed: ${JSON.stringify(init.error)}`);
+    const identity = serverIdentity(init);
+    assert.equal(identity['name'], pkg.name, `the ${era} opening should report package-aligned server name`);
+    assert.equal(
+      identity['version'],
+      pkg.version,
+      `the ${era} opening should report package-aligned server version`,
+    );
+    const result = isRecord(init.result) ? init.result : {};
+    const capabilities = isRecord(result['capabilities']) ? result['capabilities'] : {};
+    const tools = isRecord(capabilities['tools']) ? capabilities['tools'] : {};
+    // The list never changes, so a client is not told to expect it to.
+    assert.equal(
+      tools['listChanged'],
+      undefined,
+      `the ${era} opening should not advertise a changing tool list`,
+    );
+  } finally {
+    await server.stop();
+  }
 }

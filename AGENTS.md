@@ -28,6 +28,11 @@ Windowed regressions skip unless `GDHARNESS_ALLOW_WINDOWS` is set. `bun scripts/
 and `bun scripts/install-gdunit4.ts` fetch the pinned versions into the temp directory and print
 where they landed.
 
+The suites speak the 2026-07-28 protocol, as Claude Code does: `ServerProcess` opens with
+`server/discover` and puts the envelope on every request. Pass `era: 'legacy'` for the 2025
+`initialize` handshake. Smoke, `test/node-runtime.ts` and `metadata-consistency` keep checking that
+one, for the clients still sending it.
+
 Run `test:typed` after any GDScript change. gdlint and gdformat pass a script the engine refuses with
 warnings as errors, and the regressions load the addons under the default warnings, so a local run
 with the engine passed a runtime addon that failed to compile on the Linux engine leg. The fixtures
