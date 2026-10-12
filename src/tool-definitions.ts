@@ -1152,7 +1152,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       check: {
         effect: 'additive',
-        summary: 'boot headless, quit after a few frames, and report the verdict',
+        summary:
+          'boot headless, quit after a few frames, and report the verdict. booted is that verdict rather than whether the game came up: true only for a run that quit on its own within timeoutMs, exited 0 and printed no error, so a game that reached _ready and then raised an error answers false. hung is a run killed at timeoutMs, and errors and warnings count what it printed, which comes back under entries with repeats folded together',
         requires: ['projectPath'],
       },
       wait: {
