@@ -24,7 +24,7 @@ import {
   type ToolContentBlock,
   textOf,
 } from './support/json-rpc.js';
-import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
+import { listenOnAReservedPort, reservePort, ServerProcess, serverIdentity } from './support/server.js';
 import { sweep } from './support/sweep.js';
 
 const BRIDGE_HOST = process.env['GDHARNESS_BRIDGE_HOST'] ?? '127.0.0.1';
@@ -347,7 +347,7 @@ async function main(): Promise<void> {
   try {
     // The protocol handshake.
     const init = await server.initialize('bridge-test');
-    assert.ok(get(init.result, 'serverInfo', 'name'), 'initialize reports a server name');
+    assert.equal(serverIdentity(init)['name'], 'gdharness', 'the opening names the server');
     // An advertised capability is one a client will call, so each one advertised is asked here: a
     // capability the server does not serve is a promise it breaks on the first request.
     const capabilities = get(init.result, 'capabilities');
