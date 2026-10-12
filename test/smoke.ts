@@ -113,7 +113,9 @@ async function main(): Promise<void> {
  */
 async function servesTheModernEra(legacyToolCount: number): Promise<void> {
   const revision = badgedRevision();
-  const { env, runtimeDir } = testServerEnvironment({ GODOT_PATH: process.env['GODOT_PATH'] ?? process.execPath });
+  const { env, runtimeDir } = testServerEnvironment({
+    GODOT_PATH: process.env['GODOT_PATH'] ?? process.execPath,
+  });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ['build/index.js'],
@@ -139,10 +141,14 @@ async function servesTheModernEra(legacyToolCount: number): Promise<void> {
     // A call that needs no editor and no engine, read for what it answers rather than for not
     // failing: the dispatch, the argument check and the response all run in this era.
     const status = await client.callTool({ name: 'editor_status', arguments: {} });
-    assert.notEqual(status.isError, true, `editor_status answered in the 2026 era: ${JSON.stringify(status)}`);
-    const first = Array.isArray(status.content) ? status.content[0] : undefined;
-    assert.ok(isRecord(first) && first['type'] === 'text', 'with a text block');
-    assert.ok(isRecord(JSON.parse(String(first['text']))), 'carrying a JSON report');
+    assert.notEqual(
+      status.isError,
+      true,
+      `editor_status answered in the 2026 era: ${JSON.stringify(status)}`,
+    );
+    const first = status.content[0];
+    assert.ok(first?.type === 'text', 'with a text block');
+    assert.ok(isRecord(JSON.parse(first.text)), 'carrying a JSON report');
   } finally {
     await client.close();
     if (runtimeDir !== null) sweep(runtimeDir);
