@@ -6310,6 +6310,83 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
   }
 }
 
+/**
+ * What a client is told before it calls a tool: a title, and whether the call can change or destroy
+ * anything, read off the list the server sends.
+ *
+ * A client may run a read-only tool without asking and asks before a destructive one, so a hint
+ * that understates is the one that costs somebody's work. Held three ways: tools whose class is
+ * plain from what they do, the size of each class as the table stands, and the op names that say a
+ * call removes or ends something, which a new op of that kind is caught by however its tool is
+ * written up.
+ */
+async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
+  const server = new ServerProcess();
+  try {
+    await server.initialize('regression-test');
+    const listed = get((await server.request('tools/list')).result, 'tools');
+    assert.ok(Array.isArray(listed), 'tools/list answers a list');
+    const hints = new Map<string, { title: unknown; annotations: Record<string, unknown> }>();
+    for (const tool of listed) {
+      const annotations = get(tool, 'annotations');
+      assert.ok(isRecord(annotations), `${String(get(tool, 'name'))} carries annotations`);
+      hints.set(String(get(tool, 'name')), { title: get(tool, 'title'), annotations });
+    }
+    assert.equal(hints.size, TOOL_SPECS.length, 'every tool is listed with its hints');
+
+    const classOf = (name: string): string => {
+      const annotations = hints.get(name)?.annotations;
+      assert.ok(annotations !== undefined, `${name} is listed`);
+      if (annotations['readOnlyHint'] === true) {
+        assert.equal(
+          annotations['destructiveHint'],
+          undefined,
+          `${name} is read-only, so nothing about destroying`,
+        );
+        return 'read';
+      }
+      assert.equal(annotations['readOnlyHint'], false, `${name} says whether it is read-only`);
+      assert.equal(typeof annotations['destructiveHint'], 'boolean', `${name} says whether it can destroy`);
+      return annotations['destructiveHint'] === true ? 'destructive' : 'additive';
+    };
+    for (const [name, { title, annotations }] of hints) {
+      assert.ok(
+        typeof title === 'string' && title.length > 0 && title !== name,
+        `${name} has a title of its own`,
+      );
+      assert.equal(annotations['openWorldHint'], false, `${name} works on the project and this machine only`);
+    }
+
+    assert.equal(classOf('editor_status'), 'read', 'a status read changes nothing');
+    assert.equal(classOf('runtime_inspect'), 'read', 'nor does inspecting the game');
+    assert.equal(classOf('scene_animation'), 'additive', 'an animation op adds and refuses a name in use');
+    assert.equal(classOf('runtime_input'), 'additive', 'input is what a player could send');
+    assert.equal(classOf('scene_node'), 'destructive', 'scene_node can delete a node');
+    assert.equal(classOf('resource_edit'), 'destructive', 'resource_edit writes over a resource');
+    assert.equal(classOf('editor_run'), 'destructive', 'editor_run stop ends a process');
+
+    const counts = { read: 0, additive: 0, destructive: 0 };
+    for (const name of hints.keys()) {
+      counts[classOf(name) as keyof typeof counts] += 1;
+    }
+    assert.deepEqual(
+      counts,
+      { read: 13, additive: 5, destructive: 12 },
+      'each class holds what the table holds',
+    );
+
+    // An op called one of these overwrites, takes away or ends something that was there.
+    const removing = /^(?:remove|delete|disconnect|stop|restart|set)(?:_|$)/;
+    for (const spec of TOOL_SPECS) {
+      for (const op of Object.keys(spec.operations ?? {}).filter((name) => removing.test(name))) {
+        assert.equal(classOf(spec.name), 'destructive', `${spec.name} has ${op}, so it is destructive`);
+      }
+    }
+  } finally {
+    await server.stop();
+  }
+}
+
 function testProjectGodotMultilineValues(): void {
   const parsed = parseProjectGodot(
     [
@@ -34067,6 +34144,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
   testEveryArgumentNamesOpsItsToolHas,
+  testEveryToolTellsAClientWhatItCanChange,
   testToolsRefusePathsOutsideTheProject,
   testDebugToolsRefuseWithoutASession,
   testUpdateNoticeRidesOnAnAnswer,

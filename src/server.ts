@@ -2707,6 +2707,8 @@ function needsItsOwnProcess(asked: RunEnvironment): boolean {
   return asked.savesIn !== undefined || asked.env !== undefined;
 }
 
+const STATIC_LIST_HINT = { ttlMs: 5 * 60_000, cacheScope: 'private' } as const;
+
 class GodotServer {
   private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
@@ -3180,7 +3182,22 @@ class GodotServer {
     // before dispatch. The capabilities are declared there too, because McpServer handed a tools
     // capability installs handlers of its own and tells clients the list can change, which this one
     // never does.
-    const mcp = new McpServer({ name: 'gdharness', version: SERVER_VERSION });
+    const mcp = new McpServer(
+      { name: 'gdharness', version: SERVER_VERSION },
+      {
+        // What a 2026 client may keep without asking again. The lists and the discovery answer are
+        // fixed for the life of a server, and a client keys what it keeps by the server's name and
+        // version, so an upgrade is never answered from an older list. Five minutes rather than the
+        // life of the server, because a build of the same version can add a tool. A resource read is
+        // a project file and stays uncached.
+        cacheHints: {
+          'server/discover': STATIC_LIST_HINT,
+          'tools/list': STATIC_LIST_HINT,
+          'resources/list': STATIC_LIST_HINT,
+          'resources/templates/list': STATIC_LIST_HINT,
+        },
+      },
+    );
     const protocol = mcp.server;
     protocol.registerCapabilities({ tools: {}, resources: {} });
     this.setupToolHandlers(protocol);

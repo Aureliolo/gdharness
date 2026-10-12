@@ -6,7 +6,14 @@
  */
 
 import { ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
-import { argumentsOf, projectPathSentence, TOOL_SPECS, theGamePicked } from './tool-definitions.js';
+import {
+  argumentsOf,
+  effectsOf,
+  projectPathSentence,
+  TOOL_SPECS,
+  type ToolSpec,
+  theGamePicked,
+} from './tool-definitions.js';
 
 /** What a schema's `type` is called in prose, for the one argument or two that take either. */
 export function namedType(declared: unknown): string {
@@ -83,6 +90,29 @@ function headlessSection(): string[] {
   ];
 }
 
+/**
+ * The sentence behind the hints a client is sent, naming the ops that make a tool destructive:
+ * the hint is per tool, and `scene_node get` is not the call a client asks about.
+ */
+function whatItCanChange(tool: ToolSpec): string {
+  if (effectsOf(tool).every((effect) => effect === 'read')) {
+    return 'Changes nothing.';
+  }
+  const destroying = Object.entries(tool.operations ?? {})
+    .filter(([, op]) => op.effect === 'destructive')
+    .map(([name]) => `\`${name}\``);
+  if (destroying.length === 0) {
+    return 'Adds or starts things, and overwrites and removes nothing itself.';
+  }
+  return `Can overwrite, remove or end what is there, through ${listed(destroying)}.`;
+}
+
+/** [items] as prose: "a", "a and b", "a, b and c". */
+function listed(items: readonly string[]): string {
+  const last = items.at(-1) ?? '';
+  return items.length === 1 ? last : `${items.slice(0, -1).join(', ')} and ${last}`;
+}
+
 export function renderToolsMarkdown(): string {
   const lines: string[] = [
     '# Tools',
@@ -100,7 +130,7 @@ export function renderToolsMarkdown(): string {
   ];
 
   for (const tool of TOOL_SPECS) {
-    lines.push(`## ${tool.name}`, '', tool.description, '');
+    lines.push(`## ${tool.name}`, '', `${tool.title}. ${whatItCanChange(tool)}`, '', tool.description, '');
 
     const operations = Object.entries(tool.operations ?? {});
     if (operations.length > 0) {

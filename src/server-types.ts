@@ -232,6 +232,9 @@ type ToolResponseContent =
 /**
  * What every tool handler returns. `isError` marks a handled failure, not a thrown one. A type
  * rather than an interface so that it satisfies the SDK's indexed result type as it is.
+ *
+ * No `structuredContent`: Claude Code hands the model that field alone when a result carries it,
+ * so the prose an answer leads with and every notice appended after it would never be read.
  */
 export type ToolResponse = {
   content: ToolResponseContent[];
