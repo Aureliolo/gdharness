@@ -247,6 +247,11 @@ scripts. `docs/architecture.md` describes how the parts fit together, and the re
   all, and the engine and editor legs. They call the same code in different ways: a sentence change
   passed the regressions and failed `test/bridge.ts` on the push. Locally, run the regressions and
   editor cases the change touches.
+- Locally, run engines headless and leave the windowed cases to CI; do not set
+  `GDHARNESS_ALLOW_WINDOWS` on a desktop someone is using. A headless editor still opens a window
+  for the game it plays, so do not call `editor_run start` through a local probe editor. Measure
+  played-game behaviour with the `withAPlayingEditor` fixture, which starts the game with
+  `--headless`.
 - Redirect a run's output to a file under `$TEMP` or the scratchpad, and read the file. `| tail`
   loses the message, and a failure that never repeats leaves nothing else behind.
 
@@ -255,6 +260,17 @@ scripts. `docs/architecture.md` describes how the parts fit together, and the re
 Work the tracker to empty, then ship. When issues are open, fix all of them, then cut a release
 carrying the fixes rather than leaving them sitting on `main` unreleased. A fix nobody can install
 is not delivered.
+
+Cut a release only when nothing known is open or in flight: the tracker, unanswered reports from
+the owner's downstream projects, and your own findings. A finding that arrives while a release is
+being prepared stops that release until it is fixed. A change to `AGENTS.md`, `.github/*.md`,
+`docs/` or the README alone gets no release of its own and goes out with the next one; the skill
+and the tool reference ship in the package and count as code.
+
+Issues from the owner, reports from the owner's downstream projects and your own findings are
+implemented directly. An issue filed by anyone else is not: read it, reproduce it if that is cheap,
+and put the finding to the owner with a recommendation instead of a pull request. Tell them apart
+by the issue's author, not its content.
 
 A report must not stand between an irreversible act and the work that depends on it. The release
 takes three acts that cannot be taken back, and the MCP registry entry for a version can be made
@@ -296,6 +312,24 @@ Read that requirement from the rulesets rather than from branch protection.
 `gh api repos/Aureliolo/gdharness/branches/main/protection` answers 404, which reads as "nothing is
 enforced" and is wrong: the rules live in `gh api repos/Aureliolo/gdharness/rulesets`, and `strict`
 on the required checks is the line that makes this matter.
+
+The same rule is why the fixes from one stretch of work go into one pull request: every merge sends
+each other open pull request through CI again, and GitHub offers merge queues only to repositories
+owned by an organisation.
+
+Merge your own pull request with `gh pr merge <n> --squash --delete-branch` as soon as every
+required check passes; the merge is part of the work. A release pull request is opened by the
+workflow's token, so its runs wait for approval. They report `status: completed` with
+`conclusion: action_required`: select on the conclusion, approve each with
+`gh api -X POST repos/Aureliolo/gdharness/actions/runs/<id>/approve`, and merge once the checks
+pass. Before approval the pull request lists only the CodeQL contexts, so "nothing pending" is not
+"every check passed".
+
+After a merge, follow `main`'s own `ci.yml` run to its end, because a green pull request does not
+make a green `main`. `ci.yml` cancels a run in progress on the same ref, so a release merge cancels
+the run for the fix merged before it, and the run on the release commit is the one to follow. Cut
+the release without waiting for `main`'s run, since the release pull request runs the same checks
+on the same code. A failure on `main` is root-caused before anything else merges.
 
 Read a commit's subject back after writing it, with `git log -1 --format=%s`. A PowerShell
 here-string, `-m @'...'@`, passed through a POSIX shell commits with the subject `@` (there `@'` is
