@@ -21,7 +21,7 @@ const REPOSITORY = 'godot-gdunit-labs/gdUnit4';
 // renovate: datasource=github-tags depName=godot-gdunit-labs/gdUnit4
 const VERSION = 'v6.2.2';
 const COMMIT = '0127a55f4543dfc24746f6e5c7ba6f94105d51f2';
-const DIGEST = 'd96c3b37b9282cd40c724892c321b0e5e3d51dd0cce700241efe0d86b88ec0eb';
+const DIGEST = '58a391b0c85cbbcf7aeb09b718c8173793d45ab511950cd65eec0183aabf0e50';
 
 async function main(): Promise<void> {
   const root = join(process.env['RUNNER_TEMP'] ?? tmpdir(), `gdunit4-${COMMIT}`);
