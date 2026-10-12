@@ -134,6 +134,7 @@ import {
 } from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, type SearchOptions, searchProject } from '../src/project-scan.js';
+import { PROMPT_SPECS } from '../src/prompts.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
 import {
   LEFT_ALONE_ANSWER_LINES,
@@ -6382,6 +6383,216 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
         assert.equal(classOf(spec.name), 'destructive', `${spec.name} has ${op}, so it is destructive`);
       }
     }
+  } finally {
+    await server.stop();
+  }
+}
+
+/**
+ * Every call a prompt tells an agent to make is one the tool takes: the tool and op exist, every
+ * argument named is one that op reads, and every argument the op requires is passed. A prompt that
+ * names an argument the tool refuses starts every use of it with a refusal.
+ */
+function testEveryPromptAsksForCallsTheToolsTake(): void {
+  assert.equal(PROMPT_SPECS.length, 3, 'the prompts are the three written');
+  for (const prompt of PROMPT_SPECS) {
+    const declared = new Set(prompt.arguments.map((argument) => argument.name));
+    assert.ok(prompt.steps.length > 0, `${prompt.name} asks for at least one call`);
+    for (const step of prompt.steps) {
+      const call = `${prompt.name}: ${step.tool}${step.op === undefined ? '' : ` ${step.op}`}`;
+      const spec = toolSpec(step.tool);
+      assert.ok(spec !== undefined, `${call} names a tool there is`);
+      assert.ok(
+        step.op === undefined
+          ? spec.operations === undefined || spec.defaultOperation !== undefined
+          : step.op in (spec.operations ?? {}),
+        `${call} names an op the tool has, or none where the tool needs none`,
+      );
+      const op = step.op ?? spec.defaultOperation ?? '';
+      const takes = argumentsOf(spec, op);
+      const given = [...step.passes, ...Object.keys(step.fixed ?? {})];
+      for (const name of given) {
+        assert.ok(takes.includes(name), `${call} passes ${name}, which it takes`);
+      }
+      for (const name of step.passes) {
+        assert.ok(declared.has(name), `${call} passes ${name} on from an argument ${prompt.name} declares`);
+      }
+      const required = [...spec.requires, ...(spec.operations?.[op]?.requires ?? [])];
+      for (const name of required) {
+        const passedOnRequired =
+          step.passes.includes(name) && prompt.arguments.find((a) => a.name === name)?.required;
+        assert.ok(
+          passedOnRequired === true || name in (step.fixed ?? {}),
+          `${call} requires ${name}, so the prompt always passes it`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * The prompts as a client gets them: listed by name, rendered with the values given and nothing for
+ * the optional ones left out, and refused with the reason when an argument is missing or unknown.
+ */
+async function testAPromptIsRenderedWithWhatWasGiven(): Promise<void> {
+  const server = new ServerProcess();
+  try {
+    const init = await server.initialize('regression-test');
+    assert.ok(isRecord(get(get(init.result, 'capabilities'), 'prompts')), 'the server offers prompts');
+    const listed = asArray(get((await server.request('prompts/list')).result, 'prompts'));
+    assert.deepEqual(
+      listed.map((prompt) => get(prompt, 'name')),
+      ['run_and_check', 'diagnose_project', 'run_tests'],
+      'every prompt is listed',
+    );
+
+    const run = await server.request('prompts/get', {
+      name: 'run_and_check',
+      arguments: { projectPath: 'C:/games/ladder', scene: 'res://arena.tscn' },
+    });
+    const said = text(get(get(asArray(get(run.result, 'messages'))[0], 'content'), 'text'));
+    assert.match(said, /1\. Call editor_status, to /, said);
+    assert.match(
+      said,
+      /Call editor_run start with projectPath: "C:\/games\/ladder", scene: "res:\/\/arena\.tscn"/,
+      said,
+    );
+    assert.match(said, /Call editor_output run, to read what it printed/, said);
+
+    const tests = await server.request('prompts/get', {
+      name: 'run_tests',
+      arguments: { projectPath: '/p' },
+    });
+    const plain = text(get(get(asArray(get(tests.result, 'messages'))[0], 'content'), 'text'));
+    assert.match(
+      plain,
+      /Call project_test with projectPath: "\/p", to run the suites\./,
+      `no path left out: ${plain}`,
+    );
+
+    const missing = await server.request('prompts/get', { name: 'run_tests', arguments: {} });
+    assert.match(text(get(missing.error, 'message')), /run_tests needs projectPath/, JSON.stringify(missing));
+    const unknown = await server.request('prompts/get', {
+      name: 'diagnose_project',
+      arguments: { projectPath: '/p', scene: 'x' },
+    });
+    assert.match(
+      text(get(unknown.error, 'message')),
+      /diagnose_project does not take scene/,
+      JSON.stringify(unknown),
+    );
+    const nothing = await server.request('prompts/get', { name: 'no_such_prompt' });
+    assert.match(
+      text(get(nothing.error, 'message')),
+      /Prompts: run_and_check, diagnose_project, run_tests/,
+      JSON.stringify(nothing),
+    );
+  } finally {
+    await server.stop();
+  }
+}
+
+/**
+ * A template's path completes to the project's files of that kind, the ones starting with what was
+ * typed first, and never to what the engine steps over: `.godot`, a directory with `.gdignore`, or
+ * a file of another kind.
+ */
+async function testAResourcePathCompletesToTheProjectsFiles(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-complete-'));
+  const server = new ServerProcess();
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    for (const file of [
+      'scenes/main.tscn',
+      'scenes/menu/main_menu.tscn',
+      'levels/domain.tscn',
+      'scripts/main.gd',
+      'themes/main.tres',
+      '.godot/editor/cached.tscn',
+      'vendored/old_main.tscn',
+    ]) {
+      mkdirSync(join(project, dirname(file)), { recursive: true });
+      writeFileSync(join(project, file), '');
+    }
+    writeFileSync(join(project, 'vendored', '.gdignore'), '');
+
+    await server.initialize('regression-test');
+    const complete = async (uri: string, value: string): Promise<unknown> =>
+      get(
+        (
+          await server.request('completion/complete', {
+            ref: { type: 'ref/resource', uri },
+            argument: { name: 'path', value },
+          })
+        ).result,
+        'completion',
+      );
+
+    const before = await complete('godot://scene/{path}', 'main');
+    assert.deepEqual(
+      get(before, 'values'),
+      [],
+      `nothing to offer before a project is known: ${JSON.stringify(before)}`,
+    );
+
+    // Any call naming the project makes it the one resources are read under, refused or not.
+    await server.request('tools/call', { name: 'project_info', arguments: { projectPath: project } });
+
+    const scenes = await complete('godot://scene/{path}', 'main');
+    assert.deepEqual(
+      get(scenes, 'values'),
+      ['scenes/main.tscn', 'scenes/menu/main_menu.tscn'],
+      `scenes holding the words, none from .godot or a .gdignore directory: ${JSON.stringify(scenes)}`,
+    );
+    const started = await complete('godot://scene/{path}', 'le');
+    assert.deepEqual(get(started, 'values'), ['levels/domain.tscn'], JSON.stringify(started));
+    const ordered = await complete('godot://resource/{path}', 's');
+    assert.deepEqual(
+      get(ordered, 'values'),
+      [
+        'scenes/main.tscn',
+        'scenes/menu/main_menu.tscn',
+        'scripts/main.gd',
+        'levels/domain.tscn',
+        'themes/main.tres',
+      ],
+      `the ones starting with what was typed first, then the rest holding it: ${JSON.stringify(ordered)}`,
+    );
+    const scripts = await complete('godot://script/{path}', '');
+    assert.deepEqual(
+      get(scripts, 'values'),
+      ['scripts/main.gd'],
+      `a script template offers scripts only: ${JSON.stringify(scripts)}`,
+    );
+    assert.equal(get(scripts, 'total'), 1, 'and says how many there are');
+  } finally {
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * What a client puts in front of its agent at connect: the habits the skill opens with, naming
+ * only tools there are, and short enough to be worth what it costs every session.
+ */
+async function testTheServerTellsAClientHowToStart(): Promise<void> {
+  const server = new ServerProcess();
+  try {
+    const init = await server.initialize('regression-test');
+    const said = text(get(init.result, 'instructions'));
+    assert.match(said, /Call editor_status first/, said);
+    assert.match(said, /editor_run start, never by spawning an engine/, said);
+    assert.ok(
+      said.includes(projectPathSentence()),
+      `with the projectPath rule as the skill says it: ${said}`,
+    );
+    const families = new Set(TOOL_SPECS.map((spec) => spec.name.split('_')[0]));
+    for (const [whole, family] of said.matchAll(/\b([a-z]+)_[a-z_]+\b/g)) {
+      if (families.has(family ?? '')) {
+        assert.ok(toolSpec(whole) !== undefined, `${whole} is a tool there is`);
+      }
+    }
+    assert.ok(said.length < 1200, `short enough to cost little: ${said.length} characters`);
   } finally {
     await server.stop();
   }
@@ -34145,6 +34356,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnArgumentMeantForAnotherOpIsRefused,
   testEveryArgumentNamesOpsItsToolHas,
   testEveryToolTellsAClientWhatItCanChange,
+  testEveryPromptAsksForCallsTheToolsTake,
+  testAPromptIsRenderedWithWhatWasGiven,
+  testAResourcePathCompletesToTheProjectsFiles,
+  testTheServerTellsAClientHowToStart,
   testToolsRefusePathsOutsideTheProject,
   testDebugToolsRefuseWithoutASession,
   testUpdateNoticeRidesOnAnAnswer,

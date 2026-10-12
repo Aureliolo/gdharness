@@ -154,6 +154,7 @@ import {
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
+import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
 import { type NameTaken, type RenameOutcome, renameSymbol, writeLeftAloneDetail } from './rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
@@ -218,6 +219,7 @@ import {
   type SourceOf,
   UNNAMED_PREFIX,
 } from './script-profile.js';
+import { serverInstructions } from './server-instructions.js';
 import type {
   GodotProcess,
   MCPToolDefinition,
@@ -3185,6 +3187,7 @@ class GodotServer {
     const mcp = new McpServer(
       { name: 'gdharness', version: SERVER_VERSION },
       {
+        instructions: serverInstructions(),
         // What a 2026 client may keep without asking again. The lists and the discovery answer are
         // fixed for the life of a server, and a client keys what it keeps by the server's name and
         // version, so an upgrade is never answered from an older list. Five minutes rather than the
@@ -3199,8 +3202,9 @@ class GodotServer {
       },
     );
     const protocol = mcp.server;
-    protocol.registerCapabilities({ tools: {}, resources: {} });
+    protocol.registerCapabilities({ tools: {}, resources: {}, completions: {}, prompts: {} });
     this.setupToolHandlers(protocol);
+    setupPromptHandlers(protocol);
     // The project this server serves first, so a call naming another project's game does not move
     // what the resources read; the last project named only for a server that can name none.
     setupResourceHandlers(protocol, () => this.ourProject() ?? this.lastProjectPath);
