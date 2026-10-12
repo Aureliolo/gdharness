@@ -1,6 +1,7 @@
 extends SceneTree
 
-## Refusals for a control or a 3D node that is not visible, which name what hides it. The node's own
+## Refusals for a control or a 3D node that is not visible, or whose pointer a card above it has
+## turned off, which name what hides it or turned it off. The node's own
 ## visible reads true when only an ancestor is hidden, so a refusal saying only "is not visible" left
 ## a caller nothing to unhide. Reported from fantasy-guild-manager: a ledger tab under a hall hidden
 ## while the game's menu was open. Each refusal is checked beside the call that works once nothing
@@ -41,6 +42,7 @@ func _everything() -> void:
 	await _check_a_button_on_a_hidden_layer()
 	await _check_a_dropdown_under_a_hidden_panel()
 	await _check_a_node_in_a_hidden_world()
+	await _check_a_card_that_turned_the_pointer_off()
 
 	host.queue_free()
 	if failures.is_empty():
@@ -291,4 +293,75 @@ func _check_a_node_in_a_hidden_world() -> void:
 	if reached.get("landed") != true:
 		_fail("and is clicked once the world is shown: %s" % JSON.stringify(reached))
 	world.queue_free()
+	await process_frame
+
+
+## A card on its way out turns the pointer off for itself and everything in it, through
+## mouse_behavior_recursive, leaving its button enabled and its mouse_filter as it was. By words, the
+## next card's button saying the same is the one meant rather than a tie; by path, the leaving one is
+## refused with the node that turned it off, where it answered landed false; alone, it is refused by
+## words too. Turned back on, the same button is pressed, so the refusal is the setting's.
+func _check_a_card_that_turned_the_pointer_off() -> void:
+	var leaving: Panel = Panel.new()
+	leaving.name = "Leaving"
+	leaving.position = Vector2(0, 0)
+	leaving.size = Vector2(30, 30)
+	leaving.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(leaving)
+	var gone: Button = _button("GonePost", Vector2(2, 2), leaving)
+	gone.text = "Post"
+	var next: Panel = Panel.new()
+	next.name = "Next"
+	next.position = Vector2(32, 0)
+	next.size = Vector2(30, 30)
+	next.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(next)
+	var post: Button = _button("NextPost", Vector2(2, 2), next)
+	post.text = "Post"
+	leaving.mouse_behavior_recursive = Control.MOUSE_BEHAVIOR_DISABLED
+	await process_frame
+
+	var by_words: Dictionary = await input.click({"says": "Post"})
+	var found: Dictionary = by_words.get("found", {})
+	var picked: String = str(found.get("picked", ""))
+	if (
+		by_words.get("path") != "/root/Next/NextPost"
+		or _presses("NextPost") != 1
+		or _presses("GonePost") != 0
+	):
+		_fail(
+			(
+				"words on a card that turned the pointer off and on the next mean the next: %s"
+				% JSON.stringify(by_words)
+			)
+		)
+	elif not picked.ends_with("the other one on screen takes no pointer input"):
+		_fail("and say why the leaving one was passed over: %s" % picked)
+
+	var by_path: Dictionary = await input.click({"path": "/root/Leaving/GonePost"})
+	var why: String = (
+		"/root/Leaving/GonePost takes no pointer input, since mouse_behavior_recursive"
+		+ " is disabled on /root/Leaving"
+	)
+	if not _says(by_path, why) or _presses("GonePost") != 0:
+		_fail(
+			(
+				"a button whose card turned the pointer off is refused, naming the card: %s"
+				% JSON.stringify(by_path)
+			)
+		)
+
+	next.queue_free()
+	await process_frame
+	var alone: Dictionary = await input.click({"says": "Post"})
+	if not _says(alone, why) or _presses("GonePost") != 0:
+		_fail("and refused by its words when it is the only one: %s" % JSON.stringify(alone))
+
+	leaving.mouse_behavior_recursive = Control.MOUSE_BEHAVIOR_INHERITED
+	await process_frame
+	var back: Dictionary = await input.click({"path": "/root/Leaving/GonePost"})
+	if back.get("landed") != true or _presses("GonePost") != 1:
+		_fail("and pressed once the card turns the pointer back on: %s" % JSON.stringify(back))
+	gone.queue_free()
+	leaving.queue_free()
 	await process_frame

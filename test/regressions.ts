@@ -13896,7 +13896,9 @@ async function testWhatALaunchedEditorDroppedIsReadAsItArrives(): Promise<void> 
           type: 'godot_ready',
           project_path: project,
           addon_version: SERVER_VERSION,
-          editor_pid: whose === 'launched' ? pid : pid + 1,
+          // Another editor is a live process too: the bridge looks up the pid of a greeting no server
+          // marked, and a made-up one is whatever holds that number, which can be turned away.
+          editor_pid: whose === 'launched' ? pid : process.pid,
           opened_by_a_server: whose === 'launched',
         }),
       );
@@ -13917,6 +13919,11 @@ async function testWhatALaunchedEditorDroppedIsReadAsItArrives(): Promise<void> 
         get(one, 'setting'),
       );
       if (whose === 'another') {
+        assert.equal(
+          get(status, 'editor', 'editorPid'),
+          process.pid,
+          `the other editor is the one connected: ${said}`,
+        );
         assert.deepEqual(
           dropped,
           [],
@@ -31163,6 +31170,18 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     // When the server first asked about the scan in the call under way, which is on its own clock
     // rather than this one's: a request takes a while to reach it, a loaded machine a while longer.
     const scanAsked: { first: number | null } = { first: null };
+    // A scan lasting this long from that first question, or null for one set on this clock. The end
+    // of a scan and the editor's write after it are both placed from the question: with the end
+    // placed from here before the request went, the write landed later than the end by as long as
+    // the request took to arrive, and once that passed half a second the write fell outside the
+    // two seconds the server waits for one after a scan. The server stopped at that deadline, 2505ms
+    // in on a loaded runner, and compared against the cache the editor was about to replace.
+    let scanLastsMs: number | null = null;
+    const scanFor = (ms: number): void => {
+      scanAsked.first = null;
+      scanLastsMs = ms;
+      scanning = () => Date.now() < finishedAt;
+    };
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (!isRecord(message) || message['type'] !== 'tool_invoke') {
@@ -31171,6 +31190,10 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       const isScanStatus = String(message['tool']) === 'scan_status';
       if (isScanStatus && scanAsked.first === null) {
         scanAsked.first = Date.now();
+        if (scanLastsMs !== null) {
+          finishedAt = scanAsked.first + scanLastsMs;
+          scanLastsMs = null;
+        }
       }
       const reply = (): void => {
         const result = isScanStatus
@@ -31229,9 +31252,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
 
     // A scan for a second, then over, and the cache written a second and a half after that: later
     // than a headless game takes to reach _ready, so a start that did not wait reads the old file.
-    const scanEnds = Date.now() + 1_000;
-    scanning = () => Date.now() < scanEnds;
-    finishedAt = scanEnds;
+    scanFor(1_000);
     const writing = editorWritesAfter(2_500, WRITTEN_AFTER_THE_SCAN);
     const waited = await check();
     await writing;
@@ -31282,9 +31303,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     // later, putting back whatever list it holds. The rebuild waits for that write and goes after
     // it, so the file left behind is the rebuild's.
     cacheBeforeTheScan();
-    const rebuildScanEnds = Date.now() + 1_000;
-    scanning = () => Date.now() < rebuildScanEnds;
-    finishedAt = rebuildScanEnds;
+    scanFor(1_000);
     const editorWrites = editorWritesAfter(2_500, WRITTEN_AFTER_THE_SCAN);
     const rebuilt = await server.request(
       'tools/call',
@@ -31305,9 +31324,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
 
     // Any other engine started on the project, which resolves the same classes as it boots.
     cacheBeforeTheScan();
-    const listScanEnds = Date.now() + 1_000;
-    scanning = () => Date.now() < listScanEnds;
-    finishedAt = listScanEnds;
+    scanFor(1_000);
     const listWrite = editorWritesAfter(1_500, WRITTEN_AFTER_THE_SCAN);
     const listed = await server.request(
       'tools/call',
@@ -31341,9 +31358,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     // too early, and the cache the rebuild above had just written landed after that estimate and
     // passed for the editor's write. The loss below was then compared against the file the editor
     // was about to replace, and went unreported.
-    const droppingScanEnds = Date.now() + 1_000;
-    scanning = () => Date.now() < droppingScanEnds;
-    finishedAt = droppingScanEnds;
+    scanFor(1_000);
     answersAfterMs = 1_500;
     const dropping = editorWritesAfter(2_500, EMPTY);
     const afterTheDrop = await server.request(
@@ -32041,6 +32056,19 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
       const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-short-list-'));
       const sockets: WebSocket[] = [];
       const servers: ServerProcess[] = [];
+      // Live processes standing in for the editor and for the editor once restarted. The server
+      // reads the command line of the pid an editor greets with, to tell a one-shot run from an
+      // editor, so a made-up pid is whatever process holds that number on the machine: one started
+      // with -s or --quit turns the editor away, and it never reaches the server.
+      const standIns: ChildProcess[] = [];
+      const anEditorProcess = (): number => {
+        const standIn = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+        standIns.push(standIn);
+        assert.ok(typeof standIn.pid === 'number', 'the fixture needs a live process for each editor');
+        return standIn.pid;
+      };
+      const firstEditor = anEditorProcess();
+      const restartedEditor = anEditorProcess();
       const startServer = async (): Promise<{ server: ServerProcess; port: number }> => {
         const port = await reservePort();
         const server = new ServerProcess({
@@ -32114,7 +32142,7 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
           }
           assert.ok(
             known,
-            `the editor with pid ${editorPid} should have reached the server, or this proves nothing`,
+            `the editor with pid ${editorPid} should have reached the server, or this proves nothing: ${server.stderr.slice(-2000)}`,
           );
         };
         const diagnose = async (server: ServerProcess): Promise<unknown> =>
@@ -32130,7 +32158,7 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
           /editor_rescan will not clear it here: this editor wrote the class cache from a list shorter than the file on its last scan and writes the same list on every scan, so editor_launch restart is what loads it\./;
 
         const first = await startServer();
-        await dialIn(first.server, first.port, 4242);
+        await dialIn(first.server, first.port, firstEditor);
         const before = await diagnose(first.server);
         assert.deepEqual(
           get(before, 'typesTheEditorHasNotLoaded'),
@@ -32169,7 +32197,7 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
         );
         assert.equal(
           readClassNote(project)?.shortListEditorPid,
-          4242,
+          firstEditor,
           `and the editor is written into the project's note: ${readFileSync(classNotePath(project), 'utf8')}`,
         );
 
@@ -32178,7 +32206,7 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
         sockets[0]?.close();
         await first.server.stop();
         const second = await startServer();
-        await dialIn(second.server, second.port, 4242);
+        await dialIn(second.server, second.port, firstEditor);
         const replaced = await diagnose(second.server);
         assert.match(
           text(get(replaced, 'staleAnalysis')),
@@ -32189,7 +32217,7 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
         // A restarted editor is a new process with a new pid, and starts clean.
         sockets[1]?.close();
         await delay(1100);
-        await dialIn(second.server, second.port, 4343);
+        await dialIn(second.server, second.port, restartedEditor);
         const restarted = await diagnose(second.server);
         assert.match(
           text(get(restarted, 'staleAnalysis')),
@@ -32202,6 +32230,9 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
         }
         for (const server of servers) {
           await server.stop();
+        }
+        for (const standIn of standIns) {
+          standIn.kill();
         }
         sweep(project);
       }

@@ -12,6 +12,11 @@ const Words = preload("runtime_words.gd")
 ## How many of the controls saying the same words a refusal names, with the index for each.
 const LISTED_CANDIDATES: int = 10
 
+## What a match's rank is made of, one bit each, the highest deciding first.
+const TAKES_POINTER: int = 4
+const ENABLED_BUTTON: int = 2
+const WHOLE: int = 1
+
 
 ## The control a click by [param wanted] words presses, found under [param root_path] in the tree
 ## [param root] heads, or the refusal saying why there is none or which of several:
@@ -238,9 +243,12 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 		found["partOf"] = _shortened(lines[index])
 	if which == null and targets.size() > 1:
 		var others: String = (
-			"the other one on screen %s" % _passed_over(ranks[0], true)
+			"the other one on screen %s" % _passed_over(ranks[0], ranks.slice(1), true)
 			if targets.size() == 2
-			else "the other %d on screen %s" % [targets.size() - 1, _passed_over(ranks[0], false)]
+			else (
+				"the other %d on screen %s"
+				% [targets.size() - 1, _passed_over(ranks[0], ranks.slice(1), false)]
+			)
 		)
 		found["picked"] = "%s; %s" % [_described(1, ranks[0], wanted, under), others]
 	if covered > 0:
@@ -248,13 +256,43 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	return {"path": str(targets[index].get_path()), "found": found}
 
 
-## How good a match [param target] is for a click: an enabled button over anything else, and then
-## the whole of its words over a part of them. A disabled button ranks with what is not a button,
-## since a click on it presses nothing: counted as a button, one tied with an enabled button saying
-## the same words and the click was refused as not clear.
+## How good a match [param target] is for a click: a control the pointer can reach over one it
+## cannot, then an enabled button over anything else, and then the whole of its words over a part
+## of them. A disabled button ranks with what is not a button, since a click on it presses nothing:
+## counted as a button, one tied with an enabled button saying the same words and the click was
+## refused as not clear. A card on its way out turning the pointer off for itself and everything in
+## it tied the same way, its Post button against the next card's.
 static func _rank(target: Control, whole: bool) -> int:
 	var button: BaseButton = target as BaseButton
-	return (2 if button != null and not button.disabled else 0) + (1 if whole else 0)
+	var reached: bool = pointer_turned_off_by(target) == null
+	return (
+		(TAKES_POINTER if reached else 0)
+		+ (ENABLED_BUTTON if reached and button != null and not button.disabled else 0)
+		+ (WHOLE if whole else 0)
+	)
+
+
+## The control whose `mouse_behavior_recursive` keeps the pointer from [param control], itself or
+## the nearest above it setting one, or null when nothing does.
+##
+## Turned off on a control, it takes the pointer from everything under it without touching their
+## `mouse_filter` or a button's `disabled`, so neither says the press will do nothing. Read from the
+## engine's own answer, the filter with that override applied, rather than by walking the setting:
+## a control below can turn it back on, and the setting stops at a parent that is not a Control.
+## A control that ignores the pointer of its own accord, as a label does, is not turned off.
+static func pointer_turned_off_by(control: Control) -> Control:
+	if (
+		control.mouse_filter == Control.MOUSE_FILTER_IGNORE
+		or control.get_mouse_filter_with_override() != Control.MOUSE_FILTER_IGNORE
+	):
+		return null
+	var deciding: Control = control
+	while (
+		deciding.mouse_behavior_recursive == Control.MOUSE_BEHAVIOR_INHERITED
+		and deciding.get_parent() is Control
+	):
+		deciding = deciding.get_parent()
+	return deciding
 
 
 ## Whether one of [param wanted]'s alternatives is the whole of [param said], or the whole of one of
@@ -307,31 +345,43 @@ static func _in_a_word(code: int) -> bool:
 
 ## [param count] matches of [param rank], as the start of a sentence.
 static func _described(count: int, rank: int, wanted: String, under: String) -> String:
-	var what: String = "button" if rank >= 2 else "control"
+	var what: String = "button" if rank & ENABLED_BUTTON else "control"
 	var how: String = '"%s"' % wanted
 	var plain: bool = true
 	for words: String in Says.alternatives(wanted):
 		plain = plain and Says.is_plain(words)
 	if plain:
-		how = ('exactly "%s"' if rank % 2 == 1 else '"%s" as part of more') % wanted
+		how = ('exactly "%s"' if rank & WHOLE else '"%s" as part of more') % wanted
 	if count == 1:
 		return "the one %s on screen%s saying %s" % [what, under, how]
 	return "%d %ss on screen%s say %s" % [count, what, under, how]
 
 
-## Why the matches below [param rank] were passed over, said of one of them when [param one]. As
-## what the code knows, which is whether a control is an enabled button: a card taking clicks in its
-## own `gui_input` is not one, and calling it something that cannot be pressed was a guess.
-static func _passed_over(rank: int, one: bool) -> String:
-	var says: String = "says" if one else "say"
-	var is_not: String = "is not an enabled button" if one else "are not enabled buttons"
-	match rank:
-		3:
-			return "%s or %s it as part of more" % [is_not, says]
-		2:
-			return is_not
-		_:
-			return "%s it as part of more" % says
+## Why the matches ranked [param others] were passed over for the one ranked [param best], said of
+## one of them when [param one]: each way the best is better that one of them is not. As what the
+## code knows, which is whether a control is an enabled button: a card taking clicks in its own
+## `gui_input` is not one, and calling it something that cannot be pressed was a guess.
+static func _passed_over(best: int, others: Array[int], one: bool) -> String:
+	var lacking: int = 0
+	for rank: int in others:
+		var short: int = best & ~rank
+		# One the pointer cannot reach is never ranked a button, so that is the whole of why.
+		if short & TAKES_POINTER:
+			short &= ~ENABLED_BUTTON
+		lacking |= short
+	var reasons: Array[String] = []
+	if lacking & TAKES_POINTER:
+		reasons.append("takes no pointer input" if one else "take no pointer input")
+	if lacking & ENABLED_BUTTON:
+		reasons.append("is not an enabled button" if one else "are not enabled buttons")
+	if lacking & WHOLE:
+		reasons.append("says it as part of more" if one else "say it as part of more")
+	# Ranked level with the best, a match was passed over for having the words only inside longer ones.
+	if reasons.is_empty():
+		return "says it only inside a longer word" if one else "say it only inside longer words"
+	if reasons.size() == 1:
+		return reasons[0]
+	return "%s or %s" % [", ".join(reasons.slice(0, -1)), reasons[-1]]
 
 
 ## What to add to a refusal that found nothing on screen, when words matched controls out of sight.
