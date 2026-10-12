@@ -30,16 +30,9 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		if not FileAccess.file_exists("res://project.godot"):
 			details.append("Missing project.godot file")
 			deductions += 30
-
-		var recommended_dirs: Array[String] = ["res://scenes", "res://scripts", "res://assets"]
-		var missing_dirs: Array[String] = []
-		for dir: String in recommended_dirs:
-			if not DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(dir)):
-				missing_dirs.append(dir)
-
-		if missing_dirs.size() > 0:
-			details.append("Consider organizing with directories: " + ", ".join(missing_dirs))
-			deductions += 2 * missing_dirs.size()
+		# No layout is asked for. A project without res://scenes, res://scripts and res://assets
+		# failed this check and lost points, while Godot's own guidance is to keep a scene's files
+		# together by feature, so the check failed projects for following the engine's advice.
 
 		checks["structure"] = {"name": "Project Structure", "passed": details.is_empty(), "details": details}
 
@@ -74,7 +67,6 @@ func get_project_health(params: Dictionary) -> Dictionary:
 
 		var script_files: Array[String] = _files.find_files("res://", ".gd")
 		var todo_count: int = 0
-		var empty_functions: int = 0
 
 		for script_path: String in script_files:
 			var file: FileAccess = FileAccess.open(script_path, FileAccess.READ)
@@ -84,16 +76,12 @@ func get_project_health(params: Dictionary) -> Dictionary:
 
 				if "# TODO" in content or "# FIXME" in content:
 					todo_count += 1
-				if "pass # " in content or content.ends_with("pass\n"):
-					empty_functions += 1
 
+		# Work noted for later, which no script fails on, so said rather than failed. A count of
+		# "empty functions" read off a script ending in `pass` went with it: a virtual left for an
+		# override to fill ends that way and is exactly right.
 		if todo_count > 0:
-			details.append(str(todo_count) + " scripts have TODO/FIXME comments")
-			deductions += todo_count
-
-		if empty_functions > 0:
-			details.append(str(empty_functions) + " scripts may have empty functions")
-			deductions += empty_functions
+			recommendations.append("%d scripts have TODO or FIXME comments to look at" % todo_count)
 
 		checks["scripts"] = {
 			"name": "Scripts",
@@ -136,10 +124,6 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			details.append("No project name set")
 			deductions += 2
 
-		if not FileAccess.file_exists("res://export_presets.cfg"):
-			details.append("No export presets configured")
-			deductions += 3
-
 		checks["config"] = {"name": "Configuration", "passed": details.is_empty(), "details": details}
 
 	var score: int = maxi(0, 100 - deductions)
@@ -156,11 +140,11 @@ func get_project_health(params: Dictionary) -> Dictionary:
 	else:
 		grade = "F"
 
-	if deductions > 0:
-		if score < 70:
-			recommendations.append("Address critical issues to improve project stability")
-		if not FileAccess.file_exists("res://export_presets.cfg"):
-			recommendations.append("Configure export presets for your target platforms")
+	if score < 70:
+		recommendations.append("Address critical issues to improve project stability")
+	# A project still being made has no presets yet, which is no fault in it.
+	if "config" in check_categories and not FileAccess.file_exists("res://export_presets.cfg"):
+		recommendations.append("No export presets are configured: add them before exporting")
 
 	# Every detail costs points, so each is an issue; `issues` was always empty beside them, and a
 	# category said passed next to the failure it had just found.

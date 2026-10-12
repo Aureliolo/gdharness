@@ -103,7 +103,16 @@ func get_import_status(params: Dictionary) -> Dictionary:
 
 			_tally(summary, status)
 
-	return {"resources": resources, "summary": summary}
+	var answer: Dictionary = {"resources": resources, "summary": summary}
+	# A total of none reads as a walk that found nothing when the project is full of scripts and
+	# scenes, which the engine loads as they are and never imports.
+	if resource_path.is_empty() and summary["total"] == 0:
+		answer["note"] = (
+			"Nothing in this project is imported: the engine imports images, audio, fonts, models and"
+			+ " the like, found by extension or by a .import sidecar beside them, and loads scripts and"
+			+ " scenes as they are."
+		)
+	return answer
 
 
 # Get import options for a resource

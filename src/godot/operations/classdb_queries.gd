@@ -283,6 +283,7 @@ func _methods_of(class_name_str: String, include_inherited: bool) -> Array[Dicti
 				{
 					"name": a.get("name", ""),
 					"type": a.get("type", 0),
+					"type_name": _type_name(a, "Variant"),
 					"class_name": a.get("class_name", ""),
 					"hint_string": a.get("hint_string", "")
 				}
@@ -293,13 +294,31 @@ func _methods_of(class_name_str: String, include_inherited: bool) -> Array[Dicti
 				"name": m.get("name", ""),
 				"args": args,
 				"return":
-				{"type": return_info.get("type", 0), "class_name": return_info.get("class_name", "")},
+				{
+					"type": return_info.get("type", 0),
+					"type_name": _type_name(return_info, "void"),
+					"class_name": return_info.get("class_name", "")
+				},
 				"flags": m.get("flags", 0),
 				"default_args": m.get("default_args", [])
 			}
 		)
 
 	return methods
+
+
+# What [param info]'s type is called: its class for an object of one, and otherwise the engine's own
+# name for the type, beside the number the engine reports, which reads as nothing without its enum.
+# Nil is a value that can be anything when the usage says so, and [param nil_name] otherwise: void
+# for what a method returns, and Variant for an argument or property with no type.
+static func _type_name(info: Dictionary, nil_name: String) -> String:
+	var type: int = Read.as_int(info.get("type", 0))
+	var named: String = str(info.get("class_name", ""))
+	if type == TYPE_OBJECT and not named.is_empty():
+		return named
+	if type == TYPE_NIL:
+		return "Variant" if Read.as_int(info.get("usage", 0)) & PROPERTY_USAGE_NIL_IS_VARIANT else nil_name
+	return type_string(type)
 
 
 func _properties_of(class_name_str: String, include_inherited: bool) -> Array[Dictionary]:
@@ -314,6 +333,7 @@ func _properties_of(class_name_str: String, include_inherited: bool) -> Array[Di
 			{
 				"name": p.get("name", ""),
 				"type": p.get("type", 0),
+				"type_name": _type_name(p, "Variant"),
 				"class_name": p.get("class_name", ""),
 				"hint": p.get("hint", 0),
 				"hint_string": p.get("hint_string", ""),
@@ -332,7 +352,12 @@ func _signals_of(class_name_str: String, include_inherited: bool) -> Array[Dicti
 		var declared_args: Array = s.get("args", [])
 		for a: Dictionary in declared_args:
 			sig_args.append(
-				{"name": a.get("name", ""), "type": a.get("type", 0), "class_name": a.get("class_name", "")}
+				{
+					"name": a.get("name", ""),
+					"type": a.get("type", 0),
+					"type_name": _type_name(a, "Variant"),
+					"class_name": a.get("class_name", "")
+				}
 			)
 		signals.append({"name": s.get("name", ""), "args": sig_args})
 
