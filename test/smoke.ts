@@ -61,7 +61,10 @@ async function main(): Promise<void> {
   const configuredPort = Number.parseInt(process.env['GDHARNESS_BRIDGE_PORT'] ?? '', 10);
   const port = Number.isInteger(configuredPort) && configuredPort > 0 ? configuredPort : await reservePort();
 
+  // The 2025 handshake, which every other suite no longer sends: the 2026 opening is checked below
+  // through the SDK's own client.
   const server = new ServerProcess({
+    era: 'legacy',
     env: {
       GODOT_PATH: process.env['GODOT_PATH'] ?? process.execPath,
       GDHARNESS_BRIDGE_PORT: String(port),
