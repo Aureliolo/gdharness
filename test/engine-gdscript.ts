@@ -1022,6 +1022,44 @@ function testOperations(godotPath: string, projectDir: string): void {
     }
   }
 
+  // Only faults fail a check. The fixture keeps no res://scenes, res://scripts or res://assets and has
+  // no export presets, which failed two checks and cost a grade: a layout Godot's own guidance
+  // advises against, and presets a project in the making has no need of yet.
+  assert.equal(
+    get(health, 'checks', 'structure', 'passed'),
+    true,
+    `no layout is asked for: ${JSON.stringify(health)}`,
+  );
+  assert.equal(
+    get(health, 'checks', 'config', 'passed'),
+    true,
+    `no presets is no fault: ${JSON.stringify(health)}`,
+  );
+  assert.ok(
+    asArray(get(health, 'recommendations')).some((said) =>
+      /No export presets are configured/.test(String(said)),
+    ),
+    `and the missing presets are still recommended: ${JSON.stringify(get(health, 'recommendations'))}`,
+  );
+  const noted = join(projectDir, 'noted_for_later.gd');
+  writeFileSync(noted, 'extends Node\n\n\n# TODO: something later\nfunc later() -> void:\n\tpass\n');
+  try {
+    const withNotes = operation('get_project_health', { categories: ['scripts'] });
+    assert.equal(
+      get(withNotes, 'checks', 'scripts', 'passed'),
+      true,
+      `a TODO fails nothing: ${JSON.stringify(withNotes)}`,
+    );
+    assert.ok(
+      asArray(get(withNotes, 'recommendations')).some((said) =>
+        /scripts have TODO or FIXME comments/.test(String(said)),
+      ),
+      `and is said as something to look at: ${JSON.stringify(withNotes)}`,
+    );
+  } finally {
+    rmSync(noted);
+  }
+
   // A main scene named by a UID nothing resolves is said to be that, not a file that does not exist.
   operation('set_project_setting', { setting: 'application/run/main_scene', value: 'uid://b0gusb0gusb0g' });
   try {
