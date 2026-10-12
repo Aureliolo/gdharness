@@ -29,7 +29,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
-import { asArray, asNumber, asObject, asString, get, lastJsonLine } from './support/json.js';
+import { asArray, asNumber, asObject, asString, get, lastJsonLine, text } from './support/json.js';
 import { solidPng } from './support/png.js';
 import { sweep } from './support/sweep.js';
 
@@ -729,7 +729,28 @@ function testOperations(godotPath: string, projectDir: string): void {
     value: { _type: 'Vector2', x: 3, y: 4 },
   });
   assert.equal(get(written, 'was_new'), true);
+  assert.equal(get(written, 'was_default'), false, 'a setting nobody registers has no default');
   assert.equal(get(written, 'saved'), true);
+  // A setting the engine registers is there at its default before any file sets it, which is new to
+  // the file all the same, and one the file sets is not.
+  const described = operation('set_project_setting', {
+    setting: 'application/config/description',
+    value: 'A fixture',
+  });
+  assert.deepEqual(
+    [get(described, 'old_value'), get(described, 'was_new'), get(described, 'was_default')],
+    ['', true, true],
+    `a registered setting at its default is new to the file: ${JSON.stringify(described)}`,
+  );
+  const renamed = operation('set_project_setting', {
+    setting: 'application/config/name',
+    value: 'GdharnessEngineFixture',
+  });
+  assert.deepEqual(
+    [get(renamed, 'old_value'), get(renamed, 'was_new'), get(renamed, 'was_default')],
+    ['GdharnessEngineFixture', false, false],
+    `one the file sets is not: ${JSON.stringify(renamed)}`,
+  );
   assert.equal(
     get(written, 'new_value', '_type'),
     'Vector2',
@@ -833,10 +854,21 @@ function testOperations(godotPath: string, projectDir: string): void {
     'res://fixture_scene.tscn',
   );
 
+  // Scripts and a scene and nothing the engine imports: none counted, and said why rather than
+  // left to read as a walk that found nothing.
+  const nothingImported = operation('get_import_status', {});
+  assert.equal(get(nothingImported, 'summary', 'total'), 0, 'scripts and scenes are not imported');
+  assert.match(
+    text(get(nothingImported, 'note')),
+    /loads scripts and scenes as they are/,
+    `and the answer says so: ${JSON.stringify(nothingImported)}`,
+  );
+
   // The import pipeline reads and writes the .import sidecar, which is a ConfigFile.
   writeImportedResource(projectDir);
   const status = operation('get_import_status', { include_up_to_date: true });
   assert.equal(get(status, 'summary', 'total'), 1, 'the one importable resource should be found');
+  assert.equal(get(status, 'note'), undefined, 'with something imported there is nothing to explain');
   assert.equal(get(status, 'resources', 0, 'path'), 'res://art.png');
   assert.equal(get(status, 'resources', 0, 'import_file_exists'), true);
 
@@ -988,6 +1020,44 @@ function testOperations(godotPath: string, projectDir: string): void {
         `${category}'s ${JSON.stringify(detail)} should be an issue: ${JSON.stringify(get(health, 'issues'))}`,
       );
     }
+  }
+
+  // Only faults fail a check. The fixture keeps no res://scenes, res://scripts or res://assets and has
+  // no export presets, which failed two checks and cost a grade: a layout Godot's own guidance
+  // advises against, and presets a project in the making has no need of yet.
+  assert.equal(
+    get(health, 'checks', 'structure', 'passed'),
+    true,
+    `no layout is asked for: ${JSON.stringify(health)}`,
+  );
+  assert.equal(
+    get(health, 'checks', 'config', 'passed'),
+    true,
+    `no presets is no fault: ${JSON.stringify(health)}`,
+  );
+  assert.ok(
+    asArray(get(health, 'recommendations')).some((said) =>
+      String(said).includes('No export presets are configured'),
+    ),
+    `and the missing presets are still recommended: ${JSON.stringify(get(health, 'recommendations'))}`,
+  );
+  const noted = join(projectDir, 'noted_for_later.gd');
+  writeFileSync(noted, 'extends Node\n\n\n# TODO: something later\nfunc later() -> void:\n\tpass\n');
+  try {
+    const withNotes = operation('get_project_health', { categories: ['scripts'] });
+    assert.equal(
+      get(withNotes, 'checks', 'scripts', 'passed'),
+      true,
+      `a TODO fails nothing: ${JSON.stringify(withNotes)}`,
+    );
+    assert.ok(
+      asArray(get(withNotes, 'recommendations')).some((said) =>
+        String(said).includes('scripts have TODO or FIXME comments'),
+      ),
+      `and is said as something to look at: ${JSON.stringify(withNotes)}`,
+    );
+  } finally {
+    rmSync(noted);
   }
 
   // A main scene named by a UID nothing resolves is said to be that, not a file that does not exist.
@@ -1343,6 +1413,24 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(classInfo, 'parent_class'), 'Node2D');
   assert.ok(asNumber(get(classInfo, 'methods_count')) > 0);
   assert.ok(named(get(classInfo, 'properties'), 'zoom'));
+
+  // Every type named as well as numbered: the number is the engine's enum, which reads as nothing to
+  // somebody who has not got it to hand. One member for each way a name is arrived at.
+  const memberOf = (className: string, member: string): unknown =>
+    get(operation('query_class_info', { class_name: className, member }), 'found', 0, 'member');
+  assert.equal(get(memberOf('Node2D', 'position'), 'type_name'), 'Vector2', 'a value type by its own name');
+  assert.equal(get(memberOf('Node', 'get_node'), 'return', 'type_name'), 'Node', 'an object by its class');
+  assert.equal(get(memberOf('Object', 'get'), 'return', 'type_name'), 'Variant', 'anything as Variant');
+  assert.equal(
+    get(memberOf('Node', 'queue_free'), 'return', 'type_name'),
+    'void',
+    'nothing returned as void',
+  );
+  assert.equal(
+    get(memberOf('Node', 'add_child'), 'args', 0, 'type_name'),
+    'Node',
+    'an argument named the same way',
+  );
 
   const inheritance = operation('inspect_inheritance', { class_name: 'Node2D' });
   assert.ok(asArray(get(inheritance, 'ancestors')).includes('CanvasItem'));
