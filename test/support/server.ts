@@ -193,6 +193,45 @@ function refuseAStaleBuild(entry: string): void {
 }
 
 /**
+ * The environment a test server is spawned with, and the runtime directory it was given, or null
+ * when [param named] names its own. For a fixture that spawns the server some other way, such as
+ * through an SDK client's transport; it sweeps the directory itself when done.
+ */
+export function testServerEnvironment(named: Record<string, string> | undefined): {
+  env: Record<string, string>;
+  runtimeDir: string | null;
+} {
+  // A runtime directory of its own, unless the fixture names one. The default is shared by
+  // everything on this machine that speaks gdharness: one directory per user, holding the note
+  // that says which process a run is. A server started without a project of its own reads any
+  // note it finds there as its own and ends that run before starting another, so a test suite
+  // run on a developer's machine killed another project's bench six times in fifty minutes,
+  // silently, while its owner bisected their own code looking for the cause.
+  //
+  // Here rather than in each fixture, because the fixture that forgets is the one that does it,
+  // and what it costs is never its own run.
+  const runtimeDir = named?.['GDHARNESS_RUNTIME_DIR'] === undefined ? runtimeDirForTest() : null;
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
+  return {
+    env: {
+      ...inherited,
+      ...(runtimeDir === null ? {} : { GDHARNESS_RUNTIME_DIR: runtimeDir }),
+      // No update check either, unless the fixture is about one. A server whose version is
+      // behind whatever is published rides a second JSON document on its next answer, so every
+      // fixture that parses an answer starts failing the moment a release goes out and keeps
+      // failing until its branch takes the version bump. That is the suite depending on the
+      // network and on today's date, and it cost an afternoon's confusion once.
+      GDHARNESS_NO_UPDATE_CHECK: '1',
+      ...reservedPortsFor(named),
+      ...named,
+    },
+    runtimeDir,
+  };
+}
+
+/**
  * The built server as a child process speaking JSON-RPC over stdio.
  *
  * Responses are matched by id as they arrive rather than read after a fixed sleep, so a test
@@ -214,32 +253,13 @@ export class ServerProcess {
   readonly runtimeDir: string | null;
 
   constructor(options: ServerOptions = {}) {
-    // A runtime directory of its own, unless the fixture names one. The default is shared by
-    // everything on this machine that speaks gdharness: one directory per user, holding the note
-    // that says which process a run is. A server started without a project of its own reads any
-    // note it finds there as its own and ends that run before starting another, so a test suite
-    // run on a developer's machine killed another project's bench six times in fifty minutes,
-    // silently, while its owner bisected their own code looking for the cause.
-    //
-    // Here rather than in each fixture, because the fixture that forgets is the one that does it,
-    // and what it costs is never its own run.
-    this.runtimeDir = options.env?.['GDHARNESS_RUNTIME_DIR'] === undefined ? runtimeDirForTest() : null;
     const entry = options.entry ?? 'build/index.js';
     refuseAStaleBuild(entry);
+    const { env, runtimeDir } = testServerEnvironment(options.env);
+    this.runtimeDir = runtimeDir;
     this.child = spawn(process.execPath, [entry, ...(options.args ?? [])], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        ...(this.runtimeDir === null ? {} : { GDHARNESS_RUNTIME_DIR: this.runtimeDir }),
-        // No update check either, unless the fixture is about one. A server whose version is
-        // behind whatever is published rides a second JSON document on its next answer, so every
-        // fixture that parses an answer starts failing the moment a release goes out and keeps
-        // failing until its branch takes the version bump. That is the suite depending on the
-        // network and on today's date, and it cost an afternoon's confusion once.
-        GDHARNESS_NO_UPDATE_CHECK: '1',
-        ...reservedPortsFor(options.env),
-        ...options.env,
-      },
+      env,
     });
     this.child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString();

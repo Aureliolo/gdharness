@@ -9,10 +9,11 @@
  * working one.
  */
 
+import type { JSONValue } from '@modelcontextprotocol/server';
 import { dictionary } from './dictionary.js';
 import type { MCPToolDefinition } from './server-types.js';
 
-type JsonSchema = Readonly<Record<string, unknown>>;
+type JsonSchema = Readonly<Record<string, JSONValue>>;
 
 /**
  * A parameter's schema, and which ops read it.
@@ -321,7 +322,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: PROJECT_PATH,
       include: {
         type: 'array',
-        items: { type: 'string', enum: PROJECT_INFO_SECTIONS },
+        items: { type: 'string', enum: [...PROJECT_INFO_SECTIONS] },
         description:
           'Extra sections: registered autoloads, addons and whether each is enabled, export presets, the audio bus layout, a health report, or export validation.',
       },
@@ -1719,7 +1720,7 @@ function describeOperations(spec: ToolSpec): string {
 /** The specs as the protocol carries them. */
 export function buildToolDefinitions(): MCPToolDefinition[] {
   return TOOL_SPECS.map((spec) => {
-    const properties: Record<string, unknown> = {};
+    const properties: Record<string, JSONValue> = {};
     if (spec.operations) {
       properties['op'] = {
         type: 'string',

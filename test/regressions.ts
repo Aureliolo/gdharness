@@ -2429,7 +2429,7 @@ async function testACancelledFolderStopsAsking(): Promise<void> {
   }
 }
 
-function lspPayload(answer: { content: { text: string }[] }): unknown {
+function lspPayload(answer: { content: { text?: string }[] }): unknown {
   return JSON.parse(answer.content[0]?.text ?? '{}') as unknown;
 }
 

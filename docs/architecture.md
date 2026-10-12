@@ -265,6 +265,10 @@ being written.
                             `- spawn -->  godot --headless   one engine per call
 ```
 
+The agent's side is MCP over stdio, in either protocol era: the 2026-07-28 revision, which opens
+with `server/discover` and carries an envelope on every request, and the 2025 revisions, which open
+with `initialize`. The client's first message decides which, and the tools answer the same in both.
+
 `gdharness_editor`, the language server and the debug adapter are all inside the Godot editor you
 have open. `gdharness_runtime` is inside the running game. The spawned engine opens nothing and
 exits when the call is answered.

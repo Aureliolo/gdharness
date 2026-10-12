@@ -1,11 +1,6 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import {
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ReadResourceRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { answerJson } from './answer-json.js';
 import { emptyRecord } from './dictionary.js';
 import { Refusal } from './errors.js';
@@ -358,15 +353,15 @@ export function setupResourceHandlers(mcp: McpServer, getProjectPath: () => stri
   // high-level helper builds.
   const server = mcp.server;
 
-  server.setRequestHandler(ListResourcesRequestSchema, () => ({
+  server.setRequestHandler('resources/list', () => ({
     resources: STATIC_RESOURCES,
   }));
 
-  server.setRequestHandler(ListResourceTemplatesRequestSchema, () => ({
+  server.setRequestHandler('resources/templates/list', () => ({
     resourceTemplates: RESOURCE_TEMPLATES,
   }));
 
-  server.setRequestHandler(ReadResourceRequestSchema, (request) => {
+  server.setRequestHandler('resources/read', (request) => {
     const uri = request.params.uri;
 
     try {

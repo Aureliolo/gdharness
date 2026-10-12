@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
+import type { Tool } from '@modelcontextprotocol/server';
 import type { GameLog } from './game-log.js';
 import type { EditorPlay } from './run-record.js';
 
@@ -221,14 +222,12 @@ export type OperationParams = Record<string, unknown>;
 
 /**
  * One block of a tool result. `text` carries JSON or prose; `data` plus `mimeType` carry a
- * base64 payload, which is how a screenshot comes back.
+ * base64 payload, which is how a screenshot comes back. An image declares `text` as absent so
+ * that reading the first block's text needs no narrowing.
  */
-interface ToolResponseContent {
-  type: string;
-  text?: string;
-  data?: string;
-  mimeType?: string;
-}
+type ToolResponseContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string; text?: never };
 
 /**
  * What every tool handler returns. `isError` marks a handled failure, not a thrown one. A type
@@ -239,8 +238,4 @@ export type ToolResponse = {
   isError?: boolean;
 };
 
-export interface MCPToolDefinition {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
+export type MCPToolDefinition = Tool;
