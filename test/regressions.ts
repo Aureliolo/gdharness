@@ -31163,6 +31163,18 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     // When the server first asked about the scan in the call under way, which is on its own clock
     // rather than this one's: a request takes a while to reach it, a loaded machine a while longer.
     const scanAsked: { first: number | null } = { first: null };
+    // A scan lasting this long from that first question, or null for one set on this clock. The end
+    // of a scan and the editor's write after it are both placed from the question: with the end
+    // placed from here before the request went, the write landed later than the end by as long as
+    // the request took to arrive, and once that passed half a second the write fell outside the
+    // two seconds the server waits for one after a scan. The server stopped at that deadline, 2505ms
+    // in on a loaded runner, and compared against the cache the editor was about to replace.
+    let scanLastsMs: number | null = null;
+    const scanFor = (ms: number): void => {
+      scanAsked.first = null;
+      scanLastsMs = ms;
+      scanning = () => Date.now() < finishedAt;
+    };
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (!isRecord(message) || message['type'] !== 'tool_invoke') {
@@ -31171,6 +31183,10 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       const isScanStatus = String(message['tool']) === 'scan_status';
       if (isScanStatus && scanAsked.first === null) {
         scanAsked.first = Date.now();
+        if (scanLastsMs !== null) {
+          finishedAt = scanAsked.first + scanLastsMs;
+          scanLastsMs = null;
+        }
       }
       const reply = (): void => {
         const result = isScanStatus
@@ -31229,9 +31245,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
 
     // A scan for a second, then over, and the cache written a second and a half after that: later
     // than a headless game takes to reach _ready, so a start that did not wait reads the old file.
-    const scanEnds = Date.now() + 1_000;
-    scanning = () => Date.now() < scanEnds;
-    finishedAt = scanEnds;
+    scanFor(1_000);
     const writing = editorWritesAfter(2_500, WRITTEN_AFTER_THE_SCAN);
     const waited = await check();
     await writing;
@@ -31282,9 +31296,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     // later, putting back whatever list it holds. The rebuild waits for that write and goes after
     // it, so the file left behind is the rebuild's.
     cacheBeforeTheScan();
-    const rebuildScanEnds = Date.now() + 1_000;
-    scanning = () => Date.now() < rebuildScanEnds;
-    finishedAt = rebuildScanEnds;
+    scanFor(1_000);
     const editorWrites = editorWritesAfter(2_500, WRITTEN_AFTER_THE_SCAN);
     const rebuilt = await server.request(
       'tools/call',
@@ -31305,9 +31317,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
 
     // Any other engine started on the project, which resolves the same classes as it boots.
     cacheBeforeTheScan();
-    const listScanEnds = Date.now() + 1_000;
-    scanning = () => Date.now() < listScanEnds;
-    finishedAt = listScanEnds;
+    scanFor(1_000);
     const listWrite = editorWritesAfter(1_500, WRITTEN_AFTER_THE_SCAN);
     const listed = await server.request(
       'tools/call',
@@ -31341,9 +31351,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     // too early, and the cache the rebuild above had just written landed after that estimate and
     // passed for the editor's write. The loss below was then compared against the file the editor
     // was about to replace, and went unreported.
-    const droppingScanEnds = Date.now() + 1_000;
-    scanning = () => Date.now() < droppingScanEnds;
-    finishedAt = droppingScanEnds;
+    scanFor(1_000);
     answersAfterMs = 1_500;
     const dropping = editorWritesAfter(2_500, EMPTY);
     const afterTheDrop = await server.request(
