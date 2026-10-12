@@ -1,10 +1,10 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
-import type { McpServer } from '@modelcontextprotocol/server';
 import { answerJson } from './answer-json.js';
 import { emptyRecord } from './dictionary.js';
 import { Refusal } from './errors.js';
 import { isWithinRoot, resolveWithinProject } from './paths.js';
+import type { ProtocolServer } from './server-types.js';
 
 const STATIC_RESOURCES = [
   {
@@ -347,12 +347,10 @@ function readResourceText(
   };
 }
 
-export function setupResourceHandlers(mcp: McpServer, getProjectPath: () => string | null): void {
-  // Registered on the low-level protocol object rather than through registerResource: the
+export function setupResourceHandlers(server: ProtocolServer, getProjectPath: () => string | null): void {
+  // Registered on the low-level server rather than through McpServer's registerResource: the
   // godot:// space is a handful of hand-rolled URI templates, not the static list the
   // high-level helper builds.
-  const server = mcp.server;
-
   server.setRequestHandler('resources/list', () => ({
     resources: STATIC_RESOURCES,
   }));

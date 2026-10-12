@@ -222,6 +222,7 @@ import type {
   GodotProcess,
   MCPToolDefinition,
   OperationParams,
+  ProtocolServer,
   SpawnedGame,
   ToolResponse,
 } from './server-types.js';
@@ -3174,26 +3175,27 @@ class GodotServer {
    * changes lives on this server, which outlives every protocol object made for it.
    */
   private protocol(): McpServer {
-    // Registration goes through the protocol object rather than McpServer's registerTool: the
+    // Handlers go on the low-level server McpServer wraps rather than through registerTool: the
     // schemas are authored as data in tool-definitions.ts and validated against the same data
-    // before dispatch, which is the "advanced use case" McpServer's own docs point at `.server` for.
-    const mcp = new McpServer(
-      { name: 'gdharness', version: SERVER_VERSION },
-      { capabilities: { tools: {}, resources: {} } },
-    );
-    this.setupToolHandlers(mcp);
+    // before dispatch. The capabilities are declared there too, because McpServer handed a tools
+    // capability installs handlers of its own and tells clients the list can change, which this one
+    // never does.
+    const mcp = new McpServer({ name: 'gdharness', version: SERVER_VERSION });
+    const protocol = mcp.server;
+    protocol.registerCapabilities({ tools: {}, resources: {} });
+    this.setupToolHandlers(protocol);
     // The project this server serves first, so a call naming another project's game does not move
     // what the resources read; the last project named only for a server that can name none.
-    setupResourceHandlers(mcp, () => this.ourProject() ?? this.lastProjectPath);
-    mcp.server.onerror = (error) => {
+    setupResourceHandlers(protocol, () => this.ourProject() ?? this.lastProjectPath);
+    protocol.onerror = (error) => {
       console.error('[MCP Error]', error);
     };
     return mcp;
   }
 
-  private setupToolHandlers(mcp: McpServer): void {
-    mcp.server.setRequestHandler('tools/list', () => ({ tools: this.tools }));
-    mcp.server.setRequestHandler('tools/call', async (request, ctx) => {
+  private setupToolHandlers(protocol: ProtocolServer): void {
+    protocol.setRequestHandler('tools/list', () => ({ tools: this.tools }));
+    protocol.setRequestHandler('tools/call', async (request, ctx) => {
       this.logDebug(`Handling tool request: ${request.params.name}`);
       const spec = toolSpec(request.params.name);
       if (!spec) {

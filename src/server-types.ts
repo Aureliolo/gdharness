@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
-import type { Tool } from '@modelcontextprotocol/server';
+import type { McpServer, Tool } from '@modelcontextprotocol/server';
 import type { GameLog } from './game-log.js';
 import type { EditorPlay } from './run-record.js';
 
@@ -239,3 +239,6 @@ export type ToolResponse = {
 };
 
 export type MCPToolDefinition = Tool;
+
+/** The low-level protocol server handlers are registered on, as McpServer exposes it. */
+export type ProtocolServer = McpServer['server'];
