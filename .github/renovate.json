@@ -55,6 +55,15 @@
       ]
     },
     {
+      "description": "The Bun in packageManager, which the install action requires to name the Bun it pins: raised alone, the action's three tags moved to 1.4.3 and every job stopped at the install, refusing the disagreement. Same depName and release as those tags, so the two land in the same pull request.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^package\\.json$/"],
+      "matchStrings": ["\"packageManager\": \"bun@(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\""],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "oven-sh/bun",
+      "extractVersionTemplate": "^bun-v(?<version>.+)$"
+    },
+    {
       "description": "A tag with the commit it names on the next line, for a repository fetched as an archive of that commit: gdUnit4. The archive's own digest sits under it and is rewritten by hand when the raise fails, as the installer says.",
       "customType": "regex",
       "managerFilePatterns": ["/^scripts/.+\\.ts$/"],
