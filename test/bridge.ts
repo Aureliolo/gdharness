@@ -16,7 +16,7 @@ import { type RawData, WebSocket } from 'ws';
 import { RUNTIME_PROTOCOL } from '../src/runtime-client.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { shippedRuntimeDigest } from '../src/setup.js';
-import { asArray, get, text } from './support/json.js';
+import { asArray, asObject, get, text } from './support/json.js';
 import {
   isRecord,
   type JsonRpcMessage,
@@ -348,12 +348,28 @@ async function main(): Promise<void> {
     // The protocol handshake.
     const init = await server.initialize('bridge-test');
     assert.ok(get(init.result, 'serverInfo', 'name'), 'initialize reports a server name');
-    // An advertised capability is one a client will call, so advertising prompts the server does
-    // not serve is a promise it breaks on the first request.
-    assert.equal(
-      get(init.result, 'capabilities', 'prompts'),
-      undefined,
-      'the server does not advertise prompts',
+    // An advertised capability is one a client will call, so each one advertised is asked here: a
+    // capability the server does not serve is a promise it breaks on the first request.
+    const capabilities = get(init.result, 'capabilities');
+    assert.deepEqual(
+      Object.keys(asObject(capabilities, 'capabilities')).sort(),
+      ['completions', 'prompts', 'resources', 'tools'],
+      `the server advertises what it serves and nothing else: ${JSON.stringify(capabilities)}`,
+    );
+    for (const method of ['tools/list', 'resources/list', 'prompts/list']) {
+      const listed = await server.request(method);
+      assert.ok(
+        listed.error === undefined && isRecord(listed.result),
+        `${method} is answered: ${JSON.stringify(listed)}`,
+      );
+    }
+    const completed = await server.request('completion/complete', {
+      ref: { type: 'ref/resource', uri: 'godot://scene/{path}' },
+      argument: { name: 'path', value: '' },
+    });
+    assert.ok(
+      Array.isArray(get(completed.result, 'completion', 'values')),
+      `completion/complete is answered: ${JSON.stringify(completed)}`,
     );
 
     // The whole surface in one page, under names a strict client accepts, each refusing what

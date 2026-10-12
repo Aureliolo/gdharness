@@ -136,7 +136,9 @@ whose executables are world-writable. Releases are cut by CI.
 │   ├── launch.ts          # How a game is started
 │   ├── runtime-client.ts  # Talking to a running game
 │   ├── project-scan.ts    # Reading a project directory without the engine
-│   ├── resources.ts       # MCP resources
+│   ├── resources.ts       # MCP resources, and completing their paths
+│   ├── prompts.ts         # MCP prompts, written as the tool calls they make
+│   ├── server-instructions.ts # What a client puts in front of its agent at connect
 │   ├── harnesses.ts       # Which agent harnesses setup can register the server with
 │   ├── godot-bridge.ts    # Bridge transport to the editor addon
 │   ├── lsp_client.ts      # Godot language server client

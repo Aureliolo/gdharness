@@ -4,6 +4,7 @@ import { answerJson } from './answer-json.js';
 import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { portFromEnv } from './ports.js';
+import type { ToolResponse } from './server-types.js';
 
 /** What an editor serves the debug adapter on when nothing has moved it. */
 export const DEFAULT_DAP_PORT = 6006;
@@ -104,12 +105,6 @@ export interface RefusedBreakpoint {
 function said(body: DAPBody | undefined, field: string): string {
   const value = body?.[field];
   return typeof value === 'string' ? value : '';
-}
-
-interface ToolResponse {
-  content: { type: string; text: string }[];
-  /** Set on a handled failure, so a caller does not read the reason as the answer. */
-  isError?: boolean;
 }
 
 interface ToolArgs {

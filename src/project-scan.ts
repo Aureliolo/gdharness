@@ -4,7 +4,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 
 /** Directories that are never part of a project's own files, and are not spelled with a dot. */
 const SKIPPED = new Set(['node_modules']);
@@ -98,6 +98,32 @@ export function projectStructure(projectPath: string): ProjectStructure {
   };
   visit(projectPath);
   return structure;
+}
+
+/**
+ * The project's files whose extension is one of [param extensions] (with the dot, lower case),
+ * project-relative with forward slashes and sorted, stepping over what the engine steps over.
+ */
+export function projectFiles(projectPath: string, extensions: readonly string[]): string[] {
+  const found: string[] = [];
+  const visit = (directory: string, prefix: string): void => {
+    if (steppedOver(directory)) {
+      return;
+    }
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (skipped(entry.name)) {
+        continue;
+      }
+      const spelled = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) {
+        visit(join(directory, entry.name), spelled);
+      } else if (entry.isFile() && extensions.includes(extname(entry.name).toLowerCase())) {
+        found.push(spelled);
+      }
+    }
+  };
+  visit(projectPath, '');
+  return found.sort();
 }
 
 /** The extensions Godot mints a `.uid` sidecar for. */
