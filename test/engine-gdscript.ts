@@ -729,7 +729,28 @@ function testOperations(godotPath: string, projectDir: string): void {
     value: { _type: 'Vector2', x: 3, y: 4 },
   });
   assert.equal(get(written, 'was_new'), true);
+  assert.equal(get(written, 'was_default'), false, 'a setting nobody registers has no default');
   assert.equal(get(written, 'saved'), true);
+  // A setting the engine registers is there at its default before any file sets it, which is new to
+  // the file all the same, and one the file sets is not.
+  const described = operation('set_project_setting', {
+    setting: 'application/config/description',
+    value: 'A fixture',
+  });
+  assert.deepEqual(
+    [get(described, 'old_value'), get(described, 'was_new'), get(described, 'was_default')],
+    ['', true, true],
+    `a registered setting at its default is new to the file: ${JSON.stringify(described)}`,
+  );
+  const renamed = operation('set_project_setting', {
+    setting: 'application/config/name',
+    value: 'GdharnessEngineFixture',
+  });
+  assert.deepEqual(
+    [get(renamed, 'old_value'), get(renamed, 'was_new'), get(renamed, 'was_default')],
+    ['GdharnessEngineFixture', false, false],
+    `one the file sets is not: ${JSON.stringify(renamed)}`,
+  );
   assert.equal(
     get(written, 'new_value', '_type'),
     'Vector2',
@@ -1354,6 +1375,24 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(classInfo, 'parent_class'), 'Node2D');
   assert.ok(asNumber(get(classInfo, 'methods_count')) > 0);
   assert.ok(named(get(classInfo, 'properties'), 'zoom'));
+
+  // Every type named as well as numbered: the number is the engine's enum, which reads as nothing to
+  // somebody who has not got it to hand. One member for each way a name is arrived at.
+  const memberOf = (className: string, member: string): unknown =>
+    get(operation('query_class_info', { class_name: className, member }), 'found', 0, 'member');
+  assert.equal(get(memberOf('Node2D', 'position'), 'type_name'), 'Vector2', 'a value type by its own name');
+  assert.equal(get(memberOf('Node', 'get_node'), 'return', 'type_name'), 'Node', 'an object by its class');
+  assert.equal(get(memberOf('Object', 'get'), 'return', 'type_name'), 'Variant', 'anything as Variant');
+  assert.equal(
+    get(memberOf('Node', 'queue_free'), 'return', 'type_name'),
+    'void',
+    'nothing returned as void',
+  );
+  assert.equal(
+    get(memberOf('Node', 'add_child'), 'args', 0, 'type_name'),
+    'Node',
+    'an argument named the same way',
+  );
 
   const inheritance = operation('inspect_inheritance', { class_name: 'Node2D' });
   assert.ok(asArray(get(inheritance, 'ancestors')).includes('CanvasItem'));
