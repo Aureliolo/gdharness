@@ -10,6 +10,7 @@
 [![npm](https://img.shields.io/npm/v/gdharness?logo=npm&logoColor=white&label=npm&color=cb3837)](https://www.npmjs.com/package/gdharness)
 [![Release](https://img.shields.io/github/v/release/Aureliolo/gdharness?display_name=tag&sort=semver)](https://github.com/Aureliolo/gdharness/releases)
 [![MCP server](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
+[![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-2f6f4e?style=flat)](https://modelcontextprotocol.io/specification/2026-07-28)
 [![Made for Godot 4.7+](https://img.shields.io/badge/Made%20for-Godot%204.7%2B-478CBF?style=flat&logo=godot%20engine&logoColor=white)](https://godotengine.org)
 [![Node](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAureliolo%2Fgdharness%2Fmain%2Fpackage.json&query=%24.engines.node&label=node&color=5fa04e&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Bun](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAureliolo%2Fgdharness%2Fmain%2Fpackage.json&query=%24.engines.bun&label=bun&color=f9f1e1&logo=bun&logoColor=black)](https://bun.sh/)
@@ -55,7 +56,7 @@ emptily, so a call that succeeded is a call that was understood.
 |           |                                                                                      |
 | --------- | ------------------------------------------------------------------------------------ |
 | Needs     | Godot 4.7 or newer, Node 22 or newer. Runs under Bun 1.4 too.                        |
-| Surface   | 30 tools named `domain_verb`, and 4 `godot://` resources                             |
+| Surface   | 30 tools named `domain_verb`, 4 `godot://` resources and 3 prompts                   |
 | Reaches   | The editor that is open, a game it is playing, and the project on disk               |
 | Harnesses | 35, written inside the project wherever the harness has a project config             |
 | Skill     | Written to `.agents/skills`, which every major harness reads                         |

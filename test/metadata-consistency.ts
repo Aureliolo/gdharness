@@ -6,6 +6,7 @@ import process from 'node:process';
 import pkg from '../package.json' with { type: 'json' };
 import serverManifest from '../server.json' with { type: 'json' };
 import { HARNESSES } from '../src/harnesses.js';
+import { PROMPT_SPECS } from '../src/prompts.js';
 import { RESOURCE_COUNT } from '../src/resources.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { isRecord } from './support/json-rpc.js';
@@ -82,9 +83,14 @@ assert.equal(
   'the README tool count should match the tools the server answers',
 );
 assert.equal(
-  claimed(/and (\d+) `godot:\/\/` resources/, 'how many resources there are'),
+  claimed(/, (\d+) `godot:\/\/` resources/, 'how many resources there are'),
   RESOURCE_COUNT,
   'the README resource count should match the resources the server serves',
+);
+assert.equal(
+  claimed(/resources and (\d+) prompts/, 'how many prompts there are'),
+  PROMPT_SPECS.length,
+  'the README prompt count should match the prompts the server offers',
 );
 assert.equal(
   claimed(/\|\s*Harnesses\s*\|\s*(\d+),/, 'how many harnesses it knows'),

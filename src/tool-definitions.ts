@@ -9,10 +9,11 @@
  * working one.
  */
 
+import type { JSONValue, ToolAnnotations } from '@modelcontextprotocol/server';
 import { dictionary } from './dictionary.js';
 import type { MCPToolDefinition } from './server-types.js';
 
-type JsonSchema = Readonly<Record<string, unknown>>;
+type JsonSchema = Readonly<Record<string, JSONValue>>;
 
 /**
  * A parameter's schema, and which ops read it.
@@ -32,22 +33,48 @@ type JsonSchema = Readonly<Record<string, unknown>>;
  */
 type Parameter = JsonSchema & { readonly ops?: readonly string[]; readonly blank?: boolean };
 
+/**
+ * What a call does to the project, the editor, the game or the machine.
+ *
+ * `read` changes nothing. `additive` adds or starts something and overwrites and removes nothing
+ * itself: a new node, a new animation that refuses a name in use, a game run, a click (what the
+ * game then does with it is the game's). `destructive` can overwrite, remove or end something that
+ * was there before. Where an op can do either, it is
+ * destructive: a client asks before a destructive call, and asking once too often costs a click
+ * where asking once too rarely costs somebody's work.
+ */
+type Effect = 'read' | 'additive' | 'destructive';
+
 interface OperationSpec {
   /** One line on what the op does, for the description. */
   readonly summary: string;
+  readonly effect: Effect;
   /** Arguments the op needs on top of the tool's own. */
   readonly requires: readonly string[];
 }
 
-export interface ToolSpec {
+interface ToolSpecBase {
   readonly name: string;
+  /** What a client shows a person in place of the name. */
+  readonly title: string;
   readonly description: string;
   readonly parameters: Readonly<Record<string, Parameter>>;
   /** Arguments every call needs, whatever the op. */
   readonly requires: readonly string[];
-  readonly operations?: Readonly<Record<string, OperationSpec>>;
   /** The op assumed when none is given; absent means op is required. */
   readonly defaultOperation?: string;
+}
+
+/** A tool's effect is its ops' when it has them, so it is declared in one place or the other. */
+export type ToolSpec = ToolSpecBase &
+  (
+    | { readonly operations: Readonly<Record<string, OperationSpec>>; readonly effect?: never }
+    | { readonly operations?: never; readonly effect: Effect }
+  );
+
+/** The effects of every call [spec] can make. */
+export function effectsOf(spec: ToolSpec): Effect[] {
+  return spec.operations ? Object.values(spec.operations).map((op) => op.effect) : [spec.effect];
 }
 
 /**
@@ -315,13 +342,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // -------------------------------------------------------------------------------------------
   {
     name: 'project_info',
+    title: 'Project info',
+    effect: 'read',
     description:
       'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets it holds, with optional sections on top.',
     parameters: {
       projectPath: PROJECT_PATH,
       include: {
         type: 'array',
-        items: { type: 'string', enum: PROJECT_INFO_SECTIONS },
+        items: { type: 'string', enum: [...PROJECT_INFO_SECTIONS] },
         description:
           'Extra sections: registered autoloads, addons and whether each is enabled, export presets, the audio bus layout, a health report, or export validation.',
       },
@@ -336,6 +365,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'project_settings',
+    title: 'Project settings',
     description:
       "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start.",
     parameters: {
@@ -400,27 +430,43 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       // Neither is required because either will do, and which one is missing is a better refusal
       // than a list of both: the engine answers that, since it is what reads them.
-      get: { summary: 'read one setting, or every setting under prefix', requires: [] },
-      set: { summary: 'write one setting', requires: ['setting', 'value'] },
-      add_autoload: { summary: 'register an autoload singleton', requires: ['name', 'path'] },
-      remove_autoload: { summary: 'unregister an autoload', requires: ['name'] },
-      set_main_scene: { summary: 'choose the scene the game starts in', requires: ['scenePath'] },
+      get: { effect: 'read', summary: 'read one setting, or every setting under prefix', requires: [] },
+      set: { effect: 'destructive', summary: 'write one setting', requires: ['setting', 'value'] },
+      add_autoload: {
+        effect: 'additive',
+        summary: 'register an autoload singleton',
+        requires: ['name', 'path'],
+      },
+      remove_autoload: { effect: 'destructive', summary: 'unregister an autoload', requires: ['name'] },
+      set_main_scene: {
+        effect: 'destructive',
+        summary: 'choose the scene the game starts in',
+        requires: ['scenePath'],
+      },
       add_input_action: {
+        effect: 'additive',
         summary: 'register an input action and its events',
         requires: ['actionName', 'events'],
       },
-      enable_plugin: { summary: 'enable an addon', requires: ['pluginName'] },
-      disable_plugin: { summary: 'disable an addon', requires: ['pluginName'] },
-      add_audio_bus: { summary: 'add an audio bus', requires: ['busName'] },
+      enable_plugin: { effect: 'destructive', summary: 'enable an addon', requires: ['pluginName'] },
+      disable_plugin: { effect: 'destructive', summary: 'disable an addon', requires: ['pluginName'] },
+      add_audio_bus: { effect: 'additive', summary: 'add an audio bus', requires: ['busName'] },
       set_audio_bus_effect: {
+        effect: 'destructive',
         summary: 'put an effect in a slot on a bus',
         requires: ['busIndex', 'effectIndex', 'effectType'],
       },
-      set_audio_bus_volume: { summary: 'set a bus volume', requires: ['busIndex', 'volumeDb'] },
+      set_audio_bus_volume: {
+        effect: 'destructive',
+        summary: 'set a bus volume',
+        requires: ['busIndex', 'volumeDb'],
+      },
     },
   },
   {
     name: 'project_search',
+    title: 'Search the project',
+    effect: 'read',
     description:
       'Searches text or a regular expression across project files and returns file paths with line numbers. What the engine steps over is not searched: directories spelled with a dot, node_modules, and any directory holding a .gdignore. A vendored engine or an export directory is therefore absent from the results rather than matching the code you are looking for in a copy nobody runs.',
     parameters: {
@@ -439,6 +485,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'project_dependencies',
+    title: 'Project dependencies',
+    effect: 'read',
     description: 'What a resource depends on, or what depends on it.',
     parameters: {
       projectPath: PROJECT_PATH,
@@ -465,6 +513,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'project_import',
+    title: 'Asset imports',
     description:
       'The import pipeline: what needs importing, how a resource is imported, reimports, UIDs, and the global class list the editor and the engine read.',
     parameters: {
@@ -496,31 +545,37 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: ['projectPath'],
     operations: {
       status: {
+        effect: 'read',
         summary:
           'which resources are outdated or failed, or one resource with resourcePath, each with its reason. Judged by content with the checks the editor makes before it reimports: a sidecar changed since its import, as setting an option without a reimport leaves it; a sidecar with no uid or written for another file; an output under .godot/imported that is gone (missing_outputs) or changed; a source whose hash differs from the one its import recorded, or with no record. Beyond the editor, a glTF scene whose import does not depend on an image it names, because it was built before that image was imported (imported_without; a scene whose import runs an import script is not judged on images). failed is an import that failed, which the editor never tries again on its own. Without resourcePath, a sidecar whose source is gone is listed as missing_source',
         requires: [],
       },
-      options: { summary: 'the import options of one resource', requires: ['resourcePath'] },
+      options: { effect: 'read', summary: 'the import options of one resource', requires: ['resourcePath'] },
       set_options: {
+        effect: 'destructive',
         summary: 'change import options in the sidecar, then apply them with a reimport of that resource',
         requires: ['resourcePath', 'options'],
       },
       reimport: {
+        effect: 'destructive',
         summary:
           "reimport what status says is outdated or failed, one resource with resourcePath, or what is current as well with force. Through the open editor when one serves the project, so it reloads what it holds, waiting for it to finish; otherwise through the engine's own import pass. The editor scans first, since its reimport passes over a file it has not taken in, such as one an installer has just written; what that scan imported is named under importedByTheScan and is not imported again unless force asks. Answered from a second status read: reimported lists what is current now, notReimported what is not, one entry per status and reason with the paths sharing them, and via says which of the two did the work. A whole-project reimport also answers missingSource, the .import files whose source is not beside them, empty when there are none, whether or not anything needed reimporting; one resourcePath is not a walk of the project and leaves it out. stillImporting is an editor that had not finished within timeoutMs",
         requires: [],
       },
       uid: {
+        effect: 'read',
         summary:
           "the UID of one file and where it was read: a script's or shader's .uid file, an imported file's .import, or a scene's or resource's own header",
         requires: ['resourcePath'],
       },
       refresh_uids: {
+        effect: 'additive',
         summary:
           'import the project so every script and shader has its .uid sidecar, and name under uidsCreated the ones this made and under stillWithoutUid the ones the engine would not import: it writes no scene and no script, so a project whose sidecars are all present is left untouched',
         requires: [],
       },
       refresh_classes: {
+        effect: 'destructive',
         summary:
           'rewrite .godot/global_script_class_cache.cfg from the class_name declarations on disk, and name under unseenByEditor any class the editor open on this project still cannot resolve: rewriting the file does not reach the list a running editor loaded, so "added: []" means the file was already right rather than that nothing is wrong. A class the cache held after the last rebuild and had lost when this one began is named under lostSinceLastRebuild: the editor wrote the file without it in between, on a save or a scan, and will again until restarted',
         requires: [],
@@ -529,6 +584,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'project_export',
+    title: 'Export',
     description: 'Export presets and exports.',
     parameters: {
       projectPath: PROJECT_PATH,
@@ -542,12 +598,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath'],
     operations: {
-      list: { summary: 'the presets in export_presets.cfg', requires: [] },
-      run: { summary: 'export with a preset', requires: ['preset', 'outputPath'] },
+      list: { effect: 'read', summary: 'the presets in export_presets.cfg', requires: [] },
+      run: { effect: 'destructive', summary: 'export with a preset', requires: ['preset', 'outputPath'] },
     },
   },
   {
     name: 'project_test',
+    title: 'Run tests',
+    effect: 'additive',
     description:
       "Runs the project's gdUnit4 tests headless and answers with every case that did not pass: where it is, and what the assertion said. Each entry under failed carries its first report as message and detail, and, when it has more than one, every report under reports in the order the case met them: gdUnit4 goes on past a failed assertion, and a case can fail several and then stop on a runtime error, which makes its status error. failures counts the cases that failed an assertion and errors the cases that hit an error, so such a case counts in both. Suites where everything passed are counted rather than listed, and an engine message keeps the frames above gdUnit4 rather than the twenty inside it, so a clean tier answers in a few lines; identical engine messages come back once under engineEntries, with times saying how often they were printed, and engineErrors counts every one. The class list is rebuilt first, so a suite written a moment ago is found, and the rebuild's answer is under classes, with the classes each addon declares counted under addedInAddons and changedInAddons rather than named: a class it puts back that the cache had after the last rebuild is named under classes.lostSinceLastRebuild, which is the editor writing its shorter list over the file on every save until restarted. On Windows and Linux the run gets a user:// of its own, so a suite that saves a game writes nowhere near the saves of the copy somebody plays. On macOS the engine reads user:// off HOME and the run writes where the player keeps theirs, which the answer says under savesNote rather than leaving to be found in a save list. A run that found nothing to run is never called a pass: gdUnit4 exits cleanly for one, so the answer says so and names the path it looked in. A script that does not load stops gdUnit4 before any suite runs: its errors come back in full under scriptErrors, and the scripts that failed only because one they depend on did are listed by path under failedThroughDependency. When they failed on a class whose own script has a parser error, which gdUnit4 never names, that script is checked by the engine and its error comes first under scriptErrors, with the class it declares under declares, and the errors a script has only because that class did not resolve, which the engine reads as Variant, are kept apart under followFromUnresolved. A client that sends a progress token is told as each suite finishes, and at least every twenty seconds through a long one, so an idle limit does not end a long tier. A run that ends without a report, at its timeout or otherwise, names the suites it finished under suitesFinished, the failing ones with their failed cases under suitesFailing, and the one it was in under suiteRunning. When a client cuts a run off, that is kept in the project and the next project_test there carries it under previousRunCut. A run where nothing failed but nodes were left in the tree comes back under warnings, with the count per suite: gdUnit4 decides its verdict on those and keeps them out of its report, so they are read off what it printed. A run whose every case passed is still not called passed when it printed a script error that no case failed on: gdUnit4 fails a case on the script errors its logger sees, and it cannot see a stack overflow, so the cases pass on whatever the faulted calls returned. Those errors come back under uncaughtScriptErrors, and under engineEntries by index with detailUnder rather than with their backtrace a second time; a backtrace that repeats, as a recursion's does, has each repeated frame or cycle of frames written once with the frames it covers and how many times. One raised inside assert_error(...).is_runtime_error is the test's own and does not count, and none count when the project turns off gdUnit4's report/godot/script_error setting. Needs gdUnit4 under addons/gdUnit4.",
     parameters: {
@@ -588,6 +646,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // -------------------------------------------------------------------------------------------
   {
     name: 'scene_create',
+    title: 'Create or save a scene',
     description:
       "Creates a scene file where none is, saves one, or saves a copy under a new path. A save of a scene open in the editor saves the editor's copy, unsaved changes included. Needs the editor connected.",
     parameters: {
@@ -598,14 +657,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath', 'scenePath'],
     operations: {
-      create: { summary: 'a new scene with one root node', requires: [] },
-      save: { summary: 'save the scene as it is in the editor', requires: [] },
-      save_as: { summary: 'save a copy under newPath', requires: ['newPath'] },
+      create: { effect: 'destructive', summary: 'a new scene with one root node', requires: [] },
+      save: { effect: 'destructive', summary: 'save the scene as it is in the editor', requires: [] },
+      save_as: { effect: 'destructive', summary: 'save a copy under newPath', requires: ['newPath'] },
     },
     defaultOperation: 'create',
   },
   {
     name: 'scene_tree',
+    title: 'Scene tree',
+    effect: 'read',
     description:
       'The nodes of a scene file: names, classes and hierarchy, with properties when asked. Needs the editor connected.',
     parameters: {
@@ -618,6 +679,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'scene_node',
+    title: 'Scene nodes',
     description:
       'One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene, and for a node that belongs to a scene this one instances or inherits. Needs the editor connected.',
     parameters: {
@@ -645,13 +707,26 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath', 'scenePath'],
     operations: {
-      add: { summary: 'add a node of any class', requires: ['nodeType', 'nodeName'] },
-      get: { summary: "read a node's properties", requires: ['nodePath'] },
-      set: { summary: 'set properties on a node', requires: ['nodePath', 'properties'] },
-      duplicate: { summary: 'copy a node and its children', requires: ['nodePath', 'newName'] },
-      reparent: { summary: 'move a node under another parent', requires: ['nodePath', 'newParentPath'] },
-      delete: { summary: 'remove a node and its children', requires: ['nodePath'] },
+      add: { effect: 'additive', summary: 'add a node of any class', requires: ['nodeType', 'nodeName'] },
+      get: { effect: 'read', summary: "read a node's properties", requires: ['nodePath'] },
+      set: {
+        effect: 'destructive',
+        summary: 'set properties on a node',
+        requires: ['nodePath', 'properties'],
+      },
+      duplicate: {
+        effect: 'additive',
+        summary: 'copy a node and its children',
+        requires: ['nodePath', 'newName'],
+      },
+      reparent: {
+        effect: 'destructive',
+        summary: 'move a node under another parent',
+        requires: ['nodePath', 'newParentPath'],
+      },
+      delete: { effect: 'destructive', summary: 'remove a node and its children', requires: ['nodePath'] },
       set_tilemap_cells: {
+        effect: 'destructive',
         summary: 'place tiles in a TileMapLayer or TileMap',
         requires: ['nodePath', 'cells'],
       },
@@ -659,6 +734,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'scene_signal',
+    title: 'Scene signals',
     description: 'Signal connections in a scene file. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
@@ -673,18 +749,21 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: ['projectPath', 'scenePath'],
     operations: {
       connect: {
+        effect: 'additive',
         summary: 'connect a signal to a method',
         requires: ['sourceNodePath', 'signalName', 'targetNodePath', 'methodName'],
       },
       disconnect: {
+        effect: 'destructive',
         summary: 'remove a connection',
         requires: ['sourceNodePath', 'signalName', 'targetNodePath', 'methodName'],
       },
-      list: { summary: 'every connection in the scene', requires: [] },
+      list: { effect: 'read', summary: 'every connection in the scene', requires: [] },
     },
   },
   {
     name: 'scene_animation',
+    title: 'Animations',
     description:
       'Animations in an AnimationPlayer and states in an AnimationTree state machine. Needs the editor connected.',
     parameters: {
@@ -724,18 +803,22 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: ['projectPath', 'scenePath'],
     operations: {
       create: {
+        effect: 'additive',
         summary: 'a new animation in an AnimationPlayer',
         requires: ['playerNodePath', 'animationName'],
       },
       add_track: {
+        effect: 'additive',
         summary: 'a property or method track with keyframes',
         requires: ['playerNodePath', 'animationName', 'track'],
       },
       add_state: {
+        effect: 'additive',
         summary: 'a state playing an animation, in an AnimationTree',
         requires: ['animTreePath', 'stateName', 'animationName'],
       },
       connect_states: {
+        effect: 'additive',
         summary: 'a transition between two states',
         requires: ['animTreePath', 'fromState', 'toState'],
       },
@@ -747,6 +830,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // -------------------------------------------------------------------------------------------
   {
     name: 'script_edit',
+    title: 'Edit scripts',
     description:
       "Creates a GDScript file, or adds functions, variables and signals to one. Every declaration written carries a type. Both load what they wrote under the project's own warning settings and answer with parses; the engine's reasons for a refusal come back under engine_messages. create answers with the extends and class_name the engine read, and a script declaring a class_name is put in the project's class list, with registered saying whether it is there. modify makes every addition or none, and answers with the line each one is on in the file written. rename renames a class or a member wherever the engine uses it and writes every file or none. A new name already taken is refused with nothing written, a member's included when a class inheriting it already uses the name in code, as a local or a parameter. changed lists each file with its changed lines as they now read, and leftAlone lists every other whole-word occurrence of the old name with what the tokenizer makes of it (code, string, comment, doc, nodePath, scene, text, or ignored for a file under a .gdignore directory, which is never changed) and, where it is not plain, why: a string that is the old name whole, such as find_children's type or a call's method name, which nothing renames or compiles and which is listed first; a node named like the class; a call on a value whose type the analyser could not tell. A member rename answers under languageServer how many requests it made and how long they took. A comment, documentation line, string or text file line with nothing more to say is given under leftAloneInProse by file, kind and line instead, and code that is certainly another symbol of the same name, a bare name in a file where nothing inherits the member or one the language server resolved to another declaration, under leftAloneOtherSymbols as each why with the files and lines it covers. summary.leftAlone counts each of the three lists beside the total. When those two grouped lists run past 300 lines, they are written with each line's text to a file under the project's .godot directory instead, of which the newest ten are kept, and leftAloneDetail names the file and counts what is in it. Read both before calling the rename done; nothing in them was changed. Afterwards an open editor scans the changed files and reloads every changed script, which is also the compile check, and its answer comes back under editor; with no editor the class cache is rebuilt and the changed scripts are compiled in a fresh engine, under classCache and compiled. written is true once the files are written, and ok is false when what came after the write failed: the files are left changed, and note says so.",
     parameters: {
@@ -787,9 +871,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath', 'scriptPath'],
     operations: {
-      create: { summary: 'a new script file', requires: [] },
-      modify: { summary: 'add to an existing script', requires: ['modifications'] },
+      create: { effect: 'additive', summary: 'a new script file', requires: [] },
+      modify: { effect: 'additive', summary: 'add to an existing script', requires: ['modifications'] },
       rename: {
+        effect: 'destructive',
         summary: 'rename a class or a member wherever the engine uses it, across the project',
         requires: ['symbol', 'newName'],
       },
@@ -797,6 +882,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'script_info',
+    title: 'Script info',
     description:
       "What a script contains: its structure from the file, or symbols, completions and hover text from the editor's language server.",
     parameters: {
@@ -822,21 +908,25 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: ['projectPath', 'scriptPath'],
     operations: {
       structure: {
+        effect: 'read',
         summary: 'functions, variables, signals, class_name and extends, read from the file',
         requires: [],
       },
       symbols: {
+        effect: 'read',
         summary:
           'document symbols from the language server, each with its kind, the line and column of its name, and the lastLine of its declaration',
         requires: [],
       },
-      completion: { summary: 'completions at a position', requires: ['line', 'character'] },
-      hover: { summary: 'hover text at a position', requires: ['line', 'character'] },
+      completion: { effect: 'read', summary: 'completions at a position', requires: ['line', 'character'] },
+      hover: { effect: 'read', summary: 'hover text at a position', requires: ['line', 'character'] },
     },
     defaultOperation: 'structure',
   },
   {
     name: 'script_diagnostics',
+    title: 'Script diagnostics',
+    effect: 'read',
     description:
       "Errors and warnings for a script, or for several, from the editor's language server, and whether each is clean. Needs the editor running. Each diagnostic carries its severity (error or warning), its message, and where it is as the editor shows it: line and column counted from 1, and endLine and endColumn just past its end. Diagnostics are checked against the project's own files, and the two that the files disprove are named rather than passed on: a member the class cache's file declares, or a project class it extends does, a method, property, constant, static function or enum member, comes back under contradictedByTheFile with the script declaring it, and so does one a diagnostic names alone as an external class member, read against the class it is looked up on in the line it is on; and a class this project declares that the diagnostic could not resolve comes back under typesTheEditorHasNotLoaded, with inTheClassCache saying whether a launched game would resolve it. staleAnalysis then says what to do, and for both states it is editor_rescan first: it asks the editor already running, starts nothing, and has cleared each in every reproduction measured. Two exceptions are named when they apply. For an enum member, constant or static function of a global class the reload comes first: in the one project that has reproduced a stale enum member, editor_rescan with reloadScript on the declaring script cleared it and a plain rescan did not. And an editor whose last scan wrote the class cache shorter than the file holds a list behind the files and writes it on every scan, so on that editor the rescan loads nothing and staleAnalysis says editor_launch restart instead. What follows differs: for a stale analysed type, editor_rescan with reloadScript recompiles the held copy and editor_launch restart is the last resort that costs a window; for a class missing from the cache, project_import refresh_classes rewrites the cache from disk at the cost of a short headless engine, which matters beside a running bench.",
     parameters: {
@@ -856,6 +946,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // -------------------------------------------------------------------------------------------
   {
     name: 'resource_edit',
+    title: 'Edit resources',
     description:
       'Resource files: create any ClassDB resource as .tres, change one, write a shader, build a TileSet, or set a Theme colour or font size. A material is a create with resourceType StandardMaterial3D, ShaderMaterial or CanvasItemMaterial. Needs the editor connected.',
     parameters: {
@@ -885,12 +976,25 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath', 'resourcePath'],
     operations: {
-      create: { summary: 'a new resource of any class', requires: ['resourceType'] },
-      modify: { summary: 'set properties on an existing resource', requires: ['properties'] },
-      create_shader: { summary: 'a .gdshader file', requires: ['shaderType'] },
-      create_tileset: { summary: 'a TileSet from texture atlases', requires: ['sources'] },
-      set_theme_color: { summary: 'a colour in a Theme', requires: ['controlType', 'colorName', 'color'] },
+      create: { effect: 'destructive', summary: 'a new resource of any class', requires: ['resourceType'] },
+      modify: {
+        effect: 'destructive',
+        summary: 'set properties on an existing resource',
+        requires: ['properties'],
+      },
+      create_shader: { effect: 'destructive', summary: 'a .gdshader file', requires: ['shaderType'] },
+      create_tileset: {
+        effect: 'destructive',
+        summary: 'a TileSet from texture atlases',
+        requires: ['sources'],
+      },
+      set_theme_color: {
+        effect: 'destructive',
+        summary: 'a colour in a Theme',
+        requires: ['controlType', 'colorName', 'color'],
+      },
       set_theme_font_size: {
+        effect: 'destructive',
         summary: 'a font size in a Theme',
         requires: ['controlType', 'fontSizeName', 'size'],
       },
@@ -902,6 +1006,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // -------------------------------------------------------------------------------------------
   {
     name: 'editor_launch',
+    title: 'Open or restart the editor',
     description:
       "Opens the Godot editor on a project, or restarts the one already connected. open refuses while an editor of the project is already running and has not reached this server, naming its pid, rather than putting a second on the project. The editor is an ordinary visible one on the desktop in use, and on Windows it is shown without being activated, so opening or reopening it does not take the keyboard from whatever the user is typing in. hidden: true opens it headless instead and, on Windows, on a desktop of its own, where the games it plays go too; a hidden editor serves the bridge, the language server and the debug adapter as a visible one does. A game a visible editor plays opens as a window on the desktop in use. An editor goes on serving the addon it read at startup, so restart is what puts a gdharness upgrade into effect, and nothing else here restarts one; it saves open scenes on the way out and answers with the version that came back. An editor a server opened is started again by the server, visible unless hidden: true is passed again, once the old one has gone: it waits 90 seconds for that, or GDHARNESS_EDITOR_RESTART_TIMEOUT_MS, and an old editor still running after it is not replaced, since the new one would find its ports held. One opened by hand restarts itself, which only one with a window can do, because the engine hands back none of the arguments it was started with. editor_status says which editor is connected and whether it is holding an old addon. Opening a project is a save and so is closing one, which is the part that is not obvious from outside: the editor imports the project on open and writes project.godot back, and Godot writes only what differs from its own defaults, so a key named deliberately at its default value is dropped either way. A restart says which under settingsDropped in its own answer because it waits for the editor to return. An open cannot, since it answers as soon as the process exists and the save happens during the import minutes later, so editor_status carries that reading once the editor has connected. Nothing else will say a key went until something depends on one. A restart of an editor this server opened is a quit and then a launch, and this server can be ended between them, usually by the reconnect the restart was being taken for: the editor is gone and nothing replaces it. That is written down before the quit, so the next server says so under restartInterrupted in editor_status rather than waiting for an editor that is not coming, and open finishes it, saying so under finishesRestart. An open is refused when the editor it would start could never reach this server: a project other than the one this server serves, whose editor dials that project's own server; a project without the gdharness editor addon installed and enabled; and a project whose editor a restart is already bringing back.",
     // open alone: a restart is of the editor already connected, which names its own project, and
@@ -917,13 +1022,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: [],
     operations: {
-      open: { summary: 'open the editor on a project', requires: ['projectPath'] },
-      restart: { summary: 'restart the connected editor and wait for it', requires: [] },
+      open: { effect: 'additive', summary: 'open the editor on a project', requires: ['projectPath'] },
+      restart: {
+        effect: 'destructive',
+        summary: 'restart the connected editor and wait for it',
+        requires: [],
+      },
     },
     defaultOperation: 'open',
   },
   {
     name: 'editor_run',
+    title: 'Run the game',
     description:
       "The run: starting the project, stopping it, or booting it once to see whether it comes up clean. start keeps it running and collecting output until it quits or is stopped, windowed where there is a display and headless where there is not, unless headless says otherwise; only runtime_capture needs the window. A run that quits on its own is kept, so a scene that prints an answer and quits is start, then editor_output until running is false. What runs is a scene: a SceneTree script is not an entry point here, so put the script on the root of a scene of its own and name that in scene. args hands the game its own flags, the ones it reads with OS.get_cmdline_user_args(), and a run carrying any is started by this server rather than by the editor. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way. start and check both wait first for a scan the open editor is running and for the class cache it writes just after, since a game booted in between resolves no global class, as does every other engine this server starts on the project; waitedForEditorScanMs says how long, and scanNote says when a scan ran past thirty seconds and the game started during it. A start waits for the game to become something the runtime_* tools can talk to and says which it is under runtime: listening with the port it took, or why not, so the first call after a start does not have to be made twice. When it is not listening, mayYetAnnounce says whether that is final: false is a runtime that is not coming, true is a game still on its way up, which editor_status will see and runtimeWaitMs waits longer for, and the note then says what a runtime_* call naming no projectPath meets until it announces. A start this server made also answers with transcript, the file both the run's streams are written to, so a watch on it can be armed off the start rather than off a second call.",
     parameters: {
@@ -1030,20 +1140,28 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: [],
     operations: {
       start: {
+        effect: 'additive',
         summary: 'run the project until it quits or is stopped',
         requires: ['projectPath'],
       },
       stop: {
+        effect: 'destructive',
         summary:
           'end the run and answer with what it printed last, naming the process ended under endedPid: for a run the editor plays, the number its game announced under, read at the stop rather than remembered, and the operating system hands a freed number to the next process, so it can equal the game before it. A game that started processes of its own keeps them unless andChildren says to end those too. stopped is false, with the number under notSignalled, when that number no longer answers as the process the run was started as and nothing was signalled, the note naming which property it failed on, and false with the number under stillGoing when what was told to end was still running ten seconds later. endedThrough says how the stop ended a run that was going: keeper (the process that started the game ended it through the handle it holds), signal (its pid was signalled once shown to still be the run), or editor (the editor playing it was asked). A start that ends the run before it says how under endedPreviousRunThrough, with the same values, and one that refused to signal that run names the property it failed on under previousRunLeftBecause',
         requires: [],
       },
       check: {
+        effect: 'additive',
         summary: 'boot headless, quit after a few frames, and report the verdict',
         requires: ['projectPath'],
       },
-      wait: { summary: 'wait for the run to end, then answer as editor_output does', requires: [] },
+      wait: {
+        effect: 'read',
+        summary: 'wait for the run to end, then answer as editor_output does',
+        requires: [],
+      },
       profile: {
+        effect: 'read',
         summary:
           "where the run spends its time by GDScript function, while it runs or after it ended: per function its script, the function (Class.name when the script declares a class_name), the line its body's first statement is on, for a lambda the named function it is written in (within), calls, and self and total milliseconds, sorted by self time, with functionsCounted, scriptMs (the self time of them all) and coveredMs. complete is true when the engine's own totals arrived, which it sends only when the profiler is switched off: the runtime addon does that as a game quits, so a scene that does its work in _ready and quits is covered whole; otherwise the answer is the frames summed so far and the note says what that misses. Self time counts a call into the engine's own methods as the caller's, and a call through super too, while the overridden function's row counts it again: such a row carries selfIncludesSuper, so self times along an override chain overlap. The profiler's own cost of timing a call lands in the self time of the function called; with the runtime addon it is measured each run on an empty function, as perCallOverheadUs, and a row with at least half its selfMs in it carries overheadMs, since a small function called often costs that much less without the profiler. A function the profiler started inside is left out, since its time would be counted from the engine's start. The milliseconds are time passed while the function ran, not processor time given to it, so they grow when other processes compete for the processor: compare two profiles taken under the same load. They are also summed over every thread: a function run by WorkerThreadPool or a Thread on several threads at once counts each thread's time, the engine does not say which thread a call ran on, and a function waiting for them has the wait in its own self time, so selfMs is not time taken from frames, and scriptMs can exceed coveredMs, which the note then says. A property's get and set blocks are named Class.@name_getter and Class.@name_setter, as the engine names them, and their rows carry property, the property's name. A run started with profile: true is profiled from its start. A game the editor plays that was not is profiled from the moment this is asked, and the answer says so; a run this server started without it is refused, since its debugger is fixed as it starts",
         requires: [],
@@ -1053,6 +1171,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'editor_output',
+    title: 'Game and editor output',
     description:
       "What the project started by editor_run has printed, as entries with a severity: the errors and warnings the engine reported, each with where it happened, and everything else as info. For a run the editor plays the reports come from the game itself, through the runtime addon, since the editor's debugger relays what a game prints and not what it reports; a played game without the runtime addon answers here with its prints alone, with errorsUnread true and no clean, since what it raised reaches nothing here. Answers with the counts and the verdict as well as the entries. heldAt is three answers: null for a run this server knows is not held, running or over, an object for one it knows is held at a breakpoint, whether the adapter said so or the runtime did by accepting a connection and never answering, and absent with heldUnknown beside it for a server that connected to the debugger after the stop and has no runtime to ask, since the adapter reports a stop only to the sessions connected when it happened. A run that has quit still answers here, with running false and its exit code, until the next one starts; a run ended by a signal has no exit code, and exitSignal names the signal instead. A run this server started also answers with transcript, the file both its streams are written to: uncapped, written while the run is going, and the thing to read or tail for a long run rather than the engine's own log, which every engine start rotates away. Read the file for output and this answer for state: endedBy says whether gdharness ended the run, and a transcript that has stopped growing is a run between prints rather than a run that is over. running is asked of the operating system whenever there is a process to ask about, which is every run this server started and every editor-played run whose game announced its runtime. For an editor-played run that never announced, there is no process id here and running is the editor's answer, which can lag: one measured elsewhere reported a game as playing for fifteen seconds after its process had been ended from outside. editor_status names that game under runtimes, which does not depend on the editor answering. op: \"editor\" answers about the editor itself instead, which is a different log and the only way anything here can read what an editor printed: its console reaches no plugin, so the addon cannot scrape it, and an editor gdharness opened is asked for a log file as it starts. That covers the whole session from the editor's first line, which is where the output worth reading usually is, since the class cache, the plugins and the language server all say what they have to say before any harness has connected. The answer carries the entries in the order they were printed and, beside them under repeated, each message shape several lines share: how many, what varied in each slot of it and how many different values stood there, the first occurrence, and the ordinary lines above the group, found by walking back past the group rather than by counting lines. An editor somebody opened by hand has no console here and is refused saying so rather than answered empty, because an editor that printed nothing and an editor nobody captured are not the same thing. startedAt is when the run began and elapsedMs how long it has been going; for a run that is over, endedAt is when it ended and elapsedMs how long it ran, and both are left out when nobody saw the end, as for a game closed in the editor or a run picked up from a note written before ends were recorded.",
     parameters: {
@@ -1099,10 +1218,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     operations: {
       run: {
+        effect: 'read',
         summary: 'What the game a run is playing has printed, which is everything described above',
         requires: [],
       },
       editor: {
+        effect: 'read',
         summary:
           'What the connected editor itself has printed, from its first line, with repeated messages grouped and the ordinary lines above each group carried with it',
         requires: [],
@@ -1113,6 +1234,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'editor_status',
+    title: 'Editor status',
+    effect: 'read',
     description:
       'Whether the editor addon is connected, which Godot answers, whether the editor is playing something, and whether a game with the runtime addon is reachable: runtimeConnected counts the games of the project this server serves, and runtimes lists every game on the machine with ofThisProject saying which is which, since a game of another project is reached only by naming its projectPath. playingInEditor is null when the editor was not asked or did not answer, which is not the same as a no: with no editor connected there is nobody to ask, and an editor that does not serve the question is given a moment and then left. A game can be playing while this is null, so read it as unanswered rather than as nothing playing, and use processActive and runtimes, which come from elsewhere and do not depend on the editor answering. game.run names the run processActive is about, the one editor_output and editor_run stop answer for: its pid, its project, and adopted true when this server read it back from another server rather than starting it. It stays named after the run ends, beside processActive false, so editor_output can still read what that run printed; null when there is no run at all. startedAt says when it began, and endedAt when it ended, wherever something saw the end: a run adopted from a note another server wrote can have ended hours before this server started. editor.lspListening and editor.dapListening say whether anything accepts connections on the ports the editor names, lspPort and dapPort: Godot binds each once, as the editor starts, and reports a failure only in the log panel of the editor itself, so a false comes with serversNote, and editor_launch restart binds it again. editor.scan says whether the editor is scanning or importing and how many milliseconds ago its last scan finished (finishedMsAgo), or is null when it did not answer: the editor rewrites the class cache just after a scan, and editor_run waits that out before starting a game, saying so under waitedForEditorScanMs. Each game under runtimes is pinged with a short wait, so one held at a breakpoint is listed as unreachable rather than making this call wait out the runtime timeout; for the run this server is reporting on, heldAt says whether that is what it is, with the same three answers editor_output gives. A game the editor played announces the editor under editorPid, and so does whatever that game started for itself; a game some other server started announces none, which is how the two are told apart when both are running from one project. Each game also says which runtime addon it loaded, under addonVersion (null when it cannot say); addonIsStale is true when that code is not what this server ships, and staleNote says whether the project needs gdharness upgrade, the game a restart, or this server a reconnect. A second checkout of a project, such as a git worktree, carries addons of its own and is where this shows. Every runtime_* answer from such a game carries addonIsStale and staleNote too. When connected is false, mayYetConnect says whether that is final: the editor dials this server rather than the other way round and backs off between tries, so for the first half-minute after a server starts, false means "not reached yet" as often as it means "no editor". True is worth waiting out; false is an editor that is not there. False beside restartInterrupted is one that an editor_launch restart on a previous server asked to quit, where the launch half never ran because that server was ended in between, usually by the reconnect the restart was taken for; editor_launch open finishes it. True beside restartUnderway is a restart still in progress, its server alive and within the wait for the old editor to go: the editor is coming, and opening another would put two on one project. listeningSince is when this server took the bridge port, which is what that window is measured from and what a caller wanting its own window should read. An editor this server opened counts for as long as its process lives, however far past that window the import runs, and awaitingLaunchedEditor names its pid so the two reasons for true are told apart. Any editor of this project running and not yet connected, whoever opened it, makes it true as well and is named under editorsNotYetConnected with its pid and start time, so a restart a reconnect interrupted after its launch is not read as nothing being there. settingsDropped appears here once when the editor this server opened saved project.godot on its way in, which is the same reading editor_launch restart makes in its own answer. A game that has announced itself in a protocol this server does not speak is listed under unreadable rather than left out, with the protocol it speaks and whether the server or the addon is the older half. This happens during an upgrade that moves the runtime protocol, which most do not: installing replaces the addon on disk as soon as the pin moves, while a server that is already running stays on the version it started with, so the two speak different protocols until the server is reconnected. Those games are real and running, but no tool here can reach them until the halves match, so runtimes stays empty and runtimeConnected stays false. An upgrade that leaves the protocol alone opens no such window and this list stays empty through it. addonIsStale is decided by the code of the editor addons rather than their version, so an editor started before an upgrade that left that code alone reports the older addonVersion, is not stale, and addonNote says so: it needs no restart. port is the one the editor bridge is on; when that is not the one this server was configured with, portWanted names the configured one and portNote says why it moved and, when it was the server this one replaced, which pid kept it. A server replacing another of its project that holds the configured port waits for it to stand down and takes the port over, which takes a few seconds; bridgeHandover says so while it waits, and it moves only if that server has not let go within the wait. An editor that has connected and not yet greeted, which lasts a frame and longer while it imports, reports nothing about itself: greeting says so, addonIsStale is absent rather than guessed, and a restart asked then waits for the greeting to learn who opened it. startedByAnEditor is an editor another editor started, by Godot\'s own restart or the project manager, which has none of the arguments a server gave the one before it; startedByAnEditorNote says what that costs. An engine run that loads the editor addon to do one job and quit, such as a gate\'s godot --headless --import, an export or a script, is not taken as the editor: a process that greets without a server\'s mark has its command line read first, and while that is read identifying is true and connected false; one started with such an option is turned away, and turnedAway names the last one, its pid and the option. Every other call made while an editor is arriving, before its greeting or while it is looked up, waits up to ten seconds for it to settle rather than acting on connected as it reads in that window.',
     parameters: {},
@@ -1120,6 +1243,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'editor_rescan',
+    title: 'Rescan the project',
+    effect: 'additive',
     description:
       'Makes the running editor scan the project filesystem, so files written outside it are picked up. A scan or an import the editor is already running is waited out first rather than scanned over, which would start a second import over it, and the answer says how long under waitedForEditorScanMs. The scan is a change-detecting walk rather than an unconditional reparse, so a file another engine has already imported reads as settled and the walk does not look inside it: its class_name then stays out of the list the editor resolves against, however many times you scan. Any class in that state is named under unseenByEditor, which is what no check on disk can see, since the declaration and the cache are both correct there and only the editor disagrees. The cure is this call on its own, with no change to the declaring script: measured against a real editor on three platforms, with idle waits of the same length ruled out so the scan is credited rather than the time it takes, and reproduced in a second project against its own reproduction in 203ms. editor_launch restart also does it and costs a window, and project_import refresh_classes does not: it rewrites the cache and does not touch what the editor is holding. The walk also passes over a file whose .uid alone changed, so the editor keeps the old UID and every engine reading its cache warns of a duplicate; before scanning, each file whose .uid names a UID the editor does not hold for it is read again and named under uidsReread, and files on disk naming one UID between them are named under uidsDuplicatedOnDisk, which reading again cannot settle. A class the scan brings in is named under broughtIn, and every script naming it is reloaded in the editor and named under dependentsReloaded: what the editor compiled from them while it could not see the class stays compiled that way after the scan, and a script extending a new base class went on reporting "Could not find base class" until reloaded. One that would not reload is named under dependentsNotReloaded and the call is not ok, as it is not when the script named in reloadScript was not reloaded. A scan writes .godot/global_script_class_cache.cfg from the list the editor is holding, so a class the editor cannot resolve goes out of that file with it. That is not a reason to refuse the scan, because on a class the editor has merely not walked yet the scan is the cure; what the answer does instead is name the loss under cacheLost and rebuild the cache from the files, naming what came back under cacheRestored, so no fresh engine, CI run or clone inherits the short file. An editor that lost classes is still holding the short list, so the note says to restart it before scanning again. The other direction is guarded the same way: a class the editor still holds for a script that was renamed or deleted comes back into the cache at a path that is not there, and the next engine to read it fails on "Could not parse global class" in whichever correct script shares the bare name, so the cache is rebuilt without it and the answer names it under cacheDropped; the editor goes on holding it until it is restarted, and every scan until then ends in that rebuild. A script or shader written outside the editor has no .uid sidecar until something imports it, and the scan writes one beside it, which a project that commits sidecars needs before the commit. Needs the editor connected.',
     parameters: {
@@ -1144,6 +1269,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'editor_classes',
+    title: 'Engine classes',
     description: "The engine's ClassDB: find classes, read one in full, or walk an inheritance tree.",
     parameters: {
       projectPath: PROJECT_PATH,
@@ -1178,12 +1304,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath'],
     operations: {
-      query: { summary: 'classes matching a filter or category', requires: [] },
+      query: { effect: 'read', summary: 'classes matching a filter or category', requires: [] },
       info: {
+        effect: 'read',
         summary: 'methods, properties, signals and enums of one class, or one member of it by name',
         requires: ['className'],
       },
-      inheritance: { summary: 'ancestors and descendants of one class', requires: ['className'] },
+      inheritance: {
+        effect: 'read',
+        summary: 'ancestors and descendants of one class',
+        requires: ['className'],
+      },
     },
     defaultOperation: 'query',
   },
@@ -1193,6 +1324,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // -------------------------------------------------------------------------------------------
   {
     name: 'runtime_inspect',
+    title: 'Inspect the running game',
     description:
       'Questions about the running game: what is written on the screen, the scene tree, the nodes matching a query, where one node is on screen, what one property reads, or the performance metrics. Needs the game running with the runtime addon.',
     parameters: {
@@ -1277,28 +1409,33 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: [],
     operations: {
-      tree: { summary: 'the live scene tree', requires: [] },
+      tree: { effect: 'read', summary: 'the live scene tree', requires: [] },
       text: {
+        effect: 'read',
         summary:
           "every line of text under nodePath, the values in its fields included, in the order somebody reads the screen, leaving out what is hidden and everything under it. Every line reads as drawn: rich text without its tags, text only as far as it has been typed out, a translation rather than its key, an upper-case label in capitals and a secret field as its mask. Tab titles, menu bar titles, list items, a tree's column titles and rows, and an open menu's items and the titles of its separators read a line each",
         requires: [],
       },
       find: {
+        effect: 'read',
         summary:
           'the paths of every node matching className, script, namePattern, group or says, with property read off each, hidden ones included unless includeHidden says otherwise',
         requires: [],
       },
       rect: {
+        effect: 'read',
         summary:
           "one node's rectangle or position, in canvas and in window pixels. Canvas is the node's own viewport; window is where it is drawn in the game's window, through any embedded dialog or SubViewport it sits in, which is what runtime_input mouse_click and mouse_motion take. A 3D node answers with the point to aim at, which is the middle of what it draws rather than the origin it stands on, the rectangle it covers under covers, the camera that drew it, and behind_camera when it is not in front of one",
         requires: ['nodePath'],
       },
       property: {
+        effect: 'read',
         summary:
           'what one property reads on a node, or through the objects it holds, refusing a name nothing along the way has',
         requires: ['nodePath', 'property'],
       },
       metrics: {
+        effect: 'read',
         summary:
           "frame time, memory, draw calls and the rest. frame_time is the mean wall time of a frame over the last frames_timed frames (up to 120, timed by the game itself, physics and the wait for the display included), frame_time_max the slowest of them, both in seconds and null before a frame has passed; vsync says whether a frame waits for the display, and max_fps is the game's frame-rate cap, 0 for none. fps, process_time_max and physics_time are the engine's monitors, which it sets once a second: the frames counted in the last second, and the slowest process and physics step in it, so they trail a change by up to a second and the last two are a worst case rather than the frame. The memory, object and render counts are read as asked",
         requires: [],
@@ -1308,6 +1445,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'runtime_invoke',
+    title: 'Set or call in the running game',
     description:
       'Sets a property or calls a method on a node in the running game. Needs the game running with the runtime addon. The answer carries elapsed_usec, how long the call or the write took inside the game, measured around it there: the round trip to the game is a second or more, so timing from outside measures that instead. Errors and warnings the engine reported while a called method ran come back under errors, the first 20, with errors_not_shown counting the rest. A call that takes longer than timeoutMs is not cancelled: the answer is pending: true with a requestId, the call goes on and does everything it was asked, and op result with that requestId collects its reply once it comes.',
     parameters: {
@@ -1366,14 +1504,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: [],
     operations: {
       set: {
+        effect: 'destructive',
         summary: 'set a property, on a node or on an object it holds',
         requires: ['nodePath', 'property', 'value'],
       },
       call: {
+        effect: 'destructive',
         summary: 'call a method, on a node or on an object it holds, and return its result',
         requires: ['nodePath', 'method'],
       },
       result: {
+        effect: 'read',
         summary: 'collect the reply to a set or call whose wait ran out, by the requestId it answered with',
         requires: ['requestId'],
       },
@@ -1381,6 +1522,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'runtime_capture',
+    title: 'Capture the screen',
     description:
       "A picture of the running game: the whole screen, one region or node of it at full resolution, or one viewport, as an image. The whole screen includes the game's own dialogs and popups where they sit, also when a project opens them as windows of their own (subwindows not embedded). Needs the game running with a window. A capture asked for before the game's first frame is drawn waits for that frame, since the game announces itself before it and the viewport holds nothing it drew until then.",
     parameters: {
@@ -1430,13 +1572,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: [],
     operations: {
-      screenshot: { summary: 'the screen', requires: [] },
-      viewport: { summary: "one viewport's texture", requires: [] },
+      screenshot: { effect: 'read', summary: 'the screen', requires: [] },
+      viewport: { effect: 'read', summary: "one viewport's texture", requires: [] },
     },
     defaultOperation: 'screenshot',
   },
   {
     name: 'runtime_input',
+    title: 'Send input to the game',
     description:
       "Input to the running game: a whole click on a Control or a 3D node named by path or on a control named by the words on it, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it. On gdharness's own desktop, where a windowed run goes, Windows refuses to say where the pointer is: every pointer answer there carries pointer_on_hidden_desktop, and the first of the run pointer_note saying why it matters: get_mouse_position() on the root window, and the mouse positions derived from it, read a meaningless position, while what reads the event itself (the control under it, hover, tooltips, input handlers) gets the injected position.",
     parameters: {
@@ -1536,32 +1679,38 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: [],
     operations: {
       click: {
+        effect: 'additive',
         summary:
           'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed. The control is named by nodePath, or by says with the words on it, found under nodePath when both are given, and the answer then says under found which match it was. Words that are part of a RichTextLabel are pressed where they are drawn rather than at the label\'s middle, so a link among them is the one pressed: found.pressedOn says "the words", or "the middle of the label" with a note saying why they could not be placed, and on a rich label link_pressed says whether the press reached a link, with link_meta giving the meta the label reports clicked, an empty one included. A control out of sight inside a ScrollContainer is scrolled to first, each container out from it a frame after the one inside, and scrolled_into_view says whether a scroll value changed. A button in toggle mode, a CheckBox or CheckButton included, answers pressed with before and after, its button_pressed either side of the click: the same value twice is a click the game undid, and after is null when the click freed it. A disabled button, and a control that does not process (the game paused, say), are refused: the pointer reaches them and the press does nothing. A 3D node is clicked where it is drawn, and landed then says the interface did not swallow the press: no control under the pointer stopped it, a control letting the pointer pass included, and every viewport on the way out from the room had the pointer over what shows the room',
         requires: [],
       },
       choose: {
+        effect: 'additive',
         summary:
           "take an item out of a menu, by what it says or by where it is in the list. A menu's items are drawn rather than built, so there is nothing to click: the menu is opened, the item is looked for in it as it stands then, since a game can fill a menu as it opens, and the item takes the focus and ui_accept presses it, which is the engine's own path, needs no window, and does not depend on what ui_accept is bound to. A disabled or hidden button in front of the menu is refused, and so is a press the menu did not take, which is heard rather than assumed. Answers with what was chosen, read before the press, what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick), and what the button in front of it shows now when it is still there",
         requires: ['nodePath'],
       },
-      action: { summary: 'press an action, or hold it', requires: ['action'] },
+      action: { effect: 'additive', summary: 'press an action, or hold it', requires: ['action'] },
       key: {
+        effect: 'additive',
         summary:
           "press a key, or hold it. Not for a menu a click has opened: an OptionButton or PopupMenu pops up as a window of its own that a key sent to the game never reaches, so an arrow moves nothing in it and Enter closes it with nothing chosen. choose is what selects there. The limit is that menu's own navigation, not windows in general: an embedded dialog whose owner reads keys in _input gets them, and a binding catcher up in one takes the key first time",
         requires: ['keycode'],
       },
       text: {
+        effect: 'additive',
         summary:
           'type a string into the field being edited, a character at a time, and say what it landed in and what it holds afterwards, a secret field as its mask. The field is the focus of the dialog that has the focus when one does, which is where the keys go',
         requires: ['text'],
       },
       mouse_click: {
+        effect: 'additive',
         summary:
           'click a mouse button at a position, pressed and released a frame apart, each event carrying the buttons held once it has happened; the answer says whole. A drag is a press held with pressed true, motions, and a release with pressed false. A wheel button is always a whole step, press and release together as a mouse sends one: a lone wheel press holds the viewport on the control that took it, so every click after it lands there',
         requires: ['x', 'y'],
       },
       mouse_motion: {
+        effect: 'additive',
         summary:
           'move the mouse to a position, carrying the distance from where the last injected event put it unless relativeX and relativeY say otherwise, and the buttons held, so a control that drags moves under a run of these between a held mouse_click and its release',
         requires: ['x', 'y'],
@@ -1570,6 +1719,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'runtime_wait',
+    title: 'Wait in the running game',
     description:
       'Lets the running game get on with it and answers when something has happened: a number of frames, a signal, a property reaching a value, or words appearing on a screen. Needs the game running with the runtime addon.',
     parameters: {
@@ -1629,12 +1779,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: [],
     operations: {
-      frames: { summary: 'let frames pass', requires: ['frames'] },
+      frames: { effect: 'read', summary: 'let frames pass', requires: ['frames'] },
       signal: {
+        effect: 'read',
         summary: 'wait for a signal and answer with what it carried',
         requires: ['nodePath', 'signal'],
       },
       until: {
+        effect: 'read',
         summary:
           'wait for a property to read as a value, or for words to appear under a node, and answer with what it found',
         // Not required here: a wait for words has a node to default to and a wait for a property
@@ -1649,6 +1801,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // -------------------------------------------------------------------------------------------
   {
     name: 'debug_breakpoint',
+    title: 'Breakpoints',
     description:
       "Sets or removes a breakpoint through the editor's debug adapter. Needs the editor, not a running game: set them first, then editor_run, and the game stops where you asked. The editor keeps a breakpoint set this way for one play, so every breakpoint this server holds is sent again before each play editor_run starts, and the start answer lists them under breakpoints. The set is also kept in the project, for the server that comes after a reconnect: a breakpoint stays until it is removed here, whichever server set it. Every answer lists the whole set under held, and the breakpoints the user set in the editor's own gutter under setInEditor; setting one here never takes those away, and removing a line here clears it whoever set it. Godot clears every breakpoint in the editor when a debug session opens unless network/debug_adapter/sync_breakpoints is on, which the addon turns on as it loads; an editor running an older addon is said so under breakpointsAtRisk, here and in editor_status.",
     parameters: {
@@ -1658,24 +1811,30 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath', 'scriptPath', 'line'],
     operations: {
-      set: { summary: 'set a breakpoint', requires: [] },
-      remove: { summary: 'remove a breakpoint', requires: [] },
+      set: { effect: 'additive', summary: 'set a breakpoint', requires: [] },
+      remove: { effect: 'destructive', summary: 'remove a breakpoint', requires: [] },
     },
   },
   {
     name: 'debug_control',
+    title: 'Step the debugger',
     description:
       "Continues or steps the debugged game through the editor's debug adapter. A step waits for the game to stop again and answers with the stack where it ended up; one that has not stopped the game again within ten seconds answers heldAgain false and no stack. There is no pause and no step_out: Godot's adapter answers a pause by reporting the game stopped and leaving it running, and implements no stepOut at all, so hold the game where you want it with a breakpoint and step over or into from there.",
     parameters: {},
     requires: [],
     operations: {
-      continue: { summary: 'resume after a breakpoint', requires: [] },
-      step_over: { summary: 'run the current line', requires: [] },
-      step_into: { summary: 'run the current line, stopping inside whatever it calls', requires: [] },
+      continue: { effect: 'additive', summary: 'resume after a breakpoint', requires: [] },
+      step_over: { effect: 'additive', summary: 'run the current line', requires: [] },
+      step_into: {
+        effect: 'additive',
+        summary: 'run the current line, stopping inside whatever it calls',
+        requires: [],
+      },
     },
   },
   {
     name: 'debug_state',
+    title: 'Debugger state',
     description:
       "Where the debugged game is stopped: the stack trace, what is in scope at a frame with the values, or the debug adapter's console output so far, its last thousand lines, with any earlier ones counted under notShown. A stop is reported by the editor's adapter only to the sessions connected when it happened, so a server that connected afterwards, which is every server after a reconnect, is shown a thread and no frames about a game still sitting at its breakpoint. That server asks the runtime instead: a held game accepts a connection and never answers, and the refusal then says held rather than running, and that the stack cannot be read from here. debug_control continue lets it go, and the next stop is one this session is told about, with its stack.",
     parameters: {
@@ -1688,9 +1847,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: [],
     operations: {
-      stack: { summary: 'the stack trace', requires: [] },
-      variables: { summary: 'locals, members and globals at a frame, with their values', requires: [] },
-      output: { summary: 'console output captured through the debug adapter', requires: [] },
+      stack: { effect: 'read', summary: 'the stack trace', requires: [] },
+      variables: {
+        effect: 'read',
+        summary: 'locals, members and globals at a frame, with their values',
+        requires: [],
+      },
+      output: { effect: 'read', summary: 'console output captured through the debug adapter', requires: [] },
     },
     defaultOperation: 'stack',
   },
@@ -1719,7 +1882,7 @@ function describeOperations(spec: ToolSpec): string {
 /** The specs as the protocol carries them. */
 export function buildToolDefinitions(): MCPToolDefinition[] {
   return TOOL_SPECS.map((spec) => {
-    const properties: Record<string, unknown> = {};
+    const properties: Record<string, JSONValue> = {};
     if (spec.operations) {
       properties['op'] = {
         type: 'string',
@@ -1741,6 +1904,7 @@ export function buildToolDefinitions(): MCPToolDefinition[] {
 
     return {
       name: spec.name,
+      title: spec.title,
       description: `${spec.description}${describeOperations(spec)}`,
       inputSchema: {
         type: 'object',
@@ -1748,6 +1912,25 @@ export function buildToolDefinitions(): MCPToolDefinition[] {
         required,
         additionalProperties: false,
       },
+      annotations: annotationsOf(spec),
     };
   });
+}
+
+/**
+ * The hints a client decides from whether to ask before a call, for the most a call can do.
+ *
+ * Hints are per tool and ops are not, so a tool with one destructive op is destructive for every
+ * call to it. Every tool works on the project, its editor, its game and this machine, never on
+ * anything outside, which is what `openWorldHint` asks. Idempotence is left unclaimed: the spec
+ * reads its absence as "not idempotent", the safe answer, and few of these would be anything else.
+ */
+function annotationsOf(spec: ToolSpec): ToolAnnotations {
+  const effects = effectsOf(spec);
+  const readOnly = effects.every((effect) => effect === 'read');
+  return {
+    readOnlyHint: readOnly,
+    ...(readOnly ? {} : { destructiveHint: effects.includes('destructive') }),
+    openWorldHint: false,
+  };
 }

@@ -10,6 +10,7 @@ import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { envValue } from './launch.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
+import type { ToolResponse } from './server-types.js';
 
 /** What an editor serves the language server on when nothing has moved it. */
 export const DEFAULT_LSP_PORT = 6005;
@@ -893,7 +894,7 @@ function locationsIn(result: unknown): { file: string; line: number; character: 
   return found;
 }
 
-function asToolResponse(payload: unknown): { content: { type: string; text: string }[] } {
+function asToolResponse(payload: unknown): ToolResponse {
   return {
     content: [
       {
@@ -1131,7 +1132,7 @@ export async function handleLSPTool(
   client: GodotLSPClient,
   toolName: string,
   args: unknown,
-): Promise<{ content: { type: string; text: string }[] }> {
+): Promise<ToolResponse> {
   try {
     if (!args || typeof args !== 'object') {
       throw new ArgumentRefusal('Tool arguments must be an object.');

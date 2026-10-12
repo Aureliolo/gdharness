@@ -29,14 +29,8 @@ import { basename, dirname, extname, isAbsolute, join, normalize, relative } fro
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListToolsRequestSchema,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
+import { McpServer, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
+import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server/stdio';
 import { alive } from './alive.js';
 import { answerJson } from './answer-json.js';
 import { halfAsLongAgain, MAIN_SCENE, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
@@ -160,6 +154,7 @@ import {
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
+import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
 import { type NameTaken, type RenameOutcome, renameSymbol, writeLeftAloneDetail } from './rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
@@ -224,10 +219,12 @@ import {
   type SourceOf,
   UNNAMED_PREFIX,
 } from './script-profile.js';
+import { serverInstructions } from './server-instructions.js';
 import type {
   GodotProcess,
   MCPToolDefinition,
   OperationParams,
+  ProtocolServer,
   SpawnedGame,
   ToolResponse,
 } from './server-types.js';
@@ -1292,7 +1289,12 @@ function wrongTypes(spec: ToolSpec, args: OperationParams): string[] {
       continue;
     }
     const declared = spec.parameters[name]?.['type'];
-    const wanted = typeof declared === 'string' ? [declared] : Array.isArray(declared) ? declared : [];
+    const wanted =
+      typeof declared === 'string'
+        ? [declared]
+        : Array.isArray(declared)
+          ? declared.filter((kind) => typeof kind === 'string')
+          : [];
     if (wanted.length === 0 || wanted.some((kind) => isOfType(value, kind))) {
       continue;
     }
@@ -2707,11 +2709,10 @@ function needsItsOwnProcess(asked: RunEnvironment): boolean {
   return asked.savesIn !== undefined || asked.env !== undefined;
 }
 
+const STATIC_LIST_HINT = { ttlMs: 5 * 60_000, cacheScope: 'private' } as const;
+
 class GodotServer {
-  // Registration goes through the protocol object rather than McpServer's registerTool: the
-  // schemas are authored as data in tool-definitions.ts and validated against the same data
-  // before dispatch, which is the "advanced use case" McpServer's own docs point at `.server` for.
-  private readonly mcp: McpServer;
+  private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
   private readonly operationsScript = join(__dirname, 'godot', 'operations', 'godot_operations.gd');
   private readonly godotBridge: GodotBridge;
@@ -2788,17 +2789,6 @@ class GodotServer {
     this.godotBridge.on('godot_connected', () => {
       this.settleTheLaunchReading();
     });
-    this.mcp = new McpServer(
-      { name: 'gdharness', version: SERVER_VERSION },
-      { capabilities: { tools: {}, resources: {} } },
-    );
-    this.setupToolHandlers();
-    // The project this server serves first, so a call naming another project's game does not move
-    // what the resources read; the last project named only for a server that can name none.
-    setupResourceHandlers(this.mcp, () => this.ourProject() ?? this.lastProjectPath);
-    this.mcp.server.onerror = (error) => {
-      console.error('[MCP Error]', error);
-    };
     this.setupShutdownHandlers();
   }
 
@@ -2839,8 +2829,13 @@ class GodotServer {
       console.error(`[SERVER] Using Godot at: ${located.path}`);
     }
 
-    const transport = new StdioServerTransport();
-    await this.mcp.server.connect(transport);
+    // The entry decides from the client's opening message which protocol era the connection
+    // speaks, so a 2026-07-28 client and a 2025 one are both served.
+    this.stdio = serveStdio(() => this.protocol(), {
+      onerror: (error) => {
+        console.error('[MCP Error]', error);
+      },
+    });
     process.stdin.once('end', () => {
       void this.handleShutdown('stdin:end', 0);
     });
@@ -3119,7 +3114,7 @@ class GodotServer {
     } catch (error) {
       this.logDebug(`Godot bridge did not stop cleanly: ${errorMessage(error)}`);
     }
-    await this.mcp.server.close();
+    await this.stdio?.close();
   }
 
   private setupShutdownHandlers(): void {
@@ -3176,14 +3171,57 @@ class GodotServer {
   // Requests
   // -------------------------------------------------------------------------------------------
 
-  private setupToolHandlers(): void {
-    this.mcp.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: this.tools }));
-    this.mcp.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  /**
+   * A protocol object answering for this server, built afresh each time the stdio entry asks.
+   *
+   * The entry can build one for a client that opens in the 2026 era and discard it when the client
+   * falls back to a 2025 handshake, so this holds no state of its own: everything a call reads or
+   * changes lives on this server, which outlives every protocol object made for it.
+   */
+  private protocol(): McpServer {
+    // Handlers go on the low-level server McpServer wraps rather than through registerTool: the
+    // schemas are authored as data in tool-definitions.ts and validated against the same data
+    // before dispatch. The capabilities are declared there too, because McpServer handed a tools
+    // capability installs handlers of its own and tells clients the list can change, which this one
+    // never does.
+    const mcp = new McpServer(
+      { name: 'gdharness', version: SERVER_VERSION },
+      {
+        instructions: serverInstructions(),
+        // What a 2026 client may keep without asking again. The lists and the discovery answer are
+        // fixed for the life of a server, and a client keys what it keeps by the server's name and
+        // version, so an upgrade is never answered from an older list. Five minutes rather than the
+        // life of the server, because a build of the same version can add a tool. A resource read is
+        // a project file and stays uncached.
+        cacheHints: {
+          'server/discover': STATIC_LIST_HINT,
+          'tools/list': STATIC_LIST_HINT,
+          'resources/list': STATIC_LIST_HINT,
+          'resources/templates/list': STATIC_LIST_HINT,
+        },
+      },
+    );
+    const protocol = mcp.server;
+    protocol.registerCapabilities({ tools: {}, resources: {}, completions: {}, prompts: {} });
+    this.setupToolHandlers(protocol);
+    setupPromptHandlers(protocol);
+    // The project this server serves first, so a call naming another project's game does not move
+    // what the resources read; the last project named only for a server that can name none.
+    setupResourceHandlers(protocol, () => this.ourProject() ?? this.lastProjectPath);
+    protocol.onerror = (error) => {
+      console.error('[MCP Error]', error);
+    };
+    return mcp;
+  }
+
+  private setupToolHandlers(protocol: ProtocolServer): void {
+    protocol.setRequestHandler('tools/list', () => ({ tools: this.tools }));
+    protocol.setRequestHandler('tools/call', async (request, ctx) => {
       this.logDebug(`Handling tool request: ${request.params.name}`);
       const spec = toolSpec(request.params.name);
       if (!spec) {
-        throw new McpError(
-          ErrorCode.MethodNotFound,
+        throw new ProtocolError(
+          ProtocolErrorCode.MethodNotFound,
           `Unknown tool: ${request.params.name}. Tools: ${TOOL_SPECS.map((tool) => tool.name).join(', ')}`,
         );
       }
@@ -3205,13 +3243,13 @@ class GodotServer {
       // Only to a client that sent a token, which is how it says it wants to hear: a long call
       // that says nothing is cut off by a client's idle limit, a test tier past thirty minutes
       // included, and every finished suite went with it.
-      const token = request.params._meta?.progressToken;
+      const token = ctx.mcpReq._meta?.progressToken;
       const progress: CallProgress | undefined =
         token === undefined
           ? undefined
           : (done, message) => {
-              extra
-                .sendNotification({
+              ctx.mcpReq
+                .notify({
                   method: 'notifications/progress',
                   params: { progressToken: token, progress: done, message },
                 })
@@ -3220,7 +3258,7 @@ class GodotServer {
                 });
             };
       const answer = await withCallSignal(
-        extra.signal,
+        ctx.mcpReq.signal,
         () => this.answered(spec.name, checked.op ?? '', args),
         progress,
       );
@@ -3237,14 +3275,14 @@ class GodotServer {
    * as something it did wrong, and it will spend three turns rephrasing a call that was right the
    * first time. A {@link Refusal} is the caller's answer, returned as a refusal like any other: a
    * throw out of the request handler reached the caller as a JSON-RPC internal error, where a
-   * tool's own refusals do not belong. An `McpError` goes as itself, since the protocol has its
+   * tool's own refusals do not belong. A `ProtocolError` goes as itself, since the protocol has its
    * own place for "no such tool".
    */
   private async answered(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     try {
       return await this.dispatch(tool, op, args);
     } catch (error) {
-      if (error instanceof McpError) {
+      if (error instanceof ProtocolError) {
         throw error;
       }
       if (error instanceof Refusal) {
@@ -3926,7 +3964,7 @@ class GodotServer {
       }
 
       default:
-        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${tool}`);
+        throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `Unknown tool: ${tool}`);
     }
   }
 
@@ -5820,10 +5858,7 @@ class GodotServer {
     }
   }
 
-  private async handleLSP(
-    toolName: string,
-    args: unknown,
-  ): Promise<{ content: { type: string; text: string }[] }> {
+  private async handleLSP(toolName: string, args: unknown): Promise<ToolResponse> {
     return handleLSPTool(await this.lsp(), toolName, args);
   }
 
