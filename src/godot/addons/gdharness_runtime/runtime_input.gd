@@ -570,12 +570,24 @@ func click(params: Dictionary) -> Dictionary:
 ## The last two answered landed, since the pointer reaches the control, while the press did nothing,
 ## measured on 4.7.2: a disabled button keeps its mouse filter and ignores the press, and a control
 ## that does not process while the game is paused is hovered and never handed the event.
+## A control whose pointer a `mouse_behavior_recursive` above it has turned off is passed through to
+## what is underneath, which answered `landed: false` with nothing saying why.
 func _takes_no_click(control: Control, node_path: String) -> String:
 	if not control.is_visible_in_tree():
 		return "%s is not visible%s, so nothing can click it" % [node_path, Targets.why_hidden(control)]
 	var button: BaseButton = control as BaseButton
 	if button != null and button.disabled:
 		return "%s is disabled, so clicking it presses nothing" % node_path
+	var turned_off: Control = Targets.pointer_turned_off_by(control)
+	if turned_off != null:
+		var on: String = "itself" if turned_off == control else str(turned_off.get_path())
+		return (
+			(
+				"%s takes no pointer input, since mouse_behavior_recursive is disabled on %s,"
+				+ " so clicking it presses nothing"
+			)
+			% [node_path, on]
+		)
 	if not control.can_process():
 		var why: String = _why_it_does_not_process(control, node_path)
 		var over: Node = Targets.drawn_over(control)
