@@ -29,7 +29,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
-import { asArray, asNumber, asObject, asString, get, lastJsonLine } from './support/json.js';
+import { asArray, asNumber, asObject, asString, get, lastJsonLine, text } from './support/json.js';
 import { solidPng } from './support/png.js';
 import { sweep } from './support/sweep.js';
 
@@ -833,10 +833,21 @@ function testOperations(godotPath: string, projectDir: string): void {
     'res://fixture_scene.tscn',
   );
 
+  // Scripts and a scene and nothing the engine imports: none counted, and said why rather than
+  // left to read as a walk that found nothing.
+  const nothingImported = operation('get_import_status', {});
+  assert.equal(get(nothingImported, 'summary', 'total'), 0, 'scripts and scenes are not imported');
+  assert.match(
+    text(get(nothingImported, 'note')),
+    /loads scripts and scenes as they are/,
+    `and the answer says so: ${JSON.stringify(nothingImported)}`,
+  );
+
   // The import pipeline reads and writes the .import sidecar, which is a ConfigFile.
   writeImportedResource(projectDir);
   const status = operation('get_import_status', { include_up_to_date: true });
   assert.equal(get(status, 'summary', 'total'), 1, 'the one importable resource should be found');
+  assert.equal(get(status, 'note'), undefined, 'with something imported there is nothing to explain');
   assert.equal(get(status, 'resources', 0, 'path'), 'res://art.png');
   assert.equal(get(status, 'resources', 0, 'import_file_exists'), true);
 
