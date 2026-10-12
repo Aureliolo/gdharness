@@ -57,7 +57,11 @@ export const PROMPT_SPECS: readonly PromptSpec[] = [
       },
     ],
     steps: [
-      { tool: 'editor_status', passes: [], why: 'see whether an editor is connected and its addon matches' },
+      {
+        tool: 'editor_status',
+        passes: [],
+        why: 'see whether an editor is connected and its addon matches; without one the run is a game of its own, not a fault',
+      },
       { tool: 'editor_run', op: 'start', passes: ['projectPath', 'scene'], why: 'start the run' },
       {
         tool: 'editor_run',
@@ -77,7 +81,11 @@ export const PROMPT_SPECS: readonly PromptSpec[] = [
       'Check the editor connection, the project health report, export validation and the import state.',
     arguments: [PROJECT_PATH],
     steps: [
-      { tool: 'editor_status', passes: [], why: 'see whether an editor is connected and its addon matches' },
+      {
+        tool: 'editor_status',
+        passes: [],
+        why: 'see whether an editor is connected and, if one is, whether its addon matches; no editor is no fault in the project, so leave it out of what is wrong',
+      },
       {
         tool: 'project_info',
         passes: ['projectPath'],
