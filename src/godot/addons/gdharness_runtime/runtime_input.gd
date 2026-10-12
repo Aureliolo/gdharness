@@ -517,6 +517,13 @@ func click(params: Dictionary) -> Dictionary:
 	var on_rich_text: bool = rich != null
 	if on_rich_text:
 		var _listening: int = rich.meta_clicked.connect(heard)
+	# A toggle's state either side of the press, since landing says nothing of it: a game clock's
+	# switch clicked three times answered clicked each time, and a wait for the clock to move then
+	# ran out on a clock left stopped. A click the game undid reads the same before and after.
+	var toggle: BaseButton = control as BaseButton
+	var was_pressed: Variant = null
+	if toggle != null and toggle.toggle_mode:
+		was_pressed = toggle.button_pressed
 	_press_button(viewport, _button(position, button, true, double))
 	await _host.get_tree().process_frame
 	_press_button(viewport, _button(position, button, false, false))
@@ -544,6 +551,11 @@ func click(params: Dictionary) -> Dictionary:
 	}
 	if found != null:
 		answer["found"] = found
+	if was_pressed != null:
+		var now_pressed: Variant = null
+		if is_instance_valid(toggle):
+			now_pressed = toggle.button_pressed
+		answer["pressed"] = {"before": was_pressed, "after": now_pressed}
 	# Whether a link was pressed apart from what it carries: a bare [url] reports an empty meta,
 	# and given as the meta alone that press read exactly like one that reached no link.
 	if on_rich_text:
