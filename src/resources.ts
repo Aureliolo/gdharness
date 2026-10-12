@@ -1,15 +1,11 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import {
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ReadResourceRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
 import { answerJson } from './answer-json.js';
 import { emptyRecord } from './dictionary.js';
 import { Refusal } from './errors.js';
 import { isWithinRoot, resolveWithinProject } from './paths.js';
+import { projectFiles } from './project-scan.js';
+import type { ProtocolServer } from './server-types.js';
 
 const STATIC_RESOURCES = [
   {
@@ -140,20 +136,57 @@ function parseGodotUri(uri: string): ParsedGodotUri {
   return { kind: host, resourcePath };
 }
 
+/** What each template reads, which is also what it offers to complete. */
+const EXTENSIONS: Readonly<Record<'scene' | 'script' | 'resource', readonly string[]>> = {
+  scene: ['.tscn'],
+  script: ['.gd'],
+  resource: ['.tres', '.tscn', '.gd'],
+};
+
 function ensureAllowedExtension(kind: 'scene' | 'script' | 'resource', filePath: string): void {
-  const extension = extname(filePath).toLowerCase();
-
-  if (kind === 'scene' && extension !== '.tscn') {
-    throw new Refusal('Scene resources must use .tscn extension.');
+  const allowed = EXTENSIONS[kind];
+  if (!allowed.includes(extname(filePath).toLowerCase())) {
+    throw new Refusal(`godot://${kind}/ reads only ${allowed.join(', ')} files.`);
   }
+}
 
-  if (kind === 'script' && extension !== '.gd') {
-    throw new Refusal('Script resources must use .gd extension.');
-  }
+/** The most values one completion answer may carry, which the protocol sets. */
+const COMPLETION_LIMIT = 100;
 
-  if (kind === 'resource' && !['.tres', '.tscn', '.gd'].includes(extension)) {
-    throw new Refusal('Resource URIs support only .tres, .tscn, and .gd files.');
+/**
+ * The project's files a template's `path` could be, for a client's picker: those whose path holds
+ * what has been typed, ignoring case. Ones whose path starts with it come first, then ones whose
+ * file name does, since `main` is usually a file somebody is naming rather than a directory, then
+ * the rest.
+ */
+function completeResourcePath(
+  uriTemplate: string,
+  typed: string,
+  getProjectPath: () => string | null,
+): { values: string[]; total: number; hasMore: boolean } {
+  const kind = /^godot:\/\/(scene|script|resource)\/\{path\}$/.exec(uriTemplate)?.[1] as
+    | keyof typeof EXTENSIONS
+    | undefined;
+  const projectPath = getProjectPath();
+  if (kind === undefined || projectPath === null) {
+    return { values: [], total: 0, hasMore: false };
   }
+  const wanted = typed.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+  const matching = projectFiles(resolve(projectPath), EXTENSIONS[kind]).filter((path) =>
+    path.toLowerCase().includes(wanted),
+  );
+  const rank = (path: string): number => {
+    const lower = path.toLowerCase();
+    if (lower.startsWith(wanted)) return 0;
+    return (lower.split('/').at(-1) ?? '').startsWith(wanted) ? 1 : 2;
+  };
+  // Sorted already, and a stable sort keeps that order within each rank.
+  const ordered = matching.toSorted((a, b) => rank(a) - rank(b));
+  return {
+    values: ordered.slice(0, COMPLETION_LIMIT),
+    total: ordered.length,
+    hasMore: ordered.length > COMPLETION_LIMIT,
+  };
 }
 
 // Godot writes dictionaries, arrays and Object(...) values across several lines, so a
@@ -352,21 +385,28 @@ function readResourceText(
   };
 }
 
-export function setupResourceHandlers(mcp: McpServer, getProjectPath: () => string | null): void {
-  // Registered on the low-level protocol object rather than through registerResource: the
+export function setupResourceHandlers(server: ProtocolServer, getProjectPath: () => string | null): void {
+  // Registered on the low-level server rather than through McpServer's registerResource: the
   // godot:// space is a handful of hand-rolled URI templates, not the static list the
   // high-level helper builds.
-  const server = mcp.server;
-
-  server.setRequestHandler(ListResourcesRequestSchema, () => ({
+  server.setRequestHandler('resources/list', () => ({
     resources: STATIC_RESOURCES,
   }));
 
-  server.setRequestHandler(ListResourceTemplatesRequestSchema, () => ({
+  server.setRequestHandler('resources/templates/list', () => ({
     resourceTemplates: RESOURCE_TEMPLATES,
   }));
 
-  server.setRequestHandler(ReadResourceRequestSchema, (request) => {
+  server.setRequestHandler('completion/complete', (request) => {
+    const { ref, argument } = request.params;
+    const empty = { completion: { values: [], total: 0, hasMore: false } };
+    if (ref.type !== 'ref/resource' || argument.name !== 'path') {
+      return empty;
+    }
+    return { completion: completeResourcePath(ref.uri, argument.value, getProjectPath) };
+  });
+
+  server.setRequestHandler('resources/read', (request) => {
     const uri = request.params.uri;
 
     try {
