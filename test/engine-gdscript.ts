@@ -1037,7 +1037,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   assert.ok(
     asArray(get(health, 'recommendations')).some((said) =>
-      /No export presets are configured/.test(String(said)),
+      String(said).includes('No export presets are configured'),
     ),
     `and the missing presets are still recommended: ${JSON.stringify(get(health, 'recommendations'))}`,
   );
@@ -1052,7 +1052,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     );
     assert.ok(
       asArray(get(withNotes, 'recommendations')).some((said) =>
-        /scripts have TODO or FIXME comments/.test(String(said)),
+        String(said).includes('scripts have TODO or FIXME comments'),
       ),
       `and is said as something to look at: ${JSON.stringify(withNotes)}`,
     );
