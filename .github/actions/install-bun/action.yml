@@ -13,14 +13,14 @@ runs:
         # Three copies of the tag on purpose: each platform's digest has to sit beside a version
         # for Renovate to move the two together, and the script refuses to run if they disagree.
         # renovate: datasource=github-release-attachments depName=oven-sh/bun versioning=regex:^bun-v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
-        LINUX_X64_TAG: bun-v1.4.2
-        LINUX_X64_SHA256: 36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913
+        LINUX_X64_TAG: bun-v1.4.3
+        LINUX_X64_SHA256: 3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18
         # renovate: datasource=github-release-attachments depName=oven-sh/bun versioning=regex:^bun-v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
-        MACOS_ARM64_TAG: bun-v1.4.2
-        MACOS_ARM64_SHA256: 90987a3a16d7db556d886ac3d551e7b6d3edf0a1cf43acaed622e8676be1d12f
+        MACOS_ARM64_TAG: bun-v1.4.3
+        MACOS_ARM64_SHA256: 80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403
         # renovate: datasource=github-release-attachments depName=oven-sh/bun versioning=regex:^bun-v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
-        WINDOWS_X64_TAG: bun-v1.4.2
-        WINDOWS_X64_SHA256: ce4c17497b2f29712a99d3d53f028de28cd42e3bacb8589599e7f000e49b6405
+        WINDOWS_X64_TAG: bun-v1.4.3
+        WINDOWS_X64_SHA256: 0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d
       # The one write to GITHUB_PATH is a directory under RUNNER_TEMP named by this file; no
       # input reaches it.
       run: | # zizmor: ignore[github-env]
