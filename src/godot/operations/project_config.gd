@@ -94,6 +94,11 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	var had_value: bool = ProjectSettings.has_setting(setting_path)
 	if had_value:
 		old_value = ProjectSettings.get_setting(setting_path)
+	# A setting the engine registers is there with its default whether or not project.godot sets it,
+	# so has_setting alone called the description of a project that had never set one an old value.
+	# At its default, the file does not set it: the engine drops a key at its default when it saves.
+	var default_value: Variant = ProjectSettings.property_get_revert(setting_path)
+	var was_default: bool = had_value and default_value != null and old_value == default_value
 
 	var final_value: Variant = _values.deserialize_value(value)
 	var wanted: int = _wanted_type(setting_path, old_value if had_value else null)
@@ -116,7 +121,8 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		"setting_path": setting_path,
 		"old_value": _values.serialize_value(old_value) if had_value else null,
 		"new_value": _values.serialize_value(final_value),
-		"was_new": not had_value,
+		"was_new": not had_value or was_default,
+		"was_default": was_default,
 		"saved": true,
 	}
 
