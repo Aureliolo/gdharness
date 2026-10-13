@@ -3,7 +3,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { mkdtempSync, readdirSync, statSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
@@ -152,6 +152,8 @@ export interface ServerOptions {
   entry?: string;
   env?: Record<string, string>;
   args?: string[];
+  /** The directory the server runs in, which is the suite's own unless a fixture is about it. */
+  cwd?: string;
   /**
    * Which protocol era to speak. 2026-07-28 by default, because it is what Claude Code opens with,
    * and so what the projects driving gdharness every day reach; `legacy` for the 2025 handshake
@@ -296,9 +298,10 @@ export class ServerProcess {
     const { env, runtimeDir } = testServerEnvironment(options.env);
     this.runtimeDir = runtimeDir;
     this.era = options.era ?? 'modern';
-    this.child = spawn(process.execPath, [entry, ...(options.args ?? [])], {
+    this.child = spawn(process.execPath, [resolvePath(entry), ...(options.args ?? [])], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     });
     this.child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString();

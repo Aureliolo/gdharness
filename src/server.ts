@@ -140,6 +140,7 @@ import {
   savesStayPut,
   userDataIn,
 } from './launch.js';
+import { type CallInFlight, callsInFlight, lifecycleLogPath, writeLifecycle } from './lifecycle-log.js';
 import {
   DEFAULT_LSP_PORT,
   GodotLSPClient,
@@ -314,6 +315,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * has to look at, usually a dialog, and saying so beats holding the caller's call open in silence.
  * A project whose import runs past it sets GDHARNESS_EDITOR_RESTART_TIMEOUT_MS.
  */
+/** How long a server runs before the lifecycle log asks which process started it. */
+const PARENT_ASKED_AFTER_MS = 5_000;
+
 function editorRestartTimeoutMs(): number {
   return waitFromEnv('GDHARNESS_EDITOR_RESTART_TIMEOUT_MS', 90_000);
 }
@@ -1736,6 +1740,30 @@ const EDITOR_FREE_INSTEAD: Readonly<Record<string, string>> = {
 };
 
 /**
+ * Why no editor of [param projectPath] would ever dial in, read off the project's own addon, or
+ * null when the addon is installed and enabled, or there is no project there to read.
+ */
+function editorAddonMissing(projectPath: string): { why: string; remedies: string[] } | null {
+  if (!existsSync(join(projectPath, 'project.godot'))) {
+    return null;
+  }
+  const report = inspectProject(projectPath);
+  const installed = report.addons.some((addon) => addon.name === 'gdharness_editor' && addon.installed);
+  if (installed && report.pluginsEnabled.includes('gdharness_editor')) {
+    return null;
+  }
+  return {
+    why: `the gdharness editor addon is not ${installed ? 'enabled' : 'installed'} in ${projectPath}`,
+    remedies: installed
+      ? [
+          'gdharness setup in the project enables it',
+          'Or enable it under Project Settings, Plugins, in an editor opened by hand',
+        ]
+      : ['gdharness setup in the project installs and enables it'],
+  };
+}
+
+/**
  * Ops callers reach for on one tool that another answers, by the tool and op that do.
  *
  * Two downstream sessions read back a value they had just set with runtime_invoke, one as op "get"
@@ -2898,7 +2926,11 @@ class GodotServer {
    * taken, which is the right reference for an editor that was already running and has to notice,
    * and no reference at all for one started afterwards.
    */
-  private launchedEditor: { readonly pid: number; readonly startedAt: number | null } | null = null;
+  private launchedEditor: {
+    readonly pid: number;
+    readonly startedAt: number | null;
+    readonly projectPath: string;
+  } | null = null;
 
   /**
    * What project.godot held when this server opened an editor on it, until that editor arrives.
@@ -2921,6 +2953,15 @@ class GodotServer {
    * for the editor it had just closed.
    */
   private closedHere: { readonly editorPid: number; readonly at: string } | null = null;
+
+  /** The calls being answered, by a number of their own, which the lifecycle log's ended line names. */
+  private readonly inFlight = new Map<number, CallInFlight>();
+  private callsTaken = 0;
+  /** The client the lifecycle log last named, so a line is written only when it changes. */
+  private clientNoted: string | null = null;
+  /** The command line of the process that started this one, once asked, for the ended line. */
+  private parentCommand: string | null = null;
+  private endNoted = false;
 
   /**
    * The project this server was set up for, from the config `setup` wrote, or null.
@@ -2975,6 +3016,7 @@ class GodotServer {
   // -------------------------------------------------------------------------------------------
 
   async run(): Promise<void> {
+    this.noteTheStart();
     const located = await this.locator.find();
     if (!located.ok) {
       console.error(
@@ -3174,6 +3216,7 @@ class GodotServer {
       console.error(
         `[SERVER] pid ${successor} now serves ${this.ownProject}; this server is finished and is stopping.`,
       );
+      this.noteTheEnd('superseded', { successor });
       void this.handleShutdown(`superseded by ${successor}`, 0);
     }, SUCCESSOR_CHECK_MS);
     // Never a reason on its own for the process to stay up.
@@ -3272,10 +3315,81 @@ class GodotServer {
     await this.stdio?.close();
   }
 
+  /**
+   * The lifecycle log's started line, and the replaced line when a live server of the same project
+   * holds its announcement. The parent's command line follows on a line of its own a few seconds
+   * in: reading it costs a query of the process table, a PowerShell on Windows, and a server
+   * started and ended within seconds, as a test suite starts hundreds, then costs none.
+   */
+  private noteTheStart(): void {
+    const cwd = process.cwd();
+    const mcpJson = join(cwd, '.mcp.json');
+    const announced = this.ownProject === null ? null : readAnnouncement(announcementPath(this.ownProject));
+    const predecessor =
+      announced !== null && announced.pid !== process.pid && alive(announced.pid) ? announced.pid : null;
+    writeLifecycle('started', {
+      argv: process.argv.slice(1),
+      cwd,
+      project: this.ownProject,
+      mcpJson: existsSync(mcpJson) ? mcpJson : null,
+    });
+    if (predecessor !== null) {
+      writeLifecycle('replaced', { project: this.ownProject, predecessor });
+    }
+    const ask = setTimeout(() => {
+      void processTree().then((tree) => {
+        this.parentCommand = tree?.get(process.ppid)?.command ?? null;
+        writeLifecycle('parent', {
+          command: this.parentCommand,
+          ...(tree === undefined ? { why: whyTheProcessTreeFailed() } : {}),
+        });
+      });
+    }, PARENT_ASKED_AFTER_MS);
+    ask.unref();
+  }
+
+  /** The lifecycle log's ended line, written once, by whichever way out is taken first. */
+  private noteTheEnd(cause: string, more: Record<string, unknown> = {}): void {
+    if (this.endNoted) {
+      return;
+    }
+    this.endNoted = true;
+    writeLifecycle('ended', {
+      cause,
+      project: this.ownProject,
+      ...(this.parentCommand === null ? {} : { parentCommand: this.parentCommand }),
+      ...(this.clientNoted === null ? {} : { client: this.clientNoted }),
+      inFlight: callsInFlight(this.inFlight.values()),
+      ...more,
+    });
+  }
+
+  /** The lifecycle log's client line, when a request names a client other than the last named. */
+  private noteTheClient(client: { readonly name: string; readonly version: string } | undefined): void {
+    if (client === undefined) {
+      return;
+    }
+    const said = `${client.name} ${client.version}`;
+    if (said === this.clientNoted) {
+      return;
+    }
+    this.clientNoted = said;
+    writeLifecycle('client', { client: { name: client.name, version: client.version } });
+  }
+
   private setupShutdownHandlers(): void {
     const requestShutdown = (source: string, exitCode?: number): void => {
       void this.handleShutdown(source, exitCode);
     };
+    // Written down before the process goes, which Node's own report of an uncaught error does not
+    // do anywhere the next session can read. Then the same end Node gives it.
+    process.on('uncaughtException', (error: unknown, origin: string) => {
+      this.noteTheEnd(origin === 'unhandledRejection' ? 'unhandledRejection' : 'uncaughtException', {
+        error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+      });
+      console.error(error);
+      process.exit(1);
+    });
     process.once('SIGINT', () => {
       requestShutdown('SIGINT', 0);
     });
@@ -3288,7 +3402,8 @@ class GodotServer {
     process.once('beforeExit', (code: number) => {
       requestShutdown(`beforeExit:${code}`);
     });
-    process.once('exit', () => {
+    process.once('exit', (code: number) => {
+      this.noteTheEnd(`exit:${code}`);
       this.forceCleanupOnExit();
     });
   }
@@ -3298,6 +3413,7 @@ class GodotServer {
       return;
     }
     this.shutdownInitiated = true;
+    this.noteTheEnd(source);
     this.logDebug(`Shutting down server via ${source}`);
     try {
       await this.cleanup();
@@ -3370,9 +3486,28 @@ class GodotServer {
   }
 
   private setupToolHandlers(protocol: ProtocolServer): void {
-    protocol.setRequestHandler('tools/list', () => ({ tools: this.tools }));
+    // From the 2026 envelope every request carries, which the SDK lifts out of _meta under its own
+    // keys, and from initialize on a 2025 connection.
+    const clientOf = (envelope: object | undefined): { name: string; version: string } | undefined => {
+      const named = (envelope as Record<string, unknown> | undefined)?.['io.modelcontextprotocol/clientInfo'];
+      if (typeof named === 'object' && named !== null) {
+        const { name, version } = named as Record<string, unknown>;
+        if (typeof name === 'string' && typeof version === 'string') {
+          return { name, version };
+        }
+      }
+      // Deprecated for the 2026 era, where the envelope above answers; on a 2025 connection, which
+      // has no envelope, the SDK keeps this as the one place initialize's client is kept.
+      // oxlint-disable-next-line typescript/no-deprecated
+      return protocol.getClientVersion();
+    };
+    protocol.setRequestHandler('tools/list', (_request, ctx) => {
+      this.noteTheClient(clientOf(ctx.mcpReq.envelope));
+      return { tools: this.tools };
+    });
     protocol.setRequestHandler('tools/call', async (request, ctx) => {
       this.logDebug(`Handling tool request: ${request.params.name}`);
+      this.noteTheClient(clientOf(ctx.mcpReq.envelope));
       const spec = toolSpec(request.params.name);
       if (!spec) {
         throw new ProtocolError(
@@ -3412,12 +3547,18 @@ class GodotServer {
                   this.logDebug(`Progress for ${spec.name} was not sent: ${errorMessage(error)}`);
                 });
             };
-      const answer = await withCallSignal(
-        ctx.mcpReq.signal,
-        () => this.answered(spec.name, checked.op ?? '', args),
-        progress,
-      );
-      return this.withFeedbackNotice(this.withUpdateNotice(answer));
+      const call = this.callsTaken++;
+      this.inFlight.set(call, { tool: spec.name, op: checked.op ?? '', startedAt: Date.now() });
+      try {
+        const answer = await withCallSignal(
+          ctx.mcpReq.signal,
+          () => this.answered(spec.name, checked.op ?? '', args),
+          progress,
+        );
+        return this.withFeedbackNotice(this.withUpdateNotice(answer));
+      } finally {
+        this.inFlight.delete(call);
+      }
     });
   }
 
@@ -3785,13 +3926,12 @@ class GodotServer {
           ]);
         }
         if (!this.godotBridge.isConnected()) {
-          return this.createErrorResponse(
-            `${tool} ${op} was asked of the editor, and no editor has reached this server.`,
-            [
-              'editor_status says whether the bridge is up and whether an editor may yet connect',
-              'Open the project with editor_launch, or pass from: "disk" to read the file instead',
-            ],
-          );
+          const refused = await this.noEditorYet(answerable, [
+            `${tool} ${op} was asked of the editor; from: "disk" reads the file instead`,
+          ]);
+          if (refused !== null) {
+            return refused;
+          }
         }
         const { op: _dropped, ...asks } = answerable;
         const contained = this.containProjectFiles(asks);
@@ -3887,11 +4027,11 @@ class GodotServer {
       case 'script_info':
         switch (op) {
           case 'symbols':
-            return await this.handleLSP('lsp_get_symbols', args);
+            return await this.askScriptInfo('lsp_get_symbols', 'Symbols', args);
           case 'completion':
-            return await this.handleLSP('lsp_get_completions', args);
+            return await this.askScriptInfo('lsp_get_completions', 'Completion', args);
           default:
-            return await this.handleLSP('lsp_get_hover', args);
+            return await this.askScriptInfo('lsp_get_hover', 'Hover', args);
         }
       case 'script_diagnostics':
         return await this.handleScriptDiagnostics(args);
@@ -5848,35 +5988,9 @@ class GodotServer {
   ): Promise<{ answer: OperationParams } | { refusal: ToolResponse; perScript: boolean }> {
     const answer = await this.handleLSP('lsp_get_diagnostics', args);
     const payload = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
-    if (payload['error'] !== undefined) {
-      const reason =
-        typeof payload['error'] === 'string' ? payload['error'] : JSON.stringify(payload['error']);
-      if (payload['refusedArguments'] === true) {
-        return { refusal: this.createErrorResponse(reason), perScript: true };
-      }
-      // A server still reading the project, or one the connected editor names and has yet to
-      // start, is the right one on the right port, so the port and settings remedies would send
-      // the caller after a fault that is not there.
-      if (payload['stillReading'] === true) {
-        return { refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`), perScript: false };
-      }
-      if (typeof payload['serves'] === 'string') {
-        return {
-          refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
-            'editor_status names the editor on the bridge and the port it says it serves',
-            "editor_launch opens this project's own editor, on a language server port of its own",
-            'GDHARNESS_LSP_PORT points this server at the right one',
-          ]),
-          perScript: false,
-        };
-      }
-      return {
-        refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
-          `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
-          'GDHARNESS_LSP_PORT points this server at another one',
-        ]),
-        perScript: payload['aboutThisFile'] === true,
-      };
+    const refused = this.languageServerRefusal(payload, 'Diagnostics');
+    if (refused !== null) {
+      return refused;
     }
 
     const diagnostics = readArray(payload, 'diagnostics') ?? [];
@@ -6079,6 +6193,54 @@ class GodotServer {
 
   private async handleLSP(toolName: string, args: unknown): Promise<ToolResponse> {
     return handleLSPTool(await this.lsp(), toolName, args);
+  }
+
+  /** A script_info question for the language server, whose refusal is the caller's error. */
+  private async askScriptInfo(toolName: string, asked: string, args: OperationParams): Promise<ToolResponse> {
+    const answer = await this.handleLSP(toolName, args);
+    const refused = this.languageServerRefusal(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), asked);
+    return refused === null ? answer : refused.refusal;
+  }
+
+  /**
+   * What the language server client refused, as an error carrying what clears it, or null for an
+   * answer. `asked` names what was unavailable, and `perScript` says whether the refusal is about
+   * this script rather than the language server, which would refuse every script the same way.
+   */
+  private languageServerRefusal(
+    payload: OperationParams,
+    asked: string,
+  ): { refusal: ToolResponse; perScript: boolean } | null {
+    if (payload['error'] === undefined) {
+      return null;
+    }
+    const reason = typeof payload['error'] === 'string' ? payload['error'] : JSON.stringify(payload['error']);
+    if (payload['refusedArguments'] === true) {
+      return { refusal: this.createErrorResponse(reason), perScript: true };
+    }
+    // A server still reading the project, or one the connected editor names and has yet to start,
+    // is the right one on the right port, so the port and settings remedies would send the caller
+    // after a fault that is not there.
+    if (payload['stillReading'] === true) {
+      return { refusal: this.createErrorResponse(`${asked} unavailable: ${reason}`), perScript: false };
+    }
+    if (typeof payload['serves'] === 'string') {
+      return {
+        refusal: this.createErrorResponse(`${asked} unavailable: ${reason}`, [
+          'editor_status names the editor on the bridge and the port it says it serves',
+          "editor_launch opens this project's own editor, on a language server port of its own",
+          'GDHARNESS_LSP_PORT points this server at the right one',
+        ]),
+        perScript: false,
+      };
+    }
+    return {
+      refusal: this.createErrorResponse(`${asked} unavailable: ${reason}`, [
+        `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
+        'GDHARNESS_LSP_PORT points this server at another one',
+      ]),
+      perScript: payload['aboutThisFile'] === true,
+    };
   }
 
   /** The client for the language server of the editor this server follows, on the port it serves. */
@@ -6711,6 +6873,7 @@ class GodotServer {
           behind: game.protocol > RUNTIME_PROTOCOL ? 'server' : 'addon',
         })),
       },
+      server: { pid: process.pid, version: SERVER_VERSION, lifecycleLog: lifecycleLogPath() },
     });
   }
 
@@ -6888,6 +7051,10 @@ class GodotServer {
   private async handleCloseEditor(): Promise<ToolResponse> {
     const before = this.godotBridge.getStatus();
     if (!before.connected) {
+      const launched = this.launchedEditor;
+      if (launched !== null && (await this.launchedEditorIsUp()) && !this.godotBridge.isConnected()) {
+        return await this.stopTheLaunchedEditor(launched);
+      }
       return this.createErrorResponse('No editor is connected, so there is nothing to close.', [
         'editor_status says whether the bridge is up and what has reached it',
       ]);
@@ -6924,6 +7091,49 @@ class GodotServer {
       editorPid: pid,
       projectPath: before.projectPath,
       ...this.whatTheEditorDropped(settingsBefore, this.settingKeysOf(before.projectPath)),
+      tookMs: Date.now() - began,
+    });
+  }
+
+  /**
+   * editor_launch close for the editor this server opened, before it has connected.
+   *
+   * There is nothing to ask it and nothing of this server's in it to save, since every change this
+   * server makes in an editor goes through the bridge it has not reached. Told there was nothing to
+   * close, a caller left a hidden editor running with no window to close and no server admitting to
+   * it.
+   */
+  private async stopTheLaunchedEditor(launched: {
+    readonly pid: number;
+    readonly projectPath: string;
+  }): Promise<ToolResponse> {
+    const began = Date.now();
+    try {
+      process.kill(launched.pid);
+    } catch (error) {
+      if (alive(launched.pid)) {
+        return this.createErrorResponse(
+          `The editor this server opened, pid ${launched.pid}, has not connected, and stopping it failed: ${errorMessage(error)}`,
+          ['editor_status says whether it has since connected'],
+        );
+      }
+    }
+    const stopWaitMs = 10_000;
+    if (!(await this.waitForBridge(() => !alive(launched.pid), began + stopWaitMs))) {
+      return this.createErrorResponse(
+        `The editor this server opened, pid ${launched.pid}, had not connected and was told to stop, and is still running after ${stopWaitMs / 1000}s.`,
+        ['editor_status says whether it has since connected'],
+      );
+    }
+    this.closedHere = { editorPid: launched.pid, at: new Date().toISOString() };
+    this.launchedEditor = null;
+    this.launchedFrom = null;
+    return this.jsonTextResponse({
+      closed: true,
+      editorPid: launched.pid,
+      projectPath: launched.projectPath,
+      beforeConnecting: true,
+      note: "It had not reached the bridge, so it was stopped rather than asked to save and quit, and held nothing of this server's to save.",
       tookMs: Date.now() - began,
     });
   }
@@ -7192,17 +7402,11 @@ class GodotServer {
         ],
       );
     }
-    const report = inspectProject(projectPath);
-    const installed = report.addons.some((addon) => addon.name === 'gdharness_editor' && addon.installed);
-    if (!installed || !report.pluginsEnabled.includes('gdharness_editor')) {
+    const missing = editorAddonMissing(projectPath);
+    if (missing !== null) {
       return this.createErrorResponse(
-        `The gdharness editor addon is not ${installed ? 'enabled' : 'installed'} in ${projectPath}, so an editor opened on it would never reach this server.`,
-        installed
-          ? [
-              'gdharness setup in the project enables it',
-              'Or enable it under Project Settings, Plugins, in an editor opened by hand',
-            ]
-          : ['gdharness setup in the project installs and enables it'],
+        `${missing.why}, so an editor opened on it would never reach this server.`,
+        missing.remedies,
       );
     }
     const owed = restartOwed(projectPath);
@@ -7275,6 +7479,7 @@ class GodotServer {
     this.launchedEditor = {
       pid: launched.pid,
       startedAt: (await startTimesOf([launched.pid])).get(launched.pid) ?? null,
+      projectPath,
     };
     this.closedHere = null;
     return { pid: launched.pid, error: null };
@@ -9666,7 +9871,12 @@ class GodotServer {
         ['Ask again in a moment; editor_status shows greeting until it has'],
       );
     }
-    const projectPath = status.projectPath ?? this.ownProject ?? undefined;
+    const projectPath =
+      status.projectPath ?? this.launchedEditor?.projectPath ?? this.ownProject ?? undefined;
+    const elsewhere = this.anotherProjectNamed(args, projectPath);
+    if (elsewhere !== null) {
+      return elsewhere;
+    }
     if (projectPath === undefined || (!greeted && launched === null)) {
       return this.createErrorResponse('No editor is connected, so there is no console to read.', [
         'editor_status says whether one is connected and whether it may yet be',
@@ -9733,6 +9943,33 @@ class GodotServer {
     });
   }
 
+  /**
+   * editor_output's refusal for a projectPath that is not the project of what it would read, or
+   * null. The output read is the one run or editor this server holds, so the argument picks
+   * nothing; it is taken because every runtime tool beside this one takes it, and callers sent it
+   * here too, and a caller naming one project while the run is another's is reading output it
+   * would attribute to the wrong game.
+   */
+  private anotherProjectNamed(
+    args: OperationParams,
+    ofWhatIsRead: string | null | undefined,
+  ): ToolResponse | null {
+    const named = readNonEmptyString(args, 'projectPath');
+    if (named === undefined || ofWhatIsRead === null || ofWhatIsRead === undefined || ofWhatIsRead === '') {
+      return null;
+    }
+    if (isSameDirectory(named, ofWhatIsRead)) {
+      return null;
+    }
+    return this.createErrorResponse(
+      `editor_output reads what this server holds, which is of ${ofWhatIsRead}, and this call names ${named}.`,
+      [
+        "Another project's run is read through that project's own gdharness server",
+        'editor_status names every game running on the machine under runtimes',
+      ],
+    );
+  }
+
   private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
     if (readString(args, 'op') === 'editor') {
       return this.handleEditorConsole(args);
@@ -9741,6 +9978,13 @@ class GodotServer {
     const run = await this.currentRun();
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
+    }
+    const elsewhere = this.anotherProjectNamed(
+      args,
+      run.projectPath ?? this.godotBridge.getStatus().projectPath,
+    );
+    if (elsewhere !== null) {
+      return elsewhere;
     }
     await this.tieThePlayedGame(run);
     this.drainEditorOutput(run);
@@ -11188,25 +11432,80 @@ class GodotServer {
     return { unseen: unseenByEditor(projectPath, holds), stillHeld: heldButGone(projectPath, holds) };
   }
 
+  /**
+   * Why a call for the editor finds none, or null once one has connected.
+   *
+   * An editor this server opened is waited for while it runs. editor_launch open answers once the
+   * process has started, and the editor dials in only after it has imported the project and loaded
+   * its plugins, so a call sent straight after the open met no editor and was told to open one,
+   * beside the editor already opening. The wait is the restart's, which waits for the same thing.
+   */
+  private async noEditorYet(args: OperationParams, instead: readonly string[]): Promise<ToolResponse | null> {
+    const project = readNonEmptyString(args, 'projectPath') ?? this.ownProject;
+    // Opening an editor and enabling the plugin both assume the addon is there, and on a project
+    // that has never been set up neither can work: editor_launch refuses it for that reason.
+    const missing = project === null ? null : editorAddonMissing(project);
+    if (missing !== null) {
+      return this.createErrorResponse(
+        `Editor not connected, and no editor of this project can connect: ${missing.why}.`,
+        [...instead, ...missing.remedies, 'editor_launch then opens an editor that connects'],
+      );
+    }
+    const launched = this.launchedEditor;
+    if (launched !== null && (await this.launchedEditorIsUp())) {
+      const began = Date.now();
+      await this.waitForBridge(
+        () => hasSaidWhoItIs(this.godotBridge.getStatus()) || !alive(launched.pid),
+        began + editorRestartTimeoutMs(),
+      );
+      if (this.godotBridge.isConnected()) {
+        return null;
+      }
+      const opened = `the editor this server opened on ${launched.projectPath}, pid ${launched.pid}`;
+      if (alive(launched.pid)) {
+        return this.createErrorResponse(
+          `Editor not connected: ${opened}, is still running and has not reached the bridge in the ${String(Math.round((Date.now() - began) / 1000))}s this call waited. An editor dials in once it has imported the project and loaded its plugins, and the first open of a large project imports for minutes.`,
+          [
+            ...instead,
+            'editor_status names it under awaitingLaunchedEditor until it has connected',
+            'editor_output op editor shows what it is printing meanwhile',
+          ],
+        );
+      }
+      return this.createErrorResponse(
+        `Editor not connected: ${opened}, exited without reaching the bridge.`,
+        [
+          ...instead,
+          'editor_output op editor shows what it printed before it went',
+          'editor_launch open starts another',
+        ],
+      );
+    }
+    return this.createErrorResponse(
+      'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
+      [
+        ...instead,
+        'Open the project in the editor with editor_launch, or by hand',
+        'Enable the addon under Project > Project Settings > Plugins',
+        'editor_status says whether the bridge is up and what it is listening on',
+      ],
+    );
+  }
+
   private async handleViaBridge(
     toolName: string,
     args: OperationParams,
     askedAs?: string,
   ): Promise<ToolResponse> {
     if (!this.godotBridge.isConnected()) {
-      const instead =
+      const alternative =
         askedAs !== undefined && Object.hasOwn(EDITOR_FREE_INSTEAD, askedAs)
           ? EDITOR_FREE_INSTEAD[askedAs]
           : undefined;
-      return this.createErrorResponse(
-        'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
-        [
-          ...(instead === undefined ? [] : [instead]),
-          'Open the project in the editor with editor_launch, or by hand',
-          'Enable the addon under Project > Project Settings > Plugins',
-          'editor_status says whether the bridge is up and what it is listening on',
-        ],
-      );
+      const refused = await this.noEditorYet(args, alternative === undefined ? [] : [alternative]);
+      if (refused !== null) {
+        return refused;
+      }
     }
     // A server serves one editor, and that editor answers about the project it has open whatever
     // path the call names: it has no other project to look in. So a call naming a different one

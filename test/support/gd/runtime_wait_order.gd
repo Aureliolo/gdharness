@@ -17,6 +17,10 @@ class Counter:
 	var step: int = 0
 	var mood: String = "idle"
 	var turns_to_busy: int = -1
+	var physics_steps: int = 0
+
+	func _physics_process(_delta: float) -> void:
+		physics_steps += 1
 
 	func _process(_delta: float) -> void:
 		day += step
@@ -58,6 +62,7 @@ func _run() -> void:
 	await _check_a_fraction_is_a_threshold()
 	await _check_a_wait_for_a_difference()
 	await _check_what_is_refused()
+	await _check_physics_steps_through_a_frame_wait()
 
 	node._cleanup()
 	var _removed: Error = DirAccess.remove_absolute(OS.get_environment("GDHARNESS_RUNTIME_DIR"))
@@ -67,6 +72,29 @@ func _run() -> void:
 		return
 	printerr("\n".join(failures))
 	quit(1)
+
+
+## A game's _physics_process goes on running while frames are waited for, by the time that passed.
+## Reported from a game whose simulation steps there, read three ticks over a 120-frame wait of two
+## seconds; measured on its own copy afterwards, the wait let it step with the time, which is what
+## this holds. Counted in a node of the game's own rather than by the engine's counter, which goes on
+## counting steps for a paused tree that runs nobody's _physics_process. By time rather than frames,
+## because a headless run's frames are not paced; a step either way absorbs where the wait began and
+## ended inside one.
+func _check_physics_steps_through_a_frame_wait() -> void:
+	var before: int = counter.physics_steps
+	var waited: Dictionary = await node._execute_command("wait_frames", {"frames": 120})
+	var stepped: int = counter.physics_steps - before
+	var due: int = floori(
+		Read.as_float(waited.get("elapsed_ms", 0)) * Engine.physics_ticks_per_second / 1000.0
+	)
+	if waited.get("type") != "waited" or stepped < due - 2:
+		_fail(
+			(
+				"physics should step through a frame wait by the time it took: %s, stepped %d of %d due"
+				% [JSON.stringify(waited), stepped, due]
+			)
+		)
 
 
 func _wait(params: Dictionary) -> Dictionary:
