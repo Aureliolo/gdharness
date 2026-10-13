@@ -20044,11 +20044,24 @@ async function testEngineFlagsReachTheEngine(): Promise<void> {
         );
         assert.equal(get(verboseCheck, 'booted'), true, JSON.stringify(verboseCheck));
         assert.equal(get(verboseCheck, 'argsNote'), undefined, JSON.stringify(verboseCheck));
+        // The command line the check ran, as a start names its own, so a caller can see where each
+        // flag went without inferring it from the output.
+        const ran = asArray(get(verboseCheck, 'arguments')).map(text);
+        assert.deepEqual(
+          ran.slice(ran.indexOf('--quit-after')),
+          ['--quit-after', '3', '--verbose'],
+          `a check names what it ran: ${JSON.stringify(verboseCheck)}`,
+        );
         const misplacedCheck = await check({ args: ['--verbose'] });
         assert.match(
           text(get(misplacedCheck, 'argsNote')),
           /--verbose is a flag the engine reads, and args goes to the game after --/,
           `a check says so as a start does: ${JSON.stringify(misplacedCheck)}`,
+        );
+        assert.deepEqual(
+          asArray(get(misplacedCheck, 'arguments')).map(text).slice(-2),
+          ['--', '--verbose'],
+          `and its command line shows the flag behind the separator: ${JSON.stringify(misplacedCheck)}`,
         );
       },
       { GODOT_PATH: godotPath },
