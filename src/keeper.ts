@@ -144,6 +144,9 @@ async function startThroughHelper(
 /** How often a profiled run's file is written at most while frames arrive. */
 const PROFILE_WRITE_MS = 500;
 
+/** How many times the write as the game exits is tried before what it carried is given up. */
+const LAST_WRITE_TRIES = 5;
+
 /**
  * The game's debugger for a profiled run, writing what it sums to [param path]: when the game
  * connects, at most every `PROFILE_WRITE_MS` while frames arrive, and once more as the game exits,
@@ -156,10 +159,12 @@ async function profiledBy(
 ): Promise<{ listener: ProfileListener; finish: () => void }> {
   let latest: ProfileTotals | null = null;
   let timer: NodeJS.Timeout | null = null;
+  // A write a reader held off past its wait is tried again later rather than dropped: the totals it
+  // carried are only rewritten when the next frame arrives, and a game that has quit sends none.
   const write = (): void => {
     timer = null;
-    if (latest !== null) {
-      writeProfileFile(path, { ...latest, connected: true });
+    if (latest !== null && !writeProfileFile(path, { ...latest, connected: true })) {
+      timer = setTimeout(write, PROFILE_WRITE_MS);
     }
   };
   let projectGodot: string | null = null;
@@ -188,7 +193,16 @@ async function profiledBy(
         clearTimeout(timer);
       }
       latest = listener.totals() ?? latest;
-      write();
+      // The keeper exits after this, so there is no later write to fall back on, and the engine's
+      // own totals arrive only now. Each try waits out a held file for a while of its own.
+      let tries = 0;
+      while (
+        latest !== null &&
+        !writeProfileFile(path, { ...latest, connected: true }) &&
+        tries < LAST_WRITE_TRIES
+      ) {
+        tries += 1;
+      }
       listener.close();
     },
   };

@@ -218,6 +218,7 @@ import {
   profilerOn,
   propertyOf,
   queuedMessagesOf,
+  readProfileFile,
   type SourceOf,
   signatureParts,
   UNNAMED_PREFIX,
@@ -27093,6 +27094,88 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
 }
 
 /**
+ * A profile file is written over while another process has it open, and a write that cannot be
+ * made is answered rather than thrown.
+ *
+ * The keeper writes the file and the server reads it each time a profile is asked for, and Windows
+ * refuses a rename over a file another process has open. The refusal was thrown in the keeper, which
+ * ended it: the Windows leg then polled a running game for a minute and was told every time that it
+ * had not connected. A holder process stands in for the server's read, held for less than the wait
+ * and then for longer. Elsewhere the rename goes through while held, and the same answers say so.
+ */
+async function testAProfileIsWrittenPastAReader(): Promise<void> {
+  const holding = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-profile-held-'));
+  const path = join(holding, 'profile.json');
+  const waiting = { connected: false, listeningSince: 1 } as const;
+  const summed = (frames: number): Parameters<typeof writeProfileFile>[1] => ({
+    connected: true,
+    startedAt: 1,
+    lastFrameAt: 2,
+    frames,
+    complete: false,
+    functions: {},
+    unreadable: 0,
+  });
+  // The holder opens the file, says so, and keeps it open for [param ms].
+  const heldFor = async (ms: number): Promise<ChildProcess> => {
+    const holder = spawn(
+      process.execPath,
+      [
+        '-e',
+        `const fs = require('fs'); const fd = fs.openSync(${JSON.stringify(path)}, 'r'); console.log('held'); setTimeout(() => fs.closeSync(fd), ${String(ms)});`,
+      ],
+      { stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    await new Promise<void>((resolve, reject) => {
+      holder.stdout.once('data', () => {
+        resolve();
+      });
+      holder.once('exit', () => {
+        reject(new Error('the holder exited before it held the file'));
+      });
+    });
+    return holder;
+  };
+  const finished = async (holder: ChildProcess): Promise<void> => {
+    if (holder.exitCode === null) {
+      await new Promise((resolve) => holder.once('exit', resolve));
+    }
+  };
+  try {
+    assert.equal(writeProfileFile(path, waiting), true, 'a file nobody holds is written');
+
+    const briefly = await heldFor(300);
+    assert.equal(writeProfileFile(path, summed(5)), true, 'a reader holding the file briefly is waited out');
+    assert.equal(get(readProfileFile(path), 'frames'), 5, 'and the file is the one written');
+    await finished(briefly);
+
+    const long = await heldFor(4000);
+    const began = Date.now();
+    const written = writeProfileFile(path, summed(9));
+    const tookMs = Date.now() - began;
+    await finished(long);
+    assert.equal(
+      written,
+      process.platform !== 'win32',
+      `held past the wait: refused on Windows, written elsewhere (${String(tookMs)}ms)`,
+    );
+    assert.equal(
+      get(readProfileFile(path), 'frames'),
+      process.platform === 'win32' ? 5 : 9,
+      'a refused write leaves the file as it was, whole',
+    );
+    assert.ok(tookMs < 3000, `and gives up within its wait rather than with the holder: ${String(tookMs)}ms`);
+    assert.deepEqual(
+      readdirSync(holding).filter((name) => name.endsWith('.partial')),
+      [],
+      'leaving nothing half-written beside it',
+    );
+  } finally {
+    sweep(holding);
+  }
+}
+
+/**
  * A run started with profile: true answers which GDScript functions took its time.
  *
  * The keeper is the game's debugger and sums the engine's own script profiler. Four runs, because
@@ -35204,6 +35287,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAStackOverflowIsNotAPass,
+  testAProfileIsWrittenPastAReader,
   testAProfiledRunNamesWhereItsTimeWent,
   testAProfileFromTheStartWaitsForTheProfiler,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
