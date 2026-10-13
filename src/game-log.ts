@@ -40,7 +40,7 @@ export interface LogEntry {
 const HEADLINE = /^(USER )?(SCRIPT ERROR|SHADER ERROR|ERROR|WARNING):\s?(.*)$/;
 
 /** An ANSI colour sequence: the escape byte, a bracket, the parameters, the letter m. */
-const COLOUR_CODE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g');
+export const COLOUR_CODE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g');
 
 /** The severity a headline announces, or null for a line that announces nothing. */
 function announced(line: string): { severity: Severity; text: string; byScript: boolean } | null {

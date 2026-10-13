@@ -3713,6 +3713,10 @@ class GodotServer {
         }
       case 'scene_animation':
         switch (op) {
+          case 'read':
+            return await bridge('read_animations');
+          case 'read_states':
+            return await bridge('read_animation_states');
           case 'create':
             return await bridge('create_animation');
           case 'add_track':
@@ -3739,6 +3743,8 @@ class GodotServer {
 
       case 'resource_edit':
         switch (op) {
+          case 'read':
+            return await bridge('read_resource');
           case 'create':
             return await bridge('create_resource');
           case 'modify':

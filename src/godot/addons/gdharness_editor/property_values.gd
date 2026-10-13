@@ -17,6 +17,16 @@ extends RefCounted
 const Read = preload("reading.gd")
 const Serialisation = preload("serialisation.gd")
 
+# The data types a Theme names its items by, as in "Button/colors/font_color", and what each holds.
+const THEME_ITEMS: Dictionary[String, Array] = {
+	"colors": [TYPE_COLOR, ""],
+	"constants": [TYPE_INT, ""],
+	"font_sizes": [TYPE_INT, ""],
+	"fonts": [TYPE_OBJECT, "Font"],
+	"icons": [TYPE_OBJECT, "Texture2D"],
+	"styles": [TYPE_OBJECT, "StyleBox"],
+}
+
 # What each packed array holds, for the four whose elements are not types JSON has. A polygon is
 # written as a list of pairs, and only the property knows that each pair is a Vector2 rather than a
 # list of two numbers: without being told, every element was read as itself and the engine turned
@@ -394,7 +404,25 @@ func declaration(target: Object, property: String) -> Dictionary:
 		if Read.as_int(declared.get("usage", 0)) & HEADINGS:
 			continue
 		return declared
+	if target is Theme:
+		return _theme_item(property)
 	return {}
+
+
+## The entry a Theme would declare for [param property] once it held that item, or {} when the name
+## is not an item's. A Theme lists only the items it holds and takes any other through set, so an
+## item a read of one theme answered with was refused when written into another that lacked it.
+static func _theme_item(property: String) -> Dictionary:
+	var parts: PackedStringArray = property.split("/")
+	if parts.size() != 3 or parts[0].is_empty() or parts[2].is_empty() or not THEME_ITEMS.has(parts[1]):
+		return {}
+	var item: Array = THEME_ITEMS[parts[1]]
+	var kind: int = item[0]
+	var made: Dictionary = {"name": property, "type": kind, "usage": PROPERTY_USAGE_DEFAULT}
+	if kind == TYPE_OBJECT:
+		made["hint"] = PROPERTY_HINT_RESOURCE_TYPE
+		made["hint_string"] = item[1]
+	return made
 
 
 ## Whether [param held] is [param given], as a property read back after a set answers it.

@@ -745,7 +745,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_signal',
     title: 'Scene signals',
-    description: 'Signal connections in a scene file. Needs the editor connected.',
+    description:
+      'Signal connections in a scene file. Each connection answers with its flags as the number and as flagNames; persist is on every connection, since a scene saves no other kind. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -775,43 +776,79 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_animation',
     title: 'Animations',
     description:
-      'Animations in an AnimationPlayer and states in an AnimationTree state machine. Needs the editor connected.',
+      'Animations in an AnimationPlayer and states in an AnimationTree state machine. read answers with every track of an animation in the shape add_track takes, so a track read off one animation can be added to another. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
-      playerNodePath: { type: 'string', description: 'The AnimationPlayer node.' },
+      playerNodePath: {
+        type: 'string',
+        ops: ['read', 'create', 'add_track'],
+        description: 'The AnimationPlayer node.',
+      },
       animationName: {
         type: 'string',
-        description: 'The animation in the player. add_state: the one that state plays.',
+        ops: ['read', 'create', 'add_track', 'add_state'],
+        description:
+          'The animation in the player. read: the one to answer with whole; without it, read lists them. add_state: the one that state plays.',
       },
-      length: { type: 'number', description: 'create: seconds. Default 1.' },
+      length: { type: 'number', ops: ['create'], description: 'create: seconds. Default 1.' },
       loopMode: {
         type: 'string',
+        ops: ['create'],
         enum: ['none', 'linear', 'pingpong'],
         description: 'create: default none.',
       },
-      step: { type: 'number', description: 'create: keyframe snap in seconds. Default 0.1.' },
-      track: ANIMATION_TRACK,
-      animTreePath: { type: 'string', description: 'The AnimationTree node.' },
-      stateName: { type: 'string', description: 'add_state: the state to add.' },
+      step: {
+        type: 'number',
+        ops: ['create'],
+        description: 'create: keyframe snap in seconds. Default 0.1.',
+      },
+      track: { ...ANIMATION_TRACK, ops: ['add_track'] },
+      animTreePath: {
+        type: 'string',
+        ops: ['read_states', 'add_state', 'connect_states'],
+        description: 'The AnimationTree node.',
+      },
+      stateName: { type: 'string', ops: ['add_state'], description: 'add_state: the state to add.' },
       stateMachinePath: {
         type: 'string',
-        description: 'add_state: a nested state machine. Default the root.',
+        ops: ['read_states', 'add_state', 'connect_states'],
+        description: 'A nested state machine, by the names of the states that lead to it. Default the root.',
       },
-      fromState: { type: 'string', description: 'connect_states: the state the transition leaves.' },
-      toState: { type: 'string', description: 'connect_states: the state it arrives at.' },
+      fromState: {
+        type: 'string',
+        ops: ['connect_states'],
+        description: 'connect_states: the state the transition leaves.',
+      },
+      toState: {
+        type: 'string',
+        ops: ['connect_states'],
+        description: 'connect_states: the state it arrives at.',
+      },
       transitionType: {
         type: 'string',
+        ops: ['connect_states'],
         enum: ['immediate', 'sync', 'at_end'],
         description: 'connect_states: default immediate.',
       },
       advanceCondition: {
         type: 'string',
+        ops: ['connect_states'],
         description: 'connect_states: the condition parameter that advances.',
       },
     },
     requires: ['projectPath', 'scenePath'],
     operations: {
+      read: {
+        effect: 'read',
+        summary: 'the animations of an AnimationPlayer, or one with its tracks',
+        requires: ['playerNodePath'],
+      },
+      read_states: {
+        effect: 'read',
+        summary: 'the states and transitions of an AnimationTree state machine',
+        requires: ['animTreePath'],
+      },
       create: {
         effect: 'additive',
         summary: 'a new animation in an AnimationPlayer',
@@ -958,34 +995,59 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'resource_edit',
     title: 'Edit resources',
     description:
-      'Resource files: create any ClassDB resource as .tres, change one, write a shader, build a TileSet, or set a Theme colour or font size. A material is a create with resourceType StandardMaterial3D, ShaderMaterial or CanvasItemMaterial. Needs the editor connected.',
+      'Resource files: read one, create any ClassDB resource as .tres, change one, write a shader, build a TileSet, or set a Theme colour or font size. A material is a create with resourceType StandardMaterial3D, ShaderMaterial or CanvasItemMaterial. read answers with the properties the file sets, in the form modify takes, and a Theme lists its items there as "Button/colors/font_color". Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       resourcePath: RESOURCE_PATH,
       resourceType: {
         type: 'string',
+        ops: ['create'],
         description: 'create: the resource class, such as "PhysicsMaterial" or "StandardMaterial3D".',
       },
-      properties: PROPERTIES,
-      script: { type: 'string', description: 'create: a script to attach, for custom resources.' },
+      properties: { ...PROPERTIES, ops: ['create', 'modify'] },
+      script: {
+        type: 'string',
+        ops: ['create'],
+        description: 'create: a script to attach, for custom resources.',
+      },
+      includeDefaults: {
+        type: 'boolean',
+        ops: ['read'],
+        description: 'read: include properties still at their default. Default false.',
+      },
       shaderType: {
         type: 'string',
+        ops: ['create_shader'],
         enum: ['canvas_item', 'spatial', 'particles', 'sky', 'fog'],
         description: 'create_shader.',
       },
       code: {
         type: 'string',
+        ops: ['create_shader'],
         description: 'create_shader: the shader source. Default: a minimal shader of that type.',
       },
-      sources: TILESET_SOURCES,
-      controlType: { type: 'string', description: 'Theme ops: the Control class, such as "Button".' },
-      colorName: { type: 'string', description: 'set_theme_color: such as "font_color".' },
-      color: COLOUR,
-      fontSizeName: { type: 'string', description: 'set_theme_font_size: such as "font_size".' },
-      size: { type: 'number', description: 'set_theme_font_size: pixels.' },
+      sources: { ...TILESET_SOURCES, ops: ['create_tileset'] },
+      controlType: {
+        type: 'string',
+        ops: ['set_theme_color', 'set_theme_font_size'],
+        description: 'Theme ops: the Control class, such as "Button".',
+      },
+      colorName: {
+        type: 'string',
+        ops: ['set_theme_color'],
+        description: 'set_theme_color: such as "font_color".',
+      },
+      color: { ...COLOUR, ops: ['set_theme_color'] },
+      fontSizeName: {
+        type: 'string',
+        ops: ['set_theme_font_size'],
+        description: 'set_theme_font_size: such as "font_size".',
+      },
+      size: { type: 'number', ops: ['set_theme_font_size'], description: 'set_theme_font_size: pixels.' },
     },
     requires: ['projectPath', 'resourcePath'],
     operations: {
+      read: { effect: 'read', summary: 'the properties a resource file sets', requires: [] },
       create: { effect: 'destructive', summary: 'a new resource of any class', requires: ['resourceType'] },
       modify: {
         effect: 'destructive',

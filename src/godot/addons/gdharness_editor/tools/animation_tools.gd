@@ -6,9 +6,33 @@ extends Node
 const PropertyValues = preload("../property_values.gd")
 const Read = preload("../reading.gd")
 const SceneFile = preload("../scene_file.gd")
+const Serialisation = preload("../serialisation.gd")
+
+const LOOP_MODE_NAMES: Dictionary[int, String] = {
+	Animation.LOOP_NONE: "none",
+	Animation.LOOP_LINEAR: "linear",
+	Animation.LOOP_PINGPONG: "pingpong",
+}
+const TRACK_TYPE_NAMES: Dictionary[int, String] = {
+	Animation.TYPE_VALUE: "property",
+	Animation.TYPE_POSITION_3D: "position_3d",
+	Animation.TYPE_ROTATION_3D: "rotation_3d",
+	Animation.TYPE_SCALE_3D: "scale_3d",
+	Animation.TYPE_BLEND_SHAPE: "blend_shape",
+	Animation.TYPE_METHOD: "method",
+	Animation.TYPE_BEZIER: "bezier",
+	Animation.TYPE_AUDIO: "audio",
+	Animation.TYPE_ANIMATION: "animation",
+}
+const SWITCH_MODE_NAMES: Dictionary[int, String] = {
+	AnimationNodeStateMachineTransition.SWITCH_MODE_IMMEDIATE: "immediate",
+	AnimationNodeStateMachineTransition.SWITCH_MODE_SYNC: "sync",
+	AnimationNodeStateMachineTransition.SWITCH_MODE_AT_END: "at_end",
+}
 
 var _editor_plugin: EditorPlugin = null
 var _properties: PropertyValues = PropertyValues.new()
+var _values: Serialisation = Serialisation.new()
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
@@ -44,6 +68,19 @@ func _open_at(scene_path: String, node_path: String, kind: String) -> Array:
 	var foreign: String = scene.foreign(node)
 	if not foreign.is_empty():
 		return [scene, null, scene.refuse(foreign)]
+	return [scene, node, {}]
+
+
+## [param scene_path] opened for reading, as [method _open_at] answers. A node an instanced scene
+## owns is read like any other, since nothing is written.
+func _read_at(scene_path: String, node_path: String, kind: String) -> Array:
+	var scene: SceneFile = SceneFile.new()
+	var refused: Dictionary = scene.open(scene_path, false)
+	if not refused.is_empty():
+		return [scene, null, refused]
+	var node: Node = _find_node(scene.root, node_path)
+	if node == null or not node.is_class(kind):
+		return [scene, null, scene.refuse("%s not found at: %s" % [kind, node_path])]
 	return [scene, node, {}]
 
 
@@ -179,6 +216,141 @@ func _animated(player: AnimationPlayer, track_path: String) -> Node:
 	if from == null:
 		return null
 	return from.get_node_or_null(NodePath(track_path))
+
+
+# =============================================================================
+# read_animations, read_animation_states
+# =============================================================================
+## The animations of an AnimationPlayer, or one of them whole. A track comes back in the shape
+## add_track takes, so one read here can be written to another animation as it stands.
+func read_animations(args: Dictionary) -> Dictionary:
+	var scene_path: String = _ensure_res_path(str(args.get("scenePath", "")))
+	var player_node_path: String = str(args.get("playerNodePath", "."))
+	var animation_name: String = str(args.get("animationName", ""))
+	if scene_path.strip_edges() == "res://":
+		return {"ok": false, "error": "Missing scenePath"}
+
+	var opened: Array = _read_at(scene_path, player_node_path, "AnimationPlayer")
+	var scene: SceneFile = opened[0]
+	if opened[1] == null:
+		return opened[2]
+	var player: AnimationPlayer = opened[1]
+	var answer: Dictionary = {"ok": true, "unsavedInEditor": SceneFile.unsaved(scene_path)}
+	if animation_name.is_empty():
+		var listed: Array[Dictionary] = []
+		for called: String in player.get_animation_list():
+			var listed_one: Animation = player.get_animation(StringName(called))
+			var summary: Dictionary = _summary(listed_one)
+			summary["animationName"] = called
+			summary["tracks"] = listed_one.get_track_count()
+			listed.append(summary)
+		answer["animations"] = listed
+		scene.close()
+		return answer
+	if not player.has_animation(StringName(animation_name)):
+		var names: PackedStringArray = player.get_animation_list()
+		return scene.refuse(
+			(
+				"%s has no animation %s. It has: %s."
+				% [player.name, animation_name, ", ".join(names) if not names.is_empty() else "none"]
+			)
+		)
+
+	var anim: Animation = player.get_animation(StringName(animation_name))
+	answer.merge(_summary(anim))
+	answer["animationName"] = animation_name
+	var tracks: Array[Dictionary] = []
+	for track: int in anim.get_track_count():
+		tracks.append(_track(anim, track))
+	answer["tracks"] = tracks
+	scene.close()
+	return answer
+
+
+func _summary(anim: Animation) -> Dictionary:
+	return {
+		"length": anim.length,
+		"loopMode": LOOP_MODE_NAMES.get(anim.loop_mode, str(anim.loop_mode)),
+		"step": anim.step,
+	}
+
+
+func _track(anim: Animation, track: int) -> Dictionary:
+	var kind: int = anim.track_get_type(track)
+	var path: NodePath = anim.track_get_path(track)
+	var shaped: Dictionary = {
+		"type": TRACK_TYPE_NAMES.get(kind, str(kind)), "nodePath": str(path.get_concatenated_names())
+	}
+	var property: String = str(path.get_concatenated_subnames())
+	if not property.is_empty():
+		shaped["property"] = property
+	var keyframes: Array[Dictionary] = []
+	var methods: Dictionary = {}
+	for key: int in anim.track_get_key_count(track):
+		var keyframe: Dictionary = {"time": anim.track_get_key_time(track, key)}
+		if kind == Animation.TYPE_METHOD:
+			var method: String = str(anim.method_track_get_name(track, key))
+			methods[method] = true
+			keyframe["method"] = method
+			keyframe["args"] = _values.serialize_value(anim.method_track_get_params(track, key))
+		else:
+			keyframe["value"] = _values.serialize_value(anim.track_get_key_value(track, key))
+		keyframes.append(keyframe)
+	# One method across every key is the track's, as add_track takes it. Keys calling different
+	# methods, which the editor can make and add_track cannot, keep their own.
+	if methods.size() == 1:
+		shaped["method"] = methods.keys()[0]
+		for keyframe: Dictionary in keyframes:
+			var _shared: bool = keyframe.erase("method")
+	shaped["keyframes"] = keyframes
+	return shaped
+
+
+## The states and transitions of a state machine in an AnimationTree.
+func read_animation_states(args: Dictionary) -> Dictionary:
+	var scene_path: String = _ensure_res_path(str(args.get("scenePath", "")))
+	var anim_tree_path: String = str(args.get("animTreePath", ""))
+	var state_machine_path: String = str(args.get("stateMachinePath", ""))
+	if scene_path.strip_edges() == "res://":
+		return {"ok": false, "error": "Missing scenePath"}
+	if anim_tree_path.is_empty():
+		return {"ok": false, "error": "Missing animTreePath"}
+
+	var opened: Array = _read_at(scene_path, anim_tree_path, "AnimationTree")
+	var scene: SceneFile = opened[0]
+	if opened[1] == null:
+		return opened[2]
+	var anim_tree: AnimationTree = opened[1]
+	var sm: AnimationNodeStateMachine = _get_state_machine(anim_tree, state_machine_path)
+	if sm == null:
+		return scene.refuse("AnimationNodeStateMachine not found")
+
+	var states: Array[Dictionary] = []
+	for state: StringName in sm.get_node_list():
+		var node: AnimationNode = sm.get_node(state)
+		var entry: Dictionary = {"stateName": str(state), "type": node.get_class()}
+		if node is AnimationNodeAnimation:
+			var plays: AnimationNodeAnimation = node
+			entry["animationName"] = str(plays.animation)
+		states.append(entry)
+	var transitions: Array[Dictionary] = []
+	for index: int in sm.get_transition_count():
+		var transition: AnimationNodeStateMachineTransition = sm.get_transition(index)
+		var shaped: Dictionary = {
+			"from": str(sm.get_transition_from(index)),
+			"to": str(sm.get_transition_to(index)),
+			"transitionType": SWITCH_MODE_NAMES.get(transition.switch_mode, str(transition.switch_mode)),
+		}
+		if not str(transition.advance_condition).is_empty():
+			shaped["advanceCondition"] = str(transition.advance_condition)
+		transitions.append(shaped)
+	scene.close()
+	return {
+		"ok": true,
+		"states": states,
+		"transitions": transitions,
+		"unsavedInEditor": SceneFile.unsaved(scene_path),
+	}
 
 
 # =============================================================================

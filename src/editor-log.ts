@@ -33,7 +33,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { GameLog, type LogEntry, type Severity } from './game-log.js';
+import { COLOUR_CODE, GameLog, type LogEntry, type Severity } from './game-log.js';
 import { asParams, readNumber, readString } from './tool-args.js';
 
 /** Where the editor of [param projectPath] writes its console, beside the other notes gdharness keeps. */
@@ -198,7 +198,8 @@ function foldProgress(text: string): string {
   const out: (string | Task)[] = [];
   const open = new Map<string, Task>();
   for (const raw of text.split('\n')) {
-    const line = raw.replace(/\r$/, '');
+    // The engine colours the task name on its standard output, and the bar is the same line under it.
+    const line = raw.replace(/\r$/, '').replace(COLOUR_CODE, '');
     const step = PROGRESS_STEP.exec(line);
     if (step !== null) {
       const [, percent = '', name = '', said = ''] = step;
