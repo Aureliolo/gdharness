@@ -626,12 +626,19 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	# names this scene's file sets are always answered.
 	var props: Dictionary = _properties_of(node, include_defaults, scene.set_here(node))
 	scene.close()
-	return {
+	var answer: Dictionary = {
 		"ok": true,
 		"nodePath": node_path,
 		"properties": props,
 		"unsavedInEditor": SceneFile.unsaved(scene_path)
 	}
+	# An empty answer read as a node with nothing on it, rather than one with nothing changed.
+	if props.is_empty() and not include_defaults:
+		answer["note"] = (
+			"Every property of this node is at its default, so none is listed; "
+			+ "includeDefaults: true lists them all."
+		)
+	return answer
 
 
 func save_scene(args: Dictionary) -> Dictionary:
