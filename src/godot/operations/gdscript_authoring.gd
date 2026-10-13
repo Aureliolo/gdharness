@@ -63,12 +63,11 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	if content.is_empty():
 		if not cls_name_param.is_empty():
 			script_content += "class_name " + cls_name_param + "\n"
-		script_content += "extends " + extends_class + "\n\n"
+		script_content += "extends " + extends_class + "\n"
+		# Only what was asked for: with no template the file was given an empty _ready beside a
+		# template_used of "none", which a caller had then to delete or leave lying in the script.
 		if not template.is_empty():
-			script_content += _script_template(template)
-		else:
-			script_content += "func _ready() -> void:\n"
-			script_content += "\tpass\n"
+			script_content += "\n" + _script_template(template)
 
 	var file: FileAccess = FileAccess.open(full_script_path, FileAccess.WRITE)
 	if not file:

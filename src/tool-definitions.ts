@@ -367,7 +367,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_settings',
     title: 'Project settings',
     description:
-      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is.",
+      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot.",
     parameters: {
       projectPath: PROJECT_PATH,
       setting: { type: 'string', description: 'Setting path, such as "display/window/size/viewport_width".' },
@@ -965,7 +965,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'document symbols from the language server, each with its kind, the line and column of its name, and the lastLine of its declaration',
         requires: [],
       },
-      completion: { effect: 'read', summary: 'completions at a position', requires: ['line', 'character'] },
+      completion: {
+        effect: 'read',
+        summary: 'completions at a position, narrowed to the part of a name written before it, at most 100',
+        requires: ['line', 'character'],
+      },
       hover: { effect: 'read', summary: 'hover text at a position', requires: ['line', 'character'] },
     },
     defaultOperation: 'structure',

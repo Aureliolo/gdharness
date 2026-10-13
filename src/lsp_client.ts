@@ -1057,6 +1057,47 @@ function shownSymbol(entry: unknown): JsonRecord {
 }
 
 /** A completion without the copy of the request Godot hands back with every item. */
+/** The most completions one answer carries; the rest are counted. */
+const MOST_COMPLETIONS = 100;
+
+/**
+ * The part of a name written just before [param character] on [param line] of [param content].
+ *
+ * Godot's language server answers with every candidate in scope and leaves narrowing to the editor,
+ * which narrows by what has been typed. Passed through whole, a completion after "pow" in a method
+ * came back as the entire global scope, 239 thousand characters, past what a caller's context can
+ * take, with the two entries that matched somewhere inside it.
+ */
+export function typedBefore(content: string, line: number, character: number): string {
+  const text = content.split(/\r?\n/)[line] ?? '';
+  return /[\p{L}\p{N}_]*$/u.exec(text.slice(0, character))?.[0] ?? '';
+}
+
+/** [param completions] narrowed to those starting with [param typed], at most a hundred, with counts. */
+export function narrowedCompletions(completions: readonly unknown[], typed: string): JsonRecord {
+  const wanted = typed.toLowerCase();
+  const matching =
+    wanted === ''
+      ? completions
+      : completions.filter((entry) => {
+          const record = asRecord(entry);
+          const name = typeof record['filterText'] === 'string' ? record['filterText'] : record['label'];
+          return typeof name === 'string' && name.toLowerCase().startsWith(wanted);
+        });
+  const shown = matching.slice(0, MOST_COMPLETIONS);
+  return {
+    ...(typed === '' ? {} : { typed }),
+    completions: shown.map(shownCompletion),
+    total: matching.length,
+    ...(matching.length > shown.length
+      ? {
+          omitted: matching.length - shown.length,
+          note: `${matching.length - shown.length} more are offered here than one answer carries; ask at a position after more of the name to narrow them.`,
+        }
+      : {}),
+  };
+}
+
 function shownCompletion(entry: unknown): JsonRecord {
   const { data: _request, kind, ...rest } = asRecord(entry);
   return { ...rest, kind: named(kind, COMPLETION_KINDS) };
@@ -1164,7 +1205,7 @@ export async function handleLSPTool(
       case 'lsp_get_completions': {
         const { line, character } = protocolPosition(parsedArgs);
         const completions = await client.getCompletions(scriptPath, content, line, character);
-        return asToolResponse({ completions: completions.map(shownCompletion) });
+        return asToolResponse(narrowedCompletions(completions, typedBefore(content, line, character)));
       }
 
       case 'lsp_get_hover': {

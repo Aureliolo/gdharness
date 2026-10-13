@@ -5124,21 +5124,33 @@ class GodotServer {
       (path) => !existsSync(join(project.value.path, path.slice('res://'.length))),
     );
     const asked = paths.value.filter((path) => !missing.includes(path));
+    const runner = 'addons/gdUnit4/bin/GdUnitCmdTool.gd';
+    const noRunner = !existsSync(join(project.value.path, runner));
     if (asked.length === 0) {
       const verdict = `nothing at ${missing.join(' and ')}`;
+      // Both, when both: a project with neither tests nor gdUnit4 was told only about the folder,
+      // and the caller who wrote tests into it next would have been refused again for the runner.
+      const andNoRunner = noRunner ? `, and gdUnit4 is not installed in this project: no ${runner}` : '';
       return {
         content: [
           {
             type: 'text',
-            text: `No tests ran: ${verdict}.${elsewhereIn(project.value.path, missing[0] ?? '')}`,
+            text: `No tests ran: ${verdict}${andNoRunner}.${elsewhereIn(project.value.path, missing[0] ?? '')}`,
           },
-          { type: 'text', text: answerJson({ passed: false, verdict, tests: 0 }) },
+          {
+            type: 'text',
+            text: answerJson({
+              passed: false,
+              verdict,
+              tests: 0,
+              ...(noRunner ? { gdUnit4Installed: false } : {}),
+            }),
+          },
         ],
         isError: true,
       };
     }
-    const runner = 'addons/gdUnit4/bin/GdUnitCmdTool.gd';
-    if (!existsSync(join(project.value.path, runner))) {
+    if (noRunner) {
       return this.createErrorResponse(`gdUnit4 is not installed in this project: no ${runner}.`, [
         'Install gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4',
       ]);
