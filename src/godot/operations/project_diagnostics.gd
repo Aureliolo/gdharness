@@ -1,6 +1,7 @@
 extends RefCounted
 
 const FileWalk = preload("file_walk.gd")
+const ImportPipeline = preload("import_pipeline.gd")
 const Log = preload("logger.gd")
 
 var _log: Log
@@ -40,10 +41,11 @@ func get_project_health(params: Dictionary) -> Dictionary:
 	if "resources" in check_categories:
 		var details: Array[String] = []
 
-		var importable_extensions: Array[String] = ["png", "jpg", "wav", "mp3", "ogg"]
-		var resources: Array[String] = []
-		for ext: String in importable_extensions:
-			resources.append_array(_files.find_files("res://", "." + ext))
+		# Every format the engine imports, the list the import status reads: five of them were checked
+		# here, so a project of glTF models, fonts and WebP textures had nothing to reimport.
+		var resources: Array[String] = _files.find_files_with_extensions(
+			"res://", ImportPipeline.IMPORTABLE_EXTENSIONS
+		)
 
 		var missing_imports: int = 0
 		for res: String in resources:
@@ -58,7 +60,9 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			"name": "Resources",
 			"passed": details.is_empty(),
 			"details": details,
-			"total_resources": resources.size()
+			# What the check read: files the engine imports. A .tres is a resource and was counted
+			# under this name as none, beside a project holding one.
+			"importable_files": resources.size()
 		}
 
 	# 3. Scripts Check
