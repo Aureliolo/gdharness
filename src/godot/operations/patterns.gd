@@ -84,3 +84,25 @@ static func without_annotations(line: String) -> String:
 		rest = rest.substr(found.get_end()).strip_edges()
 		found = annotation.search(rest)
 	return rest
+
+
+# The line with any trailing comment taken off, quote-aware so a `#` inside a string stays.
+#
+# The only one of the scanners here that does not count brackets, on purpose: a `#` starts a comment
+# wherever it is, and there is no depth at which it does not. Giving this one the depth its
+# neighbours have puts the comment into the value of `var table := {  # keyed by name`, because the
+# brace opens before the `#` and closes on a later line. Held by a case, since the argument for the
+# difference is not visible from the code and reads like an oversight beside its neighbours.
+static func without_comment(line: String) -> String:
+	var quote: String = ""
+	for i: int in range(line.length()):
+		var ch: String = line[i]
+		if not quote.is_empty():
+			if ch == quote and line[i - 1] != "\\":
+				quote = ""
+			continue
+		if ch == "#":
+			return line.substr(0, i).strip_edges()
+		if ch == '"' or ch == "'":
+			quote = ch
+	return line.strip_edges()
