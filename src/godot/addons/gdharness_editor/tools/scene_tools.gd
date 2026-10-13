@@ -313,6 +313,10 @@ func create_scene(args: Dictionary) -> Dictionary:
 		if script == null:
 			root.free()
 			return {"ok": false, "error": "No script loads from " + full_script_path}
+		var uncompiled: String = SceneFile.uncompiled(script, full_script_path)
+		if not uncompiled.is_empty():
+			root.free()
+			return {"ok": false, "error": uncompiled}
 		var base: String = str(script.get_instance_base_type())
 		if not ClassDB.is_parent_class(root_node_type, base):
 			root.free()

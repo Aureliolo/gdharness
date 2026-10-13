@@ -1617,6 +1617,27 @@ const SCAN_SETTLED_MS = 500;
  */
 const REIMPORT_TIMEOUT_MS = 300_000;
 
+/**
+ * Ops callers reach for on one tool that another answers, by the tool and op that do.
+ *
+ * Two downstream sessions read back a value they had just set with runtime_invoke, one as op "get"
+ * and one as "property" three times over, and each was told only the ops runtime_invoke has, which
+ * left them a round trip to find that reads live in runtime_inspect.
+ */
+const OPS_ELSEWHERE: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  runtime_invoke: { get: 'runtime_inspect property', property: 'runtime_inspect property' },
+};
+
+/** Where an op a tool has not got is answered, as a sentence to add to the refusal, or "". */
+function opElsewhere(tool: string, requested: unknown): string {
+  const ops = Object.hasOwn(OPS_ELSEWHERE, tool) ? OPS_ELSEWHERE[tool] : undefined;
+  const where =
+    ops !== undefined && typeof requested === 'string' && Object.hasOwn(ops, requested)
+      ? ops[requested]
+      : undefined;
+  return where === undefined ? '' : ` A value is read with ${where}.`;
+}
+
 /** The project_settings ops that write the bus layout rather than project.godot. */
 const AUDIO_BUS_OPS: ReadonlySet<string> = new Set([
   'add_audio_bus',
@@ -3556,7 +3577,7 @@ class GodotServer {
         return {
           ok: false,
           response: this.createErrorResponse(
-            `${spec.name} has no op ${JSON.stringify(requested)}. Valid ops: ${valid.join(', ')}.`,
+            `${spec.name} has no op ${JSON.stringify(requested)}. Valid ops: ${valid.join(', ')}.${opElsewhere(spec.name, requested)}`,
           ),
         };
       }

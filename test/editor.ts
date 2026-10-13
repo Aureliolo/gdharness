@@ -2418,6 +2418,24 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     !existsSync(join(project, 'slash.tscn')) && !existsSync(join(project, 'wrong.tscn')),
     'and a refused create leaves no file',
   );
+  // A script the editor cannot compile has no base type, and the refusal built from that said it
+  // extended nothing (#1048). Its own failure is named instead, with where to read the errors.
+  writeFileSync(
+    join(project, 'layers', 'uncompiled.gd'),
+    'extends Control\n\n\nfunc _ready() -> void:\n\tNowhereClass.call_me()\n',
+  );
+  for (const [tool, args] of [
+    ['scene_create', { projectPath: project, scenePath: 'res://uncompiled.tscn', rootNodeType: 'Control' }],
+    [
+      'resource_edit',
+      { projectPath: project, resourcePath: 'res://uncompiled.tres', op: 'create', resourceType: 'Resource' },
+    ],
+  ] as const) {
+    const refused = await refusal(tool, { ...args, script: 'res://layers/uncompiled.gd' });
+    assert.match(refused, /res:\/\/layers\/uncompiled\.gd does not compile in the editor/, refused);
+    assert.match(refused, /script_diagnostics on it gives the parser's errors/, refused);
+    assert.doesNotMatch(refused, /extends ,/, `${tool} does not blame an extends the script has: ${refused}`);
+  }
   assert.match(
     await refusal('scene_create', { ...named, op: 'save', rootNodeType: 'Node' }),
     /scene_create save does not take rootNodeType/,

@@ -174,6 +174,9 @@ func create_resource(args: Dictionary) -> Dictionary:
 		var script: Script = load(script_file) as Script
 		if script == null:
 			return {"ok": false, "error": "No script loads from " + script_file}
+		var uncompiled: String = SceneFile.uncompiled(script, script_file)
+		if not uncompiled.is_empty():
+			return {"ok": false, "error": uncompiled}
 		var base: String = str(script.get_instance_base_type())
 		if not ClassDB.is_parent_class(resource_type, base):
 			return {

@@ -131,6 +131,9 @@ export function renderToolsMarkdown(): string {
 
   for (const tool of TOOL_SPECS) {
     lines.push(`## ${tool.name}`, '', `${tool.title}. ${whatItCanChange(tool)}`, '', tool.description, '');
+    if (tool.answer !== undefined) {
+      lines.push(`The answer: ${tool.answer}`, '');
+    }
 
     const operations = Object.entries(tool.operations ?? {});
     if (operations.length > 0) {
