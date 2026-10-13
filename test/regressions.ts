@@ -12848,13 +12848,20 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
     // A stop or a wait carrying projectPath, as one copied from the start does: another project's
     // is refused and the run goes on, and this project's is taken.
     const elsewhere = join(tmpdir(), 'gdharness-not-this-project');
-    for (const op of ['stop', 'wait']) {
+    for (const op of ['stop', 'wait', 'profile']) {
       assert.match(
         await call('editor_run', { op, projectPath: elsewhere }),
         /The run this server holds is of .*, not .*gdharness-not-this-project, so nothing was/,
         `${op} naming another project is refused`,
       );
     }
+    // This run was started without the profiler, so a profile naming its own project reaches it
+    // and is told that, rather than being refused for the argument.
+    assert.match(
+      await call('editor_run', { op: 'profile', projectPath: project }),
+      /^This run was started without profile: true/,
+      'profile naming this project reaches the run',
+    );
     const still = jsonOf(await call('editor_status', {}), 'status after the refused stop');
     assert.ok(
       asArray(get(still, 'game', 'runtimes')).some((one) => get(one, 'pid') === firstPid),
