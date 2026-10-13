@@ -24,6 +24,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cachedClasses, staleAgainst } from './class-cache.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
+import { VERSION_MARKER } from './project-scan.js';
 import { parseProjectGodot } from './resources.js';
 import { SERVER_VERSION } from './server-version.js';
 import { readString } from './tool-args.js';
@@ -63,9 +64,6 @@ export const BIND_ADDRESS_SETTING = 'gdharness/runtime/bind_address';
 
 /** The port the runtime binds, 0 meaning the operating system picks and the game announces it. */
 export const PORT_SETTING = 'gdharness/runtime/port';
-
-/** Written into each installed addon, so doctor can tell an old copy from the shipped one. */
-const VERSION_MARKER = '.gdharness-version';
 
 /**
  * Written beside the version marker in the editor addon, a digest of the code an editor loads, and

@@ -133,7 +133,14 @@ import {
   whyTheProcessTreeFailed,
 } from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
-import { projectStructure, type SearchOptions, searchProject } from '../src/project-scan.js';
+import {
+  ignoredTexts,
+  projectStructure,
+  projectTexts,
+  type SearchOptions,
+  searchProject,
+  VERSION_MARKER,
+} from '../src/project-scan.js';
 import { PROMPT_SPECS } from '../src/prompts.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
 import {
@@ -7006,6 +7013,20 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     writeFileSync(join(sandbox, 'export', '.gdignore'), '');
     writeFileSync(join(sandbox, 'export', 'shipped.gd'), needle);
 
+    // An addon gdharness installed, which nobody on the project wrote, beside the project's own
+    // addon under a name the package also uses: only the marker setup writes tells them apart.
+    mkdirSync(join(sandbox, 'addons', 'gdharness_editor'), { recursive: true });
+    writeFileSync(join(sandbox, 'addons', 'gdharness_editor', VERSION_MARKER), '1.2.15\n');
+    writeFileSync(join(sandbox, 'addons', 'gdharness_editor', 'tooling.gd'), needle);
+    mkdirSync(join(sandbox, 'addons', 'auto_reload'), { recursive: true });
+    writeFileSync(join(sandbox, 'addons', 'auto_reload', 'theirs.gd'), needle);
+    // And one inside a project kept for reference under the ignored directory, which is the only
+    // place an installed addon could pass for one of the ignored copies a rename mentions.
+    const kept = join(sandbox, 'export', 'reference', 'addons', 'gdharness_runtime');
+    mkdirSync(kept, { recursive: true });
+    writeFileSync(join(kept, VERSION_MARKER), '1.2.15\n');
+    writeFileSync(join(kept, 'tooling.gd'), needle);
+
     const found = searchProject(sandbox, {
       query: 'findable',
       fileTypes: ['gd'],
@@ -7014,12 +7035,25 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
       maxResults: 100,
     });
     assert.deepEqual(
-      found.results.map((entry) => entry.file),
-      ['res://scripts/hero.gd'],
+      found.results.map((entry) => entry.file).sort(),
+      ['res://addons/auto_reload/theirs.gd', 'res://scripts/hero.gd'],
       'the search should read the project and nothing standing beside it',
     );
-    assert.equal(found.summary.files_searched, 1, 'and should not have opened the other two');
-    assert.equal(projectStructure(sandbox).scripts, 1, 'the count should agree with the search');
+    assert.equal(found.summary.files_searched, 2, 'and should not have opened the other three');
+    assert.equal(projectStructure(sandbox).scripts, 2, 'the count should agree with the search');
+    assert.deepEqual(
+      projectTexts(sandbox)
+        .map((text) => text.path)
+        .filter((path) => path.endsWith('.gd'))
+        .sort(),
+      ['res://addons/auto_reload/theirs.gd', 'res://scripts/hero.gd'],
+      'and so should what a rename reads',
+    );
+    assert.deepEqual(
+      ignoredTexts(sandbox).map((text) => text.path),
+      ['res://export/shipped.gd'],
+      'an installed addon is not one of the ignored copies a rename mentions either',
+    );
 
     // What the structure counts as scenes and assets, which was text scenes and a short list of
     // images, fonts and sound: a project saving binary scenes had none, and its models were other.
@@ -7028,7 +7062,7 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     }
     assert.deepEqual(
       projectStructure(sandbox),
-      { scenes: 2, scripts: 1, assets: 3, other: 1 },
+      { scenes: 2, scripts: 2, assets: 3, other: 1 },
       'binary scenes are scenes, and models, video and shaders are assets',
     );
   } finally {

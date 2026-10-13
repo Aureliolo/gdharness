@@ -468,7 +468,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Search the project',
     effect: 'read',
     description:
-      'Searches text or a regular expression across project files and returns file paths with line numbers. What the engine steps over is not searched: directories spelled with a dot, node_modules, and any directory holding a .gdignore. A vendored engine or an export directory is therefore absent from the results rather than matching the code you are looking for in a copy nobody runs.',
+      'Searches text or a regular expression across project files and returns file paths with line numbers. What the engine steps over is not searched: directories spelled with a dot, node_modules, and any directory holding a .gdignore. A vendored engine or an export directory is therefore absent from the results rather than matching the code you are looking for in a copy nobody runs. The addons gdharness installed are not searched either, since nobody on the project wrote them.',
     parameters: {
       projectPath: PROJECT_PATH,
       query: { type: 'string', description: 'The text or pattern to find.' },
