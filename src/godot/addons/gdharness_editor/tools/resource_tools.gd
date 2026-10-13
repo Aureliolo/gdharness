@@ -6,51 +6,21 @@ extends Node
 const PropertyValues = preload("../property_values.gd")
 const Read = preload("../reading.gd")
 const SceneFile = preload("../scene_file.gd")
+const Serialisation = preload("../serialisation.gd")
 
-# Shader templates. Written as real multi-line source rather than escaped one-liners so that
-# what ends up in the .gdshader can be read here. The %s is the shader type.
+# The minimal shader of a type: its declaration and the one function the engine calls for it.
 const SHADER_EMPTY: String = """shader_type %s;
 
-void fragment() {
+void %s() {
 }
 """
-
-const SHADER_BASIC: String = """shader_type %s;
-
-void fragment() {
-	COLOR = vec4(1.0);
+const SHADER_ENTRY: Dictionary[String, String] = {
+	"canvas_item": "fragment", "spatial": "fragment", "particles": "process", "sky": "sky", "fog": "fog"
 }
-"""
-
-const SHADER_COLOR_SHIFT: String = """shader_type %s;
-
-uniform vec4 color_shift : source_color = vec4(0.1, 0.0, 0.2, 0.0);
-
-void fragment() {
-	vec4 base = texture(TEXTURE, UV);
-	COLOR = vec4(clamp(base.rgb + color_shift.rgb, 0.0, 1.0), base.a);
-}
-"""
-
-const SHADER_OUTLINE: String = """shader_type %s;
-
-uniform vec4 outline_color : source_color = vec4(0.0, 0.0, 0.0, 1.0);
-uniform float outline_width : hint_range(0.0, 8.0) = 1.0;
-
-void fragment() {
-	vec2 px = TEXTURE_PIXEL_SIZE * outline_width;
-	float a = texture(TEXTURE, UV).a;
-	float edge = max(
-		max(texture(TEXTURE, UV + vec2(px.x, 0.0)).a, texture(TEXTURE, UV - vec2(px.x, 0.0)).a),
-		max(texture(TEXTURE, UV + vec2(0.0, px.y)).a, texture(TEXTURE, UV - vec2(0.0, px.y)).a)
-	);
-	vec4 base = texture(TEXTURE, UV);
-	COLOR = mix(outline_color * edge, base, a);
-}
-"""
 
 var _editor_plugin: EditorPlugin = null
 var _properties: PropertyValues = PropertyValues.new()
+var _values: Serialisation = Serialisation.new()
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
@@ -260,6 +230,50 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	return {"ok": true, "resourcePath": res_path}
 
 
+## What a resource file holds, in the form modify takes, so a value read here can be written back.
+## Read from the file rather than the editor's cached copy, since the file is what the other ops
+## write and what the project loads.
+func read_resource(args: Dictionary) -> Dictionary:
+	var res_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
+	var include_defaults: bool = Read.as_bool(args.get("includeDefaults", false))
+	if res_path == "res://":
+		return {"ok": false, "error": "resourcePath is required"}
+	if not FileAccess.file_exists(res_path):
+		return {"ok": false, "error": "No resource at " + res_path}
+	var resource: Resource = ResourceLoader.load(res_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	if resource == null:
+		return {"ok": false, "error": "%s did not load as a resource." % res_path}
+
+	var script: Script = resource.get_script()
+	var scripted: Dictionary = {}
+	if script != null:
+		for declared: Dictionary in script.get_script_property_list():
+			scripted[str(declared.get("name", ""))] = true
+	var properties: Dictionary = {}
+	for p: Dictionary in resource.get_property_list():
+		var property: String = str(p.get("name", ""))
+		if property.is_empty() or property == "script":
+			continue
+		if not (Read.as_int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
+			continue
+		var value: Variant = resource.get(property)
+		if not include_defaults:
+			var default: Variant = (
+				script.get_property_default_value(property)
+				if scripted.has(property)
+				else ClassDB.class_get_property_default_value(resource.get_class(), property)
+			)
+			if PropertyValues.same(value, default):
+				continue
+		properties[property] = _values.serialize_value(value)
+	var answer: Dictionary = {
+		"ok": true, "resourcePath": res_path, "resourceType": resource.get_class(), "properties": properties
+	}
+	if script != null:
+		answer["script"] = script.resource_path
+	return answer
+
+
 func create_shader(args: Dictionary) -> Dictionary:
 	var shader_path: String = _ensure_res_path(str(args.get("shaderPath", "")))
 	var shader_type: String = str(args.get("shaderType", "canvas_item"))
@@ -270,18 +284,8 @@ func create_shader(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": taken}
 
 	var code: String = str(args.get("code", ""))
-	var template: String = str(args.get("template", ""))
-
 	if code == "":
-		match template:
-			"basic":
-				code = SHADER_BASIC % shader_type
-			"color_shift":
-				code = SHADER_COLOR_SHIFT % shader_type
-			"outline":
-				code = SHADER_OUTLINE % shader_type
-			_:
-				code = SHADER_EMPTY % shader_type
+		code = SHADER_EMPTY % [shader_type, SHADER_ENTRY.get(shader_type, "fragment")]
 
 	var file: FileAccess = FileAccess.open(shader_path, FileAccess.WRITE)
 	if file == null:

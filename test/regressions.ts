@@ -8617,7 +8617,8 @@ function testAnEditorsProgressIsOneLinePerTask(): void {
         '[  83% ] first_scan_filesystem | Starting file scan...',
         '[ DONE ] first_scan_filesystem',
         '',
-        '[   0% ] update_scripts_classes | Started Registering global classes... (36 steps)',
+        // Coloured as the engine colours it on its standard output.
+        '[   0% ] \u001b[90m\u001b[1mupdate_scripts_classes\u001b[22m | Started Registering global classes... (36 steps)\u001b[39m\u001b[0m',
         '[   2% ] update_scripts_classes | ',
         '[  91% ] update_scripts_classes | Hero',
         '[  94% ] update_scripts_classes | ',
