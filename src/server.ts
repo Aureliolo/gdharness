@@ -1659,6 +1659,18 @@ function engineFlagsNote(args: readonly string[]): string | undefined {
 }
 
 /**
+ * What answers without an editor, for an editor tool a caller reached for with none connected.
+ *
+ * A probe session that had started a game headless asked scene_tree for its nodes and was told to
+ * open an editor, which it had been asked not to do, while runtime_inspect tree answers about the
+ * running game with no editor at all.
+ */
+const EDITOR_FREE_INSTEAD: Readonly<Record<string, string>> = {
+  scene_tree:
+    'runtime_inspect tree reads the nodes of a game that is running, and needs no editor; scene_tree reads a scene file through the editor',
+};
+
+/**
  * Ops callers reach for on one tool that another answers, by the tool and op that do.
  *
  * Two downstream sessions read back a value they had just set with runtime_invoke, one as op "get"
@@ -3741,7 +3753,7 @@ class GodotServer {
     const { op: _op, ...arguments_ } = args;
     const bridge = async (command: string, extra: OperationParams = {}): Promise<ToolResponse> => {
       const contained = this.containProjectFiles({ ...arguments_, ...extra });
-      return contained.ok ? await this.handleViaBridge(command, contained.value) : contained.response;
+      return contained.ok ? await this.handleViaBridge(command, contained.value, tool) : contained.response;
     };
 
     switch (tool) {
@@ -11080,11 +11092,20 @@ class GodotServer {
     return { unseen: unseenByEditor(projectPath, holds), stillHeld: heldButGone(projectPath, holds) };
   }
 
-  private async handleViaBridge(toolName: string, args: OperationParams): Promise<ToolResponse> {
+  private async handleViaBridge(
+    toolName: string,
+    args: OperationParams,
+    askedAs?: string,
+  ): Promise<ToolResponse> {
     if (!this.godotBridge.isConnected()) {
+      const instead =
+        askedAs !== undefined && Object.hasOwn(EDITOR_FREE_INSTEAD, askedAs)
+          ? EDITOR_FREE_INSTEAD[askedAs]
+          : undefined;
       return this.createErrorResponse(
         'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
         [
+          ...(instead === undefined ? [] : [instead]),
           'Open the project in the editor with editor_launch, or by hand',
           'Enable the addon under Project > Project Settings > Plugins',
           'editor_status says whether the bridge is up and what it is listening on',
