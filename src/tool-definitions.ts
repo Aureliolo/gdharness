@@ -11,6 +11,7 @@
 
 import type { JSONValue, ToolAnnotations } from '@modelcontextprotocol/server';
 import { dictionary } from './dictionary.js';
+import { ENGINE_FLAGS } from './launch.js';
 import type { MCPToolDefinition } from './server-types.js';
 
 type JsonSchema = Readonly<Record<string, JSONValue>>;
@@ -1186,7 +1187,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         items: { type: 'string' },
         ops: ['start', 'check'],
         description:
-          'The game\'s own arguments, what OS.get_cmdline_user_args() answers, such as ["--level=2"]. The separator is added here. A run with any is started by this server rather than by the editor, which fixes the game\'s command line when it opens the project, so the debug_* tools do not answer for it.',
+          'The game\'s own arguments, what OS.get_cmdline_user_args() answers, such as ["--level=2"]. The separator is added here, so a flag the engine reads goes to the game instead, and the answer says so under argsNote. A run with any is started by this server rather than by the editor, which fixes the game\'s command line when it opens the project, so the debug_* tools do not answer for it.',
+      },
+      engineArgs: {
+        type: 'array',
+        items: { type: 'string' },
+        ops: ['start', 'check'],
+        description: `The engine's own flags, before the separator, such as ["--verbose"] or ["--fixed-fps", "60"], a value going as the next entry. Only those that change what the engine logs, draws for debugging, checks on the GPU or how it times frames: ${Object.keys(ENGINE_FLAGS).join(', ')}. Any other is refused, since the engine's command line can also run scripts, open other projects and write files. A run with any is started by this server, as one with args is. A check given --verbose answers with everything printed rather than only errors and warnings, since what verbose adds, the instances leaked at exit among it, is printed as ordinary lines.`,
       },
       headless: { type: 'boolean', ops: ['start'], description: 'start: force a window or no window.' },
       visible: {
