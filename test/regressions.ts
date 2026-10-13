@@ -13940,8 +13940,10 @@ function testEngineFlagsAreAListNotAPassage(): void {
   );
   const refused = (given: string[]): string => {
     const checked = engineFlags(given);
-    assert.equal(checked.ok, false, `${JSON.stringify(given)} should be refused`);
-    return checked.ok ? '' : checked.reason;
+    if (checked.ok) {
+      assert.fail(`${JSON.stringify(given)} should be refused`);
+    }
+    return checked.reason;
   };
   for (const unsafe of [
     ['--script', 'res://x.gd'],
@@ -20041,6 +20043,13 @@ async function testEngineFlagsReachTheEngine(): Promise<void> {
           `a verbose check answers with what verbose added: ${JSON.stringify(verboseCheck)}`,
         );
         assert.equal(get(verboseCheck, 'booted'), true, JSON.stringify(verboseCheck));
+        assert.equal(get(verboseCheck, 'argsNote'), undefined, JSON.stringify(verboseCheck));
+        const misplacedCheck = await check({ args: ['--verbose'] });
+        assert.match(
+          text(get(misplacedCheck, 'argsNote')),
+          /--verbose is a flag the engine reads, and args goes to the game after --/,
+          `a check says so as a start does: ${JSON.stringify(misplacedCheck)}`,
+        );
       },
       { GODOT_PATH: godotPath },
     );
