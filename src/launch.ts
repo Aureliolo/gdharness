@@ -81,12 +81,13 @@ export function resolveSilent(requested: unknown, variables: NodeJS.ProcessEnv):
  * The engine's own flags a run may be given, each with the value it takes after it, if any.
  *
  * Only flags that change what the engine logs, draws for debugging, checks on the GPU or how it
- * times frames. The command line also takes flags that run a script, open another project, export
- * or write files, and a tool that passed anything through would hand a caller all of those; the
- * flags this server sets itself (--headless, --path, --audio-driver, --quit-after) are taken as
- * the arguments that set them.
+ * times frames, and Movie Maker's `--write-movie`, whose file the server holds to the rules a written
+ * capture is held to before the run starts (`movieRefusal`). The command line also takes flags that
+ * run a script, open another project, export or write files anywhere, and a tool that passed anything
+ * through would hand a caller all of those; the flags this server sets itself (--headless, --path,
+ * --audio-driver, --quit-after) are taken as the arguments that set them.
  */
-export const ENGINE_FLAGS: Readonly<Record<string, 'none' | 'number' | 'size'>> = Object.freeze({
+export const ENGINE_FLAGS: Readonly<Record<string, 'none' | 'number' | 'size' | 'file'>> = Object.freeze({
   '--verbose': 'none',
   '--quiet': 'none',
   '--debug-collisions': 'none',
@@ -106,7 +107,15 @@ export const ENGINE_FLAGS: Readonly<Record<string, 'none' | 'number' | 'size'>> 
   '--fixed-fps': 'number',
   '--max-fps': 'number',
   '--resolution': 'size',
+  '--write-movie': 'file',
 });
+
+/** The value each kind of flag takes, as the refusal for a wrong one names it. */
+const VALUE_KIND: Readonly<Record<'number' | 'size' | 'file', { pattern: RegExp; named: string }>> = {
+  number: { pattern: /^\d+(?:\.\d+)?$/, named: 'a number' },
+  size: { pattern: /^\d+x\d+$/, named: 'a size such as 1280x720' },
+  file: { pattern: /^[^-]/, named: 'a file path' },
+};
 
 /** The flags this server sets for a run, by the argument that sets each. */
 const SET_BY_ARGUMENT: Readonly<Record<string, string>> = Object.freeze({
@@ -128,19 +137,18 @@ export function engineFlags(given: readonly string[]): { ok: true } | { ok: fals
         reason:
           setBy !== undefined
             ? `${flag} is set by this tool's own argument, ${setBy}, rather than through engineArgs.`
-            : `${flag} is not one of the engine flags engineArgs takes, which are those that change what the engine logs, draws for debugging, checks on the GPU or how it times frames: ${offered}. A value goes as the next entry, as in ["--fixed-fps", "60"].`,
+            : `${flag} is not one of the engine flags engineArgs takes, which are those that change what the engine logs, draws for debugging, checks on the GPU or how it times frames, and Movie Maker's --write-movie: ${offered}. A value goes as the next entry, as in ["--fixed-fps", "60"].`,
       };
     }
     if (takes === 'none') {
       continue;
     }
     const value = given[at + 1];
-    const fits =
-      value !== undefined && (takes === 'number' ? /^\d+(?:\.\d+)?$/.test(value) : /^\d+x\d+$/.test(value));
-    if (!fits) {
+    const kind = VALUE_KIND[takes];
+    if (value === undefined || !kind.pattern.test(value)) {
       return {
         ok: false,
-        reason: `${flag} takes ${takes === 'number' ? 'a number' : 'a size such as 1280x720'} as the next entry, and ${value === undefined ? 'nothing followed it' : `${JSON.stringify(value)} is not one`}.`,
+        reason: `${flag} takes ${kind.named} as the next entry, and ${value === undefined ? 'nothing followed it' : `${JSON.stringify(value)} is not one`}.`,
       };
     }
     at += 1;

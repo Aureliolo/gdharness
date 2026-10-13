@@ -238,6 +238,7 @@ import {
   foldedScriptErrors,
   leftRunningNote,
   longerWaitNote,
+  movieRefusal,
   noCodeWillCome,
   notRunNote,
   PLAY_STARTS_WITHIN_MS,
@@ -14227,6 +14228,14 @@ function testEngineFlagsAreAListNotAPassage(): void {
     /--resolution takes a size such as 1280x720.*"1280" is not one/,
   );
   assert.match(refused(['--resolution', '1280x720', '--resolution']), /nothing followed it/);
+  // Movie Maker's file is a value of its own kind: present, and not another flag. Where it may be
+  // written is the server's to judge, with the project in hand (movieRefusal).
+  assert.deepEqual(engineFlags(['--write-movie', 'X:/out/trailer.avi', '--fixed-fps', '60']), { ok: true });
+  assert.match(
+    refused(['--write-movie']),
+    /--write-movie takes a file path as the next entry, and nothing followed it/,
+  );
+  assert.match(refused(['--write-movie', '--verbose']), /"--verbose" is not one/);
 
   // A game's own arguments are not refused for holding a flag of the same name, since the game may
   // read one itself, and the ones the engine would have read are picked out to be said.
@@ -20179,6 +20188,49 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
         /--script is not one of the engine flags engineArgs takes/,
         refused.said,
       );
+
+      // A movie goes to a windowed run with its file on the command line, and is refused headless,
+      // where the engine crashes writing one, before anything is started.
+      const movies = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-movie-run-'));
+      try {
+        const trailer = join(movies, 'trailer.avi');
+        const filmed = await run({ engineArgs: ['--write-movie', trailer] });
+        assert.equal(get(filmed.answer, 'through'), 'gdharness', filmed.said);
+        const filmedArgv = asArray(get(filmed.answer, 'arguments')).map(text);
+        assert.deepEqual(
+          filmedArgv.slice(filmedArgv.indexOf('--write-movie'), filmedArgv.indexOf('--write-movie') + 2),
+          ['--write-movie', trailer],
+          filmed.said,
+        );
+        await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
+        const headlessMovie = await run({ engineArgs: ['--write-movie', trailer], headless: true });
+        assert.match(
+          text(get(headlessMovie.answer, 'refused')),
+          /needs a run that draws, and this one is headless/,
+          headlessMovie.said,
+        );
+        const checkedMovie = await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'check', engineArgs: ['--write-movie', trailer] },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.match(
+          textOf(checkedMovie) ?? '',
+          /needs a run that draws, and this one is headless/,
+          textOf(checkedMovie) ?? '',
+        );
+        const misplacedMovie = await run({ engineArgs: ['--write-movie', join(project, 'trailer.avi')] });
+        assert.match(
+          text(get(misplacedMovie.answer, 'refused')),
+          /is inside the project/,
+          misplacedMovie.said,
+        );
+      } finally {
+        sweep(movies);
+      }
       const malformed = await run({ engineArgs: '--verbose' });
       assert.match(
         text(get(malformed.answer, 'refused')),
@@ -28204,6 +28256,39 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
 }
 
 /**
+ * A test run's engine flags are judged before anything starts: an engine flag off the list, and a
+ * movie, which a test run being headless can never write, are refused with no engine or gdUnit4 to
+ * hand, so a wrong call costs no class rebuild.
+ */
+async function testATestRunsFlagsAreJudgedFirst(): Promise<void> {
+  const projectPath = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-run-flags-'));
+  const movies = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-run-movie-'));
+  try {
+    writeFileSync(join(projectPath, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(projectPath, 'test'));
+    await withStdioServer(
+      async (call) => {
+        const offList = await call('project_test', { projectPath, engineArgs: ['--script', 'res://x.gd'] });
+        assert.match(offList, /--script is not one of the engine flags engineArgs takes/, offList);
+        const movie = await call('project_test', {
+          projectPath,
+          engineArgs: ['--write-movie', join(movies, 'suite.avi')],
+        });
+        assert.match(movie, /--write-movie needs a run that draws, and this one is headless/, movie);
+        // And past those, the same call reaches the check that comes next, so the refusals above
+        // were the flags' and not a project that could not be tested at all.
+        const verbose = await call('project_test', { projectPath, engineArgs: ['--verbose'] });
+        assert.match(verbose, /gdUnit4 is not installed in this project/, verbose);
+      },
+      { GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot') },
+    );
+  } finally {
+    sweep(projectPath);
+    sweep(movies);
+  }
+}
+
+/**
  * A test run can be handed engine flags, and an ignore entry that left nothing out says so.
  *
  * Issue #1065: a gdUnit4 run ended with the engine's "ObjectDB instances were leaked at exit (run
@@ -31594,6 +31679,139 @@ function testACaptureIsSavedOnlyWhereItMayBe(): void {
     );
     assert.match(refused(join(project, 'screen.png')), /is inside the project/);
     assert.match(refused(join(outside, 'taken.png')), /already exists/);
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A windowed run given --write-movie writes the movie, in both of Movie Maker's forms.
+ *
+ * Issue #1067: a trailer rendered from the game itself, which the engine does at a fixed timestep
+ * whatever the machine's speed. Windowed, because a headless engine has no renderer for Movie Maker
+ * to read and crashed when asked; the compatibility renderer, as the other windowed cases use.
+ */
+async function testAWindowedRunWritesItsMovie(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('movie regression skipped (Godot not found)');
+    return;
+  }
+  const refused = windowedRunRefused();
+  if (refused !== null) {
+    console.log(`movie regression skipped (${refused})`);
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-movie-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-movie-rt-'));
+  const out = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-movie-out-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Movie"\nrun/main_scene="res://main.tscn"\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Node2D\n\nvar frames := 0\n\n\nfunc _process(_delta: float) -> void:\n\tframes += 1\n\tqueue_redraw()\n' +
+        '\tif frames >= 30:\n\t\tget_tree().quit()\n\n\nfunc _draw() -> void:\n\tdraw_rect(Rect2(frames * 4, 40, 60, 60), Color.ORANGE)\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node2D"]\nscript = ExtResource("1")\n',
+    );
+    await withStdioServer(
+      async (call) => {
+        const filmed = async (file: string): Promise<unknown> => {
+          const started: unknown = JSON.parse(
+            await call(
+              'editor_run',
+              {
+                projectPath: project,
+                op: 'start',
+                headless: false,
+                engineArgs: ['--write-movie', join(out, file), '--fixed-fps', '30'],
+              },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+          assert.equal(get(started, 'started'), true, JSON.stringify(started));
+          const ended: unknown = JSON.parse(
+            await call('editor_run', { op: 'wait', timeoutMs: 120_000 }, ENGINE_CALL_TIMEOUT_MS),
+          );
+          assert.equal(get(ended, 'running'), false, JSON.stringify(ended));
+          return ended;
+        };
+        const avi = await filmed('clip.avi');
+        assert.ok(
+          existsSync(join(out, 'clip.avi')) && statSync(join(out, 'clip.avi')).size > 1000,
+          `the AVI is written: ${readdirSync(out).join(', ')} ${JSON.stringify(avi)}`,
+        );
+        const png = await filmed('shot.png');
+        assert.ok(
+          existsSync(join(out, 'shot00000000.png')) && existsSync(join(out, 'shot.wav')),
+          `the PNG sequence and its sound are written: ${readdirSync(out).join(', ')} ${JSON.stringify(png)}`,
+        );
+      },
+      { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir },
+    );
+  } finally {
+    sweep(project);
+    sweep(runtimeDir);
+    sweep(out);
+  }
+}
+
+/**
+ * A movie is written only where a capture could be, and only from a run that draws.
+ *
+ * Issue #1067: a trailer rendered with Movie Maker writes a file at the caller's word, so it is held
+ * to the capture's rules, with two of its own. A PNG movie is a sequence named from the path with a
+ * WAV beside it, so a first frame or a WAV already there is a file written over; and a headless run
+ * has no renderer to read frames from, which crashed Godot 4.7.2 on the first frame when asked.
+ */
+function testAMovieIsWrittenOnlyWhereACaptureCouldBe(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-movie-place-'));
+  const project = join(root, 'project');
+  const outside = join(root, 'outside');
+  mkdirSync(project);
+  mkdirSync(outside);
+  try {
+    const refused = (path: string, headless = false): string =>
+      movieRefusal(['--verbose', '--write-movie', path], [project], headless) ?? 'accepted';
+    assert.equal(
+      movieRefusal(['--verbose'], [project], true),
+      null,
+      'no movie asked for is nothing to refuse',
+    );
+    assert.equal(refused(join(outside, 'trailer.avi')), 'accepted', 'a new AVI outside the project');
+    assert.equal(refused(join(outside, 'frame.png')), 'accepted', 'a new PNG sequence outside the project');
+    assert.match(
+      refused(join(outside, 'trailer.avi'), true),
+      /needs a run that draws, and this one is headless/,
+    );
+    assert.match(
+      refused(join(outside, 'trailer.mp4')),
+      /--write-movie .* does not end in \.avi or \.png, which is what a movie is/,
+    );
+    assert.match(refused('trailer.avi'), /is not absolute/);
+    assert.match(refused('res://trailer.avi'), /is a Godot path/);
+    assert.match(refused(join(project, 'trailer.avi')), /is inside the project/);
+    assert.match(
+      refused(join(outside, 'gone', 'trailer.avi')),
+      /does not exist; a movie creates no directories/,
+    );
+    writeFileSync(join(outside, 'kept.avi'), 'x');
+    assert.match(refused(join(outside, 'kept.avi')), /already exists; a movie is not written over a file/);
+    // The sequence's own files, not the name given, are what a PNG movie would write over.
+    writeFileSync(join(outside, 'shot00000000.png'), 'x');
+    assert.match(refused(join(outside, 'shot.png')), /would write .*shot00000000\.png, which already exists/);
+    writeFileSync(join(outside, 'scene.wav'), 'x');
+    assert.match(refused(join(outside, 'scene.png')), /would write .*scene\.wav, which already exists/);
   } finally {
     sweep(root);
   }
@@ -35644,6 +35862,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testShippedProseHasNoDashStandInsOrHabitPhrases,
   testEveryArgumentTheSkillNamesIsOneTheOpTakes,
   testACaptureIsSavedOnlyWhereItMayBe,
+  testAMovieIsWrittenOnlyWhereACaptureCouldBe,
+  testAWindowedRunWritesItsMovie,
   testTheEditorIsOfferedWhereItCanAnswer,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
@@ -35866,6 +36086,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAStackOverflowIsNotAPass,
   testATestRunNamesItsLeaksAndItsUnusedIgnores,
+  testATestRunsFlagsAreJudgedFirst,
   testAProfileIsWrittenPastAReader,
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
