@@ -159,7 +159,7 @@ import {
   writeLeftAloneDetail,
 } from '../src/rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
-import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
+import { noteRestartBegun, restartNotePath, restartOwed } from '../src/restart-note.js';
 import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
@@ -4961,20 +4961,6 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
       sweep(other);
     }
 
-    // The contrast, from a server just as young with no note to read: its `true` is the window,
-    // and is the right answer there.
-    restartSettled(project);
-    await uninformed.initialize('regression-test');
-    const plain = parseTextContent(
-      await uninformed.request('tools/call', { name: 'editor_status', arguments: {} }),
-    );
-    assert.equal(
-      get(plain, 'editor', 'mayYetConnect'),
-      true,
-      'without the note a young server may yet be reached',
-    );
-    assert.equal(get(plain, 'editor', 'restartInterrupted'), undefined, 'and reports no restart');
-
     // An editor arriving settles it, whoever opened it: the note is gone from disk, not merely
     // unreported, so the server after this one does not report a debt that was paid.
     noteRestartBegun({
@@ -5026,6 +5012,21 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
       false,
       'and the note is taken down, not just unreported',
     );
+
+    // The contrast, from a server just as young with no note to read: its `true` is the window,
+    // and is the right answer there. Last, because it serves the same project and is the newer of
+    // the two, so the first server stands down once it has announced: asked in the middle, it left
+    // the first one stopping under the calls still to come, whenever its notice landed in time.
+    await uninformed.initialize('regression-test');
+    const plain = parseTextContent(
+      await uninformed.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(
+      get(plain, 'editor', 'mayYetConnect'),
+      true,
+      'without the note a young server may yet be reached',
+    );
+    assert.equal(get(plain, 'editor', 'restartInterrupted'), undefined, 'and reports no restart');
   } finally {
     editor?.close();
     await server.stop();
@@ -9351,6 +9352,12 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
   };
   const port = await reservePort();
   const waitMs = 8_000;
+  // Named, PowerShell saves its cache at that path and never where it runs, which leaves nothing
+  // to look for; set empty, it saves none at all. So it is taken out of what the server inherits
+  // for the server's start and put back after.
+  const cachePathVariable = 'PSModuleAnalysisCachePath';
+  const inheritedCachePath = process.env[cachePathVariable];
+  delete process.env[cachePathVariable];
   const server = new ServerProcess({
     env: {
       ...own,
@@ -9361,6 +9368,9 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     },
     cwd: workdir,
   });
+  if (inheritedCachePath !== undefined) {
+    process.env[cachePathVariable] = inheritedCachePath;
+  }
   let pid = 0;
   let socket: WebSocket | null = null;
   const sceneCreate = async (): Promise<JsonRpcMessage> =>
@@ -9456,7 +9466,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
       }
       assert.ok(
         existsSync(cache),
-        'the PowerShell the server runs saved its module cache in the temporary directory',
+        `the PowerShell the server runs saved its module cache in the temporary directory (the suite had ${cachePathVariable} ${inheritedCachePath === undefined ? 'unset' : `as ${inheritedCachePath}`}, which the server was not given)`,
       );
       await delay(Math.max(0, launchedAt + 25_000 - Date.now()));
       assert.deepEqual(readdirSync(workdir), [], 'and nothing in the directory the server runs in');
