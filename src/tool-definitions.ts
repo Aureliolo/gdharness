@@ -370,7 +370,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot.",
     parameters: {
       projectPath: PROJECT_PATH,
-      setting: { type: 'string', description: 'Setting path, such as "display/window/size/viewport_width".' },
+      setting: {
+        type: 'string',
+        ops: ['get', 'set'],
+        description: 'Setting path, such as "display/window/size/viewport_width".',
+      },
       from: {
         type: 'string',
         enum: ['disk', 'editor'],
@@ -386,45 +390,71 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       value: {
         blank: true,
+        ops: ['set'],
         description:
           'The value to write. Engine types may be tagged, {"_type": "Vector2", "x": 1, "y": 2}, and infinity as {"_type": "float", "value": "inf"}, the form a read answers with. "" writes an empty string.',
       },
-      name: { type: 'string', description: 'Autoload name.' },
-      path: { type: 'string', description: 'Autoload script or scene inside the project.' },
+      name: { type: 'string', ops: ['add_autoload', 'remove_autoload'], description: 'Autoload name.' },
+      path: {
+        type: 'string',
+        ops: ['add_autoload'],
+        description: 'Autoload script or scene inside the project.',
+      },
       enabled: {
         type: 'boolean',
+        ops: ['add_autoload', 'set_audio_bus_effect'],
         description:
-          'Autoloads: Godot 4 loads every autoload in the list, so false is refused. Use global: false to keep the name out of the global scope, or remove_autoload to stop it loading.',
+          'add_autoload: Godot 4 loads every autoload in the list, so false is refused. Use global: false to keep the name out of the global scope, or remove_autoload to stop it loading. set_audio_bus_effect: whether the effect is on. Default true.',
       },
       global: {
         type: 'boolean',
+        ops: ['add_autoload'],
         description:
           'Autoloads: make the name a global variable, the * in project.godot and the editor\'s "Global Variable" column. Default true. The autoload loads either way.',
       },
-      scenePath: SCENE_PATH,
-      actionName: { type: 'string', description: 'Input action name, such as "jump".' },
-      events: INPUT_EVENTS,
+      scenePath: { ...SCENE_PATH, ops: ['set_main_scene'] },
+      actionName: {
+        type: 'string',
+        ops: ['add_input_action', 'remove_input_action'],
+        description: 'Input action name, such as "jump".',
+      },
+      events: { ...INPUT_EVENTS, ops: ['add_input_action'] },
       deadzone: {
         type: 'number',
+        ops: ['add_input_action'],
         minimum: 0,
         maximum: 1,
         description: 'Input actions: analogue deadzone, 0 to 1. Default 0.5.',
       },
-      pluginName: { type: 'string', description: 'Folder name under addons/.' },
-      busName: { type: 'string', description: 'Audio bus name.' },
+      pluginName: {
+        type: 'string',
+        ops: ['enable_plugin', 'disable_plugin'],
+        description: 'Folder name under addons/.',
+      },
+      busName: { type: 'string', ops: ['add_audio_bus', 'remove_audio_bus'], description: 'Audio bus name.' },
       parentBusIndex: {
         type: 'number',
+        ops: ['add_audio_bus'],
         description:
           'Audio buses: the bus to send to. Default 0, Master. The new bus goes right after it, so every later bus moves one along, and the answer lists them all.',
       },
-      busIndex: { type: 'number', description: 'Audio bus index.' },
+      busIndex: {
+        type: 'number',
+        ops: ['set_audio_bus_effect', 'set_audio_bus_volume'],
+        description: 'Audio bus index.',
+      },
       effectIndex: {
         type: 'number',
+        ops: ['set_audio_bus_effect'],
         description:
           'Slot on the bus for the effect: the effect there is replaced, and one past the last adds one. Any other slot is refused.',
       },
-      effectType: { type: 'string', description: 'Effect class, such as "AudioEffectReverb".' },
-      volumeDb: { type: 'number', description: 'Bus volume in decibels.' },
+      effectType: {
+        type: 'string',
+        ops: ['set_audio_bus_effect'],
+        description: 'Effect class, such as "AudioEffectReverb".',
+      },
+      volumeDb: { type: 'number', ops: ['set_audio_bus_volume'], description: 'Bus volume in decibels.' },
     },
     requires: ['projectPath'],
     operations: {
@@ -448,9 +478,19 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         summary: 'register an input action and its events',
         requires: ['actionName', 'events'],
       },
+      remove_input_action: {
+        effect: 'destructive',
+        summary: 'remove an input action the project defines',
+        requires: ['actionName'],
+      },
       enable_plugin: { effect: 'destructive', summary: 'enable an addon', requires: ['pluginName'] },
       disable_plugin: { effect: 'destructive', summary: 'disable an addon', requires: ['pluginName'] },
       add_audio_bus: { effect: 'additive', summary: 'add an audio bus', requires: ['busName'] },
+      remove_audio_bus: {
+        effect: 'destructive',
+        summary: 'remove an audio bus, sending what sent to it on to where it sent',
+        requires: ['busName'],
+      },
       set_audio_bus_effect: {
         effect: 'destructive',
         summary: 'put an effect in a slot on a bus',

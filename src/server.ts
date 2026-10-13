@@ -1620,6 +1620,7 @@ const REIMPORT_TIMEOUT_MS = 300_000;
 /** The project_settings ops that write the bus layout rather than project.godot. */
 const AUDIO_BUS_OPS: ReadonlySet<string> = new Set([
   'add_audio_bus',
+  'remove_audio_bus',
   'set_audio_bus_effect',
   'set_audio_bus_volume',
 ]);
@@ -1659,6 +1660,7 @@ export function settingsNamedBy(op: string, args: OperationParams): string[] {
     case 'set_main_scene':
       return ['application/run/main_scene'];
     case 'add_input_action':
+    case 'remove_input_action':
       return text('actionName') === '' ? [] : [`input/${text('actionName')}`];
     case 'enable_plugin':
     case 'disable_plugin':
@@ -7616,7 +7618,7 @@ class GodotServer {
         frameFunctions: profileFrameFunctions(projectPath),
       });
       if (armed.isError === true) {
-        return this.profilerRefusal(armed);
+        return armed;
       }
     }
     const answer = await this.handleViaBridge(
@@ -9206,7 +9208,7 @@ class GodotServer {
   ): Promise<ToolResponse> {
     const read = await this.handleViaBridge('profile_read', {});
     if (read.isError === true) {
-      return this.profilerRefusal(read);
+      return read;
     }
     const held = asParams(JSON.parse(read.content[0]?.text ?? '{}'));
     if (readBoolean(held, 'profiled') !== true && readBoolean(held, 'armed') !== true) {
@@ -9219,7 +9221,7 @@ class GodotServer {
         frameFunctions: profileFrameFunctions(projectPath),
       });
       if (started.isError === true) {
-        return this.profilerRefusal(started);
+        return started;
       }
       if (readBoolean(asParams(JSON.parse(started.content[0]?.text ?? '{}')), 'started') !== true) {
         return this.createErrorResponse(
@@ -9294,20 +9296,6 @@ class GodotServer {
       await delay(100);
     }
     return false;
-  }
-
-  /** The editor addon's refusal to profile, with what to do when the addon predates the profiler. */
-  private profilerRefusal(refused: ToolResponse): ToolResponse {
-    const said = refused.content[0]?.text ?? '';
-    return said.includes('Unknown tool: profile_')
-      ? this.createErrorResponse(
-          "The editor's gdharness addon is older than the profiler, so it cannot profile the game it plays.",
-          [
-            'editor_launch restart loads the addon this server installed',
-            'editor_status says which addon the editor holds',
-          ],
-        )
-      : refused;
   }
 
   private async handleWaitForRun(args: OperationParams): Promise<ToolResponse> {
@@ -11006,9 +10994,25 @@ class GodotServer {
         ),
       );
     } catch (error) {
-      return this.createErrorResponse(
-        `The editor answered ${toolName} with an error: ${errorMessage(error)}`,
-      );
+      const message = errorMessage(error);
+      // An addon older than this server has no command for an op added since, and its own words for
+      // that named the command and nothing else: a probe calling resource_edit read on an editor a
+      // release behind was told "Unknown tool: read_resource", which reads as a fault in the tool.
+      if (message.includes(`Unknown tool: ${toolName}`)) {
+        const status = this.godotBridge.getStatus();
+        const remedy = addonMismatch(
+          status.addonVersion,
+          SERVER_VERSION,
+          status.addonDigest,
+          shippedEditorDigest(),
+          this.editorCodeOnDisk(),
+        );
+        return this.createErrorResponse(
+          `The editor's gdharness addon is older than this ${SERVER_VERSION} server and has no ${toolName}, so it cannot answer this call. ${remedy ?? 'Restart it with editor_launch restart to load the addon the project holds.'}`,
+          ['editor_status says which addon the editor holds'],
+        );
+      }
+      return this.createErrorResponse(`The editor answered ${toolName} with an error: ${message}`);
     }
   }
 

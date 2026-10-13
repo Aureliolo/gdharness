@@ -323,6 +323,10 @@ func create_scene(args: Dictionary) -> Dictionary:
 			}
 		root.set_script(script)
 
+	var folder: String = SceneFile.make_folder_for(scene_path)
+	if not folder.is_empty():
+		root.free()
+		return {"ok": false, "error": folder}
 	var scene: SceneFile = SceneFile.new()
 	scene.root = root
 	scene.path = scene_path
