@@ -29,7 +29,14 @@ func get_project_setting(params: Dictionary) -> Dictionary:
 	}
 
 	if result["exists"]:
-		result["value"] = _values.serialize_value(ProjectSettings.get_setting(setting_path))
+		var value: Variant = ProjectSettings.get_setting(setting_path)
+		result["value"] = _values.serialize_value(value)
+		# A setting the engine registers exists whether or not the project sets it, so exists did
+		# not say whether project.godot has a line for it. At its default it has none: the engine
+		# drops such a key when it saves.
+		var default_value: Variant = ProjectSettings.property_get_revert(setting_path)
+		if default_value != null:
+			result["at_default"] = value == default_value
 	else:
 		result["value"] = null
 		result["message"] = "Setting does not exist"

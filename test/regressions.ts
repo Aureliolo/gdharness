@@ -117,7 +117,13 @@ import {
   savesStayPut,
   userDataIn,
 } from '../src/launch.js';
-import { GodotLSPClient, handleLSPTool, LSPTimeout } from '../src/lsp_client.js';
+import {
+  GodotLSPClient,
+  handleLSPTool,
+  LSPTimeout,
+  narrowedCompletions,
+  typedBefore,
+} from '../src/lsp_client.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
@@ -5752,6 +5758,86 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
     lingering.kill();
     sweep(project);
   }
+}
+
+/**
+ * A test run in a project with neither tests nor gdUnit4 says both.
+ *
+ * Found by driving the tools through a model: the answer named the missing folder alone, so writing
+ * tests there would have met a second refusal for the runner. The case with gdUnit4 installed and
+ * the folder missing, which must not name the runner, is held by the engine-backed test run case.
+ */
+async function testATestRunWithNothingToRunNamesTheRunnerToo(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-runner-'));
+  writeFileSync(join(project, 'project.godot'), '; Engine configuration file.\nconfig_version=5\n');
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(await reservePort()) } });
+  try {
+    await server.initialize('regression-test');
+    const answer = await server.request('tools/call', {
+      name: 'project_test',
+      arguments: { projectPath: project },
+    });
+    const said = textOf(answer) ?? '';
+    assert.match(
+      said,
+      /^No tests ran: nothing at res:\/\/test, and gdUnit4 is not installed in this project: no addons\/gdUnit4\/bin\/GdUnitCmdTool\.gd\./,
+      said,
+    );
+    const content = get(answer, 'result', 'content');
+    const json: unknown = JSON.parse(String(get(asArray(content, 'content')[1], 'text')));
+    assert.deepEqual(
+      [get(json, 'passed'), get(json, 'tests'), get(json, 'gdUnit4Installed')],
+      [false, 0, false],
+      JSON.stringify(json),
+    );
+  } finally {
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * Completions are narrowed to the part of a name written before the position, and capped.
+ *
+ * Godot's language server offers the whole scope and leaves narrowing to the editor, so passed
+ * through, a completion after "pow" was the entire global list, 239 thousand characters. The
+ * branches a live editor case does not reach: an entry narrowed by its filterText rather than its
+ * label, a name in letters outside ASCII, case, and more matches than one answer carries.
+ */
+function testCompletionsAreNarrowedToWhatWasTyped(): void {
+  const source = 'extends Node\n\nfunc go() -> void:\n\tvar größe := 1\n\tprint(grö\n\tPOW\n';
+  assert.equal(typedBefore(source, 4, 10), 'grö', 'a name in any letters');
+  assert.equal(typedBefore(source, 5, 4), 'POW');
+  assert.equal(typedBefore(source, 3, 1), '', 'nothing typed just past the tab');
+  assert.equal(typedBefore(source, 40, 3), '', 'and nothing on a line past the end');
+
+  const offered = [
+    { label: 'größe', kind: 6 },
+    { label: 'grow()', filterText: 'grow', kind: 3 },
+    { label: 'pow', kind: 3 },
+    { label: 'power', kind: 10 },
+    { label: 'print', kind: 3 },
+  ];
+  assert.deepEqual(narrowedCompletions(offered, 'gr'), {
+    typed: 'gr',
+    completions: [
+      { label: 'größe', kind: 'variable' },
+      { label: 'grow()', filterText: 'grow', kind: 'function' },
+    ],
+    total: 2,
+  });
+  assert.deepEqual(
+    (narrowedCompletions(offered, 'POW')['completions'] as { label: string }[]).map((one) => one.label),
+    ['pow', 'power'],
+    'regardless of case',
+  );
+  const many = Array.from({ length: 250 }, (_, at) => ({ label: `name${at}`, kind: 6 }));
+  const capped = narrowedCompletions(many, '');
+  assert.equal((capped['completions'] as unknown[]).length, 100);
+  assert.equal(capped['total'], 250);
+  assert.equal(capped['omitted'], 150);
+  assert.match(String(capped['note']), /150 more are offered here/);
+  assert.equal(capped['typed'], undefined, 'and nothing said to be typed when nothing was');
 }
 
 /**
@@ -34711,6 +34797,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACallWaitsForAnArrivingEditor,
   testARestartWaitsForTheOldEditorToGo,
   testAnEditorCloseWaitsForItToGo,
+  testCompletionsAreNarrowedToWhatWasTyped,
+  testATestRunWithNothingToRunNamesTheRunnerToo,
   testAServerEndsWithAnEditorStillOnTheBridge,
   testABadPortIsReported,
   testAnEditorPortMovesOnlyWhenItIsHeld,

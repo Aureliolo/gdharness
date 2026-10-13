@@ -101,7 +101,7 @@ func query_class_info(params: Dictionary) -> Dictionary:
 	)
 
 	if not ClassDB.class_exists(class_name_str):
-		return _log.failure("Class not found: " + class_name_str)
+		return _not_found(class_name_str)
 
 	var member: String = str(params.get("member", ""))
 	if not member.is_empty():
@@ -152,6 +152,35 @@ func query_class_info(params: Dictionary) -> Dictionary:
 # is as often an ancestor's as the class's own, so the ancestry is walked without being asked. Each
 # match says which class declares it. Nothing found names the members whose names contain the one
 # asked for, since the usual miss is a spelling.
+## Why [param wanted] has no answer here. A class_name a project script declares is not in ClassDB,
+## and "Class not found" for one read as though the project had no such class.
+func _not_found(wanted: String) -> Dictionary:
+	for entry: Dictionary in ProjectSettings.get_global_class_list():
+		if str(entry.get("class", "")) == wanted:
+			return (
+				_log
+				. failure(
+					(
+						(
+							"%s is not an engine class: it is the class_name %s declares, and editor_classes reads "
+							+ "the engine's ClassDB only. script_info structure on that script, with "
+							+ "includeInherited, answers what it declares and what it inherits."
+						)
+						% [wanted, str(entry.get("path", ""))]
+					)
+				)
+			)
+	return _log.failure(
+		(
+			(
+				"Class not found: %s. editor_classes reads the engine's ClassDB, so a class_name a project "
+				+ "script declares is not in it either; script_info structure reads one."
+			)
+			% wanted
+		)
+	)
+
+
 func _member_of(class_name_str: String, member: String) -> Dictionary:
 	var found: Array[Dictionary] = []
 	var current: String = class_name_str
@@ -223,7 +252,7 @@ func inspect_inheritance(params: Dictionary) -> Dictionary:
 	_log.info("Inspecting inheritance for: " + class_name_str)
 
 	if not ClassDB.class_exists(class_name_str):
-		return _log.failure("Class not found: " + class_name_str)
+		return _not_found(class_name_str)
 
 	var ancestors: Array[String] = []
 	var current: String = class_name_str
