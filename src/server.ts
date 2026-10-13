@@ -2922,7 +2922,11 @@ class GodotServer {
    * taken, which is the right reference for an editor that was already running and has to notice,
    * and no reference at all for one started afterwards.
    */
-  private launchedEditor: { readonly pid: number; readonly startedAt: number | null } | null = null;
+  private launchedEditor: {
+    readonly pid: number;
+    readonly startedAt: number | null;
+    readonly projectPath: string;
+  } | null = null;
 
   /**
    * What project.godot held when this server opened an editor on it, until that editor arrives.
@@ -3809,13 +3813,12 @@ class GodotServer {
           ]);
         }
         if (!this.godotBridge.isConnected()) {
-          return this.createErrorResponse(
-            `${tool} ${op} was asked of the editor, and no editor has reached this server.`,
-            [
-              'editor_status says whether the bridge is up and whether an editor may yet connect',
-              'Open the project with editor_launch, or pass from: "disk" to read the file instead',
-            ],
-          );
+          const refused = await this.noEditorYet(answerable, [
+            `${tool} ${op} was asked of the editor; from: "disk" reads the file instead`,
+          ]);
+          if (refused !== null) {
+            return refused;
+          }
         }
         const { op: _dropped, ...asks } = answerable;
         const contained = this.containProjectFiles(asks);
@@ -6934,6 +6937,10 @@ class GodotServer {
   private async handleCloseEditor(): Promise<ToolResponse> {
     const before = this.godotBridge.getStatus();
     if (!before.connected) {
+      const launched = this.launchedEditor;
+      if (launched !== null && (await this.launchedEditorIsUp()) && !this.godotBridge.isConnected()) {
+        return await this.stopTheLaunchedEditor(launched);
+      }
       return this.createErrorResponse('No editor is connected, so there is nothing to close.', [
         'editor_status says whether the bridge is up and what has reached it',
       ]);
@@ -6970,6 +6977,49 @@ class GodotServer {
       editorPid: pid,
       projectPath: before.projectPath,
       ...this.whatTheEditorDropped(settingsBefore, this.settingKeysOf(before.projectPath)),
+      tookMs: Date.now() - began,
+    });
+  }
+
+  /**
+   * editor_launch close for the editor this server opened, before it has connected.
+   *
+   * There is nothing to ask it and nothing of this server's in it to save, since every change this
+   * server makes in an editor goes through the bridge it has not reached. Told there was nothing to
+   * close, a caller left a hidden editor running with no window to close and no server admitting to
+   * it.
+   */
+  private async stopTheLaunchedEditor(launched: {
+    readonly pid: number;
+    readonly projectPath: string;
+  }): Promise<ToolResponse> {
+    const began = Date.now();
+    try {
+      process.kill(launched.pid);
+    } catch (error) {
+      if (alive(launched.pid)) {
+        return this.createErrorResponse(
+          `The editor this server opened, pid ${launched.pid}, has not connected, and stopping it failed: ${errorMessage(error)}`,
+          ['editor_status says whether it has since connected'],
+        );
+      }
+    }
+    const stopWaitMs = 10_000;
+    if (!(await this.waitForBridge(() => !alive(launched.pid), began + stopWaitMs))) {
+      return this.createErrorResponse(
+        `The editor this server opened, pid ${launched.pid}, had not connected and was told to stop, and is still running after ${stopWaitMs / 1000}s.`,
+        ['editor_status says whether it has since connected'],
+      );
+    }
+    this.closedHere = { editorPid: launched.pid, at: new Date().toISOString() };
+    this.launchedEditor = null;
+    this.launchedFrom = null;
+    return this.jsonTextResponse({
+      closed: true,
+      editorPid: launched.pid,
+      projectPath: launched.projectPath,
+      beforeConnecting: true,
+      note: "It had not reached the bridge, so it was stopped rather than asked to save and quit, and held nothing of this server's to save.",
       tookMs: Date.now() - began,
     });
   }
@@ -7315,6 +7365,7 @@ class GodotServer {
     this.launchedEditor = {
       pid: launched.pid,
       startedAt: (await startTimesOf([launched.pid])).get(launched.pid) ?? null,
+      projectPath,
     };
     this.closedHere = null;
     return { pid: launched.pid, error: null };
@@ -11228,39 +11279,80 @@ class GodotServer {
     return { unseen: unseenByEditor(projectPath, holds), stillHeld: heldButGone(projectPath, holds) };
   }
 
+  /**
+   * Why a call for the editor finds none, or null once one has connected.
+   *
+   * An editor this server opened is waited for while it runs. editor_launch open answers once the
+   * process has started, and the editor dials in only after it has imported the project and loaded
+   * its plugins, so a call sent straight after the open met no editor and was told to open one,
+   * beside the editor already opening. The wait is the restart's, which waits for the same thing.
+   */
+  private async noEditorYet(args: OperationParams, instead: readonly string[]): Promise<ToolResponse | null> {
+    const project = readNonEmptyString(args, 'projectPath') ?? this.ownProject;
+    // Opening an editor and enabling the plugin both assume the addon is there, and on a project
+    // that has never been set up neither can work: editor_launch refuses it for that reason.
+    const missing = project === null ? null : editorAddonMissing(project);
+    if (missing !== null) {
+      return this.createErrorResponse(
+        `Editor not connected, and no editor of this project can connect: ${missing.why}.`,
+        [...instead, ...missing.remedies, 'editor_launch then opens an editor that connects'],
+      );
+    }
+    const launched = this.launchedEditor;
+    if (launched !== null && (await this.launchedEditorIsUp())) {
+      const began = Date.now();
+      await this.waitForBridge(
+        () => hasSaidWhoItIs(this.godotBridge.getStatus()) || !alive(launched.pid),
+        began + editorRestartTimeoutMs(),
+      );
+      if (this.godotBridge.isConnected()) {
+        return null;
+      }
+      const opened = `the editor this server opened on ${launched.projectPath}, pid ${launched.pid}`;
+      if (alive(launched.pid)) {
+        return this.createErrorResponse(
+          `Editor not connected: ${opened}, is still running and has not reached the bridge in the ${String(Math.round((Date.now() - began) / 1000))}s this call waited. An editor dials in once it has imported the project and loaded its plugins, and the first open of a large project imports for minutes.`,
+          [
+            ...instead,
+            'editor_status names it under awaitingLaunchedEditor until it has connected',
+            'editor_output op editor shows what it is printing meanwhile',
+          ],
+        );
+      }
+      return this.createErrorResponse(
+        `Editor not connected: ${opened}, exited without reaching the bridge.`,
+        [
+          ...instead,
+          'editor_output op editor shows what it printed before it went',
+          'editor_launch open starts another',
+        ],
+      );
+    }
+    return this.createErrorResponse(
+      'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
+      [
+        ...instead,
+        'Open the project in the editor with editor_launch, or by hand',
+        'Enable the addon under Project > Project Settings > Plugins',
+        'editor_status says whether the bridge is up and what it is listening on',
+      ],
+    );
+  }
+
   private async handleViaBridge(
     toolName: string,
     args: OperationParams,
     askedAs?: string,
   ): Promise<ToolResponse> {
     if (!this.godotBridge.isConnected()) {
-      const instead =
+      const alternative =
         askedAs !== undefined && Object.hasOwn(EDITOR_FREE_INSTEAD, askedAs)
           ? EDITOR_FREE_INSTEAD[askedAs]
           : undefined;
-      const project = readNonEmptyString(args, 'projectPath') ?? this.ownProject;
-      // Opening an editor and enabling the plugin both assume the addon is there, and on a project
-      // that has never been set up neither can work: editor_launch refuses it for that reason.
-      const missing = project === null ? null : editorAddonMissing(project);
-      if (missing !== null) {
-        return this.createErrorResponse(
-          `Editor not connected, and no editor of this project can connect: ${missing.why}.`,
-          [
-            ...(instead === undefined ? [] : [instead]),
-            ...missing.remedies,
-            'editor_launch then opens an editor that connects',
-          ],
-        );
+      const refused = await this.noEditorYet(args, alternative === undefined ? [] : [alternative]);
+      if (refused !== null) {
+        return refused;
       }
-      return this.createErrorResponse(
-        'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
-        [
-          ...(instead === undefined ? [] : [instead]),
-          'Open the project in the editor with editor_launch, or by hand',
-          'Enable the addon under Project > Project Settings > Plugins',
-          'editor_status says whether the bridge is up and what it is listening on',
-        ],
-      );
     }
     // A server serves one editor, and that editor answers about the project it has open whatever
     // path the call names: it has no other project to look in. So a call naming a different one

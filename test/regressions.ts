@@ -9250,6 +9250,155 @@ async function testAnEditorStartedByAnEditorSaysSo(): Promise<void> {
 }
 
 /**
+ * A call needing the editor, made while the editor this server opened is on its way, waits for it,
+ * and close ends that editor before it has connected.
+ *
+ * Found by a probe session: scene_create sent straight after editor_launch open was told to open an
+ * editor, beside the one already opening, and editor_launch close then said there was nothing to
+ * close and left the hidden editor running. The editor here is a real headless one on a project
+ * whose addon is enabled and empty, so it runs and never dials in. A fake editor connects while the
+ * first call waits, which is the editor arriving; once it has gone, a second call meets an editor
+ * that does not arrive within the wait.
+ */
+async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('call waits for the opened editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-awaited-'));
+  const home = join(project, '.home');
+  mkdirSync(home, { recursive: true });
+  // The editor's own settings and user data, so nothing here is written into the machine's.
+  const own = {
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: home,
+    LOCALAPPDATA: home,
+    XDG_CONFIG_HOME: home,
+    XDG_DATA_HOME: home,
+    XDG_CACHE_HOME: home,
+    GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+  };
+  const port = await reservePort();
+  const waitMs = 8_000;
+  const server = new ServerProcess({
+    env: {
+      ...own,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GODOT_PATH: godotPath,
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: String(waitMs),
+    },
+  });
+  let pid = 0;
+  let socket: WebSocket | null = null;
+  const sceneCreate = async (): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      {
+        name: 'scene_create',
+        arguments: { op: 'create', projectPath: project, scenePath: 'res://made.tscn', rootNodeType: 'Node' },
+      },
+      60_000,
+    );
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Awaited"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    await server.initialize('regression-test');
+    const opened = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_launch',
+        arguments: { op: 'open', projectPath: project, hidden: true },
+      }),
+    );
+    pid = asNumber(get(opened, 'pid'), 'pid');
+    assert.ok(alive(pid), `the fixture needs the opened editor running: ${JSON.stringify(opened)}`);
+
+    const asked = sceneCreate();
+    await delay(1_500);
+    const invoked: string[] = [];
+    const arriving = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    socket = arriving;
+    await new Promise<void>((resolve, reject) => {
+      arriving.once('open', () => {
+        resolve();
+      });
+      arriving.once('error', reject);
+    });
+    arriving.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (isRecord(message) && message['type'] === 'tool_invoke') {
+        invoked.push(String(message['tool']));
+        arriving.send(
+          JSON.stringify({
+            type: 'tool_result',
+            id: message['id'],
+            success: true,
+            result: { scenePath: 'res://made.tscn' },
+          }),
+        );
+      }
+    });
+    arriving.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+    const answered = await asked;
+    assert.notEqual(
+      get(answered.result, 'isError'),
+      true,
+      `the call made before the editor arrived waits for it: ${textOf(answered)}`,
+    );
+    assert.deepEqual(invoked, ['create_scene'], 'and is answered by the editor that arrived');
+
+    arriving.close();
+    socket = null;
+    for (let waited = 0; waited < 10_000; waited += 100) {
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      if (get(status, 'editor', 'connected') === false) {
+        break;
+      }
+      await delay(100);
+    }
+    const refused = textOf(await sceneCreate()) ?? '';
+    assert.ok(
+      refused.startsWith(
+        `Editor not connected: the editor this server opened on ${project}, pid ${pid}, is still running and has not reached the bridge in the ${String(waitMs / 1000)}s this call waited.`,
+      ),
+      `one that does not arrive is named, and waited for as long as a restart waits: ${refused}`,
+    );
+    assert.doesNotMatch(refused, /Open the project in the editor with editor_launch/, refused);
+
+    const closed = parseTextContent(
+      await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'close' } }),
+    );
+    assert.equal(
+      get(closed, 'closed'),
+      true,
+      `close ends the editor that never connected: ${JSON.stringify(closed)}`,
+    );
+    assert.equal(get(closed, 'beforeConnecting'), true, JSON.stringify(closed));
+    assert.equal(get(closed, 'editorPid'), pid, JSON.stringify(closed));
+    assert.equal(alive(pid), false, 'and its process is gone');
+  } finally {
+    socket?.close();
+    if (pid > 0 && alive(pid)) {
+      process.kill(pid);
+    }
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * The console of an editor this server launched is read before that editor has connected.
  *
  * Reported downstream: `editor_output op: "editor"`, asked while an editor gdharness had just
@@ -32264,7 +32413,8 @@ async function testAReadAskedOfTheEditorIsNotAnsweredFromDisk(): Promise<void> {
       arguments: { projectPath: '/p', op: 'get', setting: 'application/config/name', from: 'editor' },
     });
     const refused = textOf(asked) ?? JSON.stringify(asked);
-    assert.match(refused, /no editor has reached this server/, `it says why it cannot: ${refused}`);
+    assert.match(refused, /^Editor not connected: no Godot editor/, `it says why it cannot: ${refused}`);
+    assert.match(refused, /was asked of the editor/, `and that the editor was what was asked: ${refused}`);
     assert.match(refused, /from: "disk"/, `and what to pass to read the file instead: ${refused}`);
 
     // Beside it, the same question with nothing said about where: it goes to disk, gets as far as
@@ -36074,6 +36224,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartWaitsForTheEditorToSayWhoItIs,
   testTheStaleHalfIsNamedCorrectly,
   testALaunchedEditorsConsoleIsReadBeforeItConnects,
+  testACallWaitsForTheEditorThisServerOpened,
   testAnEditorStartedByAnEditorSaysSo,
   testStalenessIsTheEditorCodeNotTheVersion,
   testAnEditorOnTheShippedCodeIsNotCalledStale,
