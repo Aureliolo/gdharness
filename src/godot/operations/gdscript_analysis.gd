@@ -59,7 +59,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 			if _triple_quotes(raw) % 2 == 1:
 				in_multiline_string = false
 			continue
-		var stripped: String = _without_comment(raw)
+		var stripped: String = Patterns.without_comment(raw)
 
 		if stripped.is_empty():
 			continue
@@ -101,7 +101,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		if _can_wrap(header):
 			while _bracket_depth(stripped) > 0 and i + 1 < lines.size():
 				i += 1
-				stripped = (stripped + " " + _without_comment(lines[i])).strip_edges()
+				stripped = (stripped + " " + Patterns.without_comment(lines[i])).strip_edges()
 			header = Patterns.without_annotations(stripped)
 		var declaration: RegExMatch = Patterns.declared_class(header)
 		if declaration != null:
@@ -506,28 +506,6 @@ func _up_to(text: String, needle: String) -> String:
 		elif ch == needle and depth == 0:
 			return text.substr(0, i)
 	return text
-
-
-# The line with any trailing comment taken off, quote-aware so a `#` inside a string stays.
-#
-# The only one of these scanners that does not count brackets, on purpose: a `#` starts a comment
-# wherever it is, and there is no depth at which it does not. Giving this one the depth its
-# neighbours have puts the comment into the value of `var table := {  # keyed by name`, because the
-# brace opens before the `#` and closes on a later line. Held by a case, since the argument for the
-# difference is not visible from the code and reads like an oversight beside its neighbours.
-func _without_comment(line: String) -> String:
-	var quote: String = ""
-	for i: int in range(line.length()):
-		var ch: String = line[i]
-		if not quote.is_empty():
-			if ch == quote and line[i - 1] != "\\":
-				quote = ""
-			continue
-		if ch == "#":
-			return line.substr(0, i).strip_edges()
-		if ch == '"' or ch == "'":
-			quote = ch
-	return line.strip_edges()
 
 
 # Where the bracket opened at [from] closes, or -1 if it does not.

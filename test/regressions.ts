@@ -27513,12 +27513,20 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
         'console.log(rewrites);\n',
     );
     const stop = join(runtimeDir, 'stop');
+    // When each part ended, said with the answer: on a Windows runner the case once took 46 seconds
+    // and nothing said which part held it.
+    const began = Date.now();
+    const phases: string[] = [];
+    const mark = (phase: string): void => {
+      phases.push(`${phase} at ${String(Date.now() - began)}ms`);
+    };
     const built = await Bun.build({
       entrypoints: [entry],
       target: 'node',
       outdir: join(runtimeDir, 'built'),
     });
     assert.ok(built.success, `the rewriter bundles: ${built.logs.map(String).join('\n')}`);
+    mark('bundled');
     const rewriter = spawn('node', [join(runtimeDir, 'built', 'rewrite.js'), JSON.stringify(record), stop], {
       env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtimeDir },
       stdio: ['ignore', 'pipe', 'inherit'],
@@ -27539,11 +27547,16 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
     });
     const rewritten = new Promise((settle) => rewriter.once('close', settle));
     await rewriting;
+    mark('rewriting');
+    // The reader counts the versions it parsed, which is what says its reads overlapped rewrites. The
+    // writer's own count does not: a write waits out a reader holding the note on Windows, so the
+    // reader slows the writer, and a runner that made 90 rounds failed a floor on rounds while every
+    // one of its reads parsed.
     const reader = spawn(
       process.execPath,
       [
         '-e',
-        `const fs = require('fs'); const path = require('path'); const dir = ${JSON.stringify(runs)}; const seen = { parsed: 0 }; const notes = new Set(); const end = Date.now() + 2000; while (Date.now() < end) { for (const name of fs.readdirSync(dir)) { if (!name.endsWith('.json')) continue; try { JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); seen.parsed += 1; notes.add(name.split('-')[0]); } catch (e) { const kind = name.split('-')[0] + ' ' + (e.code ?? 'torn'); seen[kind] = (seen[kind] ?? 0) + 1; } } } seen.notes = notes.size; console.log(JSON.stringify(seen));`,
+        `const fs = require('fs'); const path = require('path'); const dir = ${JSON.stringify(runs)}; const seen = { parsed: 0 }; const notes = new Set(); const versions = new Set(); const end = Date.now() + 2000; while (Date.now() < end) { for (const name of fs.readdirSync(dir)) { if (!name.endsWith('.json')) continue; try { const note = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); seen.parsed += 1; notes.add(name.split('-')[0]); versions.add(name.split('-')[0] + note.startedAt); } catch (e) { const kind = name.split('-')[0] + ' ' + (e.code ?? 'torn'); seen[kind] = (seen[kind] ?? 0) + 1; } } } seen.notes = notes.size; seen.versions = versions.size; console.log(JSON.stringify(seen));`,
       ],
       { stdio: ['ignore', 'pipe', 'inherit'] },
     );
@@ -27553,17 +27566,28 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
     });
     // Closed rather than exited, which can come before what it printed has been read.
     await new Promise((settle) => reader.once('close', settle));
+    mark('read');
     writeFileSync(stop, '');
     await rewritten;
+    mark('rewriter ended');
     const count = Number(rewrites.replace('rewriting\n', ''));
-    assert.ok(count > 100, `the notes were rewritten throughout the read: ${rewrites}`);
+    const timing = `${String(count)} rounds of rewrites; ${phases.join(', ')}`;
+    if (Date.now() - began > 10_000) {
+      console.log(`run note race regression took long: ${timing}`);
+    }
     const seen = JSON.parse(said) as Record<string, number>;
-    assert.ok((seen['parsed'] ?? 0) > 100, `the reader read the notes throughout: ${said}`);
+    assert.ok((seen['parsed'] ?? 0) > 100, `the reader read the notes throughout: ${said}; ${timing}`);
     assert.equal(seen['notes'], 3, `the run note, the editor-played run's and the latest run's: ${said}`);
+    // Ten versions across the three notes is the reader having met the notes mid-rewrite many times
+    // over; one version each is a reader that ran beside a writer that had stopped.
+    assert.ok(
+      (seen['versions'] ?? 0) >= 10,
+      `the reader met the notes as they were rewritten: ${said}; ${timing}`,
+    );
     assert.deepEqual(
       Object.keys(seen),
-      ['parsed', 'notes'],
-      `and every read parsed, over ${String(count)} rewrites of each: ${said}`,
+      ['parsed', 'notes', 'versions'],
+      `and every read parsed: ${said}; ${timing}`,
     );
   } finally {
     if (had === undefined) {
