@@ -17,10 +17,6 @@ const Targets = preload("runtime_targets.gd")
 ## The distance from a capital letter to its small one in Unicode. A keycode holds the capital.
 const TO_SMALL: int = 32
 
-## What a game started without a window gets whatever the project settings say, and the usual
-## reason a control is out of reach. Only worth telling somebody when it is what they have.
-const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
-
 ## Set, to the desktop's name, for a process gdharness started on a desktop of its own and for
 ## everything that process starts. Kept in step with `DESKTOP_VARIABLE` in src/desktop.ts.
 const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
@@ -654,20 +650,8 @@ func _out_of_reach(
 	)
 
 
-## What to add to a refusal about a point outside the viewport, when the reason is that nobody
-## gave this game a window. The rect on its own does not say it, and it is the usual reason.
-##
-## The size is only claimed where it is true: the rect is printed beside this, so naming 64 by 64
-## over a viewport somebody has resized says two different things in one sentence.
 func _no_window_note(viewport: Viewport) -> String:
-	if viewport != _host.get_tree().root or _host.get_tree().root.can_draw():
-		return ""
-	if viewport.get_visible_rect().size == HEADLESS_VIEWPORT:
-		return (
-			". This game has no window, and a game with no window has a 64 by 64 viewport whatever "
-			+ "the project settings say: run it with a window to reach this control"
-		)
-	return ". This game has no window: run it with a window to reach this control"
+	return Targets.no_window_note(viewport, _host.get_tree().root)
 
 
 ## Sends a click's press or release into [param viewport], through Input when that is the game's

@@ -12,6 +12,10 @@ const Words = preload("runtime_words.gd")
 ## How many of the controls saying the same words a refusal names, with the index for each.
 const LISTED_CANDIDATES: int = 10
 
+## What a game started without a window gets whatever the project settings say, and the usual
+## reason a control is out of reach. Only worth telling somebody when it is what they have.
+const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
+
 ## What a match's rank is made of, one bit each, the highest deciding first.
 const TAKES_POINTER: int = 4
 const ENABLED_BUTTON: int = 2
@@ -139,7 +143,7 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 					under,
 					wanted,
 					_hidden_note(hidden),
-					_outside_note(outside),
+					_outside_note(outside, root),
 					_covered_note(covered, cover),
 					_open_menu_note(root, wanted),
 				]
@@ -393,10 +397,32 @@ static func _hidden_note(hidden: int) -> String:
 
 ## What to add to a refusal that found nothing on screen, when words matched controls a click cannot
 ## reach: off the viewport, or clipped away by a container it does not scroll.
-static func _outside_note(outside: int) -> String:
+static func _outside_note(outside: int, root: Node) -> String:
 	if outside == 0:
 		return ""
-	return "; %d control%s it outside what the screen shows" % [outside, " says" if outside == 1 else "s say"]
+	var note: String = (
+		"; %d control%s it outside what the screen shows" % [outside, " says" if outside == 1 else "s say"]
+	)
+	var window: Window = root as Window
+	return note if window == null else note + no_window_note(window, window)
+
+
+## What to add to a refusal about a point outside the viewport, when the reason is that nobody
+## gave this game a window. The rect on its own does not say it, and it is the usual reason: a
+## headless game's button twenty pixels in from the corner was refused as off screen, and the
+## refusal read as though the button were not there.
+##
+## The size is only claimed where it is true: the rect is printed beside this, so naming 64 by 64
+## over a viewport somebody has resized says two different things in one sentence.
+static func no_window_note(viewport: Viewport, root: Window) -> String:
+	if viewport != root or root.can_draw():
+		return ""
+	if viewport.get_visible_rect().size == HEADLESS_VIEWPORT:
+		return (
+			". This game has no window, and a game with no window has a 64 by 64 viewport whatever "
+			+ "the project settings say: run it with a window to reach this control"
+		)
+	return ". This game has no window: run it with a window to reach this control"
 
 
 ## What to add to a refusal that found nothing on screen, when the controls saying it are covered.

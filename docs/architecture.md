@@ -379,7 +379,7 @@ once the server is there, rather than waiting for somebody to restart it.
 
 | Tools                                                                                    | Route                                                               | Needs running                                   |
 | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------- |
-| `scene_*`, `resource_edit`, `editor_rescan`, `editor_launch restart`                     | Editor bridge                                                       | The editor, addon enabled                       |
+| `scene_*`, `resource_edit`, `editor_rescan`, `editor_launch restart` and `close`         | Editor bridge                                                       | The editor, addon enabled                       |
 | `script_diagnostics`, `script_info` except `structure`, `script_edit rename` of a member | Language server                                                     | The editor                                      |
 | `debug_*`, and the console `editor_output` returns                                       | Debug adapter                                                       | A game the editor is playing                    |
 | `runtime_*`                                                                              | Runtime                                                             | A game with the runtime autoload                |
