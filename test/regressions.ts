@@ -12062,8 +12062,13 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
         'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
     );
     writeFileSync(
+      join(project, 'main.gd'),
+      'extends Control\n\nvar lives: int = 3\n@export var speed: float = 1.5\nvar _hidden: int = 7\n',
+    );
+    writeFileSync(
       join(project, 'main.tscn'),
-      '[gd_scene format=3]\n\n[node name="Main" type="Control"]\n\n' +
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\nscript = ExtResource("1")\n\n' +
         '[node name="Near" type="Button" parent="."]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Near"\n\n' +
         '[node name="Far" type="Button" parent="."]\noffset_left = 100.0\noffset_top = 20.0\noffset_right = 160.0\noffset_bottom = 50.0\ntext = "Far"\n',
     );
@@ -12084,6 +12089,23 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       runtimeWaitMs: 30_000,
     });
     assert.match(started, /"listening": true/, started);
+
+    // A tree read with properties carries the script's own variables, the game's state, beside what
+    // the node stores: a plain var is not stored, and was left out of every tree read.
+    const tree: unknown = JSON.parse(
+      await call('runtime_inspect', {
+        op: 'tree',
+        nodePath: '/root/Main',
+        depth: 0,
+        includeProperties: true,
+      }),
+    );
+    const held = get(tree, 'root', 'properties');
+    assert.deepEqual(
+      [get(held, 'lives'), get(held, 'speed'), get(held, '_hidden')],
+      [3, 1.5, undefined],
+      JSON.stringify(held),
+    );
 
     assert.match(await call('runtime_input', { op: 'click', says: 'Near' }), /"type": "clicked"/);
     const far = await call('runtime_input', { op: 'click', says: 'Far' });
