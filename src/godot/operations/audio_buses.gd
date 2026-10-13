@@ -44,6 +44,41 @@ func create_audio_bus(params: Dictionary) -> Dictionary:
 	return {"bus": _bus(new_idx), "buses": buses, "layout": layout}
 
 
+func remove_audio_bus(params: Dictionary) -> Dictionary:
+	var bus_name: String = str(params.get("bus_name", ""))
+	if bus_name.is_empty():
+		return _log.failure("bus_name is required")
+	var index: int = AudioServer.get_bus_index(bus_name)
+	if index == -1:
+		var names: Array[String] = []
+		for i: int in range(AudioServer.bus_count):
+			names.append(AudioServer.get_bus_name(i))
+		return _log.failure("No bus named %s. The buses are %s." % [bus_name, ", ".join(names)])
+	if index == 0:
+		return _log.failure("%s is the bus every other ends in, so it cannot be removed." % bus_name)
+
+	# A bus sending to this one would be left sending to a name nothing has, which the engine reads
+	# as Master; sent on to where this one went instead, the chain it was part of keeps its shape.
+	var onward: String = AudioServer.get_bus_send(index)
+	var resent: Array[String] = []
+	for i: int in range(AudioServer.bus_count):
+		if i != index and AudioServer.get_bus_send(i) == bus_name:
+			AudioServer.set_bus_send(i, onward)
+			resent.append(AudioServer.get_bus_name(i))
+	AudioServer.remove_bus(index)
+
+	var layout: String = _save_layout()
+	if layout.is_empty():
+		return {}
+	var buses: Array[Dictionary] = []
+	for i: int in range(AudioServer.bus_count):
+		buses.append(_bus(i))
+	var answer: Dictionary = {"removed": bus_name, "buses": buses, "layout": layout}
+	if not resent.is_empty():
+		answer["resent"] = {"buses": resent, "to": onward}
+	return answer
+
+
 func get_audio_buses(_params: Dictionary) -> Dictionary:
 	var buses: Array[Dictionary] = []
 	for i: int in range(AudioServer.bus_count):

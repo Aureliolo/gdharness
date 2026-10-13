@@ -35,10 +35,17 @@ func is_stepped_over(path: String) -> bool:
 	return FileAccess.file_exists(path + ".gdignore")
 
 
+# An addon gdharness installed, told by the marker setup writes into it. The engine loads it, but
+# nobody on the project wrote it: the health check counted its thirty-odd scripts as the project's,
+# 39 beside the 5 project_info's own count gave, which the server's walks already step over.
+func is_installed_by_gdharness(path: String) -> bool:
+	return FileAccess.file_exists(path + ".gdharness-version")
+
+
 # Files under `path` whose name ends with `extension`, which is passed with its dot.
 func find_files(path: String, extension: String) -> Array[String]:
 	var files: Array[String] = []
-	if is_stepped_over(path):
+	if is_stepped_over(path) or is_installed_by_gdharness(path):
 		return files
 
 	var dir: DirAccess = DirAccess.open(path)
@@ -62,7 +69,7 @@ func find_files(path: String, extension: String) -> Array[String]:
 # Files under `path` whose extension is in `extensions`, which are passed without their dot.
 func find_files_with_extensions(path: String, extensions: Array) -> Array[String]:
 	var files: Array[String] = []
-	if is_stepped_over(path):
+	if is_stepped_over(path) or is_installed_by_gdharness(path):
 		return files
 
 	var dir: DirAccess = DirAccess.open(path)

@@ -1332,6 +1332,19 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(action, 'events', 0, 'keycode'), 32, 'Space is KEY_SPACE');
   assert.equal(get(action, 'events', 0, 'ctrl_pressed'), true);
   keptWhole(beforeAction, readFileSync(projectFile, 'utf8'), 'adding an input action');
+  // Read back, the binding says what it is: a bare resource said InputEventKey and nothing else.
+  const boundTo = get(
+    operation('get_project_setting', { setting: 'input/fixture_jump' }),
+    'value',
+    'events',
+    0,
+  );
+  assert.deepEqual(
+    [get(boundTo, 'class'), get(boundTo, 'keycode'), get(boundTo, 'ctrl_pressed')],
+    ['InputEventKey', 32, true],
+    JSON.stringify(boundTo),
+  );
+  assert.match(String(get(boundTo, 'text')), /Space/, JSON.stringify(boundTo));
 
   // Audio buses live in the AudioServer and only survive the run if the layout is saved.
   const fixtureBus = operation('create_audio_bus', { bus_name: 'Fixture' });
@@ -1388,6 +1401,62 @@ function testOperations(godotPath: string, projectDir: string): void {
     beyond.stderr,
     /Bus 2 has 1 effect, so effect_index can be 0 to 1, where 1 adds one after the last/,
     beyond.stderr,
+  );
+
+  // A bus removed, with one sending to it: that one is sent on to where the removed bus went rather
+  // than left sending to a name nothing has, which the engine reads as Master whatever the chain.
+  const child = operation('create_audio_bus', { bus_name: 'Child', parent_bus_index: 1 });
+  assert.deepEqual(
+    [get(child, 'bus', 'index'), get(child, 'bus', 'send')],
+    [2, 'Second'],
+    JSON.stringify(child),
+  );
+  const removed = operation('remove_audio_bus', { bus_name: 'Second' });
+  assert.deepEqual(get(removed, 'resent'), { buses: ['Child'], to: 'Master' }, JSON.stringify(removed));
+  assert.deepEqual(
+    layoutNames(operation('get_audio_buses', {})),
+    [
+      [0, 'Master', ''],
+      [1, 'Child', 'Master'],
+      [2, 'Fixture', 'Master'],
+    ],
+    'and the layout a fresh process reads has it gone',
+  );
+  const master = runRefusedOperation(godotPath, projectDir, 'remove_audio_bus', { bus_name: 'Master' });
+  assert.match(
+    master.stderr,
+    /Master is the bus every other ends in, so it cannot be removed/,
+    master.stderr,
+  );
+  const absentBus = runRefusedOperation(godotPath, projectDir, 'remove_audio_bus', { bus_name: 'Nope' });
+  assert.match(
+    absentBus.stderr,
+    /No bus named Nope\. The buses are Master, Child, Fixture\./,
+    absentBus.stderr,
+  );
+
+  // An input action removed, and one of the engine's own refused, since clearing it from the file
+  // brings the engine's binding back rather than removing it.
+  assert.deepEqual(operation('remove_input_action', { action_name: 'fixture_jump' }), {
+    action_name: 'fixture_jump',
+    removed: true,
+  });
+  assert.doesNotMatch(
+    readFileSync(projectFile, 'utf8'),
+    /fixture_jump/,
+    'and project.godot no longer has it',
+  );
+  const builtIn = runRefusedOperation(godotPath, projectDir, 'remove_input_action', {
+    action_name: 'ui_accept',
+  });
+  assert.match(builtIn.stderr, /ui_accept is one of the engine's own actions/, builtIn.stderr);
+  const missingAction = runRefusedOperation(godotPath, projectDir, 'remove_input_action', {
+    action_name: 'fixture_jump',
+  });
+  assert.match(
+    missingAction.stderr,
+    /This project has no input action named fixture_jump/,
+    missingAction.stderr,
   );
 
   // ClassDB, which is the one source of answers that does not touch the project at all.
@@ -1831,6 +1900,39 @@ function testAGdignoreStopsTheWalk(godotPath: string, projectDir: string): void 
     scriptsBefore + 1,
     'the visible script should count and the one under .gdignore should not',
   );
+
+  // An addon gdharness installed is not the project's, told by the marker setup writes and not by
+  // its name; an addon the project wrote is. And a WebP texture is something the engine imports,
+  // which the health check counted as nothing beside five other formats.
+  const installed = join(projectDir, 'addons', 'installed_tool');
+  const theirs = join(projectDir, 'addons', 'their_tool');
+  mkdirSync(installed, { recursive: true });
+  mkdirSync(theirs, { recursive: true });
+  const checkedImports = (): number =>
+    asNumber(get(operation('get_project_health', {}), 'checks', 'resources', 'importable_files'));
+  const checkedBefore = checkedImports();
+  try {
+    writeFileSync(join(installed, '.gdharness-version'), '1.2.15\n');
+    writeFileSync(join(installed, 'tooling.gd'), 'extends Node\n');
+    writeFileSync(join(theirs, 'theirs.gd'), 'extends Node\n');
+    writeFileSync(join(projectDir, 'made', 'pic.webp'), '');
+    writeFileSync(join(projectDir, 'made', 'pic.webp.import'), '');
+    assert.equal(
+      scripts(),
+      scriptsBefore + 2,
+      "the project's own addon counts and the installed one does not",
+    );
+    assert.equal(
+      checkedImports(),
+      checkedBefore + 1,
+      'and the WebP is counted among what the engine imports',
+    );
+  } finally {
+    rmSync(installed, { recursive: true, force: true });
+    rmSync(theirs, { recursive: true, force: true });
+    rmSync(join(projectDir, 'made', 'pic.webp'), { force: true });
+    rmSync(join(projectDir, 'made', 'pic.webp.import'), { force: true });
+  }
 
   // Rebuilt from nothing so the answer is the whole list rather than the difference from a
   // cache that already holds the project's classes.

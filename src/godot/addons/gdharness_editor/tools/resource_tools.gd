@@ -187,6 +187,9 @@ func create_resource(args: Dictionary) -> Dictionary:
 	if not refused.is_empty():
 		return {"ok": false, "error": refused}
 
+	var folder: String = SceneFile.make_folder_for(res_path)
+	if not folder.is_empty():
+		return {"ok": false, "error": folder}
 	var failed: String = _save_checked(resource, res_path, properties.keys(), null)
 	if not failed.is_empty():
 		return {"ok": false, "error": failed}
@@ -287,6 +290,9 @@ func create_shader(args: Dictionary) -> Dictionary:
 	if code == "":
 		code = SHADER_EMPTY % [shader_type, SHADER_ENTRY.get(shader_type, "fragment")]
 
+	var folder: String = SceneFile.make_folder_for(shader_path)
+	if not folder.is_empty():
+		return {"ok": false, "error": folder}
 	var file: FileAccess = FileAccess.open(shader_path, FileAccess.WRITE)
 	if file == null:
 		return {
@@ -339,6 +345,9 @@ func create_tileset(args: Dictionary) -> Dictionary:
 			{"sourceId": added, "texture": atlas.texture.resource_path, "tiles": atlas.get_tiles_count()}
 		)
 
+	var folder: String = SceneFile.make_folder_for(tileset_path)
+	if not folder.is_empty():
+		return {"ok": false, "error": folder}
 	var saving: Error = ResourceSaver.save(tileset, tileset_path)
 	if saving != OK:
 		return {"ok": false, "error": "Failed to save %s: %s" % [tileset_path, error_string(saving)]}

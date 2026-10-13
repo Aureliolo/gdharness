@@ -186,10 +186,14 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = Plugins.new(_log).disable_plugin(params)
 		"add_input_action":
 			payload = InputActions.new(_log).add_input_action(params)
+		"remove_input_action":
+			payload = InputActions.new(_log).remove_input_action(params)
 
 		# Audio
 		"create_audio_bus":
 			payload = AudioBuses.new(_log).create_audio_bus(params)
+		"remove_audio_bus":
+			payload = AudioBuses.new(_log).remove_audio_bus(params)
 		"get_audio_buses":
 			payload = AudioBuses.new(_log).get_audio_buses(params)
 		"set_audio_bus_effect":

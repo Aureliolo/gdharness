@@ -5761,6 +5761,102 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
 }
 
 /**
+ * An op the editor's older addon has no command for is answered as the addon's age, with the remedy.
+ *
+ * Found by driving the tools through a model: resource_edit read on an editor a release behind came
+ * back "Unknown tool: read_resource", the addon's words for a command it has never heard of, which
+ * named an internal command and read as a fault in the tool. Every release that adds an op meets
+ * this on every editor not yet restarted.
+ */
+async function testAnOldAddonIsNamedForAnOpItLacks(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-old-addon-'));
+  writeFileSync(join(project, 'project.godot'), '; Engine configuration file.\nconfig_version=5\n');
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_PROJECT: project },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (isRecord(message) && message['type'] === 'tool_invoke') {
+        // What an addon from before the op answers for a command it does not have.
+        const known = message['tool'] === 'modify_resource';
+        socket.send(
+          JSON.stringify(
+            known
+              ? { type: 'tool_result', id: message['id'], success: true, result: { ok: true } }
+              : {
+                  type: 'tool_result',
+                  id: message['id'],
+                  success: false,
+                  error: `Unknown tool: ${String(message['tool'])}`,
+                },
+          ),
+        );
+      }
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: '1.0.0',
+        editor_pid: process.pid,
+        opened_by_a_server: true,
+      }),
+    );
+    let greeted = false;
+    for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+      await delay(100);
+      const now = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      greeted = get(now, 'editor', 'addonVersion') === '1.0.0';
+    }
+    assert.ok(greeted, 'the fake editor should have been greeted');
+
+    const read =
+      textOf(
+        await server.request('tools/call', {
+          name: 'resource_edit',
+          arguments: { projectPath: project, resourcePath: 'res://ui.tres', op: 'read' },
+        }),
+      ) ?? '';
+    assert.match(
+      read,
+      new RegExp(
+        `^The editor's gdharness addon is older than this ${SERVER_VERSION.replaceAll('.', '\\.')} server and has no read_resource, so it cannot answer this call\\. The editor is running the 1\\.0\\.0 addon`,
+      ),
+      read,
+    );
+    assert.match(read, /editor_launch restart/, `with what to do about it: ${read}`);
+    // An op the old addon has is answered as usual, so the refusal above is about the op.
+    const modified =
+      textOf(
+        await server.request('tools/call', {
+          name: 'resource_edit',
+          arguments: { projectPath: project, resourcePath: 'res://ui.tres', op: 'modify', properties: {} },
+        }),
+      ) ?? '';
+    assert.doesNotMatch(modified, /older than this/, modified);
+    assert.match(modified, /"ok": true/, modified);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A test run in a project with neither tests nor gdUnit4 says both.
  *
  * Found by driving the tools through a model: the answer named the missing folder alone, so writing
@@ -34799,6 +34895,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorCloseWaitsForItToGo,
   testCompletionsAreNarrowedToWhatWasTyped,
   testATestRunWithNothingToRunNamesTheRunnerToo,
+  testAnOldAddonIsNamedForAnOpItLacks,
   testAServerEndsWithAnEditorStillOnTheBridge,
   testABadPortIsReported,
   testAnEditorPortMovesOnlyWhenItIsHeld,

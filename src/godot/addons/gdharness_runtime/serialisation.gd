@@ -540,6 +540,9 @@ func _serialize_colors(value: PackedColorArray) -> Array:
 
 # A pathless Resource says so rather than inventing an empty path for the caller to load.
 func _serialize_object(value: Object) -> Variant:
+	if value is InputEvent:
+		var event: InputEvent = value
+		return _describe_input_event(event)
 	if value is Resource:
 		var resource: Resource = value
 		if resource.resource_path.is_empty():
@@ -550,6 +553,23 @@ func _serialize_object(value: Object) -> Variant:
 		if node.is_inside_tree():
 			return {"path": str(node.get_path()), "class": node.get_class(), "_type": "Node"}
 	return _describe_object(value)
+
+
+## An input event, by what it is bound to: the engine's own words for it and every field it stores
+## away from its default. As a bare resource it was its class and nothing else, so an input action
+## read back from project.godot could not say whether it was bound to Space or to a joypad button.
+func _describe_input_event(event: InputEvent) -> Dictionary:
+	var described: Dictionary = {"class": event.get_class(), "_type": "Resource", "text": event.as_text()}
+	for property: Dictionary in event.get_property_list():
+		var usage: int = property.get("usage", 0)
+		var name: String = str(property.get("name", ""))
+		if not (usage & PROPERTY_USAGE_STORAGE) or name.begins_with("resource_") or name == "script":
+			continue
+		var held: Variant = event.get(name)
+		if held == ClassDB.class_get_property_default_value(event.get_class(), name):
+			continue
+		described[name] = serialize_value(held)
+	return described
 
 
 ## A plain object, said in enough detail to tell it from the one beside it.

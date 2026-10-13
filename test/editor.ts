@@ -1461,6 +1461,28 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
   });
   assert.match(fileText(project, 'look.gdshader'), /^shader_type canvas_item;/, 'the shader type');
 
+  // Into folders not made yet, which the engine does not make when it saves. A sky shader is the
+  // minimal one of its type, with the function the engine calls for a sky rather than fragment.
+  await call('resource_edit', {
+    projectPath: project,
+    resourcePath: 'res://fx/deep/sky.gdshader',
+    op: 'create_shader',
+    shaderType: 'sky',
+  });
+  assert.equal(fileText(project, 'fx/deep/sky.gdshader'), 'shader_type sky;\n\nvoid sky() {\n}\n');
+  await call('resource_edit', {
+    projectPath: project,
+    resourcePath: 'res://data/new/stuff.tres',
+    op: 'create',
+    resourceType: 'Resource',
+  });
+  assert.ok(
+    existsSync(join(project, 'data', 'new', 'stuff.tres')),
+    'a resource goes into a folder made for it',
+  );
+  await call('scene_create', { projectPath: project, scenePath: 'res://levels/one/start.tscn' });
+  assert.ok(existsSync(join(project, 'levels', 'one', 'start.tscn')), 'and so does a scene');
+
   // A theme op on a path with no theme used to load a blank one and save it there, which wrote
   // a resource nobody asked for and answered success for it.
   const missing = await refusal('resource_edit', {
