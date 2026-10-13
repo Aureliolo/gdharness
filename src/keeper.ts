@@ -286,6 +286,19 @@ async function launch(): Promise<void> {
   });
 }
 
+/**
+ * The run's note, written where it can be. The game is running by the time this is asked, so a note
+ * that cannot be written leaves a run no later server can find, and a keeper that ended over it
+ * would leave the game held by nobody as well.
+ */
+function writeNoteIfItCan(record: Parameters<typeof writeRunRecord>[0]): void {
+  try {
+    writeRunRecord(record);
+  } catch {
+    // The server that started the run has its pid from the line printed below, and stops it by that.
+  }
+}
+
 async function keep(): Promise<void> {
   const spec = await receivedSpec();
   const run = spec.run;
@@ -337,7 +350,7 @@ async function keep(): Promise<void> {
   if (record !== null) {
     // Before the pid goes back, and in the same turn as the exit is listened for: a game that ends at
     // once would otherwise exit before any record held its pid, and the exit would have nowhere to go.
-    writeRunRecord(record);
+    writeNoteIfItCan(record);
   }
   let listening: KeeperListening | null = null;
   // This process ends here, so nothing below runs for a game that has exited.
@@ -364,7 +377,7 @@ async function keep(): Promise<void> {
       return child.kill() ? 'signalled' : 'gone';
     });
     if (listening !== null) {
-      writeRunRecord({ ...record, keeper: listening.address });
+      writeNoteIfItCan({ ...record, keeper: listening.address });
     }
   }
   process.stdout.write(`pid ${pid}\n`);

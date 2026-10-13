@@ -9376,6 +9376,61 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
 }
 
 /**
+ * A keeper that cannot write its run's note goes on holding the run.
+ *
+ * The note is written after the game has started, so a keeper that ended over a failed write left
+ * the game running with nothing holding it and gave the server no pid either: the launcher answered
+ * that the keeper had ended before it said anything. The note's path is made a directory, which no
+ * write can replace, and a stand-in is launched through the launcher and keeper the server uses.
+ */
+function testAKeeperHoldsARunWhoseNoteItCannotWrite(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unwritable-note-'));
+  const runtime = join(scratch, 'runtime');
+  const project = join(scratch, 'project');
+  let launched = 0;
+  try {
+    mkdirSync(project);
+    mkdirSync(runRecordPath(project, runtime), { recursive: true });
+    const answer = join(scratch, 'launched.json');
+    const launcher = join(scratch, 'launch.mjs');
+    const spec = {
+      command: process.execPath,
+      args: ['-e', 'setTimeout(() => {}, 60000)'],
+      run: { transcript: join(runtime, 'runs', 'run-1.log'), startedAt: Date.now(), projectPath: project },
+    };
+    writeFileSync(
+      launcher,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+        `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+      ].join('\n'),
+    );
+    const ran = spawnSync(process.execPath, [launcher], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      windowsHide: true,
+      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+    });
+    const said: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+    const pid = get(said, 'pid');
+    assert.ok(
+      typeof pid === 'number',
+      `the launch answers with the run's pid: ${JSON.stringify(said)} ${ran.stdout} ${ran.stderr}`,
+    );
+    launched = pid;
+    assert.ok(isAlive(pid), `and the run is going: pid ${String(pid)}`);
+    assert.ok(statSync(runRecordPath(project, runtime)).isDirectory(), 'with no note written in its place');
+  } finally {
+    if (launched > 0 && isAlive(launched)) {
+      process.kill(launched);
+    }
+    sweep(scratch);
+  }
+}
+
+/**
  * The command line a run on its own desktop is started with reads back as the arguments it was
  * given.
  *
@@ -11694,6 +11749,26 @@ async function testTheKeeperAnswersAStop(): Promise<void> {
     }
     const closed = await askTheKeeperToStop(listening.address, 5_000);
     assert.ok(typeof closed !== 'string', `a keeper that has gone is not reached: ${JSON.stringify(closed)}`);
+  }
+  // A stop that throws is answered with why, which the server reads as a keeper it could not reach
+  // and ends the run by its pid. Thrown from inside the listener, it ended the keeper instead.
+  let tries = 0;
+  const failing = await listenForAStop(() => {
+    tries += 1;
+    throw new Error('the stop file\ncould not be written');
+  });
+  assert.ok(failing !== null, 'the keeper listens');
+  try {
+    for (const attempt of [1, 2]) {
+      assert.deepEqual(
+        await askTheKeeperToStop(failing.address, 5_000),
+        { unreached: 'it answered "could not end it: the stop file could not be written"' },
+        `attempt ${String(attempt)}`,
+      );
+    }
+    assert.equal(tries, 2, 'and the keeper is still there to be asked again');
+  } finally {
+    failing.close();
   }
   const silent = createServer((socket) => {
     socket.on('error', () => {});
@@ -27212,32 +27287,47 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
       entry,
       'import { recordRunEnded, writeEditorRunNote, writeLatestRun, writeRunRecord } from ' +
         `${JSON.stringify(resolve('src', 'run-record.ts'))};\n` +
+        "import { existsSync } from 'node:fs';\n" +
         'const record = JSON.parse(process.argv[2]);\n' +
+        'const stop = process.argv[3];\n' +
         'let rewrites = 0;\n' +
-        'for (const end = Date.now() + 2500; Date.now() < end; rewrites += 1) {\n' +
+        'for (const end = Date.now() + 60000; Date.now() < end && !existsSync(stop); rewrites += 1) {\n' +
         '  const startedAt = record.startedAt + rewrites;\n' +
         '  writeRunRecord({ ...record, startedAt });\n' +
         '  recordRunEnded(record.projectPath, record.pid, { exitCode: 0, exitSignal: null });\n' +
         '  writeEditorRunNote({ projectPath: record.projectPath, transcript: record.transcript, startedAt });\n' +
         '  writeLatestRun(record.projectPath, { projectPath: record.projectPath, pid: record.pid, startedAt });\n' +
+        "  if (rewrites === 0) console.log('rewriting');\n" +
         '}\n' +
         'console.log(rewrites);\n',
     );
+    const stop = join(runtimeDir, 'stop');
     const built = await Bun.build({
       entrypoints: [entry],
       target: 'node',
       outdir: join(runtimeDir, 'built'),
     });
     assert.ok(built.success, `the rewriter bundles: ${built.logs.map(String).join('\n')}`);
-    const rewriter = spawn('node', [join(runtimeDir, 'built', 'rewrite.js'), JSON.stringify(record)], {
+    const rewriter = spawn('node', [join(runtimeDir, 'built', 'rewrite.js'), JSON.stringify(record), stop], {
       env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtimeDir },
       stdio: ['ignore', 'pipe', 'inherit'],
     });
     let rewrites = '';
-    rewriter.stdout.on('data', (chunk: Buffer) => {
-      rewrites += chunk.toString();
+    // The reader starts once every note is being rewritten rather than beside the start of Node,
+    // which on a Windows runner took longer than the whole read: the reader saw one note.
+    const rewriting = new Promise<void>((started, failed) => {
+      rewriter.stdout.on('data', (chunk: Buffer) => {
+        rewrites += chunk.toString();
+        if (rewrites.includes('rewriting\n')) {
+          started();
+        }
+      });
+      rewriter.once('close', () => {
+        failed(new Error(`the rewriter ended before it rewrote: ${rewrites}`));
+      });
     });
     const rewritten = new Promise((settle) => rewriter.once('close', settle));
+    await rewriting;
     const reader = spawn(
       process.execPath,
       [
@@ -27251,15 +27341,18 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
       said += chunk.toString();
     });
     // Closed rather than exited, which can come before what it printed has been read.
-    await Promise.all([new Promise((settle) => reader.once('close', settle)), rewritten]);
-    assert.ok(Number(rewrites) > 100, `the notes were rewritten throughout: ${rewrites}`);
+    await new Promise((settle) => reader.once('close', settle));
+    writeFileSync(stop, '');
+    await rewritten;
+    const count = Number(rewrites.replace('rewriting\n', ''));
+    assert.ok(count > 100, `the notes were rewritten throughout the read: ${rewrites}`);
     const seen = JSON.parse(said) as Record<string, number>;
     assert.ok((seen['parsed'] ?? 0) > 100, `the reader read the notes throughout: ${said}`);
     assert.equal(seen['notes'], 3, `the run note, the editor-played run's and the latest run's: ${said}`);
     assert.deepEqual(
       Object.keys(seen),
       ['parsed', 'notes'],
-      `and every read parsed, over ${rewrites.trim()} rewrites of each: ${said}`,
+      `and every read parsed, over ${String(count)} rewrites of each: ${said}`,
     );
   } finally {
     if (had === undefined) {
@@ -35385,6 +35478,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStackOverflowIsNotAPass,
   testAProfileIsWrittenPastAReader,
   testARunNoteIsNeverReadHalfWritten,
+  testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,
   testAProfileFromTheStartWaitsForTheProfiler,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
