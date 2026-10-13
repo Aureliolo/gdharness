@@ -82,6 +82,11 @@ func _settings_under(prefix: String) -> Dictionary:
 			"type": type_string(kind),
 			"value": _values.serialize_value(value),
 		}
+		# As a single get says it, so a family read can be told apart into what the project sets
+		# and the engine's defaults: "input/" is ninety actions the engine ships and the project's few.
+		var default_value: Variant = ProjectSettings.property_get_revert(name)
+		if default_value != null:
+			described["at_default"] = value == default_value
 		found.append(described)
 
 	found.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["setting"] < b["setting"])

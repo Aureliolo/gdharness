@@ -2335,6 +2335,42 @@ function testASettingSaysWhatReplacesIt(godotPath: string): void {
 }
 
 /**
+ * A family read says which of its settings the project sets. `input/` answers the ninety actions the
+ * engine ships beside the project's own, and without `at_default` on each a caller after the one it
+ * added read them all. Three kinds are rendered: a setting the project changed, one it left alone,
+ * and an action only the project defines, which the engine registers no default for.
+ */
+function testAFamilySaysWhatTheProjectSets(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    writeFileSync(
+      join(dir, 'project.godot'),
+      `${readFileSync(join(dir, 'project.godot'), 'utf8')}\n[input]\n\njump={\n"deadzone": 0.5,\n"events": []\n}\n`,
+    );
+    const entry = (prefix: string, setting: string): unknown =>
+      asArray(get(runOperation(godotPath, dir, 'get_project_setting', { prefix }), 'settings')).find(
+        (one) => get(one, 'setting') === setting,
+      );
+    // The fixture sets every warning to error, so a warning is the setting it changed.
+    const changed = entry('debug/gdscript/warnings/', 'debug/gdscript/warnings/unsafe_call_argument');
+    assert.equal(
+      get(changed, 'at_default'),
+      false,
+      `a setting the project changed: ${JSON.stringify(changed)}`,
+    );
+    const untouched = entry('application/run/', 'application/run/max_fps');
+    assert.equal(get(untouched, 'at_default'), true, `one it left alone: ${JSON.stringify(untouched)}`);
+    const shipped = entry('input/', 'input/ui_accept');
+    assert.equal(get(shipped, 'at_default'), true, `an action the engine ships: ${JSON.stringify(shipped)}`);
+    const own = entry('input/', 'input/jump');
+    assert.ok(own !== undefined, 'the project-defined action is listed');
+    assert.equal(get(own, 'at_default'), undefined, `and has no default to be at: ${JSON.stringify(own)}`);
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * Validation reads at most a hundred scripts, and says so with the count it read and the count there
  * are. It counted the one past the limit before stopping and answered 101.
  */
@@ -2631,6 +2667,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   refusals: testRefusals,
   installedLayout: testInstalledLayout,
   settingsFamily: testAFamilyOfSettingsAnswersWithItsTypes,
+  familyDefaults: (godotPath) => {
+    testAFamilySaysWhatTheProjectSets(godotPath);
+  },
   everyWarning: (godotPath) => {
     testTheOperationsSurviveEveryWarning(godotPath);
   },
