@@ -683,6 +683,13 @@ same stdout. When the answer was the last JSON line printed, an autoload printin
 `_process` replaced it. With a file, a run that wrote no answer has failed whatever its exit code
 was. A run that wrote one and then exited badly (an autoload quitting with a code, say) still
 answers, with `engine_after_answer` saying how it ended, because the write it reports has happened.
+
+Godot starts the project's autoloads in every script run and has no switch to leave them out, so an
+operation always runs them once it has answered. The script prints `[gdharness] answered` on stderr
+when the answer is written, and what the engine reports after that line comes back under
+`engine_messages_after_answer`, with a note saying whose it is. Mixed into `engine_messages`, a
+failing autoload's errors rode on every settings read and read as the read failing.
+
 An error raised inside the operations script itself refuses the answer: the engine hands the
 faulting function's caller a default value and exits 0, so the answer is missing whatever that
 function would have given.

@@ -1,5 +1,6 @@
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import type { Socket } from 'node:net';
+import { tmpdir } from 'node:os';
 import process from 'node:process';
 
 /**
@@ -118,7 +119,11 @@ function running(): ChildProcessWithoutNullStreams {
       '-EncodedCommand',
       Buffer.from(SCRIPT, 'utf16le').toString('base64'),
     ],
-    { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
+    // In the temporary directory rather than the server's, which is usually somebody's project.
+    // Windows PowerShell saves its module cache under the profile's local application data, and
+    // when that folder does not resolve it saves it relative to where it runs: a server given a
+    // fresh USERPROFILE left a Microsoft directory in the directory it was started in.
+    { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: tmpdir() },
   );
   buffered = '';
   child.stdout.setEncoding('utf8');

@@ -9271,17 +9271,28 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-awaited-'));
   const home = join(project, '.home');
-  mkdirSync(home, { recursive: true });
-  // The editor's own settings and user data, so nothing here is written into the machine's.
+  // Where the server runs and what it takes for the temporary directory, each of the fixture's own.
+  const workdir = join(project, '.workdir');
+  const temp = join(project, '.temp');
+  for (const directory of [home, workdir, temp]) {
+    mkdirSync(directory, { recursive: true });
+  }
+  // The editor's own settings and user data, so nothing here is written into the machine's. On
+  // Windows the profile too, which is what put a Microsoft directory into the repository: a profile
+  // with no local application data in it resolves to nothing, and Windows PowerShell then saves its
+  // module cache relative to where it runs. The server queries Windows through one PowerShell and
+  // starts a hidden editor through another, and both ran in the server's directory, which for a
+  // user is their project.
+  const windows = process.platform === 'win32';
   const own = {
     HOME: home,
-    USERPROFILE: home,
     APPDATA: home,
     LOCALAPPDATA: home,
     XDG_CONFIG_HOME: home,
     XDG_DATA_HOME: home,
     XDG_CACHE_HOME: home,
     GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+    ...(windows ? { USERPROFILE: home, TEMP: temp, TMP: temp } : {}),
   };
   const port = await reservePort();
   const waitMs = 8_000;
@@ -9293,6 +9304,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
       GODOT_PATH: godotPath,
       GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: String(waitMs),
     },
+    cwd: workdir,
   });
   let pid = 0;
   let socket: WebSocket | null = null;
@@ -9312,6 +9324,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     );
     mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
     await server.initialize('regression-test');
+    const launchedAt = Date.now();
     const opened = parseTextContent(
       await server.request('tools/call', {
         name: 'editor_launch',
@@ -9377,6 +9390,23 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     );
     assert.doesNotMatch(refused, /Open the project in the editor with editor_launch/, refused);
 
+    if (windows) {
+      // Saved some thirteen seconds after a PowerShell first loads a module, measured here, so it is
+      // waited for while both are still running rather than assumed. Both save to the same place, so
+      // the first to save meets the positive; the wait runs on until the later of the two, the one
+      // that started the editor, has had its chance to save in the wrong place.
+      const cache = join(temp, 'Microsoft', 'Windows', 'PowerShell', 'ModuleAnalysisCache');
+      for (let waited = 0; waited < 40_000 && !existsSync(cache); waited += 250) {
+        await delay(250);
+      }
+      assert.ok(
+        existsSync(cache),
+        'the PowerShell the server runs saved its module cache in the temporary directory',
+      );
+      await delay(Math.max(0, launchedAt + 25_000 - Date.now()));
+      assert.deepEqual(readdirSync(workdir), [], 'and nothing in the directory the server runs in');
+    }
+
     const closed = parseTextContent(
       await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'close' } }),
     );
@@ -9392,6 +9422,9 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     socket?.close();
     if (pid > 0 && alive(pid)) {
       process.kill(pid);
+    }
+    for (let waited = 0; pid > 0 && waited < 10_000 && alive(pid); waited += 100) {
+      await delay(100);
     }
     await server.stop();
     sweep(project);
