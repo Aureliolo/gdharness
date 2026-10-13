@@ -20143,6 +20143,100 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
 }
 
 /**
+ * A run that crashes the engine is an error, from a check and from a started run alike.
+ *
+ * Issue #1059: a scene whose _ready segfaulted Godot answered `booted: false` with no entries from
+ * check, and `clean: true` with the crash report as info lines from wait and editor_output, so a
+ * caller judging the run by `clean` read a crash as a good run. `OS.crash` is the engine's own way
+ * to reach its crash handler, called from a function so the GDScript backtrace has two frames.
+ *
+ * `OS.crash` prints an `ERROR` line of its own before the handler runs, which a segfault does not,
+ * so here that line alone keeps `errors` above zero and `clean` false: with the crash read as info
+ * again, both still held. What only the crash handling makes true is the crash entry being an error
+ * with its backtrace, which is what fails when it is broken; test/game-log.ts holds the count for a
+ * report with no line before it.
+ */
+async function testACrashedRunIsNeverClean(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('crashed run regression skipped (Godot not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-crashed-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-crashed-rt-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Crashed"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(projectDir, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint("about to crash")\n\tboom()\n\n\nfunc boom() -> void:\n\tOS.crash("deliberate")\n',
+    );
+    writeFileSync(
+      join(projectDir, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    const theCrash = (answer: unknown): unknown =>
+      asArray(get(answer, 'entries')).find((entry) =>
+        /Program crashed with signal \d+/.test(text(get(entry, 'text'))),
+      );
+    const backtraced = (entry: unknown): boolean =>
+      asArray(get(entry, 'detail') ?? []).some((line) => text(line).includes('boom (res://main.gd:10)'));
+    await withStdioServer(
+      async (call) => {
+        const checked: unknown = JSON.parse(
+          await call('editor_run', { projectPath: projectDir, op: 'check' }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        const said = JSON.stringify(checked);
+        assert.equal(get(checked, 'booted'), false, said);
+        assert.ok(asNumber(get(checked, 'errors')) >= 1, `the crash is counted: ${said}`);
+        const checkCrash = theCrash(checked);
+        assert.equal(get(checkCrash, 'severity'), 'error', `the crash is an entry, as an error: ${said}`);
+        assert.ok(backtraced(checkCrash), `with its GDScript backtrace: ${said}`);
+        assert.ok(
+          asNumber(get(checked, 'printedLinesNotShown')) >= 1,
+          `and the print it left out is counted: ${said}`,
+        );
+
+        const started: unknown = JSON.parse(
+          await call(
+            'editor_run',
+            { projectPath: projectDir, op: 'start', headless: true, runtimeWaitMs: 0 },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(started, 'started'), true, JSON.stringify(started));
+        const waited: unknown = JSON.parse(
+          await call('editor_run', { op: 'wait', timeoutMs: 60_000 }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        const read = JSON.stringify(waited);
+        assert.equal(get(waited, 'running'), false, read);
+        assert.equal(get(waited, 'clean'), false, `a crashed run is not clean: ${read}`);
+        assert.ok(asNumber(get(waited, 'errors')) >= 1, read);
+        const waitCrash = theCrash(waited);
+        assert.equal(get(waitCrash, 'severity'), 'error', read);
+        assert.ok(backtraced(waitCrash), read);
+        const output: unknown = JSON.parse(await call('editor_output', { severity: 'error' }));
+        assert.equal(get(output, 'clean'), false, JSON.stringify(output));
+        assert.ok(
+          theCrash(output) !== undefined,
+          `editor_output names the crash as an error: ${JSON.stringify(output)}`,
+        );
+      },
+      { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
+    );
+  } finally {
+    sweep(projectDir);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * The flags reach the engine, which is the property the issue was about: `--verbose` among a game's
  * own arguments was accepted, sent, and never read. A leaked object is what tells them apart, since
  * the engine reports the leak either way and names the leaked instance only when verbose.
@@ -35407,6 +35501,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASilentRunIsStartedHereAndSaysWhy,
   testARunGivenEngineFlagsIsStartedHere,
   testEngineFlagsReachTheEngine,
+  testACrashedRunIsNeverClean,
   testAPlayedRunWithNoReportGivesNoVerdict,
   testAPlayedGameIsToldFromItsWorkers,
   testHeadlessFollowsTheDisplay,

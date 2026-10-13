@@ -9202,6 +9202,11 @@ class GodotServer {
 
     const errors = boot.log.count('error');
     const warnings = boot.log.count('warning');
+    // What verbose adds is printed as ordinary lines, the leaked instances among them, and a
+    // check's run is read nowhere but here, so an answer keeping only the problems would drop
+    // everything the flag was passed for.
+    const floor: Severity = engineArgs.includes('--verbose') ? 'info' : 'warning';
+    const printed = boot.log.count('info');
     return this.jsonTextResponse({
       booted: !hung && boot.exitCode === 0 && errors === 0,
       hung,
@@ -9215,10 +9220,10 @@ class GodotServer {
       argsNote: engineFlagsNote(userArgs),
       ...scanWaitAnswer(scanned),
       savesNote: asked.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
-      // What verbose adds is printed as ordinary lines, the leaked instances among them, and a
-      // check's run is read nowhere but here, so an answer keeping only the problems would drop
-      // everything the flag was passed for.
-      ...foldedEntriesAnswer(boot.log, engineArgs.includes('--verbose') ? 'info' : 'warning'),
+      // Counted rather than left to be inferred: entries holding no ordinary line read as a run that
+      // printed nothing, beside a run that printed and was not shown.
+      printedLinesNotShown: floor === 'warning' && printed > 0 ? printed : undefined,
+      ...foldedEntriesAnswer(boot.log, floor),
     });
   }
 
