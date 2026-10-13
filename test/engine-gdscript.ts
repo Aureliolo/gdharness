@@ -2258,6 +2258,24 @@ function testEveryUseIsFound(godotPath: string): void {
       ['res://sub/b.gd'],
       'and the forward walk follows it',
     );
+    // A path a comment names is not a dependency, in any of the three places a comment sits; the
+    // shipped serialisation module's example path was one of every project with the addon.
+    writeFileSync(
+      join(dir, 'sub', 'commented.gd'),
+      'extends Node\n## Loads b.gd, as res://sub/ghost_doc.gd once did.\n# res://sub/ghost_line.gd\n' +
+        'const B = preload("res://sub/b.gd")  # in place of res://sub/ghost_trailing.gd\n',
+    );
+    assert.deepEqual(
+      asArray(
+        get(
+          operation('get_dependencies', { resource_path: 'sub/commented.gd' }),
+          'dependencies',
+          'res://sub/commented.gd',
+        ),
+      ).map((dep) => get(dep, 'path')),
+      ['res://sub/b.gd'],
+      'a path named in a comment is not walked',
+    );
 
     // A class used by name in code, and only there: a node and a string with the same word are not uses.
     writeFileSync(join(dir, 'enemy.gd'), 'class_name Enemy\nextends Node2D\n');
