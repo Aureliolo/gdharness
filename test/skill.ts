@@ -87,6 +87,19 @@ function testTheReferenceIsTheServersOwnToolList(): void {
   for (const tool of TOOL_SPECS) {
     assert.ok(reference.includes(`## ${tool.name}`), `${tool.name} is in the reference`);
   }
+  // What the description a client is sent leaves out for room, the reference carries whole.
+  const answered = TOOL_SPECS.filter((tool) => tool.answer !== undefined);
+  assert.deepEqual(
+    answered.map((tool) => tool.name),
+    ['editor_run', 'editor_status', 'runtime_input'],
+    'the tools whose answers are described apart from their description',
+  );
+  for (const tool of answered) {
+    assert.ok(
+      reference.includes(`The answer: ${tool.answer ?? ''}`),
+      `${tool.name}'s answer is in the reference`,
+    );
+  }
   assert.ok(
     reference.includes(String(TOOL_SPECS.length)),
     'and it counts the tools rather than stating a number that can rot',
