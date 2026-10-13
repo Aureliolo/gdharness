@@ -9223,6 +9223,10 @@ class GodotServer {
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
     }
+    const elsewhere = this.anotherProjectsRun(run.projectPath, args, 'read');
+    if (elsewhere) {
+      return elsewhere;
+    }
     const limit = readPositiveNumber(args, 'limit') ?? PROFILE_FUNCTIONS;
     const callersName = readString(args, 'callersOf');
     if (
