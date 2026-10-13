@@ -556,6 +556,9 @@ function renderTools(): string {
     parts.push(`<section class="tool" id="${escaped(tool.name)}">\n`);
     parts.push(`<h3><code>${escaped(tool.name)}</code></h3>\n`);
     parts.push(`<p>${escaped(tool.description)}</p>\n`);
+    if (tool.answer !== undefined) {
+      parts.push(`<p><strong>The answer:</strong> ${escaped(tool.answer)}</p>\n`);
+    }
 
     const operations = Object.entries(tool.operations ?? {});
     if (operations.length > 0) {

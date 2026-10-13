@@ -5,6 +5,7 @@ import process from 'node:process';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { WebSocket } from 'ws';
+import { MOST_DESCRIPTION_CHARACTERS } from '../src/tool-definitions.js';
 import { isRecord } from './support/json-rpc.js';
 import { reservePort, ServerProcess, testServerEnvironment } from './support/server.js';
 import { sweep } from './support/sweep.js';
@@ -88,6 +89,28 @@ async function main(): Promise<void> {
       .filter((name) => typeof name !== 'string' || !TOOL_NAME_PATTERN.test(name));
     if (invalidToolNames.length > 0) {
       throw new Error(`tools/list exposed names outside domain_verb: ${invalidToolNames.join(', ')}`);
+    }
+    // Claude Code cuts a description past this length, and the cut fell inside editor_run's list of
+    // ops. Read off what the server sends, since the ops are appended to the prose on the way out.
+    const longest = Math.max(
+      ...tools.map((tool) =>
+        isRecord(tool) && typeof tool['description'] === 'string' ? tool['description'].length : 0,
+      ),
+    );
+    const cut = tools.filter(
+      (tool) =>
+        isRecord(tool) &&
+        typeof tool['description'] === 'string' &&
+        tool['description'].length > MOST_DESCRIPTION_CHARACTERS,
+    );
+    if (cut.length > 0 || longest === 0) {
+      throw new Error(
+        `tools/list descriptions past ${MOST_DESCRIPTION_CHARACTERS} characters, which Claude Code cuts: ${cut
+          .map((tool) =>
+            isRecord(tool) ? `${String(tool['name'])} (${String(tool['description']).length})` : '',
+          )
+          .join(', ')}`,
+      );
     }
 
     // The bridge port carries the editor's socket and nothing else.
