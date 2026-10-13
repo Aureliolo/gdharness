@@ -12902,16 +12902,32 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
               ENGINE_CALL_TIMEOUT_MS,
             ),
           );
-        const went = await started(cameUp);
-        const said = JSON.stringify(went);
-        const output = await call('editor_output', { contains: 'runtime listening on' });
-        assert.match(output, /\[gdharness\] runtime listening on/, `the runtime did come up: ${output}`);
-        assert.equal(get(went, 'runtime', 'listening'), false, said);
-        assert.equal(get(went, 'runtime', 'mayYetAnnounce'), false, said);
-        assert.match(
-          text(get(went, 'runtime', 'note')),
-          /^the game's runtime came up and the game quit before this start could reach it/,
-          `and the start says so: ${said}`,
+        // A race by its nature: the announcement lasts a frame, and a start that looks during it has
+        // caught a runtime that was listening, which is a right answer of its own. A Windows runner
+        // whose frame outlasted the wait's look did that, so several starts are made, each one that
+        // missed is held to the note, and at least one has to have missed.
+        const outcomes: string[] = [];
+        let missed = 0;
+        for (let attempt = 0; attempt < 8 && missed === 0; attempt += 1) {
+          const went = await started(cameUp);
+          const said = JSON.stringify(went);
+          const output = await call('editor_output', { contains: 'runtime listening on' });
+          assert.match(output, /\[gdharness\] runtime listening on/, `the runtime did come up: ${output}`);
+          if (get(went, 'runtime', 'listening') === true) {
+            outcomes.push('caught listening');
+            continue;
+          }
+          missed += 1;
+          assert.equal(get(went, 'runtime', 'mayYetAnnounce'), false, said);
+          assert.match(
+            text(get(went, 'runtime', 'note')),
+            /^the game's runtime came up and the game quit before this start could reach it/,
+            `and the start says so: ${said}`,
+          );
+        }
+        assert.ok(
+          missed > 0,
+          `no start missed the announcement, so the note was never read: ${outcomes.join(', ')}`,
         );
 
         const never = await started(neverUp);
