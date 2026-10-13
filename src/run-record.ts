@@ -25,22 +25,14 @@
 
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import {
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { errorMessage } from './errors.js';
 import { isSameDirectory } from './paths.js';
 import { type CommandLineRead, readCommandLine } from './process-children.js';
 import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
+import { writeWhole } from './whole-file.js';
 import { askWindows } from './windows-ask.js';
 
 const execFileAsync = promisify(execFile);
@@ -174,7 +166,7 @@ function latestRunPath(servedBy: string, directory = runtimeDirectory()): string
 export function writeLatestRun(servedBy: string, latest: LatestRun): void {
   try {
     mkdirSync(runsDirectory(), { recursive: true });
-    writeFileSync(latestRunPath(servedBy), JSON.stringify(latest, null, 2), 'utf8');
+    writeWhole(latestRunPath(servedBy), JSON.stringify(latest, null, 2));
   } catch {
     // Unwritable leaves the successor choosing by age, which is what it did before this was kept.
   }
@@ -223,7 +215,10 @@ export function profilePath(startedAt: number): string {
 
 export function writeRunRecord(record: RunRecord): void {
   mkdirSync(runsDirectory(), { recursive: true });
-  writeFileSync(runRecordPath(record.projectPath), JSON.stringify(record, null, 2), 'utf8');
+  const path = runRecordPath(record.projectPath);
+  if (!writeWhole(path, JSON.stringify(record, null, 2))) {
+    throw new Error(`the run note could not be written at ${path}`);
+  }
 }
 
 /**
@@ -270,7 +265,10 @@ function editorNotePath(projectPath: string, directory = runtimeDirectory()): st
 
 export function writeEditorRunNote(note: EditorRunNote): void {
   mkdirSync(runsDirectory(), { recursive: true });
-  writeFileSync(editorNotePath(note.projectPath), JSON.stringify(note, null, 2), 'utf8');
+  const path = editorNotePath(note.projectPath);
+  if (!writeWhole(path, JSON.stringify(note, null, 2))) {
+    throw new Error(`the editor run note could not be written at ${path}`);
+  }
 }
 
 /** The editor-played run of [param projectPath] another server left a file for, or null. */
@@ -340,11 +338,8 @@ export function recordRunEnded(
     ...(ending.exitSignal === null ? {} : { exitSignal: ending.exitSignal }),
     endedAt: Date.now(),
   };
-  try {
-    writeFileSync(path, JSON.stringify(written, null, 2), 'utf8');
-  } catch {
-    // Gone or unwritable, which is a state every reader of this note already handles.
-  }
+  // Unwritable leaves the note as it was, a run with no recorded end, which every reader handles.
+  writeWhole(path, JSON.stringify(written, null, 2));
 }
 
 /**
@@ -874,7 +869,10 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
     return;
   }
   for (const entry of entries) {
-    if (!entry.startsWith('run-') || !(entry.endsWith('.log') || entry.endsWith('.profile.json'))) {
+    // A partial file is what a writer that died between writing and renaming left behind.
+    const transcript =
+      entry.startsWith('run-') && (entry.endsWith('.log') || entry.endsWith('.profile.json'));
+    if (!transcript && !entry.endsWith('.partial')) {
       continue;
     }
     const path = join(directory, entry);
