@@ -1170,7 +1170,16 @@ interface AfterWaiting {
    * that is up and slow to announce, or one the editor has not started yet.
    */
   readonly playingSeen?: boolean;
+  /**
+   * Whether the run printed the line its runtime prints as it starts listening. A game that quits
+   * in the frame after its runtime came up takes the announcement away with it before the wait
+   * looks again, and was answered as one that never announced.
+   */
+  readonly runtimeCameUp?: boolean;
 }
+
+/** What the runtime addon prints once it is listening, which a run's output is read for. */
+const RUNTIME_LISTENING_LINE = '[gdharness] runtime listening on ';
 
 /**
  * What a start says about the runtime it waited for.
@@ -1216,6 +1225,14 @@ export function runtimeVerdict(
       : halfAsLongAgain(after.sizedToMs) > after.budgetMs
         ? `, the longest a start waits unasked though the slowest of its last boots took ${after.sizedToMs}ms to announce,`
         : `, half as long again as the ${after.sizedToMs}ms the slowest of its last boots took,`;
+  if (!after.running && after.runtimeCameUp === true) {
+    return {
+      listening: false,
+      mayYetAnnounce: false,
+      note: "the game's runtime came up and the game quit before this start could reach it, so there is nothing to talk to: editor_output has what it printed, and a scene that is to be inspected has to stay running past its first frame",
+      heldAt: null,
+    };
+  }
   return {
     listening: false,
     mayYetAnnounce: after.running,
@@ -7571,17 +7588,25 @@ class GodotServer {
         note: `${fresh.length} games of this project announced at once and none could be told from the process tree as this run's own game rather than one it started, so none is taken as its runtime. editor_status lists them under runtimes.`,
       };
     }
+    // Only asked when there is no announcement to answer with: a game that announced is up, and
+    // asking the editor about a played one costs a round trip the answer would not use.
+    const running = endpoint !== null || (going !== null && (await this.runStillGoing(going)));
+    if (going !== null && !running) {
+      this.drainTranscript(going);
+    }
     return runtimeVerdict(endpoint, {
       addon: true,
       budgetMs,
       ...(budget.sizedToMs === undefined ? {} : { sizedToMs: budget.sizedToMs }),
       heldAt: this.dapClient?.whereItStopped() ?? null,
-      // Only asked when there is no announcement to answer with: a game that announced is up, and
-      // asking the editor about a played one costs a round trip the answer would not use.
-      running: endpoint !== null || (going !== null && (await this.runStillGoing(going))),
+      running,
       withArgs,
       servesAProject: this.ownProject !== null,
       ...(going?.throughEditor === true ? { playingSeen: going.seenPlaying === true } : {}),
+      runtimeCameUp:
+        going !== null &&
+        !running &&
+        going.log.all.some((entry) => entry.text.startsWith(RUNTIME_LISTENING_LINE)),
     });
   }
 
@@ -9177,6 +9202,11 @@ class GodotServer {
 
     const errors = boot.log.count('error');
     const warnings = boot.log.count('warning');
+    // What verbose adds is printed as ordinary lines, the leaked instances among them, and a
+    // check's run is read nowhere but here, so an answer keeping only the problems would drop
+    // everything the flag was passed for.
+    const floor: Severity = engineArgs.includes('--verbose') ? 'info' : 'warning';
+    const printed = boot.log.count('info');
     return this.jsonTextResponse({
       booted: !hung && boot.exitCode === 0 && errors === 0,
       hung,
@@ -9190,10 +9220,10 @@ class GodotServer {
       argsNote: engineFlagsNote(userArgs),
       ...scanWaitAnswer(scanned),
       savesNote: asked.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
-      // What verbose adds is printed as ordinary lines, the leaked instances among them, and a
-      // check's run is read nowhere but here, so an answer keeping only the problems would drop
-      // everything the flag was passed for.
-      ...foldedEntriesAnswer(boot.log, engineArgs.includes('--verbose') ? 'info' : 'warning'),
+      // Counted rather than left to be inferred: entries holding no ordinary line read as a run that
+      // printed nothing, beside a run that printed and was not shown.
+      printedLinesNotShown: floor === 'warning' && printed > 0 ? printed : undefined,
+      ...foldedEntriesAnswer(boot.log, floor),
     });
   }
 
