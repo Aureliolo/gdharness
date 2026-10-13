@@ -304,6 +304,20 @@ export function hasSaidWhoItIs(status: { connected: boolean; addonVersion?: stri
  * allows. Measured downstream at nine minutes, over which the answer read "an editor that is not
  * there" about an editor the same server had just started.
  */
+/**
+ * [param path] without the separator it ends in, unless it is a root.
+ *
+ * The editor reports its project as `ProjectSettings.globalize_path("res://")`, which ends in one,
+ * and every answer naming the project carried it as though it were another path from the one the
+ * caller had passed.
+ */
+export function withoutTrailingSeparator(path: string): string {
+  if (path.length <= 1 || !/[\\/]$/.test(path) || /^[A-Za-z]:[\\/]$/.test(path)) {
+    return path;
+  }
+  return path.slice(0, -1);
+}
+
 export function anEditorIsStillComing(
   listeningSince: Date | undefined,
   launchedEditorIsAlive: boolean,
@@ -738,7 +752,7 @@ export class GodotBridge extends EventEmitter {
             );
             return;
           }
-          this.connectionInfo.projectPath = message.project_path;
+          this.connectionInfo.projectPath = withoutTrailingSeparator(message.project_path);
           // An older addon sends no version at all, which is itself worth reporting: it is one
           // installed before this was written, so it is certainly not the shipped one.
           this.connectionInfo.addonVersion = message.addon_version ?? '';

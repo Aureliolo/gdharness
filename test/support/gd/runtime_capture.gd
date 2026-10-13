@@ -200,8 +200,12 @@ func _check_refused(answer: Dictionary, what: String, output_path: String) -> vo
 	if answer.get("type", "") != "error":
 		_fail("a %s of a window nothing is drawn to should be refused: %s" % [what, JSON.stringify(answer)])
 		return
+	# This runs headless, so the refusal is the one for a game with no window at all; the one for a
+	# minimised window needs a window to minimise, which only a windowed run has.
 	var message: String = str(answer.get("message", ""))
-	if not message.contains("Nothing is being drawn"):
-		_fail("the %s refusal should say nothing is being drawn: %s" % [what, message])
+	if not message.contains("runs headless, so it has no window and draws nothing"):
+		_fail("the %s refusal should say the game has no window: %s" % [what, message])
+	if message.contains("Restore the window"):
+		_fail("and should not send a headless game to restore a window: %s" % message)
 	if FileAccess.file_exists(output_path):
 		_fail("a refused %s should write no file, but %s exists" % [what, output_path])

@@ -97,6 +97,7 @@ import {
   GodotBridge,
   mayYetConnect,
   theEditorHasComeBack,
+  withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
 import { DebuggerStream, decodeVariant, framedCommand } from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
@@ -5764,6 +5765,7 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
  */
 async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-close-'));
+  const spelled = project.replaceAll('\\', '/');
   const settings = '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Close"\n';
   writeFileSync(
     join(project, 'project.godot'),
@@ -5774,7 +5776,10 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
   const stays = standIn();
   const goes = standIn();
 
-  const closeWith = async (pid: number, onQuit: () => void): Promise<{ answer: string; asked: string[] }> => {
+  const closeWith = async (
+    pid: number,
+    onQuit: () => void,
+  ): Promise<{ answer: string; asked: string[]; after: unknown }> => {
     const port = await reservePort();
     const server = new ServerProcess({
       env: {
@@ -5810,7 +5815,8 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
       socket.send(
         JSON.stringify({
           type: 'godot_ready',
-          project_path: project,
+          // As the editor spells it: globalize_path("res://"), forward slashes and one at the end.
+          project_path: `${spelled}/`,
           addon_version: SERVER_VERSION,
           editor_pid: pid,
           opened_by_a_server: true,
@@ -5831,7 +5837,20 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
             .request('tools/call', { name: 'editor_launch', arguments: { op: 'close' } }, 30_000)
             .catch(() => null),
         ) ?? 'no answer';
-      return { answer, asked };
+      socket.terminate();
+      // Disconnected, as an editor that has gone is, before the server is asked what is coming.
+      let after: unknown = null;
+      for (let waited = 0; waited < 5000; waited += 100) {
+        after = get(
+          parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+          'editor',
+        );
+        if (get(after, 'connected') === false) {
+          break;
+        }
+        await delay(100);
+      }
+      return { answer, asked, after };
     } finally {
       editor?.terminate();
       await server.stop();
@@ -5861,12 +5880,32 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
     const answered: unknown = JSON.parse(closed.answer);
     assert.equal(get(answered, 'closed'), true, closed.answer);
     assert.equal(get(answered, 'editorPid'), leaving, closed.answer);
+    assert.equal(
+      get(answered, 'projectPath'),
+      spelled,
+      'the project as a path, without the slash the editor ends it in',
+    );
+    // A root keeps its separator, since without it C: names a drive's current directory.
+    assert.deepEqual(['C:/', 'C:\\', '/', 'D:/game/', '/home/game/'].map(withoutTrailingSeparator), [
+      'C:/',
+      'C:\\',
+      '/',
+      'D:/game',
+      '/home/game',
+    ]);
     assert.equal(alive(leaving), false, 'and it had gone by the time it was answered');
     assert.match(
       JSON.stringify(get(answered, 'settingsDropped')),
       /gdscript\/warnings\/unused_variable/,
       `the save on its way out is reported with what it dropped: ${closed.answer}`,
     );
+    // A server seconds old would otherwise say an editor may yet connect, which is its grace window
+    // for one already running, and the caller would wait on the editor it has just closed.
+    assert.equal(get(closed.after, 'connected'), false, JSON.stringify(closed.after));
+    assert.equal(get(closed.after, 'mayYetConnect'), false, JSON.stringify(closed.after));
+    assert.equal(get(closed.after, 'closedHere', 'editorPid'), leaving, JSON.stringify(closed.after));
+    // And the one refused, still running, is not said to be closed.
+    assert.equal(get(refused.after, 'closedHere'), undefined, JSON.stringify(refused.after));
 
     const nobody = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(await reservePort()) } });
     try {
@@ -11802,6 +11841,82 @@ async function testAClickThatDoesNotProcessSaysWhy(): Promise<void> {
       /the game is paused and \/root\/Main\/Later does not process while it is \(\/root\/Main\/Later inherits process_mode PAUSABLE from \/root\), so clicking it does nothing/,
       'the pause, and the root it inherits pausable from',
     );
+    await stopItsRun(server);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
+ * A headless game says it has no window when a click or a capture needs one.
+ *
+ * Found by driving the tools through a model: a click by the words on a button twenty pixels in
+ * from the corner was refused as "no control on screen says Go", which read as though the button
+ * were not there, when the only screen a headless game has is the engine's 64 by 64; and a capture
+ * was told to restore a window the game never had. The button inside the 64 by 64 is the positive:
+ * a click by words reaches it, so the refusal beside it is about where the other one is.
+ */
+async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('headless window regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-window-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-window-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="NoWindow"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene format=3]\n\n[node name="Main" type="Control"]\n\n' +
+        '[node name="Near" type="Button" parent="."]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Near"\n\n' +
+        '[node name="Far" type="Button" parent="."]\noffset_left = 100.0\noffset_top = 20.0\noffset_right = 160.0\noffset_bottom = 50.0\ntext = "Far"\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+      textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+    const started = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.match(started, /"listening": true/, started);
+
+    assert.match(await call('runtime_input', { op: 'click', says: 'Near' }), /"type": "clicked"/);
+    const far = await call('runtime_input', { op: 'click', says: 'Far' });
+    assert.match(
+      far,
+      /no control on screen says "Far", so nothing was clicked; 1 control says it outside what the screen shows\. This game has no window, and a game with no window has a 64 by 64 viewport/,
+      far,
+    );
+    const captured = await call('runtime_capture', { op: 'screenshot' });
+    assert.match(
+      captured,
+      /This game runs headless, so it has no window and draws nothing to capture/,
+      captured,
+    );
+    assert.doesNotMatch(captured, /Restore the window/, captured);
     await stopItsRun(server);
   } finally {
     await server.stop();
@@ -34527,6 +34642,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWorktreeFindsItsMainCheckoutsEngine,
   testAPointerOnTheHiddenDesktopIsNoted,
   testAClickThatDoesNotProcessSaysWhy,
+  testAHeadlessGameSaysItHasNoWindow,
   testTheKeeperAnswersAStop,
   testAStopGoesThroughTheKeeper,
   testAStartStopsWaitingForAGameThatIsOver,
