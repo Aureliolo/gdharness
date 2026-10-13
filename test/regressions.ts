@@ -27176,6 +27176,102 @@ async function testAProfileIsWrittenPastAReader(): Promise<void> {
 }
 
 /**
+ * A run note is never read half-written while it is rewritten.
+ *
+ * Every server of a project reads its run note, and the keeper rewrites it as the run ends. Written
+ * in place, the note is empty between the truncate and the write: measured on Windows, about one
+ * read in twelve that overlapped a rewrite failed to parse, and a reader takes a note it cannot read
+ * for no note, so a start could take a running game for none and start a second beside it. A reader
+ * in another process parses the note in a loop while it is rewritten, and every read must parse.
+ *
+ * Rewritten under Node, from the source bundled for it, because that is what writes the note in use
+ * and the runtime is what decides it: a note Node rewrote in place tore about one read in fourteen,
+ * and the same rewrite from Bun tore none, so a writer running in this suite's own process could not
+ * fail.
+ */
+async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-whole-note-'));
+  const project = join(runtimeDir, 'project');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+  try {
+    const record = {
+      pid: process.pid,
+      transcript: join(runtimeDir, 'run.log'),
+      startedAt: Date.now(),
+      projectPath: project,
+      arguments: ['--headless', '--path', project],
+      command: process.execPath,
+    };
+    writeRunRecord(record);
+    const runs = dirname(runRecordPath(project, runtimeDir));
+    // Every note a server reads that another process writes: the run's, its ending, the editor-played
+    // run's and which run a server started last. Rewritten in turn, so each is read mid-rewrite.
+    const entry = join(runtimeDir, 'rewrite.ts');
+    writeFileSync(
+      entry,
+      'import { recordRunEnded, writeEditorRunNote, writeLatestRun, writeRunRecord } from ' +
+        `${JSON.stringify(resolve('src', 'run-record.ts'))};\n` +
+        'const record = JSON.parse(process.argv[2]);\n' +
+        'let rewrites = 0;\n' +
+        'for (const end = Date.now() + 2500; Date.now() < end; rewrites += 1) {\n' +
+        '  const startedAt = record.startedAt + rewrites;\n' +
+        '  writeRunRecord({ ...record, startedAt });\n' +
+        '  recordRunEnded(record.projectPath, record.pid, { exitCode: 0, exitSignal: null });\n' +
+        '  writeEditorRunNote({ projectPath: record.projectPath, transcript: record.transcript, startedAt });\n' +
+        '  writeLatestRun(record.projectPath, { projectPath: record.projectPath, pid: record.pid, startedAt });\n' +
+        '}\n' +
+        'console.log(rewrites);\n',
+    );
+    const built = await Bun.build({
+      entrypoints: [entry],
+      target: 'node',
+      outdir: join(runtimeDir, 'built'),
+    });
+    assert.ok(built.success, `the rewriter bundles: ${built.logs.map(String).join('\n')}`);
+    const rewriter = spawn('node', [join(runtimeDir, 'built', 'rewrite.js'), JSON.stringify(record)], {
+      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtimeDir },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    let rewrites = '';
+    rewriter.stdout.on('data', (chunk: Buffer) => {
+      rewrites += chunk.toString();
+    });
+    const rewritten = new Promise((settle) => rewriter.once('close', settle));
+    const reader = spawn(
+      process.execPath,
+      [
+        '-e',
+        `const fs = require('fs'); const path = require('path'); const dir = ${JSON.stringify(runs)}; const seen = { parsed: 0 }; const notes = new Set(); const end = Date.now() + 2000; while (Date.now() < end) { for (const name of fs.readdirSync(dir)) { if (!name.endsWith('.json')) continue; try { JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); seen.parsed += 1; notes.add(name.split('-')[0]); } catch (e) { const kind = name.split('-')[0] + ' ' + (e.code ?? 'torn'); seen[kind] = (seen[kind] ?? 0) + 1; } } } seen.notes = notes.size; console.log(JSON.stringify(seen));`,
+      ],
+      { stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    let said = '';
+    reader.stdout.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    // Closed rather than exited, which can come before what it printed has been read.
+    await Promise.all([new Promise((settle) => reader.once('close', settle)), rewritten]);
+    assert.ok(Number(rewrites) > 100, `the notes were rewritten throughout: ${rewrites}`);
+    const seen = JSON.parse(said) as Record<string, number>;
+    assert.ok((seen['parsed'] ?? 0) > 100, `the reader read the notes throughout: ${said}`);
+    assert.equal(seen['notes'], 3, `the run note, the editor-played run's and the latest run's: ${said}`);
+    assert.deepEqual(
+      Object.keys(seen),
+      ['parsed', 'notes'],
+      `and every read parsed, over ${rewrites.trim()} rewrites of each: ${said}`,
+    );
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A run started with profile: true answers which GDScript functions took its time.
  *
  * The keeper is the game's debugger and sums the engine's own script profiler. Four runs, because
@@ -35288,6 +35384,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAStackOverflowIsNotAPass,
   testAProfileIsWrittenPastAReader,
+  testARunNoteIsNeverReadHalfWritten,
   testAProfiledRunNamesWhereItsTimeWent,
   testAProfileFromTheStartWaitsForTheProfiler,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,

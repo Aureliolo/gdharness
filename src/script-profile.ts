@@ -11,7 +11,7 @@
  * started.
  */
 
-import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import {
   bodyCallsSuper,
@@ -24,6 +24,7 @@ import {
 } from './gdscript-source.js';
 import { type DebuggerMessage, DebuggerStream, framedCommand, type GodotValue } from './godot-variant.js';
 import { parseProjectGodot } from './resources.js';
+import { writeWhole } from './whole-file.js';
 
 /** One function's totals, keyed by the signature the engine compiled into it. */
 interface FunctionTotals {
@@ -66,47 +67,13 @@ export type ProfileFile =
   | { readonly connected: false; readonly listeningSince: number }
   | (ProfileTotals & { readonly connected: true });
 
-/** How long a write waits out a reader holding the file, and how long it sleeps between tries. */
-const HELD_FILE_MS = 1000;
-const HELD_FILE_RETRY_MS = 10;
-
-/** The codes Windows answers a rename with while another process has the file open. */
-const HELD_BY_A_READER = new Set(['EPERM', 'EACCES', 'EBUSY']);
-
 /**
- * Writes [param file] whole or not at all, so a reader never meets half of one, and answers whether
- * it did.
- *
- * Windows refuses to rename over a file another process has open, and the server opens this one
- * every time a profile is asked for, so a refusal is waited out for a moment. A write that still
- * fails is answered rather than thrown, because the writer is the keeper: a throw ends it, and the
- * file is left saying the game never connected while the game runs on with nobody summing it.
+ * Writes [param file] whole, and answers whether it did. The writer is the keeper and the server
+ * reads the file each time a profile is asked for, so it answers rather than throws: a throw ends
+ * the keeper, and the file is left saying the game never connected while the game runs on unsummed.
  */
 export function writeProfileFile(path: string, file: ProfileFile): boolean {
-  const partial = `${path}.${process.pid}.partial`;
-  try {
-    writeFileSync(partial, JSON.stringify(file), 'utf8');
-  } catch {
-    return false;
-  }
-  const until = Date.now() + HELD_FILE_MS;
-  for (;;) {
-    try {
-      renameSync(partial, path);
-      return true;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code ?? '';
-      if (!HELD_BY_A_READER.has(code) || Date.now() >= until) {
-        try {
-          rmSync(partial, { force: true });
-        } catch {
-          // Left for the next write of this process, which writes over it.
-        }
-        return false;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_FILE_RETRY_MS);
-    }
-  }
+  return writeWhole(path, JSON.stringify(file));
 }
 
 /** The profile at [param path], or null where there is none or it cannot be read. */
