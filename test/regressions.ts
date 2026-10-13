@@ -6467,6 +6467,10 @@ async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
 
       const unknownOp = await call('scene_node', { projectPath: '/p', scenePath: 'a.tscn', op: name });
       assert.match(unknownOp, /has no op/, `${name} must not resolve to an op`);
+      // The table of ops another tool answers is indexed the same way.
+      const elsewhere = await call('runtime_invoke', { op: name });
+      assert.match(elsewhere, /^runtime_invoke has no op/, elsewhere);
+      assert.doesNotMatch(elsewhere, /is read with/, `${name} is not an op answered elsewhere: ${elsewhere}`);
 
       // Named as a section rather than merely refused, because every one of these is refused by
       // something: what this asks is that it was turned away for not being a section, with the
@@ -6478,6 +6482,17 @@ async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
         `${name} must not resolve to a section`,
       );
     }
+    // The read two downstream sessions reached for after a set, sent where reads live; and an op
+    // nothing answers, refused with the valid ops alone.
+    for (const asked of ['get', 'property']) {
+      assert.match(
+        await call('runtime_invoke', { op: asked }),
+        new RegExp(
+          `^runtime_invoke has no op "${asked}"\\. Valid ops: set, call, result\\. A value is read with runtime_inspect property\\.`,
+        ),
+      );
+    }
+    assert.doesNotMatch(await call('runtime_invoke', { op: 'destroy' }), /is read with/);
   });
 }
 
