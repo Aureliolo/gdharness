@@ -39,6 +39,19 @@ export interface LogEntry {
 
 const HEADLINE = /^(USER )?(SCRIPT ERROR|SHADER ERROR|ERROR|WARNING):\s?(.*)$/;
 
+/**
+ * The line the engine's crash handler starts its report with: `CrashHandlerException` on Windows,
+ * `handle_crash` on Linux and macOS. Nothing in the report is indented, so read as ordinary lines
+ * it was a column of info entries, and a run that crashed counted no errors and read as clean.
+ */
+const CRASH = /^(?:CrashHandlerException|handle_crash): Program crashed with signal \d+/;
+
+/**
+ * Lines of a crash report that say nothing: the rules around its parts, the markers ending them,
+ * and a native frame the build has no symbol for, which is an address and nothing else.
+ */
+const CRASH_FILLER = /^(?:=+|-- END OF .* BACKTRACE --|\[\d+\] .* - no debug info in .*)$/;
+
 /** An ANSI colour sequence: the escape byte, a bracket, the parameters, the letter m. */
 export const COLOUR_CODE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g');
 
@@ -264,6 +277,16 @@ export class GameLog {
    */
   private readonly seen: Record<Severity, number> = { error: 0, warning: 0, info: 0 };
   /**
+   * The detail of the crash each stream reported, once it has: everything the stream prints after
+   * the crash handler's first line is that report, the engine version, the native backtrace and the
+   * GDScript one, and the process ends with it.
+   */
+  private readonly crashed: Record<Stream, string[] | null> = {
+    stdout: null,
+    stderr: null,
+    transcript: null,
+  };
+  /**
    * The entries the engine headed `SCRIPT ERROR`, by index.
    *
    * Kept beside the entries rather than on them, because every answer carries entries and none of
@@ -296,6 +319,21 @@ export class GameLog {
     // Colour codes are for a terminal; a caller reading entries wants the words.
     const line = raw.replace(COLOUR_CODE, '');
     if (line.trim() === '') {
+      return;
+    }
+    const report = this.crashed[source];
+    if (report !== null) {
+      const said = line.trim();
+      if (!CRASH_FILLER.test(said)) {
+        report.push(said);
+      }
+      return;
+    }
+    if (CRASH.test(line)) {
+      const detail: string[] = [];
+      this.entries.push({ index: this.entries.length, severity: 'error', source, text: line.trim(), detail });
+      this.crashed[source] = detail;
+      this.lastHeadline[source] = null;
       return;
     }
     const owner = this.lastHeadline[source];

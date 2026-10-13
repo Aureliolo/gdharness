@@ -169,6 +169,93 @@ function testAFilteredReadDoesNotConsumeWhatItDidNotReport(): void {
   );
 }
 
+/**
+ * A crash is an error, with its report as its detail.
+ *
+ * Nothing in the crash handler's report is indented, so it was read as a column of info lines: a
+ * run that ended on a segfault counted no errors and read as clean. The Windows report here is what
+ * Godot 4.7.2 printed for `OS.crash`, cut to three native frames; the Linux and macOS handler opens
+ * with `handle_crash` instead and prints the rest the same way.
+ */
+function testACrashIsAnErrorWithItsReport(): void {
+  const windows = new GameLog();
+  windows.append(
+    'transcript',
+    [
+      'Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org',
+      'about to crash',
+      '================================================================',
+      'CrashHandlerException: Program crashed with signal 4',
+      'Engine version: Godot Engine v4.7.2.stable.official (ed1daf0bf001b61586d9930840f2f1394092c079)',
+      'Dumping the backtrace. Please include this when reporting the bug on: https://github.com/godotengine/godot/issues',
+      'Load address: 7ff51ac40000',
+      '',
+      '[1] 7ff65ed14d03 (main+40d4d03) - no debug info in PE/COFF executable',
+      '[2] 7fffc7964702 (ntdll.dll+124702) - no debug info in PE/COFF executable',
+      '[3] -1 (main+-7ff65ac40001) - no debug info in PE/COFF executable',
+      '-- END OF C++ BACKTRACE --',
+      '================================================================',
+      'GDScript backtrace (most recent call first):',
+      '    [0] boom (res://main.gd:10)',
+      '    [1] _ready (res://main.gd:6)',
+      '-- END OF GDSCRIPT BACKTRACE --',
+      '================================================================',
+      '',
+    ].join('\r\n'),
+  );
+  assert.equal(windows.count('error'), 1, `the crash is the one error: ${JSON.stringify(windows.all)}`);
+  const crash = windows.all.find((entry) => entry.severity === 'error');
+  assert.equal(crash?.text, 'CrashHandlerException: Program crashed with signal 4');
+  assert.deepEqual(
+    crash.detail,
+    [
+      'Engine version: Godot Engine v4.7.2.stable.official (ed1daf0bf001b61586d9930840f2f1394092c079)',
+      'Dumping the backtrace. Please include this when reporting the bug on: https://github.com/godotengine/godot/issues',
+      'Load address: 7ff51ac40000',
+      'GDScript backtrace (most recent call first):',
+      '[0] boom (res://main.gd:10)',
+      '[1] _ready (res://main.gd:6)',
+    ],
+    'its report is its detail, the GDScript backtrace with it, and frames with no symbol are left out',
+  );
+  assert.deepEqual(
+    windows.all.filter((entry) => entry.severity === 'info').map((entry) => entry.text),
+    [
+      'Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org',
+      'about to crash',
+      '================================================================',
+    ],
+    'and what came before it is still what the game printed',
+  );
+
+  const linux = new GameLog();
+  linux.append(
+    'stderr',
+    [
+      'handle_crash: Program crashed with signal 11',
+      'Engine version: Godot Engine v4.7.2.stable.official',
+      '[1] /lib/x86_64-linux-gnu/libc.so.6(+0x42520) [0x7f0000042520] (??:0)',
+      '-- END OF C++ BACKTRACE --',
+      '',
+    ].join('\n'),
+  );
+  assert.equal(linux.count('error'), 1, JSON.stringify(linux.all));
+  assert.deepEqual(
+    linux.all[0]?.detail,
+    [
+      'Engine version: Godot Engine v4.7.2.stable.official',
+      '[1] /lib/x86_64-linux-gnu/libc.so.6(+0x42520) [0x7f0000042520] (??:0)',
+    ],
+    'a frame that names its library is kept',
+  );
+
+  // The words alone, printed by a game, are not a crash: only the handler's own opening is.
+  const quoted = new GameLog();
+  quoted.append('stdout', 'the log said: CrashHandlerException: Program crashed with signal 11\n');
+  assert.equal(quoted.count('error'), 0, JSON.stringify(quoted.all));
+}
+
+testACrashIsAnErrorWithItsReport();
 testAFilteredReadDoesNotConsumeWhatItDidNotReport();
 testHeadlinesKeepTheirDetail();
 testChunksAndLineEndingsDoNotMatter();
