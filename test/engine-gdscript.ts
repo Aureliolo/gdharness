@@ -588,6 +588,11 @@ function testOperations(godotPath: string, projectDir: string): void {
     });
     assert.equal(get(made, 'parses'), true, `the ${template} template should parse under every warning`);
   }
+  assert.equal(
+    readFileSync(join(projectDir, 'made', 'none_template.gd'), 'utf8'),
+    'extends Node\n',
+    'with no template, the script is what was asked for and nothing else',
+  );
   const broken = runRefusedOperation(godotPath, projectDir, 'create_script', {
     script_path: 'made/broken.gd',
     content: 'func _ready() -> void:\n\tvar loose = 1\n',
@@ -723,6 +728,14 @@ function testOperations(godotPath: string, projectDir: string): void {
   const name = operation('get_project_setting', { setting: 'application/config/name' });
   assert.equal(get(name, 'exists'), true);
   assert.equal(get(name, 'value'), 'GdharnessEngineFixture');
+  assert.equal(get(name, 'at_default'), false, 'a name the project set is not at the default');
+  // Registered by the engine, so it exists whether or not project.godot says anything of it.
+  const width = operation('get_project_setting', { setting: 'display/window/size/viewport_width' });
+  assert.deepEqual(
+    [get(width, 'exists'), get(width, 'at_default')],
+    [true, true],
+    `a setting the project never set exists, at its default: ${JSON.stringify(width)}`,
+  );
 
   const written = operation('set_project_setting', {
     setting: 'fixture/vector',
@@ -761,6 +774,11 @@ function testOperations(godotPath: string, projectDir: string): void {
     { x: get(readBack, 'value', 'x'), y: get(readBack, 'value', 'y') },
     { x: 3, y: 4 },
     'the setting should come back as the vector it went in as',
+  );
+  assert.equal(
+    get(readBack, 'at_default'),
+    undefined,
+    'and a setting nothing registers has no default to be at',
   );
 
   // JSON has one number type, so an int setting was written as "50.0" and every reader cast it
@@ -1435,6 +1453,25 @@ function testOperations(godotPath: string, projectDir: string): void {
   const inheritance = operation('inspect_inheritance', { class_name: 'Node2D' });
   assert.ok(asArray(get(inheritance, 'ancestors')).includes('CanvasItem'));
   assert.ok(asArray(get(inheritance, 'all_descendants')).includes('Camera2D'));
+
+  // A class_name the project declares is not in ClassDB, and "Class not found" for one read as
+  // though the project had no such class. The cache rebuilt above holds FixtureHero.
+  const scripted = runRefusedOperation(godotPath, projectDir, 'query_class_info', {
+    class_name: 'FixtureHero',
+  });
+  assert.match(
+    scripted.stderr,
+    /FixtureHero is not an engine class: it is the class_name res:\/\/made\/hero\.gd declares/,
+    scripted.stderr,
+  );
+  const nowhere = runRefusedOperation(godotPath, projectDir, 'inspect_inheritance', {
+    class_name: 'FixtureNobody',
+  });
+  assert.match(
+    nowhere.stderr,
+    /Class not found: FixtureNobody\. editor_classes reads the engine's ClassDB/,
+    nowhere.stderr,
+  );
 }
 
 /**

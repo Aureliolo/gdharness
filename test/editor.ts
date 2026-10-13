@@ -4124,13 +4124,30 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
     'hover should answer with the declaration under the cursor',
   );
 
-  const completions = asArray(
-    get(await call('script_info', { ...sound, op: 'completion', line: 9, character: 7 }), 'completions'),
-    'completions',
-  ).map((entry) => asString(get(entry, 'label'), 'label'));
+  // Line 10 is `rang.emit(count)`, and column 4 is just past `ra`: narrowed to what starts with it,
+  // as an editor narrows, rather than the whole scope the language server offers.
+  const narrowed = await call('script_info', { ...sound, op: 'completion', line: 10, character: 4 });
+  const labels = asArray(get(narrowed, 'completions'), 'completions').map((entry) =>
+    asString(get(entry, 'label'), 'label'),
+  );
+  assert.equal(get(narrowed, 'typed'), 'ra', JSON.stringify(narrowed));
+  assert.ok(labels.includes('rang'), `completions should offer the script's own names: ${labels.join(', ')}`);
   assert.ok(
-    completions.includes('rang'),
-    `completions should offer the script's own names: ${completions.length}`,
+    labels.every((label) => label.toLowerCase().startsWith('ra')),
+    `and only what starts with what was typed: ${labels.join(', ')}`,
+  );
+  assert.equal(get(narrowed, 'total'), labels.length, JSON.stringify(narrowed));
+
+  // Column 2 of line 9 is just past the tab, with nothing typed: the whole scope, which is more than
+  // one answer carries, so it is capped and the rest counted.
+  const everything = await call('script_info', { ...sound, op: 'completion', line: 9, character: 2 });
+  const offered = asArray(get(everything, 'completions'), 'completions');
+  assert.equal(get(everything, 'typed'), undefined, JSON.stringify(get(everything, 'total')));
+  assert.equal(offered.length, 100, `capped at a hundred: ${offered.length}`);
+  assert.equal(
+    asNumber(get(everything, 'omitted'), 'omitted'),
+    asNumber(get(everything, 'total'), 'total') - 100,
+    'with the rest counted',
   );
 }
 
