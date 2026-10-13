@@ -107,6 +107,8 @@ import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
 import { askTheKeeperToStop, listenForAStop } from '../src/keeper-channel.js';
 import {
   editorArguments,
+  engineFlags,
+  engineFlagsAmongGameArgs,
   environmentFor,
   envValue,
   OPENED_BY_A_SERVER,
@@ -6562,7 +6564,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.match(
       await call('editor_run', { op: 'start', projectPath: '/p', frames: 3 }),
-      /start takes: projectPath, scene, args, headless, visible, silent, savesIn, env, runtimeWaitMs/,
+      /start takes: projectPath, scene, args, engineArgs, headless, visible, silent, savesIn, env, runtimeWaitMs/,
       'and the refusal says what start takes instead',
     );
     assert.match(
@@ -13895,6 +13897,101 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
     '--path',
     '/p',
   ]);
+  // The engine's own flags go where it reads them: before the scene, which it reads positionally,
+  // and before the separator, after which it reads nothing.
+  assert.deepEqual(
+    runArguments({
+      projectPath: '/p',
+      headless: true,
+      scene: 'a.tscn',
+      quitAfter: 3,
+      userArgs: ['--x'],
+      engineArgs: ['--verbose', '--fixed-fps', '30'],
+    }),
+    [
+      '--headless',
+      '--path',
+      '/p',
+      '--quit-after',
+      '3',
+      '--verbose',
+      '--fixed-fps',
+      '30',
+      'res://a.tscn',
+      '--',
+      '--x',
+    ],
+  );
+}
+
+/**
+ * The engine flags a run may be handed are a list, because the engine's command line also runs
+ * scripts (`--script`), opens other projects (`--path`, `-e`) and writes files (`--export-release`,
+ * `--log-file`), and a caller is handed exactly what this lets through. The flags this server sets
+ * itself are refused by the argument that sets them, and a value goes as the next entry and is
+ * checked there, since an unchecked one is another argument the engine reads.
+ */
+function testEngineFlagsAreAListNotAPassage(): void {
+  assert.deepEqual(engineFlags([]), { ok: true });
+  assert.deepEqual(engineFlags(['--verbose', '--debug-collisions', '--print-fps']), { ok: true });
+  assert.deepEqual(
+    engineFlags(['--fixed-fps', '60', '--time-scale', '0.5', '--resolution', '640x360', '--quiet']),
+    { ok: true },
+  );
+  const refused = (given: string[]): string => {
+    const checked = engineFlags(given);
+    assert.equal(checked.ok, false, `${JSON.stringify(given)} should be refused`);
+    return checked.ok ? '' : checked.reason;
+  };
+  for (const unsafe of [
+    ['--script', 'res://x.gd'],
+    ['--path', '/elsewhere'],
+    ['-e'],
+    ['--export-release', 'Linux', '/tmp/x'],
+    ['--log-file', '/tmp/x'],
+    ['--verbose', '-s', 'x.gd'],
+    ['res://other.tscn'],
+  ]) {
+    assert.match(
+      refused(unsafe),
+      /is not one of the engine flags engineArgs takes, which are those that change what the engine logs.*--verbose, --quiet/,
+      `${JSON.stringify(unsafe)} names what is taken`,
+    );
+  }
+  // A name every object answers to is not on the list for having been inherited.
+  for (const inherited of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    assert.match(refused([inherited]), /is not one of the engine flags/, inherited);
+  }
+  assert.match(refused(['--headless']), /--headless is set by this tool's own argument, headless/);
+  assert.match(
+    refused(['--audio-driver', 'Dummy']),
+    /--audio-driver is set by this tool's own argument, silent/,
+  );
+  assert.match(refused(['--quit-after', '5']), /--quit-after is set by this tool's own argument, frames/);
+  // The value is the next entry, and is checked: a flag left at the end has none, and a value that
+  // is another flag would be read by the engine as one.
+  assert.match(
+    refused(['--fixed-fps']),
+    /--fixed-fps takes a number as the next entry, and nothing followed it/,
+  );
+  assert.match(
+    refused(['--fixed-fps', '--script']),
+    /--fixed-fps takes a number as the next entry, and "--script" is not one/,
+  );
+  assert.match(refused(['--max-fps', '-1']), /"-1" is not one/);
+  assert.match(
+    refused(['--resolution', '1280']),
+    /--resolution takes a size such as 1280x720.*"1280" is not one/,
+  );
+  assert.match(refused(['--resolution', '1280x720', '--resolution']), /nothing followed it/);
+
+  // A game's own arguments are not refused for holding a flag of the same name, since the game may
+  // read one itself, and the ones the engine would have read are picked out to be said.
+  assert.deepEqual(engineFlagsAmongGameArgs(['--level=2', '--verbose', '--headless', 'toString']), [
+    '--verbose',
+    '--headless',
+  ]);
+  assert.deepEqual(engineFlagsAmongGameArgs(['--level=2']), []);
 }
 
 /**
@@ -19764,6 +19861,191 @@ async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
       },
       { env: one.env },
     );
+  }
+}
+
+/**
+ * A run given engine flags is started by this server, with the flags where the engine reads them,
+ * and a flag outside the list is refused before anything is asked of the editor.
+ *
+ * The editor fixes a played game's command line when it opens the project, so a play through it
+ * would drop the flags as quietly as `args` once dropped them behind the separator. A game's own
+ * arguments holding an engine flag are run as asked, and the answer says the engine did not read it.
+ */
+async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
+  let plays = 0;
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          plays += 1;
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        return tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true };
+      },
+    async ({ server, project }) => {
+      const run = async (asked: Record<string, unknown>): Promise<{ answer: unknown; said: string }> => {
+        const response = await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: 500, ...asked },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const answer = parseTextContent(response) ?? { refused: textOf(response) };
+        return { answer, said: JSON.stringify(answer) };
+      };
+
+      // Engine flags alone, since a game argument beside them would route the run by itself.
+      const flagged = await run({ engineArgs: ['--verbose', '--fixed-fps', '30'] });
+      assert.equal(get(flagged.answer, 'through'), 'gdharness', `started here: ${flagged.said}`);
+      const argv = asArray(get(flagged.answer, 'arguments')).map(text);
+      assert.deepEqual(
+        argv.slice(argv.indexOf('--verbose')),
+        ['--verbose', '--fixed-fps', '30'],
+        `with the flags on its command line: ${flagged.said}`,
+      );
+      assert.match(
+        text(get(flagged.answer, 'message')),
+        /The editor cannot be handed arguments for a game it plays, so this one was started here/,
+        flagged.said,
+      );
+      assert.equal(get(flagged.answer, 'argsNote'), undefined, `nothing misplaced to say: ${flagged.said}`);
+      await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
+
+      const misplaced = await run({ args: ['--verbose', '--level=2'] });
+      assert.equal(get(misplaced.answer, 'through'), 'gdharness', misplaced.said);
+      assert.deepEqual(
+        asArray(get(misplaced.answer, 'arguments')).map(text).slice(-3),
+        ['--', '--verbose', '--level=2'],
+        `the game's arguments are run as asked: ${misplaced.said}`,
+      );
+      assert.match(
+        text(get(misplaced.answer, 'argsNote')),
+        /^--verbose is a flag the engine reads, and args goes to the game after --, where the engine does not read it\. engineArgs hands the engine its own flags/,
+        misplaced.said,
+      );
+      await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
+
+      const refused = await run({ engineArgs: ['--script', 'res://main.gd'] });
+      assert.match(
+        text(get(refused.answer, 'refused')),
+        /--script is not one of the engine flags engineArgs takes/,
+        refused.said,
+      );
+      const malformed = await run({ engineArgs: '--verbose' });
+      assert.match(
+        text(get(malformed.answer, 'refused')),
+        /takes engineArgs as array, not a string/,
+        malformed.said,
+      );
+      assert.equal(plays, 0, 'and the editor is never asked to play');
+    },
+  );
+}
+
+/**
+ * The flags reach the engine, which is the property the issue was about: `--verbose` among a game's
+ * own arguments was accepted, sent, and never read. A leaked object is what tells them apart, since
+ * the engine reports the leak either way and names the leaked instance only when verbose.
+ */
+async function testEngineFlagsReachTheEngine(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('engine flags regression skipped (Godot not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-flags-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Flags"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(projectDir, 'main.gd'),
+      'extends Node\n\nvar kept: Object\n\n\nfunc _ready() -> void:\n\tkept = Object.new()\n' +
+        '\tprint("booted")\n\tget_tree().quit.call_deferred()\n',
+    );
+    writeFileSync(
+      join(projectDir, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    const saidIn = (answer: unknown): string =>
+      asArray(get(answer, 'entries'))
+        .flatMap((entry) => [text(get(entry, 'text')), ...asArray(get(entry, 'detail') ?? []).map(text)])
+        .join('\n');
+    await withStdioServer(
+      async (call) => {
+        // A started run is read back whole, prints included, so whether the engine went verbose is
+        // read off the same answer either way.
+        const run = async (asked: Record<string, unknown>): Promise<{ started: unknown; said: string }> => {
+          const started: unknown = JSON.parse(
+            await call(
+              'editor_run',
+              { projectPath: projectDir, op: 'start', headless: true, runtimeWaitMs: 1000, ...asked },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+          const ended: unknown = JSON.parse(
+            await call('editor_run', { op: 'wait', timeoutMs: 30_000 }, ENGINE_CALL_TIMEOUT_MS),
+          );
+          assert.equal(get(ended, 'running'), false, `the run quits on its own: ${JSON.stringify(ended)}`);
+          const said = saidIn(ended);
+          assert.match(said, /booted/, `the run reached the script: ${said}`);
+          assert.match(said, /ObjectDB instance was leaked/, `and the leak is reported: ${said}`);
+          return { started, said };
+        };
+        const misplaced = await run({ args: ['--verbose'] });
+        assert.doesNotMatch(
+          misplaced.said,
+          /Leaked instance:/,
+          'the engine does not read it behind the separator',
+        );
+        assert.match(
+          text(get(misplaced.started, 'argsNote')),
+          /--verbose is a flag the engine reads, and args goes to the game after --/,
+          `and the answer says so: ${JSON.stringify(misplaced.started)}`,
+        );
+        const verbose = await run({ engineArgs: ['--verbose'] });
+        assert.match(verbose.said, /Leaked instance: Object/, 'given as an engine flag, it is read');
+        assert.equal(get(verbose.started, 'argsNote'), undefined, JSON.stringify(verbose.started));
+
+        // A check's answer keeps only the problems, except for a verbose run, whose additions are
+        // ordinary lines and are read nowhere else.
+        const check = async (asked: Record<string, unknown>): Promise<unknown> =>
+          JSON.parse(
+            await call(
+              'editor_run',
+              { projectPath: projectDir, op: 'check', ...asked },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+        const plain = await check({});
+        assert.match(saidIn(plain), /ObjectDB instance was leaked/, JSON.stringify(plain));
+        assert.deepEqual(
+          asArray(get(plain, 'entries')).filter((entry) => get(entry, 'severity') === 'info'),
+          [],
+          `a plain check answers with problems alone: ${JSON.stringify(plain)}`,
+        );
+        const verboseCheck = await check({ engineArgs: ['--verbose'] });
+        assert.match(
+          saidIn(verboseCheck),
+          /Leaked instance: Object/,
+          `a verbose check answers with what verbose added: ${JSON.stringify(verboseCheck)}`,
+        );
+        assert.equal(get(verboseCheck, 'booted'), true, JSON.stringify(verboseCheck));
+      },
+      { GODOT_PATH: godotPath },
+    );
+  } finally {
+    sweep(projectDir);
   }
 }
 
@@ -34709,8 +34991,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProfilerReadsWhatTheEngineSends,
   testSceneToolsVectorRegression,
   testRunArgumentsLeaveTheLocalDebuggerOff,
+  testEngineFlagsAreAListNotAPassage,
   testSilenceFollowsTheAskThenTheEnvironment,
   testASilentRunIsStartedHereAndSaysWhy,
+  testARunGivenEngineFlagsIsStartedHere,
+  testEngineFlagsReachTheEngine,
   testAPlayedRunWithNoReportGivesNoVerdict,
   testAPlayedGameIsToldFromItsWorkers,
   testHeadlessFollowsTheDisplay,

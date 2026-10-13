@@ -88,7 +88,14 @@ import {
 } from './editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
-import { answersTo, type FoldedEntry, foldedRepeats, GameLog, type LogEntry } from './game-log.js';
+import {
+  answersTo,
+  type FoldedEntry,
+  foldedRepeats,
+  GameLog,
+  type LogEntry,
+  type Severity,
+} from './game-log.js';
 import { isIdentifier } from './gdscript-source.js';
 import {
   anEditorIsStillComing,
@@ -119,6 +126,8 @@ import {
   EDITOR_PID_VARIABLE,
   type EditorPorts,
   editorArguments,
+  engineFlags,
+  engineFlagsAmongGameArgs,
   environmentFor,
   envValue,
   OPENED_BY_A_SERVER,
@@ -1618,6 +1627,21 @@ const SCAN_SETTLED_MS = 500;
 const REIMPORT_TIMEOUT_MS = 300_000;
 
 /**
+ * What to say about engine flags handed to the game in [param args], or undefined when there are
+ * none. They go after the `--`, where the engine does not read them: a run given --verbose that way
+ * printed the same leak warning without its details three runs in a row, with nothing saying the
+ * flag had gone to the game. Said rather than refused, since a game can read a flag of that name.
+ */
+function engineFlagsNote(args: readonly string[]): string | undefined {
+  const among = engineFlagsAmongGameArgs(args);
+  if (among.length === 0) {
+    return undefined;
+  }
+  const named = among.join(', ');
+  return `${named} ${among.length === 1 ? 'is a flag' : 'are flags'} the engine reads, and args goes to the game after --, where the engine does not read ${among.length === 1 ? 'it' : 'them'}. engineArgs hands the engine its own flags; ${among.length === 1 ? 'leave it' : 'leave them'} in args only for a game that reads ${among.length === 1 ? 'that flag' : 'those flags'} itself.`;
+}
+
+/**
  * Ops callers reach for on one tool that another answers, by the tool and op that do.
  *
  * Two downstream sessions read back a value they had just set with runtime_invoke, one as op "get"
@@ -2430,15 +2454,19 @@ function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading[
 const MOST_ENGINE_ENTRIES = 200;
 
 /**
- * A run's errors and warnings as an answer carries them: folded, the newest two hundred distinct
- * ones, and how many distinct ones were left out when any were.
+ * A run's errors and warnings as an answer carries them, or everything it printed from
+ * [param floor] `info` up: folded, the newest two hundred distinct ones, and how many distinct ones
+ * were left out when any were.
  */
-function foldedEntriesAnswer(log: GameLog): {
+function foldedEntriesAnswer(
+  log: GameLog,
+  floor: Severity = 'warning',
+): {
   entries: readonly FoldedEntry[];
   entriesOmitted?: number;
 } {
   const problems = log.selectFolded({
-    severity: 'warning',
+    severity: floor,
     sinceLastCall: false,
     limit: MOST_ENGINE_ENTRIES,
   });
@@ -4055,6 +4083,27 @@ class GodotServer {
           'Pass the game\'s own flags, such as ["--level=2"]',
         ]),
       };
+    }
+    return { ok: true, value: given };
+  }
+
+  /** The engine's own flags a run is to be handed, or the refusal saying why these cannot be. */
+  private engineArguments(args: OperationParams): Checked<readonly string[]> {
+    if (args['engineArgs'] === undefined) {
+      return { ok: true, value: [] };
+    }
+    const given = readStringArray(args, 'engineArgs');
+    if (given === undefined) {
+      return {
+        ok: false,
+        response: this.createErrorResponse('engineArgs must be a list of strings.', [
+          'Pass engine flags, such as ["--verbose"] or ["--fixed-fps", "60"]',
+        ]),
+      };
+    }
+    const checked = engineFlags(given);
+    if (!checked.ok) {
+      return { ok: false, response: this.createErrorResponse(checked.reason) };
     }
     return { ok: true, value: given };
   }
@@ -7170,6 +7219,10 @@ class GodotServer {
     if (!given.ok) {
       return given.response;
     }
+    const flags = this.engineArguments(args);
+    if (!flags.ok) {
+      return flags.response;
+    }
     const asked = this.runEnvironment(args);
     if (!asked.ok) {
       return asked.response;
@@ -7209,6 +7262,7 @@ class GodotServer {
         given.value,
         scanned,
         asked.value,
+        flags.value,
       );
     }
 
@@ -7288,6 +7342,7 @@ class GodotServer {
       this.godotBridge.isConnected() &&
       editorWouldPlay &&
       given.value.length === 0 &&
+      flags.value.length === 0 &&
       !needsItsOwnProcess(asked.value) &&
       !silent
     ) {
@@ -7308,6 +7363,7 @@ class GodotServer {
       headless,
       scene: sceneArgument,
       userArgs: given.value,
+      engineArgs: flags.value,
       silent,
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
@@ -7342,7 +7398,7 @@ class GodotServer {
     // arguments has been handed a game that editor is not holding, so the debug tools will not
     // answer about it however connected the editor is.
     const spawnedInstead =
-      this.godotBridge.isConnected() && editorWouldPlay && given.value.length > 0
+      this.godotBridge.isConnected() && editorWouldPlay && (given.value.length > 0 || flags.value.length > 0)
         ? ' The editor cannot be handed arguments for a game it plays, so this one was started ' +
           'here: the debug_* tools answer only for a game the editor is playing.'
         : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
@@ -7369,6 +7425,7 @@ class GodotServer {
       alsoRunning: stranded.length === 0 ? undefined : stranded.map((one) => one.pid),
       pid: started.pid,
       arguments: cmdArgs,
+      argsNote: engineFlagsNote(given.value),
       // Named here rather than only by editor_output, because a caller who wants to watch the
       // file had to make a second call to learn it and a reconstructed name is worse than no
       // name: a tail on a path that does not exist reports nothing, which is exactly what a run
@@ -9082,10 +9139,18 @@ class GodotServer {
     userArgs: readonly string[],
     scanned: ScanWait,
     asked: RunEnvironment = {},
+    engineArgs: readonly string[] = [],
   ): Promise<ToolResponse> {
     const frames = readPositiveNumber(args, 'frames') ?? 3;
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 60000;
-    const cmdArgs = runArguments({ projectPath, headless: true, scene, quitAfter: frames, userArgs });
+    const cmdArgs = runArguments({
+      projectPath,
+      headless: true,
+      scene,
+      quitAfter: frames,
+      userArgs,
+      engineArgs,
+    });
     const boot = this.spawnGame(
       godotPath,
       cmdArgs,
@@ -9121,9 +9186,13 @@ class GodotServer {
       frames,
       errors,
       warnings,
+      argsNote: engineFlagsNote(userArgs),
       ...scanWaitAnswer(scanned),
       savesNote: asked.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
-      ...foldedEntriesAnswer(boot.log),
+      // What verbose adds is printed as ordinary lines, the leaked instances among them, and a
+      // check's run is read nowhere but here, so an answer keeping only the problems would drop
+      // everything the flag was passed for.
+      ...foldedEntriesAnswer(boot.log, engineArgs.includes('--verbose') ? 'info' : 'warning'),
     });
   }
 
