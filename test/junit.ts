@@ -9,6 +9,7 @@ import {
   BOTH_SIDES_ALIKE_NOTE,
   failedCases,
   hookFailuresPrinted,
+  ignoredYetRan,
   MalformedReportError,
   orphansPrinted,
   parseJUnit,
@@ -886,6 +887,48 @@ testAFailingStringReadsItsValue();
 testOneLineFailingTwiceKeepsEachValue();
 testASuiteWithASpaceInItsPathKeepsItsOrphans();
 testAFailedHookIsCountedAndNamed();
+/**
+ * The ignore entries that named a case which ran, on the forms the real run does not reach: a case
+ * named with its suite, a suite named by a piece of its path, a res:// prefix, and an entry naming
+ * no case at all, which is not something this can tell went unused and is left out.
+ */
+function testAnIgnoreThatLeftOutNothingIsNamed(): void {
+  const report = parseJUnit(
+    [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<testsuites tests="3" failures="0" errors="0" skipped="0" time="0.1">',
+      '<testsuite name="ledger_test" package="test/econ" tests="2" failures="0" errors="0" skipped="0" time="0.1">',
+      '<testcase name="test_sum" classname="ledger_test" time="0.01"></testcase>',
+      '<testcase name="test_tax" classname="ledger_test" time="0.01"></testcase>',
+      '</testsuite>',
+      '<testsuite name="inn_test" package="test" tests="1" failures="0" errors="0" skipped="0" time="0.1">',
+      '<testcase name="test_sum" classname="inn_test" time="0.01"></testcase>',
+      '</testsuite>',
+      '</testsuites>',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    ignoredYetRan(report, [
+      'test_tax',
+      'ledger_test:test_sum',
+      'res://test/econ:test_tax',
+      'test_gone',
+      'inn_test',
+    ]),
+    [
+      { entry: 'test_tax', ran: 'ledger_test:test_tax' },
+      { entry: 'ledger_test:test_sum', ran: 'ledger_test:test_sum' },
+      { entry: 'res://test/econ:test_tax', ran: 'ledger_test:test_tax' },
+    ],
+    JSON.stringify(report.suites.map((suite) => [suite.name, suite.path])),
+  );
+  // A bare name that two suites' cases share is named once for each case that ran.
+  assert.deepEqual(ignoredYetRan(report, ['test_sum']), [
+    { entry: 'test_sum', ran: 'ledger_test:test_sum' },
+    { entry: 'test_sum', ran: 'inn_test:test_sum' },
+  ]);
+}
+
 testASecondFailedAssertionIsNotAHook();
 testEveryReportOfACaseIsKept();
 testAStringAfterAnArrayReadsItsOwnValue();
@@ -897,4 +940,5 @@ testARunThatSaidNothingOfTheSortIsLeftAlone();
 testOrphansAreReadOffTheConsole();
 testScriptErrorsAreReadOffTheConsole();
 testFinishedSuitesAreReadOffTheConsole();
+testAnIgnoreThatLeftOutNothingIsNamed();
 console.log('junit reader tests passed');

@@ -226,6 +226,41 @@ function count(attributes: Readonly<Record<string, string>>, name: string): numb
   return Number.isFinite(value) ? value : 0;
 }
 
+/** An entry of a run's ignore list that named a case the run went on to run. */
+export interface IgnoreNotApplied {
+  readonly entry: string;
+  /** The case that ran, as `suite_name:test_name`, which is the form that leaves it out. */
+  readonly ran: string;
+}
+
+/**
+ * The entries of [param ignored] that named a case which ran all the same.
+ *
+ * gdUnit4 reads an entry with no colon as a suite name or a piece of a suite's path, and a case only
+ * as `suite_name:test_name`, so a list of test function names left out nothing and said nothing: nine
+ * of nine cases ran in a run asked to skip some of them. Which entries skipped something cannot be
+ * read afterwards, since a skipped case is simply absent; a case that ran under a name an entry gave
+ * can be, and that is the mistake made.
+ */
+export function ignoredYetRan(report: TestReport, ignored: readonly string[]): IgnoreNotApplied[] {
+  const found: IgnoreNotApplied[] = [];
+  for (const entry of ignored) {
+    const bare = entry.replace('res://', '');
+    const at = bare.lastIndexOf(':');
+    const suiteNamed = at === -1 ? null : bare.slice(0, at);
+    const testNamed = at === -1 ? bare : bare.slice(at + 1);
+    for (const suite of report.suites) {
+      const suiteMatches =
+        suiteNamed === null || suite.name === suiteNamed || (suite.path ?? '').includes(suiteNamed);
+      const ran = suiteMatches ? suite.cases.find((one) => one.name === testNamed) : undefined;
+      if (ran !== undefined) {
+        found.push({ entry, ran: `${suite.name}:${ran.name}` });
+      }
+    }
+  }
+  return found;
+}
+
 /**
  * A case with every report gdUnit4 wrote for it.
  *
