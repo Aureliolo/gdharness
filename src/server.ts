@@ -2769,6 +2769,15 @@ class GodotServer {
   private launchedDropped: OperationParams | null = null;
 
   /**
+   * The editor this server closed on request, until another connects or is opened.
+   *
+   * Positive evidence that nothing is coming, which the bridge's grace window does not have: a close
+   * in a server's first half-minute was followed by mayYetConnect true, so a caller would have waited
+   * for the editor it had just closed.
+   */
+  private closedHere: { readonly editorPid: number; readonly at: string } | null = null;
+
+  /**
    * The project this server was set up for, from the config `setup` wrote, or null.
    *
    * Null is every config written before this existed and every one written by hand, and it is
@@ -2787,6 +2796,7 @@ class GodotServer {
     this.godotBridge = getDefaultBridge(this.ownProject);
     this.godotBridge.identifyEditorsWith(oneShotOptionOf);
     this.godotBridge.on('godot_connected', () => {
+      this.closedHere = null;
       this.settleTheLaunchReading();
     });
     this.setupShutdownHandlers();
@@ -6159,8 +6169,17 @@ class GodotServer {
           ? true
           : unfinished !== null
             ? unfinished.underway
-            : anEditorIsStillComing(status.listeningSince, launchedIsUp),
+            : this.closedHere !== null
+              ? false
+              : anEditorIsStillComing(status.listeningSince, launchedIsUp),
       editorsNotYetConnected: arriving.length > 0 ? arriving : undefined,
+      closedHere:
+        status.connected || arriving.length > 0 || this.closedHere === null
+          ? undefined
+          : {
+              ...this.closedHere,
+              note: 'This server closed the editor on request, so nothing is coming until editor_launch open starts one.',
+            },
       restartInterrupted:
         unfinished === null || unfinished.underway || arriving.length > 0
           ? undefined
@@ -6696,6 +6715,10 @@ class GodotServer {
         ],
       );
     }
+    this.closedHere = { editorPid: pid, at: new Date().toISOString() };
+    if (this.launchedEditor?.pid === pid) {
+      this.launchedEditor = null;
+    }
     return this.jsonTextResponse({
       closed: true,
       editorPid: pid,
@@ -7053,6 +7076,7 @@ class GodotServer {
       pid: launched.pid,
       startedAt: (await startTimesOf([launched.pid])).get(launched.pid) ?? null,
     };
+    this.closedHere = null;
     return { pid: launched.pid, error: null };
   }
 
