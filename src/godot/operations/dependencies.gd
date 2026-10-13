@@ -284,6 +284,15 @@ static func _code_of(line: String) -> String:
 	return bare if mark == -1 else bare.substr(0, mark)
 
 
+# [param content] with each line's comment taken off and its strings kept, which is where the paths
+# a script loads are written.
+static func _code_lines(content: String) -> String:
+	var kept: Array[String] = []
+	for line: String in content.split("\n"):
+		kept.append(Patterns.without_comment(line))
+	return "\n".join(kept)
+
+
 # The comment on [param line], strings emptied first so a # inside one does not start it.
 static func _comment_of(line: String) -> String:
 	var bare: String = Patterns.compiled(STRING_LITERAL).sub(line, '""', true)
@@ -361,6 +370,11 @@ func _analyze_resource(path: String, current_depth: int, walk: DependencyWalk) -
 	if file:
 		var content: String = file.get_as_text()
 		file.close()
+		# A script's comments name paths as examples, and read as references they were answered as
+		# dependencies, one of a file that does not exist: the shipped serialisation module's comment
+		# about `["res://addons/x/plugin.cfg"]` was a dependency of every project with the addon.
+		if path.get_extension() == "gd":
+			content = _code_lines(content)
 
 		for pattern: String in REFERENCE_PATTERNS:
 			var regex: RegEx = Patterns.compiled(pattern)
