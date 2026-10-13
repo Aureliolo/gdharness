@@ -652,8 +652,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
-      rootNodeType: { type: 'string', description: 'create: the root node class. Default Node.' },
-      newPath: { type: 'string', description: 'save_as: where the copy goes.' },
+      rootNodeType: {
+        type: 'string',
+        ops: ['create'],
+        description: 'create: the root node class. Default Node.',
+      },
+      rootNodeName: {
+        type: 'string',
+        ops: ['create'],
+        description: 'create: the root node name. Default the class name, as the editor names a new root.',
+      },
+      script: { type: 'string', ops: ['create'], description: 'create: a script to attach to the root.' },
+      newPath: { type: 'string', ops: ['save_as'], description: 'save_as: where the copy goes.' },
     },
     requires: ['projectPath', 'scenePath'],
     operations: {
@@ -1226,7 +1236,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       editor: {
         effect: 'read',
         summary:
-          'What the connected editor itself has printed, from its first line, with repeated messages grouped and the ordinary lines above each group carried with it',
+          "What the connected editor itself has printed, from its first line, with repeated messages grouped and the ordinary lines above each group carried with it. The engine's progress bars are one line per task, saying how far an unfinished one got",
         requires: [],
       },
     },

@@ -249,7 +249,8 @@ func create_scene(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
 	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
 	var root_node_type: String = str(args.get("rootNodeType", "Node"))
-	var script_path: String = str(args.get("scriptPath", ""))
+	var root_node_name: String = str(args.get("rootNodeName", root_node_type))
+	var script_path: String = str(args.get("script", ""))
 
 	if scene_path == "res://":
 		return {"ok": false, "error": "Missing scenePath"}
@@ -263,6 +264,9 @@ func create_scene(args: Dictionary) -> Dictionary:
 		}
 	if not ClassDB.can_instantiate(root_node_type):
 		return {"ok": false, "error": "%s cannot be instantiated." % root_node_type}
+	var unfit: String = SceneFile.unfit_name(root_node_name)
+	if not unfit.is_empty():
+		return {"ok": false, "error": unfit}
 	# Saving over a scene that is there replaced it, nodes and all, and answered as a new scene.
 	if FileAccess.file_exists(scene_path):
 		return {
@@ -278,7 +282,7 @@ func create_scene(args: Dictionary) -> Dictionary:
 		}
 
 	var root: Node = ClassDB.instantiate(root_node_type)
-	root.name = root_node_type
+	root.name = root_node_name
 
 	if not script_path.is_empty():
 		var full_script_path: String = _to_scene_res_path(project_path, script_path)
@@ -303,7 +307,9 @@ func create_scene(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {"ok": true, "scenePath": scene_path, "rootNodeType": root_node_type}
+	return {
+		"ok": true, "scenePath": scene_path, "rootNodeType": root_node_type, "rootNodeName": root_node_name
+	}
 
 
 func list_scene_nodes(args: Dictionary) -> Dictionary:
