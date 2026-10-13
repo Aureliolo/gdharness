@@ -29,6 +29,10 @@ const ProjectDiagnostics = preload("project_diagnostics.gd")
 const RenameChecks = preload("rename_checks.gd")
 const ResourceFiles = preload("resource_files.gd")
 
+## Printed once the answer is written, after which the engine runs the project's autoloads. Kept in
+## step with `ANSWERED` in src/headless.ts.
+const ANSWERED: String = "[gdharness] answered"
+
 var _log: Log
 
 
@@ -86,6 +90,9 @@ func _init() -> void:
 		_log.error("Could not write the answer to " + answer_path)
 		quit(1)
 		return
+	# On stderr, where the engine's errors go, so the server can tell what the project's autoloads
+	# report after this from what the operation reported before it.
+	printerr(ANSWERED)
 	quit()
 
 

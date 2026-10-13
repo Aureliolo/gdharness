@@ -53,6 +53,7 @@ async function startDirectly(
   hidden: boolean,
   detached = true,
   errors: number | 'ignore' = output,
+  directory: string = process.cwd(),
 ): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
   return await new Promise((resolve) => {
     const child = spawn(spec.command, [...spec.args], {
@@ -60,6 +61,7 @@ async function startDirectly(
       detached,
       windowsHide: hidden,
       env: withChanges(process.env, spec.envChanges),
+      cwd: directory,
     });
     child.once('error', (error: Error) => {
       resolve({ error: error.message });
@@ -97,7 +99,7 @@ async function startThroughHelper(
   const errorFile = join(scratch, 'error');
   const where = spec.desktop === undefined ? 'without activation' : `on the ${spec.desktop} desktop`;
   try {
-    const wrapper = throughHelper(spec, spec.command, spec.args, {
+    const wrapper = throughHelper({ ...spec, directory: process.cwd() }, spec.command, spec.args, {
       spec: join(scratch, 'spec.json'),
       pid: pidFile,
       error: errorFile,
@@ -106,12 +108,16 @@ async function startThroughHelper(
     // The helper's environment is what it starts inherits, since the start names no other.
     const envChanges =
       spec.desktop === undefined ? spec.envChanges : { ...spec.envChanges, [DESKTOP_VARIABLE]: spec.desktop };
+    // In the temporary directory, with the target given this one explicitly: Windows PowerShell
+    // saves its module cache relative to where it runs when the profile does not resolve, and this
+    // process runs in the server's directory, which is usually somebody's project.
     const started = await startDirectly(
       { ...spec, command: wrapper.command, args: wrapper.args, envChanges },
       output,
       true,
       false,
       'ignore',
+      tmpdir(),
     );
     if ('error' in started) {
       return started;

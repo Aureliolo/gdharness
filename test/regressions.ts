@@ -119,6 +119,7 @@ import {
   savesStayPut,
   userDataIn,
 } from '../src/launch.js';
+import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import {
   GodotLSPClient,
   handleLSPTool,
@@ -159,7 +160,7 @@ import {
   writeLeftAloneDetail,
 } from '../src/rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
-import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
+import { noteRestartBegun, restartNotePath, restartOwed } from '../src/restart-note.js';
 import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
@@ -2982,6 +2983,25 @@ async function testTheLanguageServerOfAnotherProjectIsRefused(): Promise<void> {
             0,
             "and this project's script was not handed to it",
           );
+          for (const [op, unavailable] of [
+            ['symbols', 'Symbols'],
+            ['hover', 'Hover'],
+            ['completion', 'Completion'],
+          ] as const) {
+            const asked = await server.request('tools/call', {
+              name: 'script_info',
+              arguments: { projectPath: ours, scriptPath: 'res://hero.gd', op, line: 1, character: 1 },
+            });
+            const told = textOf(asked) ?? '';
+            assert.equal(get(asked.result, 'isError'), true, `script_info ${op} is refused as well: ${told}`);
+            assert.ok(
+              told.startsWith(
+                `${unavailable} unavailable: The language server on port ${String(lspPort)} belongs to the editor of ${serving}`,
+              ),
+              `saying what was unavailable and whose server it asked: ${told}`,
+            );
+            assert.match(told, /editor_launch opens this project's own editor/, `with what to do: ${told}`);
+          }
 
           // Straight after the refusal, on the same connection, where Godot sends nothing at all:
           // what the other project's server said is about that initialize and no later one.
@@ -4942,20 +4962,6 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
       sweep(other);
     }
 
-    // The contrast, from a server just as young with no note to read: its `true` is the window,
-    // and is the right answer there.
-    restartSettled(project);
-    await uninformed.initialize('regression-test');
-    const plain = parseTextContent(
-      await uninformed.request('tools/call', { name: 'editor_status', arguments: {} }),
-    );
-    assert.equal(
-      get(plain, 'editor', 'mayYetConnect'),
-      true,
-      'without the note a young server may yet be reached',
-    );
-    assert.equal(get(plain, 'editor', 'restartInterrupted'), undefined, 'and reports no restart');
-
     // An editor arriving settles it, whoever opened it: the note is gone from disk, not merely
     // unreported, so the server after this one does not report a debt that was paid.
     noteRestartBegun({
@@ -5007,6 +5013,21 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
       false,
       'and the note is taken down, not just unreported',
     );
+
+    // The contrast, from a server just as young with no note to read: its `true` is the window,
+    // and is the right answer there. Last, because it serves the same project and is the newer of
+    // the two, so the first server stands down once it has announced: asked in the middle, it left
+    // the first one stopping under the calls still to come, whenever its notice landed in time.
+    await uninformed.initialize('regression-test');
+    const plain = parseTextContent(
+      await uninformed.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(
+      get(plain, 'editor', 'mayYetConnect'),
+      true,
+      'without the note a young server may yet be reached',
+    );
+    assert.equal(get(plain, 'editor', 'restartInterrupted'), undefined, 'and reports no restart');
   } finally {
     editor?.close();
     await server.stop();
@@ -6561,6 +6582,40 @@ async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
       });
       assert.match(create, /^Editor not connected/, create);
       assert.doesNotMatch(create, /runtime_inspect/, create);
+
+      // A project never set up has no addon to enable and no editor that could dial in, so the
+      // refusal says that and how to install it. Each half of the addon check gets the shape only it
+      // refuses, as editor_launch's does, and then the project that has both, which an editor could
+      // still connect from.
+      const ask = async (): Promise<string> =>
+        await call('scene_create', { projectPath, scenePath: 'res://made.tscn', rootNodeType: 'Node' });
+      assert.ok(
+        create.startsWith(
+          `Editor not connected, and no editor of this project can connect: the gdharness editor addon is not installed in ${projectPath}.`,
+        ),
+        create,
+      );
+      assert.match(create, /gdharness setup in the project installs and enables it/, create);
+      assert.doesNotMatch(create, /Enable the addon under/, create);
+      const settings = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+      const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
+      writeFileSync(join(projectPath, 'project.godot'), enabled);
+      const enabledOnly = await ask();
+      assert.match(enabledOnly, /addon is not installed in /, `enabled and not installed: ${enabledOnly}`);
+      writeFileSync(join(projectPath, 'project.godot'), settings);
+      mkdirSync(join(projectPath, 'addons', 'gdharness_editor'), { recursive: true });
+      const installedOnly = await ask();
+      assert.match(installedOnly, /addon is not enabled in /, `installed and not enabled: ${installedOnly}`);
+      assert.match(installedOnly, /gdharness setup in the project enables it/, installedOnly);
+      writeFileSync(join(projectPath, 'project.godot'), enabled);
+      const ready = await ask();
+      assert.ok(
+        ready.startsWith(
+          'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
+        ),
+        `a project an editor could connect from: ${ready}`,
+      );
+      assert.match(ready, /Open the project in the editor with editor_launch/, ready);
     });
   } finally {
     sweep(projectPath);
@@ -6616,7 +6671,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.match(
       await call('editor_output', { op: 'editor', cpu: true }),
-      /editor takes: severity, contains, limit, before/,
+      /editor takes: projectPath, severity, contains, limit, before/,
       'and the refusal says what the editor op does take',
     );
     assert.match(
@@ -9193,6 +9248,396 @@ async function testAnEditorStartedByAnEditorSaysSo(): Promise<void> {
       await server.stop();
       sweep(project);
     }
+  }
+}
+
+/**
+ * The lifecycle log says when each server started and ended, why it ended, and which one replaced
+ * which, and editor_status names where it is.
+ *
+ * Asked for from game-b, where the client twice restarted a healthy server mid-call and nothing
+ * could say why: a client closing its end, a signal, a crash and a reconnect all looked the same.
+ * Each way out is taken here and its line read. A kill on Windows is TerminateProcess, which no
+ * handler sees, so the signal is taken where there is one to take; there a missing ended line is
+ * itself the answer. The ended line's calls in flight and the cap on the file are rendered directly,
+ * since no fixture holds a call open across a server's end or writes a megabyte of lines.
+ */
+async function testTheLifecycleLogSaysHowAServerEnded(): Promise<void> {
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lifecycle-'));
+  const project = join(runtime, 'project');
+  mkdirSync(project);
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  const log = join(runtime, 'servers.log');
+  const linesOf = (pid: number | undefined): Record<string, unknown>[] =>
+    (existsSync(log) ? readFileSync(log, 'utf8') : '')
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((line) => line['pid'] === pid);
+  const exited = (server: ServerProcess): Promise<void> =>
+    server.exited
+      ? Promise.resolve()
+      : new Promise((done) => {
+          server.child.once('exit', () => {
+            done();
+          });
+        });
+  const servers: ServerProcess[] = [];
+  const start = async (): Promise<ServerProcess> => {
+    const server = new ServerProcess({ env: { GDHARNESS_RUNTIME_DIR: runtime, GDHARNESS_PROJECT: project } });
+    servers.push(server);
+    await server.initialize('regression-test');
+    return server;
+  };
+  try {
+    const closed = await start();
+    const status = parseTextContent(
+      await closed.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(
+      get(status, 'server', 'lifecycleLog'),
+      log,
+      `editor_status names the log: ${JSON.stringify(get(status, 'server'))}`,
+    );
+    closed.child.stdin?.end();
+    await exited(closed);
+    const told = linesOf(closed.child.pid);
+    assert.deepEqual(
+      told.map((line) => line['event']),
+      ['started', 'client', 'ended'],
+      `a server whose client closed its end: ${JSON.stringify(told)}`,
+    );
+    const [started, client, ended] = told;
+    assert.equal(get(started, 'project'), project, JSON.stringify(started));
+    assert.equal(get(started, 'ppid'), process.pid, `started by this process: ${JSON.stringify(started)}`);
+    assert.equal(get(client, 'client', 'name'), 'gdharness-test', JSON.stringify(client));
+    assert.equal(
+      get(client, 'version'),
+      SERVER_VERSION,
+      `the line's version is the server's: ${JSON.stringify(client)}`,
+    );
+    assert.equal(get(ended, 'cause'), 'stdin:end', JSON.stringify(ended));
+    assert.equal(get(ended, 'client'), 'gdharness-test 1.0.0', JSON.stringify(ended));
+    assert.deepEqual(get(ended, 'inFlight'), [], JSON.stringify(ended));
+
+    if (process.platform !== 'win32') {
+      const signalled = await start();
+      signalled.child.kill('SIGTERM');
+      await exited(signalled);
+      const last = linesOf(signalled.child.pid).at(-1);
+      assert.equal(get(last, 'cause'), 'SIGTERM', `a server ended by a signal: ${JSON.stringify(last)}`);
+    }
+
+    // The newer of two servers of one project says which it replaced, and the older, once it sees
+    // the announcement move, says which replaced it.
+    const older = await start();
+    for (
+      let waited = 0;
+      waited < 10_000 && readAnnouncement(announcementPath(project))?.pid !== older.child.pid;
+      waited += 100
+    ) {
+      await delay(100);
+    }
+    const newer = await start();
+    const replaced = linesOf(newer.child.pid).find((line) => line['event'] === 'replaced');
+    assert.equal(
+      get(replaced, 'predecessor'),
+      older.child.pid,
+      `the newer names the older: ${JSON.stringify(linesOf(newer.child.pid))}`,
+    );
+    await Promise.race([exited(older), delay(30_000)]);
+    const superseded = linesOf(older.child.pid).at(-1);
+    assert.deepEqual(
+      [get(superseded, 'cause'), get(superseded, 'successor')],
+      ['superseded', newer.child.pid],
+      `and the older names the newer: ${JSON.stringify(superseded)}`,
+    );
+
+    assert.deepEqual(
+      callsInFlight(
+        [
+          { tool: 'editor_run', op: 'check', startedAt: 1_000 },
+          { tool: 'editor_status', op: '', startedAt: 2_500 },
+        ],
+        4_000,
+      ),
+      [
+        { tool: 'editor_run', op: 'check', runningMs: 3_000 },
+        { tool: 'editor_status', runningMs: 1_500 },
+      ],
+      'calls in flight are named with how long each had run',
+    );
+
+    // The cap: a full log moves aside and the next line starts a fresh one.
+    const kept = process.env['GDHARNESS_RUNTIME_DIR'];
+    process.env['GDHARNESS_RUNTIME_DIR'] = runtime;
+    try {
+      writeFileSync(log, `${'x'.repeat(LIFECYCLE_LOG_LIMIT)}\n`);
+      writeLifecycle('probe');
+    } finally {
+      if (kept === undefined) {
+        delete process.env['GDHARNESS_RUNTIME_DIR'];
+      } else {
+        process.env['GDHARNESS_RUNTIME_DIR'] = kept;
+      }
+    }
+    assert.equal(statSync(`${log}.1`).size, LIFECYCLE_LOG_LIMIT + 1, 'the full log is moved aside');
+    assert.deepEqual(
+      linesOf(process.pid).map((line) => line['event']),
+      ['probe'],
+      'and the next line starts a fresh one',
+    );
+  } finally {
+    for (const server of servers) {
+      await server.stop();
+    }
+    sweep(runtime);
+  }
+}
+
+/**
+ * editor_output takes the project it is meant to read and refuses one that is not the run's.
+ *
+ * Two probe sessions sent projectPath here as they do to every runtime tool, and were refused for
+ * an argument the tool did not declare. It picks nothing, since the server holds one run, so it is a
+ * check: the run's own project answers, and another is refused naming the run's, rather than handing
+ * back one game's output to a caller who believes it is another's. The engine is a stand-in that
+ * exits at once, which still leaves a run, ended, with the project it was started for.
+ */
+async function testEditorOutputChecksTheProjectItIsGiven(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-output-project-'));
+  const project = join(root, 'ours');
+  const other = join(root, 'theirs');
+  for (const directory of [project, other]) {
+    mkdirSync(directory);
+    writeFileSync(
+      join(directory, 'project.godot'),
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(directory, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  }
+  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath, GDHARNESS_PROJECT: project } });
+  const output = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name: 'editor_output', arguments: args });
+  try {
+    await server.initialize('regression-test');
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { op: 'start', projectPath: project, headless: true, runtimeWaitMs: 500 },
+      },
+      60_000,
+    );
+    assert.notEqual(get(started.result, 'isError'), true, `the fixture needs a run: ${textOf(started)}`);
+
+    const unnamed = await output({});
+    assert.notEqual(get(unnamed.result, 'isError'), true, `the run answers: ${textOf(unnamed)}`);
+    const own = await output({ projectPath: project });
+    assert.notEqual(get(own.result, 'isError'), true, `and answers to its own project: ${textOf(own)}`);
+    assert.equal(get(parseTextContent(own), 'project'), project, textOf(own) ?? '');
+
+    const refused = textOf(await output({ projectPath: other })) ?? '';
+    assert.ok(
+      refused.startsWith(
+        `editor_output reads what this server holds, which is of ${project}, and this call names ${other}.`,
+      ),
+      `another project is refused, naming the run's: ${refused}`,
+    );
+  } finally {
+    await server.stop();
+    sweep(root);
+  }
+}
+
+/**
+ * A call needing the editor, made while the editor this server opened is on its way, waits for it,
+ * and close ends that editor before it has connected.
+ *
+ * Found by a probe session: scene_create sent straight after editor_launch open was told to open an
+ * editor, beside the one already opening, and editor_launch close then said there was nothing to
+ * close and left the hidden editor running. The editor here is a real headless one on a project
+ * whose addon is enabled and empty, so it runs and never dials in. A fake editor connects while the
+ * first call waits, which is the editor arriving; once it has gone, a second call meets an editor
+ * that does not arrive within the wait.
+ */
+async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('call waits for the opened editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-awaited-'));
+  const home = join(project, '.home');
+  // Where the server runs and what it takes for the temporary directory, each of the fixture's own.
+  const workdir = join(project, '.workdir');
+  const temp = join(project, '.temp');
+  for (const directory of [home, workdir, temp]) {
+    mkdirSync(directory, { recursive: true });
+  }
+  // The editor's own settings and user data, so nothing here is written into the machine's. On
+  // Windows the profile too, which is what put a Microsoft directory into the repository: a profile
+  // with no local application data in it resolves to nothing, and Windows PowerShell then saves its
+  // module cache relative to where it runs. The server queries Windows through one PowerShell and
+  // starts a hidden editor through another, and both ran in the server's directory, which for a
+  // user is their project.
+  const windows = process.platform === 'win32';
+  const own = {
+    HOME: home,
+    APPDATA: home,
+    LOCALAPPDATA: home,
+    XDG_CONFIG_HOME: home,
+    XDG_DATA_HOME: home,
+    XDG_CACHE_HOME: home,
+    GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+    ...(windows ? { USERPROFILE: home, TEMP: temp, TMP: temp } : {}),
+  };
+  const port = await reservePort();
+  const waitMs = 8_000;
+  // Named, PowerShell saves its cache at that path and never where it runs, which leaves nothing
+  // to look for; set empty, it saves none at all. So it is taken out of what the server inherits
+  // for the server's start and put back after.
+  const cachePathVariable = 'PSModuleAnalysisCachePath';
+  const inheritedCachePath = process.env[cachePathVariable];
+  delete process.env[cachePathVariable];
+  const server = new ServerProcess({
+    env: {
+      ...own,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GODOT_PATH: godotPath,
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: String(waitMs),
+    },
+    cwd: workdir,
+  });
+  if (inheritedCachePath !== undefined) {
+    process.env[cachePathVariable] = inheritedCachePath;
+  }
+  let pid = 0;
+  let socket: WebSocket | null = null;
+  const sceneCreate = async (): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      {
+        name: 'scene_create',
+        arguments: { op: 'create', projectPath: project, scenePath: 'res://made.tscn', rootNodeType: 'Node' },
+      },
+      60_000,
+    );
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Awaited"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    await server.initialize('regression-test');
+    const launchedAt = Date.now();
+    const opened = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_launch',
+        arguments: { op: 'open', projectPath: project, hidden: true },
+      }),
+    );
+    pid = asNumber(get(opened, 'pid'), 'pid');
+    assert.ok(alive(pid), `the fixture needs the opened editor running: ${JSON.stringify(opened)}`);
+
+    const asked = sceneCreate();
+    await delay(1_500);
+    const invoked: string[] = [];
+    const arriving = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    socket = arriving;
+    await new Promise<void>((resolve, reject) => {
+      arriving.once('open', () => {
+        resolve();
+      });
+      arriving.once('error', reject);
+    });
+    arriving.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (isRecord(message) && message['type'] === 'tool_invoke') {
+        invoked.push(String(message['tool']));
+        arriving.send(
+          JSON.stringify({
+            type: 'tool_result',
+            id: message['id'],
+            success: true,
+            result: { scenePath: 'res://made.tscn' },
+          }),
+        );
+      }
+    });
+    arriving.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+    const answered = await asked;
+    assert.notEqual(
+      get(answered.result, 'isError'),
+      true,
+      `the call made before the editor arrived waits for it: ${textOf(answered)}`,
+    );
+    assert.deepEqual(invoked, ['create_scene'], 'and is answered by the editor that arrived');
+
+    arriving.close();
+    socket = null;
+    for (let waited = 0; waited < 10_000; waited += 100) {
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      if (get(status, 'editor', 'connected') === false) {
+        break;
+      }
+      await delay(100);
+    }
+    const refused = textOf(await sceneCreate()) ?? '';
+    assert.ok(
+      refused.startsWith(
+        `Editor not connected: the editor this server opened on ${project}, pid ${pid}, is still running and has not reached the bridge in the ${String(waitMs / 1000)}s this call waited.`,
+      ),
+      `one that does not arrive is named, and waited for as long as a restart waits: ${refused}`,
+    );
+    assert.doesNotMatch(refused, /Open the project in the editor with editor_launch/, refused);
+
+    if (windows) {
+      // Saved some thirteen seconds after a PowerShell first loads a module, measured here, so it is
+      // waited for while both are still running rather than assumed. Both save to the same place, so
+      // the first to save meets the positive; the wait runs on until the later of the two, the one
+      // that started the editor, has had its chance to save in the wrong place.
+      const cache = join(temp, 'Microsoft', 'Windows', 'PowerShell', 'ModuleAnalysisCache');
+      for (let waited = 0; waited < 40_000 && !existsSync(cache); waited += 250) {
+        await delay(250);
+      }
+      assert.ok(
+        existsSync(cache),
+        `the PowerShell the server runs saved its module cache in the temporary directory (the suite had ${cachePathVariable} ${inheritedCachePath === undefined ? 'unset' : `as ${inheritedCachePath}`}, which the server was not given)`,
+      );
+      await delay(Math.max(0, launchedAt + 25_000 - Date.now()));
+      assert.deepEqual(readdirSync(workdir), [], 'and nothing in the directory the server runs in');
+    }
+
+    const closed = parseTextContent(
+      await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'close' } }),
+    );
+    assert.equal(
+      get(closed, 'closed'),
+      true,
+      `close ends the editor that never connected: ${JSON.stringify(closed)}`,
+    );
+    assert.equal(get(closed, 'beforeConnecting'), true, JSON.stringify(closed));
+    assert.equal(get(closed, 'editorPid'), pid, JSON.stringify(closed));
+    assert.equal(alive(pid), false, 'and its process is gone');
+  } finally {
+    socket?.close();
+    if (pid > 0 && alive(pid)) {
+      process.kill(pid);
+    }
+    for (let waited = 0; pid > 0 && waited < 10_000 && alive(pid); waited += 100) {
+      await delay(100);
+    }
+    await server.stop();
+    sweep(project);
   }
 }
 
@@ -16308,8 +16753,8 @@ async function testThePowerShellHelperGoesWithItsProcess(): Promise<void> {
 function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
   const without = callsWithoutProjectPath();
   assert.ok(
-    without.includes('editor_status') && without.includes('editor_output'),
-    `the two that started this should be in the list: ${without.join(', ')}`,
+    without.includes('editor_status'),
+    `the one that started this is in the list: ${without.join(', ')}`,
   );
   assert.ok(
     without.includes('editor_launch restart'),
@@ -16321,6 +16766,9 @@ function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
     !without.includes('editor_run stop') && !without.includes('editor_run wait'),
     `and not the stop or the wait, which take one: ${without.join(', ')}`,
   );
+  // Nor editor_output, which reads the one run this server holds and takes the project as a check
+  // on it, since sessions sent it there as they do to every runtime tool beside it.
+  assert.ok(!without.includes('editor_output'), `nor editor_output: ${without.join(', ')}`);
   // The whole set, walked from every op's own arguments rather than from the function under test:
   // a call takes projectPath when its op does, and a tool without ops when the tool does.
   const walked: string[] = [];
@@ -32211,7 +32659,8 @@ async function testAReadAskedOfTheEditorIsNotAnsweredFromDisk(): Promise<void> {
       arguments: { projectPath: '/p', op: 'get', setting: 'application/config/name', from: 'editor' },
     });
     const refused = textOf(asked) ?? JSON.stringify(asked);
-    assert.match(refused, /no editor has reached this server/, `it says why it cannot: ${refused}`);
+    assert.match(refused, /^Editor not connected: no Godot editor/, `it says why it cannot: ${refused}`);
+    assert.match(refused, /was asked of the editor/, `and that the editor was what was asked: ${refused}`);
     assert.match(refused, /from: "disk"/, `and what to pass to read the file instead: ${refused}`);
 
     // Beside it, the same question with nothing said about where: it goes to disk, gets as far as
@@ -36021,6 +36470,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartWaitsForTheEditorToSayWhoItIs,
   testTheStaleHalfIsNamedCorrectly,
   testALaunchedEditorsConsoleIsReadBeforeItConnects,
+  testACallWaitsForTheEditorThisServerOpened,
+  testEditorOutputChecksTheProjectItIsGiven,
+  testTheLifecycleLogSaysHowAServerEnded,
   testAnEditorStartedByAnEditorSaysSo,
   testStalenessIsTheEditorCodeNotTheVersion,
   testAnEditorOnTheShippedCodeIsNotCalledStale,

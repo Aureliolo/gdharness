@@ -280,6 +280,29 @@ answer here that leads with prose or carries a notice would lose them.
 have open. `gdharness_runtime` is inside the running game. The spawned engine opens nothing and
 exits when the call is answered.
 
+## The servers' own log
+
+A client can end a server in the middle of a call and start another, and nothing on the client's
+side says why. So every server appends JSON lines to `servers.log` in the runtime directory, one
+file for all of the user's servers. `editor_status` names the file under `server.lifecycleLog`.
+Each line carries the time, the server's pid, its parent's pid and its version. The events are:
+
+- `started`: the command line, working directory, project, and the `.mcp.json` beside it, if any.
+- `replaced`: written as a server starts while a live server of its project holds the
+  announcement, naming that `predecessor`.
+- `parent`: the parent's command line, which says which client started the server. It is asked
+  for five seconds in, so a server that lives only a moment (a test suite starts hundreds) costs
+  no process listing.
+- `client`: the name and version the client gave, written again whenever they change.
+- `ended`: the `cause`. This is `stdin:end` when the client closes its end, the signal's name,
+  `superseded` with the `successor`'s pid, `uncaughtException` or `unhandledRejection` with the
+  stack, or `exit:` and the code. It also lists the calls in flight, each with how long it had run.
+
+A server killed without warning writes no `ended` line, and on Windows every kill is that, since
+`TerminateProcess` runs no handler. So a `started` line with no `ended` line after it means
+something killed that server. Past a megabyte the file moves aside to `servers.log.1`, replacing
+the one there.
+
 ## Connections
 
 | Connection          | Transport                                 | Port               | Override                                      | Needs                                          |
@@ -683,6 +706,13 @@ same stdout. When the answer was the last JSON line printed, an autoload printin
 `_process` replaced it. With a file, a run that wrote no answer has failed whatever its exit code
 was. A run that wrote one and then exited badly (an autoload quitting with a code, say) still
 answers, with `engine_after_answer` saying how it ended, because the write it reports has happened.
+
+Godot starts the project's autoloads in every script run and has no switch to leave them out, so an
+operation always runs them once it has answered. The script prints `[gdharness] answered` on stderr
+when the answer is written, and what the engine reports after that line comes back under
+`engine_messages_after_answer`, with a note saying whose it is. Mixed into `engine_messages`, a
+failing autoload's errors rode on every settings read and read as the read failing.
+
 An error raised inside the operations script itself refuses the answer: the engine hands the
 faulting function's caller a default value and exits 0, so the answer is missing whatever that
 function would have given.

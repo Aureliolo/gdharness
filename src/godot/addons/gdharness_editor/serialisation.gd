@@ -321,10 +321,24 @@ static func acceptable(value: Variant, type: int) -> bool:
 ## The conversion is also what restores a packed array's exact type. Those cross as the plain JSON
 ## lists they fit into, so what comes back from the wire is an Array, and the parameter is what says
 ## it was a PackedStringArray.
+##
+## A dictionary with no tag is read as the type wanted when it carries that type's fields, as
+## scene_node and resource_edit read one: runtime_invoke refused {"x": 140, "y": 300} for a Vector2
+## argument the editor tools took, so one value was right for one tool and wrong for the next. The
+## value as sent is what is tagged, since the builders read a nested vector from its own fields.
 func fitted(value: Variant, type: int) -> Variant:
 	var rebuilt: Variant = deserialize_value(value)
 	if type == TYPE_NIL or typeof(rebuilt) == type:
 		return rebuilt
+
+	if value is Dictionary and type != TYPE_DICTIONARY:
+		var fields: Dictionary = value
+		if not fields.has("_type"):
+			var tagged: Dictionary = fields.duplicate()
+			tagged["_type"] = type_string(type)
+			var built: Variant = deserialize_value(tagged)
+			if typeof(built) == type:
+				return built
 
 	if rebuilt is Array and LIST_TYPES.has(type):
 		return type_convert(rebuilt, type)
@@ -346,6 +360,21 @@ func fitted(value: Variant, type: int) -> Variant:
 		rebuilt = parsed
 
 	return type_convert(rebuilt, type)
+
+
+## How a value of [param type] is written to be read as one, for a refusal to name, or empty for a
+## type that is not built from fields. A refusal naming only the two types left a caller to find
+## the shape in the description of another op.
+static func written_as(type: int) -> String:
+	var tag: String = type_string(type)
+	var alternatives: Array = REQUIRED.get(tag, [])
+	if alternatives.is_empty() or tag == "float" or tag == "Dictionary":
+		return ""
+	var keys: Array = alternatives[0]
+	var parts: Array[String] = []
+	for key: Variant in keys:
+		parts.append('"%s": ...' % key)
+	return "{%s}" % ", ".join(parts)
 
 
 ## Whether [param fields] carries every key of any one of [param alternatives].

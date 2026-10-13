@@ -215,7 +215,9 @@ emptily: no game running, a game with no debugger behind it, a game running rath
 control outside a headless viewport. Read the refusal instead of retrying the call.
 
 Every answer is read back from the engine after the change rather than echoed from the request, and
-whatever the engine said on stderr comes back under \`engine_messages\`.
+whatever the engine said on stderr comes back under \`engine_messages\`. A headless engine runs the
+project's autoloads after the operation has answered, and what it reports from then until it exits
+comes back separately, under \`engine_messages_after_answer\`: none of it changes the answer.
 
 ## More
 

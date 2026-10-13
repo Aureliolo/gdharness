@@ -101,8 +101,14 @@ func set_property(params: Dictionary) -> Dictionary:
 					"type": "error",
 					"message":
 					(
-						"%s.%s holds %s and the value given is %s, which cannot become one."
-						% [reached["called"], named, type_string(wanted), type_string(typeof(given))]
+						"%s.%s holds %s and the value given is %s, which cannot become one.%s"
+						% [
+							reached["called"],
+							named,
+							type_string(wanted),
+							type_string(typeof(given)),
+							_written_as(wanted)
+						]
 					)
 				}
 		var typed: Dictionary = _values.typed_like(given, old_value, _element_object.bind(node, node_path))
@@ -301,8 +307,15 @@ func call_method(params: Dictionary) -> Dictionary:
 				"type": "error",
 				"message":
 				(
-					"%s.%s takes %s as argument %d and was given %s, which cannot be converted."
-					% [reached["called"], named, type_string(wants), index + 1, type_string(typeof(given))]
+					"%s.%s takes %s as argument %d and was given %s, which cannot be converted.%s"
+					% [
+						reached["called"],
+						named,
+						type_string(wants),
+						index + 1,
+						type_string(typeof(given)),
+						_written_as(wants)
+					]
 				)
 			}
 		# A typed list or map is built as one, since a plain one handed to such a parameter raises
@@ -492,6 +505,13 @@ func _element_object(
 
 
 ## "list" or "map", for a refusal about a typed container.
+## The sentence a refusal ends with for a type built from fields, naming the shape that is read as
+## one, or nothing for a type that is not.
+static func _written_as(type: int) -> String:
+	var shape: String = Values.written_as(type)
+	return "" if shape.is_empty() else " A %s is sent as %s." % [type_string(type), shape]
+
+
 static func _sort_of(container: Variant) -> String:
 	return "list" if container is Array else "map"
 

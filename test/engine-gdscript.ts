@@ -26,7 +26,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
+import { ANSWERED, engineExtras, runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { asArray, asNumber, asObject, asString, get, lastJsonLine, text } from './support/json.js';
@@ -448,8 +448,14 @@ function runOperation(
   // Anything on stderr from an operation that succeeded is the engine complaining about
   // something the operation did, a leaked object or a resource still in use at exit included,
   // and the server hands every such line on to the caller. So an operation that passes here is
-  // one that answers cleanly.
-  assert.equal(run.stderr.trim(), '', `${operation} succeeded but wrote to stderr:\n${run.stderr.trim()}`);
+  // one that answers cleanly. The line saying the answer is written is the script's own, and the
+  // only one.
+  const complaints = run.stderr
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== ANSWERED)
+    .join('\n')
+    .trim();
+  assert.equal(complaints, '', `${operation} succeeded but wrote to stderr:\n${run.stderr.trim()}`);
   assert.ok(run.answer !== null, `${operation} wrote no answer:\n${output.trim()}`);
   return run.answer;
 }
@@ -2531,6 +2537,7 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
         '',
         'func _ready() -> void:',
         '\tprint({"setting_path": "not the operation", "value": "loud _ready"})',
+        '\tpush_error("raised by the loud autoload")',
         '\tif FileAccess.file_exists("res://quit_after"):',
         '\t\tget_tree().quit(3)',
         '',
@@ -2553,6 +2560,25 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
       [get(read.payload, 'setting_path'), get(read.payload, 'value'), read.afterAnswer],
       ['application/config/name', 'Answered', undefined],
       `the answer is the operation's, not the autoload's: ${JSON.stringify(read.payload)}`,
+    );
+    // And so are its messages. Godot runs the autoloads in every script run, after the operation has
+    // answered, and their errors rode on the answer as the operation's own.
+    const raised = (entries: readonly { text: string }[] | undefined): boolean =>
+      (entries ?? []).some((entry) => entry.text.includes('raised by the loud autoload'));
+    assert.ok(
+      raised(read.afterAnswerMessages),
+      `the autoload's error is reported as printed after the answer: ${JSON.stringify(read.afterAnswerMessages)}`,
+    );
+    assert.ok(!raised(read.messages), `and not as the operation's: ${JSON.stringify(read.messages)}`);
+    const extras = engineExtras(read);
+    assert.match(
+      String(get(extras, 'engine_messages_after_answer_note')),
+      /^Printed after this operation had written its answer, while the engine ran the project's autoloads/,
+      JSON.stringify(extras),
+    );
+    assert.ok(
+      raised(get(extras, 'engine_messages_after_answer') as { text: string }[]),
+      JSON.stringify(extras),
     );
 
     writeFileSync(join(dir, 'quit_after'), '');

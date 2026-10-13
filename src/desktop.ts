@@ -122,8 +122,10 @@ public static class GdharnessDesktop {
   // what a program's first ShowWindow does whatever it asks for when the start names a show state,
   // and the foreground is held while it starts, since Godot also asks for it outright. The process
   // is ended through the handle held here once stopFile appears, which is how a keeper ends a game
-  // it did not start itself: a handle names one process, where a pid can name the next one too.
-  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile) {
+  // it did not start itself: a handle names one process, where a pid can name the next one too. The
+  // process starts in directory rather than in this one's, which is a temporary directory: Windows
+  // PowerShell saves its module cache relative to where it runs when the profile does not resolve.
+  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     if (desktop.Length > 0) {
@@ -146,7 +148,7 @@ public static class GdharnessDesktop {
       LockSetForegroundWindow(LockForeground);
     }
     try {
-    if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, DetachedProcess, IntPtr.Zero, null, ref startup, out started)) {
+    if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, DetachedProcess, IntPtr.Zero, directory, ref startup, out started)) {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
     }
     File.WriteAllText(pidFile, started.processId.ToString());
@@ -221,7 +223,7 @@ export interface HelperFiles {
  * one in use when it names none, shown without activation when it says so; writes its pid to the
  * pid file, waits for it and exits with its code, ending it first if the stop file appears. What
  * stops it before the pid is written goes to the error file, since its own streams are the ones the
- * process inherits.
+ * process inherits. The process starts in [param how]'s directory, which the helper is not run in.
  *
  * The spec goes in a file rather than on the command line. It carries the helper's C# source and the
  * command line to start, and base64 of the JSON inside base64 of the script passed Windows' limit
@@ -229,7 +231,7 @@ export interface HelperFiles {
  * failed with ENAMETOOLONG before anything started.
  */
 export function throughHelper(
-  how: { readonly desktop?: string; readonly noActivate?: boolean },
+  how: { readonly desktop?: string; readonly noActivate?: boolean; readonly directory: string },
   command: string,
   args: readonly string[],
   files: HelperFiles,
@@ -240,6 +242,7 @@ export function throughHelper(
     commandLine: windowsCommandLine(command, args),
     pidFile: files.pid,
     stopFile: files.stop,
+    directory: how.directory,
     source: SOURCE,
     digest: createHash('sha256').update(SOURCE).digest('hex').slice(0, 16),
   };
@@ -256,7 +259,7 @@ export function throughHelper(
     '    try { Move-Item -LiteralPath $partial -Destination $assembly } catch { Remove-Item -LiteralPath $partial -ErrorAction SilentlyContinue }',
     '  }',
     '  Add-Type -LiteralPath $assembly',
-    '  $code = [GdharnessDesktop]::Run($spec.desktop, $spec.commandLine, $spec.pidFile, [bool]$spec.noActivate, $spec.stopFile)',
+    '  $code = [GdharnessDesktop]::Run($spec.desktop, $spec.commandLine, $spec.pidFile, [bool]$spec.noActivate, $spec.stopFile, $spec.directory)',
     '} catch {',
     `  [IO.File]::WriteAllText(${literal(files.error)}, $_.Exception.Message)`,
     '  exit 1',

@@ -65,6 +65,11 @@ static func acceptable(value: Variant, type: int) -> bool:
 	return Serialisation.acceptable(value, type)
 
 
+## How a value of [param type] is written to be read as one, or empty when it is not built from fields.
+static func written_as(type: int) -> String:
+	return Serialisation.written_as(type)
+
+
 ## The declared type of one parameter of a method, or TYPE_NIL when the method or the parameter
 ## is not there, which reads as "no opinion".
 func parameter_type(object: Object, method: String, index: int) -> int:
