@@ -1736,6 +1736,30 @@ const EDITOR_FREE_INSTEAD: Readonly<Record<string, string>> = {
 };
 
 /**
+ * Why no editor of [param projectPath] would ever dial in, read off the project's own addon, or
+ * null when the addon is installed and enabled, or there is no project there to read.
+ */
+function editorAddonMissing(projectPath: string): { why: string; remedies: string[] } | null {
+  if (!existsSync(join(projectPath, 'project.godot'))) {
+    return null;
+  }
+  const report = inspectProject(projectPath);
+  const installed = report.addons.some((addon) => addon.name === 'gdharness_editor' && addon.installed);
+  if (installed && report.pluginsEnabled.includes('gdharness_editor')) {
+    return null;
+  }
+  return {
+    why: `the gdharness editor addon is not ${installed ? 'enabled' : 'installed'} in ${projectPath}`,
+    remedies: installed
+      ? [
+          'gdharness setup in the project enables it',
+          'Or enable it under Project Settings, Plugins, in an editor opened by hand',
+        ]
+      : ['gdharness setup in the project installs and enables it'],
+  };
+}
+
+/**
  * Ops callers reach for on one tool that another answers, by the tool and op that do.
  *
  * Two downstream sessions read back a value they had just set with runtime_invoke, one as op "get"
@@ -3887,11 +3911,11 @@ class GodotServer {
       case 'script_info':
         switch (op) {
           case 'symbols':
-            return await this.handleLSP('lsp_get_symbols', args);
+            return await this.askScriptInfo('lsp_get_symbols', 'Symbols', args);
           case 'completion':
-            return await this.handleLSP('lsp_get_completions', args);
+            return await this.askScriptInfo('lsp_get_completions', 'Completion', args);
           default:
-            return await this.handleLSP('lsp_get_hover', args);
+            return await this.askScriptInfo('lsp_get_hover', 'Hover', args);
         }
       case 'script_diagnostics':
         return await this.handleScriptDiagnostics(args);
@@ -5848,35 +5872,9 @@ class GodotServer {
   ): Promise<{ answer: OperationParams } | { refusal: ToolResponse; perScript: boolean }> {
     const answer = await this.handleLSP('lsp_get_diagnostics', args);
     const payload = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
-    if (payload['error'] !== undefined) {
-      const reason =
-        typeof payload['error'] === 'string' ? payload['error'] : JSON.stringify(payload['error']);
-      if (payload['refusedArguments'] === true) {
-        return { refusal: this.createErrorResponse(reason), perScript: true };
-      }
-      // A server still reading the project, or one the connected editor names and has yet to
-      // start, is the right one on the right port, so the port and settings remedies would send
-      // the caller after a fault that is not there.
-      if (payload['stillReading'] === true) {
-        return { refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`), perScript: false };
-      }
-      if (typeof payload['serves'] === 'string') {
-        return {
-          refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
-            'editor_status names the editor on the bridge and the port it says it serves',
-            "editor_launch opens this project's own editor, on a language server port of its own",
-            'GDHARNESS_LSP_PORT points this server at the right one',
-          ]),
-          perScript: false,
-        };
-      }
-      return {
-        refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
-          `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
-          'GDHARNESS_LSP_PORT points this server at another one',
-        ]),
-        perScript: payload['aboutThisFile'] === true,
-      };
+    const refused = this.languageServerRefusal(payload, 'Diagnostics');
+    if (refused !== null) {
+      return refused;
     }
 
     const diagnostics = readArray(payload, 'diagnostics') ?? [];
@@ -6079,6 +6077,54 @@ class GodotServer {
 
   private async handleLSP(toolName: string, args: unknown): Promise<ToolResponse> {
     return handleLSPTool(await this.lsp(), toolName, args);
+  }
+
+  /** A script_info question for the language server, whose refusal is the caller's error. */
+  private async askScriptInfo(toolName: string, asked: string, args: OperationParams): Promise<ToolResponse> {
+    const answer = await this.handleLSP(toolName, args);
+    const refused = this.languageServerRefusal(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), asked);
+    return refused === null ? answer : refused.refusal;
+  }
+
+  /**
+   * What the language server client refused, as an error carrying what clears it, or null for an
+   * answer. `asked` names what was unavailable, and `perScript` says whether the refusal is about
+   * this script rather than the language server, which would refuse every script the same way.
+   */
+  private languageServerRefusal(
+    payload: OperationParams,
+    asked: string,
+  ): { refusal: ToolResponse; perScript: boolean } | null {
+    if (payload['error'] === undefined) {
+      return null;
+    }
+    const reason = typeof payload['error'] === 'string' ? payload['error'] : JSON.stringify(payload['error']);
+    if (payload['refusedArguments'] === true) {
+      return { refusal: this.createErrorResponse(reason), perScript: true };
+    }
+    // A server still reading the project, or one the connected editor names and has yet to start,
+    // is the right one on the right port, so the port and settings remedies would send the caller
+    // after a fault that is not there.
+    if (payload['stillReading'] === true) {
+      return { refusal: this.createErrorResponse(`${asked} unavailable: ${reason}`), perScript: false };
+    }
+    if (typeof payload['serves'] === 'string') {
+      return {
+        refusal: this.createErrorResponse(`${asked} unavailable: ${reason}`, [
+          'editor_status names the editor on the bridge and the port it says it serves',
+          "editor_launch opens this project's own editor, on a language server port of its own",
+          'GDHARNESS_LSP_PORT points this server at the right one',
+        ]),
+        perScript: false,
+      };
+    }
+    return {
+      refusal: this.createErrorResponse(`${asked} unavailable: ${reason}`, [
+        `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
+        'GDHARNESS_LSP_PORT points this server at another one',
+      ]),
+      perScript: payload['aboutThisFile'] === true,
+    };
   }
 
   /** The client for the language server of the editor this server follows, on the port it serves. */
@@ -7192,17 +7238,11 @@ class GodotServer {
         ],
       );
     }
-    const report = inspectProject(projectPath);
-    const installed = report.addons.some((addon) => addon.name === 'gdharness_editor' && addon.installed);
-    if (!installed || !report.pluginsEnabled.includes('gdharness_editor')) {
+    const missing = editorAddonMissing(projectPath);
+    if (missing !== null) {
       return this.createErrorResponse(
-        `The gdharness editor addon is not ${installed ? 'enabled' : 'installed'} in ${projectPath}, so an editor opened on it would never reach this server.`,
-        installed
-          ? [
-              'gdharness setup in the project enables it',
-              'Or enable it under Project Settings, Plugins, in an editor opened by hand',
-            ]
-          : ['gdharness setup in the project installs and enables it'],
+        `${missing.why}, so an editor opened on it would never reach this server.`,
+        missing.remedies,
       );
     }
     const owed = restartOwed(projectPath);
@@ -11198,6 +11238,20 @@ class GodotServer {
         askedAs !== undefined && Object.hasOwn(EDITOR_FREE_INSTEAD, askedAs)
           ? EDITOR_FREE_INSTEAD[askedAs]
           : undefined;
+      const project = readNonEmptyString(args, 'projectPath') ?? this.ownProject;
+      // Opening an editor and enabling the plugin both assume the addon is there, and on a project
+      // that has never been set up neither can work: editor_launch refuses it for that reason.
+      const missing = project === null ? null : editorAddonMissing(project);
+      if (missing !== null) {
+        return this.createErrorResponse(
+          `Editor not connected, and no editor of this project can connect: ${missing.why}.`,
+          [
+            ...(instead === undefined ? [] : [instead]),
+            ...missing.remedies,
+            'editor_launch then opens an editor that connects',
+          ],
+        );
+      }
       return this.createErrorResponse(
         'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
         [

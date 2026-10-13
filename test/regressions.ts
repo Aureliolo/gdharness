@@ -2982,6 +2982,25 @@ async function testTheLanguageServerOfAnotherProjectIsRefused(): Promise<void> {
             0,
             "and this project's script was not handed to it",
           );
+          for (const [op, unavailable] of [
+            ['symbols', 'Symbols'],
+            ['hover', 'Hover'],
+            ['completion', 'Completion'],
+          ] as const) {
+            const asked = await server.request('tools/call', {
+              name: 'script_info',
+              arguments: { projectPath: ours, scriptPath: 'res://hero.gd', op, line: 1, character: 1 },
+            });
+            const told = textOf(asked) ?? '';
+            assert.equal(get(asked.result, 'isError'), true, `script_info ${op} is refused as well: ${told}`);
+            assert.ok(
+              told.startsWith(
+                `${unavailable} unavailable: The language server on port ${String(lspPort)} belongs to the editor of ${serving}`,
+              ),
+              `saying what was unavailable and whose server it asked: ${told}`,
+            );
+            assert.match(told, /editor_launch opens this project's own editor/, `with what to do: ${told}`);
+          }
 
           // Straight after the refusal, on the same connection, where Godot sends nothing at all:
           // what the other project's server said is about that initialize and no later one.
@@ -6561,6 +6580,40 @@ async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
       });
       assert.match(create, /^Editor not connected/, create);
       assert.doesNotMatch(create, /runtime_inspect/, create);
+
+      // A project never set up has no addon to enable and no editor that could dial in, so the
+      // refusal says that and how to install it. Each half of the addon check gets the shape only it
+      // refuses, as editor_launch's does, and then the project that has both, which an editor could
+      // still connect from.
+      const ask = async (): Promise<string> =>
+        await call('scene_create', { projectPath, scenePath: 'res://made.tscn', rootNodeType: 'Node' });
+      assert.ok(
+        create.startsWith(
+          `Editor not connected, and no editor of this project can connect: the gdharness editor addon is not installed in ${projectPath}.`,
+        ),
+        create,
+      );
+      assert.match(create, /gdharness setup in the project installs and enables it/, create);
+      assert.doesNotMatch(create, /Enable the addon under/, create);
+      const settings = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+      const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
+      writeFileSync(join(projectPath, 'project.godot'), enabled);
+      const enabledOnly = await ask();
+      assert.match(enabledOnly, /addon is not installed in /, `enabled and not installed: ${enabledOnly}`);
+      writeFileSync(join(projectPath, 'project.godot'), settings);
+      mkdirSync(join(projectPath, 'addons', 'gdharness_editor'), { recursive: true });
+      const installedOnly = await ask();
+      assert.match(installedOnly, /addon is not enabled in /, `installed and not enabled: ${installedOnly}`);
+      assert.match(installedOnly, /gdharness setup in the project enables it/, installedOnly);
+      writeFileSync(join(projectPath, 'project.godot'), enabled);
+      const ready = await ask();
+      assert.ok(
+        ready.startsWith(
+          'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
+        ),
+        `a project an editor could connect from: ${ready}`,
+      );
+      assert.match(ready, /Open the project in the editor with editor_launch/, ready);
     });
   } finally {
     sweep(projectPath);
