@@ -6535,6 +6535,38 @@ async function testArgumentsOfTheWrongTypeAreRefused(): Promise<void> {
 }
 
 /**
+ * An editor tool asked with no editor connected names what answers without one, where something does.
+ *
+ * A probe session that had started a game headless asked scene_tree for its nodes and was told only
+ * to open an editor, which it had been asked not to do; runtime_inspect tree answers about a running
+ * game with none. A tool with no such alternative is told nothing of the kind.
+ */
+async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
+  const projectPath = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-editor-'));
+  try {
+    writeFileSync(join(projectPath, 'project.godot'), 'config_version=5\n');
+    await withStdioServer(async (call) => {
+      const tree = await call('scene_tree', { projectPath, scenePath: 'res://main.tscn' });
+      assert.match(tree, /^Editor not connected/, tree);
+      assert.match(
+        tree,
+        /runtime_inspect tree reads the nodes of a game that is running, and needs no editor/,
+        tree,
+      );
+      const create = await call('scene_create', {
+        projectPath,
+        scenePath: 'res://made.tscn',
+        rootNodeType: 'Node',
+      });
+      assert.match(create, /^Editor not connected/, create);
+      assert.doesNotMatch(create, /runtime_inspect/, create);
+    });
+  } finally {
+    sweep(projectPath);
+  }
+}
+
+/**
  * An argument meant for another op is refused too.
  *
  * The third way past the same door. The tool takes the word, so the tool-level check waves it
@@ -35779,6 +35811,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testToolAndOpLookupsCannotReachThePrototype,
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
+  testANoEditorRefusalNamesWhatNeedsNone,
   testEveryArgumentNamesOpsItsToolHas,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,
