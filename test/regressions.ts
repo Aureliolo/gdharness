@@ -133,7 +133,14 @@ import {
   whyTheProcessTreeFailed,
 } from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
-import { projectStructure, type SearchOptions, searchProject } from '../src/project-scan.js';
+import {
+  ignoredTexts,
+  projectStructure,
+  projectTexts,
+  type SearchOptions,
+  searchProject,
+  VERSION_MARKER,
+} from '../src/project-scan.js';
 import { PROMPT_SPECS } from '../src/prompts.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
 import {
@@ -5747,6 +5754,139 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
 }
 
 /**
+ * A close is answered once the editor has gone, and not while it lingers.
+ *
+ * A hidden editor has no window, so close is the only way to end one short of killing it. The
+ * editor that goes rewrites project.godot on its way out, dropping a key named at its default as a
+ * real one does, and the answer has to say which; the one that stays is refused rather than called
+ * closed. Both stand-ins are processes of their own, detached, so whether one is alive is the
+ * operating system's answer and not the test's.
+ */
+async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-close-'));
+  const settings = '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Close"\n';
+  writeFileSync(
+    join(project, 'project.godot'),
+    `${settings}\n[debug]\n\ngdscript/warnings/unused_variable=0\n`,
+  );
+  const standIn = () =>
+    spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { detached: true, stdio: 'ignore' });
+  const stays = standIn();
+  const goes = standIn();
+
+  const closeWith = async (pid: number, onQuit: () => void): Promise<{ answer: string; asked: string[] }> => {
+    const port = await reservePort();
+    const server = new ServerProcess({
+      env: {
+        GDHARNESS_BRIDGE_PORT: String(port),
+        GDHARNESS_PROJECT: project,
+        GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '2000',
+      },
+    });
+    let editor: WebSocket | null = null;
+    try {
+      await server.initialize('regression-test');
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      editor = socket;
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      const asked: string[] = [];
+      socket.on('message', (raw: Buffer) => {
+        const message: unknown = JSON.parse(String(raw));
+        if (isRecord(message) && message['type'] === 'tool_invoke') {
+          asked.push(String(message['tool']));
+          socket.send(
+            JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: { ok: true } }),
+          );
+          if (message['tool'] === 'quit_editor') {
+            onQuit();
+          }
+        }
+      });
+      socket.send(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: project,
+          addon_version: SERVER_VERSION,
+          editor_pid: pid,
+          opened_by_a_server: true,
+        }),
+      );
+      let greeted = false;
+      for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+        await delay(100);
+        const now = parseTextContent(
+          await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+        );
+        greeted = get(now, 'editor', 'editorPid') === pid;
+      }
+      assert.ok(greeted, 'the fake editor should have been greeted');
+      const answer =
+        textOf(
+          await server
+            .request('tools/call', { name: 'editor_launch', arguments: { op: 'close' } }, 30_000)
+            .catch(() => null),
+        ) ?? 'no answer';
+      return { answer, asked };
+    } finally {
+      editor?.terminate();
+      await server.stop();
+    }
+  };
+
+  try {
+    const lingering = stays.pid ?? 0;
+    const leaving = goes.pid ?? 0;
+    assert.ok(alive(lingering) && alive(leaving), 'the fixture needs two live stand-ins');
+
+    const refused = await closeWith(lingering, () => undefined);
+    assert.ok(
+      refused.asked.includes('quit_editor'),
+      `the editor was asked to go: ${refused.asked.join(', ')}`,
+    );
+    assert.match(
+      refused.answer,
+      new RegExp(`pid ${lingering} is still running after 2s`),
+      `an editor that stays is not answered as closed: ${refused.answer}`,
+    );
+
+    const closed = await closeWith(leaving, () => {
+      writeFileSync(join(project, 'project.godot'), settings);
+      goes.kill();
+    });
+    const answered: unknown = JSON.parse(closed.answer);
+    assert.equal(get(answered, 'closed'), true, closed.answer);
+    assert.equal(get(answered, 'editorPid'), leaving, closed.answer);
+    assert.equal(alive(leaving), false, 'and it had gone by the time it was answered');
+    assert.match(
+      JSON.stringify(get(answered, 'settingsDropped')),
+      /gdscript\/warnings\/unused_variable/,
+      `the save on its way out is reported with what it dropped: ${closed.answer}`,
+    );
+
+    const nobody = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(await reservePort()) } });
+    try {
+      await nobody.initialize('regression-test');
+      assert.match(
+        textOf(await nobody.request('tools/call', { name: 'editor_launch', arguments: { op: 'close' } })) ??
+          '',
+        /No editor is connected, so there is nothing to close/,
+      );
+    } finally {
+      await nobody.stop();
+    }
+  } finally {
+    stays.kill();
+    goes.kill();
+    sweep(project);
+  }
+}
+
+/**
  * A server told to go ends, with an editor still holding the bridge.
  *
  * Written to catch a hang and it found none, which is worth saying plainly: `http.Server.close`
@@ -7006,6 +7146,20 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     writeFileSync(join(sandbox, 'export', '.gdignore'), '');
     writeFileSync(join(sandbox, 'export', 'shipped.gd'), needle);
 
+    // An addon gdharness installed, which nobody on the project wrote, beside the project's own
+    // addon under a name the package also uses: only the marker setup writes tells them apart.
+    mkdirSync(join(sandbox, 'addons', 'gdharness_editor'), { recursive: true });
+    writeFileSync(join(sandbox, 'addons', 'gdharness_editor', VERSION_MARKER), '1.2.15\n');
+    writeFileSync(join(sandbox, 'addons', 'gdharness_editor', 'tooling.gd'), needle);
+    mkdirSync(join(sandbox, 'addons', 'auto_reload'), { recursive: true });
+    writeFileSync(join(sandbox, 'addons', 'auto_reload', 'theirs.gd'), needle);
+    // And one inside a project kept for reference under the ignored directory, which is the only
+    // place an installed addon could pass for one of the ignored copies a rename mentions.
+    const kept = join(sandbox, 'export', 'reference', 'addons', 'gdharness_runtime');
+    mkdirSync(kept, { recursive: true });
+    writeFileSync(join(kept, VERSION_MARKER), '1.2.15\n');
+    writeFileSync(join(kept, 'tooling.gd'), needle);
+
     const found = searchProject(sandbox, {
       query: 'findable',
       fileTypes: ['gd'],
@@ -7014,12 +7168,25 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
       maxResults: 100,
     });
     assert.deepEqual(
-      found.results.map((entry) => entry.file),
-      ['res://scripts/hero.gd'],
+      found.results.map((entry) => entry.file).sort(),
+      ['res://addons/auto_reload/theirs.gd', 'res://scripts/hero.gd'],
       'the search should read the project and nothing standing beside it',
     );
-    assert.equal(found.summary.files_searched, 1, 'and should not have opened the other two');
-    assert.equal(projectStructure(sandbox).scripts, 1, 'the count should agree with the search');
+    assert.equal(found.summary.files_searched, 2, 'and should not have opened the other three');
+    assert.equal(projectStructure(sandbox).scripts, 2, 'the count should agree with the search');
+    assert.deepEqual(
+      projectTexts(sandbox)
+        .map((text) => text.path)
+        .filter((path) => path.endsWith('.gd'))
+        .sort(),
+      ['res://addons/auto_reload/theirs.gd', 'res://scripts/hero.gd'],
+      'and so should what a rename reads',
+    );
+    assert.deepEqual(
+      ignoredTexts(sandbox).map((text) => text.path),
+      ['res://export/shipped.gd'],
+      'an installed addon is not one of the ignored copies a rename mentions either',
+    );
 
     // What the structure counts as scenes and assets, which was text scenes and a short list of
     // images, fonts and sound: a project saving binary scenes had none, and its models were other.
@@ -7028,7 +7195,7 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     }
     assert.deepEqual(
       projectStructure(sandbox),
-      { scenes: 2, scripts: 1, assets: 3, other: 1 },
+      { scenes: 2, scripts: 2, assets: 3, other: 1 },
       'binary scenes are scenes, and models, video and shaders are assets',
     );
   } finally {
@@ -9044,7 +9211,10 @@ async function testALaunchWithoutActivationSaysSo(): Promise<void> {
       '    StartupInfo info = new StartupInfo();',
       '    info.cb = Marshal.SizeOf(typeof(StartupInfo));',
       '    GetStartupInfoW(ref info);',
-      '    File.WriteAllText(args[0], "flags=" + info.flags + " show=" + info.show + " desktop=" + Marshal.PtrToStringUni(info.desktop));',
+      // Written beside and moved into place, because the wait below is for the file to exist and
+      // WriteAllText creates it before it writes: a Windows runner read it empty in between.
+      '    File.WriteAllText(args[0] + ".part", "flags=" + info.flags + " show=" + info.show + " desktop=" + Marshal.PtrToStringUni(info.desktop));',
+      '    File.Move(args[0] + ".part", args[0]);',
       '  }',
       '}',
     ].join('\n');
@@ -34424,6 +34594,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorIsReadOnceItHasSaidWhoItIs,
   testACallWaitsForAnArrivingEditor,
   testARestartWaitsForTheOldEditorToGo,
+  testAnEditorCloseWaitsForItToGo,
   testAServerEndsWithAnEditorStillOnTheBridge,
   testABadPortIsReported,
   testAnEditorPortMovesOnlyWhenItIsHeld,

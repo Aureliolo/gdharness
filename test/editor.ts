@@ -1112,7 +1112,20 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
 
   const read = await call('scene_node', { ...scene, op: 'get', nodePath: 'Press' });
   assert.equal(get(read, 'properties', 'text'), 'Go', 'the property should read back off the node');
+  assert.equal(get(read, 'note'), undefined, 'a node with something set needs no note');
   assert.match(fileText(project, 'fixture.tscn'), /text = "Go"/, 'and be in the saved scene');
+
+  // The root has nothing set, so the default read lists nothing and says why.
+  const bare = await call('scene_node', { ...scene, op: 'get', nodePath: '.' });
+  assert.deepEqual(get(bare, 'properties'), {}, JSON.stringify(bare));
+  assert.match(
+    String(get(bare, 'note')),
+    /at its default.*includeDefaults: true lists them/,
+    JSON.stringify(bare),
+  );
+  const whole = await call('scene_node', { ...scene, op: 'get', nodePath: '.', includeDefaults: true });
+  assert.ok(get(whole, 'properties', 'position') !== undefined, JSON.stringify(whole));
+  assert.equal(get(whole, 'note'), undefined, 'and a read that lists them needs no note');
 
   await call('scene_node', { ...scene, op: 'add', nodeType: 'Node2D', nodeName: 'Panel' });
   await call('scene_node', { ...scene, op: 'duplicate', nodePath: 'Press', newName: 'Copy' });

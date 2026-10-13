@@ -14,6 +14,9 @@ function skipped(name: string): boolean {
   return name.startsWith('.') || SKIPPED.has(name);
 }
 
+/** Written into each addon gdharness installs, so it can be told from one the project wrote. */
+export const VERSION_MARKER = '.gdharness-version';
+
 /**
  * A directory holding a `.gdignore` is stepped over, because the engine steps over it.
  *
@@ -22,9 +25,22 @@ function skipped(name: string): boolean {
  * answers about files the engine will never load. A hundred megabytes of exported binary is the
  * cheap half of getting this wrong; the expensive half is a search that finds a match in a copy
  * of the code nobody is running.
+ *
+ * An addon gdharness installed is stepped over too. The engine loads it, but nobody on the project
+ * wrote it: a search for a word in the game answered with this tool's own comments, its thirty-odd
+ * scripts were counted as the project's, and a rename would have rewritten code the next upgrade
+ * replaces. Told by the marker setup writes, so a project's own addon of the same name is kept.
  */
 function steppedOver(directory: string): boolean {
+  return gdignored(directory) || installedByUs(directory);
+}
+
+function gdignored(directory: string): boolean {
   return existsSync(join(directory, '.gdignore'));
+}
+
+function installedByUs(directory: string): boolean {
+  return existsSync(join(directory, VERSION_MARKER));
 }
 
 /** File counts for a project, by kind. */
@@ -264,7 +280,10 @@ export function projectTexts(projectPath: string): ProjectText[] {
 export function ignoredTexts(projectPath: string): ProjectText[] {
   const found: ProjectText[] = [];
   const visit = (directory: string, prefix: string, ignored: boolean): void => {
-    const under = ignored || steppedOver(directory);
+    if (installedByUs(directory)) {
+      return;
+    }
+    const under = ignored || gdignored(directory);
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (skipped(entry.name)) {
         continue;
