@@ -26,6 +26,12 @@ var counts: Dictionary[int, int] = {68: 6}
 var weights: Dictionary[float, String] = {2.0: "two"}
 var tagged: Dictionary[StringName, int] = {&"gold": 3}
 var spare: RefCounted = RefCounted.new()
+var spot: Vector2 = Vector2.ZERO
+var area: Rect2 = Rect2()
+
+
+func press(point: Vector2, forward: bool) -> bool:
+	return forward and point == Vector2(140, 300)
 
 
 func take(given: Walker) -> String:
@@ -88,6 +94,7 @@ func _run() -> void:
 	await _check_an_element_declared_as_an_object()
 	await _check_a_map_keyed_by_numbers()
 	await _check_maps_typed_by_key()
+	await _check_a_value_given_by_its_fields()
 	node._cleanup()
 	# Not checked: both are gone either way by the time the fixture tears itself down.
 	var _took_directory: Error = DirAccess.remove_absolute(directory)
@@ -247,6 +254,42 @@ func _check_the_argument_count() -> void:
 		_fail("a method that reports an error still answers what it returned: %s" % JSON.stringify(noisy))
 	if raised.size() != 1 or not str(raised[0]).contains("noisy said so"):
 		_fail("with what it reported: %s" % JSON.stringify(noisy))
+
+
+## A Vector2 given as its fields with no tag, the way scene_node and resource_edit take one, is
+## read as a Vector2 by a call and a write, and a nested one inside a Rect2 too. The tagged form
+## still works beside it, and one missing a field is refused naming the shape that is read.
+func _check_a_value_given_by_its_fields() -> void:
+	for point: Variant in [{"x": 140, "y": 300}, {"_type": "Vector2", "x": 140, "y": 300}]:
+		var pressed: Dictionary = await _invoke("press", [point, true])
+		if pressed.get("type") != "method_result" or pressed.get("result") != true:
+			_fail("press takes %s as a Vector2: %s" % [JSON.stringify(point), JSON.stringify(pressed)])
+	var moved: Dictionary = await _write("spot", {"x": 1.5, "y": -2})
+	if moved.get("type") != "property_set" or holder.get("spot") != Vector2(1.5, -2):
+		_fail(
+			(
+				"a write takes a Vector2 as its fields: %s, holding %s"
+				% [JSON.stringify(moved), holder.get("spot")]
+			)
+		)
+	var framed: Dictionary = await _write("area", {"position": {"x": 1, "y": 2}, "size": {"x": 3, "y": 4}})
+	if framed.get("type") != "property_set" or holder.get("area") != Rect2(1, 2, 3, 4):
+		_fail(
+			(
+				"and a Rect2 with its vectors as fields: %s, holding %s"
+				% [JSON.stringify(framed), holder.get("area")]
+			)
+		)
+	var short: Dictionary = await _invoke("press", [{"x": 140}, true])
+	var said: String = str(short.get("message", ""))
+	if short.get("type") != "error" or not said.ends_with('A Vector2 is sent as {"x": ..., "y": ...}.'):
+		_fail("one missing a field is refused naming the shape: %s" % JSON.stringify(short))
+	var unshaped: Dictionary = await _write("spot", "east")
+	if not str(unshaped.get("message", "")).ends_with('A Vector2 is sent as {"x": ..., "y": ...}.'):
+		_fail("and so is a write of a word: %s" % JSON.stringify(unshaped))
+	var counted: Dictionary = await _write("counted", "many")
+	if str(counted.get("message", "")).contains("is sent as"):
+		_fail("a number names no shape: %s" % JSON.stringify(counted))
 
 
 ## A slot declared as Variant takes what it is given, as the engine does; one declared as a number
