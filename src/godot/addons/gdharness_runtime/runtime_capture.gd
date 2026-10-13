@@ -250,14 +250,24 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 	# texture keeps whatever was drawn last. A capture then comes back byte for byte the same
 	# every time, with a success payload, and a game running perfectly well reads as a game
 	# that has frozen. A frame nobody drew is not evidence of anything, so it is refused.
+	# Told apart, because the remedies are: a headless game told to restore its window had none.
+	if DisplayServer.get_name() == "headless":
+		return {
+			"type": "error",
+			"message":
+			(
+				"This game runs headless, so it has no window and draws nothing to capture. Start it "
+				+ "with a window (editor_run start with headless false) to capture it."
+			),
+		}
 	if not _host.get_tree().root.can_draw():
 		return {
 			"type": "error",
 			"message":
 			(
-				"Nothing is being drawn to the game's window: it is minimised, or this engine "
-				+ "has no window. The texture still holds the last frame that was drawn, so this "
-				+ "and every capture after it would be that frame. Restore the window and ask again."
+				"Nothing is being drawn to the game's window because it is minimised. The texture "
+				+ "still holds the last frame that was drawn, so this and every capture after it "
+				+ "would be that frame. Restore the window and ask again."
 			),
 		}
 
