@@ -112,6 +112,7 @@ import {
   failedCases,
   finishesASuite,
   hookFailuresPrinted,
+  ignoredYetRan,
   orphansPrinted,
   parseJUnit,
   type ScriptError,
@@ -376,28 +377,92 @@ const SLOWEST_FRAME_RATE = 20;
  * export picks up, and never over a file that is already there.
  */
 export function captureDestinationRefusal(outputPath: string, projects: readonly string[]): string | null {
-  if (/^(res|user):\/\//.test(outputPath)) {
-    return `outputPath ${outputPath} is a Godot path; a capture is saved outside the project, at an absolute path on this machine.`;
+  return writtenFileRefusal(outputPath, {
+    named: 'outputPath',
+    what: 'a capture',
+    extensions: ['.png'],
+    projects,
+    writes: (where) => [where],
+  });
+}
+
+/**
+ * Why a file something here is let write may not be written at [param path], or null when it may:
+ * the rules a capture is held to, for whatever else writes a file at a caller's word. [param rule]
+ * names the argument and the thing written, the extensions it may end in, and every file the write
+ * makes from the path, which is more than the one named for a movie written as a PNG sequence.
+ */
+function writtenFileRefusal(
+  path: string,
+  rule: {
+    readonly named: string;
+    readonly what: string;
+    readonly extensions: readonly string[];
+    readonly projects: readonly string[];
+    readonly writes: (where: string) => readonly string[];
+  },
+): string | null {
+  const { named, what } = rule;
+  if (/^(res|user):\/\//.test(path)) {
+    return `${named} ${path} is a Godot path; ${what} is saved outside the project, at an absolute path on this machine.`;
   }
-  if (!isAbsolute(outputPath)) {
-    return `outputPath ${outputPath} is not absolute; name the whole path, so where it is written does not depend on this server's directory.`;
+  if (!isAbsolute(path)) {
+    return `${named} ${path} is not absolute; name the whole path, so where it is written does not depend on this server's directory.`;
   }
-  if (extname(outputPath).toLowerCase() !== '.png') {
-    return `outputPath ${outputPath} does not end in .png, which is what a capture is.`;
+  if (!rule.extensions.includes(extname(path).toLowerCase())) {
+    return `${named} ${path} does not end in ${rule.extensions.join(' or ')}, which is what ${what} is.`;
   }
-  const directory = realPathOr(dirname(outputPath));
+  const directory = realPathOr(dirname(path));
   if (!existsSync(directory)) {
-    return `outputPath's directory ${dirname(outputPath)} does not exist; a capture creates no directories.`;
+    return `${named}'s directory ${dirname(path)} does not exist; ${what} creates no directories.`;
   }
-  const where = join(directory, basename(outputPath));
-  const inside = projects.find((project) => project !== '' && isWithinRoot(realPathOr(project), where));
+  const where = join(directory, basename(path));
+  const inside = rule.projects.find((project) => project !== '' && isWithinRoot(realPathOr(project), where));
   if (inside !== undefined) {
-    return `outputPath ${outputPath} is inside the project at ${inside}; a capture is saved outside it, so it never becomes part of the game.`;
+    return `${named} ${path} is inside the project at ${inside}; ${what} is saved outside it, so it never becomes part of the game.`;
   }
-  if (existsSync(where)) {
-    return `outputPath ${outputPath} already exists; a capture is not written over a file. Name a new one.`;
+  const taken = rule.writes(where).find((file) => existsSync(file));
+  if (taken !== undefined) {
+    return taken === where
+      ? `${named} ${path} already exists; ${what} is not written over a file. Name a new one.`
+      : `${named} ${path} would write ${taken}, which already exists; ${what} is not written over a file. Name a new one.`;
   }
   return null;
+}
+
+/**
+ * Why a run cannot write the movie [param engineArgs] asks for, or null when it asks for none or may.
+ *
+ * Movie Maker reads every frame back from the renderer, and a headless run has none: Godot 4.7.2 asked
+ * for one headless crashed on its first frame, in the dummy renderer's texture lookup. A `.png` path
+ * is a sequence, written as the path's name with eight digits for each frame and a `.wav` beside it,
+ * so those are what must not already be there; an `.avi` is the one file.
+ */
+export function movieRefusal(
+  engineArgs: readonly string[],
+  projects: readonly string[],
+  headless: boolean,
+): string | null {
+  const at = engineArgs.indexOf('--write-movie');
+  if (at === -1) {
+    return null;
+  }
+  if (headless) {
+    return '--write-movie needs a run that draws, and this one is headless: Movie Maker reads every frame back from the renderer, and the engine crashed on the first frame when asked headless. Start the run with headless: false; it is drawn on a desktop of its own and does not show.';
+  }
+  return writtenFileRefusal(engineArgs[at + 1] ?? '', {
+    named: '--write-movie',
+    what: 'a movie',
+    extensions: ['.avi', '.png'],
+    projects,
+    writes: (where) => {
+      if (extname(where).toLowerCase() !== '.png') {
+        return [where];
+      }
+      const base = where.slice(0, -'.png'.length);
+      return [`${base}00000000.png`, `${base}.wav`];
+    },
+  });
 }
 
 /**
@@ -5216,6 +5281,15 @@ class GodotServer {
     if (!paths.ok) {
       return this.createErrorResponse(paths.reason, PATH_SOLUTIONS);
     }
+    // Before any engine starts, the class rebuild's included: a refused flag costs nothing.
+    const flags = this.engineArguments(args);
+    if (!flags.ok) {
+      return flags.response;
+    }
+    const movie = movieRefusal(flags.value, [project.value.path], true);
+    if (movie !== null) {
+      return this.createErrorResponse(movie);
+    }
     // An entry not there is left out of the run rather than handed to gdUnit4, which runs the rest
     // and then sums the whole run up as having found nothing. Left out, and not the reason to run
     // nothing: a set of suites named from memory met one wrong name four times in a day, and each
@@ -5281,6 +5355,8 @@ class GodotServer {
       '--headless',
       '--path',
       project.value.path,
+      // Before the script, where the engine reads its own options rather than handing them on.
+      ...flags.value,
       '-s',
       `res://${runner}`,
       '--ignoreHeadlessMode',
@@ -5361,9 +5437,15 @@ class GodotServer {
       }
     }
 
+    // A verbose run's additions are ordinary lines, the leaked instances and the resources still in
+    // use at exit among them, and they are what the flag was passed for.
     const engineEntries = foldedRepeats(
       run.log
-        .select({ severity: 'warning', sinceLastCall: false, limit: Number.POSITIVE_INFINITY })
+        .select({
+          severity: flags.value.includes('--verbose') ? 'info' : 'warning',
+          sinceLastCall: false,
+          limit: Number.POSITIVE_INFINITY,
+        })
         .entries.map(aboveTheRunner),
     );
     const engineEntriesShown = engineEntries.slice(-MOST_ENGINE_ENTRIES);
@@ -5569,6 +5651,7 @@ class GodotServer {
     // has the first index its counterpart there has.
     const uncaughtFolded = foldedRepeats(uncaught.map(aboveTheRunner));
     const listedAsUncaught = new Set(uncaughtFolded.map((entry) => entry.index));
+    const notApplied = ignoredYetRan(report, ignored);
     return this.jsonTextResponse({
       // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
       // passed beside a verdict saying no test cases were found.
@@ -5600,6 +5683,7 @@ class GodotServer {
       warnings: warnings.length > 0 ? warnings : undefined,
       orphans: orphans.total > 0 ? orphans.total : undefined,
       notRun: notRun > 0 ? notRun : undefined,
+      ignoreNotApplied: notApplied.length > 0 ? notApplied : undefined,
       ...printedLines,
       savesNote,
       ...scanned,
@@ -5607,6 +5691,9 @@ class GodotServer {
       note:
         [
           missingNote,
+          notApplied.length > 0
+            ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
+            : undefined,
           uncaughtNote(uncaught),
           ranAs.startsWith('warnings') && warnings.length === 0
             ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
@@ -7251,6 +7338,15 @@ class GodotServer {
     const flags = this.engineArguments(args);
     if (!flags.ok) {
       return flags.response;
+    }
+    const movie = movieRefusal(
+      flags.value,
+      [project.value.path],
+      op === 'check' ||
+        resolveHeadless(args['headless'], { platform: process.platform, variables: process.env }),
+    );
+    if (movie !== null) {
+      return this.createErrorResponse(movie);
     }
     const asked = this.runEnvironment(args);
     if (!asked.ok) {
