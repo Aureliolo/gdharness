@@ -29,6 +29,9 @@ interface Reported {
   /** What the engine and the script reported on the way, as problems rather than lines. */
   readonly messages: readonly LogEntry[];
   readonly messagesOmitted?: number;
+  /** What was reported once the answer was written, which is not the operation's. */
+  readonly afterAnswerMessages?: readonly LogEntry[];
+  readonly afterAnswerOmitted?: number;
 }
 
 export type HeadlessOutcome =
@@ -61,15 +64,40 @@ function snakeCased(params: OperationParams): OperationParams {
 export function engineExtras(
   outcome: Reported & { readonly afterAnswer?: string | undefined },
 ): Record<string, unknown> {
+  const after = outcome.afterAnswerMessages ?? [];
   return {
     ...(outcome.messages.length > 0 ? { engine_messages: outcome.messages } : {}),
     ...(outcome.messagesOmitted === undefined ? {} : { engine_messages_omitted: outcome.messagesOmitted }),
+    ...(after.length > 0
+      ? { engine_messages_after_answer: after, engine_messages_after_answer_note: AFTER_ANSWER_NOTE }
+      : {}),
+    ...(outcome.afterAnswerOmitted === undefined
+      ? {}
+      : { engine_messages_after_answer_omitted: outcome.afterAnswerOmitted }),
     ...(outcome.afterAnswer === undefined ? {} : { engine_after_answer: outcome.afterAnswer }),
   };
 }
 
+/**
+ * Why the messages printed after an operation answered are kept apart from its own.
+ *
+ * Godot starts a project's autoloads in every script run, after the script's `_init`, and has no
+ * switch to leave them out; the operation is finished by then. Mixed in with the operation's own,
+ * an autoload's errors read as the operation's: a settings read on a project with a failing
+ * autoload came back carrying that autoload's errors, every time, and a caller took the read to
+ * have gone wrong.
+ */
+const AFTER_ANSWER_NOTE =
+  "Printed after this operation had written its answer, while the engine ran the project's autoloads and shut down: Godot starts a project's autoloads in every script run and cannot be told not to. An error raised in a project script here is that autoload's own, and none of these changes the answer.";
+
 /** How the operations script marks its own errors, which are otherwise ordinary lines to the engine. */
 const OWN_ERROR = '[ERROR] ';
+
+/**
+ * What the operations script prints once its answer is written. Kept in step with `ANSWERED` in
+ * godot_operations.gd.
+ */
+export const ANSWERED = '[gdharness] answered';
 
 /** At most this many of the newest problems ride on an answer; the rest are counted. */
 const MESSAGES_KEPT = 200;
@@ -83,7 +111,11 @@ const ERRORS_NAMED = 3;
  * as ordinary lines they were dropped from an answer that went on to say it had succeeded.
  */
 function problemsIn(log: GameLog): LogEntry[] {
-  return log.everything().flatMap((entry): LogEntry[] => {
+  return problemsAmong(log.everything());
+}
+
+function problemsAmong(entries: readonly LogEntry[]): LogEntry[] {
+  return entries.flatMap((entry): LogEntry[] => {
     if (entry.severity !== 'info') {
       return [entry];
     }
@@ -319,13 +351,21 @@ export async function runOperation(
   } finally {
     discard(paramsDir);
   }
-  const problems = problemsIn(ran.log);
+  const everything = ran.log.everything();
+  const answered = everything.findIndex((entry) => entry.source === 'stderr' && entry.text === ANSWERED);
+  const problems = problemsAmong(answered === -1 ? everything : everything.slice(0, answered));
+  const after = answered === -1 ? [] : problemsAmong(everything.slice(answered + 1));
+  const afterAnswered = {
+    ...(after.length === 0 ? {} : { afterAnswerMessages: after.slice(-MESSAGES_KEPT) }),
+    ...(after.length > MESSAGES_KEPT ? { afterAnswerOmitted: after.length - MESSAGES_KEPT } : {}),
+  };
 
   if (answer.kind === 'unreadable') {
     return {
       ok: false,
       message: `${operation} wrote an answer that could not be read (${answer.why})`,
       ...reported(problems),
+      ...afterAnswered,
     };
   }
   // No answer is an operation that refused or an engine that never reached the script, whatever
@@ -347,6 +387,7 @@ export async function runOperation(
         `${operation} hit an error in the operations script, so its answer is left out: part of it was ` +
         `never computed. ${fault.text} (${fault.detail[0]?.slice('at: '.length) ?? 'no location given'})`,
       ...reported(problems),
+      ...afterAnswered,
     };
   }
   // The answer is written before the engine shuts down and the project's autoloads run, so a
@@ -354,11 +395,12 @@ export async function runOperation(
   const afterAnswer =
     ran.exitCode === 0 && ran.failure === null
       ? undefined
-      : `The operation finished and wrote this answer, and then the engine did not exit cleanly (${howItEnded(ran)}). Anything it reported on the way out is under engine_messages.`;
+      : `The operation finished and wrote this answer, and then the engine did not exit cleanly (${howItEnded(ran)}). Anything it reported on the way out is under ${answered === -1 ? 'engine_messages' : 'engine_messages_after_answer'}.`;
   return {
     ok: true,
     payload: answer.payload,
     ...reported(problems),
+    ...afterAnswered,
     ...(afterAnswer === undefined ? {} : { afterAnswer }),
   };
 }
