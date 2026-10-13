@@ -184,6 +184,33 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	}
 
 
+# Remove an input action the project defines, which add_input_action had no way back from.
+func remove_input_action(params: Dictionary) -> Dictionary:
+	var action_name: String = str(params.get("action_name", ""))
+	if action_name.is_empty():
+		return _log.failure("action_name is required")
+	var setting: String = "input/" + action_name
+	if not ProjectSettings.has_setting(setting):
+		return _log.failure("This project has no input action named " + action_name)
+	# The engine registers its own ui_ actions with a default, so clearing one from project.godot
+	# puts the engine's binding back rather than removing the action.
+	if ProjectSettings.property_get_revert(setting) != null:
+		return _log.failure(
+			(
+				(
+					"%s is one of the engine's own actions: removing it from project.godot restores the "
+					+ "engine's binding rather than removing it. Rebind it with add_input_action instead."
+				)
+				% action_name
+			)
+		)
+	ProjectSettings.set_setting(setting, null)
+	var err: Error = ProjectSettings.save()
+	if err != OK:
+		return _log.failure("Failed to save project.godot: " + error_string(err))
+	return {"action_name": action_name, "removed": true}
+
+
 # The value project.godot stores for one input action.
 #
 # It has to be a Dictionary holding real InputEvent objects. The engine writes those as the

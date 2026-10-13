@@ -124,6 +124,17 @@ func fixed(node: Node) -> String:
 	return ""
 
 
+## Why the folder a new file at [param file_path] goes in cannot be made, or "" once it is there. The
+## engine makes no folder when it saves, so a create into one not yet made failed with no more than
+## the engine's error, while script_edit create made its folder and went ahead.
+static func make_folder_for(file_path: String) -> String:
+	var folder: String = file_path.get_base_dir()
+	if DirAccess.dir_exists_absolute(folder):
+		return ""
+	var made: Error = DirAccess.make_dir_recursive_absolute(folder)
+	return "" if made == OK else "Could not make the folder %s: %s" % [folder, error_string(made)]
+
+
 ## Why no node can be called [param node_name], wherever it sits, or "".
 static func unfit_name(node_name: String) -> String:
 	if node_name.is_empty():
