@@ -3760,6 +3760,9 @@ class GodotServer {
         }
 
       case 'editor_launch':
+        if (op === 'close') {
+          return await this.handleCloseEditor();
+        }
         return op === 'restart' ? await this.handleRestartEditor(args) : await this.handleLaunchEditor(args);
       case 'editor_run':
         if (op === 'stop') {
@@ -6652,6 +6655,52 @@ class GodotServer {
       ),
       ...this.whatTheEditorDropped(settingsBefore, after),
       ...servers,
+      tookMs: Date.now() - began,
+    });
+  }
+
+  /**
+   * editor_launch close: the connected editor saved and quit, and gone before this answers.
+   *
+   * A hidden editor has no window to close, so without this the only way to end one was to find its
+   * process and kill it, which loses what it had not saved. Waited for, the way a restart waits, so
+   * an editor still asking about something on its way out is not answered as closed.
+   */
+  private async handleCloseEditor(): Promise<ToolResponse> {
+    const before = this.godotBridge.getStatus();
+    if (!before.connected) {
+      return this.createErrorResponse('No editor is connected, so there is nothing to close.', [
+        'editor_status says whether the bridge is up and what has reached it',
+      ]);
+    }
+    if (!hasSaidWhoItIs(before) || before.editorPid === undefined) {
+      return this.createErrorResponse(
+        `The editor has connected and has not said who it is within ${greetingWaitMs() / 1000}s, so there is no process to wait on once it is asked to go.`,
+        ['editor_status says when it has, under greeting while it has not', 'Then ask for the close again'],
+      );
+    }
+    const pid = before.editorPid;
+    const settingsBefore = this.settingKeysOf(before.projectPath);
+    const asked = await this.handleViaBridge('quit_editor', {});
+    if (asked.isError === true) {
+      return asked;
+    }
+    const began = Date.now();
+    const gone = await this.waitForBridge(() => !alive(pid), began + editorRestartTimeoutMs());
+    if (!gone) {
+      return this.createErrorResponse(
+        `The editor saved and was asked to go, and pid ${pid} is still running after ${editorRestartTimeoutMs() / 1000}s.`,
+        [
+          'It may be asking what to do about unsaved changes, or a script may be holding up its exit',
+          'editor_status says whether it is still connected',
+        ],
+      );
+    }
+    return this.jsonTextResponse({
+      closed: true,
+      editorPid: pid,
+      projectPath: before.projectPath,
+      ...this.whatTheEditorDropped(settingsBefore, this.settingKeysOf(before.projectPath)),
       tookMs: Date.now() - began,
     });
   }
