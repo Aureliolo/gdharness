@@ -124,21 +124,29 @@ func fixed(node: Node) -> String:
 	return ""
 
 
-## Why [param child_name] cannot be given to a child of [param parent], or "". Godot renames a node
-## whose name is taken or holds a character a path cannot, and the next call naming it would then
-## reach another node.
-func unusable_name(parent: Node, child_name: String, moving: Node = null) -> String:
-	if child_name.is_empty():
+## Why no node can be called [param node_name], wherever it sits, or "".
+static func unfit_name(node_name: String) -> String:
+	if node_name.is_empty():
 		return "A node needs a name."
-	var valid: String = child_name.validate_node_name()
-	if valid != child_name:
+	var valid: String = node_name.validate_node_name()
+	if valid != node_name:
 		return (
 			(
 				"%s is not a name a node can have; Godot would save it as %s. The characters "
 				+ '. : @ / " %% cannot be in a node name.'
 			)
-			% [child_name, valid]
+			% [node_name, valid]
 		)
+	return ""
+
+
+## Why [param child_name] cannot be given to a child of [param parent], or "". Godot renames a node
+## whose name is taken or holds a character a path cannot, and the next call naming it would then
+## reach another node.
+func unusable_name(parent: Node, child_name: String, moving: Node = null) -> String:
+	var unfit: String = unfit_name(child_name)
+	if not unfit.is_empty():
+		return unfit
 	var taken: Node = parent.get_node_or_null(NodePath(child_name))
 	if taken != null and taken != moving and taken.get_parent() == parent:
 		return "%s already has a child named %s." % [path_of(parent), child_name]

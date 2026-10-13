@@ -166,9 +166,79 @@ export function editorConsole(
   }
   const log = new GameLog();
   const { text, of } = theFirstOf(path);
-  log.append('transcript', text);
+  log.append('transcript', foldProgress(text));
   log.finish();
   return { log, path, ...(of === undefined ? {} : { readBytes: text.length, of }) };
+}
+
+/** A step of a task a headless editor reports progress on, as `[  16% ] task | label`. */
+const PROGRESS_STEP = /^\[\s*(\d+)% \] (\S+) \| (.*)$/;
+const PROGRESS_DONE = /^\[ DONE \] (\S+)\s*$/;
+
+interface Task {
+  readonly name: string;
+  readonly label: string;
+  percent: string;
+  last?: string;
+  done: boolean;
+}
+
+/**
+ * [param text] with each task the editor reported progress on as one line where it started.
+ *
+ * A headless editor prints a line for every step of every task, and most of them carry nothing but
+ * a percentage: an editor opening a two-scene project wrote 55 lines, 50 of them progress and 35
+ * of those blank after the bar, so the answer was mostly bar, and the grouping could not fold them
+ * because no two percentages are the same. A finished task keeps only its label. One that never finished
+ * keeps how far it got and the last step it named, because an editor stuck mid-import is exactly
+ * what that line is for. Anything printed during a task stays where it was, after the task's line.
+ * A step or a finish for a task whose start was not seen is left as printed.
+ */
+function foldProgress(text: string): string {
+  const out: (string | Task)[] = [];
+  const open = new Map<string, Task>();
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const step = PROGRESS_STEP.exec(line);
+    if (step !== null) {
+      const [, percent = '', name = '', said = ''] = step;
+      const started = /^Started (.*)$/.exec(said);
+      if (started !== null) {
+        const task: Task = { name, label: started[1] ?? '', percent, done: false };
+        open.set(name, task);
+        out.push(task);
+        continue;
+      }
+      const task = open.get(name);
+      if (task !== undefined) {
+        task.percent = percent;
+        if (said.trim() !== '') {
+          task.last = said.trim();
+        }
+        continue;
+      }
+    }
+    const finished = PROGRESS_DONE.exec(line);
+    const task = finished === null ? undefined : open.get(finished[1] ?? '');
+    if (task !== undefined) {
+      task.done = true;
+      open.delete(task.name);
+      continue;
+    }
+    out.push(raw);
+  }
+  return out
+    .map((entry) => {
+      if (typeof entry === 'string') {
+        return entry;
+      }
+      if (entry.done) {
+        return `[ DONE ] ${entry.name} | ${entry.label}`;
+      }
+      const last = entry.last === undefined ? '' : `, and the last step it named was "${entry.last}"`;
+      return `[ ${entry.percent}% ] ${entry.name} | ${entry.label}, which has not finished${last}`;
+    })
+    .join('\n');
 }
 
 /**
