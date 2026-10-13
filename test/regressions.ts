@@ -8596,6 +8596,59 @@ function testAnUncapturedConsoleSaysWhichEditorItIs(): void {
 }
 
 /**
+ * A headless editor's progress bars are one line per task, and what was printed during one stays.
+ *
+ * The console of a small project was 55 lines, 50 of them progress and 35 of those a bare
+ * percentage, so the answer was mostly bar. A task that never finished is the one whose steps
+ * matter, and its line keeps how far it got and the last step it named.
+ */
+function testAnEditorsProgressIsOneLinePerTask(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-console-'));
+  try {
+    writeEditorLogNote(project, 4242);
+    writeFileSync(
+      editorLogPath(project),
+      [
+        'Godot Engine v4.7.2.stable.official',
+        '',
+        '[   0% ] first_scan_filesystem | Started Project initialization (5 steps)',
+        '[   0% ] first_scan_filesystem | Scanning file structure...',
+        'ERROR: Parse Error: printed during the scan',
+        '[  83% ] first_scan_filesystem | Starting file scan...',
+        '[ DONE ] first_scan_filesystem',
+        '',
+        '[   0% ] update_scripts_classes | Started Registering global classes... (36 steps)',
+        '[   2% ] update_scripts_classes | ',
+        '[  91% ] update_scripts_classes | Hero',
+        '[  94% ] update_scripts_classes | ',
+        '[  40% ] reimport | an import whose start was never printed',
+        '[ DONE ] reimport',
+        '',
+      ].join('\r\n'),
+    );
+    const read = editorConsole(project, 4242, true);
+    assert.ok(!('kind' in read), JSON.stringify(read));
+    if ('kind' in read) {
+      return;
+    }
+    assert.deepEqual(
+      read.log.everything().map((entry) => entry.text),
+      [
+        'Godot Engine v4.7.2.stable.official',
+        '[ DONE ] first_scan_filesystem | Project initialization (5 steps)',
+        'Parse Error: printed during the scan',
+        '[ 94% ] update_scripts_classes | Registering global classes... (36 steps), which has not finished, and the last step it named was "Hero"',
+        '[  40% ] reimport | an import whose start was never printed',
+        '[ DONE ] reimport',
+      ],
+    );
+    assert.equal(read.log.count('error'), 1, 'the error printed mid-task keeps its severity');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * An editor started by another editor reports the ports it serves, not the ones in its environment.
  *
  * Godot's own restart and the project manager start the new editor as the old one's child, so it
@@ -10167,6 +10220,17 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
     assert.ok(
       texts.includes('CONSOLE PROBE loaded'),
       `an editor plugin's print reaches it, so it is an editor's console: ${texts.join(' | ')}`,
+    );
+    // The engine's own progress format, which the folding reads and a new engine could change: the
+    // first scan is one finished line, and no step survives as a bar with nothing after it.
+    assert.ok(
+      texts.some((line) => line.startsWith('[ DONE ] first_scan_filesystem | ')),
+      `the first scan is folded into one finished line: ${texts.join(' | ')}`,
+    );
+    assert.deepEqual(
+      texts.filter((line) => /^\[\s*\d+% \]/.test(line)),
+      [],
+      'and every task it reported on finished, so no step is left',
     );
     assert.ok(
       console_.log.count('error') >= 3,
@@ -34272,6 +34336,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameTooNewToTalkToIsStillAGame,
   testAWallOfOneMessageCollapsesToItsShape,
   testAnUncapturedConsoleSaysWhichEditorItIs,
+  testAnEditorsProgressIsOneLinePerTask,
   testAnEditorWritesItsConsoleWhereTheServerLooks,
   testACancelledCallEndsTheEngineItStarted,
   testAnErrorReportOutlivesItsGameForAnHour,

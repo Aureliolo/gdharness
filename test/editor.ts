@@ -2199,6 +2199,44 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     }),
     /rootNodeType must be a node class, and Resource is not one/,
   );
+  // The root by the name and with the script asked for, so a scene named for its file is one call.
+  const named = { projectPath: project, scenePath: 'res://arena.tscn' };
+  const made = await call('scene_create', {
+    ...named,
+    rootNodeType: 'Node2D',
+    rootNodeName: 'Arena',
+    script: 'res://layers/tool_node.gd',
+  });
+  assert.equal((made as { rootNodeName?: unknown }).rootNodeName, 'Arena', JSON.stringify(made));
+  assert.match(
+    nodeBody(fileText(project, 'arena.tscn'), 'Arena'),
+    /script = ExtResource/,
+    'the root is saved under its name, carrying the script',
+  );
+  assert.match(
+    await refusal('scene_create', {
+      projectPath: project,
+      scenePath: 'res://slash.tscn',
+      rootNodeName: 'A/B',
+    }),
+    /A\/B is not a name a node can have/,
+  );
+  assert.match(
+    await refusal('scene_create', {
+      projectPath: project,
+      scenePath: 'res://wrong.tscn',
+      script: 'res://layers/tool_resource.gd',
+    }),
+    /extends Resource, so it cannot be on a Node root/,
+  );
+  assert.ok(
+    !existsSync(join(project, 'slash.tscn')) && !existsSync(join(project, 'wrong.tscn')),
+    'and a refused create leaves no file',
+  );
+  assert.match(
+    await refusal('scene_create', { ...named, op: 'save', rootNodeType: 'Node' }),
+    /scene_create save does not take rootNodeType/,
+  );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Timer2', nodeName: 'Late' }),
     /nodeType must be a node class, and Timer2 is not one/,
