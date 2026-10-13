@@ -11292,6 +11292,37 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
   assert.equal(over['mayYetAnnounce'], false, 'a game that has ended is not going to announce');
   assert.match(String(over['note']), /editor_output/, 'and the answer says where its output went');
   assert.doesNotMatch(String(over['note']), /Until it does/, 'and is told nothing about waiting for it');
+  assert.match(String(over['note']), /^nothing announced itself/, 'a game that ended without its runtime');
+  // A game whose runtime came up and that quit in the next frame took its announcement with it
+  // before the wait looked again, and was told nothing had announced. Its output says otherwise.
+  const cameAndWent = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: false,
+    withArgs: false,
+    servesAProject: true,
+    runtimeCameUp: true,
+  });
+  assert.equal(cameAndWent['mayYetAnnounce'], false, 'is not going to announce again');
+  assert.match(
+    String(cameAndWent['note']),
+    /^the game's runtime came up and the game quit before this start could reach it/,
+    String(cameAndWent['note']),
+  );
+  assert.doesNotMatch(String(cameAndWent['note']), /nothing announced/, String(cameAndWent['note']));
+  // While the game runs, the line is what a runtime announcing a moment later prints, and the wait
+  // has not missed it: the usual answer stands.
+  const stillUp = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: true,
+    withArgs: false,
+    servesAProject: true,
+    runtimeCameUp: true,
+  });
+  assert.equal(stillUp['mayYetAnnounce'], true, String(stillUp['note']));
 
   // Held at a breakpoint is the one case where waiting alone is not enough and the caller has
   // something to do, so it must not read as either of the two above.
@@ -12788,6 +12819,85 @@ async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
  * after a start was answered "No game with the runtime addon is running" about a game that was
  * starting, and the way through was to make the same call again. Twice in one session.
  */
+/**
+ * A game whose runtime came up and that quit straight away is told so, not that nothing announced.
+ *
+ * The runtime announces in its own _ready and takes the announcement away as the game quits, so a
+ * scene that quits in its first frame is announced for less time than the start's wait takes
+ * between looks. A probe session's start on such a game answered "nothing announced itself", beside
+ * output saying the runtime was listening. The control is the same scene with the addon on disk but
+ * not registered, which never comes up and is told nothing announced.
+ */
+async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('runtime that came and went regression skipped (Godot not found)');
+    return;
+  }
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-came-and-went-rt-'));
+  const project = (registered: boolean): string => {
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-came-and-went-'));
+    writeFileSync(
+      join(dir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="CameAndWent"\n' +
+        'run/main_scene="res://main.tscn"\n' +
+        (registered ? `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n` : ''),
+    );
+    writeFileSync(join(dir, 'main.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tget_tree().quit()\n');
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(dir, 'addons', 'gdharness_runtime'), {
+      recursive: true,
+    });
+    return dir;
+  };
+  const cameUp = project(true);
+  const neverUp = project(false);
+  try {
+    await withStdioServer(
+      async (call) => {
+        const started = async (dir: string): Promise<unknown> =>
+          JSON.parse(
+            await call(
+              'editor_run',
+              { projectPath: dir, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+        const went = await started(cameUp);
+        const said = JSON.stringify(went);
+        const output = await call('editor_output', { contains: 'runtime listening on' });
+        assert.match(output, /\[gdharness\] runtime listening on/, `the runtime did come up: ${output}`);
+        assert.equal(get(went, 'runtime', 'listening'), false, said);
+        assert.equal(get(went, 'runtime', 'mayYetAnnounce'), false, said);
+        assert.match(
+          text(get(went, 'runtime', 'note')),
+          /^the game's runtime came up and the game quit before this start could reach it/,
+          `and the start says so: ${said}`,
+        );
+
+        const never = await started(neverUp);
+        assert.match(
+          text(get(never, 'runtime', 'note')),
+          /^nothing announced itself within/,
+          `a game whose runtime never came up is told nothing announced: ${JSON.stringify(never)}`,
+        );
+      },
+      { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
+    );
+  } finally {
+    sweep(cameUp);
+    sweep(neverUp);
+    sweep(runtimeDir);
+  }
+}
+
 /**
  * A runtime call made while the game this server just started is still coming up waits for it.
  *
@@ -20030,6 +20140,100 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
       assert.equal(plays, 0, 'and the editor is never asked to play');
     },
   );
+}
+
+/**
+ * A run that crashes the engine is an error, from a check and from a started run alike.
+ *
+ * Issue #1059: a scene whose _ready segfaulted Godot answered `booted: false` with no entries from
+ * check, and `clean: true` with the crash report as info lines from wait and editor_output, so a
+ * caller judging the run by `clean` read a crash as a good run. `OS.crash` is the engine's own way
+ * to reach its crash handler, called from a function so the GDScript backtrace has two frames.
+ *
+ * `OS.crash` prints an `ERROR` line of its own before the handler runs, which a segfault does not,
+ * so here that line alone keeps `errors` above zero and `clean` false: with the crash read as info
+ * again, both still held. What only the crash handling makes true is the crash entry being an error
+ * with its backtrace, which is what fails when it is broken; test/game-log.ts holds the count for a
+ * report with no line before it.
+ */
+async function testACrashedRunIsNeverClean(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('crashed run regression skipped (Godot not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-crashed-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-crashed-rt-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Crashed"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(projectDir, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint("about to crash")\n\tboom()\n\n\nfunc boom() -> void:\n\tOS.crash("deliberate")\n',
+    );
+    writeFileSync(
+      join(projectDir, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    const theCrash = (answer: unknown): unknown =>
+      asArray(get(answer, 'entries')).find((entry) =>
+        /Program crashed with signal \d+/.test(text(get(entry, 'text'))),
+      );
+    const backtraced = (entry: unknown): boolean =>
+      asArray(get(entry, 'detail') ?? []).some((line) => text(line).includes('boom (res://main.gd:10)'));
+    await withStdioServer(
+      async (call) => {
+        const checked: unknown = JSON.parse(
+          await call('editor_run', { projectPath: projectDir, op: 'check' }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        const said = JSON.stringify(checked);
+        assert.equal(get(checked, 'booted'), false, said);
+        assert.ok(asNumber(get(checked, 'errors')) >= 1, `the crash is counted: ${said}`);
+        const checkCrash = theCrash(checked);
+        assert.equal(get(checkCrash, 'severity'), 'error', `the crash is an entry, as an error: ${said}`);
+        assert.ok(backtraced(checkCrash), `with its GDScript backtrace: ${said}`);
+        assert.ok(
+          asNumber(get(checked, 'printedLinesNotShown')) >= 1,
+          `and the print it left out is counted: ${said}`,
+        );
+
+        const started: unknown = JSON.parse(
+          await call(
+            'editor_run',
+            { projectPath: projectDir, op: 'start', headless: true, runtimeWaitMs: 0 },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(started, 'started'), true, JSON.stringify(started));
+        const waited: unknown = JSON.parse(
+          await call('editor_run', { op: 'wait', timeoutMs: 60_000 }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        const read = JSON.stringify(waited);
+        assert.equal(get(waited, 'running'), false, read);
+        assert.equal(get(waited, 'clean'), false, `a crashed run is not clean: ${read}`);
+        assert.ok(asNumber(get(waited, 'errors')) >= 1, read);
+        const waitCrash = theCrash(waited);
+        assert.equal(get(waitCrash, 'severity'), 'error', read);
+        assert.ok(backtraced(waitCrash), read);
+        const output: unknown = JSON.parse(await call('editor_output', { severity: 'error' }));
+        assert.equal(get(output, 'clean'), false, JSON.stringify(output));
+        assert.ok(
+          theCrash(output) !== undefined,
+          `editor_output names the crash as an error: ${JSON.stringify(output)}`,
+        );
+      },
+      { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
+    );
+  } finally {
+    sweep(projectDir);
+    sweep(runtimeDir);
+  }
 }
 
 /**
@@ -35297,6 +35501,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASilentRunIsStartedHereAndSaysWhy,
   testARunGivenEngineFlagsIsStartedHere,
   testEngineFlagsReachTheEngine,
+  testACrashedRunIsNeverClean,
   testAPlayedRunWithNoReportGivesNoVerdict,
   testAPlayedGameIsToldFromItsWorkers,
   testHeadlessFollowsTheDisplay,
@@ -35454,6 +35659,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartWaitsForTheGameToAnnounceItself,
   testAGameIsFoundThroughALinkToItsProject,
   testARuntimeCallWaitsForTheGameThisServerStarted,
+  testARuntimeThatCameAndWentIsSaidToHave,
   testARunCanBeGivenItsOwnEnvironment,
   testARunsEnvironmentIsBuiltInOrder,
   testATestRunKeepsOutOfThePlayersSaves,
