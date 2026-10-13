@@ -112,6 +112,7 @@ import {
   failedCases,
   finishesASuite,
   hookFailuresPrinted,
+  ignoredYetRan,
   orphansPrinted,
   parseJUnit,
   type ScriptError,
@@ -5277,10 +5278,16 @@ class GodotServer {
     const ours = `gdharness-reports/${randomUUID()}`;
     const reports = `res://.godot/${ours}`;
     const ignored = readStringArray(args, 'ignore') ?? [];
+    const flags = this.engineArguments(args);
+    if (!flags.ok) {
+      return flags.response;
+    }
     const cmdArgs = [
       '--headless',
       '--path',
       project.value.path,
+      // Before the script, where the engine reads its own options rather than handing them on.
+      ...flags.value,
       '-s',
       `res://${runner}`,
       '--ignoreHeadlessMode',
@@ -5361,9 +5368,15 @@ class GodotServer {
       }
     }
 
+    // A verbose run's additions are ordinary lines, the leaked instances and the resources still in
+    // use at exit among them, and they are what the flag was passed for.
     const engineEntries = foldedRepeats(
       run.log
-        .select({ severity: 'warning', sinceLastCall: false, limit: Number.POSITIVE_INFINITY })
+        .select({
+          severity: flags.value.includes('--verbose') ? 'info' : 'warning',
+          sinceLastCall: false,
+          limit: Number.POSITIVE_INFINITY,
+        })
         .entries.map(aboveTheRunner),
     );
     const engineEntriesShown = engineEntries.slice(-MOST_ENGINE_ENTRIES);
@@ -5569,6 +5582,7 @@ class GodotServer {
     // has the first index its counterpart there has.
     const uncaughtFolded = foldedRepeats(uncaught.map(aboveTheRunner));
     const listedAsUncaught = new Set(uncaughtFolded.map((entry) => entry.index));
+    const notApplied = ignoredYetRan(report, ignored);
     return this.jsonTextResponse({
       // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
       // passed beside a verdict saying no test cases were found.
@@ -5600,6 +5614,7 @@ class GodotServer {
       warnings: warnings.length > 0 ? warnings : undefined,
       orphans: orphans.total > 0 ? orphans.total : undefined,
       notRun: notRun > 0 ? notRun : undefined,
+      ignoreNotApplied: notApplied.length > 0 ? notApplied : undefined,
       ...printedLines,
       savesNote,
       ...scanned,
@@ -5607,6 +5622,9 @@ class GodotServer {
       note:
         [
           missingNote,
+          notApplied.length > 0
+            ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
+            : undefined,
           uncaughtNote(uncaught),
           ranAs.startsWith('warnings') && warnings.length === 0
             ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'

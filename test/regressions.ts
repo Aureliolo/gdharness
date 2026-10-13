@@ -28203,6 +28203,110 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
   }
 }
 
+/**
+ * A test run can be handed engine flags, and an ignore entry that left nothing out says so.
+ *
+ * Issue #1065: a gdUnit4 run ended with the engine's "ObjectDB instances were leaked at exit (run
+ * with `--verbose` for details)", project_test refused engineArgs, and the leak took a bisection by
+ * hand to find. The same report: `ignore` given test function names ran nine cases of nine, since
+ * gdUnit4 leaves a case out only as suite_name:test_name. The form the answer gives back is then
+ * used, so the remedy is shown to work rather than read.
+ */
+async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('test run flags regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-test-flags-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="TestFlags"\n',
+    );
+    cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(projectDir, 'leaky'));
+    writeFileSync(
+      join(projectDir, 'leaky', 'leaky_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_keeps_one() -> void:',
+        '\tvar kept: Object = Object.new()',
+        '\tassert_object(kept).is_not_null()',
+        '',
+        '',
+        'func test_other() -> void:',
+        '\tassert_bool(true).is_true()',
+        '',
+      ].join('\n'),
+    );
+    await withStdioServer(async (_call, request) => {
+      const run = async (asked: Record<string, unknown>): Promise<unknown> => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: projectDir, path: 'res://leaky', ...asked } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+      };
+      const printed = (answer: unknown): string =>
+        asArray(get(answer, 'engineEntries'))
+          .map((entry) => text(get(entry, 'text')))
+          .join('\n');
+
+      const plain = await run({});
+      assert.equal(get(plain, 'tests'), 2, JSON.stringify(plain));
+      assert.match(
+        printed(plain),
+        /ObjectDB instances? (?:was|were) leaked/,
+        `the leak is reported: ${JSON.stringify(plain)}`,
+      );
+      assert.doesNotMatch(printed(plain), /Leaked instance:/, 'and not named without verbose');
+
+      const verbose = await run({ engineArgs: ['--verbose'] });
+      assert.equal(get(verbose, 'tests'), 2, JSON.stringify(verbose));
+      assert.match(
+        printed(verbose),
+        /Leaked instance: Object/,
+        `verbose names the instance: ${printed(verbose)}`,
+      );
+
+      const refused = await run({ engineArgs: ['--script', 'res://leaky/leaky_test.gd'] });
+      assert.equal(get(refused, 'tests'), undefined, 'a flag off the list starts nothing');
+
+      const bare = await run({ ignore: ['test_other'] });
+      assert.equal(get(bare, 'tests'), 2, `a bare test name leaves nothing out: ${JSON.stringify(bare)}`);
+      const notApplied = asArray(get(bare, 'ignoreNotApplied'));
+      assert.equal(notApplied.length, 1, JSON.stringify(bare));
+      assert.equal(get(notApplied[0], 'entry'), 'test_other');
+      const form = text(get(notApplied[0], 'ran'));
+      assert.match(form, /:test_other$/, form);
+      assert.match(
+        text(get(bare, 'note')),
+        /gdUnit4 leaves a case out only as suite_name:test_name/,
+        JSON.stringify(bare),
+      );
+
+      const formed = await run({ ignore: [form] });
+      assert.equal(
+        get(formed, 'tests'),
+        1,
+        `the form given back leaves the case out: ${JSON.stringify(formed)}`,
+      );
+      assert.equal(get(formed, 'ignoreNotApplied'), undefined, JSON.stringify(formed));
+    });
+  } finally {
+    sweep(projectDir);
+  }
+}
+
 async function testAStackOverflowIsNotAPass(): Promise<void> {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
@@ -35761,6 +35865,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAStackOverflowIsNotAPass,
+  testATestRunNamesItsLeaksAndItsUnusedIgnores,
   testAProfileIsWrittenPastAReader,
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,

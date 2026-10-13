@@ -667,7 +667,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       ignore: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Suites or cases to leave out, as "suite_name" or "suite_name:test_name".',
+        description:
+          'Suites or cases to leave out, as "suite_name" or "suite_name:test_name". A bare test name is read as a suite name and leaves out nothing; an entry that named a case which ran all the same comes back under ignoreNotApplied with the form that would have left it out.',
+      },
+      engineArgs: {
+        type: 'array',
+        items: { type: 'string' },
+        description: `The engine's own flags for the run, such as ["--verbose"], a value going as the next entry. Only those that change what the engine logs, draws for debugging, checks on the GPU or how it times frames: ${Object.keys(ENGINE_FLAGS).join(', ')}. Any other is refused. With --verbose, engineEntries holds the ordinary lines the run printed as well, which is where the engine names the instances leaked and the resources still in use at exit.`,
       },
       failFast: {
         type: 'boolean',
