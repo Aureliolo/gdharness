@@ -56,6 +56,8 @@ export interface RunOptions {
   readonly quitAfter?: number | null;
   /** What the game itself is to read, which is everything after `--` on the command line. */
   readonly userArgs?: readonly string[];
+  /** Engine flags, checked by [method engineFlags], which go before the `--`. */
+  readonly engineArgs?: readonly string[];
   /** Whether the run makes no sound; a headless one makes none whatever this says. */
   readonly silent?: boolean;
 }
@@ -73,6 +75,86 @@ export function resolveSilent(requested: unknown, variables: NodeJS.ProcessEnv):
   }
   const said = envValue('GDHARNESS_SILENT', variables)?.toLowerCase();
   return said !== undefined && said !== '0' && said !== 'false';
+}
+
+/**
+ * The engine's own flags a run may be given, each with the value it takes after it, if any.
+ *
+ * Only flags that change what the engine logs, draws for debugging, checks on the GPU or how it
+ * times frames. The command line also takes flags that run a script, open another project, export
+ * or write files, and a tool that passed anything through would hand a caller all of those; the
+ * flags this server sets itself (--headless, --path, --audio-driver, --quit-after) are taken as
+ * the arguments that set them.
+ */
+export const ENGINE_FLAGS: Readonly<Record<string, 'none' | 'number' | 'size'>> = Object.freeze({
+  '--verbose': 'none',
+  '--quiet': 'none',
+  '--debug-collisions': 'none',
+  '--debug-paths': 'none',
+  '--debug-navigation': 'none',
+  '--debug-avoidance': 'none',
+  '--debug-stringnames': 'none',
+  '--debug-canvas-item-redraw': 'none',
+  '--debug-mute-audio': 'none',
+  '--print-fps': 'none',
+  '--gpu-profile': 'none',
+  '--gpu-validation': 'none',
+  '--gpu-abort': 'none',
+  '--disable-vsync': 'none',
+  '--frame-delay': 'number',
+  '--time-scale': 'number',
+  '--fixed-fps': 'number',
+  '--max-fps': 'number',
+  '--resolution': 'size',
+});
+
+/** The flags this server sets for a run, by the argument that sets each. */
+const SET_BY_ARGUMENT: Readonly<Record<string, string>> = Object.freeze({
+  '--headless': 'headless',
+  '--audio-driver': 'silent',
+  '--quit-after': 'frames, on editor_run check',
+});
+
+/** [param given] as the engine flags a run is handed, or why it cannot be. */
+export function engineFlags(given: readonly string[]): { ok: true } | { ok: false; reason: string } {
+  const offered = Object.keys(ENGINE_FLAGS).join(', ');
+  for (let at = 0; at < given.length; at += 1) {
+    const flag = given[at] ?? '';
+    const takes = Object.hasOwn(ENGINE_FLAGS, flag) ? ENGINE_FLAGS[flag] : undefined;
+    if (takes === undefined) {
+      const setBy = Object.hasOwn(SET_BY_ARGUMENT, flag) ? SET_BY_ARGUMENT[flag] : undefined;
+      return {
+        ok: false,
+        reason:
+          setBy !== undefined
+            ? `${flag} is set by this tool's own argument, ${setBy}, rather than through engineArgs.`
+            : `${flag} is not one of the engine flags engineArgs takes, which are those that change what the engine logs, draws for debugging, checks on the GPU or how it times frames: ${offered}. A value goes as the next entry, as in ["--fixed-fps", "60"].`,
+      };
+    }
+    if (takes === 'none') {
+      continue;
+    }
+    const value = given[at + 1];
+    const fits =
+      value !== undefined && (takes === 'number' ? /^\d+(?:\.\d+)?$/.test(value) : /^\d+x\d+$/.test(value));
+    if (!fits) {
+      return {
+        ok: false,
+        reason: `${flag} takes ${takes === 'number' ? 'a number' : 'a size such as 1280x720'} as the next entry, and ${value === undefined ? 'nothing followed it' : `${JSON.stringify(value)} is not one`}.`,
+      };
+    }
+    at += 1;
+  }
+  return { ok: true };
+}
+
+/**
+ * The entries of a game's own [param args] that are engine flags, which the engine does not read
+ * after the `--` they go behind. A game may read a flag of the same name itself, so this is said
+ * rather than refused.
+ */
+export function engineFlagsAmongGameArgs(args: readonly string[]): string[] {
+  return args.filter((one) => Object.hasOwn(ENGINE_FLAGS, one) || Object.hasOwn(SET_BY_ARGUMENT, one));
 }
 
 /**
@@ -102,6 +184,9 @@ export function runArguments(options: RunOptions): string[] {
   }
   if (options.quitAfter !== undefined && options.quitAfter !== null) {
     args.push('--quit-after', String(options.quitAfter));
+  }
+  if (options.engineArgs !== undefined) {
+    args.push(...options.engineArgs);
   }
   if (options.scene !== null) {
     args.push(`res://${options.scene}`);
