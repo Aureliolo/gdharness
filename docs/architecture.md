@@ -280,6 +280,29 @@ answer here that leads with prose or carries a notice would lose them.
 have open. `gdharness_runtime` is inside the running game. The spawned engine opens nothing and
 exits when the call is answered.
 
+## The servers' own log
+
+A client can end a server in the middle of a call and start another, and nothing on the client's
+side says why. So every server appends JSON lines to `servers.log` in the runtime directory, one
+file for all of the user's servers. `editor_status` names the file under `server.lifecycleLog`.
+Each line carries the time, the server's pid, its parent's pid and its version. The events are:
+
+- `started`: the command line, working directory, project, and the `.mcp.json` beside it, if any.
+- `replaced`: written as a server starts while a live server of its project holds the
+  announcement, naming that `predecessor`.
+- `parent`: the parent's command line, which says which client started the server. It is asked
+  for five seconds in, so a server that lives only a moment (a test suite starts hundreds) costs
+  no process listing.
+- `client`: the name and version the client gave, written again whenever they change.
+- `ended`: the `cause`. This is `stdin:end` when the client closes its end, the signal's name,
+  `superseded` with the `successor`'s pid, `uncaughtException` or `unhandledRejection` with the
+  stack, or `exit:` and the code. It also lists the calls in flight, each with how long it had run.
+
+A server killed without warning writes no `ended` line, and on Windows every kill is that, since
+`TerminateProcess` runs no handler. So a `started` line with no `ended` line after it means
+something killed that server. Past a megabyte the file moves aside to `servers.log.1`, replacing
+the one there.
+
 ## Connections
 
 | Connection          | Transport                                 | Port               | Override                                      | Needs                                          |

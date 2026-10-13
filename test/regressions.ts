@@ -119,6 +119,7 @@ import {
   savesStayPut,
   userDataIn,
 } from '../src/launch.js';
+import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import {
   GodotLSPClient,
   handleLSPTool,
@@ -9247,6 +9248,150 @@ async function testAnEditorStartedByAnEditorSaysSo(): Promise<void> {
       await server.stop();
       sweep(project);
     }
+  }
+}
+
+/**
+ * The lifecycle log says when each server started and ended, why it ended, and which one replaced
+ * which, and editor_status names where it is.
+ *
+ * Asked for from ostinato, where the client twice restarted a healthy server mid-call and nothing
+ * could say why: a client closing its end, a signal, a crash and a reconnect all looked the same.
+ * Each way out is taken here and its line read. A kill on Windows is TerminateProcess, which no
+ * handler sees, so the signal is taken where there is one to take; there a missing ended line is
+ * itself the answer. The ended line's calls in flight and the cap on the file are rendered directly,
+ * since no fixture holds a call open across a server's end or writes a megabyte of lines.
+ */
+async function testTheLifecycleLogSaysHowAServerEnded(): Promise<void> {
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lifecycle-'));
+  const project = join(runtime, 'project');
+  mkdirSync(project);
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  const log = join(runtime, 'servers.log');
+  const linesOf = (pid: number | undefined): Record<string, unknown>[] =>
+    (existsSync(log) ? readFileSync(log, 'utf8') : '')
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((line) => line['pid'] === pid);
+  const exited = (server: ServerProcess): Promise<void> =>
+    server.exited
+      ? Promise.resolve()
+      : new Promise((done) => {
+          server.child.once('exit', () => {
+            done();
+          });
+        });
+  const servers: ServerProcess[] = [];
+  const start = async (): Promise<ServerProcess> => {
+    const server = new ServerProcess({ env: { GDHARNESS_RUNTIME_DIR: runtime, GDHARNESS_PROJECT: project } });
+    servers.push(server);
+    await server.initialize('regression-test');
+    return server;
+  };
+  try {
+    const closed = await start();
+    const status = parseTextContent(
+      await closed.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(
+      get(status, 'server', 'lifecycleLog'),
+      log,
+      `editor_status names the log: ${JSON.stringify(get(status, 'server'))}`,
+    );
+    closed.child.stdin?.end();
+    await exited(closed);
+    const told = linesOf(closed.child.pid);
+    assert.deepEqual(
+      told.map((line) => line['event']),
+      ['started', 'client', 'ended'],
+      `a server whose client closed its end: ${JSON.stringify(told)}`,
+    );
+    const [started, client, ended] = told;
+    assert.equal(get(started, 'project'), project, JSON.stringify(started));
+    assert.equal(get(started, 'ppid'), process.pid, `started by this process: ${JSON.stringify(started)}`);
+    assert.equal(get(client, 'client', 'name'), 'gdharness-test', JSON.stringify(client));
+    assert.equal(
+      get(client, 'version'),
+      SERVER_VERSION,
+      `the line's version is the server's: ${JSON.stringify(client)}`,
+    );
+    assert.equal(get(ended, 'cause'), 'stdin:end', JSON.stringify(ended));
+    assert.equal(get(ended, 'client'), 'gdharness-test 1.0.0', JSON.stringify(ended));
+    assert.deepEqual(get(ended, 'inFlight'), [], JSON.stringify(ended));
+
+    if (process.platform !== 'win32') {
+      const signalled = await start();
+      signalled.child.kill('SIGTERM');
+      await exited(signalled);
+      const last = linesOf(signalled.child.pid).at(-1);
+      assert.equal(get(last, 'cause'), 'SIGTERM', `a server ended by a signal: ${JSON.stringify(last)}`);
+    }
+
+    // The newer of two servers of one project says which it replaced, and the older, once it sees
+    // the announcement move, says which replaced it.
+    const older = await start();
+    for (
+      let waited = 0;
+      waited < 10_000 && readAnnouncement(announcementPath(project))?.pid !== older.child.pid;
+      waited += 100
+    ) {
+      await delay(100);
+    }
+    const newer = await start();
+    const replaced = linesOf(newer.child.pid).find((line) => line['event'] === 'replaced');
+    assert.equal(
+      get(replaced, 'predecessor'),
+      older.child.pid,
+      `the newer names the older: ${JSON.stringify(linesOf(newer.child.pid))}`,
+    );
+    await Promise.race([exited(older), delay(30_000)]);
+    const superseded = linesOf(older.child.pid).at(-1);
+    assert.deepEqual(
+      [get(superseded, 'cause'), get(superseded, 'successor')],
+      ['superseded', newer.child.pid],
+      `and the older names the newer: ${JSON.stringify(superseded)}`,
+    );
+
+    assert.deepEqual(
+      callsInFlight(
+        [
+          { tool: 'editor_run', op: 'check', startedAt: 1_000 },
+          { tool: 'editor_status', op: '', startedAt: 2_500 },
+        ],
+        4_000,
+      ),
+      [
+        { tool: 'editor_run', op: 'check', runningMs: 3_000 },
+        { tool: 'editor_status', runningMs: 1_500 },
+      ],
+      'calls in flight are named with how long each had run',
+    );
+
+    // The cap: a full log moves aside and the next line starts a fresh one.
+    const kept = process.env['GDHARNESS_RUNTIME_DIR'];
+    process.env['GDHARNESS_RUNTIME_DIR'] = runtime;
+    try {
+      writeFileSync(log, `${'x'.repeat(LIFECYCLE_LOG_LIMIT)}\n`);
+      writeLifecycle('probe');
+    } finally {
+      if (kept === undefined) {
+        delete process.env['GDHARNESS_RUNTIME_DIR'];
+      } else {
+        process.env['GDHARNESS_RUNTIME_DIR'] = kept;
+      }
+    }
+    assert.equal(statSync(`${log}.1`).size, LIFECYCLE_LOG_LIMIT + 1, 'the full log is moved aside');
+    assert.deepEqual(
+      linesOf(process.pid).map((line) => line['event']),
+      ['probe'],
+      'and the next line starts a fresh one',
+    );
+  } finally {
+    for (const server of servers) {
+      await server.stop();
+    }
+    sweep(runtime);
   }
 }
 
@@ -36327,6 +36472,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALaunchedEditorsConsoleIsReadBeforeItConnects,
   testACallWaitsForTheEditorThisServerOpened,
   testEditorOutputChecksTheProjectItIsGiven,
+  testTheLifecycleLogSaysHowAServerEnded,
   testAnEditorStartedByAnEditorSaysSo,
   testStalenessIsTheEditorCodeNotTheVersion,
   testAnEditorOnTheShippedCodeIsNotCalledStale,

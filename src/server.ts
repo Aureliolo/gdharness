@@ -140,6 +140,7 @@ import {
   savesStayPut,
   userDataIn,
 } from './launch.js';
+import { type CallInFlight, callsInFlight, lifecycleLogPath, writeLifecycle } from './lifecycle-log.js';
 import {
   DEFAULT_LSP_PORT,
   GodotLSPClient,
@@ -314,6 +315,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * has to look at, usually a dialog, and saying so beats holding the caller's call open in silence.
  * A project whose import runs past it sets GDHARNESS_EDITOR_RESTART_TIMEOUT_MS.
  */
+/** How long a server runs before the lifecycle log asks which process started it. */
+const PARENT_ASKED_AFTER_MS = 5_000;
+
 function editorRestartTimeoutMs(): number {
   return waitFromEnv('GDHARNESS_EDITOR_RESTART_TIMEOUT_MS', 90_000);
 }
@@ -2950,6 +2954,15 @@ class GodotServer {
    */
   private closedHere: { readonly editorPid: number; readonly at: string } | null = null;
 
+  /** The calls being answered, by a number of their own, which the lifecycle log's ended line names. */
+  private readonly inFlight = new Map<number, CallInFlight>();
+  private callsTaken = 0;
+  /** The client the lifecycle log last named, so a line is written only when it changes. */
+  private clientNoted: string | null = null;
+  /** The command line of the process that started this one, once asked, for the ended line. */
+  private parentCommand: string | null = null;
+  private endNoted = false;
+
   /**
    * The project this server was set up for, from the config `setup` wrote, or null.
    *
@@ -3003,6 +3016,7 @@ class GodotServer {
   // -------------------------------------------------------------------------------------------
 
   async run(): Promise<void> {
+    this.noteTheStart();
     const located = await this.locator.find();
     if (!located.ok) {
       console.error(
@@ -3202,6 +3216,7 @@ class GodotServer {
       console.error(
         `[SERVER] pid ${successor} now serves ${this.ownProject}; this server is finished and is stopping.`,
       );
+      this.noteTheEnd('superseded', { successor });
       void this.handleShutdown(`superseded by ${successor}`, 0);
     }, SUCCESSOR_CHECK_MS);
     // Never a reason on its own for the process to stay up.
@@ -3300,10 +3315,81 @@ class GodotServer {
     await this.stdio?.close();
   }
 
+  /**
+   * The lifecycle log's started line, and the replaced line when a live server of the same project
+   * holds its announcement. The parent's command line follows on a line of its own a few seconds
+   * in: reading it costs a query of the process table, a PowerShell on Windows, and a server
+   * started and ended within seconds, as a test suite starts hundreds, then costs none.
+   */
+  private noteTheStart(): void {
+    const cwd = process.cwd();
+    const mcpJson = join(cwd, '.mcp.json');
+    const announced = this.ownProject === null ? null : readAnnouncement(announcementPath(this.ownProject));
+    const predecessor =
+      announced !== null && announced.pid !== process.pid && alive(announced.pid) ? announced.pid : null;
+    writeLifecycle('started', {
+      argv: process.argv.slice(1),
+      cwd,
+      project: this.ownProject,
+      mcpJson: existsSync(mcpJson) ? mcpJson : null,
+    });
+    if (predecessor !== null) {
+      writeLifecycle('replaced', { project: this.ownProject, predecessor });
+    }
+    const ask = setTimeout(() => {
+      void processTree().then((tree) => {
+        this.parentCommand = tree?.get(process.ppid)?.command ?? null;
+        writeLifecycle('parent', {
+          command: this.parentCommand,
+          ...(tree === undefined ? { why: whyTheProcessTreeFailed() } : {}),
+        });
+      });
+    }, PARENT_ASKED_AFTER_MS);
+    ask.unref();
+  }
+
+  /** The lifecycle log's ended line, written once, by whichever way out is taken first. */
+  private noteTheEnd(cause: string, more: Record<string, unknown> = {}): void {
+    if (this.endNoted) {
+      return;
+    }
+    this.endNoted = true;
+    writeLifecycle('ended', {
+      cause,
+      project: this.ownProject,
+      ...(this.parentCommand === null ? {} : { parentCommand: this.parentCommand }),
+      ...(this.clientNoted === null ? {} : { client: this.clientNoted }),
+      inFlight: callsInFlight(this.inFlight.values()),
+      ...more,
+    });
+  }
+
+  /** The lifecycle log's client line, when a request names a client other than the last named. */
+  private noteTheClient(client: { readonly name: string; readonly version: string } | undefined): void {
+    if (client === undefined) {
+      return;
+    }
+    const said = `${client.name} ${client.version}`;
+    if (said === this.clientNoted) {
+      return;
+    }
+    this.clientNoted = said;
+    writeLifecycle('client', { client: { name: client.name, version: client.version } });
+  }
+
   private setupShutdownHandlers(): void {
     const requestShutdown = (source: string, exitCode?: number): void => {
       void this.handleShutdown(source, exitCode);
     };
+    // Written down before the process goes, which Node's own report of an uncaught error does not
+    // do anywhere the next session can read. Then the same end Node gives it.
+    process.on('uncaughtException', (error: unknown, origin: string) => {
+      this.noteTheEnd(origin === 'unhandledRejection' ? 'unhandledRejection' : 'uncaughtException', {
+        error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+      });
+      console.error(error);
+      process.exit(1);
+    });
     process.once('SIGINT', () => {
       requestShutdown('SIGINT', 0);
     });
@@ -3316,7 +3402,8 @@ class GodotServer {
     process.once('beforeExit', (code: number) => {
       requestShutdown(`beforeExit:${code}`);
     });
-    process.once('exit', () => {
+    process.once('exit', (code: number) => {
+      this.noteTheEnd(`exit:${code}`);
       this.forceCleanupOnExit();
     });
   }
@@ -3326,6 +3413,7 @@ class GodotServer {
       return;
     }
     this.shutdownInitiated = true;
+    this.noteTheEnd(source);
     this.logDebug(`Shutting down server via ${source}`);
     try {
       await this.cleanup();
@@ -3398,9 +3486,28 @@ class GodotServer {
   }
 
   private setupToolHandlers(protocol: ProtocolServer): void {
-    protocol.setRequestHandler('tools/list', () => ({ tools: this.tools }));
+    // From the 2026 envelope every request carries, which the SDK lifts out of _meta under its own
+    // keys, and from initialize on a 2025 connection.
+    const clientOf = (envelope: object | undefined): { name: string; version: string } | undefined => {
+      const named = (envelope as Record<string, unknown> | undefined)?.['io.modelcontextprotocol/clientInfo'];
+      if (typeof named === 'object' && named !== null) {
+        const { name, version } = named as Record<string, unknown>;
+        if (typeof name === 'string' && typeof version === 'string') {
+          return { name, version };
+        }
+      }
+      // Deprecated for the 2026 era, where the envelope above answers; on a 2025 connection, which
+      // has no envelope, the SDK keeps this as the one place initialize's client is kept.
+      // oxlint-disable-next-line typescript/no-deprecated
+      return protocol.getClientVersion();
+    };
+    protocol.setRequestHandler('tools/list', (_request, ctx) => {
+      this.noteTheClient(clientOf(ctx.mcpReq.envelope));
+      return { tools: this.tools };
+    });
     protocol.setRequestHandler('tools/call', async (request, ctx) => {
       this.logDebug(`Handling tool request: ${request.params.name}`);
+      this.noteTheClient(clientOf(ctx.mcpReq.envelope));
       const spec = toolSpec(request.params.name);
       if (!spec) {
         throw new ProtocolError(
@@ -3440,12 +3547,18 @@ class GodotServer {
                   this.logDebug(`Progress for ${spec.name} was not sent: ${errorMessage(error)}`);
                 });
             };
-      const answer = await withCallSignal(
-        ctx.mcpReq.signal,
-        () => this.answered(spec.name, checked.op ?? '', args),
-        progress,
-      );
-      return this.withFeedbackNotice(this.withUpdateNotice(answer));
+      const call = this.callsTaken++;
+      this.inFlight.set(call, { tool: spec.name, op: checked.op ?? '', startedAt: Date.now() });
+      try {
+        const answer = await withCallSignal(
+          ctx.mcpReq.signal,
+          () => this.answered(spec.name, checked.op ?? '', args),
+          progress,
+        );
+        return this.withFeedbackNotice(this.withUpdateNotice(answer));
+      } finally {
+        this.inFlight.delete(call);
+      }
     });
   }
 
@@ -6760,6 +6873,7 @@ class GodotServer {
           behind: game.protocol > RUNTIME_PROTOCOL ? 'server' : 'addon',
         })),
       },
+      server: { pid: process.pid, version: SERVER_VERSION, lifecycleLog: lifecycleLogPath() },
     });
   }
 
