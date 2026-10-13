@@ -11,7 +11,7 @@
  * started.
  */
 
-import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import {
   bodyCallsSuper,
@@ -24,6 +24,7 @@ import {
 } from './gdscript-source.js';
 import { type DebuggerMessage, DebuggerStream, framedCommand, type GodotValue } from './godot-variant.js';
 import { parseProjectGodot } from './resources.js';
+import { writeWhole } from './whole-file.js';
 
 /** One function's totals, keyed by the signature the engine compiled into it. */
 interface FunctionTotals {
@@ -66,11 +67,13 @@ export type ProfileFile =
   | { readonly connected: false; readonly listeningSince: number }
   | (ProfileTotals & { readonly connected: true });
 
-/** Writes [param file] whole or not at all, so a reader never meets half of one. */
-export function writeProfileFile(path: string, file: ProfileFile): void {
-  const partial = `${path}.${process.pid}.partial`;
-  writeFileSync(partial, JSON.stringify(file), 'utf8');
-  renameSync(partial, path);
+/**
+ * Writes [param file] whole, and answers whether it did. The writer is the keeper and the server
+ * reads the file each time a profile is asked for, so it answers rather than throws: a throw ends
+ * the keeper, and the file is left saying the game never connected while the game runs on unsummed.
+ */
+export function writeProfileFile(path: string, file: ProfileFile): boolean {
+  return writeWhole(path, JSON.stringify(file));
 }
 
 /** The profile at [param path], or null where there is none or it cannot be read. */
