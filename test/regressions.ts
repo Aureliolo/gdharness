@@ -6669,7 +6669,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.match(
       await call('editor_output', { op: 'editor', cpu: true }),
-      /editor takes: severity, contains, limit, before/,
+      /editor takes: projectPath, severity, contains, limit, before/,
       'and the refusal says what the editor op does take',
     );
     assert.match(
@@ -9246,6 +9246,61 @@ async function testAnEditorStartedByAnEditorSaysSo(): Promise<void> {
       await server.stop();
       sweep(project);
     }
+  }
+}
+
+/**
+ * editor_output takes the project it is meant to read and refuses one that is not the run's.
+ *
+ * Two probe sessions sent projectPath here as they do to every runtime tool, and were refused for
+ * an argument the tool did not declare. It picks nothing, since the server holds one run, so it is a
+ * check: the run's own project answers, and another is refused naming the run's, rather than handing
+ * back one game's output to a caller who believes it is another's. The engine is a stand-in that
+ * exits at once, which still leaves a run, ended, with the project it was started for.
+ */
+async function testEditorOutputChecksTheProjectItIsGiven(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-output-project-'));
+  const project = join(root, 'ours');
+  const other = join(root, 'theirs');
+  for (const directory of [project, other]) {
+    mkdirSync(directory);
+    writeFileSync(
+      join(directory, 'project.godot'),
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(directory, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  }
+  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath, GDHARNESS_PROJECT: project } });
+  const output = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name: 'editor_output', arguments: args });
+  try {
+    await server.initialize('regression-test');
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { op: 'start', projectPath: project, headless: true, runtimeWaitMs: 500 },
+      },
+      60_000,
+    );
+    assert.notEqual(get(started.result, 'isError'), true, `the fixture needs a run: ${textOf(started)}`);
+
+    const unnamed = await output({});
+    assert.notEqual(get(unnamed.result, 'isError'), true, `the run answers: ${textOf(unnamed)}`);
+    const own = await output({ projectPath: project });
+    assert.notEqual(get(own.result, 'isError'), true, `and answers to its own project: ${textOf(own)}`);
+    assert.equal(get(parseTextContent(own), 'project'), project, textOf(own) ?? '');
+
+    const refused = textOf(await output({ projectPath: other })) ?? '';
+    assert.ok(
+      refused.startsWith(
+        `editor_output reads what this server holds, which is of ${project}, and this call names ${other}.`,
+      ),
+      `another project is refused, naming the run's: ${refused}`,
+    );
+  } finally {
+    await server.stop();
+    sweep(root);
   }
 }
 
@@ -16543,8 +16598,8 @@ async function testThePowerShellHelperGoesWithItsProcess(): Promise<void> {
 function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
   const without = callsWithoutProjectPath();
   assert.ok(
-    without.includes('editor_status') && without.includes('editor_output'),
-    `the two that started this should be in the list: ${without.join(', ')}`,
+    without.includes('editor_status'),
+    `the one that started this is in the list: ${without.join(', ')}`,
   );
   assert.ok(
     without.includes('editor_launch restart'),
@@ -16556,6 +16611,9 @@ function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
     !without.includes('editor_run stop') && !without.includes('editor_run wait'),
     `and not the stop or the wait, which take one: ${without.join(', ')}`,
   );
+  // Nor editor_output, which reads the one run this server holds and takes the project as a check
+  // on it, since sessions sent it there as they do to every runtime tool beside it.
+  assert.ok(!without.includes('editor_output'), `nor editor_output: ${without.join(', ')}`);
   // The whole set, walked from every op's own arguments rather than from the function under test:
   // a call takes projectPath when its op does, and a tool without ops when the tool does.
   const walked: string[] = [];
@@ -36258,6 +36316,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheStaleHalfIsNamedCorrectly,
   testALaunchedEditorsConsoleIsReadBeforeItConnects,
   testACallWaitsForTheEditorThisServerOpened,
+  testEditorOutputChecksTheProjectItIsGiven,
   testAnEditorStartedByAnEditorSaysSo,
   testStalenessIsTheEditorCodeNotTheVersion,
   testAnEditorOnTheShippedCodeIsNotCalledStale,

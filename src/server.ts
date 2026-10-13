@@ -9757,7 +9757,12 @@ class GodotServer {
         ['Ask again in a moment; editor_status shows greeting until it has'],
       );
     }
-    const projectPath = status.projectPath ?? this.ownProject ?? undefined;
+    const projectPath =
+      status.projectPath ?? this.launchedEditor?.projectPath ?? this.ownProject ?? undefined;
+    const elsewhere = this.anotherProjectNamed(args, projectPath);
+    if (elsewhere !== null) {
+      return elsewhere;
+    }
     if (projectPath === undefined || (!greeted && launched === null)) {
       return this.createErrorResponse('No editor is connected, so there is no console to read.', [
         'editor_status says whether one is connected and whether it may yet be',
@@ -9824,6 +9829,33 @@ class GodotServer {
     });
   }
 
+  /**
+   * editor_output's refusal for a projectPath that is not the project of what it would read, or
+   * null. The output read is the one run or editor this server holds, so the argument picks
+   * nothing; it is taken because every runtime tool beside this one takes it, and callers sent it
+   * here too, and a caller naming one project while the run is another's is reading output it
+   * would attribute to the wrong game.
+   */
+  private anotherProjectNamed(
+    args: OperationParams,
+    ofWhatIsRead: string | null | undefined,
+  ): ToolResponse | null {
+    const named = readNonEmptyString(args, 'projectPath');
+    if (named === undefined || ofWhatIsRead === null || ofWhatIsRead === undefined || ofWhatIsRead === '') {
+      return null;
+    }
+    if (isSameDirectory(named, ofWhatIsRead)) {
+      return null;
+    }
+    return this.createErrorResponse(
+      `editor_output reads what this server holds, which is of ${ofWhatIsRead}, and this call names ${named}.`,
+      [
+        "Another project's run is read through that project's own gdharness server",
+        'editor_status names every game running on the machine under runtimes',
+      ],
+    );
+  }
+
   private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
     if (readString(args, 'op') === 'editor') {
       return this.handleEditorConsole(args);
@@ -9832,6 +9864,13 @@ class GodotServer {
     const run = await this.currentRun();
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
+    }
+    const elsewhere = this.anotherProjectNamed(
+      args,
+      run.projectPath ?? this.godotBridge.getStatus().projectPath,
+    );
+    if (elsewhere !== null) {
+      return elsewhere;
     }
     await this.tieThePlayedGame(run);
     this.drainEditorOutput(run);
