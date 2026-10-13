@@ -29,6 +29,22 @@ export interface KeeperListening {
 }
 
 /**
+ * What [param end] did, or why it could not, which the asking server reads as a keeper it could not
+ * reach and ends the run by its pid instead. Caught here because a throw from inside the listener
+ * ends the keeper, and the game it holds would run on held by nobody.
+ */
+function endedOrWhyNot(end: () => KeeperAnswer): string {
+  try {
+    return end();
+  } catch (error) {
+    return `could not end it: ${error instanceof Error ? error.message : String(error)}`.replaceAll(
+      '\n',
+      ' ',
+    );
+  }
+}
+
+/**
  * Listens for a stop, answering it with what [param end] did. Null when it cannot listen, which
  * leaves a stop to the check it makes without a keeper.
  */
@@ -47,7 +63,7 @@ export async function listenForAStop(end: () => KeeperAnswer): Promise<KeeperLis
       socket.on('data', (chunk: string) => {
         asked += chunk;
         if (asked.includes('\n')) {
-          socket.end(asked.startsWith('stop\n') ? `${end()}\n` : 'unknown\n');
+          socket.end(asked.startsWith('stop\n') ? `${endedOrWhyNot(end)}\n` : 'unknown\n');
         }
       });
     });

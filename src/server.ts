@@ -9186,6 +9186,7 @@ class GodotServer {
       frames,
       errors,
       warnings,
+      arguments: cmdArgs,
       argsNote: engineFlagsNote(userArgs),
       ...scanWaitAnswer(scanned),
       savesNote: asked.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,

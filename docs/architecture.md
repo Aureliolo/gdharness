@@ -536,9 +536,15 @@ would only trade a killed run for a wedged one.
 
 The keeper writes the note once the game is up and its exit into the note when it ends, since it
 is the one process that can wait on the game; the server that started the run and any server that
-picks it up read the exit from there alike. A process still there is reported as running, with
-everything printed while nobody was reading; one that is gone is answered with its output and the
-code the keeper wrote, or with `endedUnwatched` when the keeper went first and nothing wrote one,
+picks it up read the exit from there alike. Every note, and a profiled run's profile, is written
+to a file of its own and renamed over the old one, because other processes read it while it is
+written: rewritten in place, a note is empty between the truncate and the write, and a server
+reading it then finds no note at all. Windows refuses a rename over a file another process has
+open, so the write waits that out for up to a second, and a write that still fails is reported to
+the caller rather than thrown, since a throw inside the keeper ends the keeper. A process still
+there is reported as running, with everything printed while nobody was reading; one that is gone
+is answered with its output and the code the keeper wrote, or with `endedUnwatched` when the keeper
+went first and nothing wrote one,
 because a guessed zero reads as a run that finished its work. `editor_run stop` asks the keeper to
 end it, reads the exit the keeper writes for it, and takes the note away. The keeper listens on a
 named pipe, or a socket in a directory only its user can enter, whose address is in the note, so a
