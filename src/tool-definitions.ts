@@ -1166,16 +1166,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       "The run: starting the project, stopping it, or booting it once to see whether it comes up clean. start keeps it running and collecting output until it quits or is stopped, windowed where there is a display and headless where there is not, unless headless says otherwise; only runtime_capture needs the window. A run that quits on its own is kept, so a scene that prints an answer and quits is start, then editor_output until running is false. What runs is a scene: a SceneTree script is not an entry point here, so put the script on the root of a scene of its own and name that in scene. args hands the game its own flags, the ones it reads with OS.get_cmdline_user_args(), and a run carrying any is started by this server rather than by the editor. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way. start and check both wait first for a scan the open editor is running and for the class cache it writes just after, since a game booted in between resolves no global class, as does every other engine this server starts on the project; waitedForEditorScanMs says how long, and scanNote says when a scan ran past thirty seconds and the game started during it. A start waits for the game to become something the runtime_* tools can talk to and says which it is under runtime: listening with the port it took, or why not, so the first call after a start does not have to be made twice. When it is not listening, mayYetAnnounce says whether that is final: false is a runtime that is not coming, true is a game still on its way up, which editor_status will see and runtimeWaitMs waits longer for, and the note then says what a runtime_* call naming no projectPath meets until it announces. A start this server made also answers with transcript, the file both the run's streams are written to, so a watch on it can be armed off the start rather than off a second call.",
     parameters: {
-      // start and check alone, because they are the two that need telling which project. The
-      // others are about the run already going, which this server is holding and can name for
-      // itself: asking a caller to repeat it is asking for something that cannot disagree and
-      // must therefore be right, and taking it while ignoring it is the silent default this
-      // schema exists to refuse.
+      // start and check need telling which project. The ops about the run already going take it
+      // too, because a call copied from the start carries it, and they check it rather than ignore
+      // it: the one thing it can say is which project's run is meant.
       projectPath: {
         ...PROJECT_PATH,
-        ops: ['start', 'check', 'stop', 'wait'],
+        ops: ['start', 'check', 'stop', 'wait', 'profile'],
         description:
-          'Absolute path to the project directory, the one holding project.godot. stop, wait: optional, the project whose run is meant; a run of another project is refused rather than touched.',
+          'Absolute path to the project directory, the one holding project.godot. stop, wait, profile: optional, the project whose run is meant; a run of another project is refused rather than touched.',
       },
       scene: {
         type: 'string',
