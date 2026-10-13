@@ -1486,6 +1486,36 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
   const written = fileText(project, 'theme.tres');
   assert.match(written, /Button\/colors\/font_color = Color\(1, 0, 0, 1\)/);
   assert.match(written, /Button\/font_sizes\/font_size = 21/);
+
+  // Read back in the form modify takes: what one theme holds, written whole into another, reads the
+  // same, which is the round trip a caller copying a look from one resource to the next depends on.
+  const read = await call('resource_edit', { ...theme, op: 'read' });
+  assert.equal(get(read, 'resourceType'), 'Theme', JSON.stringify(read));
+  const held = get(read, 'properties') as Record<string, unknown>;
+  assert.deepEqual(
+    held,
+    {
+      'Button/colors/font_color': { _type: 'Color', r: 1, g: 0, b: 0, a: 1 },
+      'Button/font_sizes/font_size': 21,
+    },
+    'the two items the ops above set, and nothing still at its default',
+  );
+  const copy = { projectPath: project, resourcePath: 'res://theme_copy.tres' };
+  await call('resource_edit', { ...copy, op: 'create', resourceType: 'Theme' });
+  await call('resource_edit', { ...copy, op: 'modify', properties: held });
+  assert.deepEqual(get(await call('resource_edit', { ...copy, op: 'read' }), 'properties'), held);
+  const everything = get(
+    await call('resource_edit', { ...theme, op: 'read', includeDefaults: true }),
+    'properties',
+  );
+  assert.ok(
+    'default_base_scale' in (everything as Record<string, unknown>) && !('default_base_scale' in held),
+    `includeDefaults adds what the file leaves at its default: ${JSON.stringify(everything)}`,
+  );
+  assert.match(
+    await refusal('resource_edit', { ...theme, op: 'read', properties: {} }),
+    /resource_edit read does not take properties/,
+  );
 }
 
 /**
@@ -1618,6 +1648,50 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
   assert.match(written, /states\/idle\/node = SubResource/, 'the state should be in the machine');
   assert.match(written, /states\/walk\/node = SubResource/);
   assert.match(written, /transitions = \[/, 'and the transition with it');
+
+  await call('scene_animation', {
+    ...states,
+    op: 'connect_states',
+    animTreePath: 'Tree',
+    fromState: 'walk',
+    toState: 'idle',
+    transitionType: 'at_end',
+    advanceCondition: 'stopped',
+  });
+
+  // Other cases add to this machine too, so each entry is found rather than the lists compared whole.
+  const machine = await call('scene_animation', { ...states, op: 'read_states', animTreePath: 'Tree' });
+  const named = (name: string) =>
+    asArray(get(machine, 'states'), 'states').find((state) => get(state, 'stateName') === name);
+  assert.deepEqual(
+    named('walk'),
+    { stateName: 'walk', type: 'AnimationNodeAnimation', animationName: 'step' },
+    JSON.stringify(machine),
+  );
+  assert.equal(
+    get(named('Start'), 'type'),
+    'AnimationNodeStartState',
+    "the machine's own states are listed too",
+  );
+  assert.deepEqual(
+    asArray(get(machine, 'transitions'), 'transitions').find((one) => get(one, 'from') === 'idle'),
+    { from: 'idle', to: 'walk', transitionType: 'immediate' },
+    JSON.stringify(machine),
+  );
+  assert.deepEqual(
+    asArray(get(machine, 'transitions'), 'transitions').find((one) => get(one, 'from') === 'walk'),
+    { from: 'walk', to: 'idle', transitionType: 'at_end', advanceCondition: 'stopped' },
+    JSON.stringify(machine),
+  );
+  assert.match(
+    await refusal('scene_animation', {
+      ...states,
+      op: 'read_states',
+      animTreePath: 'Tree',
+      stateMachinePath: 'idle',
+    }),
+    /AnimationNodeStateMachine not found/,
+  );
 }
 
 /**
@@ -1986,6 +2060,7 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
   assert.equal(get(made, 'methodFound'), true);
   const deferred = await call('scene_signal', { ...ends, op: 'connect', methodName: 'queue_free', flags: 1 });
   assert.equal(get(deferred, 'flags'), 3, 'and connecting it again with new flags gives it those');
+  assert.deepEqual(get(deferred, 'flagNames'), ['deferred', 'persist'], JSON.stringify(deferred));
   assert.match(
     fileText(project, 'signals.tscn'),
     /\[connection signal="pressed" from="Go" to="Sink" method="queue_free" flags=3\]/,
@@ -1995,7 +2070,13 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
   await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_frees' });
 
   const involving = await call('scene_signal', { ...scene, op: 'list', nodePath: 'Sink' });
-  assert.equal(asArray(get(involving, 'connections')).length, 1, 'a node is involved in what reaches it');
+  const reaching = asArray(get(involving, 'connections'));
+  assert.equal(reaching.length, 1, 'a node is involved in what reaches it');
+  assert.deepEqual(
+    get(reaching[0], 'flagNames'),
+    ['deferred', 'persist'],
+    'a list names the flags as a connect does',
+  );
   assert.match(
     await refusal('scene_signal', { ...scene, op: 'list', nodePath: 'Nobody' }),
     /Node not found: Nobody/,
@@ -2018,6 +2099,16 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
   });
   await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_free' });
   assert.doesNotMatch(fileText(project, 'signals.tscn'), /\[connection/, 'and a disconnect removes it');
+
+  // A bit Object.ConnectFlags does not name is still said, as its number, rather than dropped.
+  const unnamed = await call('scene_signal', {
+    ...ends,
+    op: 'connect',
+    methodName: 'queue_free',
+    flags: 1024,
+  });
+  assert.deepEqual(get(unnamed, 'flagNames'), ['persist', '1024'], JSON.stringify(unnamed));
+  await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_free' });
 }
 
 /**
@@ -2054,6 +2145,65 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
   const library = fileText(project, 'moves/library.tres');
   assert.match(library, /NodePath\("Sprite:position"\)/, `the track is in the library file: ${library}`);
   assert.match(library, /Vector2\(1, 2\), Vector2\(3, 4\)/, `each key a Vector2: ${library}`);
+
+  // A track reads back in the shape add_track takes, so one read off idle and added to walk reads
+  // the same there. A method track's one method is the track's, as add_track takes it.
+  await call('scene_animation', {
+    ...scene,
+    op: 'add_track',
+    animationName: 'moves/idle',
+    track: {
+      type: 'method',
+      nodePath: 'Sprite',
+      method: 'set_visible',
+      keyframes: [{ time: 0.25, args: [false] }],
+    },
+  });
+  const idle = await call('scene_animation', { ...scene, op: 'read', animationName: 'moves/idle' });
+  const tracks = asArray(get(idle, 'tracks'), 'tracks');
+  assert.deepEqual(
+    tracks,
+    [
+      {
+        type: 'property',
+        nodePath: 'Sprite',
+        property: 'position',
+        keyframes: [
+          { time: 0, value: { _type: 'Vector2', x: 1, y: 2 } },
+          { time: 0.5, value: { _type: 'Vector2', x: 3, y: 4 } },
+        ],
+      },
+      {
+        type: 'method',
+        nodePath: 'Sprite',
+        method: 'set_visible',
+        keyframes: [{ time: 0.25, args: [false] }],
+      },
+    ],
+    JSON.stringify(idle),
+  );
+  for (const each of tracks) {
+    await call('scene_animation', { ...scene, op: 'add_track', animationName: 'moves/walk', track: each });
+  }
+  const walk = await call('scene_animation', { ...scene, op: 'read', animationName: 'moves/walk' });
+  assert.deepEqual(get(walk, 'tracks'), tracks, 'and the tracks it read add to another animation unchanged');
+  assert.equal(get(walk, 'loopMode'), 'none', JSON.stringify(walk));
+  const listed = asArray(
+    get(await call('scene_animation', { ...scene, op: 'read' }), 'animations'),
+    'animations',
+  );
+  const walked = listed.find((one) => get(one, 'animationName') === 'moves/walk');
+  // The step is a 32-bit float in the engine, so 0.1 reads back as 0.100000001.
+  assert.ok(Math.abs(Number(get(walked, 'step')) - 0.1) < 1e-6, JSON.stringify(walked));
+  assert.deepEqual(
+    { ...(walked as object), step: 0.1 },
+    { animationName: 'moves/walk', length: 1, loopMode: 'none', step: 0.1, tracks: 2 },
+    `without an animationName the player's animations are listed: ${JSON.stringify(listed)}`,
+  );
+  assert.match(
+    await refusal('scene_animation', { ...scene, op: 'read', animationName: 'moves/run' }),
+    /has no animation moves\/run\. It has: .*moves\/walk/,
+  );
 
   assert.match(await refusal('scene_animation', track([{ value: [1, 2] }])), /keyframes\[0\] has no time/);
   assert.match(await refusal('scene_animation', track([], 'colour')), /Sprite2D has no property colour/);
@@ -2259,8 +2409,13 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
   await call('resource_edit', resource);
   assert.match(await refusal('resource_edit', resource), /res:\/\/once\.tres already exists/);
 
-  const tooled = { ...resource, resourcePath: 'res://tooled.tres', script: 'res://layers/tool_resource.gd' };
-  await call('resource_edit', tooled);
+  const tooled = { projectPath: project, resourcePath: 'res://tooled.tres' };
+  await call('resource_edit', { ...resource, ...tooled, script: 'res://layers/tool_resource.gd' });
+  assert.equal(
+    get(await call('resource_edit', { ...tooled, op: 'read' }), 'script'),
+    'res://layers/tool_resource.gd',
+    'a read names the script the resource carries',
+  );
   const kept = fileText(project, 'tooled.tres');
   assert.match(
     // With a property the file does keep, so the save the refusal undoes has changed something.

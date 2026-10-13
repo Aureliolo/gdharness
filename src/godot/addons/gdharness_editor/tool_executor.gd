@@ -104,12 +104,12 @@ func _init_tools() -> void:
 		# Resource tools
 		"create_resource": [_resource_tools, "create_resource"],
 		"modify_resource": [_resource_tools, "modify_resource"],
+		"read_resource": [_resource_tools, "read_resource"],
 		"create_shader": [_resource_tools, "create_shader"],
 		"create_tileset": [_resource_tools, "create_tileset"],
 		"set_tilemap_cells": [_resource_tools, "set_tilemap_cells"],
 		"set_theme_color": [_resource_tools, "set_theme_color"],
 		"set_theme_font_size": [_resource_tools, "set_theme_font_size"],
-		# Animation tools
 		"play_scene": [_play_tools, "play_scene"],
 		"restart_editor": [_play_tools, "restart_editor"],
 		"quit_editor": [_play_tools, "quit_editor"],
@@ -118,6 +118,9 @@ func _init_tools() -> void:
 		# The script profiler on a game the editor plays
 		"profile_start": [_profile_tools, "profile_start"],
 		"profile_read": [_profile_tools, "profile_read"],
+		# Animation tools
+		"read_animations": [_animation_tools, "read_animations"],
+		"read_animation_states": [_animation_tools, "read_animation_states"],
 		"create_animation": [_animation_tools, "create_animation"],
 		"add_animation_track": [_animation_tools, "add_animation_track"],
 		"add_animation_state": [_animation_tools, "add_animation_state"],
