@@ -786,8 +786,10 @@ func _serialize_node(node: Node, include_properties: bool) -> Dictionary:
 
 	if include_properties:
 		var properties: Dictionary = {}
+		# A script's own variables as well as what the node stores: a plain `var health` is not stored,
+		# so a tree read of a running game answered every engine property and none of the game's state.
 		for prop: Dictionary in node.get_property_list():
-			if prop["usage"] & PROPERTY_USAGE_STORAGE:
+			if prop["usage"] & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_SCRIPT_VARIABLE):
 				var property_name: String = prop["name"]
 				if not property_name.begins_with("_"):
 					properties[property_name] = _values.serialize(node.get(property_name))
