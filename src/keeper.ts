@@ -210,6 +210,13 @@ function profiledBy(path: string, projectPath: string): { observer: ProfileObser
   };
 }
 
+/**
+ * How long the keeper of an exited game waits for the game's debugger connection to close before it
+ * finishes: an exited process's socket closes at once, so this is only a game that left a child
+ * holding a copy of it.
+ */
+const DRAIN_MS = 2000;
+
 /** How long a start through the helper is given to name the process it started. */
 const DESKTOP_START_MS = 60_000;
 
@@ -361,16 +368,25 @@ async function keep(): Promise<void> {
   let listening: KeeperListening | null = null;
   // This process ends here, so nothing below runs for a game that has exited.
   child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-    if (run !== undefined) {
-      recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
+    const finish = (): void => {
+      profiled?.finish();
+      // After the profile, so a server told the run ended reads the profile it ended with.
+      if (run !== undefined) {
+        recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
+      }
+      debuggerPeer?.close();
+      listening?.close();
+      if (own !== null) {
+        rmSync(own, { recursive: true, force: true });
+      }
+      process.exit(0);
+    };
+    // The profile is finished from everything the game sent, which is read after its exit is told.
+    if (debuggerPeer === null) {
+      finish();
+    } else {
+      void debuggerPeer.drained(DRAIN_MS).then(finish);
     }
-    profiled?.finish();
-    debuggerPeer?.close();
-    listening?.close();
-    if (own !== null) {
-      rmSync(own, { recursive: true, force: true });
-    }
-    process.exit(0);
   });
   if (record !== null) {
     // Through what this process holds rather than through the pid: the game's own handle, or the

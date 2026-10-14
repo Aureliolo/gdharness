@@ -20,7 +20,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { createServer, type Server, type Socket } from 'node:net';
+import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -81,7 +81,7 @@ import {
   writeEditorLogNote,
 } from '../src/editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
-import { framesOf, shownValue } from '../src/game-debugger.js';
+import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
 import {
   callSitesOf,
@@ -12233,14 +12233,46 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
 }
 
 /**
- * A keeper answers a stop with what it did, and a keeper that cannot be reached says why.
+ * What an exiting game sent last is read before its keeper finishes with it.
  *
- * The stop asks the keeper before it asks the operating system anything, so what comes back decides
- * whether the proof that failed on a loaded Windows runner is needed at all. Each answer is taken
- * from a listener that did that thing, and the two ways of not being reached are real: an address
- * nothing listens on, and a peer that takes the question and says nothing. Outside Windows the
- * socket sits in a directory only this user can enter, since the runs directory can be shared.
+ * The process exit is told before the socket's last reads, and a profile finished on the exit
+ * alone was summed from twenty frames of a thirty-frame scene. The keeper waits for the connection
+ * to close, which comes after everything the game sent.
  */
+async function testAnExitedGamesLastMessagesAreRead(): Promise<void> {
+  const seen: string[] = [];
+  const peer = await GameDebugger.open(
+    [],
+    [
+      {
+        connected: () => undefined,
+        message: (received) => {
+          if ('message' in received) {
+            seen.push(received.message);
+          }
+        },
+      },
+    ],
+  );
+  try {
+    const game = createConnection({ host: '127.0.0.1', port: peer.port });
+    await new Promise<void>((resolve) => game.once('connect', resolve));
+    for (let frame = 0; frame < 50; frame += 1) {
+      game.write(framedCommand('servers:profile_frame', [frame]));
+    }
+    game.end();
+    // Asked straight after the game hung up, as the keeper asks when it is told the game exited.
+    await peer.drained(5000);
+    assert.equal(
+      seen.filter((name) => name === 'servers:profile_frame').length,
+      50,
+      `every frame sent before the game closed is read before the drain settles: ${seen.length}`,
+    );
+  } finally {
+    peer.close();
+  }
+}
+
 /**
  * A kept game's stack and values read as the debugger sends them. A stack dump is its size and then
  * three entries a frame, and a value is shown as text a caller can read: an object by the class the
@@ -12273,6 +12305,10 @@ function testAKeptGamesStackAndValuesRead(): void {
   assert.equal(shownValue(null), 'null');
 }
 
+/**
+ * A keeper hands a question to its game's debugger and answers with what it said; one without a
+ * debugger, or from before debuggers, says so rather than leaving the question unanswered.
+ */
 async function testTheKeeperAnswersItsDebuggersQuestions(): Promise<void> {
   // A keeper with a debugger hands it the question and sends back what it answers, whole.
   const asked: unknown[] = [];
@@ -12326,6 +12362,15 @@ async function testTheKeeperAnswersItsDebuggersQuestions(): Promise<void> {
   }
 }
 
+/**
+ * A keeper answers a stop with what it did, and a keeper that cannot be reached says why.
+ *
+ * The stop asks the keeper before it asks the operating system anything, so what comes back decides
+ * whether the proof that failed on a loaded Windows runner is needed at all. Each answer is taken
+ * from a listener that did that thing, and the two ways of not being reached are real: an address
+ * nothing listens on, and a peer that takes the question and says nothing. Outside Windows the
+ * socket sits in a directory only this user can enter, since the runs directory can be shared.
+ */
 async function testTheKeeperAnswersAStop(): Promise<void> {
   for (const answer of ['signalled', 'gone'] as const) {
     let asked = 0;
@@ -37224,6 +37269,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheKeeperAnswersAStop,
   testTheKeeperAnswersItsDebuggersQuestions,
   testAKeptGamesStackAndValuesRead,
+  testAnExitedGamesLastMessagesAreRead,
   testAStopGoesThroughTheKeeper,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
