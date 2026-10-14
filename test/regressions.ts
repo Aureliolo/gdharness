@@ -81,6 +81,7 @@ import {
   writeEditorLogNote,
 } from '../src/editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
+import { framesOf, shownValue } from '../src/game-debugger.js';
 import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
 import {
   callSitesOf,
@@ -104,7 +105,7 @@ import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/
 import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
-import { askTheKeeperToStop, listenForAStop } from '../src/keeper-channel.js';
+import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
 import {
   editorArguments,
   engineFlags,
@@ -929,7 +930,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   // Frames summed per function past the servers' section, and the engine's totals replacing them.
   const aggregate = new ProfileAggregate(1000, 3);
   const take = (message: string, data: unknown[]): void => {
-    aggregate.take({ message, data: data as never }, 2000);
+    aggregate.take({ message, thread: 1, data: data as never }, 2000);
   };
   take('servers:function_signature', ['res://w.gd::6::Work.square', 0]);
   take('servers:function_signature', ['res://w.gd::10::Work.busy', 1]);
@@ -990,7 +991,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   // function whose naming message never came is kept under its number.
   const tight = new ProfileAggregate(1000, 2);
   const into = (message: string, data: unknown[]): void => {
-    tight.take({ message, data: data as never }, 2000);
+    tight.take({ message, thread: 1, data: data as never }, 2000);
   };
   into('servers:function_signature', ['res://w.gd::6::Work.square', 0]);
   into('servers:profile_frame', frame(1));
@@ -7382,6 +7383,8 @@ async function testDebugToolsRefuseWithoutASession(): Promise<void> {
       ['debug_control', { op: 'continue' }],
       ['debug_control', { op: 'step_over' }],
       ['debug_control', { op: 'step_into' }],
+      ['debug_control', { op: 'step_out' }],
+      ['debug_control', { op: 'pause' }],
     ] as [string, Record<string, unknown>][]) {
       assert.match(
         await call(tool, args),
@@ -12238,13 +12241,98 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
  * nothing listens on, and a peer that takes the question and says nothing. Outside Windows the
  * socket sits in a directory only this user can enter, since the runs directory can be shared.
  */
+/**
+ * A kept game's stack and values read as the debugger sends them. A stack dump is its size and then
+ * three entries a frame, and a value is shown as text a caller can read: an object by the class the
+ * game named it with, a long list cut with how much more there was.
+ */
+function testAKeptGamesStackAndValuesRead(): void {
+  assert.deepEqual(framesOf([6, 'res://a.gd', 12, 'inner', 'res://b.gd', 3, '_ready']), [
+    { id: 0, name: 'inner', line: 12, script: 'res://a.gd' },
+    { id: 1, name: '_ready', line: 3, script: 'res://b.gd' },
+  ]);
+  assert.deepEqual(framesOf([0]), [], 'a game held where no script runs has no frames');
+  assert.equal(shownValue({ kind: 'Object', values: [26642220497] }, 'Node'), '<Node#26642220497>');
+  assert.equal(shownValue({ kind: 'Object', values: [7] }), '<Object#7>', 'an object with no class named');
+  assert.equal(shownValue({ kind: 'Vector2', values: [1, 2.5] }), 'Vector2(1, 2.5)');
+  assert.equal(
+    shownValue({
+      kind: 'dictionary',
+      entries: [
+        ['hp', 3],
+        ['name', 'Ada'],
+      ],
+    }),
+    '{hp: 3, name: Ada}',
+  );
+  assert.equal(
+    shownValue(Array.from({ length: 25 }, (_, at) => at)),
+    `[${Array.from({ length: 20 }, (_, at) => at).join(', ')}, and 5 more]`,
+    'a long list is cut, and says how much was left out',
+  );
+  assert.equal(shownValue(null), 'null');
+}
+
+async function testTheKeeperAnswersItsDebuggersQuestions(): Promise<void> {
+  // A keeper with a debugger hands it the question and sends back what it answers, whole.
+  const asked: unknown[] = [];
+  const debugged = await listenForTheServer(
+    () => 'gone',
+    (request) => {
+      asked.push(request);
+      return Promise.resolve({
+        paused: true,
+        stack: [{ id: 0, name: '_ready', line: 9, script: 'res://main.gd' }],
+      });
+    },
+  );
+  assert.ok(debugged !== null, 'the keeper listens');
+  try {
+    assert.deepEqual(await askTheKeepersDebugger(debugged.address, { op: 'pause' }, 5_000), {
+      paused: true,
+      stack: [{ id: 0, name: '_ready', line: 9, script: 'res://main.gd' }],
+    });
+    assert.deepEqual(asked, [{ op: 'pause' }], 'the question reached the debugger as it was asked');
+  } finally {
+    debugged.close();
+  }
+  // One whose run has no debugger says so, rather than leaving the question unanswered.
+  const without = await listenForTheServer(() => 'gone', null);
+  assert.ok(without !== null, 'the keeper listens');
+  try {
+    assert.deepEqual(await askTheKeepersDebugger(without.address, { op: 'stack' }, 5_000), {
+      refused: 'This run has no debugger.',
+    });
+  } finally {
+    without.close();
+  }
+  // A keeper from before debuggers answers every question but a stop with "unknown".
+  const older = createServer((socket) => {
+    socket.on('data', () => {
+      socket.end('unknown\n');
+    });
+  });
+  const address =
+    process.platform === 'win32'
+      ? `\\\\.\\pipe\\gdharness-old-keeper-${process.pid}`
+      : join(mkdtempSync(join(tmpdir(), 'gdharness-old-keeper-')), 'k.sock');
+  await new Promise<void>((resolve) => older.listen(address, resolve));
+  try {
+    assert.deepEqual(await askTheKeepersDebugger(address, { op: 'stack' }, 5_000), {
+      unreached: 'its keeper was started by a gdharness from before game debuggers, and has none',
+    });
+  } finally {
+    older.close();
+  }
+}
+
 async function testTheKeeperAnswersAStop(): Promise<void> {
   for (const answer of ['signalled', 'gone'] as const) {
     let asked = 0;
-    const listening = await listenForAStop(() => {
+    const listening = await listenForTheServer(() => {
       asked += 1;
       return answer;
-    });
+    }, null);
     assert.ok(listening !== null, 'the keeper listens');
     try {
       assert.equal(await askTheKeeperToStop(listening.address, 5_000), answer);
@@ -12262,10 +12350,10 @@ async function testTheKeeperAnswersAStop(): Promise<void> {
   // A stop that throws is answered with why, which the server reads as a keeper it could not reach
   // and ends the run by its pid. Thrown from inside the listener, it ended the keeper instead.
   let tries = 0;
-  const failing = await listenForAStop(() => {
+  const failing = await listenForTheServer(() => {
     tries += 1;
     throw new Error('the stop file\ncould not be written');
-  });
+  }, null);
   assert.ok(failing !== null, 'the keeper listens');
   try {
     for (const attempt of [1, 2]) {
@@ -12477,7 +12565,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     // answer cannot make a running game read as ended.
     const misled = await start(third, true);
     await replace(third);
-    const liar = await listenForAStop(() => 'gone');
+    const liar = await listenForTheServer(() => 'gone', null);
     assert.ok(liar !== null, 'the lying keeper listens');
     try {
       writeFileSync(
@@ -23113,6 +23201,191 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
 }
 
 /**
+ * A game this server started is debugged by the keeper holding it.
+ *
+ * Only a game the editor plays had a debugger, and a run given args, savesIn, env or silent cannot be
+ * played by the editor, so such a run could not be debugged at all: a game hung on its first frame,
+ * its main thread spinning in a script loop and its runtime served on that thread, could be asked
+ * nothing. The game here stops on a breakpoint set with no editor connected before it started, and
+ * then spins forever the way that game did, and is broken into, read, stepped and let go.
+ */
+async function testAGameThisServerStartedIsDebugged(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('kept game debugger regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-kept-debugger-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-kept-debugger-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Debugged"\nrun/main_scene="res://main.tscn"\n',
+  );
+  // Line 8 is the breakpoint, and lines 9 to 11 the loop the game never leaves.
+  writeFileSync(
+    join(project, 'main.gd'),
+    [
+      'extends Node',
+      '',
+      'var waited: int = 0',
+      '',
+      '',
+      'func _ready() -> void:',
+      '\tvar path: String = "res://never.tres"',
+      '\tprint("waiting for ", path)',
+      '\twhile true:',
+      '\t\twaited += 1',
+      '\t\tOS.delay_usec(1000)',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  const lineOf = (answer: unknown): unknown => get(answer, 'stack', 0, 'line');
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    const set = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 8,
+    });
+    assert.deepEqual(get(set.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [8] }], set.said);
+    assert.match(
+      text(get(set.answer, 'note')),
+      /No editor is connected, so the breakpoint is held here/,
+      set.said,
+    );
+
+    const start = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 1000,
+    });
+    started = true;
+    assert.equal(get(start.answer, 'started'), true, start.said);
+    let stopped = await call('debug_state', { op: 'stack' });
+    for (let waited = 0; waited < 15_000 && stopped.answer === null; waited += 250) {
+      await delay(250);
+      stopped = await call('debug_state', { op: 'stack' });
+    }
+    assert.deepEqual(
+      [
+        lineOf(stopped.answer),
+        get(stopped.answer, 'stack', 0, 'script'),
+        get(stopped.answer, 'held', 'reason'),
+      ],
+      [8, 'res://main.gd', 'Breakpoint'],
+      `the breakpoint set before the start stops the game on its line: ${stopped.said}`,
+    );
+    const scopes = await call('debug_state', { op: 'variables' });
+    const locals = asArray(get(asArray(get(scopes.answer, 'scopes'))[0], 'variables'));
+    assert.deepEqual(
+      locals.map((one) => [get(one, 'name'), get(one, 'value'), get(one, 'type')]),
+      [['path', 'res://never.tres', 'String']],
+      `the frame's locals with their values: ${scopes.said}`,
+    );
+
+    const removed = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'remove',
+      scriptPath: 'main.gd',
+      line: 8,
+    });
+    assert.match(text(get(removed.answer, 'runningGame')), /^Told to the running game/, removed.said);
+    const going = await call('debug_control', { op: 'continue' });
+    assert.equal(get(going.answer, 'continued'), true, going.said);
+    const running = await call('debug_state', { op: 'stack' });
+    assert.match(
+      running.said,
+      /The game is running, not held/,
+      `a game let go has no stack: ${running.said}`,
+    );
+
+    // The hang itself: a main thread that never returns from _ready, broken into where it spins.
+    const paused = await call('debug_control', { op: 'pause' });
+    assert.equal(get(paused.answer, 'paused'), true, paused.said);
+    assert.ok(
+      [9, 10, 11].includes(Number(lineOf(paused.answer))) &&
+        get(paused.answer, 'stack', 0, 'name') === '_ready',
+      `paused on the loop it spins in: ${paused.said}`,
+    );
+    const stepped = await call('debug_control', { op: 'step_over' });
+    assert.ok(
+      get(stepped.answer, 'heldAgain') === true && [9, 10, 11].includes(Number(lineOf(stepped.answer))),
+      `a step stops on the loop's next line: ${stepped.said}`,
+    );
+    const members = asArray(
+      get(asArray(get((await call('debug_state', { op: 'variables' })).answer, 'scopes'))[1], 'variables'),
+    );
+    const waited = members.find((one) => get(one, 'name') === 'waited');
+    assert.ok(
+      Number(get(waited, 'value')) > 0,
+      `the member the loop counts in has counted: ${JSON.stringify(members)}`,
+    );
+
+    // Set and removed while it runs, on a line the loop passes every millisecond: set, it stops the
+    // game there; removed, the game runs on and stops nowhere.
+    const live = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 10,
+    });
+    assert.match(text(get(live.answer, 'runningGame')), /^Told to the running game/, live.said);
+    await call('debug_control', { op: 'continue' });
+    let atLive = await call('debug_state', { op: 'stack' });
+    for (let tries = 0; tries < 20 && atLive.answer === null; tries += 1) {
+      await delay(250);
+      atLive = await call('debug_state', { op: 'stack' });
+    }
+    assert.deepEqual(
+      [lineOf(atLive.answer), get(atLive.answer, 'held', 'reason')],
+      [10, 'Breakpoint'],
+      `a breakpoint set while the game runs stops it: ${atLive.said}`,
+    );
+    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 10 });
+    await call('debug_control', { op: 'continue' });
+    await delay(500);
+    const free = await call('debug_state', { op: 'stack' });
+    assert.match(
+      free.said,
+      /The game is running, not held/,
+      `and removed, it lets the game run: ${free.said}`,
+    );
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * An operation that refuses answers with its refusal, once.
  *
  * It answered "set_import_options failed (exit code 1): " and then the sentence, and the same
@@ -32909,8 +33182,8 @@ function testEveryToolNamedInProseIsATool(): void {
   const families = [...new Set(TOOL_SPECS.map((spec) => spec.name.split('_')[0]))];
   // Words this project owns or reads that are shaped like a tool and are not one: the fields the
   // bridge sends the addon, the autoload the runtime installs, a section of project.godot, the
-  // gdUnit4 setting a test run obeys on script errors, and the signal and the message the engine's
-  // debugger speaks in, which the profiler reads. Named one
+  // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
+  // debugger speaks in, which the keeper's debugger reads. Named one
   // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
   // and called a tool or called vocabulary.
   const notTools = new Set([
@@ -32933,6 +33206,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'script_error',
     'debug_data',
     'debug_enter',
+    'debug_exit',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
@@ -36843,6 +37117,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheRendererIsChosenAndItsMemoryRead,
   testWhatTheGameTellsAScreenReaderIsRead,
   testARefusalIsSaidOnce,
+  testAGameThisServerStartedIsDebugged,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,
@@ -36939,6 +37214,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClickThatDoesNotProcessSaysWhy,
   testAHeadlessGameSaysItHasNoWindow,
   testTheKeeperAnswersAStop,
+  testTheKeeperAnswersItsDebuggersQuestions,
+  testAKeptGamesStackAndValuesRead,
   testAStopGoesThroughTheKeeper,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,

@@ -12,7 +12,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { createServer, type Server, type Socket } from 'node:net';
+import type { DebugObserver } from './game-debugger.js';
 import {
   bodyCallsSuper,
   type CallSite,
@@ -22,7 +22,7 @@ import {
   enclosingFunction,
   shapeOf,
 } from './gdscript-source.js';
-import { type DebuggerMessage, DebuggerStream, framedCommand, type GodotValue } from './godot-variant.js';
+import { type DebuggerMessage, framedCommand, type GodotValue, type SentValue } from './godot-variant.js';
 import { parseProjectGodot } from './resources.js';
 import { writeWhole } from './whole-file.js';
 
@@ -130,9 +130,11 @@ export const UNNAMED_PREFIX = '#';
  */
 export const PROFILE_FROM_START = 'GDHARNESS_PROFILE_FROM_START';
 
+const PROFILER_SWITCH = 'profiler:servers';
+
 /** The command that switches the profiler on, as the editor sends it: `[true, [count, native]]`. */
 export function profilerOn(frameFunctions: number): Uint8Array {
-  return framedCommand('profiler:servers', [true, [frameFunctions, false]]);
+  return framedCommand(PROFILER_SWITCH, [true, [frameFunctions, false]]);
 }
 
 /**
@@ -558,113 +560,47 @@ export function callersOf(
 }
 
 /**
- * A debugger peer that switches the profiler on as the game connects and sums what it sends.
- *
- * Bound to loopback on a port the system picks, and it takes one connection: the game's, which
- * dials the address it was started with once, at startup, before any script loads. Nothing is sent
- * but the switch, and the game is started with `--skip-breakpoints` and `--ignore-error-breaks`, so
- * it never stops to wait for a debugger that will not answer. A break that happens all the same is
- * answered with `continue`.
+ * The script profiler, read off the game's debugger connection: switched on as the game connects,
+ * and every frame it sends summed.
  */
-export class ProfileListener {
-  private connection: Socket | null = null;
+export class ProfileObserver implements DebugObserver {
   private aggregate: ProfileAggregate | null = null;
-  private readonly server: Server;
-  readonly port: number;
   private readonly changed: (totals: ProfileTotals) => void;
   private readonly frameFunctions: number;
 
-  private constructor(
-    server: Server,
-    port: number,
-    changed: (totals: ProfileTotals) => void,
-    frameFunctions: number,
-  ) {
-    this.server = server;
-    this.port = port;
+  /** Asking for at most [param frameFunctions] functions a frame; see `frameFunctionsFor`. */
+  constructor(changed: (totals: ProfileTotals) => void, frameFunctions: number) {
     this.changed = changed;
     this.frameFunctions = frameFunctions;
   }
 
-  /** A listener asking for at most [param frameFunctions] functions a frame; see `frameFunctionsFor`. */
-  static async open(
-    changed: (totals: ProfileTotals) => void,
-    frameFunctions: number,
-  ): Promise<ProfileListener> {
-    const server = createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', () => {
-        resolve();
-      });
-    });
-    const address = server.address();
-    if (address === null || typeof address === 'string') {
-      server.close();
-      throw new Error('the profiler listener has no port');
-    }
-    const listener = new ProfileListener(server, address.port, changed, frameFunctions);
-    server.on('connection', (socket) => {
-      listener.accept(socket);
-    });
-    return listener;
+  connected(send: (message: string, data: readonly SentValue[]) => void): void {
+    const aggregate = new ProfileAggregate(Date.now(), this.frameFunctions);
+    this.aggregate = aggregate;
+    send(PROFILER_SWITCH, [true, [this.frameFunctions, false]]);
+    this.changed(aggregate.snapshot());
   }
 
-  /** The engine arguments that point a game at this listener and keep it from stopping. */
-  get engineArguments(): readonly string[] {
-    return ['--remote-debug', `tcp://127.0.0.1:${this.port}`, '--skip-breakpoints', '--ignore-error-breaks'];
-  }
-
-  private accept(socket: Socket): void {
-    if (this.connection !== null) {
-      socket.destroy();
+  message(received: DebuggerMessage, send: (message: string, data: readonly SentValue[]) => void): void {
+    const aggregate = this.aggregate;
+    if (aggregate === null) {
       return;
     }
-    this.connection = socket;
-    // Only the one game ever dials it, and it dials once.
-    this.server.close();
-    const started = Date.now();
-    const aggregate = new ProfileAggregate(started, this.frameFunctions);
-    this.aggregate = aggregate;
-    const stream = new DebuggerStream();
-    socket.write(profilerOn(this.frameFunctions));
-    this.changed(aggregate.snapshot());
-    socket.on('data', (chunk: Buffer) => {
-      let messages: DebuggerMessage[];
-      try {
-        messages = stream.push(chunk);
-      } catch {
-        socket.destroy();
-        return;
-      }
-      let frames = false;
-      for (const received of messages) {
-        if ('message' in received && received.message === 'debug_enter') {
-          socket.write(framedCommand('continue', []));
-        }
-        // Read in order, so the totals sent before this are summed by now.
-        if ('message' in received && received.message === PROFILE_SENT) {
-          socket.write(framedCommand(PROFILE_RECEIVED, []));
-        }
-        aggregate.take(received, Date.now());
-        frames ||=
-          'message' in received &&
-          (received.message === 'servers:profile_frame' || received.message === 'servers:profile_total');
-      }
-      if (frames) {
-        this.changed(aggregate.snapshot());
-      }
-    });
-    socket.on('error', () => undefined);
+    // Read in order, so the totals sent before this are summed by now.
+    if ('message' in received && received.message === PROFILE_SENT) {
+      send(PROFILE_RECEIVED, []);
+    }
+    aggregate.take(received, Date.now());
+    if (
+      'message' in received &&
+      (received.message === 'servers:profile_frame' || received.message === 'servers:profile_total')
+    ) {
+      this.changed(aggregate.snapshot());
+    }
   }
 
   /** What has been summed so far, or null when the game never connected. */
   totals(): ProfileTotals | null {
     return this.aggregate?.snapshot() ?? null;
-  }
-
-  close(): void {
-    this.connection?.destroy();
-    this.server.close();
   }
 }
