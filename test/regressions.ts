@@ -12241,11 +12241,17 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
  */
 async function testAnExitedGamesLastMessagesAreRead(): Promise<void> {
   const seen: string[] = [];
+  let accepted: () => void = () => undefined;
+  const taken = new Promise<void>((resolve) => {
+    accepted = resolve;
+  });
   const peer = await GameDebugger.open(
     [],
     [
       {
-        connected: () => undefined,
+        connected: () => {
+          accepted();
+        },
         message: (received) => {
           if ('message' in received) {
             seen.push(received.message);
@@ -12256,7 +12262,9 @@ async function testAnExitedGamesLastMessagesAreRead(): Promise<void> {
   );
   try {
     const game = createConnection({ host: '127.0.0.1', port: peer.port });
-    await new Promise<void>((resolve) => game.once('connect', resolve));
+    // Accepted on the debugger's side, which the game's side can learn of first: a game that exits
+    // that early is one that never connected, and the drain rightly settles for it at once.
+    await taken;
     for (let frame = 0; frame < 50; frame += 1) {
       game.write(framedCommand('servers:profile_frame', [frame]));
     }
