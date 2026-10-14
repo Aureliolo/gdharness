@@ -574,7 +574,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       options: {
         type: 'object',
         description:
-          'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}.',
+          'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}. A dictionary option whose keys are numbers, a font\'s opentype_features or any option already holding number keys, takes them written as strings of digits, and opentype_features also takes an OpenType tag by its four-letter name: {"opentype_features": {"liga": 0}} turns ligatures off. Both are written as the numbers the engine reads.',
         additionalProperties: true,
       },
       reimport: {
@@ -1587,7 +1587,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       metrics: {
         effect: 'read',
         summary:
-          "frame time, memory, draw calls and the rest. frame_time is the mean wall time of a frame over the last frames_timed frames (up to 120, timed by the game itself, physics and the wait for the display included), frame_time_max the slowest of them, both in seconds and null before a frame has passed; vsync says whether a frame waits for the display, and max_fps is the game's frame-rate cap, 0 for none. fps, process_time_max and physics_time are the engine's monitors, which it sets once a second: the frames counted in the last second, and the slowest process and physics step in it, so they trail a change by up to a second and the last two are a worst case rather than the frame. The memory, object and render counts are read as asked. memory_static is what the engine allocated on the CPU side; render_video_mem_used, render_texture_mem_used and render_buffer_mem_used are what the renderer has on the GPU, in bytes, which memory_static does not count",
+          "frame time, memory, draw calls and the rest. frame_time is the mean wall time of a frame over the last frames_timed frames (up to 120, timed by the game itself, physics and the wait for the display included), frame_time_max the slowest of them, both in seconds and null before a frame has passed; vsync says whether a frame waits for the display, and max_fps is the game's frame-rate cap, 0 for none. fps, process_time_max and physics_time are the engine's monitors, which it sets once a second: the frames counted in the last second, and the slowest process and physics step in it, so they trail a change by up to a second and the last two are a worst case rather than the frame. The memory, object and render counts are read as asked. memory_static is what the engine allocated on the CPU side, in bytes; render_video_mem_used, render_texture_mem_used and render_buffer_mem_used are what the renderer has on the GPU, in bytes, which memory_static does not count",
         requires: [],
       },
       accessibility: {

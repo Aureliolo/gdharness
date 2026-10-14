@@ -23113,6 +23113,72 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
 }
 
 /**
+ * An operation that refuses answers with its refusal, once.
+ *
+ * It answered "set_import_options failed (exit code 1): " and then the sentence, and the same
+ * sentence again under engine_messages: the name is the operations script's own, which no caller
+ * uses, and the exit status read as a crash. The contrast is an engine error in the same call, which
+ * is not the refusal and stays under engine_messages.
+ */
+async function testARefusalIsSaidOnce(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('refusal regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-refusal-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Refusal"\n\n' +
+      '[autoload]\n\nBroken="*res://broken.gd"\n',
+  );
+  // An autoload that fails to load, so the engine reports an error of its own in the same call.
+  writeFileSync(join(project, 'broken.gd'), 'extends Node\n\nfunc _ready() -> void:\n\tthis is not code\n');
+  const server = new ServerProcess({ env: { GODOT_PATH: engine, GDHARNESS_PROJECT: project } });
+  try {
+    await server.initialize('regression-test');
+    const answered = await server.request(
+      'tools/call',
+      {
+        name: 'project_settings',
+        arguments: {
+          projectPath: project,
+          op: 'set',
+          setting: 'debug/file_logging/max_log_files',
+          value: 50.5,
+        },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const blocks = asArray(get(answered, 'result', 'content')).map((block) => text(get(block, 'text')));
+    const shown = JSON.stringify(blocks);
+    assert.equal(get(answered, 'result', 'isError'), true, shown);
+    assert.equal(
+      blocks[0],
+      'debug/file_logging/max_log_files is declared as int, and 50.5 (float) cannot be written as that without losing something.',
+      `the refusal is the answer: ${shown}`,
+    );
+    const messages = asArray(get(JSON.parse(blocks[1] ?? '{}'), 'engine_messages')).map((entry) =>
+      text(get(entry, 'text')),
+    );
+    assert.ok(
+      messages.some((message) => message.includes('broken.gd')),
+      `the engine's own error stays under engine_messages: ${shown}`,
+    );
+    assert.ok(
+      !messages.some((message) => message.includes('cannot be written as that')),
+      `and the refusal is not among them: ${shown}`,
+    );
+  } finally {
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * What a running game tells a screen reader is read back as a tree.
  *
  * The engine builds the tree only when something asks for it, and nothing on gdharness's desktop
@@ -36776,6 +36842,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAScreenshotHoldsTheGamesOwnWindows,
   testTheRendererIsChosenAndItsMemoryRead,
   testWhatTheGameTellsAScreenReaderIsRead,
+  testARefusalIsSaidOnce,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,
