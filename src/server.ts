@@ -4345,7 +4345,7 @@ class GodotServer {
                 }),
           note: editor
             ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
-            : 'No editor is connected, so the breakpoint is held here: every game this server starts is handed the whole set as it starts, an editor that connects is sent it before its first play, and it is kept in the project for the server after a reconnect.',
+            : 'No editor is connected, so the set under held is kept here: every game this server starts is handed it as it starts, an editor that connects is sent it before its first play, and it is kept in the project for the server after a reconnect.',
           ...(editor ? this.breakpointsAtRisk() : {}),
         });
       }
@@ -7923,6 +7923,8 @@ class GodotServer {
     // simply that nothing here holds it: the refusals for those two states both said a start would
     // end it, and a start measured against each left it running.
     const stranded = wereHereFirst.filter((one) => one.pid !== ended?.pid && alive(one.pid));
+    // The set the game was started with: nothing has changed it since the launch read it.
+    const handed = this.dapHoldingBreakpointsOf(project.value.path).breakpointsHeld();
     const alsoRunning = leftRunningNote(stranded);
     return this.jsonTextResponse({
       started: true,
@@ -7936,6 +7938,12 @@ class GodotServer {
       // name: a tail on a path that does not exist reports nothing, which is exactly what a run
       // that has not printed yet looks like.
       transcript: started.transcript,
+      // What the game was handed to stop on, as a played run's answer says, so a caller learns here
+      // that the game may already be held rather than from the next debug_state.
+      breakpoints:
+        started.keeper === undefined || handed.length === 0
+          ? undefined
+          : this.breakpointsAsProjectSpells(project.value.path, handed),
       profile: profileOnStart(profiled, 'gdharness', runtimeAddonRegistered(project.value.path)),
       refreshedClasses: refreshed.value,
       ...scanWaitAnswer(scanned),
@@ -7953,7 +7961,7 @@ class GodotServer {
         runtimeWaitMs,
         given.value.length > 0,
       ),
-      message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}${endedForThis}${alsoRunning}`,
+      message: `Use editor_output for what it prints and editor_run stop to end it.${started.keeper !== undefined && handed.length > 0 ? ' It stops at the lines under breakpoints, and debug_state stack reads where it is held.' : ''}${spawnedInstead}${endedForThis}${alsoRunning}`,
     });
   }
 

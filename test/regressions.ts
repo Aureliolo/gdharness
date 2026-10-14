@@ -23271,7 +23271,7 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
     assert.deepEqual(get(set.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [8] }], set.said);
     assert.match(
       text(get(set.answer, 'note')),
-      /No editor is connected, so the breakpoint is held here/,
+      /No editor is connected, so the set under held is kept here/,
       set.said,
     );
 
@@ -23283,6 +23283,11 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
     });
     started = true;
     assert.equal(get(start.answer, 'started'), true, start.said);
+    assert.deepEqual(
+      get(start.answer, 'breakpoints'),
+      [{ scriptPath: 'res://main.gd', lines: [8] }],
+      `the start says what the game was handed to stop on: ${start.said}`,
+    );
     let stopped = await call('debug_state', { op: 'stack' });
     for (let waited = 0; waited < 15_000 && stopped.answer === null; waited += 250) {
       await delay(250);
@@ -23324,6 +23329,8 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
     // The hang itself: a main thread that never returns from _ready, broken into where it spins.
     const paused = await call('debug_control', { op: 'pause' });
     assert.equal(get(paused.answer, 'paused'), true, paused.said);
+    // The engine reports the stop after its step as a breakpoint, the one just removed.
+    assert.equal(get(paused.answer, 'held', 'reason'), 'Paused', paused.said);
     assert.ok(
       [9, 10, 11].includes(Number(lineOf(paused.answer))) &&
         get(paused.answer, 'stack', 0, 'name') === '_ready',
@@ -23334,6 +23341,7 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       get(stepped.answer, 'heldAgain') === true && [9, 10, 11].includes(Number(lineOf(stepped.answer))),
       `a step stops on the loop's next line: ${stepped.said}`,
     );
+    assert.equal(get(stepped.answer, 'held', 'reason'), 'Stepped', stepped.said);
     const members = asArray(
       get(asArray(get((await call('debug_state', { op: 'variables' })).answer, 'scopes'))[1], 'variables'),
     );

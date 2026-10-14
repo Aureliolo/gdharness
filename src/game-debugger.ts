@@ -501,8 +501,19 @@ export class GameDebugger {
         };
       }
     }
+    this.stoppedBy('Paused');
     const frames = await this.stack();
     return { paused: true, held: this.heldState(), stack: frames ?? [] };
+  }
+
+  /**
+   * Names what stopped the game when it was this debugger: the engine reports a stop after a step as
+   * `Breakpoint`, which read after a pause as a breakpoint the caller had just removed.
+   */
+  private stoppedBy(cause: 'Paused' | 'Stepped'): void {
+    if (this.held !== null) {
+      this.held = { ...this.held, reason: cause };
+    }
   }
 
   private async resume(how: 'continue' | 'next' | 'step' | 'out'): Promise<DebugAnswer> {
@@ -532,9 +543,10 @@ export class GameDebugger {
       return {
         stepped: true,
         heldAgain: false,
-        note: `The game had not stopped again ${STEP_MS / 1000}s after the step: the step is still running, or it went on without reaching another line. debug_state stack answers once it stops.`,
+        note: `The game had not stopped again ${STEP_MS / 1000}s after the step: the step is still running, as one out of a function that never returns does, or it went on without reaching another line. debug_state stack answers once it stops, and debug_control pause stops it wherever it is.`,
       };
     }
+    this.stoppedBy('Stepped');
     return { stepped: true, heldAgain: true, held: this.heldState(), stack: (await this.stack()) ?? [] };
   }
 
