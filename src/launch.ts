@@ -48,7 +48,8 @@ export function resolveHeadless(requested: unknown, host: LaunchHost): boolean {
 }
 
 export interface RunOptions {
-  readonly projectPath: string;
+  /** The project to run, or null for an exported build, which carries its own pack. */
+  readonly projectPath: string | null;
   readonly headless: boolean;
   /** The scene as the project names it, `scenes/main.tscn`, or null for the main scene. */
   readonly scene: string | null;
@@ -201,9 +202,10 @@ export function engineFlagsAmongGameArgs(args: readonly string[]): string[] {
  * rather than left to be remembered.
  */
 export function runArguments(options: RunOptions): string[] {
-  const args = options.headless
-    ? ['--headless', '--path', options.projectPath]
-    : ['--path', options.projectPath];
+  const args = [
+    ...(options.headless ? ['--headless'] : []),
+    ...(options.projectPath === null ? [] : ['--path', options.projectPath]),
+  ];
   // The Dummy driver rather than a muted bus: every stream plays and every position advances, so
   // what the game is playing can still be asked, and nothing the game reads about its buses moves.
   // A headless run has it already.
