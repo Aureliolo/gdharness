@@ -23,6 +23,9 @@ const START_MS: int = 15000
 ## Deep enough for any interface a game builds, and inside the hundred levels ConvertTo-Json stops
 ## at, which are two to a level of the tree.
 const MOST_LEVELS: int = 40
+## Where an element holds its node's instance id between matching and placing, removed before the
+## answer goes.
+const NODE_ID: String = "_node_instance"
 
 ## The client, as PowerShell, with $Handles, $Out, $SettleMs, $EmptyMs and $MostLevels set before it. Each
 ## element answers what UI Automation names its role, its name, its value where it has one, its
@@ -172,10 +175,25 @@ func _init(host: Node) -> void:
 ## The game's windows as a screen reader is told them, each a tree of elements.
 func get_accessibility(_params: Dictionary) -> Dictionary:
 	if DisplayServer.get_name() == "headless":
+		# Both needs at once: told only the window, a caller started a windowed run and was then
+		# refused for the tree the engine had not been asked to build.
+		var also: String = ""
+		if _setting() != "always":
+			also = (
+				(
+					' and engineArgs ["--accessibility", "always"], since this project\'s'
+					+ " accessibility/general/accessibility_support is %s and the engine builds the tree"
+					+ " only when asked"
+				)
+				% _setting()
+			)
 		return _refused(
 			(
-				"A headless run has no window, so a screen reader is told nothing: start the run with"
-				+ " headless: false."
+				(
+					"A headless run has no window, so a screen reader is told nothing: start the run with"
+					+ " headless: false%s."
+				)
+				% also
 			)
 		)
 	if OS.get_name() != "Windows":
@@ -255,12 +273,16 @@ func get_accessibility(_params: Dictionary) -> Dictionary:
 		var window: Dictionary = windows[at]
 		var window_id: int = ids[at] if at < ids.size() else -1
 		window["window_id"] = window_id
+		_match(window, made_by, placing)
+	for at: int in windows.size():
+		var window: Dictionary = windows[at]
+		var window_id: int = window["window_id"]
 		var holder: Window = _window_with(_host.get_tree().root, window_id)
-		var holder_path: String = ""
 		if holder != null:
-			holder_path = str(holder.get_path())
-			window["node"] = holder_path
-		_place(window, holder_path, made_by, placing, true)
+			window["node"] = str(holder.get_path())
+			_attribute(window, holder, placing, true)
+		else:
+			_unmark(window)
 		elements += _count(window)
 		unnamed += _unnamed_text(window)
 	var result: Dictionary = {"windows": windows, "elements": elements}
@@ -360,15 +382,13 @@ static func _window_with(node: Node, window_id: int) -> Window:
 	return null
 
 
-## Gives each child of [param element] the node that made it, or, for an element a node made as a
-## part of itself (a line of a text box, a window's announcements), the node it is a part of.
+## Gives every element below [param element] whose id is a node's element that node, and notes
+## which nodes UI Automation shows.
 ##
 ## UI Automation's runtime id for an element ends in the four halves of AccessKit's id for it, and
 ## Godot gives AccessKit the element's RID: measured on 4.7.2, /root/Main's element answered
 ## 114,1,0,0 with RID 114 << 32 | 1. Which pair holds it is not assumed, so both are tried.
-static func _place(
-	element: Dictionary, holder: String, made_by: Dictionary, placing: Placing, is_window: bool
-) -> void:
+static func _match(element: Dictionary, made_by: Dictionary, placing: Placing) -> void:
 	var children: Array = element.get("children", [])
 	for child: Variant in children:
 		if not child is Dictionary:
@@ -376,27 +396,127 @@ static func _place(
 		var inner: Dictionary = child
 		var parts: Array = inner.get("element_id", [])
 		var _dropped: bool = inner.erase("element_id")
-		var node: Node = null
 		if parts.size() == 4:
 			placing.asked += 1
-			node = _made(parts, made_by)
-		var path: String = holder
-		if node != null:
-			placing.placed += 1
-			path = str(node.get_path())
-			inner["node"] = path
-			if node is Control:
-				var control: Control = node
-				if not control.tooltip_text.is_empty():
-					inner["tooltip"] = control.tooltip_text
-					placing.tooltips += 1
+			var node: Node = _made(parts, made_by)
+			if node != null:
+				placing.placed += 1
+				placing.shown[node.get_instance_id()] = true
+				inner["node"] = str(node.get_path())
+				inner[NODE_ID] = node.get_instance_id()
+				if node is Control:
+					var control: Control = node
+					if not control.tooltip_text.is_empty():
+						inner["tooltip"] = control.tooltip_text
+						placing.tooltips += 1
+		_match(inner, made_by, placing)
+
+
+## Gives every element below [param element] that is no node's own the node it is a part of.
+##
+## UI Automation's parent is not that node: AccessKit leaves every container out of the tree it
+## gives UI Automation and hangs what the container held on the nearest element it keeps, and a
+## Control, a RichTextLabel and each of its lines are containers. A RichTextLabel's text in a
+## column of plain containers came out straight under the window. So the node is found where it
+## must be: below the shown element's node, itself left out of the tree (a node that is shown would
+## have the part under it), drawn around the part, and, for text, holding its words.
+static func _attribute(element: Dictionary, holder: Node, placing: Placing, is_window: bool) -> void:
+	var children: Array = element.get("children", [])
+	for child: Variant in children:
+		if not child is Dictionary:
+			continue
+		var inner: Dictionary = child
+		if inner.has(NODE_ID):
+			var node: Node = instance_from_id(Read.as_int(inner[NODE_ID], 0))
+			var _dropped: bool = inner.erase(NODE_ID)
+			_attribute(inner, node if node != null else holder, placing, false)
+			continue
+		var owners: Array[Node] = _owners_of(inner, holder, placing)
+		if owners.size() == 1:
+			inner["part_of"] = str(owners[0].get_path())
 		else:
-			inner["part_of"] = holder
-			# The one static text a window makes of itself: where it speaks what is announced, named
-			# only while something is.
-			if is_window and inner.get("role") == "text":
-				inner["part"] = "announcement"
-		_place(inner, path, made_by, placing, false)
+			inner["part_of"] = str(holder.get_path())
+			var paths: Array[String] = []
+			for owner: Node in owners:
+				paths.append(str(owner.get_path()))
+			inner["part_of_candidates"] = paths
+		# The one text a window makes of itself, where it speaks what is announced: it is given no
+		# bounds, where every text a node draws has them.
+		var only_holder: bool = owners.size() == 1 and owners[0] == holder
+		if is_window and inner.get("role") == "text" and not inner.has("bounds") and only_holder:
+			inner["part"] = "announcement"
+		_attribute(inner, owners[0] if owners.size() == 1 else holder, placing, false)
+
+
+## The nodes that may have made [param element], below [param holder]: the deepest ones drawn
+## around it whose own elements are not shown, narrowed to those holding its words when that leaves
+## any. [param holder] alone when none is drawn around it, or when it has no bounds to look by.
+static func _owners_of(element: Dictionary, holder: Node, placing: Placing) -> Array[Node]:
+	var bounds: Variant = element.get("bounds")
+	if not bounds is Dictionary:
+		return [holder]
+	var box: Dictionary = bounds
+	var drawn: Rect2 = Rect2(
+		Read.as_float(box.get("x", 0)),
+		Read.as_float(box.get("y", 0)),
+		Read.as_float(box.get("width", 0)),
+		Read.as_float(box.get("height", 0))
+	)
+	var found: Array[Node] = []
+	_drawn_around(holder, drawn, placing, found)
+	if found.is_empty():
+		return [holder]
+	# A RichTextLabel's line ends in a zero-width space its text does not have.
+	var words: String = str(element.get("name", "")).replace(String.chr(0x200b), "").strip_edges()
+	if found.size() > 1 and not words.is_empty():
+		var saying: Array[Node] = []
+		for node: Node in found:
+			if _text_of(node).contains(words):
+				saying.append(node)
+		if not saying.is_empty():
+			return saying
+	return found
+
+
+## Where a Control is drawn is read off its screen transform, which for a window that is not
+## embedded is in that window's own pixels, as the bounds are.
+static func _drawn_around(node: Node, drawn: Rect2, placing: Placing, found: Array[Node]) -> void:
+	for child: Node in node.get_children(true):
+		# A node that is shown has its parts under it, and so do the nodes below it.
+		if placing.shown.has(child.get_instance_id()):
+			continue
+		if child is CanvasItem:
+			var item: CanvasItem = child
+			if not item.is_visible_in_tree():
+				continue
+		var before: int = found.size()
+		_drawn_around(child, drawn, placing, found)
+		if found.size() > before or not child is Control:
+			continue
+		var control: Control = child
+		var around: Rect2 = control.get_screen_transform() * Rect2(Vector2.ZERO, control.size)
+		# Two pixels either way, for the rounding of bounds to whole pixels on both sides.
+		if around.grow(2.0).encloses(drawn):
+			found.append(control)
+
+
+## Takes the instance ids [method _match] left out of a window no node holds.
+static func _unmark(element: Dictionary) -> void:
+	var _dropped: bool = element.erase(NODE_ID)
+	var children: Array = element.get("children", [])
+	for child: Variant in children:
+		if child is Dictionary:
+			var inner: Dictionary = child
+			_unmark(inner)
+
+
+static func _text_of(node: Node) -> String:
+	if node is RichTextLabel:
+		var rich: RichTextLabel = node
+		return rich.get_parsed_text()
+	if "text" in node:
+		return str(node.get("text"))
+	return ""
 
 
 static func _made(parts: Array, made_by: Dictionary) -> Node:
@@ -410,12 +530,14 @@ static func _made(parts: Array, made_by: Dictionary) -> Node:
 	return null
 
 
-## Counts kept while the elements are placed.
+## Counts kept while the elements are placed, and the nodes whose own elements UI Automation shows,
+## by instance id.
 class Placing:
 	extends RefCounted
 	var asked: int = 0
 	var placed: int = 0
 	var tooltips: int = 0
+	var shown: Dictionary = {}
 
 
 ## Text elements with bounds and no name. The window's announcement element has no bounds and is
