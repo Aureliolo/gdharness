@@ -120,6 +120,7 @@ import {
   savesStayPut,
   userDataIn,
 } from '../src/launch.js';
+import { freeLibraryCopies } from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import {
   GodotLSPClient,
@@ -13329,6 +13330,140 @@ async function testRuntimeConnectedIsAboutThisProjectsGames(): Promise<void> {
   }
 }
 
+/**
+ * A runtime call that overlapped another on the same game says so, on both answers.
+ *
+ * Reported from game-d as physics stalling during runtime_wait: the read before a 120-frame wait,
+ * the wait and the read after it went out as one batch of tool calls, so the read after was answered
+ * during the wait, and nothing in either answer said they had run together. Two fake games, the
+ * wait on one answered after 1.5s: a call to the same game sent during it is listed on both answers,
+ * one to the other game during it is not, and one to the same game after it is not.
+ */
+async function testACallBesideAnotherOnTheGameSaysSo(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-alongside-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-alongside-rt-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  const ONE_PIXEL_PNG =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+  const listening: Server[] = [];
+  const children: ChildProcess[] = [];
+  const game = async (): Promise<number> => {
+    const answering = createServer((socket) => {
+      socket.setEncoding('utf8');
+      socket.write(`${JSON.stringify({ type: 'welcome', protocol: RUNTIME_PROTOCOL })}\n`);
+      let buffered = '';
+      socket.on('data', (chunk: string) => {
+        buffered += chunk;
+        for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+          const asked = JSON.parse(buffered.slice(0, at)) as {
+            id: number;
+            command: string;
+            params: { output_path?: string };
+          };
+          buffered = buffered.slice(at + 1);
+          const writeTo = asked.params.output_path;
+          if (asked.command === 'capture_screenshot' && writeTo !== undefined) {
+            writeFileSync(writeTo, Buffer.from(ONE_PIXEL_PNG, 'base64'));
+            socket.write(
+              `${JSON.stringify({ id: asked.id, type: 'screenshot_file', path: writeTo, width: 1, height: 1, format: 'png' })}\n`,
+            );
+          } else if (asked.command === 'wait_frames') {
+            setTimeout(() => {
+              socket.write(
+                `${JSON.stringify({ id: asked.id, type: 'waited', frames: 90, elapsed_ms: 1500 })}\n`,
+              );
+            }, 1500);
+          } else {
+            socket.write(`${JSON.stringify({ id: asked.id, type: 'method_result', result: 7 })}\n`);
+          }
+        }
+      });
+      socket.on('error', () => {});
+    });
+    listening.push(answering);
+    await listenOnAReservedPort(answering);
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    children.push(holder);
+    const pid = holder.pid ?? 0;
+    writeFileSync(
+      join(runtimeDir, `runtime-${pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid,
+        port: portOf(answering),
+        address: '127.0.0.1',
+        project: { name: basename(project), path: project },
+      }),
+      'utf8',
+    );
+    return pid;
+  };
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
+  });
+  try {
+    const one = await game();
+    const two = await game();
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+      parseTextContent(await server.request('tools/call', { name, arguments: args }));
+    const invoke = (pid: number): Promise<unknown> =>
+      call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'count', pid });
+
+    const waiting = call('runtime_wait', { op: 'frames', frames: 90, pid: one });
+    await delay(400);
+    const [during, elsewhere] = await Promise.all([invoke(one), invoke(two)]);
+    const waited = await waiting;
+    const after = await invoke(one);
+
+    assert.equal(get(waited, 'type'), 'waited', JSON.stringify(waited));
+    assert.deepEqual(get(waited, 'ranAlongside'), ['runtime_invoke call'], JSON.stringify(waited));
+    assert.equal(get(during, 'result'), 7, JSON.stringify(during));
+    assert.deepEqual(get(during, 'ranAlongside'), ['runtime_wait frames'], JSON.stringify(during));
+    assert.match(String(get(during, 'alongsideNote')), /answered as each finishes/, JSON.stringify(during));
+    assert.equal(get(elsewhere, 'result'), 7, `the other game answered: ${JSON.stringify(elsewhere)}`);
+    assert.equal(
+      get(elsewhere, 'ranAlongside'),
+      undefined,
+      `a call to another game is not beside this one: ${JSON.stringify(elsewhere)}`,
+    );
+    assert.equal(get(after, 'result'), 7, `the call after answered: ${JSON.stringify(after)}`);
+    assert.equal(
+      get(after, 'ranAlongside'),
+      undefined,
+      `a call sent after the wait answered ran on its own: ${JSON.stringify(after)}`,
+    );
+
+    // A capture answers in prose beside its image, so it says so there.
+    const again = call('runtime_wait', { op: 'frames', frames: 90, pid: one });
+    await delay(400);
+    const captured =
+      textOf(
+        await server.request('tools/call', {
+          name: 'runtime_capture',
+          arguments: { op: 'screenshot', pid: one },
+        }),
+      ) ?? '';
+    await again;
+    assert.match(captured, /^Screenshot captured: 1x1 png/, captured);
+    assert.match(
+      captured,
+      /Ran alongside runtime_wait frames\. Another call on this game was running/,
+      captured,
+    );
+  } finally {
+    await server.stop();
+    for (const answering of listening) {
+      answering.close();
+    }
+    for (const child of children) {
+      child.kill();
+    }
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
 async function testATestServerWritesWhereNoRealRunIs(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-isolation-'));
   // Where this project's note would land in the directory every gdharness on the machine shares.
@@ -20303,6 +20438,198 @@ function testAnExportIsJudgedByTheFileItWrote(): void {
 }
 
 /**
+ * An export that could not copy an extension library says which and why, for one and for two.
+ * Reported from game-d, whose export straight after an editor restart failed with eight errors
+ * and nothing saying the open editor's copies were the cause.
+ */
+function testAnExportThatCouldNotCopyALibrarySaysSo(): void {
+  const ran = (...libraries: string[]): unknown => {
+    const log = new GameLog();
+    for (const library of libraries) {
+      log.append('stderr', `ERROR: Error copying library: ${library}\n`);
+    }
+    log.finish();
+    const answer = exportAnswer(
+      { log, exitCode: 0, exitSignal: null, failure: null },
+      { preset: 'Windows Desktop', outputPath: 'export/game.exe', debug: false },
+      null,
+      null,
+    );
+    // An export that wrote nothing says so in prose first and gives its verdict after.
+    return JSON.parse(String(answer.content.at(-1)?.text)) as unknown;
+  };
+  const one = ran('X:/game/bin/game.dll');
+  assert.deepEqual(get(one, 'librariesNotLoaded'), ['X:/game/bin/game.dll'], JSON.stringify(one));
+  assert.match(
+    String(get(one, 'extensionNote')),
+    /^The export could not load X:\/game\/bin\/game\.dll: on Windows .* ~ copy beside the library/,
+    JSON.stringify(one),
+  );
+  const two = ran('X:/game/bin/game.dll', 'X:/game/bin/sandbox.dll');
+  assert.match(
+    String(get(two, 'extensionNote')),
+    /could not load X:\/game\/bin\/game\.dll and X:\/game\/bin\/sandbox\.dll:/,
+    JSON.stringify(two),
+  );
+  const none = ran();
+  assert.equal(
+    get(none, 'extensionNote'),
+    undefined,
+    `an export that copied everything: ${JSON.stringify(none)}`,
+  );
+  assert.equal(get(none, 'errors'), 0, JSON.stringify(none));
+}
+
+/**
+ * Before an engine runs as the editor, each Windows library's ~ copy is moved aside and what is
+ * named after it is swept, for the libraries the project's extensions list and no others.
+ *
+ * The manifest names a library by res:// and another by a path beside it, and has a Linux library
+ * and a dependency the sweep must leave alone. Asked as Linux, nothing is touched, since there a
+ * mapped copy can be replaced.
+ */
+function testLibraryCopiesAreMovedAsideAndSwept(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-library-copies-'));
+  try {
+    mkdirSync(join(project, '.godot'));
+    mkdirSync(join(project, 'bin'));
+    mkdirSync(join(project, 'ext'));
+    writeFileSync(join(project, '.godot', 'extension_list.cfg'), 'res://ext/game.gdextension\n');
+    writeFileSync(
+      join(project, 'ext', 'game.gdextension'),
+      '[configuration]\n\nentry_symbol = "init"\nreloadable = true\n\n[libraries]\n\n' +
+        'windows.debug.x86_64 = "res://bin/game.dll"\nwindows.release.x86_64 = "res://bin/game.dll"\n' +
+        'linux.debug.x86_64 = "res://bin/libgame.so"\nwindows.debug.arm64 = "beside.dll"\n\n' +
+        '[dependencies]\n\nwindows.debug.x86_64 = { "res://bin/dep.dll": "" }\n',
+    );
+    const files = [
+      'bin/game.dll',
+      'bin/~game.dll',
+      'bin/~game.dll~RF1a2b3c.TMP',
+      'bin/~game.dll.aside-1-2',
+      'bin/~libgame.so',
+      'bin/~dep.dll',
+      'bin/~other.dll',
+      'ext/beside.dll',
+      'ext/~beside.dll',
+    ];
+    for (const file of files) {
+      writeFileSync(join(project, file), 'library');
+    }
+    const left = (): string[] =>
+      ['bin', 'ext']
+        .flatMap((folder) => readdirSync(join(project, folder)).map((name) => `${folder}/${name}`))
+        .sort();
+
+    const elsewhere = freeLibraryCopies(project, 'linux');
+    assert.deepEqual([elsewhere.setAside, elsewhere.swept], [[], []]);
+    assert.deepEqual(left(), [...files, 'ext/game.gdextension'].sort(), 'nothing is touched outside Windows');
+
+    const freed = freeLibraryCopies(project, 'win32');
+    assert.deepEqual(
+      freed.setAside.map((path) => basename(path).replace(/-\d+-\d+$/, '')).sort(),
+      ['~beside.dll.aside', '~game.dll.aside'],
+      JSON.stringify(freed),
+    );
+    assert.deepEqual(
+      left(),
+      [
+        'bin/game.dll',
+        'bin/~dep.dll',
+        'bin/~libgame.so',
+        'bin/~other.dll',
+        'ext/beside.dll',
+        'ext/game.gdextension',
+      ],
+      `each copy moved aside, and with nothing holding them every leftover swept: ${JSON.stringify(freed)}`,
+    );
+    assert.equal(freed.swept.length, 4, JSON.stringify(freed));
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A copy an engine has loaded is moved aside, kept while it is held, and swept once it is not.
+ *
+ * The open editor's copy is a mapped image, which Windows lets be renamed and not deleted, and a
+ * plain file stands in for neither: here a child process loads the copy with LoadLibrary, as the
+ * engine does. That the copy set aside is still there while held is what shows the hold was real.
+ */
+async function testAHeldLibraryCopyIsSetAsideAndSweptLater(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log(
+      'held library copy regression skipped (Windows only: elsewhere a mapped copy can be replaced)',
+    );
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-copy-'));
+  let holder: ChildProcess | null = null;
+  try {
+    mkdirSync(join(project, '.godot'));
+    mkdirSync(join(project, 'bin'));
+    writeFileSync(join(project, '.godot', 'extension_list.cfg'), 'res://game.gdextension\n');
+    writeFileSync(
+      join(project, 'game.gdextension'),
+      '[libraries]\n\nwindows.debug.x86_64 = "res://bin/game.dll"\n',
+    );
+    const system = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32');
+    cpSync(join(system, 'version.dll'), join(project, 'bin', 'game.dll'));
+    const copy = join(project, 'bin', '~game.dll');
+    cpSync(join(system, 'version.dll'), copy);
+    holder = spawn(
+      join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$k = Add-Type -Name Loader -Namespace Held -PassThru -MemberDefinition '[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr LoadLibraryW(string path);'; ` +
+          `$h = $k::LoadLibraryW('${copy.replace(/'/g, "''")}'); "handle $h"; Start-Sleep -Seconds 120`,
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let said = '';
+    holder.stdout?.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    holder.stderr?.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    const deadline = Date.now() + 60_000;
+    while (!/handle \d+/.test(said) && Date.now() < deadline) {
+      await delay(100);
+    }
+    assert.match(said, /handle [1-9]\d*/, `the copy is loaded: ${said}`);
+
+    const held = freeLibraryCopies(project);
+    assert.equal(held.setAside.length, 1, JSON.stringify(held));
+    const aside = held.setAside[0] ?? '';
+    assert.equal(existsSync(copy), false, 'the name is free for the next engine to make its own copy');
+    assert.equal(
+      existsSync(aside),
+      true,
+      `the loaded copy is kept while it is held: ${JSON.stringify(held)}`,
+    );
+    assert.deepEqual(held.swept, [], JSON.stringify(held));
+
+    const exited = new Promise<void>((done) => {
+      holder?.once('exit', () => {
+        done();
+      });
+    });
+    holder.kill();
+    await exited;
+    holder = null;
+    const after = freeLibraryCopies(project);
+    assert.deepEqual([after.setAside, after.swept], [[], [aside]], JSON.stringify(after));
+    assert.equal(existsSync(aside), false, 'and swept once nothing holds it');
+  } finally {
+    holder?.kill();
+    sweep(project);
+  }
+}
+
+/**
  * The note on a scan still running names what started and where its complaints are.
  *
  * A headless operation's answer once carried the game's note: it spoke of a game that never
@@ -20598,6 +20925,96 @@ async function testTheFrameTimeIsTheFrame(): Promise<void> {
         `process_time_max is the engine's slowest step, which the mean frame is well under: ${shown}`,
       );
       assert.equal(get(metrics, 'data', 'vsync'), 'none, headless', shown);
+      await call('editor_run', { op: 'stop' });
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
+ * physics_steps_per_second is the steps the engine took, not the rate the project asks for.
+ *
+ * Downstream a game drew sixty frames a second while its physics stepped a tenth as often, and fps,
+ * frame_time and physics_time all read as a healthy game. Here the game is held to one step a frame
+ * with frames of over 50ms, so it takes about a third of the sixty steps it asks for; then it is let
+ * go at 30 frames a second, where it takes two steps a frame, so the reading is above the frame rate
+ * and cannot be the frames counted under another name.
+ */
+async function testThePhysicsRateIsTheStepsTaken(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('physics rate regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Node\n\nvar slow: bool = true:\n\tset(value):\n\t\tslow = value\n' +
+          '\t\tEngine.max_physics_steps_per_frame = 1 if value else 8\n\n\n' +
+          'func _ready() -> void:\n\tEngine.max_physics_steps_per_frame = 1\n\n\n' +
+          'func _process(_delta: float) -> void:\n\tif slow:\n\t\tOS.delay_msec(50)\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        );
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        engineArgs: ['--max-fps', '30'],
+        runtimeWaitMs: 30_000,
+      });
+      assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+      const measure = async (): Promise<{ read: (name: string) => number; shown: string }> => {
+        // More than the window, so it holds no frame from before.
+        await call('runtime_wait', { op: 'frames', frames: 130 });
+        const metrics = await call('runtime_inspect', { op: 'metrics' });
+        return {
+          read: (name) => asNumber(get(metrics, 'data', name), JSON.stringify(metrics)),
+          shown: JSON.stringify(metrics),
+        };
+      };
+
+      const held = await measure();
+      assert.equal(held.read('physics_ticks_per_second'), 60, held.shown);
+      assert.equal(held.read('max_physics_steps_per_frame'), 1, held.shown);
+      assert.equal(held.read('time_scale'), 1, held.shown);
+      const heldFps = 1 / held.read('frame_time');
+      assert.ok(heldFps < 20, `the frames are held past 50ms: ${held.shown}`);
+      assert.ok(
+        held.read('physics_steps_per_second') > heldFps * 0.8 &&
+          held.read('physics_steps_per_second') < heldFps * 1.2,
+        `one step a frame is what was taken, not the sixty asked for: ${held.shown}`,
+      );
+
+      await call('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'slow', value: false });
+      const free = await measure();
+      assert.equal(free.read('max_physics_steps_per_frame'), 8, free.shown);
+      const freeFps = 1 / free.read('frame_time');
+      assert.ok(
+        free.read('physics_steps_per_second') > 50 && free.read('physics_steps_per_second') < 70,
+        `sixty steps a second once nothing holds them: ${free.shown}`,
+      );
+      assert.ok(
+        free.read('physics_steps_per_second') > freeFps * 1.5,
+        `two steps to each of the ${freeFps.toFixed(1)} frames a second, not the frames: ${free.shown}`,
+      );
       await call('editor_run', { op: 'stop' });
     },
     { realAddon: true, engine },
@@ -37156,9 +37573,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunSaysHowItEnded,
   testTheScanNoteNamesWhatStarted,
   testAnExportIsJudgedByTheFileItWrote,
+  testAnExportThatCouldNotCopyALibrarySaysSo,
+  testLibraryCopiesAreMovedAsideAndSwept,
+  testAHeldLibraryCopyIsSetAsideAndSweptLater,
   testNotRunIsPutDownToFailFastOnlyWhenSet,
   testAWordsWaitLeavesTheGameItsSpeed,
   testTheFrameTimeIsTheFrame,
+  testThePhysicsRateIsTheStepsTaken,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
   testTheWaitIsSizedToTheLastBoot,
@@ -37267,6 +37688,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartSaysWhatItLeftRunning,
   testATestServerWritesWhereNoRealRunIs,
   testRuntimeConnectedIsAboutThisProjectsGames,
+  testACallBesideAnotherOnTheGameSaysSo,
   testAGameOnEveryInterfaceIsReached,
   testAGameOnAnotherRuntimeAddonSaysSo,
   testAGameSaysWhichRuntimeAddonItLoaded,

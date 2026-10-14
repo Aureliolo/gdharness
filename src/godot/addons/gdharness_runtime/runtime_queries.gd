@@ -35,7 +35,10 @@ var _host: Node
 var _values: Values
 ## How long each of the last frames took, oldest first, in microseconds, as the game timed them.
 var _frame_usec: PackedInt64Array = PackedInt64Array()
+## How many physics steps ran in each of those frames, in the same order.
+var _frame_physics: PackedInt64Array = PackedInt64Array()
 var _last_frame_usec: int = 0
+var _last_physics_frames: int = 0
 
 
 ## The host is the autoload, which is how the tree is reached: it is not in one when the
@@ -662,12 +665,21 @@ func get_property(params: Dictionary) -> Dictionary:
 ## read 45ms for a second at a time, and a change to the game showed only on the next second's
 ## worst frame. The time between two of these calls is the frame as it passed, physics and the wait
 ## for the display included.
+##
+## The physics steps are counted beside it because the engine steps physics from the wall clock and
+## nothing else reports how many it took: a game drawing sixty frames a second whose brew advanced
+## by physics steps moved a tenth as far as the frames promised, and every reading available said
+## the game was running well.
 func note_frame(now_usec: int) -> void:
+	var physics: int = Engine.get_physics_frames()
 	if _last_frame_usec > 0:
 		var _grew: bool = _frame_usec.push_back(now_usec - _last_frame_usec)
+		var _stepped: bool = _frame_physics.push_back(physics - _last_physics_frames)
 		if _frame_usec.size() > FRAMES_TIMED:
 			_frame_usec.remove_at(0)
+			_frame_physics.remove_at(0)
 	_last_frame_usec = now_usec
+	_last_physics_frames = physics
 
 
 ## Whether the frame waits for the display, which sets its floor: a game with vsync on cannot
@@ -695,16 +707,26 @@ func get_metrics(params: Dictionary) -> Dictionary:
 		total_usec += one
 		slowest_usec = maxi(slowest_usec, one)
 	# Null rather than zero before a frame has been timed: no frame took no time.
+	var steps: int = 0
+	for one: int in _frame_physics:
+		steps += one
 	var frame_time: Variant = null
 	var frame_time_max: Variant = null
+	var physics_steps_per_second: Variant = null
 	if timed > 0:
 		frame_time = float(total_usec) / timed / 1000000.0
 		frame_time_max = slowest_usec / 1000000.0
+		if total_usec > 0:
+			physics_steps_per_second = steps * 1000000.0 / total_usec
 	var all: Dictionary = {
 		"fps": Engine.get_frames_per_second(),
 		"frame_time": frame_time,
 		"frame_time_max": frame_time_max,
 		"frames_timed": timed,
+		"physics_steps_per_second": physics_steps_per_second,
+		"physics_ticks_per_second": Engine.physics_ticks_per_second,
+		"max_physics_steps_per_frame": Engine.max_physics_steps_per_frame,
+		"time_scale": Engine.time_scale,
 		"process_time_max": Performance.get_monitor(Performance.TIME_PROCESS),
 		"physics_time": Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS),
 		"vsync": _vsync(),
