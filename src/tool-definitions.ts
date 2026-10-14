@@ -1733,7 +1733,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       "Input to the running game: a whole click on a Control or a 3D node named by path or on a control named by the words on it, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it. On gdharness's own desktop, where a windowed run goes, Windows refuses to say where the pointer is: every pointer answer there carries pointer_on_hidden_desktop, and the first of the run pointer_note saying why it matters: get_mouse_position() on the root window, and the mouse positions derived from it, read a meaningless position, while what reads the event itself (the control under it, hover, tooltips, input handlers) gets the injected position.",
     answer:
-      'click: what was under the pointer, and what became of the control: in_tree, removed or freed. Named by says, found says which match it was, and found.pressedOn says "the words" for words in a RichTextLabel pressed where they are drawn, or "the middle of the label" with a note saying why they could not be placed; on a rich label link_pressed says whether the press reached a link, with link_meta giving the meta the label reports clicked, an empty one included. A control scrolled into view first is scrolled each container out from it a frame after the one inside, and scrolled_into_view says whether a scroll value changed. A button in toggle mode, a CheckBox or CheckButton included, answers pressed with before and after, its button_pressed either side of the click: the same value twice is a click the game undid, and after is null when the click freed it. A refusal for a pointer turned off names where mouse_behavior_recursive was set. On a 3D node landed says the interface did not swallow the press: no control under the pointer stopped it, a control letting the pointer pass included, and every viewport on the way out from the room had the pointer over what shows the room. choose: what was chosen, read before the press, which is heard rather than assumed; what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick); and what the button in front of the menu shows now when it is still there. A menu is opened rather than clicked because its items are drawn rather than built, and the item is looked for as the menu stands once open, since a game can fill a menu as it opens. action, key and mouse_click: the event as it was sent, with whole saying whether the press was let go of again, and for a key the keycode, physical_keycode and unicode it carried. mouse_motion: the position and the relative movement sent. None of these is aimed at anything, so none says what the event reached: click on a nodePath or says answers what was under the pointer.',
+      'click: what was under the pointer, and what became of the control: in_tree, removed or freed. Named by says, found says which match it was, and found.pressedOn says "the words" for words in a RichTextLabel pressed where they are drawn, or "the middle of the label" with a note saying why they could not be placed; on a rich label link_pressed says whether the press reached a link, with link_meta giving the meta the label reports clicked, an empty one included. A control scrolled into view first is scrolled each container out from it a frame after the one inside, and scrolled_into_view says whether a scroll value changed. A button in toggle mode, a CheckBox or CheckButton included, answers pressed with before and after, its button_pressed either side of the click: the same value twice is a click the game undid, and after is null when the click freed it. A refusal for a pointer turned off names where mouse_behavior_recursive was set. On a 3D node landed says the interface did not swallow the press: no control under the pointer stopped it, a control letting the pointer pass included, and every viewport on the way out from the room had the pointer over what shows the room. choose: what was chosen, read before the press, which is heard rather than assumed; what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick); and what the button in front of the menu shows now when it is still there. A menu is opened rather than clicked because its items are drawn rather than built, and the item is looked for as the menu stands once open, since a game can fill a menu as it opens. action, key, mouse_click and joypad_button: the event as it was sent, with whole saying whether the press was let go of again, for a key the keycode, physical_keycode and unicode it carried, and for a controller button its number, its name and the device. mouse_motion: the position and the relative movement sent. joypad_motion: the axis by number and name, the value and the device. None of these is aimed at anything, so none says what the event reached: click on a nodePath or says answers what was under the pointer.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
@@ -1757,9 +1757,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       pressed: {
         type: 'boolean',
-        ops: ['action', 'key', 'mouse_click'],
+        ops: ['action', 'key', 'mouse_click', 'joypad_button'],
         description:
-          'action, key, mouse_click: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held. A wheel button held down is still a whole step, since a wheel is never held.',
+          'action, key, mouse_click, joypad_button: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held. A wheel button held down is still a whole step, since a wheel is never held.',
       },
       strength: {
         type: 'number',
@@ -1807,9 +1807,29 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       button: {
         type: ['string', 'number'],
-        ops: ['click', 'mouse_click'],
+        ops: ['click', 'mouse_click', 'joypad_button'],
         description:
-          'click, mouse_click: left, right, middle, wheel_up or wheel_down, or a button number. Default left.',
+          'click, mouse_click: left, right, middle, wheel_up or wheel_down, or a button number. Default left. joypad_button: the controller button, by name (a, b, x, y, back, guide, start, left_stick, right_stick, left_shoulder, right_shoulder, dpad_up, dpad_down, dpad_left, dpad_right, misc1, paddle1 to paddle4, touchpad) or by its JoyButton number; a, b, x and y are the bottom, right, left and top face buttons, as Godot names them, whatever the controller prints on them.',
+      },
+      axis: {
+        type: ['string', 'number'],
+        ops: ['joypad_motion'],
+        description:
+          'joypad_motion: the stick or trigger axis, by name (left_x, left_y, right_x, right_y, trigger_left, trigger_right) or by its JoyAxis number.',
+      },
+      value: {
+        type: 'number',
+        minimum: -1,
+        maximum: 1,
+        ops: ['joypad_motion'],
+        description:
+          'joypad_motion: where the axis is, -1 to 1: down and right are positive on a stick, and a trigger runs 0 to 1. The axis stays there until another motion moves it, as a stick held over does; send 0 to let it go back.',
+      },
+      device: {
+        type: 'number',
+        minimum: 0,
+        ops: ['joypad_button', 'joypad_motion'],
+        description: 'joypad_button, joypad_motion: which controller, counting from 0. Default 0.',
       },
       doubleClick: {
         type: 'boolean',
@@ -1866,6 +1886,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         summary:
           'move the mouse to a position, carrying the distance from where the last injected event put it unless relativeX and relativeY say otherwise, and the buttons held, so a control that drags moves under a run of these between a held mouse_click and its release',
         requires: ['x', 'y'],
+      },
+      joypad_button: {
+        effect: 'additive',
+        summary:
+          'press a controller button, or hold it, as an InputEventJoypadButton, so a game reading the pad in _input or _unhandled_input gets what a controller sends; an action bound to the button fires with it, as it would for a real one. Pressed and released a frame apart unless pressed says otherwise',
+        requires: ['button'],
+      },
+      joypad_motion: {
+        effect: 'additive',
+        summary:
+          'move a stick or trigger axis to a value, as an InputEventJoypadMotion, which is what a game reading the sticks gets; the axis stays there until another motion moves it',
+        requires: ['axis', 'value'],
       },
     },
   },
