@@ -18,7 +18,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DESKTOP_VARIABLE, throughHelper } from './desktop.js';
-import { type KeeperListening, listenForAStop } from './keeper-channel.js';
+import { GameDebugger } from './game-debugger.js';
+import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
 import {
   KEEPER_SCRIPT,
   readLaunched,
@@ -31,7 +32,7 @@ import { recordRunEnded, writeRunRecord } from './run-record.js';
 import { discard, scratchDirectory } from './scratch.js';
 import {
   frameFunctionsFor,
-  ProfileListener,
+  ProfileObserver,
   type ProfileTotals,
   queuedMessagesOf,
   withEngineArguments,
@@ -154,15 +155,11 @@ const PROFILE_WRITE_MS = 500;
 const LAST_WRITE_TRIES = 5;
 
 /**
- * The game's debugger for a profiled run, writing what it sums to [param path]: when the game
- * connects, at most every `PROFILE_WRITE_MS` while frames arrive, and once more as the game exits,
- * so a server reading the file mid-run is at most that far behind and one reading it after the
- * exit has the lot.
+ * The profiler of a profiled run, writing what it sums to [param path]: when the game connects, at
+ * most every `PROFILE_WRITE_MS` while frames arrive, and once more as the game exits, so a server
+ * reading the file mid-run is at most that far behind and one reading it after the exit has the lot.
  */
-async function profiledBy(
-  path: string,
-  projectPath: string,
-): Promise<{ listener: ProfileListener; finish: () => void }> {
+function profiledBy(path: string, projectPath: string): { observer: ProfileObserver; finish: () => void } {
   let latest: ProfileTotals | null = null;
   let timer: NodeJS.Timeout | null = null;
   // A write a reader held off past its wait is tried again later rather than dropped: the totals it
@@ -179,7 +176,7 @@ async function profiledBy(
   } catch {
     // The engine's default queue is what such a game runs with too.
   }
-  const listener = await ProfileListener.open(
+  const observer = new ProfileObserver(
     (totals) => {
       const first = latest === null;
       latest = totals;
@@ -193,12 +190,12 @@ async function profiledBy(
   );
   writeProfileFile(path, { connected: false, listeningSince: Date.now() });
   return {
-    listener,
+    observer,
     finish: () => {
       if (timer !== null) {
         clearTimeout(timer);
       }
-      latest = listener.totals() ?? latest;
+      latest = observer.totals() ?? latest;
       // The keeper exits after this, so there is no later write to fall back on, and the engine's
       // own totals arrive only now. Each try waits out a held file for a while of its own.
       let tries = 0;
@@ -209,10 +206,16 @@ async function profiledBy(
       ) {
         tries += 1;
       }
-      listener.close();
     },
   };
 }
+
+/**
+ * How long the keeper of an exited game waits for the game's debugger connection to close before it
+ * finishes: an exited process's socket closes at once, so this is only a game that left a child
+ * holding a copy of it.
+ */
+const DRAIN_MS = 2000;
 
 /** How long a start through the helper is given to name the process it started. */
 const DESKTOP_START_MS = 60_000;
@@ -312,13 +315,17 @@ async function keep(): Promise<void> {
     process.stdout.write('error a keeper was started without a run or a helper to keep\n');
     process.exit(1);
   }
-  // The game's debugger for a profiled run, opened before the game so it is listening when the game
-  // dials it: the engine dials once, as it starts, and runs with no debugger if nobody answers.
-  const profiled = run?.profile === undefined ? null : await profiledBy(run.profile, run.projectPath);
+  // The game's debugger, opened before the game so it is listening when the game dials it: the
+  // engine dials once, as it starts, and runs with no debugger if nobody answers.
+  const profiled = run?.profile === undefined ? null : profiledBy(run.profile, run.projectPath);
+  const debuggerPeer =
+    run === undefined
+      ? null
+      : await GameDebugger.open(run.breakpoints ?? [], profiled === null ? [] : [profiled.observer]);
   const toStart =
-    profiled === null
+    debuggerPeer === null
       ? spec
-      : { ...spec, args: withEngineArguments(spec.args, profiled.listener.engineArguments) };
+      : { ...spec, args: withEngineArguments(spec.args, debuggerPeer.engineArguments) };
   const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
   // Private to this keeper, for the file a helper watches for its stop.
   const own =
@@ -334,7 +341,7 @@ async function keep(): Promise<void> {
     }
   }
   if ('error' in started) {
-    profiled?.listener.close();
+    debuggerPeer?.close();
     process.stdout.write(`error ${started.error}\n`);
     process.exit(1);
   }
@@ -361,27 +368,40 @@ async function keep(): Promise<void> {
   let listening: KeeperListening | null = null;
   // This process ends here, so nothing below runs for a game that has exited.
   child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-    if (run !== undefined) {
-      recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
+    const finish = (): void => {
+      profiled?.finish();
+      // After the profile, so a server told the run ended reads the profile it ended with.
+      if (run !== undefined) {
+        recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
+      }
+      debuggerPeer?.close();
+      listening?.close();
+      if (own !== null) {
+        rmSync(own, { recursive: true, force: true });
+      }
+      process.exit(0);
+    };
+    // The profile is finished from everything the game sent, which is read after its exit is told.
+    if (debuggerPeer === null) {
+      finish();
+    } else {
+      void debuggerPeer.drained(DRAIN_MS).then(finish);
     }
-    profiled?.finish();
-    listening?.close();
-    if (own !== null) {
-      rmSync(own, { recursive: true, force: true });
-    }
-    process.exit(0);
   });
   if (record !== null) {
     // Through what this process holds rather than through the pid: the game's own handle, or the
     // helper's, which ends the game through the handle it holds. Neither can reach a later process
     // given the same number.
-    listening = await listenForAStop(() => {
-      if (stopFile !== '') {
-        writeFileSync(stopFile, '');
-        return 'signalled';
-      }
-      return child.kill() ? 'signalled' : 'gone';
-    });
+    listening = await listenForTheServer(
+      () => {
+        if (stopFile !== '') {
+          writeFileSync(stopFile, '');
+          return 'signalled';
+        }
+        return child.kill() ? 'signalled' : 'gone';
+      },
+      debuggerPeer === null ? null : (request) => debuggerPeer.ask(request),
+    );
     if (listening !== null) {
       writeNoteIfItCan({ ...record, keeper: listening.address });
     }
