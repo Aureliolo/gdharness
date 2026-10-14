@@ -14,6 +14,7 @@ const Capture = preload("runtime_capture.gd")
 const Changes = preload("runtime_changes.gd")
 const ErrorReport = preload("error_report.gd")
 const InputCommands = preload("runtime_input.gd")
+const Pad = preload("runtime_pad.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
 const Typing = preload("runtime_typing.gd")
@@ -85,6 +86,7 @@ var _queries: Queries = Queries.new(self, values)
 var _changes: Changes = Changes.new(self, values)
 var _input: InputCommands = InputCommands.new(self, values)
 var _typing: Typing = Typing.new(self)
+var _pad: Pad = Pad.new(self)
 var _capture: Capture = Capture.new(self, values)
 var _waits: Waits = Waits.new(self, values)
 
@@ -135,6 +137,8 @@ func _init() -> void:
 		"inject_text": _typing.inject_text,
 		"inject_mouse_click": _input.inject_mouse_click,
 		"inject_mouse_motion": _input.inject_mouse_motion,
+		"inject_joypad_button": _pad.inject_joypad_button,
+		"inject_joypad_motion": _pad.inject_joypad_motion,
 		"click": _input.click,
 		"choose": _typing.choose,
 		"wait_frames": _waits.wait_frames,
