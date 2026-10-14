@@ -106,7 +106,13 @@ import {
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
-import { engineExtras, type HeadlessOutcome, runImport, runOperation } from './headless.js';
+import {
+  engineExtras,
+  type HeadlessOutcome,
+  librariesNotCopied,
+  runImport,
+  runOperation,
+} from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
@@ -141,6 +147,7 @@ import {
   savesStayPut,
   userDataIn,
 } from './launch.js';
+import { freeLibraryCopies } from './library-copies.js';
 import { type CallInFlight, callsInFlight, lifecycleLogPath, writeLifecycle } from './lifecycle-log.js';
 import {
   DEFAULT_LSP_PORT,
@@ -508,6 +515,22 @@ export function captureDetail(payload: OperationParams): string {
 export function patienceForFrames(frames: number, atLeast: number): number {
   return Math.max(atLeast, (frames / SLOWEST_FRAME_RATE) * 1000 + atLeast);
 }
+
+/** A runtime call while it is being answered, and the others on the same game it overlapped. */
+interface CallOnAGame {
+  readonly pid: number;
+  readonly what: string;
+  readonly alongside: Set<string>;
+}
+
+/**
+ * Said on an answer that overlapped another call on the same game. A harness sends a batch of tool
+ * calls together, and a read, a 120-frame wait and a second read sent that way had the second read
+ * answered during the wait: physics looked stalled for two seconds a wait, and a game was searched
+ * for the fault for a day.
+ */
+const ALONGSIDE_NOTE =
+  'Another call on this game was running while this one was: calls sent together run together and are answered as each finishes, so this answer is not from after the other. Send a call meant to come after another once that one has answered.';
 
 /**
  * What would wait longer for a runtime call that ran out of time, for [param tool] [param op]
@@ -1646,6 +1669,7 @@ export function exportAnswer(
 ): ToolResponse {
   const { log } = ending;
   const written = after !== null && after !== before;
+  const notCopied = librariesNotCopied(log.all);
   const verdict = {
     exported: ending.exitCode === 0 && ending.failure === null && log.count('error') === 0 && written,
     ...asked,
@@ -1654,6 +1678,12 @@ export function exportAnswer(
     failure: ending.failure ?? undefined,
     errors: log.count('error'),
     warnings: log.count('warning'),
+    ...(notCopied.length === 0
+      ? {}
+      : {
+          librariesNotLoaded: notCopied,
+          extensionNote: `The export could not load ${notCopied.join(' and ')}: on Windows an engine running as the editor, which an export is, loads a GDExtension from a ~ copy beside the library, and another engine on this project held that copy: it could not be moved aside before the export, or another engine made a new one in between. Export again once that engine has loaded or exited.`,
+        }),
     ...foldedEntriesAnswer(log),
   };
   if (verdict.exported) {
@@ -2993,6 +3023,8 @@ class GodotServer {
 
   /** The calls being answered, by a number of their own, which the lifecycle log's ended line names. */
   private readonly inFlight = new Map<number, CallInFlight>();
+  /** The runtime calls being answered, each with the game it went to. */
+  private readonly callsOnGames = new Set<CallOnAGame>();
   private callsTaken = 0;
   /** The client the lifecycle log last named, so a line is written only when it changes. */
   private clientNoted: string | null = null;
@@ -5457,6 +5489,12 @@ class GodotServer {
     const writtenAt = (): number | null =>
       existsSync(output.absolutePath) ? statSync(output.absolutePath).mtimeMs : null;
     const before = writtenAt();
+    const freed = freeLibraryCopies(project.value.path);
+    if (freed.setAside.length > 0 || freed.swept.length > 0) {
+      this.logDebug(
+        `Before the export: set aside ${freed.setAside.join(', ')}; swept ${freed.swept.join(', ')}`,
+      );
+    }
     let ending: EngineRun;
     try {
       // An export of a real project is slow, so it gets five minutes rather than no limit.
@@ -7617,6 +7655,8 @@ class GodotServer {
     // third variable is this server saying it opened this editor, which is what decides who may
     // open it again.
     clearEditorLog(projectPath);
+    // An editor being restarted may not have let its library copies go yet.
+    freeLibraryCopies(projectPath);
     // Through a launcher that exits once the editor is up, so the editor is nobody's child here: the
     // harness ends a server by killing its process tree, at every reconnect, and an editor spawned
     // as this server's child went with it however detached it was.
@@ -12022,6 +12062,23 @@ class GodotServer {
     const stale = staleNote === undefined ? {} : { addonIsStale: true, staleNote };
     const refused = (message: string): ToolResponse =>
       this.createErrorResponse(staleNote === undefined ? message : `${message}\n\n${staleNote}`);
+    const onGame: CallOnAGame = {
+      pid: choice.endpoint.pid,
+      what: `${asked.tool} ${asked.op}`,
+      alongside: new Set(),
+    };
+    for (const other of this.callsOnGames) {
+      if (other.pid === onGame.pid) {
+        other.alongside.add(onGame.what);
+        onGame.alongside.add(other.what);
+      }
+    }
+    this.callsOnGames.add(onGame);
+    // Read as the answer is made, since a call that starts after this one adds itself here.
+    const alongside = (): Record<string, unknown> =>
+      onGame.alongside.size === 0
+        ? {}
+        : { ranAlongside: [...onGame.alongside], alongsideNote: ALONGSIDE_NOTE };
     try {
       const reply = await runtimeRequest(
         choice.endpoint,
@@ -12042,6 +12099,7 @@ class GodotServer {
           note: `${reply.message} ${longerWaitNote(asked.tool, asked.op, timeoutMs)}`,
           ...answeredBy,
           ...stale,
+          ...alongside(),
         });
       }
       if (!reply.ok) {
@@ -12050,7 +12108,7 @@ class GodotServer {
 
       const { id: _id, ...payload } = reply.payload;
       if (!expectsScreenshot) {
-        return this.jsonTextResponse({ ...payload, ...answeredBy, ...stale });
+        return this.jsonTextResponse({ ...payload, ...answeredBy, ...stale, ...alongside() });
       }
 
       const returnedPath = readString(payload, 'path');
@@ -12073,16 +12131,18 @@ class GodotServer {
           );
         }
       }
+      const ranWith = [...onGame.alongside];
       return {
         content: [
           {
             type: 'text',
-            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${saveTo === null ? '' : `. Saved to ${saveTo}`}${staleNote === undefined ? '' : `\n\n${staleNote}`}`,
+            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${saveTo === null ? '' : `. Saved to ${saveTo}`}${ranWith.length === 0 ? '' : `\n\nRan alongside ${ranWith.join(', ')}. ${ALONGSIDE_NOTE}`}${staleNote === undefined ? '' : `\n\n${staleNote}`}`,
           },
           { type: 'image', data: readFileSync(screenshotPath).toString('base64'), mimeType: 'image/png' },
         ],
       };
     } finally {
+      this.callsOnGames.delete(onGame);
       discard(screenshotDir);
     }
   }

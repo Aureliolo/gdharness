@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path';
 import { emptyRecord } from './dictionary.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import type { GameLog, LogEntry } from './game-log.js';
+import { freeLibraryCopies } from './library-copies.js';
 import { forceNextImport } from './reimport.js';
 import { discard, scratchDirectory } from './scratch.js';
 import type { OperationParams } from './server-types.js';
@@ -217,7 +218,9 @@ export type ImportOutcome = (
  * from a `~` copy made beside the library, and the running editor holds its own copy at that path.
  * Measured on 4.7.2 with GodotSteam: an import started beside a headless editor printed "Error
  * copying library" and ran without the extension, and the same import run again loaded it, because
- * the failed attempt had moved the editor's copy aside as a `~RF….TMP` file.
+ * the failed attempt had moved the editor's copy aside as a `~RF….TMP` file. Each pass moves the
+ * copy aside first ({@link freeLibraryCopies}), so what is left to collide is an engine that took
+ * the name between that and its own load.
  */
 export function librariesNotCopied(messages: readonly LogEntry[]): string[] {
   const found = new Set<string>();
@@ -241,7 +244,7 @@ function extensionRetryNote(libraries: readonly string[], stillNotLoaded: readon
     'loads a GDExtension from a ~ copy beside the library, and the editor open on this project holds its own ' +
     'copy there, so the first engine started beside it cannot make one. That failed attempt moves the ' +
     `editor's copy aside, ${second} The editor's copy is left beside the library as a ~RF….TMP file, which ` +
-    'can be deleted once the editor has exited.'
+    'the next import, export or editor this server starts on the project deletes once the editor has exited.'
   );
 }
 
@@ -273,6 +276,7 @@ export async function runImport(
     for (const target of options.forcing ?? []) {
       forceNextImport(projectPath, target);
     }
+    freeLibraryCopies(projectPath);
     return once(godotPath, projectPath);
   };
   const first = await pass();
