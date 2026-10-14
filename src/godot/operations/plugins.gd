@@ -2,6 +2,7 @@ extends RefCounted
 
 const Patterns = preload("patterns.gd")
 const Log = preload("logger.gd")
+const ProjectFile = preload("project_file.gd")
 
 var _log: Log
 
@@ -171,11 +172,11 @@ static func _names_of(paths: Array[String]) -> Array[String]:
 func _save_enabled_paths(paths: Array[String]) -> Error:
 	if paths.is_empty():
 		ProjectSettings.set_setting("editor_plugins/enabled", null)
-		return ProjectSettings.save()
+		return ProjectFile.save()
 
 	# Kept in an Array[String] and converted here, because appending to a packed array answers with
 	# whether it worked and a project holding return_value_discarded at error level will not compile
 	# a script that drops that answer. The conversion is what matters: an Array[String] handed to
 	# set_setting is written as Array[String]([...]), which the editor does not read as a plugin list.
 	ProjectSettings.set_setting("editor_plugins/enabled", PackedStringArray(paths))
-	return ProjectSettings.save()
+	return ProjectFile.save()
