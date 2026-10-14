@@ -2016,7 +2016,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       pause: {
         effect: 'additive',
         summary:
-          'stop a game this server started where it is, answering with the stack. The game takes it between frames or every few thousand lines of script; stopped between frames, where no script runs, it is stepped on to the next line of script it runs',
+          'stop a game this server started where it is, answering with the stack. The game takes it between frames, and in a script every 2048 lines it runs, so a loop that sleeps between few lines can take seconds; the call waits thirty, and past that answers paused false with the request still standing. Stopped between frames, where no script runs, the game is stepped on to the next line of script it runs',
         requires: [],
       },
       continue: { effect: 'additive', summary: 'resume after a breakpoint', requires: [] },

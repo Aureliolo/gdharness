@@ -61,8 +61,12 @@ export interface DebugObserver {
   message(received: DebuggerMessage, send: (message: string, data: readonly SentValue[]) => void): void;
 }
 
-/** How long a pause waits for the game to stop, which a frame or a few thousand lines of script do. */
-export const PAUSE_MS = 5000;
+/**
+ * How long a pause waits for the game to stop. The engine takes the request between frames, and in a
+ * script only every 2048 lines it runs, so a loop sleeping between its lines, the hang a pause is
+ * for, gets there slowly: one sleeping a millisecond a turn took over five seconds on a macOS runner.
+ */
+export const PAUSE_MS = 30_000;
 /** How long a step waits for the game to stop again, as the editor's adapter is given. */
 export const STEP_MS = 10_000;
 /** How long a read of a held game waits for its answer, which comes from the same thread at once. */
@@ -430,7 +434,18 @@ export class GameDebugger {
         return await this.resume(request.how);
       case 'stack': {
         const frames = await this.stack();
-        return frames === null ? this.notHeld() : { held: this.heldState(), stack: frames };
+        if (frames === null) {
+          return this.notHeld();
+        }
+        return {
+          held: this.heldState(),
+          stack: frames,
+          ...(frames.length === 0
+            ? {
+                note: 'The game is held between frames, where no script runs, so there is no stack: debug_control step_over takes it to the next line of script it runs.',
+              }
+            : {}),
+        };
       }
       case 'variables':
         return await this.variables(request.frame);
@@ -482,7 +497,8 @@ export class GameDebugger {
       const entered = await this.next(GameDebugger.named('debug_enter'), PAUSE_MS);
       if (entered === null) {
         return {
-          refused: `The game did not stop within ${PAUSE_MS / 1000}s of being asked. It takes the request between frames and every few thousand lines of script, so its main thread is in neither: inside one long engine call, or a native extension's own loop.`,
+          paused: false,
+          note: `The game has been asked to stop and had not within ${PAUSE_MS / 1000}s. It takes the request between frames, and in a script every 2048 lines it runs, so its main thread is in a loop that sleeps between few lines, or inside one long engine call or a native extension's own loop. The request stays with the game, which stops when it next reaches that point; debug_state stack reads where once it has.`,
         };
       }
     }
