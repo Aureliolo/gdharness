@@ -1191,7 +1191,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         items: { type: 'string' },
         ops: ['start', 'check'],
         description:
-          'The game\'s own arguments, what OS.get_cmdline_user_args() answers, such as ["--level=2"]. The separator is added here, so a flag the engine reads goes to the game instead, and the answer says so under argsNote. A run with any is started by this server rather than by the editor, which fixes the game\'s command line when it opens the project, so the debug_* tools do not answer for it.',
+          'The game\'s own arguments, what OS.get_cmdline_user_args() answers, such as ["--level=2"]. The separator is added here, so a flag the engine reads goes to the game instead, and the answer says so under argsNote. A run with any is started by this server rather than by the editor, which fixes the game\'s command line when it opens the project, so its debugger is the keeper holding it rather than the editor; the debug_* tools answer for it all the same.',
       },
       engineArgs: {
         type: 'array',
@@ -1210,7 +1210,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['start'],
         description:
-          "start: run the game with no sound out of the machine, by starting the engine with --audio-driver Dummy: every stream still plays and every playback position still advances, so what is playing can still be asked. The editor takes no engine flags for a game it plays, so a silent windowed run is started by this server, and the debug_* tools do not answer for it. A headless run, check's included, is silent already. Default false, or true when GDHARNESS_SILENT is set in the server's environment to anything but 0 or false; silent: false then plays through the editor as before.",
+          "start: run the game with no sound out of the machine, by starting the engine with --audio-driver Dummy: every stream still plays and every playback position still advances, so what is playing can still be asked. The editor takes no engine flags for a game it plays, so a silent windowed run is started by this server, whose keeper is its debugger rather than the editor. A headless run, check's included, is silent already. Default false, or true when GDHARNESS_SILENT is set in the server's environment to anything but 0 or false; silent: false then plays through the editor as before.",
       },
       savesIn: {
         type: 'string',
@@ -1993,7 +1993,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'debug_breakpoint',
     title: 'Breakpoints',
     description:
-      "Sets or removes a breakpoint through the editor's debug adapter. Needs the editor, not a running game: set them first, then editor_run, and the game stops where you asked. The editor keeps a breakpoint set this way for one play, so every breakpoint this server holds is sent again before each play editor_run starts, and the start answer lists them under breakpoints. The set is also kept in the project, for the server that comes after a reconnect: a breakpoint stays until it is removed here, whichever server set it. Every answer lists the whole set under held, and the breakpoints the user set in the editor's own gutter under setInEditor; setting one here never takes those away, and removing a line here clears it whoever set it. Godot clears every breakpoint in the editor when a debug session opens unless network/debug_adapter/sync_breakpoints is on, which the addon turns on as it loads; an editor running an older addon is said so under breakpointsAtRisk, here and in editor_status.",
+      "Sets or removes a breakpoint. Set them first, then editor_run, and the game stops where you asked. With the editor connected it goes through the editor's debug adapter; with none, it is held here. A game this server starts itself, which editor_run start does for a run given args, savesIn, env or silent, or with no editor, is handed every breakpoint held here as it starts, and one set while that game runs reaches it at once (runningGame says so). The editor keeps a breakpoint set this way for one play, so every breakpoint this server holds is sent again before each play editor_run starts, and the start answer lists them under breakpoints. The set is also kept in the project, for the server that comes after a reconnect: a breakpoint stays until it is removed here, whichever server set it. Every answer lists the whole set under held, and the breakpoints the user set in the editor's own gutter under setInEditor; setting one here never takes those away, and removing a line here clears it whoever set it. Godot clears every breakpoint in the editor when a debug session opens unless network/debug_adapter/sync_breakpoints is on, which the addon turns on as it loads; an editor running an older addon is said so under breakpointsAtRisk, here and in editor_status.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
@@ -2009,15 +2009,27 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'debug_control',
     title: 'Step the debugger',
     description:
-      "Continues or steps the debugged game through the editor's debug adapter. A step waits for the game to stop again and answers with the stack where it ended up; one that has not stopped the game again within ten seconds answers heldAgain false and no stack. There is no pause and no step_out: Godot's adapter answers a pause by reporting the game stopped and leaving it running, and implements no stepOut at all, so hold the game where you want it with a breakpoint and step over or into from there.",
+      "Pauses, continues or steps the debugged game. A step waits for the game to stop again and answers with the stack where it ended up; one that has not stopped the game again within ten seconds answers heldAgain false and no stack. A game the editor plays is moved through the editor's debug adapter, which cannot pause or step out: it answers a pause by reporting the game stopped and leaving it running, and implements no stepOut, so hold such a game with a breakpoint and step over or into from there. A game this server started itself has its keeper as its debugger, which does both: pause breaks into the game wherever it is, a script spinning in a loop included, which is how a game hung on its first frame is asked where it is.",
     parameters: {},
     requires: [],
     operations: {
+      pause: {
+        effect: 'additive',
+        summary:
+          'stop a game this server started where it is, answering with the stack. The game takes it between frames, and in a script every 2048 lines it runs, so a loop that sleeps between few lines can take seconds; the call waits thirty, and past that answers paused false with the request still standing. Stopped between frames, where no script runs, the game is stepped on to the next line of script it runs',
+        requires: [],
+      },
       continue: { effect: 'additive', summary: 'resume after a breakpoint', requires: [] },
       step_over: { effect: 'additive', summary: 'run the current line', requires: [] },
       step_into: {
         effect: 'additive',
         summary: 'run the current line, stopping inside whatever it calls',
+        requires: [],
+      },
+      step_out: {
+        effect: 'additive',
+        summary:
+          'run to the end of the current function and stop in its caller; a game this server started only',
         requires: [],
       },
     },
@@ -2026,7 +2038,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'debug_state',
     title: 'Debugger state',
     description:
-      "Where the debugged game is stopped: the stack trace, what is in scope at a frame with the values, or the debug adapter's console output so far, its last thousand lines, with any earlier ones counted under notShown. A stop is reported by the editor's adapter only to the sessions connected when it happened, so a server that connected afterwards, which is every server after a reconnect, is shown a thread and no frames about a game still sitting at its breakpoint. That server asks the runtime instead: a held game accepts a connection and never answers, and the refusal then says held rather than running, and that the stack cannot be read from here. debug_control continue lets it go, and the next stop is one this session is told about, with its stack.",
+      "Where the debugged game is stopped: the stack trace, what is in scope at a frame with the values, or the debugger's console output so far, its last thousand lines, with any earlier ones counted under notShown. For a game this server started, its keeper's debugger answers: each frame names its script as the project spells it under script and on this machine under path, and held says which thread stopped and why. For a game the editor plays, the editor's debug adapter answers. A stop is reported by the editor's adapter only to the sessions connected when it happened, so a server that connected afterwards, which is every server after a reconnect, is shown a thread and no frames about a game still sitting at its breakpoint. That server asks the runtime instead: a held game accepts a connection and never answers, and the refusal then says held rather than running, and that the stack cannot be read from here. debug_control continue lets it go, and the next stop is one this session is told about, with its stack.",
     parameters: {
       frameId: {
         type: 'number',

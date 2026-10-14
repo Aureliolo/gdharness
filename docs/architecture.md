@@ -305,14 +305,15 @@ the one there.
 
 ## Connections
 
-| Connection          | Transport                                 | Port               | Override                                      | Needs                                          |
-| ------------------- | ----------------------------------------- | ------------------ | --------------------------------------------- | ---------------------------------------------- |
-| Editor bridge       | WebSocket, editor connects to the server  | 6505, or any free  | `GDHARNESS_BRIDGE_PORT`                       | Editor open, addon enabled                     |
-| Language server     | TCP, server connects to the editor        | 6005, or any free  | `GDHARNESS_LSP_PORT`, Godot's `--lsp-port`    | Editor open                                    |
-| Debug adapter       | TCP, server connects to the editor        | 6006, or any free  | `GDHARNESS_DAP_PORT`, Godot's `--dap-port`    | Editor open                                    |
-| Editor debugger     | TCP, the game connects to the editor      | assigned by the OS | none: Godot has no option for it              | A game the editor is playing                   |
-| Runtime             | TCP loopback, server connects to the game | assigned by the OS | `GDHARNESS_RUNTIME_DIR` for the announce file | Game running, autoload registered, debug build |
-| Headless operations | Process, one per call                     | none               | `GODOT_PATH` for the binary                   | Nothing                                        |
+| Connection          | Transport                                     | Port               | Override                                      | Needs                                          |
+| ------------------- | --------------------------------------------- | ------------------ | --------------------------------------------- | ---------------------------------------------- |
+| Editor bridge       | WebSocket, editor connects to the server      | 6505, or any free  | `GDHARNESS_BRIDGE_PORT`                       | Editor open, addon enabled                     |
+| Language server     | TCP, server connects to the editor            | 6005, or any free  | `GDHARNESS_LSP_PORT`, Godot's `--lsp-port`    | Editor open                                    |
+| Debug adapter       | TCP, server connects to the editor            | 6006, or any free  | `GDHARNESS_DAP_PORT`, Godot's `--dap-port`    | Editor open                                    |
+| Editor debugger     | TCP, the game connects to the editor          | assigned by the OS | none: Godot has no option for it              | A game the editor is playing                   |
+| Keeper debugger     | TCP loopback, the game connects to its keeper | assigned by the OS | none                                          | A game this server started                     |
+| Runtime             | TCP loopback, server connects to the game     | assigned by the OS | `GDHARNESS_RUNTIME_DIR` for the announce file | Game running, autoload registered, debug build |
+| Headless operations | Process, one per call                         | none               | `GODOT_PATH` for the binary                   | Nothing                                        |
 
 **Godot keeps those three per machine, not per editor.** All three live in editor settings, which
 are one file for every editor on the machine, so two editors open at once want the same three
@@ -648,14 +649,22 @@ verdict and every error and warning printed.
 
 `args` hands the game its own flags, the ones it reads back with `OS.get_cmdline_user_args()`,
 behind the `--` the engine stops reading at. A run carrying any is spawned rather than played by
-the editor, so `debug_*` will not answer for it.
+the editor.
 
 That is the engine's line, not a preference. The editor builds the game's command line out of
 `editor/run/main_run_args`, and it reads that when it opens the project: measured against 4.7.2,
 a value the addon wrote into the live settings was not on the command line of the game played a
 moment later, saving it to disk did not change that, and the same value put there before the
-editor started arrived. So a run is the debugger or the arguments, and which one was wanted is
-not the server's to guess.
+editor started arrived. So the editor's debugger cannot hold such a run, and the run's keeper is its
+debugger instead: the game is started with `--remote-debug` pointed at the keeper, which speaks the
+engine's own debugger protocol to it (`src/game-debugger.ts`), and `debug_*` asks the keeper over
+its pipe. The keeper rather than the server, because the game dials once, as it starts, and the
+keeper is the one process that lives as long as the game. Every breakpoint the server holds is
+handed to the game as it starts, and one set while it runs reaches it at once. This debugger also
+pauses a running game, which the editor's adapter cannot, and the engine takes the pause between
+lines of script as well as between frames, so a game spinning in a script loop on its first frame
+can be broken into and asked where it is. Errors do not stop such a game (`--ignore-error-breaks`),
+as they did not when it had no debugger. A profiled run's profiler reads the same connection.
 
 `editor_output` answers with entries rather than lines: each `ERROR:`, `SCRIPT ERROR:` and
 `WARNING:` headline with its `at:` line and backtrace, the counts, and a `clean` verdict. It

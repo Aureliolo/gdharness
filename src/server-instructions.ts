@@ -13,7 +13,7 @@ export function serverInstructions(): string {
     'Call editor_status first: it says whether an editor is connected and whether its addon matches this server.',
     'Start the game with editor_run start, never by spawning an engine, and read editor_output after every run:',
     'its clean verdict and its error entries are how a run is judged, and editor_run wait is how to wait for one.',
-    "The runtime_* tools work on the running game and the debug_* tools on the editor's debugger.",
+    'The runtime_* tools work on the running game and the debug_* tools on its debugger.',
     'A refusal names what would have worked, so read it before calling again.',
   ].join(' ');
 }

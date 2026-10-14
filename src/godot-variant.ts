@@ -317,12 +317,15 @@ function encodeVariant(value: SentValue): Uint8Array {
   return Uint8Array.from(out);
 }
 
-/** The thread every command is addressed to: the game drops one for a thread it does not know. */
-const MAIN_THREAD = 1;
+/**
+ * The thread a command is addressed to unless it is meant for one held at a break: the game drops a
+ * command for a thread it does not know, and a thread stopped in the debugger reads only its own.
+ */
+export const MAIN_THREAD = 1;
 
 /** A command to the game as the debugger frames it: its length, then `[message, thread, data]`. */
-export function framedCommand(message: string, data: readonly SentValue[]): Uint8Array {
-  const body = encodeVariant([message, MAIN_THREAD, data]);
+export function framedCommand(message: string, data: readonly SentValue[], thread = MAIN_THREAD): Uint8Array {
+  const body = encodeVariant([message, thread, data]);
   const framed = new Uint8Array(body.length + 4);
   new DataView(framed.buffer).setUint32(0, body.length, true);
   framed.set(body, 4);
@@ -331,7 +334,7 @@ export function framedCommand(message: string, data: readonly SentValue[]): Uint
 
 /** One message from the game, or why one could not be read. */
 export type DebuggerMessage =
-  | { readonly message: string; readonly data: readonly GodotValue[] }
+  | { readonly message: string; readonly thread: number; readonly data: readonly GodotValue[] }
   | { readonly unreadable: string };
 
 /** The engine's own limit on one message, past which the stream cannot be in step. */
@@ -378,9 +381,9 @@ function readMessage(body: Uint8Array): DebuggerMessage {
   if (!Array.isArray(value) || value.length !== 3) {
     return { unreadable: 'a message that is not [message, thread, data]' };
   }
-  const [message, , data] = value as readonly GodotValue[];
-  if (typeof message !== 'string' || !Array.isArray(data)) {
-    return { unreadable: 'a message whose name or data is the wrong type' };
+  const [message, thread, data] = value as readonly GodotValue[];
+  if (typeof message !== 'string' || typeof thread !== 'number' || !Array.isArray(data)) {
+    return { unreadable: 'a message whose name, thread or data is the wrong type' };
   }
-  return { message, data: data as readonly GodotValue[] };
+  return { message, thread, data: data as readonly GodotValue[] };
 }

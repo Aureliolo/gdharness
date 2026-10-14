@@ -771,6 +771,23 @@ export class GodotDAPClient {
   }
 
   /**
+   * Lets go of a held breakpoint without telling the editor, for a server with no editor connected:
+   * the editor that connects later is sent the set as it is then, before its first play.
+   */
+  forgetBreakpoint(scriptPath: string, line: number): void {
+    const key = fileKey(scriptPath);
+    const lines = this.breakpoints.get(key);
+    if (lines === undefined) {
+      return;
+    }
+    lines.delete(line);
+    if (lines.size === 0) {
+      this.breakpoints.delete(key);
+      this.spelled.delete(key);
+    }
+  }
+
+  /**
    * Takes on breakpoints another server set, without sending them: they are sent before the next
    * play, and a server that has just started has no play to send them for yet.
    */

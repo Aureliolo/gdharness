@@ -19,6 +19,10 @@ import { connect, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
+import type { DebugAnswer, DebugRequest } from './game-debugger.js';
+
+/** How a question for the game's debugger starts its line; the JSON of the request follows. */
+const DEBUG_PREFIX = 'debug ';
 
 /** What the keeper did when asked: ended the game, or found it already gone. */
 export type KeeperAnswer = 'signalled' | 'gone';
@@ -44,11 +48,34 @@ function endedOrWhyNot(end: () => KeeperAnswer): string {
   }
 }
 
+/** What the keeper's debugger answers, as one line of JSON. */
+async function debuggedOrWhyNot(
+  debug: ((request: DebugRequest) => Promise<DebugAnswer>) | null,
+  asked: string,
+): Promise<string> {
+  if (debug === null) {
+    return JSON.stringify({ refused: 'This run has no debugger.' });
+  }
+  try {
+    return JSON.stringify(await debug(JSON.parse(asked) as DebugRequest));
+  } catch (error) {
+    return JSON.stringify({ refused: `The debugger could not answer: ${errorText(error)}` });
+  }
+}
+
+function errorText(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).replaceAll('\n', ' ');
+}
+
 /**
- * Listens for a stop, answering it with what [param end] did. Null when it cannot listen, which
- * leaves a stop to the check it makes without a keeper.
+ * Listens for the server: a stop, answered with what [param end] did, and a question for the game's
+ * debugger, answered by [param debug]. Null when it cannot listen, which leaves a stop to the check
+ * it makes without a keeper.
  */
-export async function listenForAStop(end: () => KeeperAnswer): Promise<KeeperListening | null> {
+export async function listenForTheServer(
+  end: () => KeeperAnswer,
+  debug: ((request: DebugRequest) => Promise<DebugAnswer>) | null,
+): Promise<KeeperListening | null> {
   let directory: string | null = null;
   try {
     directory = process.platform === 'win32' ? null : mkdtempSync(join(tmpdir(), 'gdharness-keeper-'));
@@ -60,10 +87,22 @@ export async function listenForAStop(end: () => KeeperAnswer): Promise<KeeperLis
         // A server that gave up waiting, which leaves nothing here to answer.
       });
       let asked = '';
+      let answering = false;
       socket.on('data', (chunk: string) => {
         asked += chunk;
-        if (asked.includes('\n')) {
-          socket.end(asked.startsWith('stop\n') ? `${endedOrWhyNot(end)}\n` : 'unknown\n');
+        const line = asked.split('\n')[0] ?? '';
+        if (answering || !asked.includes('\n')) {
+          return;
+        }
+        answering = true;
+        if (line === 'stop') {
+          socket.end(`${endedOrWhyNot(end)}\n`);
+        } else if (line.startsWith(DEBUG_PREFIX)) {
+          void debuggedOrWhyNot(debug, line.slice(DEBUG_PREFIX.length)).then((answer) => {
+            socket.end(`${answer}\n`);
+          });
+        } else {
+          socket.end('unknown\n');
         }
       });
     });
@@ -101,14 +140,56 @@ function listening(server: Server, address: string): Promise<void> {
  * that has gone took its game with it or saw it go, but a stop does not rest on that: whoever answers,
  * the caller still waits for the process itself to go.
  */
-export function askTheKeeperToStop(
+export async function askTheKeeperToStop(
   address: string,
   withinMs: number,
 ): Promise<KeeperAnswer | { readonly unreached: string }> {
+  const answered = await askTheKeeper(address, 'stop', withinMs);
+  if (typeof answered !== 'string') {
+    return answered;
+  }
+  return answered === 'signalled' || answered === 'gone'
+    ? answered
+    : { unreached: `it answered ${JSON.stringify(answered)}` };
+}
+
+/**
+ * Asks the debugger of the game the keeper at [param address] holds. An answer that is not JSON is a
+ * keeper from before the debugger, which answers every question but a stop with `unknown`.
+ */
+export async function askTheKeepersDebugger(
+  address: string,
+  request: DebugRequest,
+  withinMs: number,
+): Promise<DebugAnswer | { readonly unreached: string }> {
+  const answered = await askTheKeeper(address, `${DEBUG_PREFIX}${JSON.stringify(request)}`, withinMs);
+  if (typeof answered !== 'string') {
+    return answered;
+  }
+  if (answered === 'unknown') {
+    return { unreached: 'its keeper was started by a gdharness from before game debuggers, and has none' };
+  }
+  try {
+    const parsed: unknown = JSON.parse(answered);
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as DebugAnswer;
+    }
+  } catch {
+    // Said below.
+  }
+  return { unreached: `it answered ${JSON.stringify(answered.slice(0, 200))}` };
+}
+
+/** The first line the keeper at [param address] answers [param line] with, or why there was none. */
+function askTheKeeper(
+  address: string,
+  line: string,
+  withinMs: number,
+): Promise<string | { readonly unreached: string }> {
   return new Promise((resolve) => {
     let said = '';
     let settled = false;
-    const settle = (answer: KeeperAnswer | { readonly unreached: string }): void => {
+    const settle = (answer: string | { readonly unreached: string }): void => {
       if (!settled) {
         settled = true;
         clearTimeout(timer);
@@ -122,17 +203,12 @@ export function askTheKeeperToStop(
     }, withinMs);
     socket.setEncoding('utf8');
     socket.on('connect', () => {
-      socket.write('stop\n');
+      socket.write(`${line}\n`);
     });
     socket.on('data', (chunk: string) => {
       said += chunk;
-      const line = said.split('\n')[0] ?? '';
       if (said.includes('\n')) {
-        settle(
-          line === 'signalled' || line === 'gone'
-            ? line
-            : { unreached: `it answered ${JSON.stringify(line)}` },
-        );
+        settle(said.split('\n')[0] ?? '');
       }
     });
     socket.on('error', (error: NodeJS.ErrnoException) => {

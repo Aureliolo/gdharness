@@ -33,6 +33,11 @@ export interface OutsideSpec {
      * game's debugger then, since it outlives the server that started the run.
      */
     readonly profile?: string;
+    /**
+     * The breakpoints the game starts with, as `res://path:line`. The keeper is its debugger, for
+     * the same reason it is a profiled run's.
+     */
+    readonly breakpoints?: readonly string[];
   };
   /** A Windows desktop to start it on, where its windows neither show nor take the focus. */
   readonly desktop?: string;
