@@ -41,12 +41,45 @@ try {
     if ($element.TryGetCurrentPattern($pattern, [ref]$found)) { return $found }
     return $null
   }
+  # FullDescription is where the description is put, and the managed client refuses every property
+  # newer than itself, so it is asked through the core call the client makes for the rest.
+  $script:unread = $null
+  try {
+    $client = [System.Windows.Automation.AutomationElement]
+    $core = $client.Assembly.GetType('MS.Internal.Automation.UiaCoreApi')
+    $ask = $core.GetMethod('UiaGetPropertyValue', [System.Reflection.BindingFlags]'NonPublic,Public,Static')
+    $nodeField = $client.GetField('_hnode', [System.Reflection.BindingFlags]'NonPublic,Instance')
+    if ($null -eq $ask -or $null -eq $nodeField) {
+      $script:unread = 'this Windows has no UiaGetPropertyValue to ask it through'
+    }
+  } catch {
+    $script:unread = "$_"
+  }
+  function FullDescription($element) {
+    if ($null -ne $script:unread) { return '' }
+    try {
+      $asked = @($nodeField.GetValue($element), [int]30159, $null)
+      $null = $ask.Invoke($null, $asked)
+      if ($asked[2] -is [string]) { return $asked[2] }
+    } catch {
+      $script:unread = "$_"
+    }
+    return ''
+  }
   function Describe($element, $ox, $oy, $depth) {
     $c = $element.Current
     $role = $c.ControlType.ProgrammaticName -replace '^ControlType[.]', ''
     $role = ($role -creplace '(?<=[a-z])(?=[A-Z])', '_').ToLowerInvariant()
     $node = [ordered]@{ role = $role; name = $c.Name }
-    if ($c.HelpText) { $node.description = $c.HelpText }
+    $description = FullDescription $element
+    if ($description) { $node.description = $description }
+    if ($c.HelpText) { $node.placeholder = $c.HelpText }
+    # The element's own id, the last four parts of its runtime id, which the game reads back as the
+    # node that made it.
+    $runtime = $element.GetRuntimeId()
+    if ($null -ne $runtime -and $runtime.Length -ge 4) {
+      $node.element_id = @($runtime[-4], $runtime[-3], $runtime[-2], $runtime[-1])
+    }
     $r = $c.BoundingRectangle
     if (-not $r.IsEmpty) {
       $node.bounds = [ordered]@{ x = [int]($r.X - $ox); y = [int]($r.Y - $oy) }
@@ -121,7 +154,9 @@ try {
     }
     $windows += , $tree
   }
-  Answer @{ windows = $windows }
+  $answer = @{ windows = $windows }
+  if ($null -ne $script:unread) { $answer.description_unread = $script:unread }
+  Answer $answer
 } catch {
   Answer @{ error = "$_" }
 }
@@ -211,14 +246,41 @@ func get_accessibility(_params: Dictionary) -> Dictionary:
 		return _refused("UI Automation could not read the game's windows: %s" % str(answer["error"]))
 
 	var windows: Array = answer.get("windows", [])
+	var made_by: Dictionary = {}
+	_note_elements(_host.get_tree().root, made_by)
+	var placing: Placing = Placing.new()
 	var elements: int = 0
 	var unnamed: int = 0
 	for at: int in windows.size():
 		var window: Dictionary = windows[at]
-		window["window_id"] = ids[at] if at < ids.size() else -1
+		var window_id: int = ids[at] if at < ids.size() else -1
+		window["window_id"] = window_id
+		var holder: Window = _window_with(_host.get_tree().root, window_id)
+		var holder_path: String = ""
+		if holder != null:
+			holder_path = str(holder.get_path())
+			window["node"] = holder_path
+		_place(window, holder_path, made_by, placing, true)
 		elements += _count(window)
 		unnamed += _unnamed_text(window)
 	var result: Dictionary = {"windows": windows, "elements": elements}
+	if placing.tooltips > 0:
+		result["tooltip_note"] = (
+			"tooltip is the node's tooltip_text, which the engine puts in the tree, and UI Automation, as"
+			+ " AccessKit fills it in, has no property that carries it (measured on 4.7.2), so a screen"
+			+ " reader on Windows is not told it. Say what a reader needs in accessibility_description."
+		)
+	if placing.asked > 0 and placing.placed == 0:
+		# Nothing at all matched: the element ids are not the engine's element RIDs any more, which
+		# an AccessKit that numbers its elements another way would do, and every node would read null.
+		result["node_note"] = (
+			"No element could be matched to the node that made it: UI Automation's runtime ids did not"
+			+ " carry the engine's element ids, so node and part_of are the windows' alone."
+		)
+	if answer.has("description_unread"):
+		result["description_note"] = (
+			"Descriptions could not be read, so none is shown: %s" % str(answer["description_unread"])
+		)
 	if elements <= windows.size():
 		var setting: String = _setting()
 		# The command line's --accessibility is consumed by the engine and not handed on, so only
@@ -276,8 +338,88 @@ static func _count(element: Dictionary) -> int:
 	return total
 
 
-## Text elements with bounds and no name. A window also holds a nameless text element with no bounds
-## that no node of the game made, in every scene tried, which is left out.
+## Every node's element by its id, for the walk's elements to be read back as the node that made
+## them. Internal children too: a dialog's buttons are elements like any other.
+static func _note_elements(node: Node, made_by: Dictionary) -> void:
+	var element: RID = node.get_accessibility_element()
+	if element.is_valid():
+		made_by[element.get_id()] = node
+	for child: Node in node.get_children(true):
+		_note_elements(child, made_by)
+
+
+static func _window_with(node: Node, window_id: int) -> Window:
+	if node is Window:
+		var window: Window = node
+		if window.get_window_id() == window_id:
+			return window
+	for child: Node in node.get_children(true):
+		var found: Window = _window_with(child, window_id)
+		if found != null:
+			return found
+	return null
+
+
+## Gives each child of [param element] the node that made it, or, for an element a node made as a
+## part of itself (a line of a text box, a window's announcements), the node it is a part of.
+##
+## UI Automation's runtime id for an element ends in the four halves of AccessKit's id for it, and
+## Godot gives AccessKit the element's RID: measured on 4.7.2, /root/Main's element answered
+## 114,1,0,0 with RID 114 << 32 | 1. Which pair holds it is not assumed, so both are tried.
+static func _place(
+	element: Dictionary, holder: String, made_by: Dictionary, placing: Placing, is_window: bool
+) -> void:
+	var children: Array = element.get("children", [])
+	for child: Variant in children:
+		if not child is Dictionary:
+			continue
+		var inner: Dictionary = child
+		var parts: Array = inner.get("element_id", [])
+		var _dropped: bool = inner.erase("element_id")
+		var node: Node = null
+		if parts.size() == 4:
+			placing.asked += 1
+			node = _made(parts, made_by)
+		var path: String = holder
+		if node != null:
+			placing.placed += 1
+			path = str(node.get_path())
+			inner["node"] = path
+			if node is Control:
+				var control: Control = node
+				if not control.tooltip_text.is_empty():
+					inner["tooltip"] = control.tooltip_text
+					placing.tooltips += 1
+		else:
+			inner["part_of"] = holder
+			# The one static text a window makes of itself: where it speaks what is announced, named
+			# only while something is.
+			if is_window and inner.get("role") == "text":
+				inner["part"] = "announcement"
+		_place(inner, path, made_by, placing, false)
+
+
+static func _made(parts: Array, made_by: Dictionary) -> Node:
+	var halves: Array[int] = []
+	for part: Variant in parts:
+		halves.append(Read.as_int(part, 0) & 0xFFFFFFFF)
+	for at: int in [0, 2]:
+		var id: int = (halves[at] << 32) | halves[at + 1]
+		if made_by.has(id):
+			return made_by[id]
+	return null
+
+
+## Counts kept while the elements are placed.
+class Placing:
+	extends RefCounted
+	var asked: int = 0
+	var placed: int = 0
+	var tooltips: int = 0
+
+
+## Text elements with bounds and no name. The window's announcement element has no bounds and is
+## left out with them: it is empty until something is announced.
 static func _unnamed_text(element: Dictionary) -> int:
 	var total: int = 0
 	if element.get("role") == "text" and str(element.get("name", "")).is_empty() and element.has("bounds"):

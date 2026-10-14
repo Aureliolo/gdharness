@@ -24008,7 +24008,8 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
       '[node name="Page" type="Control" parent="."]\noffset_right = 200.0\noffset_bottom = 100.0\n' +
       'focus_mode = 2\naccessibility_name = "Page"\nscript = ExtResource("2")\n\n' +
-      '[node name="Three" type="Label" parent="."]\noffset_top = 120.0\noffset_right = 200.0\noffset_bottom = 143.0\ntext = "Three"\n',
+      '[node name="Three" type="Label" parent="."]\noffset_top = 120.0\noffset_right = 200.0\noffset_bottom = 143.0\n' +
+      'tooltip_text = "Hover words"\naccessibility_description = "The third line"\ntext = "Three"\n',
   );
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
@@ -24110,6 +24111,45 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       text(get(tree, '_note')),
       /^1 text element\(s\) on screen have no name, so a screen reader reads them as nothing/,
       `the line with no words is counted: ${shown}`,
+    );
+
+    // Each element traced to the node that made it, and the parts a node made of itself to it.
+    assert.equal(get(window, 'node'), '/root', `the window is the root's: ${shown}`);
+    assert.deepEqual(
+      [get(page, 'node'), get(label, 'node'), get(label, 'part_of')],
+      ['/root/Main/Page', '/root/Main/Three', undefined],
+      `the page and the Label by their paths: ${shown}`,
+    );
+    assert.deepEqual(
+      asArray(get(page, 'children')).map((line) => [
+        get(line, 'node'),
+        get(line, 'part_of'),
+        get(line, 'part'),
+      ]),
+      [
+        [undefined, '/root/Main/Page', undefined],
+        [undefined, '/root/Main/Page', undefined],
+        [undefined, '/root/Main/Page', undefined],
+      ],
+      `the lines the page made as parts of it: ${shown}`,
+    );
+    const announcing = children.filter((child) => get(child, 'part') === 'announcement');
+    assert.deepEqual(
+      announcing.map((child) => [get(child, 'role'), get(child, 'name'), get(child, 'part_of')]),
+      [['text', '', '/root']],
+      `the window's own nameless text is its announcement element: ${shown}`,
+    );
+    assert.equal(get(tree, 'node_note'), undefined, shown);
+    assert.equal(get(tree, 'description_note'), undefined, shown);
+    assert.deepEqual(
+      [get(label, 'description'), get(page, 'description'), get(label, 'tooltip')],
+      ['The third line', undefined, 'Hover words'],
+      `the description a reader is told, and the tooltip it is not: ${shown}`,
+    );
+    assert.match(
+      text(get(tree, 'tooltip_note')),
+      /^tooltip is the node's tooltip_text, .* has no property that carries it/,
+      shown,
     );
   } finally {
     if (!stopped) {
