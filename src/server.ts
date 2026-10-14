@@ -4126,6 +4126,13 @@ class GodotServer {
               },
               { tool: 'runtime_inspect', op, patience },
             );
+          case 'accessibility':
+            // Starting PowerShell and walking the tree until it settles takes longer than a query.
+            return await this.handleRuntimeCommand('get_accessibility', whichGame(args), {
+              tool: 'runtime_inspect',
+              op,
+              patience: readPositiveNumber(args, 'timeoutMs') ?? Math.max(30_000, this.runtimeTimeoutMs()),
+            });
           default:
             return await this.handleRuntimeCommand(
               'get_metrics',

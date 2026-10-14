@@ -14681,6 +14681,30 @@ function testEngineFlagsAreAListNotAPassage(): void {
     /--write-movie takes a file path as the next entry, and nothing followed it/,
   );
   assert.match(refused(['--write-movie', '--verbose']), /"--verbose" is not one/);
+  // The renderer is chosen by name, so a scene can be measured on another driver, and a value that
+  // is not one the engine draws with is refused naming those it takes.
+  assert.deepEqual(engineFlags(['--rendering-driver', 'vulkan', '--rendering-method', 'mobile']), {
+    ok: true,
+  });
+  assert.deepEqual(engineFlags(['--rendering-driver', 'opengl3', '--rendering-method', 'gl_compatibility']), {
+    ok: true,
+  });
+  assert.match(
+    refused(['--rendering-driver', 'directx']),
+    /--rendering-driver takes a rendering driver: vulkan, d3d12, .* "directx" is not one/,
+  );
+  assert.match(refused(['--rendering-driver', 'vulkan --script x.gd']), /is not one/);
+  assert.match(
+    refused(['--rendering-method', 'forward']),
+    /--rendering-method takes a rendering method: forward_plus, mobile or gl_compatibility.* "forward" is not one/,
+  );
+  assert.match(refused(['--rendering-method']), /nothing followed it/);
+  // Whether the engine builds the tree a screen reader reads, by the engine's own three names.
+  assert.deepEqual(engineFlags(['--accessibility', 'always']), { ok: true });
+  assert.match(
+    refused(['--accessibility', 'on']),
+    /--accessibility takes an accessibility mode: auto, always or disabled.* "on" is not one/,
+  );
 
   // A game's own arguments are not refused for holding a flag of the same name, since the game may
   // read one itself, and the ones the engine would have read are picked out to be said.
@@ -22926,6 +22950,350 @@ async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
     );
     await stopItsRun(server);
     stopped = true;
+  } finally {
+    if (!stopped) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * The renderer a run draws with is chosen through engineArgs, and the memory it holds on the GPU is
+ * read through metrics.
+ *
+ * A game's memory on the GPU is not in memory_static, so a game committing gigabytes answered a few
+ * hundred megabytes and the rest could not be asked about; and telling which driver holds it takes
+ * the same scene on another one. The game prints the driver and method that draw it, so the second
+ * run shows the flag reached the engine and was obeyed rather than only passing the check. The dummy
+ * driver is the one every runner has besides the project's own, and it holds nothing on the GPU,
+ * which is the contrast: the first run's memory is the renderer's, not a number every run reports.
+ *
+ * Windowed, since a headless run draws with the dummy driver whatever it is asked; on Windows on a
+ * desktop of its own.
+ */
+async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('renderer choice regression skipped (Godot not found)');
+    return;
+  }
+  const refused = process.platform === 'win32' ? null : windowedRunRefused();
+  if (refused !== null) {
+    console.log(`renderer choice regression skipped (${refused})`);
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-renderer-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-renderer-rt-'));
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Renderer"\nrun/main_scene="res://main.tscn"\n\n' +
+      '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+      '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\tprint("drawn by %s, %s" % [\n' +
+      '\t\tRenderingServer.get_current_rendering_driver_name(), RenderingServer.get_current_rendering_method()\n\t])\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+      '[node name="Screen" type="ColorRect" parent="."]\noffset_right = 200.0\noffset_bottom = 200.0\ncolor = Color(0, 0, 1, 1)\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const gpuMemory = ['render_video_mem_used', 'render_texture_mem_used', 'render_buffer_mem_used'];
+  // The driver the game says draws it, and the GPU memory it answers after its first frames.
+  const runWith = async (
+    engineArgs: string[],
+  ): Promise<{ drawnBy: string; memory: Record<string, number> }> => {
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: {
+          projectPath: project,
+          op: 'start',
+          headless: false,
+          runtimeWaitMs: WINDOWED_BOOT_MS,
+          engineArgs,
+        },
+      },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    );
+    assert.equal(
+      get(parseTextContent(started), 'runtime', 'listening'),
+      true,
+      `${JSON.stringify(engineArgs)} starts a game: ${textOf(started) ?? JSON.stringify(started)}`,
+    );
+    await server.request(
+      'tools/call',
+      { name: 'runtime_wait', arguments: { op: 'frames', frames: 30 } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const asked = await server.request(
+      'tools/call',
+      { name: 'runtime_inspect', arguments: { op: 'metrics', metrics: gpuMemory } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const metrics = parseTextContent(asked);
+    const answered = get(metrics, 'data');
+    assert.ok(
+      typeof answered === 'object' && answered !== null,
+      `metrics answers the GPU memory: ${textOf(asked) ?? JSON.stringify(asked)}`,
+    );
+    assert.deepEqual(Object.keys(answered).sort(), [...gpuMemory].sort(), JSON.stringify(metrics));
+    const memory = Object.fromEntries(
+      gpuMemory.map((name) => [name, asNumber(get(metrics, 'data', name), JSON.stringify(metrics))]),
+    );
+    const printed =
+      textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    await stopItsRun(server);
+    return {
+      drawnBy: /drawn by ([a-z0-9_]+, [a-z_]+)/.exec(printed)?.[1] ?? `nothing said: ${printed}`,
+      memory,
+    };
+  };
+  let stopped = true;
+  try {
+    await server.initialize('regression-test');
+    stopped = false;
+    const own = await runWith([]);
+    // Any of the OpenGL drivers: a runner with no GPU falls back to ANGLE, which is the project's
+    // renderer all the same.
+    assert.match(
+      own.drawnBy,
+      /^opengl3[a-z_]*, gl_compatibility$/,
+      "the project's own renderer draws a run given no flag",
+    );
+    const shown = JSON.stringify(own.memory);
+    assert.ok(
+      (own.memory['render_texture_mem_used'] ?? 0) > 0,
+      `the screen's textures are on the GPU: ${shown}`,
+    );
+    assert.ok((own.memory['render_buffer_mem_used'] ?? 0) > 0, `its buffers are too: ${shown}`);
+    assert.ok(
+      (own.memory['render_video_mem_used'] ?? 0) >=
+        (own.memory['render_texture_mem_used'] ?? 0) + (own.memory['render_buffer_mem_used'] ?? 0),
+      `video memory holds the textures and buffers: ${shown}`,
+    );
+    const dummy = await runWith(['--rendering-driver', 'dummy']);
+    stopped = true;
+    assert.equal(dummy.drawnBy, 'dummy, dummy', 'the driver engineArgs named draws the run');
+    assert.deepEqual(
+      dummy.memory,
+      { render_video_mem_used: 0, render_texture_mem_used: 0, render_buffer_mem_used: 0 },
+      'a driver that draws nothing holds nothing on the GPU',
+    );
+  } finally {
+    if (!stopped) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * What a running game tells a screen reader is read back as a tree.
+ *
+ * The engine builds the tree only when something asks for it, and nothing on gdharness's desktop
+ * did, so a game's NOTIFICATION_ACCESSIBILITY_UPDATE never came. The page here makes three lines
+ * of static text in that notification, two with words and a click and one with neither, beside a
+ * Label, so the answer has to carry each line's words, role, place and action, and the note has to
+ * count the one a screen reader would read as nothing. The same game started without the flag is
+ * the contrast: it builds no tree, and the answer says how to make it build one.
+ *
+ * Windowed, since a headless run has no window to read. UI Automation is Windows' own, so on Linux
+ * and macOS the case holds the refusal naming the platform instead.
+ */
+async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('accessibility regression skipped (Godot not found)');
+    return;
+  }
+  const refused = process.platform === 'win32' ? null : windowedRunRefused();
+  if (refused !== null) {
+    console.log(`accessibility regression skipped (${refused})`);
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-accessibility-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-accessibility-rt-'));
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Accessible"\nrun/main_scene="res://main.tscn"\n\n' +
+      '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+      '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\t($Page as Control).grab_focus()\n',
+  );
+  writeFileSync(
+    join(project, 'page.gd'),
+    [
+      'extends Control',
+      '',
+      'var lines: Array[RID] = []',
+      '',
+      '',
+      'func _notification(what: int) -> void:',
+      '\tif what != NOTIFICATION_ACCESSIBILITY_UPDATE:',
+      '\t\treturn',
+      '\tfor line: RID in lines:',
+      '\t\tDisplayServer.accessibility_free_element(line)',
+      '\tlines.clear()',
+      '\tfor at: int in 3:',
+      '\t\tvar line: RID = DisplayServer.accessibility_create_sub_element(',
+      '\t\t\tget_accessibility_element(), DisplayServer.ROLE_STATIC_TEXT',
+      '\t\t)',
+      '\t\tDisplayServer.accessibility_update_set_bounds(line, Rect2(0, at * 20, 100, 20))',
+      '\t\tif at < 2:',
+      '\t\t\tDisplayServer.accessibility_update_set_value(line, ["One", "Two"][at])',
+      '\t\t\tDisplayServer.accessibility_update_add_action(line, DisplayServer.ACTION_CLICK, _clicked)',
+      '\t\tlines.append(line)',
+      '',
+      '',
+      'func _clicked(_data: Variant) -> void:',
+      '\tpass',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=3 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n' +
+      '[ext_resource type="Script" path="res://page.gd" id="2"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+      '[node name="Page" type="Control" parent="."]\noffset_right = 200.0\noffset_bottom = 100.0\n' +
+      'focus_mode = 2\naccessibility_name = "Page"\nscript = ExtResource("2")\n\n' +
+      '[node name="Three" type="Label" parent="."]\noffset_top = 120.0\noffset_right = 200.0\noffset_bottom = 143.0\ntext = "Three"\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  // What the game answered, read once it has drawn a frame or two.
+  const readWith = async (engineArgs: string[]): Promise<JsonRpcMessage> => {
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: {
+          projectPath: project,
+          op: 'start',
+          headless: false,
+          runtimeWaitMs: WINDOWED_BOOT_MS,
+          engineArgs,
+        },
+      },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    );
+    assert.equal(
+      get(parseTextContent(started), 'runtime', 'listening'),
+      true,
+      `${JSON.stringify(engineArgs)} starts a game: ${textOf(started) ?? JSON.stringify(started)}`,
+    );
+    await server.request(
+      'tools/call',
+      { name: 'runtime_wait', arguments: { op: 'frames', frames: 10 } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answered = await server.request(
+      'tools/call',
+      { name: 'runtime_inspect', arguments: { op: 'accessibility' } },
+      60_000,
+    );
+    await stopItsRun(server);
+    return answered;
+  };
+  let stopped = true;
+  try {
+    await server.initialize('regression-test');
+    stopped = false;
+    if (process.platform !== 'win32') {
+      const elsewhere = textOf(await readWith(['--accessibility', 'always'])) ?? '';
+      stopped = true;
+      assert.match(
+        elsewhere,
+        /The tree is read through UI Automation, the interface a Windows screen reader uses, and this game runs on (Linux|macOS)/,
+        elsewhere,
+      );
+      return;
+    }
+    const unbuilt = textOf(await readWith([])) ?? '';
+    assert.match(
+      unbuilt,
+      /UI Automation found nothing in the game's windows: .*this project's is auto\. Start the run with engineArgs \["--accessibility", "always"\]/,
+      `a game started without the flag builds no tree, and the answer says how to make it: ${unbuilt}`,
+    );
+    const asked = await readWith(['--accessibility', 'always']);
+    stopped = true;
+    const tree = parseTextContent(asked);
+    const shown = textOf(asked) ?? JSON.stringify(asked);
+    const window = get(tree, 'windows', 0);
+    assert.deepEqual(
+      [get(window, 'role'), get(window, 'window_id'), get(window, 'bounds', 'x'), get(window, 'bounds', 'y')],
+      ['window', 0, 0, 0],
+      `one window, placed at its own corner: ${shown}`,
+    );
+    assert.match(text(get(window, 'name')), /^Accessible/, `named by its title: ${shown}`);
+    const children = asArray(get(window, 'children'));
+    const page = children.find((child) => get(child, 'name') === 'Page');
+    assert.deepEqual(
+      [get(page, 'role'), get(page, 'focused')],
+      ['group', true],
+      `the page holding the lines, with the focus: ${shown}`,
+    );
+    const lines = asArray(get(page, 'children')).map((line) => [
+      get(line, 'role'),
+      get(line, 'name'),
+      get(line, 'bounds', 'y'),
+      get(line, 'actions'),
+    ]);
+    assert.deepEqual(
+      lines,
+      [
+        ['text', 'One', 0, ['click']],
+        ['text', 'Two', 20, ['click']],
+        ['text', '', 40, []],
+      ],
+      `each line with its words, its place and its action: ${shown}`,
+    );
+    const label = children.find((child) => get(child, 'name') === 'Three');
+    assert.deepEqual(
+      [get(label, 'role'), get(label, 'bounds', 'y')],
+      ['text', 120],
+      `the Label as static text, where it is drawn: ${shown}`,
+    );
+    assert.match(
+      text(get(tree, '_note')),
+      /^1 text element\(s\) on screen have no name, so a screen reader reads them as nothing/,
+      `the line with no words is counted: ${shown}`,
+    );
   } finally {
     if (!stopped) {
       await server.request(
@@ -36406,6 +36774,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAOneShotEngineRunIsNotTheEditor,
   testASubViewportCaptureIsDrawnNow,
   testAScreenshotHoldsTheGamesOwnWindows,
+  testTheRendererIsChosenAndItsMemoryRead,
+  testWhatTheGameTellsAScreenReaderIsRead,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,

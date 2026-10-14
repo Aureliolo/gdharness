@@ -10,6 +10,7 @@ extends Node
 ## wanted. Both directions of the socket carry one JSON object per line. Every request names an
 ## id and the reply carries it back.
 
+const Accessibility = preload("runtime_accessibility.gd")
 const Capture = preload("runtime_capture.gd")
 const Changes = preload("runtime_changes.gd")
 const ErrorReport = preload("error_report.gd")
@@ -89,6 +90,7 @@ var _typing: Typing = Typing.new(self)
 var _pad: Pad = Pad.new(self)
 var _capture: Capture = Capture.new(self, values)
 var _waits: Waits = Waits.new(self, values)
+var _accessibility: Accessibility = Accessibility.new(self)
 
 var _server: TCPServer
 var _clients: Array[StreamPeerTCP] = []
@@ -130,6 +132,7 @@ func _init() -> void:
 		"set_property": _changes.set_property,
 		"call_method": _changes.call_method,
 		"get_metrics": _queries.get_metrics,
+		"get_accessibility": _accessibility.get_accessibility,
 		"capture_screenshot": _capture.capture_screenshot,
 		"capture_viewport": _capture.capture_viewport,
 		"inject_action": _input.inject_action,
