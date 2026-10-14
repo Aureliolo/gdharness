@@ -84,6 +84,7 @@ const operationsModules = [
   'plugins.gd',
   'project_config.gd',
   'project_diagnostics.gd',
+  'project_file.gd',
   'reading.gd',
   'rename_checks.gd',
   'resource_files.gd',

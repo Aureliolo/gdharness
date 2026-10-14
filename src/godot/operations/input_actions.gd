@@ -2,6 +2,7 @@ extends RefCounted
 
 const Read = preload("reading.gd")
 const Log = preload("logger.gd")
+const ProjectFile = preload("project_file.gd")
 
 # The key names a caller may write, and what the engine calls them.
 const KEY_NAMES: Dictionary = {
@@ -172,7 +173,7 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	# Through ProjectSettings so the file is saved the way the editor saves it, header and
 	# every other line kept; a ConfigFile of project.godot drops the comments on the way out.
 	ProjectSettings.set_setting("input/" + action_name, action)
-	var err: Error = ProjectSettings.save()
+	var err: Error = ProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
@@ -205,7 +206,7 @@ func remove_input_action(params: Dictionary) -> Dictionary:
 			)
 		)
 	ProjectSettings.set_setting(setting, null)
-	var err: Error = ProjectSettings.save()
+	var err: Error = ProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 	return {"action_name": action_name, "removed": true}

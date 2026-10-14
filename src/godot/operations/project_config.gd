@@ -2,6 +2,7 @@ extends RefCounted
 
 const Read = preload("reading.gd")
 const Log = preload("logger.gd")
+const ProjectFile = preload("project_file.gd")
 const Serialisation = preload("serialisation.gd")
 
 var _log: Log
@@ -124,12 +125,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 			)
 		final_value = type_convert(final_value, wanted)
 
-	ProjectSettings.set_setting(setting_path, final_value)
-	var err: Error = ProjectSettings.save()
-	if err != OK:
-		return _log.failure("Failed to save project.godot: " + error_string(err))
-
-	return {
+	var answer: Dictionary = {
 		"setting_path": setting_path,
 		"old_value": _values.serialize_value(old_value) if had_value else null,
 		"new_value": _values.serialize_value(final_value),
@@ -137,6 +133,18 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		"was_default": was_default,
 		"saved": true,
 	}
+	# The same value in the same type is no change, and the file is left alone: a save rewrites it
+	# whole. The type is compared as well, so an int setting the file holds as 50.0 is still put right.
+	if had_value and typeof(old_value) == typeof(final_value) and old_value == final_value:
+		answer["saved"] = false
+		answer["unchanged"] = true
+		return answer
+
+	ProjectSettings.set_setting(setting_path, final_value)
+	var err: Error = ProjectFile.save()
+	if err != OK:
+		return _log.failure("Failed to save project.godot: " + error_string(err))
+	return answer
 
 
 # The type a setting wants, or TYPE_NIL where the engine names none and there is nothing to go on.
@@ -201,7 +209,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	# "Global Variable" column. Without it the node still comes up under the root; only the name
 	# stops resolving.
 	ProjectSettings.set_setting(setting, ("*" if global else "") + path)
-	var err: Error = ProjectSettings.save()
+	var err: Error = ProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
@@ -226,7 +234,7 @@ func remove_autoload(params: Dictionary) -> Dictionary:
 
 	var old_value: String = str(ProjectSettings.get_setting(setting))
 	ProjectSettings.set_setting(setting, null)
-	var err: Error = ProjectSettings.save()
+	var err: Error = ProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
@@ -275,7 +283,7 @@ func set_main_scene(params: Dictionary) -> Dictionary:
 	var old_main_scene: String = str(ProjectSettings.get_setting("application/run/main_scene", ""))
 
 	ProjectSettings.set_setting("application/run/main_scene", scene_path)
-	var err: Error = ProjectSettings.save()
+	var err: Error = ProjectFile.save()
 
 	if err != OK:
 		return _log.failure("Failed to save project settings: " + str(err))

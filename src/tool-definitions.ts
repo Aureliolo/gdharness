@@ -375,7 +375,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_settings',
     title: 'Project settings',
     description:
-      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
+      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. Every write keeps the sections and keys of project.godot in the order the file had them, so a change touches only its own lines. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
     parameters: {
       projectPath: PROJECT_PATH,
       setting: {
@@ -574,7 +574,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       options: {
         type: 'object',
         description:
-          'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}.',
+          'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}. A dictionary option whose keys are numbers, a font\'s opentype_features or any option already holding number keys, takes them written as strings of digits, and opentype_features also takes an OpenType tag by its four-letter name: {"opentype_features": {"liga": 0}} turns ligatures off. Both are written as the numbers the engine reads.',
         additionalProperties: true,
       },
       reimport: {
@@ -673,7 +673,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       engineArgs: {
         type: 'array',
         items: { type: 'string' },
-        description: `The engine's own flags for the run, such as ["--verbose"], a value going as the next entry. Only those that change what the engine logs, draws for debugging, checks on the GPU or how it times frames: ${Object.keys(ENGINE_FLAGS).join(', ')}. Any other is refused. With --verbose, engineEntries holds the ordinary lines the run printed as well, which is where the engine names the instances leaked and the resources still in use at exit.`,
+        description: `The engine's own flags for the run, such as ["--verbose"], a value going as the next entry. Only those that change what the engine logs, draws for debugging, checks on the GPU, which renderer draws, how it times frames or whether it builds the tree a screen reader reads: ${Object.keys(ENGINE_FLAGS).join(', ')}. Any other is refused. With --verbose, engineEntries holds the ordinary lines the run printed as well, which is where the engine names the instances leaked and the resources still in use at exit.`,
       },
       failFast: {
         type: 'boolean',
@@ -1197,7 +1197,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'array',
         items: { type: 'string' },
         ops: ['start', 'check'],
-        description: `The engine's own flags, before the separator, such as ["--verbose"] or ["--fixed-fps", "60"], a value going as the next entry. Only those that change what the engine logs, draws for debugging, checks on the GPU or how it times frames, and Movie Maker's --write-movie: ${Object.keys(ENGINE_FLAGS).join(', ')}. Any other is refused, since the engine's command line can also run scripts, open other projects and write files. --write-movie takes an absolute path outside the project, in a directory that exists, ending in .avi (one file, video and sound) or .png (one numbered PNG per frame and a .wav beside them), where nothing it would write is there already; it needs a start with headless: false, since the engine crashes writing a movie headless, and it records at the project's editor/movie_writer/fps unless --fixed-fps says otherwise. A run with any is started by this server, as one with args is. A check given --verbose answers with everything printed rather than only errors and warnings, since what verbose adds, the instances leaked at exit among it, is printed as ordinary lines.`,
+        description: `The engine's own flags, before the separator, such as ["--verbose"] or ["--fixed-fps", "60"], a value going as the next entry. Only those that change what the engine logs, draws for debugging, checks on the GPU, which renderer draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's --write-movie: ${Object.keys(ENGINE_FLAGS).join(', ')}. Any other is refused, since the engine's command line can also run scripts, open other projects and write files. --rendering-driver takes vulkan, d3d12, metal, opengl3, opengl3_es, opengl3_angle or dummy, and --rendering-method forward_plus, mobile or gl_compatibility, so the same scene can be measured on another driver and a project's OpenGL fallback exercised on a machine that has Vulkan; they choose what draws a run with a window. --accessibility always has the game build the tree a screen reader reads, as the project's accessibility/general/accessibility_support at Always Active does, so runtime_inspect accessibility can read it; otherwise the engine builds it only when a screen reader is running. --write-movie takes an absolute path outside the project, in a directory that exists, ending in .avi (one file, video and sound) or .png (one numbered PNG per frame and a .wav beside them), where nothing it would write is there already; it needs a start with headless: false, since the engine crashes writing a movie headless, and it records at the project's editor/movie_writer/fps unless --fixed-fps says otherwise. A run with any is started by this server, as one with args is. A check given --verbose answers with everything printed rather than only errors and warnings, since what verbose adds, the instances leaked at exit among it, is printed as ordinary lines.`,
       },
       headless: { type: 'boolean', ops: ['start'], description: 'start: force a window or no window.' },
       visible: {
@@ -1476,7 +1476,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'runtime_inspect',
     title: 'Inspect the running game',
     description:
-      'Questions about the running game: what is written on the screen, the scene tree, the nodes matching a query, where one node is on screen, what one property reads, or the performance metrics. Needs the game running with the runtime addon.',
+      'Questions about the running game: what is written on the screen, the scene tree, the nodes matching a query, where one node is on screen, what one property reads, the performance metrics, or what it tells a screen reader. Needs the game running with the runtime addon.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
@@ -1554,7 +1554,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'integer',
         minimum: 1,
         description:
-          'How long to wait for the answer before answering pending with a requestId, which runtime_invoke op result collects the reply by. Default 10000, or GDHARNESS_RUNTIME_TIMEOUT_MS.',
+          'How long to wait for the answer before answering pending with a requestId, which runtime_invoke op result collects the reply by. Default 10000, or GDHARNESS_RUNTIME_TIMEOUT_MS; accessibility defaults to 30000 or that, whichever is longer.',
       },
     },
     requires: [],
@@ -1587,7 +1587,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       metrics: {
         effect: 'read',
         summary:
-          "frame time, memory, draw calls and the rest. frame_time is the mean wall time of a frame over the last frames_timed frames (up to 120, timed by the game itself, physics and the wait for the display included), frame_time_max the slowest of them, both in seconds and null before a frame has passed; vsync says whether a frame waits for the display, and max_fps is the game's frame-rate cap, 0 for none. fps, process_time_max and physics_time are the engine's monitors, which it sets once a second: the frames counted in the last second, and the slowest process and physics step in it, so they trail a change by up to a second and the last two are a worst case rather than the frame. The memory, object and render counts are read as asked",
+          "frame time, memory, draw calls and the rest. frame_time is the mean wall time of a frame over the last frames_timed frames (up to 120, timed by the game itself, physics and the wait for the display included), frame_time_max the slowest of them, both in seconds and null before a frame has passed; vsync says whether a frame waits for the display, and max_fps is the game's frame-rate cap, 0 for none. fps, process_time_max and physics_time are the engine's monitors, which it sets once a second: the frames counted in the last second, and the slowest process and physics step in it, so they trail a change by up to a second and the last two are a worst case rather than the frame. The memory, object and render counts are read as asked. memory_static is what the engine allocated on the CPU side, in bytes; render_video_mem_used, render_texture_mem_used and render_buffer_mem_used are what the renderer has on the GPU, in bytes, which memory_static does not count",
+        requires: [],
+      },
+      accessibility: {
+        effect: 'read',
+        summary:
+          'what the game tells a screen reader, read through UI Automation as a Windows screen reader reads it, under windows: one tree per window, each element with its role as UI Automation names it (text for static text, button, check_box, group for a control holding others), its name, its value where it has one, its bounds in the window\'s pixels, the actions a screen reader is offered (click, focus, toggle, set_value, select, expand_collapse, scroll_into_view), and focused on the one holding the focus. The name is what is read aloud, so an empty one is read as nothing; static text takes it from DisplayServer.accessibility_update_set_value, not from a name set on it, and the answer says under _note how many text elements on screen have none. With no control focused, the engine reports the first node under the root as focused, which in a run with the runtime is GdharnessRuntime. Needs a windowed run on Windows started with engineArgs ["--accessibility", "always"] or with the project\'s accessibility/general/accessibility_support at Always Active, since the engine builds the tree only when asked; reading it takes a second or two, starting PowerShell inside the game so it reaches the game\'s own desktop',
         requires: [],
       },
     },

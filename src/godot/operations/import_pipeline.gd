@@ -46,6 +46,9 @@ const IMPORTER_VERSIONS: Dictionary[String, int] = {"scene": 1, "animation_libra
 ## The VRAM compression formats a project can ask for, each behind its
 ## `rendering/textures/vram_compression/import_<format>` setting.
 const VRAM_FORMATS: Array[String] = ["s3tc_bptc", "etc2_astc"]
+## Options keyed by OpenType tags, by the importer that holds them. The engine keys them by the tag as
+## an int, which a caller can also name, as "liga" for ligatures.
+const OPENTYPE_OPTIONS: Dictionary[String, Array] = {"font_data_dynamic": ["opentype_features"]}
 const EDITOR_DIRECTORY: String = "res://.godot/editor"
 const EDITOR_CACHE_PREFIX: String = "filesystem_cache"
 
@@ -177,6 +180,7 @@ func set_import_options(params: Dictionary) -> Dictionary:
 		return _log.failure("Failed to parse import file: " + str(err))
 
 	# Every option checked before any is written, so a refused one leaves the sidecar as it was.
+	var importer: String = str(config.get_value("remap", "importer", ""))
 	var fitted_values: Dictionary = {}
 	var refused: Array[String] = []
 	for key: Variant in options:
@@ -184,6 +188,13 @@ func set_import_options(params: Dictionary) -> Dictionary:
 		var held: Variant = config.get_value("params", name, null)
 		var given: Variant = _values.deserialize_value(options[key])
 		var value: Variant = _as_option(_values.fitted(options[key], typeof(held)), held)
+		if value is Dictionary:
+			var entries: Dictionary = value
+			var keyed: Dictionary = _keyed_as_option(name, entries, held, importer)
+			if keyed.has("refused"):
+				refused.append(str(keyed["refused"]))
+				continue
+			value = keyed["value"]
 		# A number the option cannot hold whole is refused rather than truncated: 2.5 fitted to an
 		# enum option became 2, which is another setting.
 		var lossy: bool = (
@@ -225,6 +236,87 @@ static func _as_option(given: Variant, held: Variant) -> Variant:
 		if number == floorf(number):
 			return int(number)
 	return given
+
+
+## [param given] with the keys and values a dictionary option holds as ints made ints again.
+##
+## JSON names every key as a string and every number as a float, so a font's opentype_features was
+## written as {"1818847073": 0.0}. The importer hands that to FontFile.opentype_feature_overrides,
+## which keys features by their tag as an int, so the call reported success and the font kept its
+## ligatures. A key is an int where the importer keys the option by OpenType tags, or where every key
+## the option holds already is one; a value is an int where every value held is, or for a tag.
+## Answers the dictionary under value, or why it cannot be written under refused.
+static func _keyed_as_option(name: String, given: Dictionary, held: Variant, importer: String) -> Dictionary:
+	var tag_options: Array = OPENTYPE_OPTIONS.get(importer, [])
+	var tagged: bool = name in tag_options
+	var numbered_keys: bool = tagged or _all_ints(held, true)
+	var whole_values: bool = tagged or _all_ints(held, false)
+	if not numbered_keys and not whole_values:
+		return {"value": given}
+	var keyed: Dictionary = {}
+	for key: Variant in given:
+		var as_key: Variant = key
+		if numbered_keys:
+			as_key = _int_key(key, tagged)
+			if as_key == null:
+				var wanted: String = (
+					'OpenType tags, by name such as "liga" or as the number TextServer.name_to_tag gives'
+					if tagged
+					else "ints"
+				)
+				return {
+					"refused": "%s is keyed by %s, and %s is not one" % [name, wanted, JSON.stringify(key)]
+				}
+		var value: Variant = given[key]
+		if whole_values and value is float:
+			var number: float = value
+			if number == floorf(number):
+				value = int(number)
+		keyed[as_key] = value
+	return {"value": keyed}
+
+
+## [param key] as an int key, or null when it is not one: a whole number, written as a number or as
+## a string of digits, or where [param tagged], an OpenType tag's four characters.
+static func _int_key(key: Variant, tagged: bool) -> Variant:
+	if key is int:
+		return key
+	if key is float:
+		var number: float = key
+		if number != floorf(number):
+			return null
+		return int(number)
+	if not key is String:
+		return null
+	var text: String = key
+	if text.is_valid_int():
+		return text.to_int()
+	# Exactly four printable characters, since the engine reads a longer name by its first four and
+	# "ligatures" would quietly become "liga".
+	if tagged and text.length() == 4 and _printable(text):
+		return TextServerManager.get_primary_interface().name_to_tag(text)
+	return null
+
+
+static func _printable(text: String) -> bool:
+	for i: int in text.length():
+		var code: int = text.unicode_at(i)
+		if code < 0x20 or code > 0x7e:
+			return false
+	return true
+
+
+## Whether [param held] is a dictionary that is not empty and whose keys, or values, are all ints.
+static func _all_ints(held: Variant, keys: bool) -> bool:
+	if not held is Dictionary:
+		return false
+	var dictionary: Dictionary = held
+	if dictionary.is_empty():
+		return false
+	for item: Variant in dictionary.keys() if keys else dictionary.values():
+		if not item is int:
+			return false
+	return true
 
 
 # The names of the project's export presets, in the order export_presets.cfg holds them.

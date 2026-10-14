@@ -139,11 +139,7 @@ function reported(problems: readonly LogEntry[]): Reported {
  * stdout's last words are the fallback for a run that reported nothing.
  */
 function reason(log: GameLog, problems: readonly LogEntry[]): string {
-  const own = log
-    .everything()
-    .filter(
-      (entry) => entry.source === 'stderr' && entry.severity === 'info' && entry.text.startsWith(OWN_ERROR),
-    );
+  const own = refusalsIn(log);
   if (own.length > 0) {
     return own.map((entry) => entry.text.slice(OWN_ERROR.length)).join('; ');
   }
@@ -156,6 +152,15 @@ function reason(log: GameLog, problems: readonly LogEntry[]): string {
   }
   const printed = log.everything().filter((entry) => entry.source === 'stdout');
   return printed.at(-1)?.text ?? 'no output at all';
+}
+
+/** The operations script's own `[ERROR]` lines in [param log], as the engine logged them. */
+function refusalsIn(log: GameLog): LogEntry[] {
+  return log
+    .everything()
+    .filter(
+      (entry) => entry.source === 'stderr' && entry.severity === 'info' && entry.text.startsWith(OWN_ERROR),
+    );
 }
 
 /**
@@ -371,6 +376,18 @@ export async function runOperation(
   // No answer is an operation that refused or an engine that never reached the script, whatever
   // the exit status says.
   if (answer.kind === 'none') {
+    // A refusal the script made is the whole message. Prefixed with the script's own name for the
+    // operation and its exit status, it read as a crash in something the caller never called, and
+    // it came back a second time under engine_messages.
+    const refusals = refusalsIn(ran.log);
+    if (refusals.length > 0) {
+      const said = new Set(refusals.map((entry) => entry.index));
+      return {
+        ok: false,
+        message: refusals.map((entry) => entry.text.slice(OWN_ERROR.length)).join('; '),
+        ...reported(problems.filter((entry) => !said.has(entry.index))),
+      };
+    }
     const ending =
       ran.exitCode === 0 && ran.failure === null ? 'produced no result' : `failed (${howItEnded(ran)})`;
     return {

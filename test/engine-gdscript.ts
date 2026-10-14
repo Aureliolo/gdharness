@@ -300,8 +300,8 @@ function runFixture(godotPath: string, projectDir: string, name: string): unknow
 function testTypedGate(godotPath: string, projectDir: string): void {
   const shipped = shippedScripts();
   const fixtures = fixtureScripts();
-  assert.ok(shipped.length >= 54, `the package ships GDScript: ${shipped.length} files`);
-  assert.ok(fixtures.length >= 26, `the fixtures are GDScript: ${fixtures.length} files`);
+  assert.ok(shipped.length >= 56, `the package ships GDScript: ${shipped.length} files`);
+  assert.ok(fixtures.length >= 27, `the fixtures are GDScript: ${fixtures.length} files`);
   // The fixtures run under these settings on the engine leg and nowhere else, so a fixture that
   // discarded a return value passed every local check and failed there.
   const fixturesDir = join(projectDir, 'fixtures');
@@ -817,11 +817,70 @@ function testOperations(godotPath: string, projectDir: string): void {
     'and a refused write leaves the file as it was',
   );
 
-  // Every write to project.godot goes through the engine's own save, which keeps the header
-  // the editor writes and every line it did not touch. The file is in the engine's own form
-  // from the setting saved above, so from here on a round trip has to give the bytes back
-  // and an addition has to keep every line that was there.
+  // The engine writes each section's keys in the order it registered them, and an engine running a
+  // script registers them in another order than the editor, so a one-setting change moved lines
+  // nobody touched. The file is turned around here, sections and the keys in each, which is an
+  // order the engine would not write, and every write after this has to keep it.
   const projectFile = join(projectDir, 'project.godot');
+  const turnedAround = (file: string): string => {
+    const [preamble = '', ...sections] = file.split(/\n(?=\[)/);
+    const reversed = sections.map((section) => {
+      const [head = '', ...lines] = section.replace(/\n+$/, '').split('\n');
+      const entries: string[] = [];
+      for (const line of lines) {
+        if (/^[\w"/.-]+=/.test(line) || entries.length === 0) {
+          entries.push(line);
+        } else {
+          entries[entries.length - 1] += `\n${line}`;
+        }
+      }
+      const kept = entries.filter((entry) => entry !== '');
+      return `${head}\n\n${kept.reverse().join('\n')}`;
+    });
+    const ending = /\n*$/.exec(file)?.[0] ?? '';
+    return `${preamble}\n${reversed.reverse().join('\n\n')}${ending}`;
+  };
+  const engineOrder = readFileSync(projectFile, 'utf8');
+  writeFileSync(projectFile, turnedAround(engineOrder));
+  const handOrdered = readFileSync(projectFile, 'utf8');
+  assert.notEqual(handOrdered, engineOrder, 'the fixture has more than one key to turn around');
+  const unchanged = operation('set_project_setting', {
+    setting: 'application/config/description',
+    value: 'A fixture',
+  });
+  assert.deepEqual(
+    [get(unchanged, 'saved'), get(unchanged, 'unchanged')],
+    [false, true],
+    `a setting given the value it holds is not saved: ${JSON.stringify(unchanged)}`,
+  );
+  assert.equal(readFileSync(projectFile, 'utf8'), handOrdered, 'and the file is left byte for byte');
+  const redescribed = operation('set_project_setting', {
+    setting: 'application/config/description',
+    value: 'Another fixture',
+  });
+  assert.equal(get(redescribed, 'saved'), true, JSON.stringify(redescribed));
+  assert.equal(
+    readFileSync(projectFile, 'utf8'),
+    handOrdered.replace('config/description="A fixture"', 'config/description="Another fixture"'),
+    'a changed setting changes its own line and moves nothing',
+  );
+  const beforeSection = readFileSync(projectFile, 'utf8');
+  operation('set_project_setting', { setting: 'editor/import/use_multiple_threads', value: false });
+  const withSection = readFileSync(projectFile, 'utf8');
+  assert.match(withSection, /^\[editor\]\n\nimport\/use_multiple_threads=false$/m, withSection);
+  const linesOf = (file: string): string[] => file.split('\n').filter((line) => line !== '');
+  assert.deepEqual(
+    linesOf(withSection).filter(
+      (line) => line !== '[editor]' && line !== 'import/use_multiple_threads=false',
+    ),
+    linesOf(beforeSection),
+    'a new section is added whole and nothing else moves',
+  );
+
+  // Every write to project.godot goes through the engine's own save, which keeps the header
+  // the editor writes and every line it did not touch, in the order the file had them, so from
+  // here on a round trip has to give the bytes back and an addition has to keep every line that
+  // was there.
   const keptWhole = (before: string, after: string, what: string): void => {
     assert.match(after, /^; Engine configuration file\.$/m, `${what} should keep the editor's header`);
     const lines = after.split('\n');
@@ -2690,11 +2749,108 @@ function testBinaryScenesAreScenes(godotPath: string, projectDir: string): void 
   }
 }
 
+/**
+ * A font's OpenType features are written as the engine reads them, and the font is shaped by them.
+ *
+ * JSON names every key as a string and every number as a float, so set_options wrote
+ * opentype_features as {"1818847073": 0.0}, said it had, and the font still formed its ligatures:
+ * FontFile keys a feature by its tag as an int. The font is the engine's own fallback, written out,
+ * which forms fi, fl and ff, so shaping "fi fl ff" before and after the change is the effect itself
+ * rather than the sidecar's text.
+ */
+function testAFontsFeaturesAreWrittenAsTheEngineReadsThem(godotPath: string, _projectDir: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  const importAll = (): void => {
+    const run = spawnSync(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180_000,
+    });
+    assert.equal(run.status, 0, `the project should import: ${run.stdout}\n${run.stderr}`);
+  };
+  const glyphs = (): number => {
+    const run = runScript(godotPath, dir, 'res://shape.gd');
+    const counted = /glyphs (\d+)/.exec(run.stdout)?.[1];
+    assert.ok(counted !== undefined, `the font should be shaped: ${run.stdout}\n${run.stderr}`);
+    return Number(counted);
+  };
+  try {
+    writeFileSync(
+      join(dir, 'write_font.gd'),
+      'extends SceneTree\n\n\nfunc _init() -> void:\n\tvar font: FontFile = ThemeDB.fallback_font as FontFile\n' +
+        '\tvar file: FileAccess = FileAccess.open("res://fallback.ttf", FileAccess.WRITE)\n' +
+        '\tvar _stored: bool = file.store_buffer(font.data)\n\tfile.close()\n\tquit(0)\n',
+    );
+    writeFileSync(
+      join(dir, 'shape.gd'),
+      'extends SceneTree\n\n\nfunc _init() -> void:\n\tvar font: FontFile = load("res://fallback.ttf")\n' +
+        '\tvar server: TextServer = TextServerManager.get_primary_interface()\n' +
+        '\tvar shaped: RID = server.create_shaped_text()\n' +
+        '\tvar _added: bool = server.shaped_text_add_string(shaped, "fi fl ff", font.get_rids(), 16)\n' +
+        '\tvar _shaped: bool = server.shaped_text_shape(shaped)\n' +
+        '\tprint("glyphs %d" % server.shaped_text_get_glyph_count(shaped))\n' +
+        '\tserver.free_rid(shaped)\n\tquit(0)\n',
+    );
+    const written = runScript(godotPath, dir, 'res://write_font.gd');
+    assert.equal(written.status, 0, `the fallback font should be written out: ${written.stderr}`);
+    importAll();
+    assert.equal(
+      glyphs(),
+      5,
+      'the font forms fi, fl and ff, so the five characters and two spaces are five glyphs',
+    );
+
+    // Ligatures by their name, contextual ligatures by their number.
+    const set = operation('set_import_options', {
+      resource_path: 'fallback.ttf',
+      options: { opentype_features: { liga: 0, '1668049255': 0 } },
+    });
+    assert.deepEqual(get(set, 'updated_options'), ['opentype_features'], JSON.stringify(set));
+    const sidecar = readFileSync(join(dir, 'fallback.ttf.import'), 'utf8');
+    assert.match(sidecar, /^1818847073: 0,?$/m, `liga is written by its tag as an int: ${sidecar}`);
+    assert.match(sidecar, /^1668049255: 0,?$/m, `and clig: ${sidecar}`);
+    importAll();
+    assert.equal(glyphs(), 8, 'with ligatures off, every character is a glyph of its own');
+
+    // A longer name is refused rather than read by its first four characters, which the engine does.
+    const kept = readFileSync(join(dir, 'fallback.ttf.import'), 'utf8');
+    const long = runRefusedOperation(godotPath, dir, 'set_import_options', {
+      resource_path: 'fallback.ttf',
+      options: { opentype_features: { ligatures: 0 } },
+    });
+    assert.equal(long.answer, null, 'a feature named by no tag is refused');
+    assert.match(
+      long.stderr,
+      /opentype_features is keyed by OpenType tags, by name such as "liga" or as the number TextServer\.name_to_tag gives, and "ligatures" is not one/,
+      long.stderr,
+    );
+    assert.equal(readFileSync(join(dir, 'fallback.ttf.import'), 'utf8'), kept, 'and nothing is written');
+
+    // Any option already keyed by ints keeps its keys ints, and its values where they are ints.
+    const sidecarFile = join(dir, 'fallback.ttf.import');
+    writeFileSync(sidecarFile, kept.replace('[params]\n', '[params]\n\nnumbered={\n1: 2\n}\n'));
+    operation('set_import_options', { resource_path: 'fallback.ttf', options: { numbered: { '3': 4 } } });
+    assert.match(
+      readFileSync(sidecarFile, 'utf8'),
+      /^numbered=\{\n3: 4\n\}$/m,
+      readFileSync(sidecarFile, 'utf8'),
+    );
+    const named = runRefusedOperation(godotPath, dir, 'set_import_options', {
+      resource_path: 'fallback.ttf',
+      options: { numbered: { three: 4 } },
+    });
+    assert.match(named.stderr, /numbered is keyed by ints, and "three" is not one/, named.stderr);
+  } finally {
+    sweep(dir);
+  }
+}
+
 const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => void | Promise<void>>> = {
   dependencyWalk: testDependencyWalk,
   operations: testOperations,
   gdignore: testAGdignoreStopsTheWalk,
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
+  fontFeatures: testAFontsFeaturesAreWrittenAsTheEngineReadsThem,
   importerFirst: (godotPath) => {
     testTheImporterIsAskedFirst(godotPath);
   },
@@ -2806,6 +2962,7 @@ async function main(): Promise<void> {
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
     runFixture(godotPath, projectDir, 'runtime_pad');
+    runFixture(godotPath, projectDir, 'runtime_accessibility');
     runFixture(godotPath, projectDir, 'runtime_query');
     runFixture(godotPath, projectDir, 'runtime_change');
     runFixture(godotPath, projectDir, 'reload_script');
