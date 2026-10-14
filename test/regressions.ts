@@ -237,6 +237,7 @@ import {
   endedToStartThis,
   endedWithoutACode,
   exportAnswer,
+  exportPresetRefusal,
   finishedBeforeTheEnd,
   foldedScriptErrors,
   leftRunningNote,
@@ -7233,6 +7234,8 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
   mkdirSync(projectPath, { recursive: true });
   writeFileSync(join(projectPath, 'project.godot'), 'config_version=5\n');
   writeFileSync(join(projectPath, 'inside.gd'), 'extends Node\n');
+  // A preset for the accepted export to name, which is checked before the engine is started.
+  writeFileSync(join(projectPath, 'export_presets.cfg'), '[preset.0]\n\nname="Linux"\nplatform="Linux"\n');
   writeFileSync(join(sandbox, 'outside.gd'), 'extends Node\n');
   writeFileSync(join(sandbox, 'outside.png'), 'not a png');
 
@@ -20438,6 +20441,38 @@ function testAnExportIsJudgedByTheFileItWrote(): void {
 }
 
 /**
+ * An export names its preset's absence before the engine is started.
+ *
+ * The engine refused a project with no export_presets.cfg by naming the file, never the preset, and
+ * only after importing the project. A preset's options section can hold keys of its own, so a name
+ * there must not be read as a preset's.
+ */
+function testAnExportOfAMissingPresetIsRefusedFirst(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-presets-'));
+  try {
+    assert.match(
+      exportPresetRefusal(project, 'Windows Desktop') ?? '',
+      /^This project has no export_presets\.cfg, so it has no preset 'Windows Desktop' to export with\./,
+    );
+    writeFileSync(
+      join(project, 'export_presets.cfg'),
+      '[preset.0]\n\nname="Windows Desktop"\nplatform="Windows Desktop"\n\n[preset.0.options]\n\n' +
+        'name="Not a preset"\n\n[preset.1]\n\nname="The \\"Quoted\\" build"\nplatform="Linux"\n',
+    );
+    assert.equal(exportPresetRefusal(project, 'Windows Desktop'), null);
+    assert.equal(exportPresetRefusal(project, 'The "Quoted" build'), null);
+    assert.equal(
+      exportPresetRefusal(project, 'Not a preset'),
+      `This project has no export preset named 'Not a preset'. Its presets are 'Windows Desktop', 'The "Quoted" build'.`,
+    );
+    writeFileSync(join(project, 'export_presets.cfg'), '');
+    assert.match(exportPresetRefusal(project, 'Linux') ?? '', /^export_presets\.cfg names no preset/);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * An export that could not copy an extension library says which and why, for one and for two.
  * Reported from game-d, whose export straight after an editor restart failed with eight errors
  * and nothing saying the open editor's copies were the cause.
@@ -20926,6 +20961,85 @@ async function testTheFrameTimeIsTheFrame(): Promise<void> {
       );
       assert.equal(get(metrics, 'data', 'vsync'), 'none, headless', shown);
       await call('editor_run', { op: 'stop' });
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
+ * A headless run asked for its accessibility tree is told everything the read needs at once.
+ *
+ * It was told only to start with headless: false, so a caller started a windowed run and was then
+ * refused again for the --accessibility flag. Rendered both ways: a project at the default Auto
+ * is told about the flag too, and one at Always Active is told about the window alone.
+ */
+async function testAHeadlessAccessibilityReadNamesWhatItNeeds(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('headless accessibility regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(join(project, 'main.gd'), 'extends Node\n');
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const asked = async (): Promise<string> => {
+        const started = await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: {
+              projectPath: project,
+              op: 'start',
+              headless: true,
+              args: ['--stay'],
+              runtimeWaitMs: 30_000,
+            },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.equal(get(parseTextContent(started), 'runtime', 'listening'), true, textOf(started) ?? '');
+        const said =
+          textOf(
+            await server.request(
+              'tools/call',
+              { name: 'runtime_inspect', arguments: { op: 'accessibility' } },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          ) ?? '';
+        await stopItsRun(server);
+        return said;
+      };
+
+      const atAuto = await asked();
+      assert.match(
+        atAuto,
+        /^A headless run has no window, so a screen reader is told nothing: start the run with headless: false and engineArgs \["--accessibility", "always"\], since this project's accessibility\/general\/accessibility_support is auto/,
+        atAuto,
+      );
+      const settings = join(project, 'project.godot');
+      writeFileSync(
+        settings,
+        `${readFileSync(settings, 'utf8')}\n[accessibility]\n\ngeneral/accessibility_support=1\n`,
+      );
+      const atAlways = await asked();
+      assert.match(
+        atAlways,
+        /^A headless run has no window, so a screen reader is told nothing: start the run with headless: false\.$/m,
+        atAlways,
+      );
     },
     { realAddon: true, engine },
   );
@@ -24009,7 +24123,22 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       '[node name="Page" type="Control" parent="."]\noffset_right = 200.0\noffset_bottom = 100.0\n' +
       'focus_mode = 2\naccessibility_name = "Page"\nscript = ExtResource("2")\n\n' +
       '[node name="Three" type="Label" parent="."]\noffset_top = 120.0\noffset_right = 200.0\noffset_bottom = 143.0\n' +
-      'tooltip_text = "Hover words"\naccessibility_description = "The third line"\ntext = "Three"\n',
+      'tooltip_text = "Hover words"\naccessibility_description = "The third line"\ntext = "Three"\n\n' +
+      // A log line as game-a's hall draws one: a RichTextLabel with a link, in plain
+      // containers, all of which AccessKit leaves out, so its text surfaces under the window.
+      '[node name="Log" type="VBoxContainer" parent="."]\noffset_top = 160.0\noffset_right = 400.0\noffset_bottom = 200.0\n\n' +
+      '[node name="Row" type="HBoxContainer" parent="Log"]\nlayout_mode = 2\n\n' +
+      '[node name="Line" type="RichTextLabel" parent="Log/Row"]\nlayout_mode = 2\nsize_flags_horizontal = 3\n' +
+      'bbcode_enabled = true\nfit_content = true\ntext = "[url=docket]Awoh[/url] gave up waiting on docket 235"\n\n' +
+      // Two drawn on one rectangle, which only their words tell apart.
+      '[node name="Under" type="RichTextLabel" parent="."]\noffset_top = 220.0\noffset_right = 300.0\noffset_bottom = 250.0\n' +
+      'text = "Beneath words"\n\n' +
+      '[node name="Over" type="RichTextLabel" parent="."]\noffset_top = 220.0\noffset_right = 300.0\noffset_bottom = 250.0\n' +
+      'text = "Above words"\n\n' +
+      // A Label over both that holds their words too: UI Automation shows it, so its own parts
+      // would be under it, and it is no candidate for a part found elsewhere.
+      '[node name="Caption" type="Label" parent="."]\noffset_top = 220.0\noffset_right = 300.0\noffset_bottom = 250.0\n' +
+      'text = "Beneath words, Above words"\n',
   );
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
@@ -24133,11 +24262,48 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       ],
       `the lines the page made as parts of it: ${shown}`,
     );
-    const announcing = children.filter((child) => get(child, 'part') === 'announcement');
+    const everything = (element: unknown): unknown[] => [
+      element,
+      ...asArray(get(element, 'children') ?? []).flatMap(everything),
+    ];
+    const all = everything(window);
+    const announcing = all.filter((child) => get(child, 'part') === 'announcement');
     assert.deepEqual(
-      announcing.map((child) => [get(child, 'role'), get(child, 'name'), get(child, 'part_of')]),
-      [['text', '', '/root']],
-      `the window's own nameless text is its announcement element: ${shown}`,
+      announcing.map((child) => [
+        get(child, 'role'),
+        get(child, 'name'),
+        get(child, 'part_of'),
+        get(child, 'bounds'),
+      ]),
+      [['text', '', '/root', undefined]],
+      `the window's own nameless text is its announcement element, and nothing else is: ${shown}`,
+    );
+    const saying = (words: string): unknown[] =>
+      all.filter((child) => text(get(child, 'name') ?? '').includes(words));
+    const logLine = saying('gave up waiting on docket 235');
+    assert.ok(logLine.length > 0, `the log line is in the tree: ${shown}`);
+    assert.deepEqual(
+      logLine.map((child) => [get(child, 'part_of'), get(child, 'part'), get(child, 'part_of_candidates')]),
+      logLine.map(() => ['/root/Main/Log/Row/Line', undefined, undefined]),
+      `a RichTextLabel's text in plain containers is the label's, not the window's: ${shown}`,
+    );
+    const parts = (words: string): unknown[] =>
+      saying(words).filter((child) => get(child, 'node') === undefined);
+    assert.deepEqual(
+      [...parts('Beneath words'), ...parts('Above words')].map((child) => [
+        get(child, 'part_of'),
+        get(child, 'part_of_candidates'),
+      ]),
+      [
+        ['/root/Main/Under', undefined],
+        ['/root/Main/Over', undefined],
+      ],
+      `two labels on one rectangle are told apart by their words, and the Label shown over them is not taken: ${shown}`,
+    );
+    assert.equal(
+      saying('Beneath words, Above words').map((child) => get(child, 'node'))[0],
+      '/root/Main/Caption',
+      `the Label over them is its own element: ${shown}`,
     );
     assert.equal(get(tree, 'node_note'), undefined, shown);
     assert.equal(get(tree, 'description_note'), undefined, shown);
@@ -37614,12 +37780,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheScanNoteNamesWhatStarted,
   testAnExportIsJudgedByTheFileItWrote,
   testAnExportThatCouldNotCopyALibrarySaysSo,
+  testAnExportOfAMissingPresetIsRefusedFirst,
   testLibraryCopiesAreMovedAsideAndSwept,
   testAHeldLibraryCopyIsSetAsideAndSweptLater,
   testNotRunIsPutDownToFailFastOnlyWhenSet,
   testAWordsWaitLeavesTheGameItsSpeed,
   testTheFrameTimeIsTheFrame,
   testThePhysicsRateIsTheStepsTaken,
+  testAHeadlessAccessibilityReadNamesWhatItNeeds,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
   testTheWaitIsSizedToTheLastBoot,

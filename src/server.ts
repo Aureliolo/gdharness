@@ -1655,6 +1655,42 @@ export function notRunNote(notRun: number, failFast: boolean): string | undefine
 }
 
 /**
+ * Why [param preset] cannot be exported with, read off the project's export_presets.cfg, or null
+ * when it is one of the presets there.
+ *
+ * Asked before the engine is started: the engine refused a missing file with "doesn't have an
+ * export_presets.cfg file at its root" and never named the preset, and starting it cost an import
+ * of the whole project to learn that.
+ */
+export function exportPresetRefusal(projectPath: string, preset: string): string | null {
+  let text: string;
+  try {
+    text = readFileSync(join(projectPath, 'export_presets.cfg'), 'utf8');
+  } catch {
+    return `This project has no export_presets.cfg, so it has no preset '${preset}' to export with. The editor writes the file when a preset is added in Project > Export.`;
+  }
+  const names: string[] = [];
+  let inPreset = false;
+  for (const line of text.split(/\r?\n/)) {
+    const section = /^\s*\[([^\]]+)\]/.exec(line)?.[1];
+    if (section !== undefined) {
+      inPreset = /^preset\.\d+$/.test(section.trim());
+      continue;
+    }
+    const named = inPreset ? /^\s*name\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(line)?.[1] : undefined;
+    if (named !== undefined) {
+      names.push(named.replace(/\\(.)/g, '$1'));
+    }
+  }
+  if (names.includes(preset)) {
+    return null;
+  }
+  return names.length === 0
+    ? `export_presets.cfg names no preset, so there is no '${preset}' to export with. The editor adds one in Project > Export.`
+    : `This project has no export preset named '${preset}'. Its presets are ${names.map((name) => `'${name}'`).join(', ')}.`;
+}
+
+/**
  * What project_export answers for [param ending], given when its output file was last written
  * before the export and after it, null where there was none.
  *
@@ -5445,6 +5481,10 @@ class GodotServer {
     const output = resolveWithinProject(project.value.path, readString(args, 'outputPath') ?? '');
     if (!output.ok) {
       return this.createErrorResponse(output.reason, PATH_SOLUTIONS);
+    }
+    const noPreset = exportPresetRefusal(project.value.path, preset);
+    if (noPreset !== null) {
+      return this.createErrorResponse(noPreset, ['project_export list reads the presets the project has']);
     }
     const engine = await this.engine();
     if (!engine.ok) {
