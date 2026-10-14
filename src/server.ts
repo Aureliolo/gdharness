@@ -88,6 +88,7 @@ import {
 } from './editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
+import { type DebugRequest, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
 import {
   answersTo,
   type FoldedEntry,
@@ -122,7 +123,7 @@ import {
   testProgressMessage,
   whyNoReport,
 } from './junit.js';
-import { askTheKeeperToStop } from './keeper-channel.js';
+import { askTheKeepersDebugger, askTheKeeperToStop } from './keeper-channel.js';
 import {
   EDITOR_PID_VARIABLE,
   type EditorPorts,
@@ -533,6 +534,36 @@ export function longerWaitNote(tool: string, op: string, waitedMs: number): stri
  * as the bridge reports it may not: on macOS every /var/folders project is really under
  * /private/var/folders, and the unresolved root would put its own files outside it.
  */
+/** A debug_control or debug_state call as the question it puts to a kept game's debugger. */
+function keptGameRequest(tool: string, op: string, args: OperationParams): DebugRequest {
+  if (tool === 'debug_state') {
+    if (op === 'output') {
+      return { op: 'output' };
+    }
+    if (op === 'variables') {
+      const frame = args['frameId'];
+      return { op: 'variables', frame: typeof frame === 'number' ? frame : 0 };
+    }
+    return { op: 'stack' };
+  }
+  switch (op) {
+    case 'pause':
+      return { op: 'pause' };
+    case 'step_over':
+      return { op: 'resume', how: 'next' };
+    case 'step_into':
+      return { op: 'resume', how: 'step' };
+    case 'step_out':
+      return { op: 'resume', how: 'out' };
+    default:
+      return { op: 'resume', how: 'continue' };
+  }
+}
+
+/** What a run this server starts has instead of the editor's debugger, said where one is started. */
+const OWN_DEBUGGER =
+  ' Its debugger is the keeper holding it rather than the editor, so the debug_* tools answer for it all the same: breakpoints stop it, and debug_control pause breaks into it wherever it is, which the editor offers no way to do.';
+
 function projectSpelling(projectPath: string, absolutePath: string): string {
   return `res://${relative(realPathOr(projectPath), realPathOr(absolutePath)).replaceAll('\\', '/')}`;
 }
@@ -755,6 +786,12 @@ function stopWaitMs(): number {
  * without it.
  */
 const KEEPER_ANSWER_MS = 15_000;
+
+/**
+ * How long a question to a kept game's debugger is given: a pause that lands between frames waits
+ * for the game to stop and then for the next line of script, and its stack is read after that.
+ */
+const KEEPER_DEBUG_MS = PAUSE_MS + STEP_MS + 2 * READ_MS;
 
 /**
  * How long a run's keeper is given to write the exit of a game already seen to have gone.
@@ -4237,33 +4274,109 @@ class GodotServer {
         // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
         // every /var/folders path is really /private/var/folders.
         const session = this.dapHoldingBreakpointsOf(project.value.path);
-        const answered = await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', {
-          ...args,
-          scriptPath: realPathOr(located.absolutePath),
-        });
-        if (answered.isError === true) {
-          return answered;
+        const scriptPath = realPathOr(located.absolutePath);
+        const line = readPositiveNumber(args, 'line');
+        if (line === undefined) {
+          return this.createErrorResponse('line is required: the one-based line to stop on.');
+        }
+        const editor = this.godotBridge.isConnected();
+        let answer: Record<string, unknown>;
+        if (editor) {
+          const answered = await this.handleDAP(
+            op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint',
+            {
+              ...args,
+              scriptPath,
+            },
+          );
+          if (answered.isError === true) {
+            return answered;
+          }
+          answer = asParams(JSON.parse(answered.content[0]?.text ?? '{}'));
+        } else {
+          // Held here for whoever plays next: a game this server starts takes them as it starts, and
+          // an editor that connects is given them before its first play.
+          if (op === 'set') {
+            session.holdBreakpoints([{ scriptPath, lines: [line] }]);
+          } else {
+            session.forgetBreakpoint(scriptPath, line);
+          }
+          answer = { [op === 'set' ? 'set' : 'removed']: true };
         }
         // Written after the adapter has taken it, so the note never claims a line the editor
         // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
         const held = session.breakpointsHeld();
         writeBreakpointNote(project.value.path, held);
+        const kept = this.keptRun();
+        const told =
+          kept === null
+            ? null
+            : await askTheKeepersDebugger(
+                kept.keeper,
+                {
+                  op: 'breakpoint',
+                  script: projectSpelling(project.value.path, scriptPath),
+                  line,
+                  set: op === 'set',
+                },
+                KEEPER_DEBUG_MS,
+              );
         return this.jsonTextResponse({
-          ...asParams(JSON.parse(answered.content[0]?.text ?? '{}')),
+          ...answer,
           held: this.breakpointsAsProjectSpells(project.value.path, held),
           // The editor's own, as it reported them to this session, so a caller reading the whole
           // set sees the lines the user set by hand as well as the ones set here.
-          setInEditor: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsInEditor()),
-          note: 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, and kept in the project for the server after a reconnect.',
-          ...this.breakpointsAtRisk(),
+          ...(editor
+            ? {
+                setInEditor: this.breakpointsAsProjectSpells(
+                  project.value.path,
+                  session.breakpointsInEditor(),
+                ),
+              }
+            : {}),
+          ...(told === null
+            ? {}
+            : 'unreached' in told || typeof told['refused'] === 'string'
+              ? {
+                  runningGame: `The game this server started is running, and its debugger was not told: ${String('unreached' in told ? told.unreached : told['refused'])}. It takes the line when it is started again.`,
+                }
+              : {
+                  runningGame: `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started.`,
+                }),
+          note: editor
+            ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
+            : 'No editor is connected, so the set under held is kept here: every game this server starts is handed it as it starts, an editor that connects is sent it before its first play, and it is kept in the project for the server after a reconnect.',
+          ...(editor ? this.breakpointsAtRisk() : {}),
         });
       }
       case 'debug_control':
       case 'debug_state': {
+        // A game this server started has its keeper for a debugger, which answers everything the
+        // editor's adapter does and also breaks into a game and steps out of a function.
+        const kept = this.keptRun();
+        if (kept !== null) {
+          return await this.askTheKeptGame(
+            kept.keeper,
+            keptGameRequest(tool, op, args),
+            kept.projectPath ?? '',
+          );
+        }
         // The console the adapter buffered outlives the game it came from, so reading it needs
         // no session. A stack, a scope and a step all need one, and one that is stopped.
         if (tool === 'debug_state' && op === 'output') {
           return await this.handleDAP('dap_get_output', args);
+        }
+        const played = this.activeProcess;
+        if ((op === 'pause' || op === 'step_out') && played?.throughEditor === true && !exited(played)) {
+          return this.createErrorResponse(
+            op === 'pause'
+              ? "A game the editor plays cannot be paused from here: Godot's debug adapter answers a pause by reporting the game stopped and leaving it running."
+              : "A game the editor plays cannot be stepped out of a function from here: Godot's debug adapter implements no stepOut.",
+            [
+              'Set a breakpoint where it should stop, then step over or into from there',
+              'A game this server starts, as editor_run start does with args, savesIn or env, has a debugger here that pauses and steps out',
+            ],
+          );
         }
         const held = await this.debuggedGame(tool === 'debug_control' ? 'move' : 'read');
         if (!held.ok) {
@@ -4467,9 +4580,9 @@ class GodotServer {
       return {
         ok: false,
         response: this.createErrorResponse(
-          'The running game is its own process, so no debugger is holding it: breakpoints never hit and there is no stack to read.',
+          'The running game has no debugger: it was started with none, or by a keeper that could not take questions, so breakpoints never hit and there is no stack to read.',
           [
-            'editor_run start plays it through the open editor, whose debugger the debug_* tools speak to',
+            'editor_run start starts it again, and the keeper holding a game this server starts is its debugger',
             'editor_status says whether an editor has reached this server',
           ],
         ),
@@ -6401,6 +6514,63 @@ class GodotServer {
     };
   }
 
+  /** Every held breakpoint as a game started here is handed it: `res://path:line`. */
+  private breakpointsForAGame(projectPath: string): string[] {
+    return this.dapHoldingBreakpointsOf(projectPath)
+      .breakpointsHeld()
+      .flatMap((one) => one.lines.map((line) => `${projectSpelling(projectPath, one.scriptPath)}:${line}`));
+  }
+
+  /**
+   * The running game when this server started it and its keeper is its debugger, which answers the
+   * debug_* tools for it. Null for a game the editor plays, and for none.
+   */
+  private keptRun(): (GodotProcess & { keeper: string }) | null {
+    const game = this.activeProcess;
+    if (game === null || game.throughEditor || exited(game) || game.keeper === undefined) {
+      return null;
+    }
+    return { ...game, keeper: game.keeper };
+  }
+
+  /** [param request] put to the debugger of the run this server started, as a tool's answer. */
+  private async askTheKeptGame(
+    keeper: string,
+    request: DebugRequest,
+    projectPath: string,
+  ): Promise<ToolResponse> {
+    const answered = await askTheKeepersDebugger(keeper, request, KEEPER_DEBUG_MS);
+    if ('unreached' in answered) {
+      return this.createErrorResponse(
+        `The debugger of the running game did not answer: ${String(answered.unreached)}.`,
+        [
+          'editor_run start starts the game again, with a debugger',
+          'editor_status says whether it is still running',
+        ],
+      );
+    }
+    if (typeof answered['refused'] === 'string') {
+      return this.createErrorResponse(answered['refused']);
+    }
+    // Each frame also says where its script is on this machine, as the editor's adapter names it.
+    const stack = answered['stack'];
+    return this.jsonTextResponse({
+      ...answered,
+      ...(Array.isArray(stack)
+        ? {
+            stack: stack.map((frame: Record<string, unknown>) => ({
+              ...frame,
+              ...(projectPath !== '' &&
+              typeof frame['script'] === 'string' &&
+              frame['script'].startsWith('res://')
+                ? { path: join(projectPath, frame['script'].slice('res://'.length)) }
+                : {}),
+            })),
+          }
+        : {}),
+    });
+  }
+
   /** The held set as the project spells its files, which is how the caller named them. */
   private breakpointsAsProjectSpells(
     projectPath: string,
@@ -7736,14 +7906,12 @@ class GodotServer {
     // answer about it however connected the editor is.
     const spawnedInstead =
       this.godotBridge.isConnected() && editorWouldPlay && (given.value.length > 0 || flags.value.length > 0)
-        ? ' The editor cannot be handed arguments for a game it plays, so this one was started ' +
-          'here: the debug_* tools answer only for a game the editor is playing.'
+        ? ` The editor cannot be handed arguments for a game it plays, so this one was started here.${OWN_DEBUGGER}`
         : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
-          ? ' The editor plays a game with its own environment, so a run given one was started ' +
-            'here: the debug_* tools answer only for a game the editor is playing.'
+          ? ` The editor plays a game with its own environment, so a run given one was started here.${OWN_DEBUGGER}`
           : this.godotBridge.isConnected() && editorWouldPlay && silent
             ? ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
-              `started here${args['silent'] === true ? '' : ', silent because GDHARNESS_SILENT says so'}: the debug_* tools answer only for a game the editor is playing, and silent: false plays it through the editor.`
+              `started here${args['silent'] === true ? '' : ', silent because GDHARNESS_SILENT says so'}, and silent: false plays it through the editor.${OWN_DEBUGGER}`
             : '';
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
@@ -7755,6 +7923,8 @@ class GodotServer {
     // simply that nothing here holds it: the refusals for those two states both said a start would
     // end it, and a start measured against each left it running.
     const stranded = wereHereFirst.filter((one) => one.pid !== ended?.pid && alive(one.pid));
+    // The set the game was started with: nothing has changed it since the launch read it.
+    const handed = this.dapHoldingBreakpointsOf(project.value.path).breakpointsHeld();
     const alsoRunning = leftRunningNote(stranded);
     return this.jsonTextResponse({
       started: true,
@@ -7768,6 +7938,12 @@ class GodotServer {
       // name: a tail on a path that does not exist reports nothing, which is exactly what a run
       // that has not printed yet looks like.
       transcript: started.transcript,
+      // What the game was handed to stop on, as a played run's answer says, so a caller learns here
+      // that the game may already be held rather than from the next debug_state.
+      breakpoints:
+        started.keeper === undefined || handed.length === 0
+          ? undefined
+          : this.breakpointsAsProjectSpells(project.value.path, handed),
       profile: profileOnStart(profiled, 'gdharness', runtimeAddonRegistered(project.value.path)),
       refreshedClasses: refreshed.value,
       ...scanWaitAnswer(scanned),
@@ -7785,7 +7961,7 @@ class GodotServer {
         runtimeWaitMs,
         given.value.length > 0,
       ),
-      message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}${endedForThis}${alsoRunning}`,
+      message: `Use editor_output for what it prints and editor_run stop to end it.${started.keeper !== undefined && handed.length > 0 ? ' It stops at the lines under breakpoints, and debug_state stack reads where it is held.' : ''}${spawnedInstead}${endedForThis}${alsoRunning}`,
     });
   }
 
@@ -8697,6 +8873,7 @@ class GodotServer {
         projectPath,
         ...this.servedBy(),
         ...(profile === undefined ? {} : { profile }),
+        breakpoints: this.breakpointsForAGame(projectPath),
       },
       ...(desktop === undefined ? {} : { desktop }),
     });

@@ -4319,22 +4319,22 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
     .join('\n');
   assert.match(console_, /the game said 4/, `and reach editor_output; it carried:\n${console_}`);
 
-  // There is no pause op, and this is why: the adapter takes a pause, answers it, sends the
-  // stopped event, and the game goes on for as long as anybody watches, with an empty stack
-  // throughout. Asking for it has to be refused as the unknown op it is rather than quietly
-  // becoming one of the two that work.
+  // A game the editor plays cannot be paused, and this is why: the adapter takes a pause, answers
+  // it, sends the stopped event, and the game goes on for as long as anybody watches, with an empty
+  // stack throughout. Pause exists for a game this server starts, whose keeper is its debugger, so
+  // asked of this one it has to be refused with that reason rather than quietly sent to the adapter.
   assert.match(
     await refusal('debug_control', { op: 'pause' }),
-    /continue, step_over, step_into/,
-    'an op that does not exist should be refused with the ones that do',
+    /A game the editor plays cannot be paused from here: Godot's debug adapter answers a pause by reporting the game stopped and leaving it running/,
+    'a pause of an editor-played game is refused with the reason',
   );
 
-  // The other one Godot has not got. Asked for rather than assumed absent, so that an engine
-  // which grows a stepOut is noticed here instead of going unused.
+  // The other one Godot's adapter has not got. Asked for rather than assumed absent, so that an
+  // engine which grows a stepOut is noticed here instead of going unused.
   assert.match(
     await refusal('debug_control', { op: 'step_out' }),
-    /continue, step_over, step_into/,
-    'step_out should be refused: the adapter never answers a stepOut request',
+    /A game the editor plays cannot be stepped out of a function from here: Godot's debug adapter implements no stepOut/,
+    'step_out of an editor-played game is refused: the adapter never answers a stepOut request',
   );
 
   // The game was let go above, so it is running rather than held, which is the third thing an
@@ -5153,8 +5153,8 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, play, project
     );
     assert.match(
       text(get(run, 'message')),
-      /debug_\*/,
-      'and the answer should say the debug tools will not answer for it',
+      /Its debugger is the keeper holding it rather than the editor/,
+      'and the answer should say what its debugger is, since the editor is not holding it',
     );
 
     const given = await call('runtime_invoke', {
