@@ -665,6 +665,18 @@ this job: a non-empty PNG says nothing about whether the game came up clean.
 The engine's own stdin debugger is never enabled. It breaks into a prompt on the first script
 error and never returns without a terminal.
 
+`runtime_inspect accessibility` is the one call that starts a process from inside the game. The
+engine builds the tree a screen reader reads only when something asks for it, gives a script no way
+to read it back, and nothing on gdharness's desktop asks; a UI Automation client running on the
+user's desktop cannot reach a window on that one either. So the runtime starts the system's own
+PowerShell as its child, which lands on whatever desktop the game is on, and the client's first
+question is what makes the engine build the tree. The game waits for it a frame at a time, since
+the client's questions are answered on the game's main thread and a blocking wait would hold both.
+The engine builds the tree at all only with `--accessibility always`, which `engineArgs` takes, or
+the project's setting at Always Active; the game cannot see the flag, which the engine consumes, so
+a window with nothing in it is what the refusal is judged by. UI Automation is Windows' own, and on
+Linux and macOS the call says so.
+
 ## Finding a running game
 
 The runtime addon binds loopback on a port the OS assigns and writes a file named by its process

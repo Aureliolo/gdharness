@@ -80,14 +80,15 @@ export function resolveSilent(requested: unknown, variables: NodeJS.ProcessEnv):
 /**
  * The engine's own flags a run may be given, each with the value it takes after it, if any.
  *
- * Only flags that change what the engine logs, draws for debugging, checks on the GPU or how it
- * times frames, and Movie Maker's `--write-movie`, whose file the server holds to the rules a written
- * capture is held to before the run starts (`movieRefusal`). The command line also takes flags that
- * run a script, open another project, export or write files anywhere, and a tool that passed anything
- * through would hand a caller all of those; the flags this server sets itself (--headless, --path,
- * --audio-driver, --quit-after) are taken as the arguments that set them.
+ * Only flags that change what the engine logs, draws for debugging, checks on the GPU, which renderer
+ * draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's
+ * `--write-movie`, whose file the server holds to the rules a written capture is held to before the
+ * run starts (`movieRefusal`). The command line also takes flags that run a script, open another
+ * project, export or write files anywhere, and a tool that passed anything through would hand a
+ * caller all of those; the flags this server sets itself (--headless, --path, --audio-driver,
+ * --quit-after) are taken as the arguments that set them.
  */
-export const ENGINE_FLAGS: Readonly<Record<string, 'none' | 'number' | 'size' | 'file'>> = Object.freeze({
+export const ENGINE_FLAGS: Readonly<Record<string, 'none' | FlagValue>> = Object.freeze({
   '--verbose': 'none',
   '--quiet': 'none',
   '--debug-collisions': 'none',
@@ -108,13 +109,32 @@ export const ENGINE_FLAGS: Readonly<Record<string, 'none' | 'number' | 'size' | 
   '--max-fps': 'number',
   '--resolution': 'size',
   '--write-movie': 'file',
+  '--rendering-driver': 'driver',
+  '--rendering-method': 'method',
+  '--accessibility': 'accessibility',
 });
 
+/** The kinds of value a flag can take after it. */
+type FlagValue = 'number' | 'size' | 'file' | 'driver' | 'method' | 'accessibility';
+
 /** The value each kind of flag takes, as the refusal for a wrong one names it. */
-const VALUE_KIND: Readonly<Record<'number' | 'size' | 'file', { pattern: RegExp; named: string }>> = {
+const VALUE_KIND: Readonly<Record<FlagValue, { pattern: RegExp; named: string }>> = {
   number: { pattern: /^\d+(?:\.\d+)?$/, named: 'a number' },
   size: { pattern: /^\d+x\d+$/, named: 'a size such as 1280x720' },
   file: { pattern: /^[^-]/, named: 'a file path' },
+  // Named rather than any word, so the value is one the engine draws with and nothing else rides in.
+  driver: {
+    pattern: /^(?:vulkan|d3d12|metal|opengl3|opengl3_es|opengl3_angle|dummy)$/,
+    named: 'a rendering driver: vulkan, d3d12, metal, opengl3, opengl3_es, opengl3_angle or dummy',
+  },
+  method: {
+    pattern: /^(?:forward_plus|mobile|gl_compatibility)$/,
+    named: 'a rendering method: forward_plus, mobile or gl_compatibility',
+  },
+  accessibility: {
+    pattern: /^(?:auto|always|disabled)$/,
+    named: 'an accessibility mode: auto, always or disabled',
+  },
 };
 
 /** The flags this server sets for a run, by the argument that sets each. */
@@ -137,7 +157,7 @@ export function engineFlags(given: readonly string[]): { ok: true } | { ok: fals
         reason:
           setBy !== undefined
             ? `${flag} is set by this tool's own argument, ${setBy}, rather than through engineArgs.`
-            : `${flag} is not one of the engine flags engineArgs takes, which are those that change what the engine logs, draws for debugging, checks on the GPU or how it times frames, and Movie Maker's --write-movie: ${offered}. A value goes as the next entry, as in ["--fixed-fps", "60"].`,
+            : `${flag} is not one of the engine flags engineArgs takes, which are those that change what the engine logs, draws for debugging, checks on the GPU, which renderer draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's --write-movie: ${offered}. A value goes as the next entry, as in ["--fixed-fps", "60"].`,
       };
     }
     if (takes === 'none') {

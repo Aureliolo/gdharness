@@ -718,6 +718,11 @@ func get_metrics(params: Dictionary) -> Dictionary:
 		"render_total_objects": Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME),
 		"render_total_primitives": Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
 		"render_total_draw_calls": Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+		# The GPU's half of the game's memory, in bytes, which memory_static does not count: a game
+		# committing 2.3 GB answered 298 MB there, and the rest could not be asked about.
+		"render_video_mem_used": Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED),
+		"render_texture_mem_used": Performance.get_monitor(Performance.RENDER_TEXTURE_MEM_USED),
+		"render_buffer_mem_used": Performance.get_monitor(Performance.RENDER_BUFFER_MEM_USED),
 	}
 
 	if metrics.is_empty():
