@@ -100,15 +100,19 @@ try {
   $windows = @()
   foreach ($handle in $Handles) {
     $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$handle)
-    $r = $root.Current.BoundingRectangle
     $deadline = [DateTime]::UtcNow.AddMilliseconds($SettleMs)
     $empty = [DateTime]::UtcNow.AddMilliseconds($EmptyMs)
+    # The window's corner is read on every walk: before the engine builds its tree the window is
+    # its frame, and after it the client area inside it, so a corner read once placed everything
+    # by the frame's.
+    $r = $root.Current.BoundingRectangle
     $tree = Describe $root $r.X $r.Y 0
     $last = Count $tree
     # Walked again until two walks in a row agree, since the first question is what makes the
     # engine build the tree, which arrives over the frames after it.
     while ([DateTime]::UtcNow -lt $deadline) {
       Start-Sleep -Milliseconds 150
+      $r = $root.Current.BoundingRectangle
       $tree = Describe $root $r.X $r.Y 0
       $count = Count $tree
       if ($count -gt 1 -and $count -eq $last) { break }
