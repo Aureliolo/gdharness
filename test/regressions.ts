@@ -4974,11 +4974,15 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
   });
   let uninformed: ServerProcess | null = null;
+  const settings =
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="HalfRestart"\n';
+  const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
+  const addon = join(project, 'addons', 'gdharness_editor');
   try {
-    writeFileSync(
-      join(project, 'project.godot'),
-      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="HalfRestart"\n',
-    );
+    // With the addon, because a restart is of an editor that was connected, and a project without
+    // it is one no editor can dial in from, which editor_status answers before any restart.
+    mkdirSync(addon, { recursive: true });
+    writeFileSync(join(project, 'project.godot'), enabled);
     // What the predecessor wrote before asking its editor to quit.
     noteRestartBegun({
       projectPath: project,
@@ -5061,16 +5065,14 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     // A launch that could never connect is refused before anything starts, each for its own reason.
     // Each half of the addon check gets the shape only it refuses: enabled with nothing on disk,
     // which is a project whose addons folder was cleaned, then on disk and not enabled.
-    const settings = readFileSync(join(project, 'project.godot'), 'utf8');
-    const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
-    writeFileSync(join(project, 'project.godot'), enabled);
+    rmSync(join(project, 'addons'), { recursive: true });
     assert.match(
       await launch(project),
       /gdharness editor addon is not installed/,
       'enabled and not installed',
     );
     writeFileSync(join(project, 'project.godot'), settings);
-    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    mkdirSync(addon, { recursive: true });
     assert.match(await launch(project), /gdharness editor addon is not enabled/, 'installed and not enabled');
     writeFileSync(join(project, 'project.godot'), enabled);
     assert.match(
@@ -6870,7 +6872,14 @@ async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
         ),
         create,
       );
-      assert.match(create, /gdharness setup in the project installs and enables it/, create);
+      // Named as the command to type, since no tool installs it and a caller holding only the tools
+      // went looking for one called setup.
+      assert.ok(
+        create.includes(
+          `No gdharness tool installs the addon: run  npx -y gdharness@${SERVER_VERSION} setup "${projectPath}" --no-connect  in a shell`,
+        ),
+        create,
+      );
       assert.doesNotMatch(create, /Enable the addon under/, create);
       const settings = readFileSync(join(projectPath, 'project.godot'), 'utf8');
       const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
@@ -6881,7 +6890,11 @@ async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
       mkdirSync(join(projectPath, 'addons', 'gdharness_editor'), { recursive: true });
       const installedOnly = await ask();
       assert.match(installedOnly, /addon is not enabled in /, `installed and not enabled: ${installedOnly}`);
-      assert.match(installedOnly, /gdharness setup in the project enables it/, installedOnly);
+      assert.match(
+        installedOnly,
+        /project_settings enable_plugin with pluginName gdharness_editor enables it/,
+        installedOnly,
+      );
       writeFileSync(join(projectPath, 'project.godot'), enabled);
       const ready = await ask();
       assert.ok(
@@ -6892,6 +6905,64 @@ async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
       );
       assert.match(ready, /Open the project in the editor with editor_launch/, ready);
     });
+  } finally {
+    sweep(projectPath);
+  }
+}
+
+/**
+ * editor_status says no editor can connect to a server whose project has no editor addon.
+ *
+ * A probe session asked editor_status on a project never set up and was told mayYetConnect true,
+ * because the server was young, while editor_launch refused to open an editor there for the same
+ * missing addon. The wait it invited could not end.
+ */
+async function testEditorStatusOnAProjectWithNoAddonIsFinal(): Promise<void> {
+  const projectPath = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-addon-'));
+  const status = async (): Promise<unknown> => {
+    const server = new ServerProcess({ env: { GDHARNESS_PROJECT: projectPath } });
+    try {
+      await server.initialize('regression-test');
+      return parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }));
+    } finally {
+      await server.stop();
+    }
+  };
+  try {
+    const settings = 'config_version=5\n';
+    writeFileSync(join(projectPath, 'project.godot'), settings);
+    const bare = await status();
+    assert.equal(get(bare, 'editor', 'connected'), false, JSON.stringify(bare));
+    assert.equal(
+      get(bare, 'editor', 'mayYetConnect'),
+      false,
+      `no addon, so nothing can come: ${JSON.stringify(bare)}`,
+    );
+    assert.equal(
+      get(bare, 'editor', 'editorCannotConnect', 'note'),
+      `No editor of this project can connect: the gdharness editor addon is not installed in ${projectPath}.`,
+      JSON.stringify(bare),
+    );
+    assert.match(
+      String(asArray(get(bare, 'editor', 'editorCannotConnect', 'remedies'))[0]),
+      /^No gdharness tool installs the addon: run {2}npx -y gdharness@/,
+      JSON.stringify(bare),
+    );
+
+    // Installed and enabled, the same young server is waiting on an editor that could still come,
+    // which is what tells the refusal above from a server that says false to everything.
+    mkdirSync(join(projectPath, 'addons', 'gdharness_editor'), { recursive: true });
+    writeFileSync(
+      join(projectPath, 'project.godot'),
+      `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`,
+    );
+    const ready = await status();
+    assert.equal(
+      get(ready, 'editor', 'mayYetConnect'),
+      true,
+      `a project an editor could connect from: ${JSON.stringify(ready)}`,
+    );
+    assert.equal(get(ready, 'editor', 'editorCannotConnect'), undefined, JSON.stringify(ready));
   } finally {
     sweep(projectPath);
   }
@@ -40026,6 +40097,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
   testANoEditorRefusalNamesWhatNeedsNone,
+  testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,

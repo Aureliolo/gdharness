@@ -1943,12 +1943,16 @@ function editorAddonMissing(projectPath: string): { why: string; remedies: strin
   }
   return {
     why: `the gdharness editor addon is not ${installed ? 'enabled' : 'installed'} in ${projectPath}`,
+    // No tool installs the addon, so the install is named as the shell command it is: a caller
+    // holding only these tools was told "gdharness setup" and looked for a tool of that name.
     remedies: installed
       ? [
-          'gdharness setup in the project enables it',
+          'project_settings enable_plugin with pluginName gdharness_editor enables it',
           'Or enable it under Project Settings, Plugins, in an editor opened by hand',
         ]
-      : ['gdharness setup in the project installs and enables it'],
+      : [
+          `No gdharness tool installs the addon: run  npx -y gdharness@${SERVER_VERSION} setup "${projectPath}" --no-connect  in a shell, which installs and enables the addons and writes no harness configuration`,
+        ],
   };
 }
 
@@ -6985,6 +6989,11 @@ class GodotServer {
       greeted &&
       editorIsStale(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest());
     const unfinished = this.restartLeftUnfinished(status.connected);
+    // A project without the editor addon has no editor that can dial in, whatever the bridge's age
+    // or an editor already running: one opened on it loads no plugin. A young server said
+    // mayYetConnect true for such a project while editor_launch refused to open one.
+    const cannotConnect =
+      status.connected || this.ownProject === null ? null : editorAddonMissing(this.ownProject);
     return {
       ...status,
       serverVersion: SERVER_VERSION,
@@ -7006,14 +7015,23 @@ class GodotServer {
       // answering from its own age sent a caller into a wait that could not end.
       mayYetConnect: status.connected
         ? undefined
-        : arriving.length > 0
-          ? true
-          : unfinished !== null
-            ? unfinished.underway
-            : this.closedHere !== null
-              ? false
-              : anEditorIsStillComing(status.listeningSince, launchedIsUp),
+        : cannotConnect !== null
+          ? false
+          : arriving.length > 0
+            ? true
+            : unfinished !== null
+              ? unfinished.underway
+              : this.closedHere !== null
+                ? false
+                : anEditorIsStillComing(status.listeningSince, launchedIsUp),
       editorsNotYetConnected: arriving.length > 0 ? arriving : undefined,
+      editorCannotConnect:
+        cannotConnect === null
+          ? undefined
+          : {
+              note: `No editor of this project can connect: ${cannotConnect.why}.`,
+              remedies: cannotConnect.remedies,
+            },
       closedHere:
         status.connected || arriving.length > 0 || this.closedHere === null
           ? undefined
