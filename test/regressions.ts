@@ -12995,9 +12995,11 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     );
   const stop = async (server: ServerProcess, game: number, logged: string): Promise<void> => {
     const asked = Date.now();
+    // Not asked to close first: the game has the runtime addon, and a close would end it before the
+    // keeper or the signal were reached.
     const answered = await server.request(
       'tools/call',
-      { name: 'editor_run', arguments: { op: 'stop' } },
+      { name: 'editor_run', arguments: { op: 'stop', graceful: false } },
       ENGINE_CALL_TIMEOUT_MS,
     );
     assert.equal(
@@ -13098,7 +13100,13 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
         'tools/call',
         {
           name: 'editor_run',
-          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: WINDOWED_BOOT_MS },
+          arguments: {
+            projectPath: project,
+            op: 'start',
+            headless: true,
+            runtimeWaitMs: WINDOWED_BOOT_MS,
+            graceful: false,
+          },
         },
         WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
       ),
@@ -13130,7 +13138,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
       const answered = parseTextContent(
         await fourth.request(
           'tools/call',
-          { name: 'editor_run', arguments: { op: 'stop' } },
+          { name: 'editor_run', arguments: { op: 'stop', graceful: false } },
           ENGINE_CALL_TIMEOUT_MS,
         ),
       );
@@ -13162,6 +13170,210 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     }
     sweep(project);
     sweep(runtime);
+  }
+}
+
+/**
+ * A stop asks the game to close the way a player's close does, and ends it otherwise only when the
+ * close does not.
+ *
+ * Reported from fantasy-guild-manager as #1121: a stop ended the process, so a game keeping a crash
+ * mark until its close never took the mark down, and its next start told the player it had crashed
+ * and turned their mods off. The game here notes the close request and leaving the tree as files, in
+ * a directory of each run's own. One closes, which is the stop the issue asked for. One turns off
+ * auto_accept_quit and stays, so the stop sits out the close wait and ends it, saying why. One is
+ * stopped with graceful: false and sees no close at all. And a start ending the run before it closes
+ * that run too.
+ */
+async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('stop asks the game to close regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-close-first-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-close-first-rt-'));
+  const notes = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-close-first-notes-'));
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtime,
+      GDHARNESS_CLOSE_WAIT_MS: '3000',
+    },
+  });
+  const games: number[] = [];
+  const call = async (args: Record<string, unknown>): Promise<unknown> => {
+    const response = await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: args },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    );
+    return parseTextContent(response) ?? textOf(response);
+  };
+  const start = async (name: string, extra: Record<string, unknown> = {}): Promise<unknown> => {
+    mkdirSync(join(notes, name));
+    const started = await call({
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: WINDOWED_BOOT_MS,
+      env: { CLOSE_NOTES: join(notes, name), ...(extra['env'] as Record<string, string> | undefined) },
+      ...Object.fromEntries(Object.entries(extra).filter(([key]) => key !== 'env')),
+    });
+    assert.equal(
+      get(started, 'runtime', 'listening'),
+      true,
+      `the game should announce: ${JSON.stringify(started)}`,
+    );
+    games.push(asNumber(get(started, 'runtime', 'pid')));
+    return started;
+  };
+  const noted = (name: string): string[] => readdirSync(join(notes, name)).sort();
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Close first"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tif OS.get_environment("KEEP_OPEN") == "1":',
+        '\t\tget_tree().auto_accept_quit = false',
+        '\t_note("ready")',
+        '',
+        '',
+        'func _notification(what: int) -> void:',
+        '\tif what == NOTIFICATION_WM_CLOSE_REQUEST:',
+        '\t\t_note("close_request")',
+        '\telif what == NOTIFICATION_EXIT_TREE:',
+        '\t\t_note("exit_tree")',
+        '',
+        '',
+        'func _note(what: String) -> void:',
+        '\tvar _made: Error = DirAccess.make_dir_absolute(OS.get_environment("CLOSE_NOTES").path_join(what))',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+
+    const closing = await start('closes');
+    const closed = await call({ op: 'stop' });
+    const closedShown = JSON.stringify(closed);
+    assert.equal(get(closed, 'stopped'), true, closedShown);
+    assert.equal(get(closed, 'endedThrough'), 'close', `the close ended it: ${closedShown}`);
+    assert.equal(get(closed, 'exitCode'), 0, `with its own exit code: ${closedShown}`);
+    assert.equal(get(closed, 'exitSignal'), undefined, closedShown);
+    assert.equal(get(closed, 'notClosedBecause'), undefined, closedShown);
+    assert.match(
+      text(get(closed, 'note')),
+      /^The game was asked to close, as a player's close asks it, and exited/,
+      closedShown,
+    );
+    assert.deepEqual(noted('closes'), ['close_request', 'exit_tree', 'ready'], 'its own close ran');
+    assert.equal(isAlive(asNumber(get(closing, 'runtime', 'pid'))), false, 'and it has gone');
+
+    // A game that does not quit on a close is given the wait and then ended, as a stop always did.
+    const staying = await start('stays', { env: { KEEP_OPEN: '1' } });
+    const kept = await call({ op: 'stop' });
+    const keptShown = JSON.stringify(kept);
+    assert.equal(get(kept, 'stopped'), true, keptShown);
+    assert.match(text(get(kept, 'endedThrough')), /^(keeper|signal)$/, keptShown);
+    assert.match(
+      text(get(kept, 'notClosedBecause')),
+      /^it was asked to close and was still running 3 seconds later; its tree does not quit on a close by itself \(auto_accept_quit is off\)/,
+      keptShown,
+    );
+    assert.match(
+      text(get(kept, 'note')),
+      /It was asked to close first and was not ended by that: it was asked/,
+      keptShown,
+    );
+    assert.match(text(get(kept, 'note')), /Ended that way, the game ran none of its own close\./, keptShown);
+    assert.deepEqual(noted('stays'), ['close_request', 'ready'], 'the close reached it and it stayed');
+    assert.equal(isAlive(asNumber(get(staying, 'runtime', 'pid'))), false, 'and it has gone');
+
+    // Asked not to: no close reaches the game.
+    await start('killed');
+    const killed = await call({ op: 'stop', graceful: false });
+    const killedShown = JSON.stringify(killed);
+    assert.equal(get(killed, 'stopped'), true, killedShown);
+    assert.match(text(get(killed, 'endedThrough')), /^(keeper|signal)$/, killedShown);
+    assert.equal(get(killed, 'notClosedBecause'), undefined, killedShown);
+    assert.deepEqual(noted('killed'), ['ready'], 'no close reached it');
+
+    // A runtime announced under the game's number for another project is not asked: a close ends a
+    // game as surely as a kill, and the number alone does not say whose game it is.
+    const disowned = asNumber(get(await start('disowned'), 'runtime', 'pid'));
+    const announcement = readdirSync(runtime, { recursive: true, encoding: 'utf8' })
+      .map((name) => join(runtime, name))
+      .find((file) => {
+        try {
+          return get(JSON.parse(readFileSync(file, 'utf8')) as unknown, 'pid') === disowned;
+        } catch {
+          return false;
+        }
+      });
+    assert.ok(announcement !== undefined, `the game's announcement under ${runtime}`);
+    const announced = JSON.parse(readFileSync(announcement, 'utf8')) as Record<string, unknown>;
+    const elsewhere = join(notes, 'elsewhere');
+    writeFileSync(
+      announcement,
+      JSON.stringify({ ...announced, project: { name: 'Elsewhere', path: elsewhere } }),
+    );
+    const refused = await call({ op: 'stop' });
+    const refusedShown = JSON.stringify(refused);
+    assert.equal(get(refused, 'stopped'), true, refusedShown);
+    assert.match(text(get(refused, 'endedThrough')), /^(keeper|signal)$/, refusedShown);
+    assert.equal(
+      get(refused, 'notClosedBecause'),
+      `the runtime announced under pid ${disowned} is a game of ${elsewhere}, not of this run's project`,
+      refusedShown,
+    );
+    assert.deepEqual(noted('disowned'), ['ready'], 'no close reached it');
+
+    // A start that ends the run before it closes that run the same way.
+    await start('replaced');
+    const replacing = await start('replacing');
+    assert.equal(
+      get(replacing, 'endedPreviousRunThrough'),
+      'close',
+      `the start closed the run before it: ${JSON.stringify(replacing)}`,
+    );
+    assert.deepEqual(noted('replaced'), ['close_request', 'exit_tree', 'ready'], 'the replaced run closed');
+    const last = await call({ op: 'stop' });
+    assert.equal(get(last, 'endedThrough'), 'close', JSON.stringify(last));
+  } finally {
+    for (const game of games) {
+      if (isAlive(game)) {
+        process.kill(game);
+      }
+    }
+    await server.stop().catch(() => undefined);
+    sweep(project);
+    sweep(runtime);
+    sweep(notes);
   }
 }
 
@@ -20735,7 +20947,9 @@ async function testAStoppedSpawnedRunGivesWayToAPlay(): Promise<void> {
         runtimeWaitMs: 20_000,
       });
       assert.equal(get(started, 'through'), 'gdharness', JSON.stringify(started));
-      const stopped = await call('editor_run', { op: 'stop' });
+      // Ended by its process, since the signal is what this case reads back; a close would end it
+      // with a code of its own.
+      const stopped = await call('editor_run', { op: 'stop', graceful: false });
       assert.equal(
         get(stopped, 'exitedBeforeStop'),
         false,
@@ -20822,7 +21036,8 @@ async function testAKilledRunHasNoExitCode(): Promise<void> {
         runtimeWaitMs: 20_000,
       });
       assert.equal(get(kept, 'through'), 'gdharness', JSON.stringify(kept));
-      const stopped = await call('editor_run', { op: 'stop' });
+      // Killed rather than closed, since the kill is what has no code.
+      const stopped = await call('editor_run', { op: 'stop', graceful: false });
       assert.equal(
         get(stopped, 'exitCode'),
         null,
@@ -31281,7 +31496,9 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         assert.ok(Date.now() < framesBy, `ten frames of the profile within a minute: ${going}`);
         await delay(250);
       }
-      const stopped = await call({ op: 'stop' });
+      // Ended by its process: a game that closes quits its tree, and the runtime sends the totals as
+      // a game quits whatever the stop does.
+      const stopped = await call({ op: 'stop', graceful: false });
       assert.match(stopped, /"endedThrough": "(keeper|signal)"/, stopped);
       const after = await call({ op: 'profile', limit: 100, callersOf: '@pace_getter' });
       assert.ok(after.trimStart().startsWith('{'), `the stopped run's profile: ${after}`);
@@ -39526,6 +39743,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeptGamesStackAndValuesRead,
   testAnExitedGamesLastMessagesAreRead,
   testAStopGoesThroughTheKeeper,
+  testAStopAsksTheGameToCloseFirst,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testAGameIsFoundThroughALinkToItsProject,

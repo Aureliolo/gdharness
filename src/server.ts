@@ -239,6 +239,7 @@ import {
 } from './script-profile.js';
 import { serverInstructions } from './server-instructions.js';
 import type {
+  EndedThrough,
   GodotProcess,
   MCPToolDefinition,
   OperationParams,
@@ -843,6 +844,59 @@ async function untilGone(pids: readonly number[], withinMs = stopWaitMs()): Prom
 }
 
 /**
+ * How long a game asked to close is given to exit before the stop ends it. Its own close may save,
+ * and a windowed engine takes a while to put its renderer down. GDHARNESS_CLOSE_WAIT_MS sets
+ * another.
+ */
+function closeWaitMs(): number {
+  return waitFromEnv('GDHARNESS_CLOSE_WAIT_MS', 10_000);
+}
+
+/**
+ * How long a game is given to take a close. The runtime answers in the frame it reads the request,
+ * so a game silent past this is held at a breakpoint or stuck in a frame, and is ended instead.
+ */
+const CLOSE_ASK_MS = 3000;
+
+/**
+ * Asks the game announced as [param announced] to close the way a player's close does, and waits
+ * for it and every process in [param alsoGoing] to exit. Null when they did; otherwise why the game
+ * has to be ended another way, which nothing has done to it yet.
+ *
+ * Ended by its process, a game runs none of its own close. A game keeping a crash mark takes the
+ * mark down only on a close, so every stopped run read as a crash on its next start, which then
+ * turned the player's mods off.
+ *
+ * Only a runtime announced for [param projectPath]: a number is not an identity, and a close ends a
+ * game as surely as a kill does, so one announced under the number for another project is left be.
+ */
+async function closeLikeAPlayer(
+  announced: number,
+  alsoGoing: readonly number[],
+  projectPath: string | null,
+): Promise<string | null> {
+  const endpoint = runtimesAnnounced().running.find((one) => one.pid === announced);
+  if (endpoint === undefined) {
+    return 'its game had no runtime listening to be asked';
+  }
+  if (projectPath !== null && !isSameDirectory(endpoint.project.path, projectPath)) {
+    return `the runtime announced under pid ${announced} is a game of ${endpoint.project.path}, not of this run's project`;
+  }
+  const asked = await runtimeRequest(endpoint, 'close_game', {}, CLOSE_ASK_MS);
+  if (!asked.ok) {
+    return asked.reason === 'error'
+      ? `its runtime did not take the close (${asked.message}), as an addon older than this server's does not`
+      : `its runtime did not answer the close within ${CLOSE_ASK_MS / 1000} seconds, as a game held at a breakpoint or stuck in a frame does not`;
+  }
+  if (await untilGone([announced, ...alsoGoing], closeWaitMs())) {
+    return null;
+  }
+  return asked.payload['acceptsQuit'] === false
+    ? `it was asked to close and was still running ${closeWaitMs() / 1000} seconds later; its tree does not quit on a close by itself (auto_accept_quit is off), so its own handling of the close decides`
+    : `it was asked to close and was still running ${closeWaitMs() / 1000} seconds later`;
+}
+
+/**
  * Why a run that is over has no exit code here, said for the cause that applies.
  *
  * Two kinds of run end with nobody here collecting a code. A game the editor plays is the editor's
@@ -921,7 +975,14 @@ export function stopVerdict(stop: {
   readonly clean: boolean | undefined;
   /** Which property of the run the pid no longer answered to, for a stop that was refused. */
   readonly notEndedBecause?: string;
+  readonly endedThrough?: EndedThrough;
+  /** Why the game was not ended by the close the stop asked for first. */
+  readonly notClosedBecause?: string;
 }): StopVerdict {
+  const notClosed =
+    stop.notClosedBecause === undefined
+      ? ''
+      : ` It was asked to close first and was not ended by that: ${stop.notClosedBecause}.`;
   if (!stop.wasRunning) {
     return {
       stopped: true,
@@ -956,7 +1017,18 @@ export function stopVerdict(stop: {
     return {
       stopped: false,
       stillGoing: stop.endedPid,
-      note: `${told} ${stopWaitMs() / 1000} seconds later, so it has not stopped. editor_status says when it has gone, and editor_run stop asks again.`,
+      note: `${told} ${stopWaitMs() / 1000} seconds later, so it has not stopped.${notClosed} editor_status says when it has gone, and editor_run stop asks again.`,
+      withChildren: true,
+    };
+  }
+  if (stop.endedThrough === 'close') {
+    return {
+      stopped: true,
+      endedPid: stop.endedPid,
+      clean: stop.clean,
+      note: `The game was asked to close, as a player's close asks it, and exited, so its own handling of a close ran.${
+        stop.throughEditor ? ' Its exit code stays with the editor that played it.' : ''
+      }`,
       withChildren: true,
     };
   }
@@ -970,7 +1042,9 @@ export function stopVerdict(stop: {
           ? 'The editor was asked to stop the scene it is playing. Its game had not announced a runtime, so no process was named under endedPid, and its exit code stays with the editor.'
           : 'The editor was asked to stop the scene it is playing.'
         : 'The process named under endedPid was ended.'
-    }${stop.exitSignal === null ? '' : ` It was ended by ${stop.exitSignal} and so has no exit code.`}`,
+    }${stop.exitSignal === null ? '' : ` It was ended by ${stop.exitSignal} and so has no exit code.`}${notClosed}${
+      stop.notClosedBecause === undefined ? '' : ' Ended that way, the game ran none of its own close.'
+    }`,
     withChildren: true,
   };
 }
@@ -984,7 +1058,9 @@ interface EndedRun {
   readonly pid: number | null;
   readonly ending: Ending;
   /** How the start ended it, when it did: see `GodotProcess.endedThrough`. */
-  readonly through?: 'keeper' | 'signal' | 'editor';
+  readonly through?: EndedThrough;
+  /** Why a start that asked the run to close first had to end it another way. */
+  readonly notClosedBecause?: string;
   /** Why nothing was signalled, for a run whose pid no longer answered as it. */
   readonly notEndedBecause?: string;
 }
@@ -995,8 +1071,9 @@ interface EndedRun {
  * new run's.
  */
 export function previousRunHow(ended: EndedRun | null): {
-  endedPreviousRunThrough?: 'keeper' | 'signal' | 'editor';
+  endedPreviousRunThrough?: EndedThrough;
   previousRunLeftBecause?: string;
+  previousRunNotClosedBecause?: string;
 } {
   if (ended === null) {
     return {};
@@ -1008,6 +1085,7 @@ export function previousRunHow(ended: EndedRun | null): {
     ...(ended.ending === 'refused' && ended.notEndedBecause !== undefined
       ? { previousRunLeftBecause: ended.notEndedBecause }
       : {}),
+    ...(ended.notClosedBecause === undefined ? {} : { previousRunNotClosedBecause: ended.notClosedBecause }),
   };
 }
 
@@ -8041,12 +8119,14 @@ class GodotServer {
       const ending = await this.endActiveGame(
         'editor_run start, which ends the run that was going before it starts another',
         true,
+        readBoolean(args, 'graceful') !== false,
       );
       ended = {
         pid: before.pid ?? this.announcedPidOf(before) ?? null,
         ending,
         ...(before.endedThrough === undefined ? {} : { through: before.endedThrough }),
         ...(before.notEndedBecause === undefined ? {} : { notEndedBecause: before.notEndedBecause }),
+        ...(before.notClosedBecause === undefined ? {} : { notClosedBecause: before.notClosedBecause }),
       };
       this.logDebug(`The running game was ${ended.ending} after ${Date.now() - endingFrom}ms`);
     }
@@ -8774,7 +8854,7 @@ class GodotServer {
    * which are shared by every project on the machine: a played run stopped before it announced was
    * answered with another project's recorded run, refused as not this server's to answer for.
    */
-  private async endActiveGame(reason: string, going: boolean): Promise<Ending> {
+  private async endActiveGame(reason: string, going: boolean, graceful: boolean): Promise<Ending> {
     const running = this.activeProcess;
     const project = running?.projectPath ?? this.ourProject();
     // A run somebody has ended is not one the next server should offer to pick back up, and the
@@ -8801,6 +8881,31 @@ class GodotServer {
     // Read before anything is signalled, since the announcement goes with the game.
     const announced = this.announcedPidOf(running);
     await this.sendTheProfileFirst(running, announced);
+    running.notClosedBecause = undefined;
+    if (graceful) {
+      const why =
+        announced === undefined
+          ? 'its game announced no runtime to be asked'
+          : await closeLikeAPlayer(
+              announced,
+              running.throughEditor || running.pid === null ? [] : [running.pid],
+              project,
+            );
+      if (why === null) {
+        running.endedThrough = 'close';
+        if (!running.throughEditor && running.pid !== null) {
+          await this.untilTheExitIsRecorded(running);
+          clearTheRecord();
+        }
+        running.endedAt ??= Date.now();
+        running.log.record(
+          'info',
+          `gdharness asked pid ${announced ?? 'unknown'} to close, as a player's close asks it, and it exited.`,
+        );
+        return 'gone';
+      }
+      running.notClosedBecause = why;
+    }
     if (running.throughEditor) {
       // The editor's answer read rather than thrown away: a bridge that was down, or a stop that
       // failed, was answered "stopped" about a game still playing, and the run then read as ended
@@ -10680,7 +10785,11 @@ class GodotServer {
     const children =
       readBoolean(args, 'andChildren') === true && wasRunning ? await this.whatTheRunStarted(stopped) : null;
     this.logDebug('Stopping the running game');
-    const ending = await this.endActiveGame('editor_run stop', wasRunning);
+    const ending = await this.endActiveGame(
+      'editor_run stop',
+      wasRunning,
+      readBoolean(args, 'graceful') !== false,
+    );
     const refused = ending === 'refused' || ending === 'unreached';
     // Nothing under a pid that is not the run's is the run's to end either.
     const ended = children === null || refused ? null : endChildrenAmong(children);
@@ -10706,14 +10815,18 @@ class GodotServer {
       exitSignal: stopped.exitSignal,
       clean: cleanVerdict(stopped),
       ...(stopped.notEndedBecause === undefined ? {} : { notEndedBecause: stopped.notEndedBecause }),
+      ...(stopped.endedThrough === undefined ? {} : { endedThrough: stopped.endedThrough }),
+      ...(stopped.notClosedBecause === undefined ? {} : { notClosedBecause: stopped.notClosedBecause }),
     });
     return this.jsonTextResponse({
       stopped: verdict.stopped,
       through: stopped.throughEditor ? 'editor' : 'gdharness',
-      // How this stop ended it, for a stop that did: through the keeper holding the game, by a
-      // signal to its pid, or by asking the editor. A caller checking a stop reads the answer, and
-      // the run's log, where this was said before, is the one place nobody looked.
+      // How this stop ended it, for a stop that did: by asking the game to close, through the
+      // keeper holding the game, by a signal to its pid, or by asking the editor. A caller checking
+      // a stop reads the answer, and the run's log, where this was said before, is the one place
+      // nobody looked.
       endedThrough: wasRunning ? stopped.endedThrough : undefined,
+      notClosedBecause: wasRunning ? stopped.notClosedBecause : undefined,
       // What was ended, named. One run is one process, and a game that started others is not one
       // of them: a bench fanning out to thirty-one workers with OS.create_process had the process
       // that prints ended and thirty left grinding, which went on writing their slice files until
@@ -10801,34 +10914,48 @@ class GodotServer {
       announcedPid: pid,
     };
     const children = andChildren ? await this.whatTheRunStarted(run) : null;
+    const notClosedBecause =
+      readBoolean(args, 'graceful') === false
+        ? undefined
+        : await closeLikeAPlayer(pid, [], game.project.path);
+    const closed = notClosedBecause === null;
     let landed = true;
-    try {
-      process.kill(pid);
-    } catch {
-      // Gone between being judged and being signalled.
-      landed = false;
+    if (!closed) {
+      try {
+        process.kill(pid);
+      } catch {
+        // Gone between being judged and being signalled.
+        landed = false;
+      }
     }
-    const gone = await untilGone([pid]);
+    const gone = closed || (await untilGone([pid]));
     const ended = children === null ? null : endChildrenAmong(children);
     if (gone) {
       await announcementEnded(pid);
     }
+    const notClosed =
+      notClosedBecause === undefined || notClosedBecause === null
+        ? ''
+        : ` It was asked to close first and was not ended by that: ${notClosedBecause}.`;
     return this.jsonTextResponse({
       stopped: gone,
       through: 'gdharness',
       endedPid: gone ? pid : undefined,
       stillGoing: gone ? undefined : pid,
-      // By number: no keeper holds a game no server here started.
-      ...(landed ? { endedThrough: 'signal' } : {}),
+      // By number when it would not close: no keeper holds a game no server here started.
+      ...(closed ? { endedThrough: 'close' } : landed ? { endedThrough: 'signal' } : {}),
+      ...(notClosedBecause === undefined || notClosedBecause === null ? {} : { notClosedBecause }),
       ...childrenFields(ended),
-      exitedBeforeStop: !landed,
+      exitedBeforeStop: !closed && !landed,
       note: `${
-        !gone
-          ? `pid ${pid} was told to end and was still running ${stopWaitMs() / 1000} seconds later, so it has not stopped: a game of this project that no server here was holding,`
-          : landed
-            ? `pid ${pid} was ended: a game of this project that no server here was holding,`
-            : `pid ${pid} had already gone when it was signalled: a game of this project that no server here was holding,`
-      } identified by its announcement and by its command line, ${read.executable} run with --path ${read.projectPath ?? ''}. Nothing here read what it printed or holds its exit code, so neither is in this answer.${
+        closed
+          ? `pid ${pid} was asked to close, as a player's close asks it, and exited: a game of this project that no server here was holding,`
+          : !gone
+            ? `pid ${pid} was told to end and was still running ${stopWaitMs() / 1000} seconds later, so it has not stopped: a game of this project that no server here was holding,`
+            : landed
+              ? `pid ${pid} was ended: a game of this project that no server here was holding,`
+              : `pid ${pid} had already gone when it was signalled: a game of this project that no server here was holding,`
+      } identified by its announcement and by its command line, ${read.executable} run with --path ${read.projectPath ?? ''}. Nothing here read what it printed or holds its exit code, so neither is in this answer.${notClosed}${
         gone ? '' : ' editor_status says when it has gone.'
       } ${aboutTheChildren(ended, false)}`,
     });
