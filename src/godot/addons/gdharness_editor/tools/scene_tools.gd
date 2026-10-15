@@ -5,6 +5,7 @@ extends Node
 
 const Read = preload("../reading.gd")
 const PropertyValues = preload("../property_values.gd")
+const ResourceTools = preload("resource_tools.gd")
 const SceneFile = preload("../scene_file.gd")
 const Serialisation = preload("../serialisation.gd")
 
@@ -633,6 +634,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	# variable read as changed; and a value this scene sets back to the default was hidden, so the
 	# names this scene's file sets are always answered.
 	var props: Dictionary = _properties_of(node, include_defaults, scene.set_here(node))
+	var cells: Dictionary = ResourceTools.cells_of(node)
 	scene.close()
 	var answer: Dictionary = {
 		"ok": true,
@@ -640,6 +642,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 		"properties": props,
 		"unsavedInEditor": SceneFile.unsaved(scene_path)
 	}
+	answer.merge(cells)
 	# An empty answer read as a node with nothing on it, rather than one with nothing changed.
 	if props.is_empty() and not include_defaults:
 		answer["note"] = (

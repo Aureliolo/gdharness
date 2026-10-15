@@ -117,12 +117,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	var wanted: int = _wanted_type(setting_path, old_value if had_value else null)
 	if wanted > TYPE_NIL and final_value != null and typeof(final_value) != wanted:
 		if not _converts_faithfully(final_value, wanted):
-			return _log.failure(
-				(
-					"%s is declared as %s, and %s (%s) cannot be written as that without losing something."
-					% [setting_path, type_string(wanted), str(final_value), type_string(typeof(final_value))]
-				)
-			)
+			return _log.failure(_cannot_hold(setting_path, wanted, final_value))
 		final_value = type_convert(final_value, wanted)
 
 	var answer: Dictionary = {
@@ -172,6 +167,21 @@ func _wanted_type(setting_path: String, current: Variant) -> int:
 # happened to produce.
 func _converts_faithfully(value: Variant, to: int) -> bool:
 	return type_convert(type_convert(value, to), typeof(value)) == value
+
+
+# Why [param value] cannot be written to a setting declared as [param wanted], in the words the
+# editor's property writes use for the same two cases. One sentence for both read "without losing
+# something" about a word given for a number, where nothing would be lost: it cannot become one.
+static func _cannot_hold(setting_path: String, wanted: int, value: Variant) -> String:
+	var numbers: Array[int] = [TYPE_INT, TYPE_FLOAT]
+	var declared: String = "%s is declared as %s" % [setting_path, type_string(wanted)]
+	var cost: String = " Setting it would save a different value than the one asked for."
+	if wanted == TYPE_INT and typeof(value) == TYPE_FLOAT:
+		return "%s, which holds whole numbers, and %s would be cut to fit.%s" % [declared, str(value), cost]
+	if wanted in numbers and typeof(value) in numbers:
+		return "%s, and %s is not the same number as one.%s" % [declared, str(value), cost]
+	var given: String = type_string(typeof(value))
+	return "%s, and %s (%s) cannot become one." % [declared, JSON.stringify(value), given]
 
 
 # Add an autoload singleton
