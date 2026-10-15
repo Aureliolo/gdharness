@@ -189,52 +189,6 @@ func parameter_class(object: Object, method: String, index: int) -> String:
 	return ""
 
 
-## The components a path reads off [param value], by the names GDScript gives them, or none for a
-## value that has none: a vector's axes, a colour's channels, a rectangle's corners and size, a
-## transform's basis and origin. A value of one of these is a copy wherever it is read, so a write
-## into a component is a write into the copy until it is put back where it was read from.
-static func components_of(value: Variant) -> PackedStringArray:
-	match typeof(value):
-		TYPE_VECTOR2, TYPE_VECTOR2I:
-			return PackedStringArray(["x", "y"])
-		TYPE_VECTOR3, TYPE_VECTOR3I:
-			return PackedStringArray(["x", "y", "z"])
-		TYPE_VECTOR4, TYPE_VECTOR4I, TYPE_QUATERNION:
-			return PackedStringArray(["x", "y", "z", "w"])
-		TYPE_COLOR:
-			return PackedStringArray(
-				[
-					"r",
-					"g",
-					"b",
-					"a",
-					"r8",
-					"g8",
-					"b8",
-					"a8",
-					"h",
-					"s",
-					"v",
-					"ok_hsl_h",
-					"ok_hsl_s",
-					"ok_hsl_l"
-				]
-			)
-		TYPE_RECT2, TYPE_RECT2I, TYPE_AABB:
-			return PackedStringArray(["position", "size", "end"])
-		TYPE_PLANE:
-			return PackedStringArray(["normal", "x", "y", "z", "d"])
-		TYPE_BASIS:
-			return PackedStringArray(["x", "y", "z"])
-		TYPE_TRANSFORM2D:
-			return PackedStringArray(["x", "y", "origin"])
-		TYPE_TRANSFORM3D:
-			return PackedStringArray(["basis", "origin"])
-		TYPE_PROJECTION:
-			return PackedStringArray(["x", "y", "z", "w"])
-	return PackedStringArray()
-
-
 ## What the slot [param named] on [param holder] declares it holds, as `{"type": int, "class":
 ## String, "script": Script or null}`: a property's declaration, or the element type of a typed list
 ## or the value type of a typed map. TYPE_NIL when nothing is declared, which is also what a
@@ -250,7 +204,7 @@ static func components_of(value: Variant) -> PackedStringArray:
 static func slot_declared(holder: Variant, named: String) -> Dictionary:
 	# A component holds one kind of value and no other: a vector's axis is a number, its integer
 	# form's an integer, a rectangle's size a vector of the same form.
-	if named in components_of(holder):
+	if named in Serialisation.components_of(holder):
 		var component: Variant = holder[named]
 		return {"type": typeof(component), "class": "", "script": null}
 	if holder is Array:

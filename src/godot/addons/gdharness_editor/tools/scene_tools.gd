@@ -101,8 +101,8 @@ func _kept(scene: SceneFile, saved: Node, node: Node, names: Array) -> String:
 		return "%s is not in the scene as it would be saved." % at
 	for key: Variant in names:
 		var property: String = str(key)
-		var loaded: Variant = copy.get(property)
-		if not scene.kept(saved, loaded, node.get(property)):
+		var loaded: Variant = _properties.read_at(copy, property)
+		if not scene.kept(saved, loaded, _properties.read_at(node, property)):
 			return (
 				(
 					"%s.%s would load from the file as %s: the scene does not keep it, because the property "
@@ -601,7 +601,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 
 	var held: Dictionary = {}
 	for key: Variant in properties:
-		held[str(key)] = _readable(node, node.get(str(key)))
+		held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
 	var new_path: String = scene.path_of(node)
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String: return _kept(scene, saved, node, properties.keys())
@@ -757,6 +757,10 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	# asked for. Left alone, the answer gave the flags asked for and the file kept the old ones.
 	var callable: Callable = Callable(target, method_name)
 	var method_found: bool = target.has_method(method_name)
+	var flags_before: int = -1
+	for connection: Dictionary in source.get_signal_connection_list(signal_name):
+		if connection.get("callable") == callable:
+			flags_before = Read.as_int(connection.get("flags", 0))
 	if source.is_connected(signal_name, callable):
 		source.disconnect(signal_name, callable)
 	var connect_result: Error = source.connect(signal_name, callable, flags)
@@ -776,7 +780,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {
+	var answer: Dictionary = {
 		"ok": true,
 		"sourceNodePath": from,
 		"signalName": signal_name,
@@ -788,6 +792,14 @@ func connect_signal(args: Dictionary) -> Dictionary:
 		# next; a caller told nothing learnt of a misspelt one only when the signal fired.
 		"methodFound": method_found
 	}
+	# A second connect of the same pair read exactly like the first, so a caller could not tell a
+	# connection made from one that was already there, and a list showing one where two were made
+	# looked like a lost write.
+	if flags_before >= 0:
+		answer["alreadyConnected"] = true
+		if flags_before != Read.as_int(saved_flags[0]):
+			answer["flagsBefore"] = _flag_names(flags_before)
+	return answer
 
 
 ## The two ends of a connection in [param scene], as [source, target], or [null, why not].
