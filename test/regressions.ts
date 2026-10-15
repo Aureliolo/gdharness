@@ -21308,6 +21308,179 @@ async function testTheFrameTimeIsTheFrame(): Promise<void> {
 }
 
 /**
+ * A property path steps into a vector's components, and the other values read by theirs, to read,
+ * to wait on and to write one axis.
+ *
+ * Reported downstream: alchemill pushed a stick until the pad pointer had travelled far enough,
+ * and a wait on `at:x >= 880` was refused, "holds no object to read x off", so the pointer ran past
+ * its mark while the next call was on its way; `size:x` on a Control was refused the same way. A
+ * component of a value is a copy, so a write into one is put back where it was read from: a
+ * setter counts that it ran, a transform's origin is a copy inside a copy, and what a call
+ * returned is kept nowhere and is refused.
+ */
+async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('vector component path regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        [
+          'extends Node',
+          '',
+          'var pointer: Vector2 = Vector2(0, 40)',
+          'var cell: Vector2i = Vector2i(3, 4)',
+          'var spot: Rect2 = Rect2(1, 2, 30, 40)',
+          'var placed: Transform2D = Transform2D(0.0, Vector2(5, 6))',
+          'var tint: Color = Color(0.25, 0.5, 0.75, 1.0)',
+          'var guarded_writes: int = 0',
+          'var guarded: Vector2 = Vector2(1, 2):',
+          '\tset(value):',
+          '\t\tguarded = value',
+          '\t\tguarded_writes += 1',
+          '',
+          '',
+          'func area() -> Rect2:',
+          '\treturn Rect2(7, 8, 9, 10)',
+          '',
+          '',
+          'func _process(_delta: float) -> void:',
+          '\tpointer.x += 10.0',
+          '',
+        ].join('\n'),
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+          '[node name="Room" type="Control" parent="."]\noffset_left = 10.0\noffset_top = 20.0\n' +
+          'offset_right = 310.0\noffset_bottom = 220.0\n',
+      );
+      const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+      const read = async (nodePath: string, property: string): Promise<string> =>
+        await call('runtime_inspect', { op: 'property', nodePath, property });
+      const value = async (nodePath: string, property: string): Promise<unknown> => {
+        const said = await read(nodePath, property);
+        assert.ok(said.startsWith('{'), `${nodePath} ${property} reads as a value: ${said}`);
+        return get(JSON.parse(said), 'value');
+      };
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        engineArgs: ['--max-fps', '60'],
+        runtimeWaitMs: 30_000,
+      });
+      assert.match(started, /"listening": true/, started);
+
+      // Read: an axis of a vector, an axis of a vector inside a rectangle, a colour's channel and an
+      // integer vector's axis, each as the number it is.
+      assert.equal(await value('/root/Main/Room', 'size:x'), 300, 'a Control is as wide as its size says');
+      assert.equal(
+        await value('/root/Main', 'spot:size:y'),
+        40,
+        'a step into a rectangle and on into its size',
+      );
+      assert.equal(await value('/root/Main', 'tint:b'), 0.75, "a colour's channel");
+      assert.equal(await value('/root/Main', 'cell:y'), 4, "an integer vector's axis");
+      assert.equal(await value('/root/Main', 'placed:origin:x'), 5, "a transform's origin");
+      const noSuch = await read('/root/Main/Room', 'size:z');
+      assert.match(noSuch, /size is a Vector2, so it has no z; it has x, y/, noSuch);
+      const called = await read('/root/Main/Room', 'size:length()');
+      assert.match(
+        called,
+        /size is a Vector2, which a path reads by its components, x, y, and makes no call on/,
+        called,
+      );
+
+      // Waited on, one axis, read every frame: the pointer travels ten a frame.
+      const waited = await call('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'pointer:x',
+        compare: '>=',
+        value: 300,
+        timeoutMs: 20_000,
+      });
+      assert.equal(get(JSON.parse(waited), 'met'), true, `a wait on one axis is met: ${waited}`);
+      assert.ok(asNumber(await value('/root/Main', 'pointer:x')) >= 300, waited);
+
+      // Written: one axis alone, through the setter, and a copy inside a copy.
+      const moved = await call('runtime_invoke', {
+        op: 'set',
+        nodePath: '/root/Main/Room',
+        property: 'position:x',
+        value: 77,
+      });
+      assert.doesNotMatch(moved, /"type": "error"|isError/, moved);
+      assert.deepEqual(
+        get(JSON.parse(await read('/root/Main/Room', 'position')), 'value'),
+        { _type: 'Vector2', x: 77, y: 20 },
+        `the axis written moved and the other stayed: ${moved}`,
+      );
+      const worded = await call('runtime_invoke', {
+        op: 'set',
+        nodePath: '/root/Main/Room',
+        property: 'position:y',
+        value: 'wide',
+      });
+      assert.match(
+        worded,
+        /position\.y holds float and the value given is String/,
+        `an axis holds a number: ${worded}`,
+      );
+      const guarded = await call('runtime_invoke', {
+        op: 'set',
+        nodePath: '/root/Main',
+        property: 'guarded:y',
+        value: 9,
+      });
+      assert.equal(await value('/root/Main', 'guarded:y'), 9, guarded);
+      assert.equal(await value('/root/Main', 'guarded:x'), 1, guarded);
+      assert.equal(
+        await value('/root/Main', 'guarded_writes'),
+        1,
+        `the vector went back through its setter once: ${guarded}`,
+      );
+      const nested = await call('runtime_invoke', {
+        op: 'set',
+        nodePath: '/root/Main',
+        property: 'placed:origin:y',
+        value: 60,
+      });
+      assert.equal(
+        await value('/root/Main', 'placed:origin:y'),
+        60,
+        `a copy inside a copy is put back: ${nested}`,
+      );
+      assert.equal(await value('/root/Main', 'placed:origin:x'), 5, nested);
+      const intoACall = await call('runtime_invoke', {
+        op: 'set',
+        nodePath: '/root/Main',
+        property: 'area():position:x',
+        value: 1,
+      });
+      assert.match(intoACall, /area\(\) is what a call answered, a copy the game keeps nowhere/, intoACall);
+      await call('editor_run', { op: 'stop' });
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
  * A press held for a number of frames is held for exactly that many, counted by the game.
  *
  * alchemill poured for as long as the button was held, and a press, a 60-frame wait and a release
@@ -38822,6 +38995,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeadlessAccessibilityReadNamesWhatItNeeds,
   testAnEngineSingletonIsReachedAndOSIsNot,
   testAPressIsHeldForTheFramesAsked,
+  testAPathStepsIntoAVectorsComponents,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
   testTheWaitIsSizedToTheLastBoot,
