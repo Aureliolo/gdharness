@@ -2482,6 +2482,20 @@ function testValidationSaysHowMuchItRead(godotPath: string): void {
 }
 
 /**
+ * Moves [sidecar]'s time two seconds past the second [importedAt] falls in, for a case that rewrites
+ * a sidecar and then has `--import` act on it. The engine's filesystem cache keeps whole seconds and
+ * asks the importer only about a sidecar whose time has moved, so a rewrite landing in the second
+ * the import wrote it is never looked at: on a fast Linux runner it landed there and the engine
+ * rebuilt nothing, once in the importer case and once in the font case. A sidecar somebody changes
+ * is changed after its import, so this is the state those cases are about; the server's own
+ * reimport forces the resources it names and does not depend on it.
+ */
+function pastTheImportsSecond(sidecar: string, importedAt: number): void {
+  const at = new Date((Math.floor(importedAt / 1000) + 2) * 1000);
+  utimesSync(sidecar, at, at);
+}
+
+/**
  * An import is judged stale when the importer would judge it so, before any of its files is looked at.
  *
  * Both states have every file current: an importer that now writes a newer format, which every scene
@@ -2534,12 +2548,7 @@ function testTheImporterIsAskedFirst(godotPath: string): void {
     const importedAt = statSync(sidecarPath).mtimeMs;
     writeFileSync(sidecarPath, older);
     writeFileSync(cachePath, readFileSync(cachePath, 'utf8').replace(md5(sidecar), md5(older)));
-    // The engine's filesystem cache keeps whole seconds and asks the importer only about a sidecar
-    // whose time has moved, so a rewrite landing in the second the import wrote it is never looked
-    // at: on a fast Linux runner it landed there and the engine rebuilt nothing. Two seconds past it,
-    // so the engine reads the sidecar, which is the state the verdict is about.
-    const rewrittenAt = new Date((Math.floor(importedAt / 1000) + 2) * 1000);
-    utimesSync(sidecarPath, rewrittenAt, rewrittenAt);
+    pastTheImportsSecond(sidecarPath, importedAt);
     assert.deepEqual(statusOf('thing.gltf'), [
       'needs_reimport',
       `it was imported at version 0 of the scene importer, and this engine imports at version ${written}`,
@@ -2816,12 +2825,15 @@ function testAFontsFeaturesAreWrittenAsTheEngineReadsThem(godotPath: string, _pr
     );
 
     // Ligatures by their name, contextual ligatures by their number.
+    const sidecarPath = join(dir, 'fallback.ttf.import');
+    const importedAt = statSync(sidecarPath).mtimeMs;
     const set = operation('set_import_options', {
       resource_path: 'fallback.ttf',
       options: { opentype_features: { liga: 0, '1668049255': 0 } },
     });
     assert.deepEqual(get(set, 'updated_options'), ['opentype_features'], JSON.stringify(set));
-    const sidecar = readFileSync(join(dir, 'fallback.ttf.import'), 'utf8');
+    pastTheImportsSecond(sidecarPath, importedAt);
+    const sidecar = readFileSync(sidecarPath, 'utf8');
     assert.match(sidecar, /^1818847073: 0,?$/m, `liga is written by its tag as an int: ${sidecar}`);
     assert.match(sidecar, /^1668049255: 0,?$/m, `and clig: ${sidecar}`);
     importAll();
