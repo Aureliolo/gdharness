@@ -93,23 +93,37 @@ const READS_ONLY: String = ", and a path, which a wait reads every frame, only c
 ## "get_theme_stylebox(\"panel\"):content_margin_top", since what a control's theme gives it is only
 ## reachable by naming what is asked for; see [method arguments_of].
 ##
+## A step into a vector, a colour, a rectangle or a transform reads one of its components,
+## "size:x" or "global_transform:origin:y", by the names GDScript gives them; see
+## [method Values.components_of].
+##
 ## Answers with a `message` instead when a step along the way is not there or holds something that
 ## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
-## clocks" is a typo found, and "no property _game:clocks:speed" is a puzzle.
+## clocks" is a typo found, and "no property _game:clocks:speed" is a puzzle. Answers `chain` as
+## well, each holder walked through and the step taken off it, for [method write_back].
 static func walk_to(node: Object, node_path: String, reaching: String) -> Dictionary:
 	var parts: PackedStringArray = steps_of(reaching)
 	var holder: Variant = node
 	var called: String = node_path
+	var chain: Array[Dictionary] = []
 	for step: int in parts.size() - 1:
 		var named: String = parts[step]
 		if not can_read(holder, named):
 			return {"type": "error", "message": nothing_there(holder, named, called)}
+		chain.append({"holder": holder, "named": named, "called": called})
 		holder = read_under(holder, named)
 		called = "%s:%s" % [called, named]
-		if not _can_hold(holder):
+		if not can_hold(holder):
 			var wanted: String = parts[step + 1]
-			return {"type": "error", "message": "%s holds no object to read %s off" % [called, wanted]}
-	return {"holder": holder, "name": parts[parts.size() - 1], "called": called}
+			return {
+				"type": "error",
+				"message":
+				(
+					"%s holds %s, which has nothing to read %s off"
+					% [called, type_string(typeof(holder)), wanted]
+				)
+			}
+	return {"holder": holder, "name": parts[parts.size() - 1], "called": called, "chain": chain}
 
 
 ## The object [param given] names for a method's argument, as `{"object": ...}`, or as
@@ -160,10 +174,17 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 	return {"object": value}
 
 
-## Whether a step can be taken into [param value] at all: an object, a list or a map can be walked
-## into, and a number or a string is where a path ends whether the caller meant it to or not.
-static func _can_hold(value: Variant) -> bool:
-	return value is Object or value is Array or value is Dictionary or packed(value)
+## Whether a step can be taken into [param value] at all: an object, a list, a map or a value with
+## components can be walked into, and a number or a string is where a path ends whether the caller
+## meant it to or not.
+static func can_hold(value: Variant) -> bool:
+	return value is Object or value is Array or value is Dictionary or packed(value) or composite(value)
+
+
+## Whether [param value] is read by its components, a vector or a colour or a transform, and is a
+## copy wherever it is read from.
+static func composite(value: Variant) -> bool:
+	return not Values.components_of(value).is_empty()
 
 
 ## Whether [param value] is a packed list. Stepped into the way a list is, by index, and a write into
@@ -212,6 +233,8 @@ static func can_read(holder: Variant, named: String) -> bool:
 		if not method.is_empty():
 			return args.is_empty() and method in MAP_CALLS
 		return not _key_in(map, named).is_empty()
+	if composite(holder):
+		return method.is_empty() and named in Values.components_of(holder)
 	if holder is Object:
 		var object: Object = holder
 		if not method.is_empty():
@@ -420,25 +443,62 @@ static func _native_flags(object: Object, method: String) -> int:
 	return 0
 
 
-## Put [param value] where [param named] points. Only ever called once [method can_read] agrees,
-## and lists and maps are reference types, so writing into one reaches the game's own copy.
-static func write(holder: Variant, named: String, value: Variant) -> void:
+## Put [param value] where [param named] points, and answer the holder written into. Only ever
+## called once [method can_read] agrees. Lists and maps are reference types, so writing into one
+## reaches the game's own copy; a vector or a transform is a copy, and the one answered is the
+## changed copy, for [method write_back] to put where it came from.
+static func write(holder: Variant, named: String, value: Variant) -> Variant:
 	if holder is Array:
 		var items: Array = holder
 		items[_index_in(named, items.size())] = value
-		return
+		return holder
 	if packed(holder):
 		var list: Variant = holder
 		list[_index_in(named, len(holder))] = value
-		return
+		return holder
 	if holder is Dictionary:
 		var map: Dictionary = holder
 		# Written back under the key it was found under, since a map keyed by StringName and one
 		# keyed by String both read the same way and a write to the wrong one adds a second entry.
 		map[_key_in(map, named)[0]] = value
-		return
+		return holder
+	if composite(holder):
+		var changed: Variant = holder
+		changed[named] = value
+		return changed
 	var object: Object = holder
 	object.set(named, value)
+	return holder
+
+
+## Why a write into [param chain]'s last holder, a copy, cannot reach the game, or "" when it can:
+## each copy is put back where it was read from on the way up, and a step that was a call answered
+## a copy the game does not keep anywhere. [param chain] is the one [method walk_to] answered.
+static func unwritable_copy(chain: Array[Dictionary]) -> String:
+	for index: int in range(chain.size() - 1, -1, -1):
+		var link: Dictionary = chain[index]
+		var named: String = link["named"]
+		if not method_of(named).is_empty():
+			return (
+				"%s:%s is what a call answered, a copy the game keeps nowhere, so a part of it is not a place to write"
+				% [link["called"], named]
+			)
+		if not composite(link["holder"]):
+			return ""
+	return ""
+
+
+## Puts [param changed], the copy a write into a vector or a transform changed, back where
+## [param chain] read it from, and every copy it was read out of back where that came from, up to
+## the first holder keeping its own: an object, whose setter runs, a list or a map.
+static func write_back(chain: Array[Dictionary], changed: Variant) -> void:
+	var value: Variant = changed
+	for index: int in range(chain.size() - 1, -1, -1):
+		var link: Dictionary = chain[index]
+		var holder: Variant = link["holder"]
+		value = write(holder, str(link["named"]), value)
+		if not composite(holder):
+			return
 
 
 ## What [param holder] holds under [param named], or answers to it when [param named] is a call.
@@ -455,6 +515,8 @@ static func read_under(holder: Variant, named: String) -> Variant:
 	if holder is Dictionary:
 		var map: Dictionary = holder
 		return map[_key_in(map, named)[0]]
+	if composite(holder):
+		return holder[named]
 	var object: Object = holder
 	var method: String = method_of(named)
 	if not method.is_empty():
@@ -521,6 +583,18 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 		if keys.size() > 8:
 			rest = " and %d more" % [keys.size() - 8]
 		return "%s has no key %s; it is keyed by %s%s" % [called_as, named, ", ".join(some), rest]
+	if composite(holder):
+		var kind: String = type_string(typeof(holder))
+		var sort: String = ("an " if kind.left(1) in ["A", "E", "I", "O", "U"] else "a ") + kind
+		var has: String = ", ".join(Values.components_of(holder))
+		if not container_call.is_empty():
+			return (
+				"%s is %s, which a path reads by its components, %s, and makes no call on"
+				% [called_as, sort, has]
+			)
+		return "%s is %s, so it has no %s; it has %s" % [called_as, sort, named, has]
+	if not holder is Object:
+		return "%s is %s, which has nothing to read %s off" % [called_as, type_string(typeof(holder)), named]
 	var object: Object = holder
 	var method: String = method_of(named)
 	if not method.is_empty():
