@@ -98,6 +98,7 @@ import {
 import { isIdentifier } from './gdscript-source.js';
 import {
   anEditorIsStillComing,
+  BridgeTimeout,
   type GodotBridge,
   getDefaultBridge,
   hasSaidWhoItIs,
@@ -6378,10 +6379,48 @@ class GodotServer {
     return recorded !== undefined && recorded === (this.godotBridge.getStatus().editorPid ?? null);
   }
 
+  /**
+   * The classes the editor connected now could not see before a scan whose end no rescan saw, from
+   * the note any server on [param projectPath] left. By pid, because a restarted editor compiles
+   * every script afresh and holds nothing compiled without them.
+   */
+  private unseenBeforeAnUnfinishedScan(projectPath: string): string[] {
+    const noted = readClassNote(projectPath)?.unseenBeforeAnUnfinishedScan;
+    if (noted === undefined || noted.editorPid !== (this.godotBridge.getStatus().editorPid ?? null)) {
+      return [];
+    }
+    return [...noted.classes];
+  }
+
+  /**
+   * Notes [param classes] as unseen by the editor connected now before a scan whose end this rescan
+   * did not see, or takes the note down when [param classes] is empty. Written only when it changes.
+   */
+  private noteUnseenBeforeAnUnfinishedScan(projectPath: string, classes: readonly string[]): void {
+    const note = readClassNote(projectPath);
+    const held = note?.unseenBeforeAnUnfinishedScan;
+    if (classes.length === 0 && held === undefined) {
+      return;
+    }
+    const { unseenBeforeAnUnfinishedScan: _replaced, ...rest } = note ?? { rebuiltWith: [] };
+    writeClassNote(projectPath, {
+      ...rest,
+      ...(classes.length === 0
+        ? {}
+        : {
+            unseenBeforeAnUnfinishedScan: {
+              editorPid: this.godotBridge.getStatus().editorPid ?? null,
+              classes: [...classes].sort(),
+            },
+          }),
+    });
+  }
+
   /** Records that the editor connected now wrote [param projectPath]'s class cache short. */
   private noteAShortListEditor(projectPath: string): void {
     const note = readClassNote(projectPath);
     writeClassNote(projectPath, {
+      ...note,
       rebuiltWith: note?.rebuiltWith ?? [],
       shortListEditorPid: this.godotBridge.getStatus().editorPid ?? null,
     });
@@ -10882,7 +10921,9 @@ class GodotServer {
   /**
    * Whether the editor is scanning or importing on its own right now. False when it cannot be
    * asked, an addon without the question included: the rescan that follows declines for itself
-   * when the editor is busy, so not knowing here costs a retry rather than a second import.
+   * when the editor is busy, so not knowing here costs a retry rather than a second import. True
+   * when it took the question in and did not answer in time, which is an editor importing on the
+   * thread that answers, not an idle one.
    */
   private async editorIsScanningOrImporting(): Promise<boolean> {
     if (!this.godotBridge.isConnected()) {
@@ -10891,8 +10932,8 @@ class GodotServer {
     try {
       const status = asParams(await this.godotBridge.invokeTool('scan_status', {}));
       return status['scanning'] === true || status['importing'] === true;
-    } catch {
-      return false;
+    } catch (error) {
+      return error instanceof BridgeTimeout;
     }
   }
 
@@ -10926,7 +10967,10 @@ class GodotServer {
     // the editor's previous scan is still to be joined, which makes `scan()` return having done
     // nothing for a frame or more after that scan stops reporting itself.
     let waitedForEditorMs = 0;
-    let first: ToolResponse;
+    // Whether the editor took the request that starts the scan in and did not answer it in time. A
+    // hidden editor imports what a scan finds on the thread that answers requests, so a large import
+    // holds the answer until it is over; the editor is at work rather than gone, and is waited for.
+    let startUnanswered = false;
     // How many scans the editor had completed before the one asked for, from an addon that counts
     // them: the scan asked for is over once the count has moved past it.
     let completedBefore: number | undefined;
@@ -10947,7 +10991,11 @@ class GodotServer {
       before = projectPath === '' ? null : cachedClasses(projectPath);
       writtenBefore = projectPath === '' ? null : cacheWrittenAt(projectPath);
       blind = await this.classesTheEditorCannotSee(args);
-      first = await this.handleViaBridge('rescan_filesystem', args);
+      const first = await this.askViaBridge('rescan_filesystem', args);
+      if (first instanceof BridgeTimeout) {
+        startUnanswered = true;
+        break;
+      }
       if (first.isError) {
         return first;
       }
@@ -10979,9 +11027,19 @@ class GodotServer {
     let idleSince: number | null = null;
     while (Date.now() - started < timeoutMs) {
       await new Promise((settle) => setTimeout(settle, 100));
-      const status = asParams(
-        await this.godotBridge.invokeTool('rescan_filesystem', { ...args, statusOnly: true }),
-      );
+      let status: OperationParams;
+      try {
+        status = asParams(
+          await this.godotBridge.invokeTool('rescan_filesystem', { ...args, statusOnly: true }),
+        );
+      } catch (error) {
+        if (!(error instanceof BridgeTimeout)) {
+          throw error;
+        }
+        busy = true;
+        idleSince = null;
+        continue;
+      }
       // `pending` is from an addon before 1.1.3, which took a scan asked for as queued. It is
       // believed only for as long as a scan takes to start, since an addon that never cleared it
       // would otherwise hold every rescan for the whole budget.
@@ -11125,15 +11183,20 @@ class GodotServer {
 
     const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
     const unseen = checked.unseen;
+    // What this editor could not see before a scan an earlier rescan stopped waiting for, which
+    // that scan may have brought in after nobody was looking.
+    const carried = projectPath === '' ? [] : this.unseenBeforeAnUnfinishedScan(projectPath);
+    const unseenBefore = [...new Set([...blind.unseen.map((one) => one.className), ...carried])];
     // The classes this scan brought in, and the scripts naming them, which the editor compiled
     // while it could not resolve them and holds that way until each is reloaded.
     // Nothing while the scan is still going, since nothing was checked after it: every class unseen
     // before was named here, as if it now resolved.
     const broughtIn = busy
       ? []
-      : blind.unseen
-          .map((one) => one.className)
-          .filter((name) => !unseen.some((still) => still.className === name));
+      : unseenBefore.filter((name) => !unseen.some((still) => still.className === name));
+    if (projectPath !== '') {
+      this.noteUnseenBeforeAnUnfinishedScan(projectPath, busy ? unseenBefore : []);
+    }
     const dependents =
       busy || projectPath === '' || broughtIn.length === 0
         ? null
@@ -11142,8 +11205,15 @@ class GodotServer {
     const notes: string[] = [];
     if (busy) {
       notes.push(
-        'The editor was still scanning or importing when the wait ran out, so new files may not be visible yet.',
+        startUnanswered
+          ? 'The editor took the rescan in and did not answer it before the wait ran out, which is an editor importing: a hidden editor imports on the thread that answers, and answers nothing until it is done. It carries the scan out once it is free, so new files may not be visible yet.'
+          : 'The editor was still scanning or importing when the wait ran out, so new files may not be visible yet.',
       );
+      if (unseenBefore.length > 0) {
+        notes.push(
+          `Scripts naming ${unseenBefore.join(', ')}, which the editor could not see before this scan, were compiled without them and stay that way until reloaded. editor_rescan again once the editor is idle reloads them, for any server on this project, until this editor is restarted.`,
+        );
+      }
     } else if (stillGone.length > 0) {
       notes.push(
         'The scan wrote the class cache from the list this editor is holding, that list is shorter than the file was, and rebuilding the cache from the files did not bring these back. Every engine that reads the cache next, including a test run, will report them as unknown identifiers. Restart the editor with editor_launch restart before scanning again.',
@@ -11344,12 +11414,9 @@ class GodotServer {
     const droppedByTheEditor = lost.filter((name) => !cameBack.includes(name));
     const seenLosing = droppedByTheEditor.length > 0 && this.godotBridge.isConnected();
     writeClassNote(projectPath, {
+      ...noted,
       rebuiltWith: [...after.keys()].sort(),
-      ...(seenLosing
-        ? { shortListEditorPid: this.godotBridge.getStatus().editorPid ?? null }
-        : noted?.shortListEditorPid === undefined
-          ? {}
-          : { shortListEditorPid: noted.shortListEditorPid }),
+      ...(seenLosing ? { shortListEditorPid: this.godotBridge.getStatus().editorPid ?? null } : {}),
     });
     const notes: string[] = [];
     if (seenLosing) {
@@ -11849,6 +11916,28 @@ class GodotServer {
     args: OperationParams,
     askedAs?: string,
   ): Promise<ToolResponse> {
+    const answered = await this.askViaBridge(toolName, args, askedAs);
+    if (!(answered instanceof BridgeTimeout)) {
+      return answered;
+    }
+    return this.createErrorResponse(
+      `The editor took ${toolName} in and did not answer within ${String(answered.waitedMs / 1000)}s. An editor importing files answers nothing until the import is over, and a hidden one imports on the thread that answers.`,
+      [
+        'editor_status says whether it is scanning or importing',
+        'The editor still carries the request out once it is free, so read what it changed before asking again',
+      ],
+    );
+  }
+
+  /**
+   * [method handleViaBridge], except that a request the editor did not answer in time comes back
+   * as the timeout, for a caller that goes on waiting for an editor busy rather than gone.
+   */
+  private async askViaBridge(
+    toolName: string,
+    args: OperationParams,
+    askedAs?: string,
+  ): Promise<ToolResponse | BridgeTimeout> {
     if (!this.godotBridge.isConnected()) {
       const alternative =
         askedAs !== undefined && Object.hasOwn(EDITOR_FREE_INSTEAD, askedAs)
@@ -11887,6 +11976,9 @@ class GodotServer {
         ),
       );
     } catch (error) {
+      if (error instanceof BridgeTimeout) {
+        return error;
+      }
       const message = errorMessage(error);
       // An addon older than this server has no command for an op added since, and its own words for
       // that named the command and nothing else: a probe calling resource_edit read on an editor a

@@ -36230,6 +36230,250 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
 }
 
 /**
+ * A rescan the editor does not answer in time is a busy editor, and what its scan brings in is
+ * reloaded by the next rescan.
+ *
+ * Reported downstream: a kit install put a new class into an addon folder of a project whose hidden
+ * editor had been up for eight hours, and editor_rescan came back as an error, "timed out after
+ * 30000ms", with a scan ending a moment after the call was sent. A hidden editor imports what a
+ * scan finds on the thread that answers, so nothing answers until the import is over. The scripts
+ * naming the class were never reloaded, since the rescan had given up, and by the next rescan the
+ * editor held the class and nothing marked it as new: diagnostics read it undeclared until a
+ * restart.
+ *
+ * The fixture editor imports what a scan finds by holding every request until the import is over,
+ * and holds a list without the class until then. The first import outlasts the rescan, and the
+ * second rescan has to reload the script naming the class although its own scan brought nothing
+ * in. A third reloads nothing, so a server reloading on every scan fails there. A fourth is given
+ * room for an import longer than the wait for any one answer, so its start and its first look at
+ * the scan both go unanswered, and it has to finish the job itself.
+ */
+async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot') },
+  });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unanswered-scan-'));
+  let editor: WebSocket | null = null;
+  const editorPid = 424_242;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    mkdirSync(join(project, 'addons', 'kit', 'licences'), { recursive: true });
+    writeFileSync(
+      join(project, 'addons', 'kit', 'licences', 'licences.gd'),
+      'class_name KitLicences\nextends RefCounted\n',
+    );
+    writeFileSync(
+      join(project, 'gate.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint(KitLicences)\n',
+    );
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    // The classes the editor holds, and what its next scan imports: a scan that finds something sets
+    // off an import that holds every request until it is over, and the requests are then answered
+    // in order, as an editor importing on the thread that answers answers them.
+    let holds: string[] = [];
+    let imports: { classes: string[]; ms: number } | null = null;
+    let importing = false;
+    const held: Array<() => void> = [];
+    let completed = 1;
+    let startsAskedFor = 0;
+    const reloadsAskedFor: string[] = [];
+    const finishImport = (brought: readonly string[]): void => {
+      importing = false;
+      holds = [...holds, ...brought];
+      for (const answerHeld of held.splice(0)) {
+        answerHeld();
+      }
+    };
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      const answer = (result: Record<string, unknown>): void => {
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+      };
+      let respond: () => void;
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        startsAskedFor += 1;
+        const before = completed;
+        completed += 1;
+        respond = () => {
+          answer({
+            ok: true,
+            started: true,
+            scanning: false,
+            importing: false,
+            scansCompletedBefore: before,
+            scansCompleted: before + 1,
+          });
+        };
+        const found = imports;
+        imports = null;
+        if (found !== null) {
+          importing = true;
+          held.push(respond);
+          if (Number.isFinite(found.ms)) {
+            setTimeout(() => {
+              finishImport(found.classes);
+            }, found.ms);
+          }
+          return;
+        }
+      } else if (tool === 'rescan_filesystem' || tool === 'scan_status') {
+        respond = () => {
+          answer({ ok: true, scanning: false, importing: false, scansCompleted: completed });
+        };
+      } else if (tool === 'global_classes') {
+        respond = () => {
+          answer({ ok: true, classes: holds });
+        };
+      } else {
+        respond = () => {
+          if (tool === 'reload_script') {
+            reloadsAskedFor.push(String(args['scriptPath']));
+          }
+          answer({ ok: true, methods: [] });
+        };
+      }
+      if (importing) {
+        held.push(respond);
+      } else {
+        respond();
+      }
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: SERVER_VERSION,
+        editor_pid: editorPid,
+      }),
+    );
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const rescan = async (budget?: number): Promise<{ said: string; answer: unknown }> => {
+      const response = await server.request(
+        'tools/call',
+        {
+          name: 'editor_rescan',
+          arguments: { projectPath: project, ...(budget === undefined ? {} : { timeoutMs: budget }) },
+        },
+        (budget ?? 30_000) + 60_000,
+      );
+      return { said: textOf(response) ?? JSON.stringify(response), answer: parseTextContent(response) };
+    };
+
+    // An import longer than the whole wait.
+    imports = { classes: ['KitLicences'], ms: Number.POSITIVE_INFINITY };
+    const unanswered = await rescan();
+    assert.equal(startsAskedFor, 1, `the scan was asked for: ${unanswered.said}`);
+    assert.equal(
+      get(unanswered.answer, 'stillWorking'),
+      true,
+      `an unanswered start is a busy editor: ${unanswered.said}`,
+    );
+    assert.equal(get(unanswered.answer, 'ok'), false, unanswered.said);
+    assert.match(
+      text(get(unanswered.answer, 'note')),
+      /took the rescan in and did not answer it.*Scripts naming KitLicences, which the editor could not see before this scan/,
+      unanswered.said,
+    );
+    assert.deepEqual(
+      readClassNote(project)?.unseenBeforeAnUnfinishedScan,
+      { editorPid, classes: ['KitLicences'] },
+      'and what the editor could not see is noted for the next server, against this editor',
+    );
+    assert.deepEqual(reloadsAskedFor, [], 'nothing is reloaded while the scan is not known to be over');
+
+    // Asked again while that import is still going, so the question whether the editor is busy goes
+    // unanswered as well: an editor importing, to be waited out rather than scanned over.
+    setTimeout(() => {
+      finishImport(['KitLicences']);
+    }, 40_000);
+    const finished = await rescan(100_000);
+    assert.ok(
+      asNumber(get(finished.answer, 'waitedForEditorScanMs') ?? 0) >= 30_000,
+      `the import is waited out before the scan is asked for: ${finished.said}`,
+    );
+    assert.deepEqual(
+      asArray(get(finished.answer, 'broughtIn') ?? []).map(String),
+      ['KitLicences'],
+      `the class the unanswered scan brought in is counted by the next: ${finished.said}`,
+    );
+    assert.deepEqual(
+      reloadsAskedFor,
+      ['res://gate.gd'],
+      `and the script naming it is reloaded: ${finished.said}`,
+    );
+    assert.equal(get(finished.answer, 'ok'), true, finished.said);
+    assert.equal(
+      readClassNote(project)?.unseenBeforeAnUnfinishedScan,
+      undefined,
+      'and the note is taken down once the scan is seen to be over',
+    );
+
+    const again = await rescan();
+    assert.deepEqual(
+      reloadsAskedFor,
+      ['res://gate.gd'],
+      `a scan bringing nothing in reloads nothing: ${again.said}`,
+    );
+    assert.equal(get(again.answer, 'broughtIn'), undefined, again.said);
+
+    // An import shorter than a wait given room for it, and longer than the wait for one answer:
+    // the start and the first look at the scan both go unanswered, and the rescan finishes the job
+    // itself once the editor is free.
+    mkdirSync(join(project, 'addons', 'kit', 'spots'), { recursive: true });
+    writeFileSync(
+      join(project, 'addons', 'kit', 'spots', 'spots.gd'),
+      'class_name KitSpots\nextends RefCounted\n',
+    );
+    writeFileSync(join(project, 'board.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tprint(KitSpots)\n');
+    imports = { classes: ['KitSpots'], ms: 70_000 };
+    const outlasted = await rescan(120_000);
+    assert.equal(
+      get(outlasted.answer, 'stillWorking'),
+      false,
+      `the wait outlasts the import: ${outlasted.said}`,
+    );
+    assert.deepEqual(
+      asArray(get(outlasted.answer, 'broughtIn') ?? []).map(String),
+      ['KitSpots'],
+      `and counts what the import brought in: ${outlasted.said}`,
+    );
+    assert.deepEqual(
+      reloadsAskedFor,
+      ['res://gate.gd', 'res://board.gd'],
+      `and reloads the script naming it: ${outlasted.said}`,
+    );
+    assert.equal(get(outlasted.answer, 'ok'), true, outlasted.said);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A repair that could not run is not reported as one.
  *
  * The editor writes the class cache at the end of a scan from the list it is holding, not from the
@@ -38546,6 +38790,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
   testARescanReloadsWhatNamesAClassItBroughtIn,
+  testARescanTheEditorDidNotAnswerIsFinishedByTheNext,
   testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList,
   testAShortenedCacheIsRebuilt,
   testAClassWhoseScriptCameBackIsNotTheEditorsLoss,
