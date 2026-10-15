@@ -210,6 +210,11 @@ scripts. `docs/architecture.md` describes how the parts fit together, and the re
   it. The editor restart quits and then starts the editor; a reconnect in between left a successor
   that saw nothing connected and said an editor might still dial in. The user's reconnect is the
   usual replacement.
+- A test server claims its project as its process starts, initialised or not, and the server whose
+  announcement it replaced stops at its next successor check, ten seconds on. Spawn a second server
+  for a project where it is used, after the state it should meet. Two fixtures spawned every server
+  at the top: one lost its first server partway through on a slow Windows runner, and the other's
+  servers read the announcements they were meant to meet before the fixture had written them.
 - A replacement process misses events the old one saw. The debug adapter reports a stop only to
   sessions connected at the time; a later session asking for the stack gets a thread and no frames
   while the game sits at a breakpoint, and the code read that as running. When state comes from an
