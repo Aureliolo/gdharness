@@ -126,8 +126,8 @@ func _save_checked(resource: Resource, path: String, names: Array, previous: Var
 	else:
 		for key: Variant in names:
 			var property: String = str(key)
-			var read: Variant = loaded.get(property)
-			if not PropertyValues.same(read, resource.get(property)):
+			var read: Variant = _properties.read_at(loaded, property)
+			if not PropertyValues.same(read, _properties.read_at(resource, property)):
 				lost = (
 					(
 						"%s.%s would load from the file as %s: it is not a property the file keeps, so "
