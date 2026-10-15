@@ -326,6 +326,23 @@ export function anEditorIsStillComing(
   return mayYetConnect(listeningSince, now) || launchedEditorIsAlive;
 }
 
+/**
+ * A request the editor took in and did not answer in time. Apart from a refusal or a dropped
+ * connection, because it usually means the editor is busy rather than gone: a hidden editor runs
+ * the import a scan sets off on the thread that answers requests, and answers nothing until it is
+ * done.
+ */
+export class BridgeTimeout extends Error {
+  readonly toolName: string;
+  readonly waitedMs: number;
+
+  constructor(toolName: string, waitedMs: number) {
+    super(`Tool ${toolName} timed out after ${waitedMs}ms`);
+    this.toolName = toolName;
+    this.waitedMs = waitedMs;
+  }
+}
+
 export class GodotBridge extends EventEmitter {
   /**
    * When this bridge started listening, which is when an editor already up could first reach it.
@@ -809,7 +826,7 @@ export class GodotBridge extends EventEmitter {
     return new Promise<unknown>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
-        reject(new Error(`Tool ${toolName} timed out after ${this.timeoutMs}ms`));
+        reject(new BridgeTimeout(toolName, this.timeoutMs));
       }, this.timeoutMs);
 
       this.pendingRequests.set(requestId, {
