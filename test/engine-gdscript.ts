@@ -2531,8 +2531,15 @@ function testTheImporterIsAskedFirst(godotPath: string): void {
     const cachePath = join(dir, '.godot', 'editor', 'filesystem_cache10');
     const md5 = (text: string): string => createHash('md5').update(text).digest('hex');
     const older = sidecar.replace(/^importer_version=\d+\n/m, '');
+    const importedAt = statSync(sidecarPath).mtimeMs;
     writeFileSync(sidecarPath, older);
     writeFileSync(cachePath, readFileSync(cachePath, 'utf8').replace(md5(sidecar), md5(older)));
+    // The engine's filesystem cache keeps whole seconds and asks the importer only about a sidecar
+    // whose time has moved, so a rewrite landing in the second the import wrote it is never looked
+    // at: on a fast Linux runner it landed there and the engine rebuilt nothing. Two seconds past it,
+    // so the engine reads the sidecar, which is the state the verdict is about.
+    const rewrittenAt = new Date((Math.floor(importedAt / 1000) + 2) * 1000);
+    utimesSync(sidecarPath, rewrittenAt, rewrittenAt);
     assert.deepEqual(statusOf('thing.gltf'), [
       'needs_reimport',
       `it was imported at version 0 of the scene importer, and this engine imports at version ${written}`,
