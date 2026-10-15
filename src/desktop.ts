@@ -12,11 +12,27 @@
  * Node cannot name a desktop when it starts a process, and the package ships no native code, so the
  * one call that can, CreateProcessW with a desktop in its startup information, is made from C#
  * compiled by the Windows PowerShell every Windows machine has. The compiled assembly is kept in the
- * temporary directory under a name taken from its source, so a launch compiles only the first time.
+ * temporary directory under a name taken from its source, so it is compiled once per machine and
+ * version, by the first server to start there.
  */
 
 import { createHash } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { alive } from './alive.js';
+import { spawnHidden } from './spawn.js';
 
 /** The desktop every process started this way shares. */
 export const HIDDEN_DESKTOP = 'gdharness';
@@ -180,6 +196,133 @@ public static class GdharnessDesktop {
 }
 `;
 
+const DIGEST = createHash('sha256').update(SOURCE).digest('hex').slice(0, 16);
+
+/**
+ * How long compiling the helper is given. A few seconds as a rule, and over a minute on a loaded CI
+ * runner, which is why it is not part of a start's own budget.
+ */
+const HELPER_COMPILE_MS = 180_000;
+
+/** Where the compiled helper is kept, named after its source, so a changed source compiles anew. */
+export function helperAssembly(directory = tmpdir()): string {
+  return join(directory, `gdharness-desktop-${DIGEST}.dll`);
+}
+
+/**
+ * Compiles the helper into [param directory] unless it is there, and answers null once it is, or
+ * why it is not. One process compiles at a time: the rest wait for its assembly, or with
+ * [param wait] false go on without it, which is what a server starting up does.
+ *
+ * Apart from any start, because it used to happen inside the first one. The first start on a fresh
+ * Windows CI runner compiled for longer than the start was given, the keeper ended the helper with
+ * the compile half done, and the next start paid for it again: 35 seconds to a game's announcement
+ * where the start after it took five.
+ */
+export async function ensureHelperCompiled(
+  directory = tmpdir(),
+  budgetMs = HELPER_COMPILE_MS,
+  wait = true,
+): Promise<string | null> {
+  const assembly = helperAssembly(directory);
+  const lock = `${assembly}.compiling`;
+  const until = Date.now() + budgetMs;
+  while (Date.now() < until) {
+    if (existsSync(assembly)) {
+      return null;
+    }
+    let mine = false;
+    try {
+      const held = openSync(lock, 'wx');
+      writeSync(held, String(process.pid));
+      closeSync(held);
+      mine = true;
+    } catch {
+      // Another process is compiling it.
+    }
+    if (mine) {
+      try {
+        return await compileHelper(directory, assembly, until - Date.now());
+      } finally {
+        rmSync(lock, { force: true });
+      }
+    }
+    // A lock whose process has gone, or older than a whole compile, is one nothing will take down: a
+    // server ended mid-compile takes its compiler with it, and its lock would hold every later start
+    // for the whole budget.
+    try {
+      const holder = Number(readFileSync(lock, 'utf8').trim());
+      const old = Date.now() - statSync(lock).mtimeMs > budgetMs;
+      if (old || (Number.isInteger(holder) && holder > 0 && !alive(holder))) {
+        rmSync(lock, { force: true });
+        continue;
+      }
+    } catch {
+      // Gone between the reads, which is the compile finishing.
+    }
+    if (!wait) {
+      return null;
+    }
+    await delay(200);
+  }
+  return `the desktop helper was not compiled within ${String(budgetMs)} ms`;
+}
+
+async function compileHelper(directory: string, assembly: string, budgetMs: number): Promise<string | null> {
+  const scratch = mkdtempSync(join(directory, 'gdharness-desktop-source-'));
+  const source = join(scratch, 'helper.cs');
+  writeFileSync(source, SOURCE, 'utf8');
+  const literal = (path: string): string => `'${path.replaceAll("'", "''")}'`;
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    'try {',
+    `  $partial = ${literal(assembly)} + '.' + $PID`,
+    `  Add-Type -TypeDefinition ([IO.File]::ReadAllText(${literal(source)}, [Text.Encoding]::UTF8)) -OutputAssembly $partial`,
+    `  Move-Item -LiteralPath $partial -Destination ${literal(assembly)}`,
+    '} catch {',
+    '  [Console]::Error.WriteLine($_.Exception.Message)',
+    '  exit 1',
+    '}',
+  ].join('\n');
+  try {
+    return await new Promise<string | null>((resolve) => {
+      const compiler = spawnHidden(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-EncodedCommand',
+          Buffer.from(script, 'utf16le').toString('base64'),
+        ],
+        { stdio: ['ignore', 'ignore', 'pipe'] },
+      );
+      let complained = '';
+      compiler.stderr.on('data', (chunk: Buffer) => {
+        complained += chunk.toString();
+      });
+      const timer = setTimeout(() => {
+        compiler.kill();
+      }, budgetMs);
+      compiler.once('error', (error: Error) => {
+        clearTimeout(timer);
+        resolve(`Windows PowerShell did not start: ${error.message}`);
+      });
+      compiler.once('close', (code) => {
+        clearTimeout(timer);
+        resolve(
+          existsSync(assembly)
+            ? null
+            : `Windows PowerShell could not compile it${code === null ? ' in time' : ''}: ${complained.trim() || `exit code ${String(code)}`}`,
+        );
+      });
+    });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 /**
  * One argument as the Microsoft C runtime reads it back out of a command line: quoted when it is
  * empty or holds a space, a tab or a quote, with every quote escaped and every run of backslashes
@@ -210,7 +353,7 @@ export function windowsCommandLine(command: string, args: readonly string[]): st
 
 /** The files a helper is handed and writes, all in a directory of the caller's own. */
 export interface HelperFiles {
-  /** What to start and the helper's own source, read by the helper as it starts. */
+  /** What to start, read by the helper as it starts. */
   readonly spec: string;
   readonly pid: string;
   readonly error: string;
@@ -225,16 +368,19 @@ export interface HelperFiles {
  * stops it before the pid is written goes to the error file, since its own streams are the ones the
  * process inherits. The process starts in [param how]'s directory, which the helper is not run in.
  *
- * The spec goes in a file rather than on the command line. It carries the helper's C# source and the
- * command line to start, and base64 of the JSON inside base64 of the script passed Windows' limit
- * of 32767 characters on a command line: a keeper starting a long command on a desktop of its own
- * failed with ENAMETOOLONG before anything started.
+ * The spec goes in a file rather than on the command line. A long command line in base64 of the JSON
+ * inside base64 of the script passed Windows' limit of 32767 characters on a command line: a keeper
+ * starting a long command on a desktop of its own failed with ENAMETOOLONG before anything started.
+ *
+ * [param assembly] is the compiled helper, which {@link ensureHelperCompiled} makes first: loading
+ * it is all this does, so the start's own time is spent on the start.
  */
 export function throughHelper(
   how: { readonly desktop?: string; readonly noActivate?: boolean; readonly directory: string },
   command: string,
   args: readonly string[],
   files: HelperFiles,
+  assembly = helperAssembly(),
 ): { command: string; args: string[] } {
   const spec = {
     desktop: how.desktop ?? '',
@@ -243,8 +389,7 @@ export function throughHelper(
     pidFile: files.pid,
     stopFile: files.stop,
     directory: how.directory,
-    source: SOURCE,
-    digest: createHash('sha256').update(SOURCE).digest('hex').slice(0, 16),
+    assembly,
   };
   writeFileSync(files.spec, JSON.stringify(spec), 'utf8');
   const literal = (path: string): string => `'${path.replaceAll("'", "''")}'`;
@@ -252,13 +397,7 @@ export function throughHelper(
     "$ErrorActionPreference = 'Stop'",
     'try {',
     `  $spec = [IO.File]::ReadAllText(${literal(files.spec)}, [Text.Encoding]::UTF8) | ConvertFrom-Json`,
-    "  $assembly = Join-Path ([IO.Path]::GetTempPath()) ('gdharness-desktop-' + $spec.digest + '.dll')",
-    '  if (-not (Test-Path -LiteralPath $assembly)) {',
-    '    $partial = "$assembly.$PID"',
-    '    Add-Type -TypeDefinition $spec.source -OutputAssembly $partial',
-    '    try { Move-Item -LiteralPath $partial -Destination $assembly } catch { Remove-Item -LiteralPath $partial -ErrorAction SilentlyContinue }',
-    '  }',
-    '  Add-Type -LiteralPath $assembly',
+    '  Add-Type -LiteralPath $spec.assembly',
     '  $code = [GdharnessDesktop]::Run($spec.desktop, $spec.commandLine, $spec.pidFile, [bool]$spec.noActivate, $spec.stopFile, $spec.directory)',
     '} catch {',
     `  [IO.File]::WriteAllText(${literal(files.error)}, $_.Exception.Message)`,
