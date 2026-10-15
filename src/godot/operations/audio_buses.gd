@@ -83,7 +83,20 @@ func get_audio_buses(_params: Dictionary) -> Dictionary:
 	var buses: Array[Dictionary] = []
 	for i: int in range(AudioServer.bus_count):
 		buses.append(_bus(i))
-	return {"bus_count": AudioServer.bus_count, "buses": buses, "layout": _layout_path()}
+	var layout: String = _layout_path()
+	var answer: Dictionary = {"bus_count": AudioServer.bus_count, "buses": buses, "layout": layout}
+	# The setting names a path whether or not anything is there, and a project that never changed a
+	# bus has no file: the path alone read as a layout the project keeps.
+	if not FileAccess.file_exists(layout):
+		answer["layout_on_disk"] = false
+		answer["note"] = (
+			(
+				"Nothing is at %s, so these are the engine's default buses; the first change to a bus "
+				+ "writes the layout there."
+			)
+			% layout
+		)
+	return answer
 
 
 func set_audio_bus_effect(params: Dictionary) -> Dictionary:
