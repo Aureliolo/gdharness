@@ -20513,7 +20513,7 @@ function testAnExportedBuildIsFoundInsideTheProject(): void {
  * An exported build is started on its own, with no project, no Godot and no debugger, and stopped.
  *
  * Asked by tall-tales-inn to measure what a release costs a player, on the desktop of its own a
- * windowed run gets. The build is a copy of Node running a script, which needs no export template:
+ * windowed run gets. The build is Node running a script, which needs no export template:
  * it writes what it was given and what it reads of its saves, and it would refuse the debugger's
  * --remote-debug and never write, which is what holds that none was given. The project names no
  * main scene, which a project run would be refused for.
@@ -20529,14 +20529,25 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-run-rt-'));
   const saves = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-run-saves-'));
   const build = process.platform === 'win32' ? 'export/game.exe' : 'export/game';
-  const script = join(project, 'export', 'stand-in.js');
+  // Named after the build, so the process the script becomes still names it on its command line, as
+  // a real export does and as the check before a stop signals it asks.
+  const script = join(project, 'export', 'game-stand-in.js');
   const said = join(project, 'export', 'said.json');
   writeFileSync(
     join(project, 'project.godot'),
     'config_version=5\n\n[application]\nconfig/name="Exported"\n',
   );
   mkdirSync(join(project, 'export'));
-  cpSync(nodePath, join(project, ...build.split('/')));
+  // A real executable on Windows, which starts no script. Elsewhere a script handing on to Node,
+  // since a copy of Node was no build: Homebrew's finds its library beside where it was installed,
+  // and the copy on macOS exited at once without a word.
+  if (process.platform === 'win32') {
+    cpSync(nodePath, join(project, ...build.split('/')));
+  } else {
+    writeFileSync(join(project, ...build.split('/')), `#!/bin/sh\nexec "${nodePath}" "$@"\n`, {
+      mode: 0o755,
+    });
+  }
   writeFileSync(
     script,
     "const { writeFileSync } = require('node:fs');\n" +
@@ -20597,9 +20608,10 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
     while (!existsSync(said) && Date.now() < deadline) {
       await delay(100);
     }
+    const transcript = text(get(started, 'transcript'));
     assert.ok(
       existsSync(said),
-      `the build ran and wrote what it was given, so no debugger flag reached it: ${shown}`,
+      `the build ran and wrote what it was given, so no debugger flag reached it: ${shown}\nIt printed: ${existsSync(transcript) ? readFileSync(transcript, 'utf8') : 'nothing'}`,
     );
     const read = JSON.parse(readFileSync(said, 'utf8')) as { argv: string[]; holding: string[] };
     assert.deepEqual(read.argv, [saves, said], JSON.stringify(read));
