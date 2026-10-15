@@ -23,19 +23,16 @@
  * first had already printed stop being anywhere.
  */
 
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { promisify } from 'node:util';
 import { errorMessage } from './errors.js';
 import { isSameDirectory } from './paths.js';
 import { type CommandLineRead, readCommandLine } from './process-children.js';
 import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
+import { runHidden } from './spawn.js';
 import { writeWhole } from './whole-file.js';
 import { askWindows } from './windows-ask.js';
-
-const execFileAsync = promisify(execFile);
 
 /** What a run leaves behind so another server can find it. */
 export interface RunRecord {
@@ -465,7 +462,7 @@ export async function runningAs(pid: number): Promise<RunningAs | null> {
       return raw === '' ? null : { kind: 'commandLine', text: raw, ...when };
     }
     const args = (
-      await execFileAsync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8', timeout: 15_000 })
+      await runHidden('ps', ['-p', String(pid), '-o', 'args='], { timeout: 15_000 })
     ).stdout.trim();
     return args === '' ? null : { kind: 'commandLine', text: args, ...when };
   } catch {
@@ -498,7 +495,7 @@ export async function runningAs(pid: number): Promise<RunningAs | null> {
 export async function listeningPid(port: number): Promise<number | null> {
   try {
     if (process.platform === 'win32') {
-      const { stdout } = await execFileAsync('netstat', ['-ano'], { encoding: 'utf8', timeout: 15_000 });
+      const { stdout } = await runHidden('netstat', ['-ano'], { timeout: 15_000 });
       return listeningPidInNetstat(stdout, port);
     }
     // `lsof` is on macOS by default and usual on Linux; `ss` is the modern Linux answer and is not
@@ -509,9 +506,7 @@ export async function listeningPid(port: number): Promise<number | null> {
       ['ss', ['-ltnpH', `sport = :${port}`], /pid=(\d+)/],
     ] as const) {
       try {
-        const said = (
-          await execFileAsync(command, [...args], { encoding: 'utf8', timeout: 15_000 })
-        ).stdout.trim();
+        const said = (await runHidden(command, [...args], { timeout: 15_000 })).stdout.trim();
         const found = pattern.exec(said);
         if (found?.[1] !== undefined) {
           return Number(found[1]);
@@ -592,7 +587,7 @@ async function startedAt(pid: number, windowsAnswer: string | null): Promise<num
   }
   try {
     const said = (
-      await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 15_000 })
+      await runHidden('ps', ['-p', String(pid), '-o', 'lstart='], { timeout: 15_000 })
     ).stdout.trim();
     const when = Date.parse(said);
     return said === '' || Number.isNaN(when) ? null : when;
@@ -604,10 +599,8 @@ async function startedAt(pid: number, windowsAnswer: string | null): Promise<num
 /** The executable's name alone, from the one tool every Windows has, or why it did not give one. */
 async function windowsImage(pid: number): Promise<{ image: string } | { why: string }> {
   try {
-    const { stdout: csv } = await execFileAsync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
-      encoding: 'utf8',
+    const { stdout: csv } = await runHidden('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
       timeout: 15_000,
-      windowsHide: true,
     });
     const image = /^"([^"]+)"/.exec(csv.trim())?.[1];
     return image === undefined ? { why: 'named no process under that number' } : { image };

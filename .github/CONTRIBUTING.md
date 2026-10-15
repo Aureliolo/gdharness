@@ -134,6 +134,7 @@ whose executables are world-writable. Releases are cut by CI.
 │   ├── game-log.ts        # What a game prints, read as problems
 │   ├── junit.ts           # The JUnit report a test runner writes, read as cases
 │   ├── launch.ts          # How a game is started
+│   ├── spawn.ts           # Every process start, each with no window of its own
 │   ├── runtime-client.ts  # Talking to a running game
 │   ├── project-scan.ts    # Reading a project directory without the engine
 │   ├── resources.ts       # MCP resources, and completing their paths

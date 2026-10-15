@@ -8,7 +8,6 @@
  * `dispatch`, and the arguments have been checked against the tool's spec before it is reached.
  */
 
-import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
@@ -28,7 +27,6 @@ import {
 import { basename, dirname, extname, isAbsolute, join, normalize, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import { McpServer, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server/stdio';
 import { alive } from './alive.js';
@@ -267,6 +265,9 @@ import {
   shippedEditorDigest,
   shippedRuntimeDigest,
 } from './setup.js';
+// No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
+// array element, so a path full of backslashes, spaces or quotes is just a path.
+import { runHidden as run, spawnHidden } from './spawn.js';
 import {
   asParams,
   readArray,
@@ -307,11 +308,6 @@ const UPDATE_NOTICE_EVERY = 500;
  * once, rare enough that it is never the reason an answer got longer.
  */
 const FEEDBACK_NOTICE_EVERY = 250;
-
-// execFile, not exec: no shell means no quoting, and no quoting means no way to escape out
-// of it. Every argument below is an array element, so a path full of backslashes, spaces or
-// quotes is just a path.
-const run = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -8883,7 +8879,10 @@ class GodotServer {
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
   ): SpawnedGame & { readonly settled: Promise<void> } {
-    const child = spawn(godotPath, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}) });
+    const child = spawnHidden(godotPath, cmdArgs, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(env ? { env } : {}),
+    });
     // The same reasoning at the other end of the call: a caller who cancelled is no longer the
     // reader this run is held for, so it is ended with the call rather than at its own timeout.
     const cancelled = callSignal();

@@ -8,7 +8,6 @@
  */
 
 import assert from 'node:assert/strict';
-import { type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   cpSync,
@@ -28,6 +27,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ANSWERED, engineExtras, runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
+import { type SpawnSyncReturns, spawnHidden, spawnSyncHidden } from '../src/spawn.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { asArray, asNumber, asObject, asString, get, lastJsonLine, text } from './support/json.js';
 import { solidPng } from './support/png.js';
@@ -37,7 +37,7 @@ const tried: string[] = [];
 
 /** True when the binary at this path answers --version, which is the only test that counts. */
 function godotRuns(candidate: string): boolean {
-  const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', timeout: 60000 });
+  const probe = spawnSyncHidden(candidate, ['--version'], { encoding: 'utf8', timeout: 60000 });
   const failure: NodeJS.ErrnoException | undefined = probe.error;
   tried.push(`${candidate} -> ${probe.status ?? failure?.code ?? 'no status'}`);
   return probe.status === 0;
@@ -222,10 +222,14 @@ function runScript(
   scriptPath: string,
   extraArgs: string[] = [],
 ): SpawnSyncReturns<string> {
-  return spawnSync(godotPath, ['--headless', '--path', projectDir, '--script', scriptPath, ...extraArgs], {
-    encoding: 'utf8',
-    timeout: 180000,
-  });
+  return spawnSyncHidden(
+    godotPath,
+    ['--headless', '--path', projectDir, '--script', scriptPath, ...extraArgs],
+    {
+      encoding: 'utf8',
+      timeout: 180000,
+    },
+  );
 }
 
 /**
@@ -1632,7 +1636,7 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
   const dir = createProject(godotPath);
   const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
   const importAll = (): void => {
-    const run = spawnSync(godotPath, ['--headless', '--path', dir, '--import'], {
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', dir, '--import'], {
       encoding: 'utf8',
       timeout: 180_000,
     });
@@ -2105,10 +2109,14 @@ async function testAnOperationLeavesARunningLogAlone(godotPath: string): Promise
     ].join('\n'),
   );
 
-  const bench = spawn(godotPath, ['--headless', '--path', project, '--script', join(project, 'bench.gd')], {
-    stdio: 'ignore',
-    env: userDataIn(home),
-  });
+  const bench = spawnHidden(
+    godotPath,
+    ['--headless', '--path', project, '--script', join(project, 'bench.gd')],
+    {
+      stdio: 'ignore',
+      env: userDataIn(home),
+    },
+  );
   const moved = ['APPDATA', 'XDG_DATA_HOME'];
   const saved = new Map(moved.map((name) => [name, process.env[name]]));
   // Put back, rather than set back: assigning undefined to a variable stores the word "undefined",
@@ -2489,7 +2497,7 @@ function testTheImporterIsAskedFirst(godotPath: string): void {
     return [get(one, 'status'), get(one, 'reason')];
   };
   const importAll = (): void => {
-    const run = spawnSync(godotPath, ['--headless', '--path', dir, '--import'], {
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', dir, '--import'], {
       encoding: 'utf8',
       timeout: 180_000,
     });
@@ -2762,7 +2770,7 @@ function testAFontsFeaturesAreWrittenAsTheEngineReadsThem(godotPath: string, _pr
   const dir = createProject(godotPath);
   const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
   const importAll = (): void => {
-    const run = spawnSync(godotPath, ['--headless', '--path', dir, '--import'], {
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', dir, '--import'], {
       encoding: 'utf8',
       timeout: 180_000,
     });

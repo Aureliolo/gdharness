@@ -4,15 +4,12 @@
  * with a message about the wrong thing.
  */
 
-import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { normalize } from 'node:path';
-import { promisify } from 'node:util';
 import { godotCandidates, resolveHomeDirectory } from './detection.js';
 import { errorMessage } from './errors.js';
 import { envValue } from './launch.js';
-
-const run = promisify(execFile);
+import { runHidden as run } from './spawn.js';
 
 /**
  * The engine, or why there is none, which is two answers and not one.

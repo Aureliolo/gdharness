@@ -2,6 +2,7 @@
 
 import { chmod, cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { spawnSyncHidden } from '../src/spawn.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const sourceRoot = path.join(root, 'src');
@@ -60,9 +61,9 @@ for (const sourcePath of await collectTypeScriptEntries(sourceRoot)) {
 
   const outputPath = path.join(buildRoot, relativePath.replace(/\.ts$/, '.js'));
   await mkdir(path.dirname(outputPath), { recursive: true });
-  const result = Bun.spawnSync(
+  const result = spawnSyncHidden(
+    process.execPath,
     [
-      process.execPath,
       'build',
       sourcePath,
       `--outfile=${outputPath}`,
@@ -71,9 +72,9 @@ for (const sourcePath of await collectTypeScriptEntries(sourceRoot)) {
       '--sourcemap=none',
       '--no-bundle',
     ],
-    { cwd: root, stdout: 'pipe', stderr: 'pipe' },
+    { cwd: root },
   );
-  if (result.exitCode !== 0) {
+  if (result.status !== 0) {
     throw new Error(
       `Development module build failed for ${relativePath}:\n${result.stderr.toString().trim()}`,
     );
