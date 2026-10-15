@@ -4731,16 +4731,18 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
   await new Promise<void>((resolve) => {
     holder.listen(wanted, '127.0.0.1', resolve);
   });
-  const moved = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(wanted) },
-  });
-  const beside = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(wanted) },
-  });
+  // Each server is spawned after the announcement it is meant to meet, and only once the one before
+  // it has answered: a server reads the announcement as its process starts and claims the project
+  // then, initialised or not, and the one it replaces stops at its next successor check.
+  const servers: ServerProcess[] = [];
+  const spawn = (bridgePort: number): ServerProcess => {
+    const started = new ServerProcess({
+      env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(bridgePort) },
+    });
+    servers.push(started);
+    return started;
+  };
   const free = await reservePort();
-  const settled = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(free) },
-  });
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -4761,6 +4763,7 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
         startedAt: new Date().toISOString(),
       }),
     );
+    const moved = spawn(wanted);
     await moved.initialize('regression-test');
     const editor = get(
       parseTextContent(await moved.request('tools/call', { name: 'editor_status', arguments: {} })),
@@ -4791,6 +4794,7 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
         startedAt: new Date().toISOString(),
       }),
     );
+    const beside = spawn(wanted);
     await beside.initialize('regression-test');
     const other = get(
       parseTextContent(await beside.request('tools/call', { name: 'editor_status', arguments: {} })),
@@ -4800,6 +4804,7 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     assert.notEqual(get(other, 'port'), wanted, `it moved at once: ${JSON.stringify(other)}`);
     assert.match(text(get(other, 'portNote')), /was held by another process/, JSON.stringify(other));
 
+    const settled = spawn(free);
     await settled.initialize('regression-test');
     const plain = get(
       parseTextContent(await settled.request('tools/call', { name: 'editor_status', arguments: {} })),
@@ -4824,9 +4829,9 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
       await anyPort.stop();
     }
   } finally {
-    await moved.stop();
-    await beside.stop();
-    await settled.stop();
+    for (const started of servers) {
+      await started.stop();
+    }
     await new Promise<void>((resolve) => {
       holder.close(() => {
         resolve();
@@ -4968,7 +4973,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
   const server = new ServerProcess({
     env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
   });
-  const uninformed = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+  let uninformed: ServerProcess | null = null;
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -5138,9 +5143,12 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     );
 
     // The contrast, from a server just as young with no note to read: its `true` is the window,
-    // and is the right answer there. Last, because it serves the same project and is the newer of
-    // the two, so the first server stands down once it has announced: asked in the middle, it left
-    // the first one stopping under the calls still to come, whenever its notice landed in time.
+    // and is the right answer there. Started here and not beside the first server, because a server
+    // announces itself in the project as its process starts, initialised or not, and the one it
+    // replaces stops at its next successor check, ten seconds on. Every call to the first server
+    // has to be over before this one exists: spawned beside it, a slow runner reached the first
+    // server's tenth second partway through the calls above.
+    uninformed = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
     await uninformed.initialize('regression-test');
     const plain = parseTextContent(
       await uninformed.request('tools/call', { name: 'editor_status', arguments: {} }),
@@ -5154,7 +5162,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
   } finally {
     editor?.close();
     await server.stop();
-    await uninformed.stop();
+    await uninformed?.stop();
     sweep(project);
   }
 }
@@ -6055,17 +6063,21 @@ async function testAnOldAddonIsNamedForAnOpItLacks(): Promise<void> {
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (isRecord(message) && message['type'] === 'tool_invoke') {
-        // What an addon from before the op answers for a command it does not have.
+        // What an addon from before the op answers for a command it does not have, and a refusal of
+        // its own for a property no resource has.
         const known = message['tool'] === 'modify_resource';
+        const refused = known && JSON.stringify(message['args']).includes('nonesuch');
         socket.send(
           JSON.stringify(
-            known
+            known && !refused
               ? { type: 'tool_result', id: message['id'], success: true, result: { ok: true } }
               : {
                   type: 'tool_result',
                   id: message['id'],
                   success: false,
-                  error: `Unknown tool: ${String(message['tool'])}`,
+                  error: refused
+                    ? 'Theme has no property nonesuch'
+                    : `Unknown tool: ${String(message['tool'])}`,
                 },
           ),
         );
@@ -6100,7 +6112,7 @@ async function testAnOldAddonIsNamedForAnOpItLacks(): Promise<void> {
     assert.match(
       read,
       new RegExp(
-        `^The editor's gdharness addon is older than this ${SERVER_VERSION.replaceAll('.', '\\.')} server and has no read_resource, so it cannot answer this call\\. The editor is running the 1\\.0\\.0 addon`,
+        `^The editor's gdharness addon is older than this ${SERVER_VERSION.replaceAll('.', '\\.')} server and has no resource_edit read, so it cannot answer this call\\. The editor is running the 1\\.0\\.0 addon`,
       ),
       read,
     );
@@ -6115,6 +6127,25 @@ async function testAnOldAddonIsNamedForAnOpItLacks(): Promise<void> {
       ) ?? '';
     assert.doesNotMatch(modified, /older than this/, modified);
     assert.match(modified, /"ok": true/, modified);
+    // A refusal from the editor names the tool and op called, not the command the editor runs, which
+    // a probe pass went looking for as a tool of that name.
+    const refused =
+      textOf(
+        await server.request('tools/call', {
+          name: 'resource_edit',
+          arguments: {
+            projectPath: project,
+            resourcePath: 'res://ui.tres',
+            op: 'modify',
+            properties: { nonesuch: 1 },
+          },
+        }),
+      ) ?? '';
+    assert.match(
+      refused,
+      /^The editor answered resource_edit modify with an error: Theme has no property nonesuch/,
+      refused,
+    );
   } finally {
     editor?.terminate();
     await server.stop();
@@ -25057,7 +25088,7 @@ async function testARefusalIsSaidOnce(): Promise<void> {
     assert.equal(get(answered, 'result', 'isError'), true, shown);
     assert.equal(
       blocks[0],
-      'debug/file_logging/max_log_files is declared as int, and 50.5 (float) cannot be written as that without losing something.',
+      'debug/file_logging/max_log_files is declared as int, which holds whole numbers, and 50.5 would be cut to fit. Setting it would save a different value than the one asked for.',
       `the refusal is the answer: ${shown}`,
     );
     const messages = asArray(get(JSON.parse(blocks[1] ?? '{}'), 'engine_messages')).map((entry) =>
@@ -25068,7 +25099,7 @@ async function testARefusalIsSaidOnce(): Promise<void> {
       `the engine's own error stays under engine_messages: ${shown}`,
     );
     assert.ok(
-      !messages.some((message) => message.includes('cannot be written as that')),
+      !messages.some((message) => message.includes('would be cut to fit')),
       `and the refusal is not among them: ${shown}`,
     );
   } finally {

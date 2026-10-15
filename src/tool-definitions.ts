@@ -777,7 +777,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: ['projectPath', 'scenePath'],
     operations: {
       add: { effect: 'additive', summary: 'add a node of any class', requires: ['nodeType', 'nodeName'] },
-      get: { effect: 'read', summary: "read a node's properties", requires: ['nodePath'] },
+      get: {
+        effect: 'read',
+        summary:
+          "read a node's properties, and a TileMapLayer's or TileMap's cells as set_tilemap_cells takes them, the first 1000 with cellCount for all",
+        requires: ['nodePath'],
+      },
       set: {
         effect: 'destructive',
         summary: 'set properties on a node',

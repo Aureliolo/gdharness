@@ -2461,7 +2461,21 @@ async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Pr
     'a TileMapLayer takes cells',
   );
   assert.match(nodeBody(fileText(project, 'tiles/map.tscn'), 'Ground'), /tile_map_data = PackedByteArray/);
-  assert.match(await refusal('scene_node', cell({ x: 1, y: 0 })), /Source 0 has no tile at \(1, 0\)/);
+  assert.match(
+    await refusal('scene_node', cell({ x: 1, y: 0 })),
+    /cells\[0\]: source 0 has no tile at \(1, 0\); it has tiles at \(0, 0\)\. Nothing was placed\./,
+  );
+  // The cells read back as cells, in the form set_tilemap_cells takes, rather than as the packed
+  // bytes the scene stores them in.
+  const ground = await call('scene_node', { ...map, op: 'get', nodePath: 'Ground' });
+  assert.deepEqual(
+    { count: get(ground, 'cellCount'), cells: get(ground, 'cells') },
+    {
+      count: 1,
+      cells: [{ coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 }, alternativeTile: 0 }],
+    },
+    text(ground),
+  );
   assert.match(
     await refusal('scene_node', { ...cell({ x: 0, y: 0 }), layer: 1 }),
     /TileMapLayer, which is one layer/,

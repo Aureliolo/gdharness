@@ -812,8 +812,19 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.notEqual(truncated.status, 0, 'a number the setting cannot hold is refused, not truncated');
   assert.match(
     `${truncated.stdout}\n${truncated.stderr}`,
-    /cannot be written as that without losing something/,
+    /max_log_files is declared as int, which holds whole numbers, and 50\.5 would be cut to fit/,
     `the refusal should say why:\n${truncated.stderr.trim()}`,
+  );
+  // A word for a number is a different refusal: nothing would be cut, it cannot become one at all.
+  const worded = runRefusedOperation(godotPath, projectDir, 'set_project_setting', {
+    setting: 'debug/file_logging/max_log_files',
+    value: 'many',
+  });
+  assert.notEqual(worded.status, 0, 'a word where a number goes is refused');
+  assert.match(
+    `${worded.stdout}\n${worded.stderr}`,
+    /max_log_files is declared as int, and "many" \(String\) cannot become one\./,
+    `and says it cannot become one:\n${worded.stderr.trim()}`,
   );
   assert.match(
     readFileSync(join(projectDir, 'project.godot'), 'utf8'),

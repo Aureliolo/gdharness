@@ -18,6 +18,9 @@ const SHADER_ENTRY: Dictionary[String, String] = {
 	"canvas_item": "fragment", "spatial": "fragment", "particles": "process", "sky": "sky", "fog": "fog"
 }
 
+## How many cells a read of a tile map lists, enough for a level's worth and not a whole world's.
+const CELLS_SHOWN: int = 1000
+
 var _editor_plugin: EditorPlugin = null
 var _properties: PropertyValues = PropertyValues.new()
 var _values: Serialisation = Serialisation.new()
@@ -552,13 +555,85 @@ func _cell(entry: Variant, index: int, tile_set: TileSet) -> Array:
 	var atlas_coords: Vector2i = atlas_at[1]
 	var alternative: int = Read.as_int(cell.get("alternativeTile", 0))
 	if not source.has_tile(atlas_coords):
-		return [false, "Source %d has no tile at %s" % [source_id, atlas_coords]]
+		return [
+			false,
+			(
+				"cells[%d]: source %d has no tile at %s; it has %s. Nothing was placed."
+				% [index, source_id, atlas_coords, _tiles_of(source)]
+			)
+		]
 	if not source.has_alternative_tile(atlas_coords, alternative):
 		return [
 			false,
 			"The tile at %s in source %d has no alternative %d" % [atlas_coords, source_id, alternative]
 		]
 	return [true, at[1], source_id, atlas_coords, alternative]
+
+
+## The atlas coordinates [param source] has tiles at, the first twelve and how many more, or that it
+## has none: a refusal naming the one missing sent a caller guessing which of the others exist.
+static func _tiles_of(source: TileSetSource) -> String:
+	var count: int = source.get_tiles_count()
+	if count == 0:
+		return "no tiles"
+	var named: Array[String] = []
+	for index: int in mini(count, 12):
+		named.append(str(source.get_tile_id(index)))
+	var more: String = "" if count <= 12 else " and %d more" % (count - 12)
+	return "tiles at " + ", ".join(PackedStringArray(named)) + more
+
+
+## The cells a TileMapLayer or a TileMap holds, as {"cellCount", "cells"} in the form
+## set_tilemap_cells takes, or {} for any other node. The scene keeps them as packed bytes, which a
+## read answered with and nobody could read: a probe counted three cells by decoding the base64 by
+## hand. At most CELLS_SHOWN are listed, the count saying how many there are.
+static func cells_of(node: Node) -> Dictionary:
+	var listed: Array[Dictionary] = []
+	var count: int = 0
+	var single: TileMapLayer = node as TileMapLayer
+	var layered: TileMap = node as TileMap
+	if single != null:
+		var used: Array[Vector2i] = single.get_used_cells()
+		count = used.size()
+		for at: Vector2i in used.slice(0, CELLS_SHOWN):
+			listed.append(
+				_cell_entry(
+					at,
+					single.get_cell_source_id(at),
+					single.get_cell_atlas_coords(at),
+					single.get_cell_alternative_tile(at)
+				)
+			)
+	elif layered != null:
+		for layer: int in layered.get_layers_count():
+			var used: Array[Vector2i] = layered.get_used_cells(layer)
+			count += used.size()
+			for at: Vector2i in used:
+				if listed.size() >= CELLS_SHOWN:
+					break
+				var entry: Dictionary = _cell_entry(
+					at,
+					layered.get_cell_source_id(layer, at),
+					layered.get_cell_atlas_coords(layer, at),
+					layered.get_cell_alternative_tile(layer, at)
+				)
+				entry["layer"] = layer
+				listed.append(entry)
+	else:
+		return {}
+	var answer: Dictionary = {"cellCount": count, "cells": listed}
+	if count > listed.size():
+		answer["cellsNote"] = "The first %d of %d cells are listed." % [listed.size(), count]
+	return answer
+
+
+static func _cell_entry(at: Vector2i, source_id: int, atlas: Vector2i, alternative: int) -> Dictionary:
+	return {
+		"coords": {"x": at.x, "y": at.y},
+		"sourceId": source_id,
+		"atlasCoords": {"x": atlas.x, "y": atlas.y},
+		"alternativeTile": alternative,
+	}
 
 
 func _cell_at(node: Node, layer: int, at: Vector2i) -> Array:

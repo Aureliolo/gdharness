@@ -4065,7 +4065,9 @@ class GodotServer {
     const { op: _op, ...arguments_ } = args;
     const bridge = async (command: string, extra: OperationParams = {}): Promise<ToolResponse> => {
       const contained = this.containProjectFiles({ ...arguments_, ...extra });
-      return contained.ok ? await this.handleViaBridge(command, contained.value, tool) : contained.response;
+      return contained.ok
+        ? await this.handleViaBridge(command, contained.value, op === '' ? tool : `${tool} ${op}`)
+        : contained.response;
     };
 
     switch (tool) {
@@ -11929,7 +11931,7 @@ class GodotServer {
       return answered;
     }
     return this.createErrorResponse(
-      `The editor took ${toolName} in and did not answer within ${String(answered.waitedMs / 1000)}s. An editor importing files answers nothing until the import is over, and a hidden one imports on the thread that answers.`,
+      `The editor took ${askedAs ?? toolName} in and did not answer within ${String(answered.waitedMs / 1000)}s. An editor importing files answers nothing until the import is over, and a hidden one imports on the thread that answers.`,
       [
         'editor_status says whether it is scanning or importing',
         'The editor still carries the request out once it is free, so read what it changed before asking again',
@@ -11940,16 +11942,22 @@ class GodotServer {
   /**
    * [method handleViaBridge], except that a request the editor did not answer in time comes back
    * as the timeout, for a caller that goes on waiting for an editor busy rather than gone.
+   *
+   * [param askedAs] is the tool and op the caller called, "scene_animation connect_states", which
+   * is what a refusal names: the command the editor runs is this server's own word for it, and a
+   * caller told connect_animation_states failed went looking for a tool of that name.
    */
   private async askViaBridge(
     toolName: string,
     args: OperationParams,
     askedAs?: string,
   ): Promise<ToolResponse | BridgeTimeout> {
+    const named = askedAs ?? toolName;
     if (!this.godotBridge.isConnected()) {
+      const tool = askedAs?.split(' ')[0];
       const alternative =
-        askedAs !== undefined && Object.hasOwn(EDITOR_FREE_INSTEAD, askedAs)
-          ? EDITOR_FREE_INSTEAD[askedAs]
+        tool !== undefined && Object.hasOwn(EDITOR_FREE_INSTEAD, tool)
+          ? EDITOR_FREE_INSTEAD[tool]
           : undefined;
       const refused = await this.noEditorYet(args, alternative === undefined ? [] : [alternative]);
       if (refused !== null) {
@@ -12001,11 +12009,11 @@ class GodotServer {
           this.editorCodeOnDisk(),
         );
         return this.createErrorResponse(
-          `The editor's gdharness addon is older than this ${SERVER_VERSION} server and has no ${toolName}, so it cannot answer this call. ${remedy ?? 'Restart it with editor_launch restart to load the addon the project holds.'}`,
+          `The editor's gdharness addon is older than this ${SERVER_VERSION} server and has no ${named}, so it cannot answer this call. ${remedy ?? 'Restart it with editor_launch restart to load the addon the project holds.'}`,
           ['editor_status says which addon the editor holds'],
         );
       }
-      return this.createErrorResponse(`The editor answered ${toolName} with an error: ${message}`);
+      return this.createErrorResponse(`The editor answered ${named} with an error: ${message}`);
     }
   }
 
