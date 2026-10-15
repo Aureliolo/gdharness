@@ -124,7 +124,7 @@ const walkAddons = async (directory: string): Promise<void> => {
   }
 };
 await walkAddons(path.join(root, 'src', 'godot', 'addons'));
-assert.ok(addonScripts.length >= 14, `only ${addonScripts.length} addon scripts were found to check`);
+assert.ok(addonScripts.length >= 37, `only ${addonScripts.length} addon scripts were found to check`);
 for (const script of addonScripts) {
   assert.ok(
     packedFiles.has(`package/build/godot/${script}`),
