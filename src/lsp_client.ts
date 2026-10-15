@@ -1031,16 +1031,39 @@ function shownDiagnostic(entry: unknown): JsonRecord {
   };
 }
 
+/** How many lines [param content] has, counted as an editor counts them: a final newline ends a line. */
+function linesIn(content: string): number {
+  const lines = content.split('\n');
+  return Math.max(1, content.endsWith('\n') ? lines.length - 1 : lines.length);
+}
+
+/**
+ * The last line [param whole], a protocol range, covers, counted from one, and no later than
+ * [param lastOfDocument]. The end of a range is exclusive, so one at the start of a line ends on the
+ * line before it; and Godot ends a script's own class a line past the file, so on a script of five
+ * lines it said the class ended on line 7.
+ */
+function lastLineOf(whole: JsonRecord, lastOfDocument: number): number | null {
+  const end = shownPosition(whole['end']);
+  if (end === null) {
+    return null;
+  }
+  const start = shownPosition(whole['start']);
+  const exclusive = end.column === 1 && (start === null || end.line > start.line);
+  return Math.min(exclusive ? end.line - 1 : end.line, lastOfDocument);
+}
+
 /**
  * A symbol where its name is, which is the position hover and completion are asked at, and the
- * last line of its declaration. Godot also sends an empty documentation and a native class for
- * every symbol, which are left out when they say nothing.
+ * last line of its declaration in a document of [param lastOfDocument] lines. Godot also sends an
+ * empty documentation and a native class for every symbol, which are left out when they say
+ * nothing.
  */
-function shownSymbol(entry: unknown): JsonRecord {
+function shownSymbol(entry: unknown, lastOfDocument: number): JsonRecord {
   const symbol = asRecord(entry);
   const whole = asRecord(symbol['range'] ?? asRecord(symbol['location'])['range']);
   const at = shownPosition(asRecord(symbol['selectionRange'] ?? whole)['start']);
-  const last = shownPosition(whole['end']);
+  const last = lastLineOf(whole, lastOfDocument);
   const children = Array.isArray(symbol['children']) ? (symbol['children'] as unknown[]) : [];
   const { documentation, native_class: nativeClass, deprecated, detail } = symbol;
   return {
@@ -1048,11 +1071,11 @@ function shownSymbol(entry: unknown): JsonRecord {
     kind: named(symbol['kind'], SYMBOL_KINDS),
     ...(typeof detail === 'string' && detail !== '' ? { detail } : {}),
     ...(at === null ? {} : { line: at.line, column: at.column }),
-    ...(last === null ? {} : { lastLine: last.line }),
+    ...(last === null ? {} : { lastLine: last }),
     ...(typeof documentation === 'string' && documentation !== '' ? { documentation } : {}),
     ...(typeof nativeClass === 'string' && nativeClass !== '' ? { nativeClass } : {}),
     ...(deprecated === true ? { deprecated } : {}),
-    ...(children.length > 0 ? { children: children.map(shownSymbol) } : {}),
+    ...(children.length > 0 ? { children: children.map((child) => shownSymbol(child, lastOfDocument)) } : {}),
   };
 }
 
@@ -1216,7 +1239,7 @@ export async function handleLSPTool(
 
       case 'lsp_get_symbols': {
         const symbols = await client.getDocumentSymbols(scriptPath, content);
-        return asToolResponse({ symbols: symbols.map(shownSymbol) });
+        return asToolResponse({ symbols: symbols.map((symbol) => shownSymbol(symbol, linesIn(content))) });
       }
 
       default:

@@ -7011,7 +7011,7 @@ class GodotServer {
     }
     try {
       const askedAt = Date.now();
-      const asked = this.godotBridge.invokeTool('playing_status', {});
+      const asked = this.godotBridge.invokeTool('playing_status', {}, { counted: false });
       const answer = await Promise.race([asked, delay(PLAYING_STATUS_MS).then(() => null)]);
       if (answer === null) {
         // Logged with how late the answer was, when it comes, because a status the editor
@@ -7055,7 +7055,7 @@ class GodotServer {
     }
     try {
       const answer = await Promise.race([
-        this.godotBridge.invokeTool('scan_status', {}),
+        this.godotBridge.invokeTool('scan_status', {}, { counted: false }),
         delay(PLAYING_STATUS_MS).then(() => null),
       ]);
       if (answer === null) {
@@ -7172,10 +7172,18 @@ class GodotServer {
       this.getEditorStatusPayload(),
       this.editorServersListening(),
     ]);
+    const answeredAt = Date.now();
+    const inFlight = this.godotBridge
+      .requestsInFlight()
+      .map((request) => ({ tool: request.tool, forMs: answeredAt - request.startedAt }));
     return this.jsonTextResponse({
       editor: {
         ...editorStatus,
         ...servers,
+        // Counted again beside the list, so the two are of one moment. With how long each call has
+        // waited, so a slow answer can be told from one that is not coming.
+        pendingRequests: inFlight.length,
+        pendingRequestTools: inFlight.length === 0 ? undefined : inFlight,
         // Asked of the editor rather than remembered from when it greeted this server: the
         // debugger takes a port again before every play, so the one in the greeting is a number
         // it has already moved off.
