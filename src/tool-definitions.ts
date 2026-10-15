@@ -285,7 +285,8 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
       position: {
         type: 'string',
         enum: ['end', 'after_ready', 'after_init'],
-        description: 'Functions: where to insert.',
+        description:
+          'Functions: where to insert. end, the default, is the end of the file; after_ready and after_init are after _ready or _init, above the comments and annotation lines that open the function after it, and the end when nothing follows. A function goes in with two blank lines on each side, as gdformat writes them.',
       },
     },
     required: ['type', 'name'],
