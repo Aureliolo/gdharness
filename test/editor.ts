@@ -3791,6 +3791,57 @@ async function testAChangedUidIsReadByTheRescan({ call, project }: Editor): Prom
 }
 
 /**
+ * A member rename waits for the editor to hold the classes its uses are typed by.
+ *
+ * Found by a probe pass: a class created moments before, a script using it through
+ * `var gauge: Gauge`, and a rename of one of its members. The language server types a value only by
+ * the classes the editor holds, so the use was not among the references, was left as it was, and
+ * the rename answered ok over a script that no longer compiled. Refused until editor_rescan has
+ * brought the class in, and then the same rename reaches the use.
+ */
+async function testAMemberRenameWaitsForTheClassesItTypesBy({
+  call,
+  refusal,
+  project,
+}: Editor): Promise<void> {
+  const dir = join(project, 'gauged');
+  mkdirSync(dir, { recursive: true });
+  const gauge =
+    'class_name Gauge\nextends RefCounted\n\nvar level: int = 0\n\n\nfunc rise() -> void:\n\tlevel += 1\n';
+  const reader =
+    'extends Node\n\nvar gauge: Gauge = Gauge.new()\n\n\nfunc _ready() -> void:\n\tgauge.rise()\n\tprint(gauge.level)\n';
+  writeFileSync(join(dir, 'gauge.gd'), gauge);
+  writeFileSync(join(dir, 'reader.gd'), reader);
+  const rename = {
+    op: 'rename',
+    projectPath: project,
+    scriptPath: 'res://gauged/gauge.gd',
+    symbol: 'level',
+    newName: 'height',
+  };
+  try {
+    assert.match(
+      await refusal('script_edit', rename),
+      /^Nothing was renamed: Gauge is a class this project declares that the editor has not loaded, so its language server cannot tell the type of a value of it, and a use of level through one would be left as it was\. editor_rescan brings it in; rename after it\./,
+    );
+    assert.equal(readFileSync(join(dir, 'gauge.gd'), 'utf8'), gauge, 'and nothing was written');
+    assert.equal(readFileSync(join(dir, 'reader.gd'), 'utf8'), reader, 'in either file');
+
+    await call('editor_rescan', { projectPath: project });
+    const renamed = await call('script_edit', rename);
+    assert.equal(get(renamed, 'ok'), true, JSON.stringify(renamed));
+    assert.match(
+      readFileSync(join(dir, 'reader.gd'), 'utf8'),
+      /print\(gauge\.height\)/,
+      'the use was reached',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/**
  * A rename against a real editor and its language server.
  *
  * The member half holds what Godot 4.7.2 was measured to answer: the references of a method's own
@@ -5840,6 +5891,7 @@ async function main(): Promise<void> {
       testAClassReloadedOnceItsBaseExistsReachesItsUsers,
     ],
     ['testAChangedUidIsReadByTheRescan', testAChangedUidIsReadByTheRescan],
+    ['testAMemberRenameWaitsForTheClassesItTypesBy', testAMemberRenameWaitsForTheClassesItTypesBy],
     ['testARenameFollowsTheEngine', testARenameFollowsTheEngine],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],

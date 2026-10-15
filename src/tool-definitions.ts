@@ -259,17 +259,26 @@ const ANIMATION_TRACK: JsonSchema = {
 
 const SCRIPT_MODIFICATIONS: JsonSchema = {
   type: 'array',
-  description: 'Additions to make, in order.',
+  description:
+    'Additions to make, in order. A name the script already declares at the top level, or one the call adds twice, refuses the call before anything is written.',
   items: {
     type: 'object',
     properties: {
-      type: { type: 'string', enum: ['add_function', 'add_variable', 'add_signal'] },
+      type: { type: 'string', enum: ['add_function', 'add_variable', 'add_signal', 'add_constant'] },
       name: { type: 'string' },
       params: { type: 'string', description: 'Functions and signals: the parameter list, "delta: float".' },
       returnType: { type: 'string', description: 'Functions: the return type.' },
       body: { type: 'string', description: 'Functions: the body.' },
-      varType: { type: 'string', description: 'Variables: the type annotation.' },
-      defaultValue: { type: 'string', description: 'Variables: the initial value, as written in GDScript.' },
+      varType: {
+        type: 'string',
+        description:
+          'Variables and constants: the type annotation; without one, the type the value evaluates to.',
+      },
+      defaultValue: {
+        type: 'string',
+        description:
+          'Variables: the initial value. Constants: the value, which a constant needs. As written in GDScript.',
+      },
       isExport: { type: 'boolean', description: 'Variables: add @export.' },
       exportHint: { type: 'string', description: 'Variables: the export hint, such as "range(0, 100)".' },
       isOnready: { type: 'boolean', description: 'Variables: add @onready.' },

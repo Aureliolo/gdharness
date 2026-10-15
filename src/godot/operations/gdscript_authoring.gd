@@ -4,6 +4,8 @@ const Read = preload("reading.gd")
 const Log = preload("logger.gd")
 const Patterns = preload("patterns.gd")
 
+const MODIFICATION_TYPES: Array[String] = ["add_constant", "add_variable", "add_signal", "add_function"]
+
 var _log: Log
 
 
@@ -49,7 +51,9 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		return _log.failure("Script path must end with .gd extension")
 
 	if FileAccess.file_exists(full_script_path):
-		return _log.failure("Script file already exists: " + full_script_path)
+		return _log.failure(
+			"Script file already exists: " + full_script_path + ". script_edit modify adds to it."
+		)
 
 	var dir: DirAccess = DirAccess.open("res://")
 	var script_dir: String = full_script_path.get_base_dir()
@@ -115,14 +119,14 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	var original_content: String = file.get_as_text()
 	file.close()
 
-	# All of them checked before any is made, so a call is made whole or not at all: one skipped for a
-	# missing name used to leave the rest written and the answer saying success over an empty list.
-	var problems: Array[String] = _modification_problems(modifications)
-	if not problems.is_empty():
-		return _log.failure("Nothing was changed: " + "; ".join(problems))
-
 	var lines: Array[String] = []
 	lines.assign(original_content.split("\n"))
+
+	# All of them checked before any is made, so a call is made whole or not at all: one skipped for a
+	# missing name used to leave the rest written and the answer saying success over an empty list.
+	var problems: Array[String] = _modification_problems(modifications, _declared(lines))
+	if not problems.is_empty():
+		return _log.failure("Nothing was changed: " + "; ".join(problems))
 	# Each placed line as a zero-based index that moves down whenever a later insertion lands above
 	# it, so the numbers answered are where the lines are in the file written, not where each went
 	# at the moment it was placed.
@@ -133,6 +137,8 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 		var mod_type: String = str(fields.get("type", ""))
 		var at: int = -1
 		match mod_type:
+			"add_constant":
+				at = _add_constant(lines, fields, placed)
 			"add_variable":
 				at = _add_variable(lines, fields, placed)
 			"add_signal":
@@ -170,10 +176,15 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 
 
 # Every reason [param modifications] cannot be made as asked, each naming the entry by position.
-static func _modification_problems(modifications: Array) -> Array[String]:
+#
+# A name the script already declares is one of them, as is one the call adds twice. GDScript gives a
+# class one namespace for its members, so a second `maximum` does not parse; and the engine reports
+# only the first error it meets, so a second `func damage` behind it was written with nothing said.
+static func _modification_problems(modifications: Array, declared: Dictionary) -> Array[String]:
 	var problems: Array[String] = []
 	if modifications.is_empty():
 		problems.append("modifications is empty")
+	var added: Dictionary = {}
 	for index: int in range(modifications.size()):
 		var mod: Variant = modifications[index]
 		var which: String = "modification " + str(index + 1)
@@ -183,15 +194,53 @@ static func _modification_problems(modifications: Array) -> Array[String]:
 		var fields: Dictionary = mod
 		var mod_type: String = str(fields.get("type", ""))
 		var mod_name: String = str(fields.get("name", ""))
-		if mod_type not in ["add_variable", "add_signal", "add_function"]:
+		if mod_type not in MODIFICATION_TYPES:
 			problems.append(
-				which + " has type '" + mod_type + "', not add_variable, add_signal or add_function"
+				(
+					which
+					+ " has type '"
+					+ mod_type
+					+ "', not add_constant, add_variable, add_signal or add_function"
+				)
 			)
+		if mod_type == "add_constant" and str(fields.get("defaultValue", "")).is_empty():
+			problems.append(which + " is a constant with no defaultValue, and a constant needs a value")
 		if mod_name.is_empty():
 			problems.append(which + " has no name")
-		elif not mod_name.is_valid_unicode_identifier():
+			continue
+		if not mod_name.is_valid_unicode_identifier():
 			problems.append(which + " is named '" + mod_name + "', which GDScript does not accept as a name")
+			continue
+		if declared.has(mod_name):
+			var existing: Dictionary = declared[mod_name]
+			problems.append(
+				(
+					"%s adds %s, and the script already declares %s %s on line %d"
+					% [which, mod_name, existing["kind"], mod_name, existing["line"]]
+				)
+			)
+		elif added.has(mod_name):
+			problems.append("%s adds %s, which modification %d adds too" % [which, mod_name, added[mod_name]])
+		else:
+			added[mod_name] = index + 1
 	return problems
+
+
+# The members [param lines] declares at the top level, by name, as {"kind", "line"} counted from
+# one: variables, constants, signals, functions, enums and inner classes, which share one namespace.
+static func _declared(lines: Array[String]) -> Dictionary:
+	var found: Dictionary = {}
+	var declaration: RegEx = Patterns.compiled(
+		"^(?:static\\s+)?(var|const|signal|func|enum|class)\\s+([A-Za-z_][A-Za-z0-9_]*)"
+	)
+	for i: int in range(lines.size()):
+		var raw: String = lines[i]
+		if raw.is_empty() or raw[0] == "\t" or raw[0] == " ":
+			continue
+		var matched: RegExMatch = declaration.search(Patterns.without_annotations(raw))
+		if matched != null and not found.has(matched.get_string(2)):
+			found[matched.get_string(2)] = {"kind": matched.get_string(1), "line": i + 1}
+	return found
 
 
 # Inserts [param new_lines] at [param at] and moves every placed line at or below it down by as many.
@@ -224,6 +273,35 @@ static func _base_named(script: Script) -> String:
 		return str(script.get_instance_base_type())
 	var named: String = str(base.get_global_name())
 	return named if not named.is_empty() else base.resource_path
+
+
+# A constant, typed as a variable is and placed after the header, the signals and the constants
+# already there, which is where the style guide puts them. Its zero-based index, or -1.
+func _add_constant(lines: Array[String], mod: Dictionary, placed: Array[Dictionary]) -> int:
+	var value: String = str(mod.get("defaultValue", ""))
+	var declared_type: String = str(mod.get("varType", ""))
+	if declared_type.is_empty():
+		declared_type = _type_of_literal(value)
+	var const_line: String = "const %s: %s = %s" % [str(mod.get("name", "")), declared_type, value]
+	var after: int = 0
+	for i: int in range(lines.size()):
+		var line: String = Patterns.without_annotations(lines[i])
+		if (
+			line.begins_with("extends ")
+			or line.begins_with("class_name ")
+			or line.begins_with("signal ")
+			or line.begins_with("const ")
+		):
+			after = i + 1
+		elif (
+			line.begins_with("var ")
+			or line.begins_with("func ")
+			or line.begins_with("static ")
+			or line.begins_with("enum ")
+			or line.begins_with("class ")
+		):
+			break
+	return after if _insert(lines, after, [const_line], placed) else -1
 
 
 # Inserts the declaration and answers with its zero-based index, or -1 for one that could not be placed.

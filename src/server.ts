@@ -74,7 +74,7 @@ import {
   handleDAPTool,
   type StoppedAt,
 } from './dap_client.js';
-import { HIDDEN_DESKTOP } from './desktop.js';
+import { ensureHelperCompiled, HIDDEN_DESKTOP } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import {
   bursts,
@@ -3145,6 +3145,12 @@ class GodotServer {
     });
     console.error('gdharness running on stdio');
     sweepAbandonedScratch();
+    // The helper a windowed run starts through, compiled now rather than inside the first windowed
+    // start, which on a slow machine took longer than the start is given. Once per machine and
+    // version; a server finding another already compiling goes on without waiting.
+    if (process.platform === 'win32') {
+      void ensureHelperCompiled(undefined, undefined, false);
+    }
 
     // A bridge that cannot bind must not take the stdio server down with it: the tools that
     // need no editor still work, and editor_status says what happened.
@@ -11575,6 +11581,12 @@ class GodotServer {
     if (waited !== null) {
       return waited;
     }
+    const symbol = readNonEmptyString(args, 'symbol') ?? '';
+    const newName = readNonEmptyString(args, 'newName') ?? '';
+    const unseen = await this.classesAMemberRenameCannotType(args, scriptPath.absolutePath, symbol);
+    if (unseen !== null) {
+      return unseen;
+    }
 
     // Held in an object rather than a variable, because it is set inside the calls below and read
     // after them, which a narrowed `let` would type as never having been set.
@@ -11598,8 +11610,6 @@ class GodotServer {
         throw error;
       }
     };
-    const symbol = readNonEmptyString(args, 'symbol') ?? '';
-    const newName = readNonEmptyString(args, 'newName') ?? '';
     const outcome = await renameSymbol(
       {
         projectPath,
@@ -11850,6 +11860,41 @@ class GodotServer {
       classesUnchecked: checked.unchecked,
       note: notes.length > 0 ? notes.join(' ') : undefined,
     });
+  }
+
+  /**
+   * A refusal for a member rename the language server cannot see all of, or null.
+   *
+   * A member's uses are found through the language server, which types a value only by the classes
+   * the editor holds, so a use through a value of a class the editor has not loaded is not one it
+   * reports. Measured on 4.7.2: a script created moments before, then a second script with
+   * `var counter: Counter` and `print(counter.value)`; renaming `value` left that line as it was,
+   * the rename answered ok and the file no longer compiled. After editor_rescan brought Counter
+   * in, the same rename edited it. A class rename reads the files, so it is not held up.
+   */
+  private async classesAMemberRenameCannotType(
+    args: OperationParams,
+    scriptPath: string,
+    symbol: string,
+  ): Promise<ToolResponse | null> {
+    if (!this.godotBridge.isConnected() || symbol === '') {
+      return null;
+    }
+    const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const declared = new RegExp(`^\\s*(?:@\\w+(?:\\([^)]*\\))?\\s+)*class_name\\s+${escaped}\\b`, 'm');
+    if (declared.test(readFileSync(scriptPath, 'utf8'))) {
+      return null;
+    }
+    const checked = await this.classesTheEditorCannotSee(args);
+    if (checked.unseen.length === 0) {
+      return null;
+    }
+    const names = checked.unseen.map((entry) => entry.className);
+    const one = names.length === 1;
+    return this.createErrorResponse(
+      `Nothing was renamed: ${names.join(', ')} ${one ? 'is a class' : 'are classes'} this project declares that the editor has not loaded, so its language server cannot tell the type of a value of ${one ? 'it' : 'them'}, and a use of ${symbol} through one would be left as it was. editor_rescan brings ${one ? 'it' : 'them'} in; rename after it.`,
+      ['editor_rescan loads the classes the editor is missing, without restarting it'],
+    );
   }
 
   /**
