@@ -658,6 +658,7 @@ function testOperations(godotPath: string, projectDir: string): void {
       add_function: 'func',
       add_variable: 'var',
       add_signal: 'signal',
+      add_constant: 'const',
     };
     for (const applied of asArray(get(answer, 'modifications_applied'))) {
       assert.match(
@@ -704,6 +705,32 @@ function testOperations(godotPath: string, projectDir: string): void {
     modifiedSource,
     'and nothing is written',
   );
+  // A name the script already declares, or one the call adds twice, is refused before anything is
+  // written. A second variable of a name was written and did not parse, and a second function of a
+  // name behind it was written with nothing said, since the engine reports only its first error.
+  const duplicated = runRefusedOperation(godotPath, projectDir, 'modify_script', {
+    script_path: 'made/hero.gd',
+    modifications: [
+      { type: 'add_variable', name: 'speed', varType: 'int' },
+      { type: 'add_function', name: 'fresh' },
+      { type: 'add_signal', name: 'fresh' },
+      { type: 'add_constant', name: 'NOTHING' },
+    ],
+  });
+  assert.equal(duplicated.answer, null, 'a call adding a name already there answers nothing');
+  const speedLine = modifiedSource.split('\n').findIndex((line) => line.startsWith('var speed')) + 1;
+  assert.match(
+    duplicated.stderr,
+    new RegExp(
+      `Nothing was changed: modification 1 adds speed, and the script already declares var speed on line ${speedLine}; modification 3 adds fresh, which modification 2 adds too; modification 4 is a constant with no defaultValue, and a constant needs a value`,
+    ),
+    duplicated.stderr,
+  );
+  assert.equal(
+    readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8'),
+    modifiedSource,
+    'and nothing is written',
+  );
   assert.match(modifiedSource, /var speed: float = 4\.0/, 'the variable should carry its type and default');
   assert.match(
     modifiedSource,
@@ -721,6 +748,23 @@ function testOperations(godotPath: string, projectDir: string): void {
     modifiedSource,
     /func halt\(\) -> void:\n\tspeed = 0\.0/,
     'a function with no return type returns void',
+  );
+
+  // A constant goes in typed, after the header and the signals, and on the line it is answered at.
+  const constant = operation('modify_script', {
+    script_path: 'made/hero.gd',
+    modifications: [{ type: 'add_constant', name: 'FLOOR', defaultValue: '0' }],
+  });
+  assert.equal(get(constant, 'parses'), true, JSON.stringify(constant));
+  onTheirLines(constant);
+  const withConstant = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
+  assert.match(withConstant, /^const FLOOR: int = 0$/m, withConstant);
+  const lines = withConstant.split('\n');
+  const constantAt = lines.findIndex((line) => line.startsWith('const FLOOR'));
+  assert.ok(
+    constantAt > lines.findIndex((line) => line.startsWith('extends ')) &&
+      constantAt < lines.findIndex((line) => line.startsWith('var ')),
+    `the constant sits after the header and before the variables:\n${withConstant}`,
   );
 
   const info = operation('get_script_info', { script_path: 'made/hero.gd' });
