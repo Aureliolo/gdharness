@@ -4,6 +4,7 @@ extends Node
 ## Scenes and their nodes, edited in the open editor and read back from what it holds.
 
 const Read = preload("../reading.gd")
+const Placing = preload("scene_placing.gd")
 const PropertyValues = preload("../property_values.gd")
 const ResourceTools = preload("resource_tools.gd")
 const SceneFile = preload("../scene_file.gd")
@@ -365,16 +366,17 @@ func add_node(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
 	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
 	var node_type: String = str(args.get("nodeType", ""))
+	var instance_path: String = str(args.get("instancePath", ""))
 	var node_name: String = str(args.get("nodeName", ""))
 	var parent_node_path: String = str(args.get("parentNodePath", "."))
 	var properties: Dictionary = _parse_properties_arg(args.get("properties", {}))
 
-	if node_type.is_empty() or node_name.is_empty():
-		return {"ok": false, "error": "Missing nodeType or nodeName"}
-	if not ClassDB.class_exists(node_type) or not ClassDB.is_parent_class(node_type, "Node"):
-		return {"ok": false, "error": "nodeType must be a node class, and %s is not one." % node_type}
-	if not ClassDB.can_instantiate(node_type):
-		return {"ok": false, "error": "%s cannot be instantiated." % node_type}
+	if node_name.is_empty():
+		return {"ok": false, "error": "Missing nodeName"}
+	var making: Array = Placing.what_to_add(node_type, instance_path, scene_path)
+	var packed: PackedScene = making[0]
+	if not str(making[1]).is_empty():
+		return {"ok": false, "error": making[1]}
 
 	var opened: Array = _open(scene_path, true)
 	var scene: SceneFile = opened[0]
@@ -392,24 +394,39 @@ func add_node(args: Dictionary) -> Dictionary:
 	var unusable: String = scene.unusable_name(parent, node_name)
 	if not unusable.is_empty():
 		return scene.refuse(unusable)
+	var place: Variant = args.get("index")
+	var unplaceable: String = Placing.unplaceable(parent, null, place)
+	if not unplaceable.is_empty():
+		return scene.refuse(unplaceable)
 
 	# In the tree before its properties, so a property holding a node can find it by path.
-	var new_node: Node = ClassDB.instantiate(node_type)
+	var new_node: Node = Placing.made(packed, node_type)
 	new_node.name = node_name
 	parent.add_child(new_node)
+	Placing.place(new_node, place)
 	_own(new_node, root)
 	var refused_property: String = _properties.write_all(new_node, properties)
 	if not refused_property.is_empty():
 		return scene.refuse(refused_property)
 
 	var new_path: String = scene.path_of(new_node)
+	# Read before the write, which frees the scene it was added to.
+	var answer: Dictionary = {
+		"ok": true,
+		"nodeName": node_name,
+		"nodeType": new_node.get_class(),
+		"nodePath": new_path,
+		"index": new_node.get_index(),
+	}
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String: return _kept(scene, saved, new_node, properties.keys())
 	)
 	if not written.is_empty():
 		return written
 
-	return {"ok": true, "nodeName": node_name, "nodeType": node_type, "nodePath": new_path}
+	if packed != null:
+		answer["instanceOf"] = instance_path
+	return answer
 
 
 func delete_node(args: Dictionary) -> Dictionary:
@@ -549,25 +566,40 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	var unusable: String = scene.unusable_name(new_parent, str(node.name), node)
 	if not unusable.is_empty():
 		return scene.refuse(unusable)
+	var place: Variant = args.get("index")
+	var unplaceable: String = Placing.unplaceable(new_parent, node, place)
+	if not unplaceable.is_empty():
+		return scene.refuse(unplaceable)
 
 	var old_path: String = scene.path_of(node)
 	node.get_parent().remove_child(node)
 	new_parent.add_child(node)
+	Placing.place(node, place)
 	_own(node, root)
 
 	var new_path: String = scene.path_of(node)
+	var index: int = node.get_index()
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
-			if saved.get_node_or_null(new_path) == null:
+			var copy: Node = saved.get_node_or_null(new_path)
+			if copy == null:
 				return "%s would not be in the scene when it loads." % new_path
 			if old_path != new_path and saved.get_node_or_null(old_path) != null:
 				return "%s would still be in the scene as well when it loads." % old_path
+			if copy.get_index() != index:
+				return "%s would load at index %d, not %d." % [new_path, copy.get_index(), index]
 			return ""
 	)
 	if not written.is_empty():
 		return written
 
-	return {"ok": true, "nodePath": old_path, "newParentPath": new_parent_path, "newNodePath": new_path}
+	return {
+		"ok": true,
+		"nodePath": old_path,
+		"newParentPath": new_parent_path,
+		"newNodePath": new_path,
+		"index": index,
+	}
 
 
 func set_node_properties(args: Dictionary) -> Dictionary:
