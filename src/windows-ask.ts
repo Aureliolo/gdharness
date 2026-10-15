@@ -1,7 +1,7 @@
-import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import process from 'node:process';
+import { type ChildProcessWithoutNullStreams, spawnHidden } from './spawn.js';
 
 /**
  * One PowerShell for every question this process asks Windows about processes.
@@ -109,7 +109,7 @@ function running(): ChildProcessWithoutNullStreams {
   if (helper?.exitCode === null && helper.signalCode === null) {
     return helper;
   }
-  const child = spawn(
+  const child = spawnHidden(
     'powershell.exe',
     [
       '-NoProfile',
@@ -123,7 +123,7 @@ function running(): ChildProcessWithoutNullStreams {
     // Windows PowerShell saves its module cache under the profile's local application data, and
     // when that folder does not resolve it saves it relative to where it runs: a server given a
     // fresh USERPROFILE left a Microsoft directory in the directory it was started in.
-    { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: tmpdir() },
+    { cwd: tmpdir() },
   );
   buffered = '';
   child.stdout.setEncoding('utf8');

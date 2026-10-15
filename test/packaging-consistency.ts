@@ -6,6 +6,7 @@ import { chmod, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import pkg from '../package.json' with { type: 'json' };
+import { spawnSyncHidden } from '../src/spawn.js';
 import { asObject, get } from './support/json.js';
 
 const root = path.join(import.meta.dirname, '..');
@@ -39,15 +40,15 @@ assert.equal(
   'SHA-256 sidecar should match the release archive',
 );
 
-const tarList = Bun.spawnSync(['tar', '-tzf', archiveArg], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
-assert.equal(tarList.exitCode, 0, tarList.stderr.toString());
+const tarList = spawnSyncHidden('tar', ['-tzf', archiveArg], { cwd: root });
+assert.equal(tarList.status, 0, tarList.stderr.toString());
 const archiveEntries = tarList.stdout.toString().trim().split('\n');
 
 // The exec bit has to be asserted against what the archive records, not against an
 // extracted file: a Windows filesystem cannot represent it and reports 0o666 whatever the
 // archive said.
-const tarVerbose = Bun.spawnSync(['tar', '-tvzf', archiveArg], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
-assert.equal(tarVerbose.exitCode, 0, tarVerbose.stderr.toString());
+const tarVerbose = spawnSyncHidden('tar', ['-tvzf', archiveArg], { cwd: root });
+assert.equal(tarVerbose.status, 0, tarVerbose.stderr.toString());
 const cliListing = tarVerbose.stdout
   .toString()
   .split('\n')
@@ -169,12 +170,8 @@ for (const forbiddenFile of [
 
 const extractionRoot = await mkdtemp(path.join(os.tmpdir(), 'gdharness-packaging-'));
 try {
-  const extract = Bun.spawnSync(['tar', '-xzf', archiveArg, '-C', extractionRoot], {
-    cwd: root,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  assert.equal(extract.exitCode, 0, extract.stderr.toString());
+  const extract = spawnSyncHidden('tar', ['-xzf', archiveArg, '-C', extractionRoot], { cwd: root });
+  assert.equal(extract.status, 0, extract.stderr.toString());
 
   const packedRoot = path.join(extractionRoot, 'package');
 
@@ -276,12 +273,8 @@ try {
 
   // Some archive tools on Windows do not restore executable mode; Bun can still run the prebuilt bin.
   await chmod(cliPath, 0o755);
-  const cli = Bun.spawnSync([process.execPath, cliPath, 'version'], {
-    cwd: packedRoot,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  assert.equal(cli.exitCode, 0, cli.stderr.toString());
+  const cli = spawnSyncHidden(process.execPath, [cliPath, 'version'], { cwd: packedRoot });
+  assert.equal(cli.status, 0, cli.stderr.toString());
   assert.equal(
     cli.stdout.toString().trim(),
     `${pkg.name} v${pkg.version}`,

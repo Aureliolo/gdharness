@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { type ChildProcess, spawn } from 'node:child_process';
 import { mkdtempSync, readdirSync, statSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { type ChildProcess, spawnHidden } from '../../src/spawn.js';
 import { type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
 import { sweep } from './sweep.js';
 
@@ -298,7 +298,7 @@ export class ServerProcess {
     const { env, runtimeDir } = testServerEnvironment(options.env);
     this.runtimeDir = runtimeDir;
     this.era = options.era ?? 'modern';
-    this.child = spawn(process.execPath, [resolvePath(entry), ...(options.args ?? [])], {
+    this.child = spawnHidden(process.execPath, [resolvePath(entry), ...(options.args ?? [])], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
