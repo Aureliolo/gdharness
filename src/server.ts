@@ -252,6 +252,7 @@ import {
   DEBUG_MODE,
   editorIsStale,
   GODOT_DEBUG_MODE_DEFAULT,
+  gdharnessCommand,
   markIfStale,
   runtimeAddonUnknown,
   runtimeMismatch,
@@ -1928,6 +1929,13 @@ const EDITOR_FREE_INSTEAD: Readonly<Record<string, string>> = {
     'runtime_inspect tree reads the nodes of a game that is running, and needs no editor; scene_tree reads a scene file through the editor',
 };
 
+/** What a script tab holding unsaved edits to each of [param scripts] does to what was written. */
+function unsavedInEditorNote(scripts: readonly string[]): string {
+  const named = scripts.join(', ');
+  const one = scripts.length === 1;
+  return `${named} ${one ? 'is' : 'are'} open in the editor's script ${one ? 'tab' : 'tabs'} with unsaved edits, and saving ${one ? 'that tab' : 'them'} there writes ${one ? 'its' : 'their'} text over what was written here: close ${one ? 'it' : 'them'} without saving, or save first and edit again.`;
+}
+
 /**
  * Why no editor of [param projectPath] would ever dial in, read off the project's own addon, or
  * null when the addon is installed and enabled, or there is no project there to read.
@@ -1943,15 +1951,13 @@ function editorAddonMissing(projectPath: string): { why: string; remedies: strin
   }
   return {
     why: `the gdharness editor addon is not ${installed ? 'enabled' : 'installed'} in ${projectPath}`,
-    // No tool installs the addon, so the install is named as the shell command it is: a caller
-    // holding only these tools was told "gdharness setup" and looked for a tool of that name.
     remedies: installed
       ? [
           'project_settings enable_plugin with pluginName gdharness_editor enables it',
           'Or enable it under Project Settings, Plugins, in an editor opened by hand',
         ]
       : [
-          `No gdharness tool installs the addon: run  npx -y gdharness@${SERVER_VERSION} setup "${projectPath}" --no-connect  in a shell, which installs and enables the addons and writes no harness configuration`,
+          `No gdharness tool installs the addon: run  ${gdharnessCommand(SERVER_VERSION, `setup "${projectPath}" --no-connect`)}  in a shell, which installs and enables the addons and writes no harness configuration`,
         ],
   };
 }
@@ -2331,6 +2337,7 @@ const PATH_SOLUTIONS = [
  */
 export const PROJECT_FILE_ARGUMENTS = [
   'scenePath',
+  'instancePath',
   'scriptPath',
   'resourcePath',
   'newPath',
@@ -2930,7 +2937,7 @@ export function scriptsToDiagnose(
 ): { ok: true; value: string[] | null } | { ok: false; reason: string } {
   const listed = Array.isArray(given);
   if (!listed) {
-    const one = typeof given === 'string' ? resolveWithinProject(projectPath, given) : null;
+    const one = typeof given === 'string' ? resolveWithinProject(projectPath, given, { root: true }) : null;
     if (one === null || !one.ok || !isDirectory(one.absolutePath)) {
       return { ok: true, value: null };
     }
@@ -2951,7 +2958,7 @@ export function scriptsToDiagnose(
         reason: `scriptPath${listed ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a script or a folder in the project.`,
       };
     }
-    const location = resolveWithinProject(projectPath, entry);
+    const location = resolveWithinProject(projectPath, entry, { root: true });
     if (!location.ok) {
       return { ok: false, reason: location.reason };
     }
@@ -3833,9 +3840,9 @@ class GodotServer {
           what_to_do:
             `The project's gdharness addons are ${moved}, older than this ${SERVER_VERSION} server, so an ` +
             'editor restart loads the old code and reconnecting spawns this same server again. Tell the ' +
-            'user, and offer to run gdharness upgrade in the project, which replaces the addons with ' +
-            "this server's; ask first, since it changes files in their project. editor_launch restart " +
-            'then loads them.',
+            `user, and offer to run  ${gdharnessCommand(SERVER_VERSION, this.ownProject === null ? 'upgrade' : `upgrade "${this.ownProject}"`)}  ` +
+            "in a shell, which replaces the addons with this server's; ask first, since it changes " +
+            'files in their project. editor_launch restart then loads them.',
         },
       });
     }
@@ -4140,6 +4147,9 @@ class GodotServer {
       }
       if (headless === 'create_script') {
         return await this.handleCreateScript(answerable);
+      }
+      if (headless === 'modify_script') {
+        return await this.handleModifyScript(answerable);
       }
       if (headless !== 'refresh_class_cache') {
         return await this.headless(headless, answerable);
@@ -11326,6 +11336,7 @@ class GodotServer {
       heldConstantsBefore?: string[];
       problem?: string;
       as?: string;
+      unsaved?: string;
     } = {};
     // A @tool script is refused for the reason reloadDependents gives: it runs inside the editor, and
     // reloading one from inside a call the editor is serving can take the editor down.
@@ -11379,6 +11390,7 @@ class GodotServer {
                 ...listed('heldBefore'),
                 ...listed('constants'),
                 ...listed('heldConstantsBefore'),
+                ...(answer['unsavedInEditor'] === true ? { unsaved: unsavedInEditorNote([script]) } : {}),
               }
             : { problem: `the editor would not say what ${script} has after reloading it` };
         }
@@ -11478,6 +11490,7 @@ class GodotServer {
           }
         : {}),
       reloadProblem: reloaded.problem,
+      unsavedInEditorNote: reloaded.unsaved,
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
       broughtIn: broughtIn.length > 0 ? broughtIn : undefined,
       dependentsReloaded:
@@ -11512,12 +11525,16 @@ class GodotServer {
     return await this.reloadInEditor(scriptsNaming(projectPath, classes));
   }
 
-  /** Reloads each of [param scripts] in the editor from its file, as reloadScript reloads one. */
+  /**
+   * Reloads each of [param scripts] in the editor from its file, as reloadScript reloads one, and
+   * says which are open in a script tab with unsaved edits, which saving there writes over the file.
+   */
   private async reloadInEditor(
     scripts: readonly NamingScript[],
-  ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[] }> {
+  ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[]; unsavedInEditor: string[] }> {
     const reloaded: string[] = [];
     const notReloaded: NotReloaded[] = [];
+    const unsavedInEditor: string[] = [];
     for (const { script: scriptPath, tool } of scripts) {
       // A @tool script is running in the editor, and reloading one from inside a call the editor is
       // serving can take the editor down: it did on Linux, reloading the addon's own tool executor.
@@ -11532,6 +11549,9 @@ class GodotServer {
       }
       try {
         const answer = asParams(await this.godotBridge.invokeTool('reload_script', { scriptPath }));
+        if (answer['unsavedInEditor'] === true) {
+          unsavedInEditor.push(scriptPath);
+        }
         const failed = answer['failed'];
         if (typeof failed === 'number' && failed !== 0) {
           // What the failed compile left, for the reason failedReloadNote gives.
@@ -11557,7 +11577,7 @@ class GodotServer {
         notReloaded.push({ scriptPath, problem: errorMessage(error) });
       }
     }
-    return { reloaded, notReloaded };
+    return { reloaded, notReloaded, unsavedInEditor };
   }
 
   /**
@@ -11650,14 +11670,6 @@ class GodotServer {
   }
 
   /**
-   * A rebuilt class cache, with what the editor holding the project still cannot resolve.
-   *
-   * Rebuilding the cache writes a file and nothing rereads it, so an editor that had gone blind
-   * to a class is exactly as blind afterwards and the answer says `added: []`. That sentence is
-   * true and reads as "nothing was wrong", which is how two projects were sent away from the one
-   * call that could have told them. A refusal is left alone: it has its own thing to say.
-   */
-  /**
    * script_edit create, and the class it declares put in the class list.
    *
    * The engine resolves a `class_name` from the list, not from the file, so a script written with
@@ -11699,6 +11711,48 @@ class GodotServer {
     return this.godotBridge.isConnected()
       ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
       : answered;
+  }
+
+  /**
+   * script_edit modify, and the editor serving the project given the script it now is.
+   *
+   * A headless engine writes the file, and an editor that had loaded the script keeps the copy it
+   * compiled until something reloads it: Godot rereads a changed script when its window takes the
+   * focus, which a hidden editor never does. scene_signal connect then answered methodFound false
+   * for a method just added, while the game it played ran that method.
+   */
+  private async handleModifyScript(args: OperationParams): Promise<ToolResponse> {
+    const written = await this.headless('modify_script', args);
+    const project = this.project(args);
+    const scriptPath = readNonEmptyString(args, 'scriptPath');
+    if (
+      written.isError === true ||
+      !project.ok ||
+      scriptPath === undefined ||
+      !this.editorHasOpen(project.value.path)
+    ) {
+      return written;
+    }
+    const answer = asParams(JSON.parse(written.content[0]?.text ?? '{}'));
+    const source = this.sourceOfClass(project.value.path, scriptPath);
+    const done = await this.reloadInEditor([
+      { script: scriptPath, tool: source !== null && isToolScript(source) },
+    ]);
+    const problem = done.notReloaded[0]?.problem;
+    const notes = [
+      ...(problem === undefined
+        ? []
+        : [
+            `The editor serving the project was not given the script as written, so it answers from the copy it compiled before: ${problem}.`,
+          ]),
+      ...(done.unsavedInEditor.length > 0 ? [unsavedInEditorNote(done.unsavedInEditor)] : []),
+    ];
+    return this.jsonTextResponse({
+      ...answer,
+      editorReloaded: done.reloaded.length > 0,
+      ...(done.unsavedInEditor.length > 0 ? { unsavedInEditor: true } : {}),
+      ...(notes.length > 0 ? { editorNote: notes.join(' ') } : {}),
+    });
   }
 
   /**
@@ -11916,12 +11970,16 @@ class GodotServer {
         'The editor was still scanning when the wait ran out, so it may not hold the new names yet.',
       );
     }
+    if (done.unsavedInEditor.length > 0) {
+      notes.push(unsavedInEditorNote(done.unsavedInEditor));
+    }
     return {
       ok: scanned['stillWorking'] !== true && notReloaded.length === 0 && !stillHeld && !unseen,
       report: {
         editor: {
           reloaded,
           ...(notReloaded.length > 0 ? { notReloaded } : {}),
+          ...(done.unsavedInEditor.length > 0 ? { unsavedInEditor: done.unsavedInEditor } : {}),
           ...(stillHeld ? { stillHolds: oldClass } : {}),
           ...(typeof scanned['note'] === 'string' ? { scanNote: scanned['note'] } : {}),
         },
@@ -11972,6 +12030,14 @@ class GodotServer {
     return { ok, report };
   }
 
+  /**
+   * A rebuilt class cache, with what the editor holding the project still cannot resolve.
+   *
+   * Rebuilding the cache writes a file and nothing rereads it, so an editor that had gone blind
+   * to a class is exactly as blind afterwards and the answer says `added: []`. That sentence is
+   * true and reads as "nothing was wrong", which is how two projects were sent away from the one
+   * call that could have told them. A refusal is left alone: it has its own thing to say.
+   */
   private async alsoSayWhatTheEditorCannotSee(
     answered: ToolResponse,
     args: OperationParams,

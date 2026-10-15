@@ -117,7 +117,29 @@ func reload_script(args: Dictionary) -> Dictionary:
 			answer["restoredAs"] = error_string(restored)
 	answer["methods"] = _method_names(script)
 	answer["constants"] = _constant_names(script)
+	_reread_open_tabs(path, answer)
 	return answer
+
+
+## Has the script editor's tabs reread what changed on disk, as the editor does when its window takes
+## the focus, which a hidden editor's never does. A tab with unsaved edits is left alone and named:
+## saving it writes its text over the file, and rereading would ask a question nobody can answer in a
+## hidden editor's dialog.
+func _reread_open_tabs(path: String, answer: Dictionary) -> void:
+	# The engine fixtures reload from a script run outside any editor, where there are no tabs and
+	# EditorInterface has none of its methods.
+	if not Engine.is_editor_hint():
+		return
+	var scripts: ScriptEditor = EditorInterface.get_script_editor()
+	var unsaved: PackedStringArray = scripts.get_unsaved_files()
+	if path in unsaved:
+		answer["unsavedInEditor"] = true
+		return
+	var rereads: Variant = EditorInterface.get_editor_settings().get_setting(
+		"text_editor/behavior/files/auto_reload_scripts_on_external_change"
+	)
+	if unsaved.is_empty() and rereads is bool and rereads:
+		scripts.reload_open_files()
 
 
 ## [param path] as the files on disk spell it, a step at a time, or as given where a step is not
