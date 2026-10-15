@@ -30320,12 +30320,14 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
     // The reader counts the versions it parsed, which is what says its reads overlapped rewrites. The
     // writer's own count does not: a write waits out a reader holding the note on Windows, so the
     // reader slows the writer, and a runner that made 90 rounds failed a floor on rounds while every
-    // one of its reads parsed.
+    // one of its reads parsed. It reads for two seconds and then on until it has met ten versions,
+    // because the rate is the runner's: one took 25 seconds over the first round and made one more
+    // in the two seconds the reader was given, every read parsing.
     const reader = spawnHidden(
       process.execPath,
       [
         '-e',
-        `const fs = require('fs'); const path = require('path'); const dir = ${JSON.stringify(runs)}; const seen = { parsed: 0 }; const notes = new Set(); const versions = new Set(); const end = Date.now() + 2000; while (Date.now() < end) { for (const name of fs.readdirSync(dir)) { if (!name.endsWith('.json')) continue; try { const note = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); seen.parsed += 1; notes.add(name.split('-')[0]); versions.add(name.split('-')[0] + note.startedAt); } catch (e) { const kind = name.split('-')[0] + ' ' + (e.code ?? 'torn'); seen[kind] = (seen[kind] ?? 0) + 1; } } } seen.notes = notes.size; seen.versions = versions.size; console.log(JSON.stringify(seen));`,
+        `const fs = require('fs'); const path = require('path'); const dir = ${JSON.stringify(runs)}; const seen = { parsed: 0 }; const notes = new Set(); const versions = new Set(); const least = Date.now() + 2000; const end = Date.now() + 30000; while (Date.now() < end && (Date.now() < least || versions.size < 10)) { for (const name of fs.readdirSync(dir)) { if (!name.endsWith('.json')) continue; try { const note = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); seen.parsed += 1; notes.add(name.split('-')[0]); versions.add(name.split('-')[0] + note.startedAt); } catch (e) { const kind = name.split('-')[0] + ' ' + (e.code ?? 'torn'); seen[kind] = (seen[kind] ?? 0) + 1; } } } seen.notes = notes.size; seen.versions = versions.size; console.log(JSON.stringify(seen));`,
       ],
       { stdio: ['ignore', 'pipe', 'inherit'] },
     );
