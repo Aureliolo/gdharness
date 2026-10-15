@@ -11,6 +11,25 @@ extends RefCounted
 const Read = preload("reading.gd")
 const Serialisation = preload("serialisation.gd")
 
+## The engine singletons a call, a write or a read may name instead of a node: what the engine
+## measures, and the engine settings that are the game's own. Not every singleton: OS runs programs
+## and opens files, DisplayServer switches the keyboard's layout and Input moves the real pointer,
+## and none of that is a game's to do to the machine it runs on.
+const SINGLETONS: Array[String] = [
+	"Engine",
+	"Performance",
+	"RenderingServer",
+	"AudioServer",
+	"PhysicsServer2D",
+	"PhysicsServer3D",
+	"NavigationServer2D",
+	"NavigationServer3D",
+	"Time",
+	"TranslationServer",
+]
+## The most frames a press is held in one call, as many as a frames wait takes.
+const MOST_HELD: int = 600
+
 var _shared: Serialisation = Serialisation.new()
 
 
@@ -53,6 +72,56 @@ static func node_at(root: Node, path: String) -> Dictionary:
 	if node == null:
 		return {"type": "error", "message": "Node not found: " + path}
 	return {"node": node}
+
+
+## How many process frames a whole press holds before its release, from `holdFrames`: one unless
+## asked, as the halves of a press have always been a frame apart. Held inside the game because the
+## time between a press, a wait and a release sent as three calls counts as held too: a 60-frame
+## pour poured for nearly three seconds. A String saying why, where the hold cannot be.
+static func held_for(params: Dictionary) -> Variant:
+	if not params.has("holdFrames"):
+		return 1
+	if params.has("pressed"):
+		return (
+			"holdFrames holds a whole press and then lets go, and pressed asks for one half of one:"
+			+ " give one or the other."
+		)
+	var frames: int = Read.as_int(params["holdFrames"], 0)
+	if frames < 1 or frames > MOST_HELD:
+		return "holdFrames is %d, and it takes 1 to %d." % [frames, MOST_HELD]
+	return frames
+
+
+## What a press says it was held for: [param frames] for a whole one, nothing for one half.
+static func held_answer(whole: bool, frames: int) -> Variant:
+	if whole:
+		return frames
+	return null
+
+
+## What [param path] names: a node under [param root], as [method node_at] reads it, or an engine
+## singleton by its name. Answers the object under "object", and under "node" the node that objects
+## named in a value are found from, which for a singleton is [param root].
+static func target_at(root: Node, path: String) -> Dictionary:
+	if SINGLETONS.has(path):
+		return {"object": Engine.get_singleton(path), "node": root}
+	if not path.contains("/") and Engine.has_singleton(path):
+		return {
+			"type": "error",
+			"message":
+			(
+				(
+					"%s is an engine singleton, and the ones that can be reached are %s. The rest act"
+					+ " on the machine rather than the game: OS runs programs, DisplayServer switches the"
+					+ " keyboard's layout and Input moves the real pointer."
+				)
+				% [path, ", ".join(SINGLETONS)]
+			),
+		}
+	var standing: Dictionary = node_at(root, path)
+	if standing.has("message"):
+		return standing
+	return {"object": standing["node"], "node": standing["node"]}
 
 
 ## Whether two values can be compared without the comparison itself failing.

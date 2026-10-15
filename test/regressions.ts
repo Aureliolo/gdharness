@@ -21129,6 +21129,233 @@ async function testTheFrameTimeIsTheFrame(): Promise<void> {
 }
 
 /**
+ * A press held for a number of frames is held for exactly that many, counted by the game.
+ *
+ * game-d poured for as long as the button was held, and a press, a 60-frame wait and a release
+ * sent as three calls held it for nearly three seconds, the time between the calls included. The
+ * game here counts the process frames between seeing each press and seeing its release, a mouse
+ * button and a key, the way a pour measures one.
+ */
+async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('held press regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        [
+          'extends Node',
+          '',
+          'var mouse_down: bool = false',
+          'var mouse_frames: int = 0',
+          'var mouse_held: int = -1',
+          'var key_down: bool = false',
+          'var key_frames: int = 0',
+          'var key_held: int = -1',
+          'var action_down: bool = false',
+          'var action_frames: int = 0',
+          'var action_held: int = -1',
+          'var pad_down: bool = false',
+          'var pad_frames: int = 0',
+          'var pad_held: int = -1',
+          '',
+          '',
+          'func _input(event: InputEvent) -> void:',
+          '\tvar acted: InputEventAction = event as InputEventAction',
+          '\tif acted != null and acted.action == &"ui_accept":',
+          '\t\taction_down = acted.pressed',
+          '\t\tif acted.pressed:',
+          '\t\t\taction_frames = 0',
+          '\t\telse:',
+          '\t\t\taction_held = action_frames',
+          '\tvar pad: InputEventJoypadButton = event as InputEventJoypadButton',
+          '\tif pad != null and pad.button_index == JOY_BUTTON_A:',
+          '\t\tpad_down = pad.pressed',
+          '\t\tif pad.pressed:',
+          '\t\t\tpad_frames = 0',
+          '\t\telse:',
+          '\t\t\tpad_held = pad_frames',
+          '\tvar button: InputEventMouseButton = event as InputEventMouseButton',
+          '\tif button != null and button.button_index == MOUSE_BUTTON_LEFT:',
+          '\t\tmouse_down = button.pressed',
+          '\t\tif button.pressed:',
+          '\t\t\tmouse_frames = 0',
+          '\t\telse:',
+          '\t\t\tmouse_held = mouse_frames',
+          '\tvar key: InputEventKey = event as InputEventKey',
+          '\tif key != null and key.keycode == KEY_SPACE and not key.echo:',
+          '\t\tkey_down = key.pressed',
+          '\t\tif key.pressed:',
+          '\t\t\tkey_frames = 0',
+          '\t\telse:',
+          '\t\t\tkey_held = key_frames',
+          '',
+          '',
+          'func _process(_delta: float) -> void:',
+          '\tif mouse_down:',
+          '\t\tmouse_frames += 1',
+          '\tif key_down:',
+          '\t\tkey_frames += 1',
+          '\tif action_down:',
+          '\t\taction_frames += 1',
+          '\tif pad_down:',
+          '\t\tpad_frames += 1',
+          '',
+        ].join('\n'),
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+      const read = async (property: string): Promise<unknown> =>
+        get(
+          JSON.parse(await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property })),
+          'value',
+        );
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        engineArgs: ['--max-fps', '60'],
+        runtimeWaitMs: 30_000,
+      });
+      assert.match(started, /"listening": true/, started);
+
+      const clicked = await call('runtime_input', { op: 'mouse_click', x: 10, y: 10, holdFrames: 30 });
+      assert.match(clicked, /"held_frames": 30/, clicked);
+      assert.equal(await read('mouse_held'), 30, `the button was down for the 30 frames asked: ${clicked}`);
+
+      const keyed = await call('runtime_input', { op: 'key', keycode: 'Space', holdFrames: 12 });
+      assert.match(keyed, /"held_frames": 12/, keyed);
+      assert.equal(await read('key_held'), 12, `the key was down for the 12 frames asked: ${keyed}`);
+      const acted = await call('runtime_input', { op: 'action', action: 'ui_accept', holdFrames: 7 });
+      assert.match(acted, /"held_frames": 7/, acted);
+      assert.equal(await read('action_held'), 7, `the action was down for the 7 frames asked: ${acted}`);
+      const padded = await call('runtime_input', { op: 'joypad_button', button: 'a', holdFrames: 9 });
+      assert.match(padded, /"held_frames": 9/, padded);
+      assert.equal(await read('pad_held'), 9, `the pad button was down for the 9 frames asked: ${padded}`);
+
+      const both = await call('runtime_input', { op: 'key', keycode: 'Space', pressed: true, holdFrames: 5 });
+      assert.match(
+        both,
+        /^holdFrames holds a whole press and then lets go, and pressed asks for one half/,
+        both,
+      );
+      assert.equal(await read('key_down'), false, 'and the refused press was never sent');
+      await call('editor_run', { op: 'stop' });
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
+ * An engine singleton is called, written and read the way a node is, and one that acts on the
+ * machine is refused.
+ *
+ * Asked for to read the engine's own render timings, which live on RenderingServer rather than on
+ * any node: runtime_invoke answered "Node not found: RenderingServer", and the way left was an
+ * autoload added to the game to print them. OS is the closest thing that must not pass: a singleton
+ * like the others, which runs programs.
+ */
+async function testAnEngineSingletonIsReachedAndOSIsNot(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('singleton regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(join(project, 'main.gd'), 'extends Node\n');
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        runtimeWaitMs: 30_000,
+      });
+      assert.match(started, /"listening": true/, started);
+
+      const frames = async (): Promise<number> => {
+        const answered = await call('runtime_invoke', {
+          op: 'call',
+          nodePath: 'Engine',
+          method: 'get_process_frames',
+        });
+        assert.match(answered, /^\{/, `Engine is called rather than refused: ${answered}`);
+        return asNumber(get(JSON.parse(answered), 'result'), answered);
+      };
+      const before = await frames();
+      await call('runtime_wait', { op: 'frames', frames: 10 });
+      const after = await frames();
+      assert.ok(after >= before + 10, `Engine's frame count, read twice, grows: ${before} then ${after}`);
+
+      const written = await call('runtime_invoke', {
+        op: 'set',
+        nodePath: 'Engine',
+        property: 'max_fps',
+        value: 7,
+      });
+      assert.match(written, /"new_value": 7|"value": 7/, written);
+      const readBack = JSON.parse(
+        await call('runtime_inspect', { op: 'property', nodePath: 'Engine', property: 'max_fps' }),
+      ) as unknown;
+      assert.equal(get(readBack, 'value'), 7, JSON.stringify(readBack));
+      const monitor = JSON.parse(
+        await call('runtime_inspect', {
+          op: 'property',
+          nodePath: 'Performance',
+          property: 'get_monitor(0)',
+        }),
+      ) as unknown;
+      assert.equal(
+        typeof get(monitor, 'value'),
+        'number',
+        `a Performance monitor is read: ${JSON.stringify(monitor)}`,
+      );
+
+      const refused = await call('runtime_invoke', { op: 'call', nodePath: 'OS', method: 'get_name' });
+      assert.match(
+        refused,
+        /^OS is an engine singleton, and the ones that can be reached are Engine, Performance, RenderingServer/,
+        refused,
+      );
+      await call('editor_run', { op: 'stop' });
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
  * A headless run asked for its accessibility tree is told everything the read needs at once.
  *
  * It was told only to start with headless: false, so a caller started a windowed run and was then
@@ -24300,13 +24527,21 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       // A Label over both that holds their words too: UI Automation shows it, so its own parts
       // would be under it, and it is no candidate for a part found elsewhere.
       '[node name="Caption" type="Label" parent="."]\noffset_top = 220.0\noffset_right = 300.0\noffset_bottom = 250.0\n' +
-      'text = "Beneath words, Above words"\n',
+      'text = "Beneath words, Above words"\n\n' +
+      // Named so its path begins with the log's, which a narrowing to the log must not take.
+      '[node name="Logbook" type="Label" parent="."]\noffset_top = 270.0\noffset_right = 300.0\noffset_bottom = 293.0\n' +
+      'text = "Logbook words"\n',
   );
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
   });
   // What the game answered, read once it has drawn a frame or two.
-  const readWith = async (engineArgs: string[]): Promise<JsonRpcMessage> => {
+  // Narrowed reads of the same game, asked after the whole one and before it stops.
+  const narrowed: JsonRpcMessage[] = [];
+  const readWith = async (
+    engineArgs: string[],
+    alsoAsk: Record<string, unknown>[] = [],
+  ): Promise<JsonRpcMessage> => {
     const started = await server.request(
       'tools/call',
       {
@@ -24336,6 +24571,15 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       { name: 'runtime_inspect', arguments: { op: 'accessibility' } },
       60_000,
     );
+    for (const asked of alsoAsk) {
+      narrowed.push(
+        await server.request(
+          'tools/call',
+          { name: 'runtime_inspect', arguments: { op: 'accessibility', ...asked } },
+          60_000,
+        ),
+      );
+    }
     await stopItsRun(server);
     return answered;
   };
@@ -24359,7 +24603,14 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       /UI Automation found nothing in the game's windows: .*this project's is auto\. Start the run with engineArgs \["--accessibility", "always"\]/,
       `a game started without the flag builds no tree, and the answer says how to make it: ${unbuilt}`,
     );
-    const asked = await readWith(['--accessibility', 'always']);
+    const asked = await readWith(
+      ['--accessibility', 'always'],
+      [
+        { nodePath: '/root/Main/Log' },
+        { says: 'Above words' },
+        { nodePath: '/root/Main/Page', properties: ['role', 'name'], limit: 2 },
+      ],
+    );
     stopped = true;
     const tree = parseTextContent(asked);
     const shown = textOf(asked) ?? JSON.stringify(asked);
@@ -24478,6 +24729,42 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       text(get(tree, 'tooltip_note')),
       /^tooltip is the node's tooltip_text, .* has no property that carries it/,
       shown,
+    );
+
+    // Narrowed: one node's elements, one element by its words, and the fields and count cut.
+    const [underLog, sayingAbove, cutPage] = narrowed.map((answer) => parseTextContent(answer));
+    const keptUnder = (answer: unknown): unknown[] => asArray(get(answer, 'windows', 0, 'children'));
+    const logParts = keptUnder(underLog);
+    assert.ok(logParts.length > 0, `the log's elements are kept: ${JSON.stringify(underLog)}`);
+    assert.deepEqual(
+      logParts.map((element) => {
+        const path = text(get(element, 'node') ?? get(element, 'part_of'));
+        return path === '/root/Main/Log' || path.startsWith('/root/Main/Log/');
+      }),
+      logParts.map(() => true),
+      `and nothing made outside it, Logbook included: ${JSON.stringify(underLog)}`,
+    );
+    assert.ok(
+      logParts.some((element) => text(get(element, 'name') ?? '').includes('docket 235')),
+      JSON.stringify(underLog),
+    );
+    assert.equal(get(underLog, 'matched'), logParts.length, JSON.stringify(underLog));
+    assert.deepEqual(
+      keptUnder(sayingAbove)
+        .map((element) => text(get(element, 'name')).replace('​', ''))
+        .sort(),
+      ['Above words', 'Beneath words, Above words'],
+      `the elements saying the words, by name: ${JSON.stringify(sayingAbove)}`,
+    );
+    assert.deepEqual(
+      keptUnder(cutPage),
+      [{ role: 'group', name: 'Page', children: [{ role: 'text', name: 'One', children: [] }] }],
+      `the page with its fields cut to two and its elements to two: ${JSON.stringify(cutPage)}`,
+    );
+    assert.deepEqual(
+      [get(cutPage, 'omitted'), get(cutPage, 'elements'), get(cutPage, 'matched')],
+      [2, 3, 1],
+      `two lines cut, the window and two elements left, one match: ${JSON.stringify(cutPage)}`,
     );
   } finally {
     if (!stopped) {
@@ -37952,6 +38239,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheFrameTimeIsTheFrame,
   testThePhysicsRateIsTheStepsTaken,
   testAHeadlessAccessibilityReadNamesWhatItNeeds,
+  testAnEngineSingletonIsReachedAndOSIsNot,
+  testAPressIsHeldForTheFramesAsked,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
   testTheWaitIsSizedToTheLastBoot,

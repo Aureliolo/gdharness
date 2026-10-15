@@ -1488,9 +1488,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       pid: RUNNING_PID,
       nodePath: {
         type: 'string',
-        ops: ['tree', 'text', 'find', 'rect', 'property'],
+        ops: ['tree', 'text', 'find', 'rect', 'property', 'accessibility'],
         description:
-          'tree, find, text: where to start, default /root. rect: the node to place. property: the node to read.',
+          'tree, find, text: where to start, default /root. rect: the node to place. property: the node to read, or an engine singleton by name as runtime_invoke takes them, "Engine" with property "get_frames_drawn()". accessibility: only the elements that node and those below it made, whether as node or part_of, each window keeping the outermost of them with what they hold, and matched counting them. What a ScrollContainer holds out of its sight is not in the tree until it is scrolled to, so an element missing under one may be scrolled away rather than hidden.',
       },
       property: {
         type: 'string',
@@ -1513,9 +1513,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       properties: {
         type: 'array',
         items: { type: 'string' },
-        ops: ['tree'],
+        ops: ['tree', 'accessibility'],
         description:
-          'tree: the properties to read off each node, by name, so the text of every label and button under a panel is one call: a node that has not got one leaves it out. Colons read through what a node holds, as property does for find.',
+          'tree: the properties to read off each node, by name, so the text of every label and button under a panel is one call: a node that has not got one leaves it out. Colons read through what a node holds, as property does for find. accessibility: the fields to keep on each element, such as ["role", "name", "node"], leaving out the rest (bounds, actions, tooltip); children are always kept.',
       },
       className: {
         type: 'string',
@@ -1532,17 +1532,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       group: { type: 'string', ops: ['find'], description: 'find: a group the node is in.' },
       says: {
         type: 'string',
-        ops: ['find'],
+        ops: ['find', 'accessibility'],
         description:
-          'find: part of what the node has written on it as drawn, the way the text op reads it, case-insensitively and with a typed space matching any space the game draws (a non-breaking one included), which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern, and a glob that finds nothing says under note how many nodes it would find open at both ends. A label with a line break is matched with the break in the words, and a backslash followed by n counts as one. Alternatives separated by | match when any one of them does, each by these rules ("*won*|*lost*"); write \\| for a bar that is part of the words.',
+          'accessibility: only the elements whose name or value says these words, matched as find matches them, with what they hold. find: part of what the node has written on it as drawn, the way the text op reads it, case-insensitively and with a typed space matching any space the game draws (a non-breaking one included), which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern, and a glob that finds nothing says under note how many nodes it would find open at both ends. A label with a line break is matched with the break in the words, and a backslash followed by n counts as one. Alternatives separated by | match when any one of them does, each by these rules ("*won*|*lost*"); write \\| for a bar that is part of the words.',
       },
       limit: {
         type: 'integer',
         minimum: 1,
         maximum: 5000,
-        ops: ['find', 'text'],
+        ops: ['find', 'text', 'accessibility'],
         description:
-          'find: the most nodes to answer with, default 100. text: the most lines, default 500, with omitted saying how many lines that left behind. At most 5000 for either. A screen whose dialog sits under a long list is a screen read with omitted greater than zero, so raise this or point root at the dialog rather than reading the answer as what is on screen.',
+          'find: the most nodes to answer with, default 100. text: the most lines, default 500, with omitted saying how many lines that left behind. accessibility: the most elements below the windows, depth first, with omitted counting the rest; default all. At most 5000 for either. A screen whose dialog sits under a long list is a screen read with omitted greater than zero, so raise this or point root at the dialog rather than reading the answer as what is on screen.',
       },
       includeHidden: {
         type: 'boolean',
@@ -1609,14 +1609,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'runtime_invoke',
     title: 'Set or call in the running game',
     description:
-      'Sets a property or calls a method on a node in the running game. Needs the game running with the runtime addon. The answer carries elapsed_usec, how long the call or the write took inside the game, measured around it there: the round trip to the game is a second or more, so timing from outside measures that instead. Errors and warnings the engine reported while a called method ran come back under errors, the first 20, with errors_not_shown counting the rest. A call that takes longer than timeoutMs is not cancelled: the answer is pending: true with a requestId, the call goes on and does everything it was asked, and op result with that requestId collects its reply once it comes.',
+      'Sets a property or calls a method on a node, or on one of the engine singletons nodePath names, in the running game. Needs the game running with the runtime addon. The answer carries elapsed_usec, how long the call or the write took inside the game, measured around it there: the round trip to the game is a second or more, so timing from outside measures that instead. Errors and warnings the engine reported while a called method ran come back under errors, the first 20, with errors_not_shown counting the rest. A call that takes longer than timeoutMs is not cancelled: the answer is pending: true with a requestId, the call goes on and does everything it was asked, and op result with that requestId collects its reply once it comes.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
       nodePath: {
         type: 'string',
         ops: ['set', 'call'],
-        description: 'Absolute node path, such as "/root/Main/Player".',
+        description:
+          'Absolute node path, such as "/root/Main/Player", or the name of an engine singleton: Engine, Performance, RenderingServer, AudioServer, PhysicsServer2D, PhysicsServer3D, NavigationServer2D, NavigationServer3D, Time or TranslationServer, so "RenderingServer" with method viewport_get_measured_render_time_cpu reads what the engine measures. The other singletons are refused: OS runs programs, DisplayServer switches the keyboard layout and Input moves the real pointer.',
       },
       property: {
         type: 'string',
@@ -1772,6 +1773,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['action', 'key', 'mouse_click', 'joypad_button'],
         description:
           'action, key, mouse_click, joypad_button: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held. A wheel button held down is still a whole step, since a wheel is never held.',
+      },
+      holdFrames: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 600,
+        ops: ['action', 'key', 'mouse_click', 'joypad_button'],
+        description:
+          'action, key, mouse_click, joypad_button: hold a whole press down for this many process frames and then let go, both inside the game, so a pour, a charge or a long press runs to a set length. A press, a frames wait and a release sent as three calls hold it for the time between the calls as well. The answer says held_frames. Not with pressed, and not on a wheel step. Default 1.',
       },
       strength: {
         type: 'number',
