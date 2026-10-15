@@ -96,7 +96,7 @@ const READS_ONLY: String = ", and a path, which a wait reads every frame, only c
 ## Answers with a `message` instead when a step along the way is not there or holds something that
 ## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
 ## clocks" is a typo found, and "no property _game:clocks:speed" is a puzzle.
-static func walk_to(node: Node, node_path: String, reaching: String) -> Dictionary:
+static func walk_to(node: Object, node_path: String, reaching: String) -> Dictionary:
 	var parts: PackedStringArray = steps_of(reaching)
 	var holder: Variant = node
 	var called: String = node_path

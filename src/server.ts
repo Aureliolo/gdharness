@@ -516,6 +516,11 @@ export function patienceForFrames(frames: number, atLeast: number): number {
   return Math.max(atLeast, (frames / SLOWEST_FRAME_RATE) * 1000 + atLeast);
 }
 
+/** [param fields] without the ones that are undefined, for parameters sent only when given. */
+function withDefined(fields: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+}
+
 /** A runtime call while it is being answered, and the others on the same game it overlapped. */
 interface CallOnAGame {
   readonly pid: number;
@@ -4233,11 +4238,24 @@ class GodotServer {
             );
           case 'accessibility':
             // Starting PowerShell and walking the tree until it settles takes longer than a query.
-            return await this.handleRuntimeCommand('get_accessibility', whichGame(args), {
-              tool: 'runtime_inspect',
-              op,
-              patience: readPositiveNumber(args, 'timeoutMs') ?? Math.max(30_000, this.runtimeTimeoutMs()),
-            });
+            return await this.handleRuntimeCommand(
+              'get_accessibility',
+              {
+                ...whichGame(args),
+                // Only what was given, so the game's defaults stay the game's.
+                ...withDefined({
+                  node_path: readNonEmptyString(args, 'nodePath'),
+                  says: readNonEmptyString(args, 'says'),
+                  properties: readStringArray(args, 'properties'),
+                  limit: readPositiveNumber(args, 'limit'),
+                }),
+              },
+              {
+                tool: 'runtime_inspect',
+                op,
+                patience: readPositiveNumber(args, 'timeoutMs') ?? Math.max(30_000, this.runtimeTimeoutMs()),
+              },
+            );
           default:
             return await this.handleRuntimeCommand(
               'get_metrics',
@@ -4323,7 +4341,18 @@ class GodotServer {
             { tool: 'runtime_input', op },
           );
         }
-        return await this.handleRuntimeCommand(`inject_${op}`, args, { tool: 'runtime_input', op });
+        {
+          // A held press answers once it has let go, so it is given as long as a frames wait of
+          // the same length.
+          const holding = readPositiveNumber(args, 'holdFrames');
+          return await this.handleRuntimeCommand(`inject_${op}`, args, {
+            tool: 'runtime_input',
+            op,
+            ...(holding === undefined
+              ? {}
+              : { patience: patienceForFrames(holding, this.runtimeTimeoutMs()) }),
+          });
+        }
       case 'runtime_wait':
         return await this.handleRuntimeWait(op, args);
 

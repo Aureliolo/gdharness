@@ -10,6 +10,7 @@ extends RefCounted
 ## told, names left empty included.
 
 const Read = preload("reading.gd")
+const Says = preload("runtime_says.gd")
 
 ## How long the client keeps walking the tree for it to settle: the engine answers the first question
 ## with its windows alone and fills them in over the next frames.
@@ -173,7 +174,7 @@ func _init(host: Node) -> void:
 
 
 ## The game's windows as a screen reader is told them, each a tree of elements.
-func get_accessibility(_params: Dictionary) -> Dictionary:
+func get_accessibility(params: Dictionary) -> Dictionary:
 	if DisplayServer.get_name() == "headless":
 		# Both needs at once: told only the window, a caller started a windowed run and was then
 		# refused for the tree the engine had not been asked to build.
@@ -337,7 +338,112 @@ func get_accessibility(_params: Dictionary) -> Dictionary:
 			)
 			% unnamed
 		)
+	_narrow(result, params)
 	return result
+
+
+## Cuts [param result] to what [param params] asks for: the elements made by a node and its
+## descendants, the elements saying some words, the fields named, and no more than a number of them.
+## Each window keeps as its children only the outermost elements that match, with what they hold, so
+## a question about one panel reads one panel.
+static func _narrow(result: Dictionary, params: Dictionary) -> void:
+	var under: String = str(params.get("node_path", "")).trim_suffix("/")
+	var said: String = str(params.get("says", ""))
+	var windows: Array = result.get("windows", [])
+	if not under.is_empty() or not said.is_empty():
+		var matched: int = 0
+		for window: Variant in windows:
+			if not window is Dictionary:
+				continue
+			var holder: Dictionary = window
+			if _matches(holder, under, said):
+				matched += 1
+				continue
+			var kept: Array = []
+			_outermost(holder, under, said, kept)
+			holder["children"] = kept
+			matched += kept.size()
+		result["matched"] = matched
+	var fields: Array = params.get("properties", [])
+	if not fields.is_empty():
+		for window: Variant in windows:
+			if window is Dictionary:
+				var holder: Dictionary = window
+				_keep_only(holder, fields)
+	var limit: int = Read.as_int(params.get("limit", 0), 0)
+	if limit > 0:
+		var left: Array[int] = [limit]
+		var omitted: Array[int] = [0]
+		for window: Variant in windows:
+			if window is Dictionary:
+				var holder: Dictionary = window
+				_cut(holder, left, omitted)
+		if omitted[0] > 0:
+			result["omitted"] = omitted[0]
+	var counted: int = 0
+	for window: Variant in windows:
+		if window is Dictionary:
+			var holder: Dictionary = window
+			counted += _count(holder)
+	result["elements"] = counted
+
+
+## Whether [param element] is made by the node at [param under] or one below it, and says
+## [param said], each where asked: words as find matches them, in the element's name or value.
+static func _matches(element: Dictionary, under: String, said: String) -> bool:
+	if not under.is_empty():
+		var path: String = str(element.get("node", element.get("part_of", "")))
+		if path != under and not path.begins_with(under + "/"):
+			return false
+	if not said.is_empty():
+		var name: String = str(element.get("name", ""))
+		var value: String = str(element.get("value", ""))
+		if not Says.matches(name, said) and not Says.matches(value, said):
+			return false
+	return true
+
+
+static func _outermost(element: Dictionary, under: String, said: String, kept: Array) -> void:
+	var children: Array = element.get("children", [])
+	for child: Variant in children:
+		if not child is Dictionary:
+			continue
+		var inner: Dictionary = child
+		if _matches(inner, under, said):
+			kept.append(inner)
+		else:
+			_outermost(inner, under, said, kept)
+
+
+## Leaves [param element] and everything under it only the [param fields] asked for, and the
+## children that hold the rest of the tree.
+static func _keep_only(element: Dictionary, fields: Array) -> void:
+	for key: Variant in element.keys():
+		if key != "children" and not fields.has(key):
+			var _dropped: bool = element.erase(key)
+	var children: Array = element.get("children", [])
+	for child: Variant in children:
+		if child is Dictionary:
+			var inner: Dictionary = child
+			_keep_only(inner, fields)
+
+
+## Keeps the first [param left] elements below [param element], depth first, and counts the ones
+## cut into [param omitted]. One-element arrays, so the count carries across windows.
+static func _cut(element: Dictionary, left: Array[int], omitted: Array[int]) -> void:
+	var children: Array = element.get("children", [])
+	var kept: Array = []
+	for child: Variant in children:
+		if not child is Dictionary:
+			continue
+		var inner: Dictionary = child
+		if left[0] <= 0:
+			omitted[0] += _count(inner)
+			continue
+		left[0] -= 1
+		kept.append(inner)
+		_cut(inner, left, omitted)
+	element["children"] = kept
 
 
 ## The project's accessibility mode, as the command line's --accessibility names them.

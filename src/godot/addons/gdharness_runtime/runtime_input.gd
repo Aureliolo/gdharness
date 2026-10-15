@@ -122,12 +122,16 @@ func inject_action(params: Dictionary) -> Dictionary:
 
 	if not InputMap.has_action(action):
 		return {"type": "error", "message": "Action not found: " + action}
+	var holding: Variant = Values.held_for(params)
+	if holding is String:
+		return {"type": "error", "message": holding}
+	var frames: int = holding
 
 	_say_action(action, whole or held, strength)
 	if whole:
-		# A frame between the halves, as a click has: a listener that acts on the press and a
-		# listener that acts on the release both get their own frame to do it in.
-		await _host.get_tree().process_frame
+		# A frame between the halves at least, as a click has: a listener that acts on the press and
+		# a listener that acts on the release both get their own frame to do it in.
+		await _held(frames)
 		_say_action(action, false, strength)
 		await _host.get_tree().process_frame
 
@@ -137,7 +141,14 @@ func inject_action(params: Dictionary) -> Dictionary:
 		"action": action,
 		"pressed": held and not whole,
 		"whole": whole,
+		"held_frames": Values.held_answer(whole, frames),
 	}
+
+
+## Waits out [param frames] process frames, which is how long a whole press is held down.
+func _held(frames: int) -> void:
+	for _frame: int in frames:
+		await _host.get_tree().process_frame
 
 
 func _say_action(action: String, down: bool, strength: float) -> void:
@@ -160,6 +171,10 @@ func inject_key(params: Dictionary) -> Dictionary:
 		if not named.is_empty() and key_label.is_empty():
 			key_label = named
 	var keycode: int = 0 if keycode_raw is String else Read.as_int(keycode_raw)
+	var holding: Variant = Values.held_for(params)
+	if holding is String:
+		return {"type": "error", "message": holding}
+	var frames: int = holding
 
 	var event: InputEventKey = InputEventKey.new()
 	event.pressed = whole or held
@@ -193,7 +208,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 
 	Input.parse_input_event(event)
 	if whole:
-		await _host.get_tree().process_frame
+		await _held(frames)
 		var up: InputEventKey = event.duplicate()
 		up.pressed = false
 		Input.parse_input_event(up)
@@ -202,6 +217,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 	return {
 		"type": "input_injected",
 		"input_type": "key",
+		"held_frames": Values.held_answer(whole, frames),
 		"keycode": event.keycode,
 		"physical_keycode": event.physical_keycode,
 		"shift": event.shift_pressed,
@@ -266,6 +282,15 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	# than under the pointer, landing true and doing nothing, until a release was sent by hand.
 	var notch: bool = held and _mask_of(button) == 0
 	var whole: bool = notch or not params.has("pressed")
+	var holding: Variant = Values.held_for(params)
+	if holding is String:
+		return {"type": "error", "message": holding}
+	var frames: int = holding
+	if notch and params.has("holdFrames"):
+		return {
+			"type": "error",
+			"message": "A wheel step is pressed and let go at once, so holdFrames cannot hold one."
+		}
 
 	# A button pressed somewhere puts the pointer there: the motion after a held press measures
 	# its drag from the press, which is where a real pointer would be.
@@ -274,9 +299,9 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	if notch:
 		Input.parse_input_event(_button(position, button, false, false))
 	elif whole:
-		# A frame between the halves, as inject_action has, so a control that acts on the press and
-		# one that acts on the release each get a frame to do it in.
-		await _host.get_tree().process_frame
+		# A frame between the halves at least, as inject_action has, so a control that acts on the
+		# press and one that acts on the release each get a frame to do it in.
+		await _held(frames)
 		Input.parse_input_event(_button(position, button, false, false))
 		await _host.get_tree().process_frame
 
@@ -284,6 +309,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		{
 			"type": "input_injected",
 			"input_type": "mouse_click",
+			"held_frames": Values.held_answer(whole and not notch, frames),
 			"position": [position.x, position.y],
 			"button": button,
 			"pressed": held and not whole,

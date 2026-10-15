@@ -634,12 +634,12 @@ func get_property(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or property.is_empty():
 		return {"type": "error", "message": "Node path and property required"}
 
-	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	var standing: Dictionary = Values.target_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
-	var node: Node = standing["node"]
+	var target: Object = standing["object"]
 
-	var reached: Dictionary = Paths.walk_to(node, node_path, property)
+	var reached: Dictionary = Paths.walk_to(target, node_path, property)
 	if reached.has("message"):
 		return reached
 

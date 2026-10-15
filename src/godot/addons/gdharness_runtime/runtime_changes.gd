@@ -32,15 +32,16 @@ func set_property(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or property.is_empty():
 		return {"type": "error", "message": "Node path and property required"}
 
-	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	var standing: Dictionary = Values.target_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
+	var target: Object = standing["object"]
 
 	# Through a path as well, for the reason [method Paths.walk_to] gives, and read back off the same
 	# holder afterwards: a set that does not take says so by answering with the old value, which is
 	# how a typed container refusing a write is told from one accepting it.
-	var reached: Dictionary = Paths.walk_to(node, node_path, property)
+	var reached: Dictionary = Paths.walk_to(target, node_path, property)
 	if reached.has("message"):
 		return reached
 
@@ -211,15 +212,16 @@ func call_method(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or method.is_empty():
 		return {"type": "error", "message": "Node path and method required"}
 
-	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	var standing: Dictionary = Values.target_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
+	var target: Object = standing["object"]
 
 	# Through a path as well, for the reason [method Paths.walk_to] gives. What a game does hangs off its
 	# nodes as much as its state does, so reading `_game:run:day` while being unable to call
 	# `_game:run:advance` answers half of what a node holds and refuses the other half.
-	var reached: Dictionary = Paths.walk_to(node, node_path, method)
+	var reached: Dictionary = Paths.walk_to(target, node_path, method)
 	if reached.has("message"):
 		return reached
 
