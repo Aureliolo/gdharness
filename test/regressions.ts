@@ -13486,6 +13486,176 @@ async function testAClickThatDoesNotProcessSaysWhy(): Promise<void> {
 }
 
 /**
+ * A click in a native window the platform has not said the pointer entered presses what it lands on.
+ *
+ * Reported from Tall Tales Inn as #1122: with subwindow embedding off, Godot hovers a control in a
+ * native window only after the platform's mouse-enter, which an injected event never brings, and a
+ * BaseButton takes a press only while hovered, so a click on its first-run "Yes", in a borderless
+ * window at the screen's right edge, answered `landed: false, hovered: null` and pressed nothing.
+ *
+ * Windowed, which needs CI: the game's window goes to the right edge of the screen, away from where
+ * any pointer rests, and opens a second native window beside it. Three buttons in the first, one
+ * clicked by path, one by its position and one under a panel that stops the pointer, which the panel
+ * takes, and one in the second. Headless as well, wherever this runs: the engine fakes the root's
+ * mouse-enter there, since the headless platform puts its pointer at the origin, inside the window,
+ * so the engine hovers by itself and nothing may be supplied or entered twice over it.
+ */
+async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('click in a window nothing entered regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unentered-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unentered-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Unentered"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[display]\n\nwindow/size/viewport_width=64\nwindow/size/viewport_height=64\n' +
+        'window/size/borderless=true\nwindow/size/no_focus=true\nwindow/subwindows/embed_subwindows=false\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Control',
+        '',
+        'var pressed: Array[String] = []',
+        'var entered: Array[String] = []',
+        'var left: Array[String] = []',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\t# A headless engine embeds whatever the project says, and nothing is shown yet to refuse it.',
+        '\tget_tree().root.gui_embed_subwindows = false',
+        '\tvar buttons: Array[Button] = [$Yes, $No, $Covered]',
+        '\tif DisplayServer.get_name() != "headless":',
+        '\t\tvar screen: Rect2i = DisplayServer.screen_get_usable_rect()',
+        '\t\tget_window().position = Vector2i(screen.end.x - 80, screen.position.y + 16)',
+        '\t\tvar second: Window = Window.new()',
+        '\t\tsecond.name = "Second"',
+        '\t\tsecond.borderless = true',
+        '\t\tsecond.unfocusable = true',
+        '\t\tsecond.size = Vector2i(64, 64)',
+        '\t\tsecond.position = Vector2i(screen.end.x - 160, screen.position.y + 16)',
+        '\t\tvar other: Button = Button.new()',
+        '\t\tother.name = "Other"',
+        '\t\tother.text = "O"',
+        '\t\tother.position = Vector2(4, 4)',
+        '\t\tother.size = Vector2(56, 40)',
+        '\t\tsecond.add_child(other)',
+        '\t\tadd_child(second)',
+        '\t\tbuttons.append(other)',
+        '\tfor button: Button in buttons:',
+        '\t\tvar named: String = button.name',
+        '\t\tvar _p: int = button.pressed.connect(func() -> void: pressed.append(named))',
+        '\t\tvar _e: int = button.mouse_entered.connect(func() -> void: entered.append(named))',
+        '\t\tvar _l: int = button.mouse_exited.connect(func() -> void: left.append(named))',
+        '',
+        '',
+        'func record() -> Dictionary:',
+        '\treturn {"pressed": pressed, "entered": entered, "left": left}',
+        '',
+      ].join('\n'),
+    );
+    // Inside the 64 by 64 viewport a headless game draws.
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\noffset_right = 64.0\noffset_bottom = 64.0\nmouse_filter = 2\nscript = ExtResource("1")\n\n' +
+        '[node name="Yes" type="Button" parent="."]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Y"\n\n' +
+        '[node name="No" type="Button" parent="."]\noffset_left = 34.0\noffset_right = 62.0\noffset_bottom = 20.0\ntext = "N"\n\n' +
+        '[node name="Covered" type="Button" parent="."]\noffset_top = 30.0\noffset_right = 30.0\noffset_bottom = 60.0\ntext = "C"\n\n' +
+        '[node name="Over" type="Panel" parent="."]\noffset_top = 28.0\noffset_right = 40.0\noffset_bottom = 62.0\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return parseTextContent(response) ?? textOf(response);
+    };
+    const read = async (property: string): Promise<unknown> =>
+      get(
+        await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'record' }),
+        'result',
+        property,
+      );
+    const run = async (headless: boolean): Promise<void> => {
+      const how = headless ? 'headless' : 'windowed';
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless,
+        runtimeWaitMs: headless ? 30_000 : WINDOWED_BOOT_MS,
+      });
+      assert.equal(get(started, 'runtime', 'listening'), true, `${how}: ${JSON.stringify(started)}`);
+
+      const yes = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Yes' });
+      const yesShown = `${how}: ${JSON.stringify(yes)}`;
+      assert.equal(get(yes, 'landed'), true, yesShown);
+      assert.equal(get(yes, 'hovered'), '/root/Main/Yes', yesShown);
+      if (headless) {
+        assert.equal(get(yes, 'hover_supplied'), undefined, `the engine hovered by itself: ${yesShown}`);
+      }
+      assert.deepEqual(await read('pressed'), ['Yes'], `${how}: the click pressed it`);
+
+      // By position, as mouse_click sends it: the hover moves, so Yes is left and No entered.
+      await call('runtime_input', { op: 'mouse_click', x: 48, y: 10 });
+      assert.deepEqual(await read('pressed'), ['Yes', 'No'], `${how}: the click at its position pressed it`);
+      assert.deepEqual(await read('entered'), ['Yes', 'No'], `${how}: each was entered once`);
+      assert.deepEqual(await read('left'), ['Yes'], `${how}: and the first left when the pointer moved on`);
+
+      // Under a panel that stops the pointer, which takes the click.
+      const covered = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Covered' });
+      const coveredShown = `${how}: ${JSON.stringify(covered)}`;
+      assert.equal(get(covered, 'landed'), false, coveredShown);
+      assert.equal(get(covered, 'hovered'), '/root/Main/Over', coveredShown);
+      assert.deepEqual(await read('pressed'), ['Yes', 'No'], `${how}: nothing under the panel was pressed`);
+      assert.deepEqual(await read('left'), ['Yes', 'No'], `${how}: No was left for the panel`);
+
+      if (!headless) {
+        const other = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Second/Other' });
+        const otherShown = JSON.stringify(other);
+        assert.equal(get(other, 'landed'), true, otherShown);
+        assert.equal(get(other, 'hovered'), '/root/Main/Second/Other', otherShown);
+        assert.deepEqual(
+          await read('pressed'),
+          ['Yes', 'No', 'Other'],
+          `the button in the second window: ${otherShown}`,
+        );
+      }
+      await stopItsRun(server);
+    };
+    await run(true);
+    const refused = windowedRunRefused();
+    if (refused === null) {
+      await run(false);
+    } else {
+      console.log(`click in a window nothing entered: the windowed half skipped (${refused})`);
+    }
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A headless game says it has no window when a click or a capture needs one.
  *
  * Found by driving the tools through a model: a click by the words on a button twenty pixels in
@@ -39737,6 +39907,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWorktreeFindsItsMainCheckoutsEngine,
   testAPointerOnTheHiddenDesktopIsNoted,
   testAClickThatDoesNotProcessSaysWhy,
+  testAClickInAWindowNothingEnteredPresses,
   testAHeadlessGameSaysItHasNoWindow,
   testTheKeeperAnswersAStop,
   testTheKeeperAnswersItsDebuggersQuestions,

@@ -11,6 +11,7 @@ const Values = preload("runtime_values.gd")
 ## reports are the same place by construction rather than by agreement.
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
+const Hover = preload("runtime_hover.gd")
 const Screen = preload("runtime_screen.gd")
 const Targets = preload("runtime_targets.gd")
 
@@ -33,8 +34,12 @@ const PROCESS_MODES: Dictionary[int, String] = {
 ## Whether this run has had the pointer note in full; the game process is the run.
 static var _pointer_explained: bool = false
 
+## Whether this run has had the note on a supplied hover in full.
+static var _hover_explained: bool = false
+
 var _host: Node
 var _values: Values
+var _hover: Hover = Hover.new()
 
 ## Where the last injected pointer event put the pointer, once one has.
 ##
@@ -85,6 +90,32 @@ static func _pointer_noted(answer: Dictionary) -> Dictionary:
 			+ " once a run; pointer_on_hidden_desktop marks every answer it applies to."
 		)
 	return answer
+
+
+## [param answer], saying that the hover it reports was supplied here, when [param supplied]: see
+## runtime_hover.gd.
+static func _hover_noted(answer: Dictionary, supplied: bool) -> Dictionary:
+	if not supplied:
+		return answer
+	answer["hover_supplied"] = true
+	if not _hover_explained:
+		_hover_explained = true
+		answer["hover_note"] = (
+			"This window has had no pointer enter from the operating system, and with subwindow"
+			+ " embedding off Godot hovers nothing in a native window until it has, so a Button there"
+			+ " takes no press. The runtime gave the controls under the pointer the hover the engine"
+			+ " would have: their mouse_entered and mouse_exited, and the hover a Button presses on."
+			+ " Viewport.gui_get_hovered_control() still answers null in this window. Said once a run;"
+			+ " hover_supplied marks every answer it applies to."
+		)
+	return answer
+
+
+## Hovers what is under [param position] in the game's window, where the pointer events Input is
+## given go, when the engine cannot: see runtime_hover.gd.
+func _follow_in_the_window(position: Vector2) -> bool:
+	var root: Window = _host.get_tree().root
+	return _hover.follow(root, root.get_final_transform().affine_inverse() * position)
 
 
 ## The movement a pointer arriving at [param position] carries, which is the distance from where
@@ -295,6 +326,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	# A button pressed somewhere puts the pointer there: the motion after a held press measures
 	# its drag from the press, which is where a real pointer would be.
 	var _moved: Vector2 = _arrive(position)
+	var supplied: bool = _follow_in_the_window(position)
 	Input.parse_input_event(_button(position, button, whole or held, double))
 	if notch:
 		Input.parse_input_event(_button(position, button, false, false))
@@ -306,16 +338,19 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		await _host.get_tree().process_frame
 
 	return _pointer_noted(
-		{
-			"type": "input_injected",
-			"input_type": "mouse_click",
-			"held_frames": Values.held_answer(whole and not notch, frames),
-			"position": [position.x, position.y],
-			"button": button,
-			"pressed": held and not whole,
-			"whole": whole,
-			"double": double
-		}
+		_hover_noted(
+			{
+				"type": "input_injected",
+				"input_type": "mouse_click",
+				"held_frames": Values.held_answer(whole and not notch, frames),
+				"position": [position.x, position.y],
+				"button": button,
+				"pressed": held and not whole,
+				"whole": whole,
+				"double": double
+			},
+			supplied
+		)
 	)
 
 
@@ -343,15 +378,19 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 			return {"type": "error", "message": movement}
 		relative = movement
 
+	var supplied: bool = _follow_in_the_window(position)
 	Input.parse_input_event(_motion(position, relative))
 
 	return _pointer_noted(
-		{
-			"type": "input_injected",
-			"input_type": "mouse_motion",
-			"position": [position.x, position.y],
-			"relative": [relative.x, relative.y]
-		}
+		_hover_noted(
+			{
+				"type": "input_injected",
+				"input_type": "mouse_motion",
+				"position": [position.x, position.y],
+				"relative": [relative.x, relative.y]
+			},
+			supplied
+		)
 	)
 
 
@@ -516,6 +555,7 @@ func click(params: Dictionary) -> Dictionary:
 	# them at the next frame, so the hovered control read below would be the one from before
 	# the pointer moved. The viewport delivers it to the GUI the same way a real one arrives.
 	viewport.push_input(_motion(position, _arrive(position)))
+	var supplied: bool = _hover.follow(viewport, centre)
 	# What the engine itself thinks is under the pointer, which is the answer to "did it land",
 	# read before the press so the caller learns about a control on top rather than a click
 	# that went to it. Read in full here, path included, because nothing about that control
@@ -526,7 +566,7 @@ func click(params: Dictionary) -> Dictionary:
 	# and the window keeps the GUI state. Reading the parent reported every dialog as not landed
 	# while the button it was aimed at pressed perfectly well, which is the worst shape an answer
 	# can have, since the caller believes the miss over what the game just did.
-	var hovered: Control = control.get_viewport().gui_get_hovered_control()
+	var hovered: Control = _hover.hovered_in(control.get_viewport())
 	var hovered_path: Variant = null
 	if hovered != null:
 		hovered_path = str(hovered.get_path())
@@ -584,7 +624,7 @@ func click(params: Dictionary) -> Dictionary:
 		answer["link_pressed"] = not links.is_empty()
 		if not links.is_empty():
 			answer["link_meta"] = _values.serialize(links.back())
-	return _pointer_noted(answer)
+	return _pointer_noted(_hover_noted(answer, supplied))
 
 
 ## Why [param control] would take no click a player gave it, or "" when it would.
@@ -767,6 +807,7 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	var double: bool = Read.as_bool(params.get("double", false))
 
 	arriving.push_input(_motion(position, _arrive(position)))
+	var supplied: bool = _hover.follow(arriving, reached_point)
 	# Read before the press, for the reason the Control click reads it: what the caller needs to
 	# know is whether a panel is sitting over the room, and the press is what would change it.
 	var through: Dictionary = _through_the_interface(out)
@@ -778,19 +819,22 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	await _host.get_tree().process_frame
 
 	return _pointer_noted(
-		{
-			"type": "clicked",
-			"path": node_path,
-			"position": _values.serialize(position),
-			"button": button,
-			"double": double,
-			"hovered": hovered_path,
-			# The interface did not take it, so it reached the game's own input. As close to "it
-			# landed" as anything outside the game can get, and said in the same word the Control
-			# click says it in.
-			"landed": through["landed"],
-			"camera": found["camera"],
-		}
+		_hover_noted(
+			{
+				"type": "clicked",
+				"path": node_path,
+				"position": _values.serialize(position),
+				"button": button,
+				"double": double,
+				"hovered": hovered_path,
+				# The interface did not take it, so it reached the game's own input. As close to "it
+				# landed" as anything outside the game can get, and said in the same word the
+				# Control click says it in.
+				"landed": through["landed"],
+				"camera": found["camera"],
+			},
+			supplied
+		)
 	)
 
 
@@ -803,12 +847,12 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 ## over what shows the one inside: the SubViewportContainer, with nothing drawn over it, or inside
 ## the embedded window. Read in the first viewport alone, a click beside a container that is smaller
 ## than what it shows, or under a panel drawn over the container, answered landed.
-static func _through_the_interface(out: Array[Dictionary]) -> Dictionary:
+func _through_the_interface(out: Array[Dictionary]) -> Dictionary:
 	var first_under: Variant = null
 	for step: Dictionary in out:
 		var viewport: Viewport = step["viewport"]
 		var through: Variant = step["through"]
-		var hovered: Control = viewport.gui_get_hovered_control()
+		var hovered: Control = _hover.hovered_in(viewport)
 		if through is Window:
 			var window: Window = through
 			var point: Vector2 = step["point"]
