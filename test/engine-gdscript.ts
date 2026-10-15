@@ -1426,11 +1426,31 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   assert.match(String(get(boundTo, 'text')), /Space/, JSON.stringify(boundTo));
 
-  // Audio buses live in the AudioServer and only survive the run if the layout is saved.
+  // Audio buses live in the AudioServer and only survive the run if the layout is saved. Before any
+  // change there is no layout file, and the setting names its path all the same.
+  assert.equal(
+    existsSync(join(projectDir, 'default_bus_layout.tres')),
+    false,
+    'the fixture starts with no layout',
+  );
+  const unsaved = operation('get_audio_buses', {});
+  assert.deepEqual(
+    { onDisk: get(unsaved, 'layout_on_disk'), note: get(unsaved, 'note') },
+    {
+      onDisk: false,
+      note: "Nothing is at res://default_bus_layout.tres, so these are the engine's default buses; the first change to a bus writes the layout there.",
+    },
+    JSON.stringify(unsaved),
+  );
   const fixtureBus = operation('create_audio_bus', { bus_name: 'Fixture' });
   assert.equal(get(fixtureBus, 'bus', 'name'), 'Fixture', 'the bus carries the name it was given');
   assert.equal(get(fixtureBus, 'layout'), 'res://default_bus_layout.tres');
   const buses = operation('get_audio_buses', {});
+  assert.equal(
+    get(buses, 'layout_on_disk'),
+    undefined,
+    `once written, the layout is there: ${JSON.stringify(buses)}`,
+  );
   assert.ok(named(get(buses, 'buses'), 'Master'), 'every project has a Master bus');
   assert.ok(named(get(buses, 'buses'), 'Fixture'), 'the layout was written, so a fresh process sees the bus');
   // A second bus sending to Master goes in right after it, ahead of the first. Taking the last index
@@ -1597,6 +1617,13 @@ function testOperations(godotPath: string, projectDir: string): void {
     get(memberOf('Node', 'add_child'), 'args', 0, 'type_name'),
     'Node',
     'an argument named the same way',
+  );
+  // A default argument is a value like any other answer's, so a Vector2i is tagged rather than the
+  // text JSON makes of it.
+  assert.deepEqual(
+    get(memberOf('TileMapLayer', 'set_cell'), 'default_args'),
+    [-1, { _type: 'Vector2i', x: -1, y: -1 }, 0],
+    JSON.stringify(memberOf('TileMapLayer', 'set_cell')),
   );
 
   const inheritance = operation('inspect_inheritance', { class_name: 'Node2D' });

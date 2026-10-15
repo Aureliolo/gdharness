@@ -5152,7 +5152,45 @@ class GodotServer {
         ],
       };
     }
+    const dropped = await this.optionsTheImporterDropped(project.value.path, params, written.payload);
+    if (dropped !== null) {
+      return dropped;
+    }
     return this.jsonTextResponse({ ...written.payload, reimport: applied.payload });
+  }
+
+  /**
+   * A refusal naming the options the reimport dropped from the sidecar, or null when it kept every
+   * one written. The importer is the only thing that knows which options it has, and a reimport
+   * rewrites the sidecar with those alone: a texture given `filter`, which no texture import has,
+   * was answered as updated and filtered as before. Read after the reimport rather than checked
+   * against the sidecar before it, because a sidecar not yet imported lists only what was written
+   * into it by hand.
+   */
+  private async optionsTheImporterDropped(
+    projectPath: string,
+    params: OperationParams,
+    written: Record<string, unknown>,
+  ): Promise<ToolResponse | null> {
+    const listed = written['updated_options'];
+    const updated = Array.isArray(listed) ? listed.map(String) : [];
+    const { options: _options, ...where } = params;
+    const reread = await this.operation('get_import_options', where, projectPath);
+    if (!reread.ok || updated.length === 0) {
+      return null;
+    }
+    const held = reread.payload['params'];
+    const kept = held !== null && typeof held === 'object' ? Object.keys(held) : [];
+    const gone = updated.filter((name) => !kept.includes(name));
+    if (gone.length === 0) {
+      return null;
+    }
+    const applied = updated.filter((name) => kept.includes(name));
+    const named = gone.join(', ');
+    return this.createErrorResponse(
+      `${named} ${gone.length === 1 ? 'is not an option' : 'are not options'} of this resource's importer: the reimport left ${gone.length === 1 ? 'it' : 'them'} out of the import file, so ${gone.length === 1 ? 'it changed' : 'they changed'} nothing.${applied.length === 0 ? '' : ` ${applied.join(', ')} ${applied.length === 1 ? 'was' : 'were'} applied.`} Its options are: ${kept.join(', ')}.`,
+      ['project_import options lists every option with the value it holds'],
+    );
   }
 
   private async reimport(

@@ -2,6 +2,7 @@ extends RefCounted
 
 const Read = preload("reading.gd")
 const Log = preload("logger.gd")
+const Serialisation = preload("serialisation.gd")
 
 # The base classes each category name stands for. Kept to the list the tool's schema offers, which
 # a case holds: the schema offered physics3d and ui, which this refused, and physics answered the 3D
@@ -22,6 +23,7 @@ const CATEGORY_BASES: Dictionary = {
 }
 
 var _log: Log
+var _values: Serialisation = Serialisation.new()
 
 
 func _init(p_log: Log) -> void:
@@ -318,19 +320,24 @@ func _methods_of(class_name_str: String, include_inherited: bool) -> Array[Dicti
 				}
 			)
 		var return_info: Dictionary = m.get("return", {})
-		methods.append(
-			{
-				"name": m.get("name", ""),
-				"args": args,
-				"return":
+		(
+			methods
+			. append(
 				{
-					"type": return_info.get("type", 0),
-					"type_name": _type_name(return_info, "void"),
-					"class_name": return_info.get("class_name", "")
-				},
-				"flags": m.get("flags", 0),
-				"default_args": m.get("default_args", [])
-			}
+					"name": m.get("name", ""),
+					"args": args,
+					"return":
+					{
+						"type": return_info.get("type", 0),
+						"type_name": _type_name(return_info, "void"),
+						"class_name": return_info.get("class_name", "")
+					},
+					"flags": m.get("flags", 0),
+					# As values, tagged the way every other answer tags one: JSON writes a Vector2i it is
+					# handed as its text, so TileMapLayer.set_cell's default atlas coords read "(-1, -1)".
+					"default_args": _values.serialize_value(m.get("default_args", []))
+				}
+			)
 		)
 
 	return methods
