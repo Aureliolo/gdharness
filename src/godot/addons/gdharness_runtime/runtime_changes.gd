@@ -61,65 +61,13 @@ func set_property(params: Dictionary) -> Dictionary:
 	if not Paths.can_read(holder, named):
 		return {"type": "error", "message": Paths.nothing_there(holder, named, str(reached["called"]))}
 	var old_value: Variant = Paths.read_under(holder, named)
-	# The same rule the call path holds: a value that cannot become what the property holds is
-	# refused rather than written. Writing it means the engine picks something, and what it picks
-	# for a word where a number goes is zero, which the answer then reports as the new value.
-	#
-	# A slot declaring nothing, an untyped or Variant property or an element of an untyped list, takes
-	# anything, and the engine stores what it is given there. What it holds now still says how a value
-	# of the same kind is meant, 5 into an int staying an int, and whether a path names an object, but
-	# a value of another kind is stored as sent: a word into one holding a number is the word, and a
-	# number into one holding a word is the number, not its text. The text null empties it when it
-	# holds an object or nothing, as a wait reads it on the same slot.
 	var slot: Dictionary = Values.slot_declared(holder, named)
 	var declared: int = slot["type"]
 	var declared_script: Script = slot["script"]
-	var wanted: int = declared if declared != TYPE_NIL else typeof(old_value)
-	var holds_objects: bool = (
-		declared == TYPE_OBJECT or (declared == TYPE_NIL and (old_value == null or old_value is Object))
-	)
-	var given: Variant
-	if holds_objects and names_no_object(value):
-		given = null
-	elif wanted == TYPE_OBJECT and (value is String or value is Dictionary):
-		var named_object: Dictionary = _object_named(
-			node, node_path, value, str(slot["class"]), declared_script
-		)
-		if named_object.has("message"):
-			return {
-				"type": "error",
-				"message": "%s.%s holds an object: %s" % [reached["called"], named, named_object["message"]]
-			}
-		given = named_object["object"]
-	else:
-		var as_sent: Variant = _values.fitted(value, TYPE_NIL)
-		if declared == TYPE_NIL and not Values.acceptable(as_sent, wanted):
-			given = as_sent
-		else:
-			given = _values.fitted(value, wanted)
-			if not Values.acceptable(given, wanted):
-				return {
-					"type": "error",
-					"message":
-					(
-						"%s.%s holds %s and the value given is %s, which cannot become one.%s"
-						% [
-							reached["called"],
-							named,
-							type_string(wanted),
-							type_string(typeof(given)),
-							_written_as(wanted)
-						]
-					)
-				}
-		var typed: Dictionary = _values.typed_like(given, old_value, _element_object.bind(node, node_path))
-		if typed.has("message"):
-			return {
-				"type": "error",
-				"message":
-				"%s.%s is a typed %s: %s." % [reached["called"], named, _sort_of(old_value), typed["message"]]
-			}
-		given = typed["value"]
+	var fitting: Dictionary = _value_for(value, slot, old_value, reached, node, node_path)
+	if fitting.has("message"):
+		return fitting
+	var given: Variant = fitting["value"]
 	# A component of a vector or a transform is written into a copy, which is put back where it was
 	# read from, setter and all; the read back is then taken off the game again, since the copy here
 	# says only what was written into it.
@@ -201,6 +149,131 @@ func set_property(params: Dictionary) -> Dictionary:
 	return answer
 
 
+## What [param sent] becomes as argument [param index] of the method [param named] on the holder
+## [param reached] ends at, as [method Paths.walk_to] answered it, as `{"value": ...}`, or the refusal
+## saying why it cannot become one: a number the parameter would have to cut, a value that cannot be
+## converted, or a list or map that cannot be built as the typed one the parameter takes.
+func _argument_for(
+	sent: Variant, index: int, reached: Dictionary, named: String, node: Node, node_path: String
+) -> Dictionary:
+	var holder: Object = reached["holder"]
+	var called: String = reached["called"]
+	var wants: int = _values.parameter_type(holder, named, index)
+	if Values.cuts(sent, wants):
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s.%s takes %s as argument %d and was given %s, which it would have to be cut to fit"
+				% [called, named, type_string(wants), index + 1, JSON.stringify(sent)]
+			)
+		}
+	var given: Variant = _values.fitted(sent, wants)
+	if not Values.acceptable(given, wants):
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s.%s takes %s as argument %d and was given %s, which cannot be converted.%s"
+				% [
+					called,
+					named,
+					type_string(wants),
+					index + 1,
+					type_string(typeof(given)),
+					_written_as(wants)
+				]
+			)
+		}
+	# A typed list or map is built as one, since a plain one handed to such a parameter raises
+	# inside the game, which is what every check here exists to stop.
+	var container: Variant = _values.parameter_container(holder, named, index)
+	if container == null:
+		return {"value": given}
+	var typed: Dictionary = _values.typed_like(given, container, _element_object.bind(node, node_path))
+	if typed.has("message"):
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s.%s takes a typed %s as argument %d: %s."
+				% [called, named, _sort_of(container), index + 1, typed["message"]]
+			)
+		}
+	return {"value": typed["value"]}
+
+
+## What [param value] becomes written into the slot [param reached] ends on, as
+## [method Paths.walk_to] answered it, as `{"value": ...}`, or the refusal saying why it cannot become
+## one.
+##
+## The same rule the call path holds: a value that cannot become what the property holds is
+## refused rather than written. Writing it means the engine picks something, and what it picks
+## for a word where a number goes is zero, which the answer then reports as the new value. So is a
+## number a whole number or a truth would have to cut, since converting one truncates.
+##
+## A slot declaring nothing, an untyped or Variant property or an element of an untyped list, takes
+## anything, and the engine stores what it is given there. What it holds now still says how a value
+## of the same kind is meant, 5 into an int staying an int, and whether a path names an object, but
+## a value of another kind is stored as sent: a word into one holding a number is the word, a
+## fraction into one holding a whole number is the fraction, and a number into one holding a word is
+## the number, not its text. The text null empties it when it holds an object or nothing, as a wait
+## reads it on the same slot.
+func _value_for(
+	value: Variant, slot: Dictionary, old_value: Variant, reached: Dictionary, node: Node, node_path: String
+) -> Dictionary:
+	var named: String = reached["name"]
+	var called: String = reached["called"]
+	var declared: int = slot["type"]
+	var declared_script: Script = slot["script"]
+	var wanted: int = declared if declared != TYPE_NIL else typeof(old_value)
+	var holds_objects: bool = (
+		declared == TYPE_OBJECT or (declared == TYPE_NIL and (old_value == null or old_value is Object))
+	)
+	if holds_objects and names_no_object(value):
+		return {"value": null}
+	if wanted == TYPE_OBJECT and (value is String or value is Dictionary):
+		var named_object: Dictionary = _object_named(
+			node, node_path, value, str(slot["class"]), declared_script
+		)
+		if named_object.has("message"):
+			return {
+				"type": "error",
+				"message": "%s.%s holds an object: %s" % [called, named, named_object["message"]]
+			}
+		return {"value": named_object["object"]}
+	var as_sent: Variant = _values.fitted(value, TYPE_NIL)
+	var cut: bool = Values.cuts(value, wanted)
+	var given: Variant = as_sent
+	if declared != TYPE_NIL and cut:
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s.%s holds %s and the value given is %s, which it would have to be cut to fit"
+				% [called, named, type_string(wanted), JSON.stringify(value)]
+			)
+		}
+	if declared != TYPE_NIL or (not cut and Values.acceptable(as_sent, wanted)):
+		given = _values.fitted(value, wanted)
+		if not Values.acceptable(given, wanted):
+			return {
+				"type": "error",
+				"message":
+				(
+					"%s.%s holds %s and the value given is %s, which cannot become one.%s"
+					% [called, named, type_string(wanted), type_string(typeof(given)), _written_as(wanted)]
+				)
+			}
+	var typed: Dictionary = _values.typed_like(given, old_value, _element_object.bind(node, node_path))
+	if typed.has("message"):
+		return {
+			"type": "error",
+			"message": "%s.%s is a typed %s: %s." % [called, named, _sort_of(old_value), typed["message"]]
+		}
+	return {"value": typed["value"]}
+
+
 ## Whether [param given] is the value [param held] already is, at the precision the property keeps.
 ##
 ## A float arrives as 64 bits and most engine properties keep 32: Camera3D.h_offset given -1.1
@@ -254,6 +327,12 @@ func call_method(params: Dictionary) -> Dictionary:
 		var spelled: String = str(reached["name"])
 		if Paths.method_of(spelled).is_empty():
 			spelled += "()"
+		# A vector or a transform has no element to call a method on: it is read by its components.
+		if Paths.composite(reached["holder"]):
+			return {
+				"type": "error",
+				"message": Paths.nothing_there(reached["holder"], spelled, str(reached["called"]))
+			}
 		if args.is_empty() and Paths.can_read(reached["holder"], spelled):
 			var read_from: int = Time.get_ticks_usec()
 			var answered: Variant = Paths.read_under(reached["holder"], spelled)
@@ -320,41 +399,10 @@ func call_method(params: Dictionary) -> Dictionary:
 				by_engine_class[index + 1] = [declared, Values.class_of(resolved)]
 			deserialized_args.append(named_object["object"])
 			continue
-		var given: Variant = _values.fitted(args[index], wants)
-		if not Values.acceptable(given, wants):
-			return {
-				"type": "error",
-				"message":
-				(
-					"%s.%s takes %s as argument %d and was given %s, which cannot be converted.%s"
-					% [
-						reached["called"],
-						named,
-						type_string(wants),
-						index + 1,
-						type_string(typeof(given)),
-						_written_as(wants)
-					]
-				)
-			}
-		# A typed list or map is built as one, since a plain one handed to such a parameter raises
-		# inside the game, which is what every check here exists to stop.
-		var container: Variant = _values.parameter_container(holder, named, index)
-		if container != null:
-			var typed: Dictionary = _values.typed_like(
-				given, container, _element_object.bind(node, node_path)
-			)
-			if typed.has("message"):
-				return {
-					"type": "error",
-					"message":
-					(
-						"%s.%s takes a typed %s as argument %d: %s."
-						% [reached["called"], named, _sort_of(container), index + 1, typed["message"]]
-					)
-				}
-			given = typed["value"]
-		deserialized_args.append(given)
+		var argument: Dictionary = _argument_for(args[index], index, reached, named, node, node_path)
+		if argument.has("message"):
+			return argument
+		deserialized_args.append(argument["value"])
 
 	# Timed around the call alone, since the bridge's round trip is a second or more and swamps what
 	# one click's work costs; the frame metrics read whichever frame is last, which is not this one.

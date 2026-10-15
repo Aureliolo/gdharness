@@ -134,6 +134,28 @@ static func acceptable(value: Variant, type: int) -> bool:
 	return Serialisation.acceptable(value, type)
 
 
+## Whether [param given] would have to be cut to become a [param type]: a fraction made a whole
+## number, or a number other than 0 or 1 made a truth.
+##
+## A number arrives from JSON as a float, so one is converted to what the slot holds, and the
+## conversion truncates: 2.5 written into an int was stored as 2 and answered as written, and 0.2 on
+## a bool became true. A number written as text counts as the number.
+static func cuts(given: Variant, type: int) -> bool:
+	if type != TYPE_INT and type != TYPE_BOOL:
+		return false
+	var number: Variant = given
+	if given is String:
+		var text: String = given
+		number = Read.json_or_null(text)
+	if typeof(number) != TYPE_FLOAT and typeof(number) != TYPE_INT:
+		return false
+	var value: float = Read.as_float(number)
+	var whole: bool = value == floorf(value)
+	if type == TYPE_INT:
+		return not whole
+	return not (whole and (value == 0.0 or value == 1.0))
+
+
 ## How a value of [param type] is written to be read as one, or empty when it is not built from fields.
 static func written_as(type: int) -> String:
 	return Serialisation.written_as(type)

@@ -312,19 +312,7 @@ static func _in_order(compare: String, limit: float, current: Variant) -> bool:
 ## conversion truncates: 3.5 waited on an int became 3 and 0.2 on a bool became true, and a property
 ## already holding that answered met at once, about a state nobody asked for.
 static func _cut_to_fit(given: Variant, type: int, node_path: String, property: String) -> String:
-	if type != TYPE_INT and type != TYPE_BOOL:
-		return ""
-	var number: Variant = given
-	if given is String:
-		var text: String = given
-		number = Read.json_or_null(text)
-	if typeof(number) != TYPE_FLOAT and typeof(number) != TYPE_INT:
-		return ""
-	var value: float = Read.as_float(number)
-	var whole: bool = value == floorf(value)
-	if type == TYPE_INT and whole:
-		return ""
-	if type == TYPE_BOOL and whole and (value == 0.0 or value == 1.0):
+	if not Values.cuts(given, type):
 		return ""
 	return (
 		(
