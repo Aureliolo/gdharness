@@ -126,6 +126,10 @@ func reload_script(args: Dictionary) -> Dictionary:
 ## saving it writes its text over the file, and rereading would ask a question nobody can answer in a
 ## hidden editor's dialog.
 func _reread_open_tabs(path: String, answer: Dictionary) -> void:
+	# The engine fixtures reload from a script run outside any editor, where there are no tabs and
+	# EditorInterface has none of its methods.
+	if not Engine.is_editor_hint():
+		return
 	var scripts: ScriptEditor = EditorInterface.get_script_editor()
 	var unsaved: PackedStringArray = scripts.get_unsaved_files()
 	if path in unsaved:

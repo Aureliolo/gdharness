@@ -2018,7 +2018,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       until: {
         effect: 'read',
         summary:
-          'wait for a property to read as a value, or for words to appear under a node, and answer with what it found',
+          'wait for a property to read as a value, or for words to appear under a node, and answer with what it found; one already true when asked answers at once, with frames 0',
         // Not required here: a wait for words has a node to default to and a wait for a property
         // does not, and the declaration cannot say which, so the handler asks.
         requires: [],
