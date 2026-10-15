@@ -129,7 +129,7 @@ import {
   narrowedCompletions,
   typedBefore,
 } from '../src/lsp_client.js';
-import { isSameDirectory, isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { exportedBuild, isSameDirectory, isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
 import {
@@ -6656,7 +6656,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.match(
       await call('editor_run', { op: 'start', projectPath: '/p', frames: 3 }),
-      /start takes: projectPath, scene, args, engineArgs, headless, visible, silent, savesIn, env, runtimeWaitMs/,
+      /start takes: projectPath, scene, args, engineArgs, headless, visible, silent, executable, savesIn, env, runtimeWaitMs/,
       'and the refusal says what start takes instead',
     );
     assert.match(
@@ -20469,6 +20469,168 @@ function testAnExportOfAMissingPresetIsRefusedFirst(): void {
     assert.match(exportPresetRefusal(project, 'Linux') ?? '', /^export_presets\.cfg names no preset/);
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * The exported build editor_run starts is a file inside the project, judged where it really is.
+ *
+ * It is a file this server runs, so a link inside the project leading to any program on the machine
+ * must not pass for the game: a directory junction to a folder outside holds that, and the plain
+ * containment check, which does not follow links, passes it.
+ */
+function testAnExportedBuildIsFoundInsideTheProject(): void {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  try {
+    mkdirSync(join(project, 'export'), { recursive: true });
+    mkdirSync(outside);
+    writeFileSync(join(project, 'export', 'game.exe'), 'a build');
+    writeFileSync(join(outside, 'game.exe'), 'another program');
+    symlinkSync(outside, join(project, 'linked'), 'junction');
+
+    const found = exportedBuild(project, 'export/game.exe');
+    assert.deepEqual(found, {
+      ok: true,
+      absolutePath: realpathSync.native(join(project, 'export', 'game.exe')),
+      relativePath: 'export/game.exe',
+    });
+    const reason = (candidate: string): string => {
+      const judged = exportedBuild(project, candidate);
+      return judged.ok ? `accepted ${judged.absolutePath}` : judged.reason;
+    };
+    assert.match(reason('linked/game.exe'), /^linked\/game\.exe leads outside the project, to .*outside/);
+    assert.match(reason('export/missing.exe'), /^There is no export\/missing\.exe in the project to start/);
+    assert.match(reason('export'), /^export is not a file/);
+    assert.match(reason('../outside/game.exe'), /resolves outside the project directory/);
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * An exported build is started on its own, with no project, no Godot and no debugger, and stopped.
+ *
+ * Asked by tall-tales-inn to measure what a release costs a player, on the desktop of its own a
+ * windowed run gets. The build is Node running a script, which needs no export template:
+ * it writes what it was given and what it reads of its saves, and it would refuse the debugger's
+ * --remote-debug and never write, which is what holds that none was given. The project names no
+ * main scene, which a project run would be refused for.
+ */
+async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
+  const node = spawnSync('node', ['-p', 'process.execPath'], { encoding: 'utf8' });
+  const nodePath = node.status === 0 ? node.stdout.trim() : '';
+  if (nodePath === '') {
+    console.log('exported build regression skipped (no node on PATH to stand in for a build)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-run-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-run-rt-'));
+  const saves = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-run-saves-'));
+  const build = process.platform === 'win32' ? 'export/game.exe' : 'export/game';
+  // Named after the build, so the process the script becomes still names it on its command line, as
+  // a real export does and as the check before a stop signals it asks.
+  const script = join(project, 'export', 'game-stand-in.js');
+  const said = join(project, 'export', 'said.json');
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Exported"\n',
+  );
+  mkdirSync(join(project, 'export'));
+  // A real executable on Windows, which starts no script. Elsewhere a script handing on to Node,
+  // since a copy of Node was no build: Homebrew's finds its library beside where it was installed,
+  // and the copy on macOS exited at once without a word.
+  if (process.platform === 'win32') {
+    cpSync(nodePath, join(project, ...build.split('/')));
+  } else {
+    writeFileSync(join(project, ...build.split('/')), `#!/bin/sh\nexec "${nodePath}" "$@"\n`, {
+      mode: 0o755,
+    });
+  }
+  writeFileSync(
+    script,
+    "const { writeFileSync } = require('node:fs');\n" +
+      'const [, , saves, out] = process.argv;\n' +
+      'const holding = Object.entries(process.env).filter(([, value]) => value.includes(saves)).map(([name]) => name);\n' +
+      'writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), holding }));\n' +
+      'setInterval(() => {}, 1000);\n',
+  );
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir, GODOT_PATH: '' },
+  });
+  let pid = 0;
+  try {
+    await server.initialize('regression-test');
+    const call = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, ...args } },
+        60_000,
+      );
+
+    const withScene = textOf(await call({ op: 'start', executable: build, scene: 'main.tscn' })) ?? '';
+    assert.match(
+      withScene,
+      /^An exported build runs the main scene its pack holds, and takes no scene/,
+      withScene,
+    );
+    const profiled = textOf(await call({ op: 'start', executable: build, profile: true })) ?? '';
+    assert.match(
+      profiled,
+      /^A profile is read through the debugger, and an exported build is started without one/,
+    );
+
+    const answered = await call({
+      op: 'start',
+      executable: build,
+      headless: false,
+      savesIn: saves,
+      args: [script, saves, said],
+    });
+    const started = parseTextContent(answered);
+    const shown = textOf(answered) ?? JSON.stringify(answered);
+    pid = asNumber(get(started, 'pid'), shown);
+    assert.deepEqual(
+      [
+        get(started, 'started'),
+        get(started, 'through'),
+        get(started, 'executable'),
+        get(started, 'arguments'),
+      ],
+      [true, 'gdharness', build, ['--', script, saves, said]],
+      `the build is started with no --path and its own arguments: ${shown}`,
+    );
+    assert.match(text(get(started, 'message')), /started without a debugger/, shown);
+    assert.equal(get(started, 'runtime'), undefined, shown);
+
+    const deadline = Date.now() + 30_000;
+    while (!existsSync(said) && Date.now() < deadline) {
+      await delay(100);
+    }
+    const transcript = text(get(started, 'transcript'));
+    assert.ok(
+      existsSync(said),
+      `the build ran and wrote what it was given, so no debugger flag reached it: ${shown}\nIt printed: ${existsSync(transcript) ? readFileSync(transcript, 'utf8') : 'nothing'}`,
+    );
+    const read = JSON.parse(readFileSync(said, 'utf8')) as { argv: string[]; holding: string[] };
+    assert.deepEqual(read.argv, [saves, said], JSON.stringify(read));
+    assert.ok(read.holding.length > 0, `its saves are moved to savesIn: ${JSON.stringify(read)}`);
+    assert.ok(alive(pid), 'it runs until stopped');
+
+    const stopped = parseTextContent(await call({ op: 'stop' }));
+    assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+    const gone = Date.now() + 15_000;
+    while (alive(pid) && Date.now() < gone) {
+      await delay(100);
+    }
+    assert.equal(alive(pid), false, `stop ended it: ${JSON.stringify(stopped)}`);
+  } finally {
+    if (pid > 0 && alive(pid)) {
+      process.kill(pid);
+    }
+    await server.stop();
+    sweep(project, runtimeDir, saves);
   }
 }
 
@@ -37781,6 +37943,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExportIsJudgedByTheFileItWrote,
   testAnExportThatCouldNotCopyALibrarySaysSo,
   testAnExportOfAMissingPresetIsRefusedFirst,
+  testAnExportedBuildIsFoundInsideTheProject,
+  testAnExportedBuildIsStartedAndStopped,
   testLibraryCopiesAreMovedAsideAndSwept,
   testAHeldLibraryCopyIsSetAsideAndSweptLater,
   testNotRunIsPutDownToFailFastOnlyWhenSet,
