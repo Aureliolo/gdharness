@@ -49,6 +49,10 @@ const PROFILER_PROBE_CALLS: int = 10000
 ## on every 2048th call and only counts the others.
 const POLLS_PER_READ: int = 2048
 
+## The most frames a close waits for its answer to leave: a client that stopped reading would
+## otherwise hold the close for ever, and the server is past caring about the answer by then.
+const CLOSE_AFTER_FRAMES: int = 30
+
 ## Set in a game's environment by whatever starts it to be profiled from its start: the server for
 ## a run it spawns, the editor for a play. Kept in step with `PROFILE_FROM_START` in the server.
 const PROFILE_FROM_START: String = "GDHARNESS_PROFILE_FROM_START"
@@ -118,6 +122,8 @@ var _commands: Dictionary = {}
 var _loaded_version: String = _read_marker(VERSION_MARKER)
 var _loaded_digest: String = _read_marker(DIGEST_MARKER)
 var _profile_received: bool = false
+var _close_asked: bool = false
+var _close_frames: int = 0
 var _profiler_calibrated: bool = false
 
 
@@ -148,6 +154,7 @@ func _init() -> void:
 		"wait_signal": _waits.wait_signal,
 		"wait_until": _waits.wait_until,
 		"send_profile": _send_profile_now,
+		"close_game": _close_game,
 	}
 	_wait_for_the_profiler()
 
@@ -340,6 +347,14 @@ func _process(_delta: float) -> void:
 		# pending or owed is as forgotten as one that had both.
 		var _had_pending: bool = _pending.erase(client)
 		var _had_outgoing: bool = _outgoing.erase(client)
+
+	# After the answer to the close has gone out: the close request reaches this node too, which then
+	# drops its clients and whatever they were still owed.
+	if _close_asked:
+		_close_frames += 1
+		if _close_frames >= CLOSE_AFTER_FRAMES or _outgoing.values().all(_is_empty):
+			_close_asked = false
+			_deliver_close()
 
 
 ## Hands the socket as much of what it is owed as it will take, and says whether it is still worth
@@ -576,6 +591,29 @@ func _execute_command(command: String, params: Dictionary) -> Dictionary:
 
 func _ping(_params: Dictionary) -> Dictionary:
 	return {"type": "pong", "timestamp": Time.get_unix_time_from_system()}
+
+
+## The game asked to close, as a player's close asks it: answered at once and delivered once the
+## answer has gone out. `acceptsQuit` says whether the tree quits on the request by itself; a game
+## that turned that off decides for itself, and may ask the player first.
+func _close_game(_params: Dictionary) -> Dictionary:
+	_close_asked = true
+	_close_frames = 0
+	return {"type": "closing", "acceptsQuit": get_tree().auto_accept_quit}
+
+
+## What a player's close does: the close request reaches every node, and then the root window says
+## it was asked to close, which the tree answers by quitting when it accepts quits. So the game's own
+## close runs, a crash guard's included, where a stop that ended the process ran none of it.
+func _deliver_close() -> void:
+	var root: Window = get_tree().root
+	root.propagate_notification(NOTIFICATION_WM_CLOSE_REQUEST)
+	root.close_requested.emit()
+
+
+static func _is_empty(owed: Variant) -> bool:
+	var bytes: PackedByteArray = owed
+	return bytes.is_empty()
 
 
 ## One JSON object and a newline, queued for [method _drain] rather than written here.

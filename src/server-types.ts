@@ -3,6 +3,9 @@ import type { GameLog } from './game-log.js';
 import type { EditorPlay } from './run-record.js';
 import type { ChildProcess } from './spawn.js';
 
+/** How a stop or a start ended a run: see `GodotProcess.endedThrough`. */
+export type EndedThrough = 'close' | 'keeper' | 'signal' | 'editor';
+
 /** The game editor_run started, and everything it has said. */
 export interface GodotProcess {
   /**
@@ -55,11 +58,13 @@ export interface GodotProcess {
   /** The scene a start of this server ran, which its boot is noted and read under; see `MAIN_SCENE`. */
   bootScene?: string;
   /**
-   * How this server ended the run, when it did: through the keeper holding it, by a signal to its
-   * pid, or by asking the editor playing it. Said in the stop's answer, because a caller checking a
-   * stop looks there and not in the run's log.
+   * How this server ended the run, when it did: by asking the game to close, through the keeper
+   * holding it, by a signal to its pid, or by asking the editor playing it. Said in the stop's
+   * answer, because a caller checking a stop looks there and not in the run's log.
    */
-  endedThrough?: 'keeper' | 'signal' | 'editor';
+  endedThrough?: EndedThrough;
+  /** Why a stop that asked the game to close first had to end it another way. */
+  notClosedBecause?: string | undefined;
   /** Why a stop signalled nothing, when its pid no longer answered as the run. */
   notEndedBecause?: string;
   /**
