@@ -150,6 +150,17 @@ interface PendingRequest {
   // Explicitly `| undefined`: under exactOptionalPropertyTypes the bare `?` means the key may
   // be missing, not that it may be present and unset, and these are built from optional chains.
   resourceKey?: string | undefined;
+  counted: boolean;
+}
+
+/** How a request to the editor is sent. */
+export interface InvokeOptions {
+  /**
+   * False for a question the caller waits on only briefly and then gives up on, such as the ones
+   * editor_status asks. Such a question is not reported as pending: an editor busy importing
+   * answers it late, and two of them outstanding read as two calls stuck in the editor.
+   */
+  readonly counted?: boolean;
 }
 
 interface GodotConnectionInfo {
@@ -574,6 +585,14 @@ export class GodotBridge extends EventEmitter {
     );
   }
 
+  /** The counted requests sent to the editor and not yet answered, oldest first. */
+  public requestsInFlight(): { tool: string; startedAt: number }[] {
+    return [...this.pendingRequests.values()]
+      .filter((pending) => pending.counted)
+      .map((pending) => ({ tool: pending.toolName, startedAt: pending.startedAt }))
+      .sort((a, b) => a.startedAt - b.startedAt);
+  }
+
   public getStatus(): BridgeStatus {
     // A process still being looked up is not yet the editor, so nothing it said about itself is
     // reported as the editor's: a project named before it is served read as an editor that had
@@ -598,7 +617,7 @@ export class GodotBridge extends EventEmitter {
       syncsBreakpoints: editor?.syncsBreakpoints,
       turnedAway: this.turnedAway ?? undefined,
       identifying: identifying ? true : undefined,
-      pendingRequests: this.pendingRequests.size,
+      pendingRequests: this.requestsInFlight().length,
       queuedResources: this.resourceQueues.size,
       listeningSince: this.listeningSince ?? undefined,
       // Not for port 0, which asks for whichever port is free and so is never moved off.
@@ -609,13 +628,20 @@ export class GodotBridge extends EventEmitter {
     };
   }
 
-  public invokeTool(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+  public invokeTool(
+    toolName: string,
+    args: Record<string, unknown>,
+    options: InvokeOptions = {},
+  ): Promise<unknown> {
+    const counted = options.counted ?? true;
     const resourceKey = this.getResourceKey(args);
     if (!resourceKey) {
-      return this.invokeToolDirect(toolName, args);
+      return this.invokeToolDirect(toolName, args, counted);
     }
 
-    return this.enqueueResourceRequest(resourceKey, () => this.invokeToolDirect(toolName, args, resourceKey));
+    return this.enqueueResourceRequest(resourceKey, () =>
+      this.invokeToolDirect(toolName, args, counted, resourceKey),
+    );
   }
 
   private getRequestPathname(url: string | undefined): string {
@@ -809,6 +835,7 @@ export class GodotBridge extends EventEmitter {
   private invokeToolDirect(
     toolName: string,
     args: Record<string, unknown>,
+    counted: boolean,
     resourceKey?: string,
   ): Promise<unknown> {
     if (!this.isConnected()) {
@@ -836,6 +863,7 @@ export class GodotBridge extends EventEmitter {
         reject,
         startedAt: Date.now(),
         resourceKey,
+        counted,
       });
 
       this.emitBridgeEvent('tool_start', {

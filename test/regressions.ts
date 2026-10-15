@@ -2188,6 +2188,7 @@ async function withFakeLanguageServer<T>(
   serves?: () => string,
   initializeAfterMs = 0,
   listenOn = 0,
+  symbols: readonly unknown[] = GODOT_SYMBOLS,
 ): Promise<T> {
   const sockets = new Set<Socket>();
 
@@ -2265,7 +2266,7 @@ async function withFakeLanguageServer<T>(
             });
           }
         } else if (message.method === 'textDocument/documentSymbol') {
-          send({ jsonrpc: '2.0', id: message.id, result: GODOT_SYMBOLS });
+          send({ jsonrpc: '2.0', id: message.id, result: symbols });
         } else if (message.method === 'textDocument/hover') {
           const position = get(message.params, 'position');
           send({
@@ -2608,7 +2609,27 @@ async function testLanguageServerAnswersCountFromOne(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-from-one-'));
   try {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
-    writeFileSync(join(project, 'probe.gd'), 'extends Node\n');
+    // The thirteen lines the captured symbols describe, so a symbol's last line is held to the file
+    // they were read from: Godot ended the class at line 15 of these thirteen.
+    writeFileSync(
+      join(project, 'probe.gd'),
+      [
+        'class_name Probe',
+        'extends Node',
+        '',
+        'signal told(amount)',
+        'var count: int = 0',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tpass',
+        '',
+        'class Inner:',
+        '\tfunc deep() -> void:',
+        '\t\tprint(1)',
+        '',
+      ].join('\n'),
+    );
     const undeclared = 'Identifier "no_such_name" not declared in the current scope.';
     const unused = '(UNUSED_VARIABLE): The local variable "unused" is declared but never used in the block.';
     const seen: JsonRpcMessage[] = [];
@@ -2655,7 +2676,7 @@ async function testLanguageServerAnswersCountFromOne(): Promise<void> {
               detail: 'class Probe',
               line: 1,
               column: 12,
-              lastLine: 15,
+              lastLine: 13,
               children: [
                 {
                   name: 'told',
@@ -2741,6 +2762,98 @@ async function testLanguageServerAnswersCountFromOne(): Promise<void> {
         { message: undeclared, line: 5, character: 8, endCharacter: 20, severity: 1 },
         { message: unused, line: 4, character: 1, endCharacter: 16, severity: 2 },
       ],
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A symbol's lastLine is the last line its range covers. The end of a protocol range is exclusive,
+ * so a range ending at the start of a line ends on the line before it. Godot ends a script's own
+ * class that way, one or two lines past the file, which the clamp to the file's length also covers;
+ * the ranges here end at the start of a line inside the file, which only the exclusive reading
+ * handles.
+ */
+async function testASymbolEndingAtALinesStartEndsOnTheLineBefore(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-last-line-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(
+      join(project, 'two.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func first() -> void:',
+        '\tpass',
+        '',
+        '',
+        'func second() -> void:',
+        '\tpass',
+        '',
+      ].join('\n'),
+    );
+    const method = (name: string, start: number, end: { line: number; character: number }) => ({
+      kind: 6,
+      name,
+      detail: `func ${name}() -> void`,
+      range: { start: { line: start, character: 0 }, end },
+      selectionRange: {
+        start: { line: start, character: 5 },
+        end: { line: start, character: 5 + name.length },
+      },
+    });
+    const symbols = [
+      {
+        kind: 5,
+        name: 'two.gd',
+        detail: 'class two.gd',
+        range: { start: { line: 0, character: 0 }, end: { line: 9, character: 0 } },
+        selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        children: [
+          method('first', 3, { line: 5, character: 0 }),
+          method('second', 7, { line: 8, character: 6 }),
+        ],
+      },
+    ];
+    const answer = await withFakeLanguageServer(
+      (uri) => uri,
+      async (port) => {
+        const client = new GodotLSPClient(
+          port,
+          '127.0.0.1',
+          { requestMs: 3000, referencesMs: 3000, initializeMs: 3000, listenMs: 3000 },
+          () => true,
+        );
+        try {
+          return lspPayload(
+            await handleLSPTool(client, 'lsp_get_symbols', { projectPath: project, scriptPath: 'two.gd' }),
+          );
+        } finally {
+          await client.disconnect();
+        }
+      },
+      undefined,
+      undefined,
+      undefined,
+      0,
+      0,
+      symbols,
+    );
+    const lastLines = (entries: unknown): unknown[] =>
+      asArray(entries).flatMap((entry) => [
+        [get(entry, 'name'), get(entry, 'lastLine')],
+        ...lastLines(get(entry, 'children') ?? []),
+      ]);
+    assert.deepEqual(
+      lastLines(get(answer, 'symbols')),
+      [
+        ['two.gd', 9],
+        ['first', 5],
+        ['second', 9],
+      ],
+      JSON.stringify(answer),
     );
   } finally {
     sweep(project);
@@ -5553,6 +5666,124 @@ async function testACallWaitsForAnArrivingEditor(): Promise<void> {
       `and reached the editor only after it greeted: asked at ${String(times.asked)}, greeted at ${greetedAt}`,
     );
     assert.match(server.stderr, /Godot editor identified: pid \d+/, 'after it had been looked up');
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * editor_status counts the requests calls are waiting on the editor for, not its own questions. It
+ * asks what the editor is playing and scanning with a one-second wait, and an editor busy importing
+ * answers later than that, so the questions are still out when it answers and when the next status
+ * call counts. Counting them reported an idle editor with two requests pending, which a downstream
+ * session took for two calls stuck in an editor that was importing. The fake editor takes 1.5s
+ * over every answer, and holds one scene_tree call open to be the request that is pending.
+ */
+async function testEditorStatusCountsOnlyOtherCallsInFlight(): Promise<void> {
+  const port = await reservePort();
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-in-flight-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="InFlight"\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine') },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    const held: { id: string | null } = { id: null };
+    socket.on('message', (data: Buffer) => {
+      const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string; id?: string };
+      if (message.type !== 'tool_invoke' || message.id === undefined) {
+        return;
+      }
+      if (message.tool === 'list_scene_nodes') {
+        held.id = message.id;
+        return;
+      }
+      setTimeout(() => {
+        socket.send(
+          JSON.stringify({ type: 'tool_result', id: message.id, success: true, result: { ok: true } }),
+        );
+      }, 1500);
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: SERVER_VERSION,
+        editor_pid: process.pid,
+      }),
+    );
+    const status = async (): Promise<unknown> =>
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }, 20_000));
+    let idle: unknown = null;
+    for (let waited = 0; waited < 10_000; waited += 100) {
+      idle = await status();
+      if (typeof get(idle, 'editor', 'projectPath') === 'string') {
+        break;
+      }
+      await delay(100);
+    }
+    assert.equal(
+      typeof get(idle, 'editor', 'projectPath'),
+      'string',
+      'the fake editor should have been greeted',
+    );
+    // Asked straight after the one before, whose questions are still out.
+    idle = await status();
+    assert.deepEqual(
+      { pending: get(idle, 'editor', 'pendingRequests'), tools: get(idle, 'editor', 'pendingRequestTools') },
+      { pending: 0, tools: undefined },
+      `an idle editor has nothing pending, whatever the status calls asked: ${JSON.stringify(get(idle, 'editor'))}`,
+    );
+
+    const asked = server.request(
+      'tools/call',
+      { name: 'scene_tree', arguments: { projectPath: project, scenePath: 'res://main.tscn' } },
+      30_000,
+    );
+    for (let waited = 0; waited < 10_000 && held.id === null; waited += 50) {
+      await delay(50);
+    }
+    assert.ok(held.id !== null, 'scene_tree should have reached the editor');
+    const busy = await status();
+    assert.equal(get(busy, 'editor', 'pendingRequests'), 1, JSON.stringify(get(busy, 'editor')));
+    const tools = asArray(get(busy, 'editor', 'pendingRequestTools'));
+    assert.deepEqual(
+      tools.map((entry) => get(entry, 'tool')),
+      ['list_scene_nodes'],
+      `the one pending is the call that is waiting, named: ${JSON.stringify(tools)}`,
+    );
+    const waitedMs = get(tools[0], 'forMs');
+    // At least the second the status call waited on its own questions.
+    assert.ok(
+      typeof waitedMs === 'number' && waitedMs >= 900,
+      `with how long it has waited: ${String(waitedMs)}`,
+    );
+
+    socket.send(
+      JSON.stringify({ type: 'tool_result', id: held.id, success: true, result: { nodes: ['Main'] } }),
+    );
+    assert.match(
+      textOf(await asked) ?? '',
+      /Main/,
+      'and the held call is answered once the editor answers it',
+    );
+    const after = await status();
+    assert.equal(get(after, 'editor', 'pendingRequests'), 0, JSON.stringify(get(after, 'editor')));
   } finally {
     editor?.terminate();
     await server.stop();
@@ -39250,6 +39481,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorAServerOpenedIsStartedAgain,
   testAnEditorIsReadOnceItHasSaidWhoItIs,
   testACallWaitsForAnArrivingEditor,
+  testEditorStatusCountsOnlyOtherCallsInFlight,
   testARestartWaitsForTheOldEditorToGo,
   testAnEditorCloseWaitsForItToGo,
   testCompletionsAreNarrowedToWhatWasTyped,
@@ -39267,6 +39499,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheFirstInitializeIsGivenItsOwnTime,
   testALanguageServerStillStartingIsWaitedFor,
   testLanguageServerAnswersCountFromOne,
+  testASymbolEndingAtALinesStartEndsOnTheLineBefore,
   testACancelledFolderStopsAsking,
   testDiagnosticsLeaveNoDocumentOpen,
   testDiagnosticsSurviveAnotherSpellingOfTheSamePath,
