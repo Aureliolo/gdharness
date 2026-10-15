@@ -120,11 +120,28 @@ func set_property(params: Dictionary) -> Dictionary:
 				"%s.%s is a typed %s: %s." % [reached["called"], named, _sort_of(old_value), typed["message"]]
 			}
 		given = typed["value"]
+	# A component of a vector or a transform is written into a copy, which is put back where it was
+	# read from, setter and all; the read back is then taken off the game again, since the copy here
+	# says only what was written into it.
+	var chain: Array[Dictionary] = reached["chain"]
+	var copied: bool = Paths.composite(holder)
+	if copied:
+		var unwritable: String = Paths.unwritable_copy(chain)
+		if not unwritable.is_empty():
+			return {"type": "error", "message": unwritable}
 	# The write alone, setter included, which is where a property's cost is.
 	var began: int = Time.get_ticks_usec()
-	Paths.write(holder, named, given)
+	var written: Variant = Paths.write(holder, named, given)
+	if copied:
+		Paths.write_back(chain, written)
 	var elapsed: int = Time.get_ticks_usec() - began
 	var now: Variant = Paths.read_under(holder, named)
+	if copied:
+		var again: Dictionary = Paths.walk_to(target, node_path, property)
+		if again.has("message"):
+			return again
+		var reread: Variant = again["holder"]
+		now = Paths.read_under(reread, named) if Paths.can_read(reread, named) else null
 	# Read back rather than trusted. The engine drops a write it will not take without a word, and
 	# the answer then showed the old value as the new one, shaped as a success: a typed container
 	# refusing a plain list did exactly that. A value the property changed on the way in, a setter
@@ -463,8 +480,11 @@ static func _walk_from(object: Object, path: String) -> Dictionary:
 	var holder: Variant = object
 	var called: String = "the result"
 	for named: String in Paths.steps_of(path):
-		if not (holder is Object or holder is Array or holder is Dictionary or Paths.packed(holder)):
-			return {"message": "%s holds no object to read %s off" % [called, named]}
+		if not Paths.can_hold(holder):
+			return {
+				"message":
+				"%s holds %s, which has nothing to read %s off" % [called, type_string(typeof(holder)), named]
+			}
 		if not Paths.can_read(holder, named):
 			return {"message": Paths.nothing_there(holder, named, called)}
 		holder = Paths.read_under(holder, named)
