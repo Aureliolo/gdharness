@@ -9640,6 +9640,35 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     );
     assert.doesNotMatch(refused, /Open the project in the editor with editor_launch/, refused);
 
+    // The calls asked of the editor's language server rather than its bridge wait for it the same
+    // way. Until the editor says which port it serves, the default is all there is to ask on, and an
+    // editor opened beside another project's is moved off the default: a diagnostics call made
+    // straight after the open was asked of the other project's editor and refused for it.
+    writeFileSync(join(project, 'asked.gd'), 'extends Node\n\n\nfunc greet() -> void:\n\tpass\n');
+    const languageServerCalls: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+      ['script_diagnostics', { scriptPath: 'res://asked.gd' }],
+      ['script_info', { op: 'symbols', scriptPath: 'res://asked.gd' }],
+      [
+        'script_edit',
+        { op: 'rename', scriptPath: 'res://asked.gd', symbol: 'greet', newName: 'welcome', preview: true },
+      ],
+    ];
+    const answers = new Map<string, string>();
+    for (const [name, asks] of languageServerCalls) {
+      const answer = await server.request(
+        'tools/call',
+        { name, arguments: { projectPath: project, ...asks } },
+        60_000,
+      );
+      answers.set(name, textOf(answer) ?? '');
+    }
+    const waiting = `Editor not connected: the editor this server opened on ${project}, pid ${pid}, is still running and has not reached the bridge`;
+    assert.deepEqual(
+      [...answers].filter(([, answer]) => !answer.startsWith(waiting)).map(([name]) => name),
+      [],
+      `each waits for the editor this server opened, and names it: ${JSON.stringify(Object.fromEntries(answers))}`,
+    );
+
     if (windows) {
       // Saved some thirteen seconds after a PowerShell first loads a module, measured here, so it is
       // waited for while both are still running rather than assumed. Both save to the same place, so
