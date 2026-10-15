@@ -21344,6 +21344,9 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
           'var spot: Rect2 = Rect2(1, 2, 30, 40)',
           'var placed: Transform2D = Transform2D(0.0, Vector2(5, 6))',
           'var tint: Color = Color(0.25, 0.5, 0.75, 1.0)',
+          'var count: int = 3',
+          'var flag: bool = false',
+          'var loose = 4',
           'var guarded_writes: int = 0',
           'var guarded: Vector2 = Vector2(1, 2):',
           '\tset(value):',
@@ -21353,6 +21356,10 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
           '',
           'func area() -> Rect2:',
           '\treturn Rect2(7, 8, 9, 10)',
+          '',
+          '',
+          'func step(by: int) -> int:',
+          '\treturn count + by',
           '',
           '',
           'func _process(_delta: float) -> void:',
@@ -21474,6 +21481,59 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
         value: 1,
       });
       assert.match(intoACall, /area\(\) is what a call answered, a copy the game keeps nowhere/, intoACall);
+
+      // A number arrives as a float, and converting one truncates, so a value a whole number or a
+      // truth would have to cut is refused: 2.5 into an int was stored as 2 and answered as written.
+      // An untyped slot keeps it as sent, and a number that fits is written.
+      const set = async (nodePath: string, property: string, given: unknown): Promise<string> =>
+        await call('runtime_invoke', { op: 'set', nodePath, property, value: given });
+      const cutFor = (slot: string, type: string, given: string): RegExp =>
+        new RegExp(
+          `${slot} holds ${type} and the value given is ${given}, which it would have to be cut to fit`,
+        );
+      const cutInt = await set('/root/Main', 'count', 2.5);
+      assert.match(cutInt, cutFor('count', 'int', '2\\.5'), cutInt);
+      assert.equal(await value('/root/Main', 'count'), 3, 'and the int is left as it was');
+      const cutAxis = await set('/root/Main', 'cell:y', 2.5);
+      assert.match(cutAxis, cutFor('cell\\.y', 'int', '2\\.5'), cutAxis);
+      const cutFlag = await set('/root/Main', 'flag', 0.2);
+      assert.match(cutFlag, cutFor('flag', 'bool', '0\\.2'), cutFlag);
+      await set('/root/Main', 'count', 7);
+      assert.equal(await value('/root/Main', 'count'), 7, 'a whole number is written');
+      await set('/root/Main', 'flag', 1);
+      assert.equal(await value('/root/Main', 'flag'), true, 'and 1 is a truth');
+      await set('/root/Main', 'loose', 2.5);
+      assert.equal(await value('/root/Main', 'loose'), 2.5, 'an untyped slot keeps the fraction as sent');
+      const cutArgument = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'step',
+        args: [2.5],
+      });
+      assert.match(
+        cutArgument,
+        /step takes int as argument 1 and was given 2\.5, which it would have to be cut to fit/,
+        cutArgument,
+      );
+      const stepped = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'step',
+        args: [2],
+      });
+      assert.equal(get(JSON.parse(stepped), 'result'), 9, `a whole argument is passed: ${stepped}`);
+      // A call on a vector is answered as a vector, with no talk of the elements a list holds.
+      const onAVector = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main/Room',
+        method: 'position:normalized',
+      });
+      assert.match(
+        onAVector,
+        /position is a Vector2, which a path reads by its components, x, y, and makes no call on/,
+        onAVector,
+      );
+      assert.doesNotMatch(onAVector, /element/, onAVector);
       await call('editor_run', { op: 'stop' });
     },
     { realAddon: true, engine },
