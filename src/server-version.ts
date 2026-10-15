@@ -103,7 +103,7 @@ export function addonMismatch(
   // the restart's own answer said to restart again.
   const restart =
     onDisk !== undefined && onDisk !== shippedDigest
-      ? `The project's own addons are not this server's either, so a restart would load the same code again: gdharness upgrade in the project installs the ${serverVersion} addons, and editor_launch restart then picks them up.`
+      ? `The project's own addons are not this server's either, so a restart would load the same code again: run  ${gdharnessCommand(serverVersion, 'upgrade')}  in a shell in the project directory, which installs the ${serverVersion} addons, and editor_launch restart then picks them up.`
       : 'Restart it with editor_launch restart to pick this one up.';
   if (reported === serverVersion) {
     return `The editor is running a different build of the ${reported} addon from the one this server ships. ${restart}`;
@@ -114,6 +114,16 @@ export function addonMismatch(
     return `${both} This server is the older half: reconnect it in your harness so it spawns ${reported}.`;
   }
   return `${both} ${restart}`;
+}
+
+/**
+ * The gdharness command line running [param args] at [param version], as typed into a shell.
+ *
+ * No tool installs or upgrades the addons, so a remedy that needs one names the command in full: a
+ * caller holding only the tools, told "gdharness setup", went looking for a tool of that name.
+ */
+export function gdharnessCommand(version: string, args: string): string {
+  return `npx -y gdharness@${version} ${args}`;
 }
 
 /** A game that reports its runtime addon and could not read the markers that say what it is. */
@@ -164,7 +174,7 @@ export function runtimeMismatch(
   }
   const remedy =
     onDisk !== undefined && onDisk !== shippedDigest
-      ? `The project's own runtime addon is not this server's either, so starting the game again loads the same code: gdharness upgrade in ${projectPath} installs the ${serverVersion} addons, and the game picks them up when it next starts.`
+      ? `The project's own runtime addon is not this server's either, so starting the game again loads the same code: run  ${gdharnessCommand(serverVersion, `upgrade "${projectPath}"`)}  in a shell, which installs the ${serverVersion} addons, and the game picks them up when it next starts.`
       : `The project holds this server's runtime addon, so the game picks it up when it next starts.`;
   return `${game} is running ${loaded}, and its answers come from that code. ${remedy}`;
 }

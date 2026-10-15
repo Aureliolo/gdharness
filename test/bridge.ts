@@ -776,7 +776,10 @@ async function main(): Promise<void> {
         const staleNote = String(get(listed, 'game', 'runtimes', 0, 'staleNote'));
         assert.match(staleNote, said, staleNote);
         // The fixture project holds no addons, so it is sent to upgrade rather than to a restart.
-        assert.ok(staleNote.includes(`gdharness upgrade in ${projectPath}`), staleNote);
+        assert.ok(
+          staleNote.includes(`run  npx -y gdharness@${SERVER_VERSION} upgrade "${projectPath}"  in a shell`),
+          staleNote,
+        );
         const answered = await payload('runtime_inspect', {});
         assert.equal(get(answered, 'type'), 'tree', JSON.stringify(answered));
         assert.equal(get(answered, 'addonIsStale'), true, JSON.stringify(answered));
