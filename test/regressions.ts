@@ -4974,11 +4974,15 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
   });
   let uninformed: ServerProcess | null = null;
+  const settings =
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="HalfRestart"\n';
+  const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
+  const addon = join(project, 'addons', 'gdharness_editor');
   try {
-    writeFileSync(
-      join(project, 'project.godot'),
-      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="HalfRestart"\n',
-    );
+    // With the addon, because a restart is of an editor that was connected, and a project without
+    // it is one no editor can dial in from, which editor_status answers before any restart.
+    mkdirSync(addon, { recursive: true });
+    writeFileSync(join(project, 'project.godot'), enabled);
     // What the predecessor wrote before asking its editor to quit.
     noteRestartBegun({
       projectPath: project,
@@ -5061,16 +5065,14 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     // A launch that could never connect is refused before anything starts, each for its own reason.
     // Each half of the addon check gets the shape only it refuses: enabled with nothing on disk,
     // which is a project whose addons folder was cleaned, then on disk and not enabled.
-    const settings = readFileSync(join(project, 'project.godot'), 'utf8');
-    const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
-    writeFileSync(join(project, 'project.godot'), enabled);
+    rmSync(join(project, 'addons'), { recursive: true });
     assert.match(
       await launch(project),
       /gdharness editor addon is not installed/,
       'enabled and not installed',
     );
     writeFileSync(join(project, 'project.godot'), settings);
-    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    mkdirSync(addon, { recursive: true });
     assert.match(await launch(project), /gdharness editor addon is not enabled/, 'installed and not enabled');
     writeFileSync(join(project, 'project.godot'), enabled);
     assert.match(
@@ -6870,7 +6872,14 @@ async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
         ),
         create,
       );
-      assert.match(create, /gdharness setup in the project installs and enables it/, create);
+      // Named as the command to type, since no tool installs it and a caller holding only the tools
+      // went looking for one called setup.
+      assert.ok(
+        create.includes(
+          `No gdharness tool installs the addon: run  npx -y gdharness@${SERVER_VERSION} setup "${projectPath}" --no-connect  in a shell`,
+        ),
+        create,
+      );
       assert.doesNotMatch(create, /Enable the addon under/, create);
       const settings = readFileSync(join(projectPath, 'project.godot'), 'utf8');
       const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
@@ -6881,7 +6890,11 @@ async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
       mkdirSync(join(projectPath, 'addons', 'gdharness_editor'), { recursive: true });
       const installedOnly = await ask();
       assert.match(installedOnly, /addon is not enabled in /, `installed and not enabled: ${installedOnly}`);
-      assert.match(installedOnly, /gdharness setup in the project enables it/, installedOnly);
+      assert.match(
+        installedOnly,
+        /project_settings enable_plugin with pluginName gdharness_editor enables it/,
+        installedOnly,
+      );
       writeFileSync(join(projectPath, 'project.godot'), enabled);
       const ready = await ask();
       assert.ok(
@@ -6892,6 +6905,64 @@ async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
       );
       assert.match(ready, /Open the project in the editor with editor_launch/, ready);
     });
+  } finally {
+    sweep(projectPath);
+  }
+}
+
+/**
+ * editor_status says no editor can connect to a server whose project has no editor addon.
+ *
+ * A probe session asked editor_status on a project never set up and was told mayYetConnect true,
+ * because the server was young, while editor_launch refused to open an editor there for the same
+ * missing addon. The wait it invited could not end.
+ */
+async function testEditorStatusOnAProjectWithNoAddonIsFinal(): Promise<void> {
+  const projectPath = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-addon-'));
+  const status = async (): Promise<unknown> => {
+    const server = new ServerProcess({ env: { GDHARNESS_PROJECT: projectPath } });
+    try {
+      await server.initialize('regression-test');
+      return parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }));
+    } finally {
+      await server.stop();
+    }
+  };
+  try {
+    const settings = 'config_version=5\n';
+    writeFileSync(join(projectPath, 'project.godot'), settings);
+    const bare = await status();
+    assert.equal(get(bare, 'editor', 'connected'), false, JSON.stringify(bare));
+    assert.equal(
+      get(bare, 'editor', 'mayYetConnect'),
+      false,
+      `no addon, so nothing can come: ${JSON.stringify(bare)}`,
+    );
+    assert.equal(
+      get(bare, 'editor', 'editorCannotConnect', 'note'),
+      `No editor of this project can connect: the gdharness editor addon is not installed in ${projectPath}.`,
+      JSON.stringify(bare),
+    );
+    assert.match(
+      String(asArray(get(bare, 'editor', 'editorCannotConnect', 'remedies'))[0]),
+      /^No gdharness tool installs the addon: run {2}npx -y gdharness@/,
+      JSON.stringify(bare),
+    );
+
+    // Installed and enabled, the same young server is waiting on an editor that could still come,
+    // which is what tells the refusal above from a server that says false to everything.
+    mkdirSync(join(projectPath, 'addons', 'gdharness_editor'), { recursive: true });
+    writeFileSync(
+      join(projectPath, 'project.godot'),
+      `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`,
+    );
+    const ready = await status();
+    assert.equal(
+      get(ready, 'editor', 'mayYetConnect'),
+      true,
+      `a project an editor could connect from: ${JSON.stringify(ready)}`,
+    );
+    assert.equal(get(ready, 'editor', 'editorCannotConnect'), undefined, JSON.stringify(ready));
   } finally {
     sweep(projectPath);
   }
@@ -12995,9 +13066,11 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     );
   const stop = async (server: ServerProcess, game: number, logged: string): Promise<void> => {
     const asked = Date.now();
+    // Not asked to close first: the game has the runtime addon, and a close would end it before the
+    // keeper or the signal were reached.
     const answered = await server.request(
       'tools/call',
-      { name: 'editor_run', arguments: { op: 'stop' } },
+      { name: 'editor_run', arguments: { op: 'stop', graceful: false } },
       ENGINE_CALL_TIMEOUT_MS,
     );
     assert.equal(
@@ -13098,7 +13171,13 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
         'tools/call',
         {
           name: 'editor_run',
-          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: WINDOWED_BOOT_MS },
+          arguments: {
+            projectPath: project,
+            op: 'start',
+            headless: true,
+            runtimeWaitMs: WINDOWED_BOOT_MS,
+            graceful: false,
+          },
         },
         WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
       ),
@@ -13130,7 +13209,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
       const answered = parseTextContent(
         await fourth.request(
           'tools/call',
-          { name: 'editor_run', arguments: { op: 'stop' } },
+          { name: 'editor_run', arguments: { op: 'stop', graceful: false } },
           ENGINE_CALL_TIMEOUT_MS,
         ),
       );
@@ -13162,6 +13241,215 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     }
     sweep(project);
     sweep(runtime);
+  }
+}
+
+/**
+ * A stop asks the game to close the way a player's close does, and ends it otherwise only when the
+ * close does not.
+ *
+ * Reported from fantasy-guild-manager as #1121: a stop ended the process, so a game keeping a crash
+ * mark until its close never took the mark down, and its next start told the player it had crashed
+ * and turned their mods off. The game here notes the close request and leaving the tree as files, in
+ * a directory of each run's own. One closes, which is the stop the issue asked for. One turns off
+ * auto_accept_quit and stays, so the stop sits out the close wait and ends it, saying why. One is
+ * stopped with graceful: false and sees no close at all. And a start ending the run before it closes
+ * that run too.
+ */
+async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('stop asks the game to close regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-close-first-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-close-first-rt-'));
+  const notes = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-close-first-notes-'));
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtime,
+      GDHARNESS_CLOSE_WAIT_MS: '3000',
+    },
+  });
+  const games: number[] = [];
+  const call = async (args: Record<string, unknown>): Promise<unknown> => {
+    const response = await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: args },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    );
+    return parseTextContent(response) ?? textOf(response);
+  };
+  const start = async (name: string, extra: Record<string, unknown> = {}): Promise<unknown> => {
+    mkdirSync(join(notes, name));
+    const started = await call({
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: WINDOWED_BOOT_MS,
+      env: { CLOSE_NOTES: join(notes, name), ...(extra['env'] as Record<string, string> | undefined) },
+      ...Object.fromEntries(Object.entries(extra).filter(([key]) => key !== 'env')),
+    });
+    assert.equal(
+      get(started, 'runtime', 'listening'),
+      true,
+      `the game should announce: ${JSON.stringify(started)}`,
+    );
+    games.push(asNumber(get(started, 'runtime', 'pid')));
+    return started;
+  };
+  const noted = (name: string): string[] => readdirSync(join(notes, name)).sort();
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Close first"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tif OS.get_environment("KEEP_OPEN") == "1":',
+        '\t\tget_tree().auto_accept_quit = false',
+        '\t_note("ready")',
+        '',
+        '',
+        'func _notification(what: int) -> void:',
+        '\tif what == NOTIFICATION_WM_CLOSE_REQUEST:',
+        '\t\t_note("close_request")',
+        '\telif what == NOTIFICATION_EXIT_TREE:',
+        '\t\t_note("exit_tree")',
+        '',
+        '',
+        'func _note(what: String) -> void:',
+        '\tvar _made: Error = DirAccess.make_dir_absolute(OS.get_environment("CLOSE_NOTES").path_join(what))',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+
+    const closing = await start('closes');
+    const closed = await call({ op: 'stop' });
+    const closedShown = JSON.stringify(closed);
+    assert.equal(get(closed, 'stopped'), true, closedShown);
+    assert.equal(get(closed, 'endedThrough'), 'close', `the close ended it: ${closedShown}`);
+    assert.equal(get(closed, 'exitCode'), 0, `with its own exit code: ${closedShown}`);
+    assert.equal(get(closed, 'exitSignal'), undefined, closedShown);
+    assert.equal(get(closed, 'notClosedBecause'), undefined, closedShown);
+    assert.match(
+      text(get(closed, 'note')),
+      /^The game was asked to close, as a player's close asks it, and exited/,
+      closedShown,
+    );
+    assert.deepEqual(noted('closes'), ['close_request', 'exit_tree', 'ready'], 'its own close ran');
+    assert.equal(isAlive(asNumber(get(closing, 'runtime', 'pid'))), false, 'and it has gone');
+
+    // A game that does not quit on a close is given the wait and then ended, as a stop always did.
+    const staying = await start('stays', { env: { KEEP_OPEN: '1' } });
+    const kept = await call({ op: 'stop' });
+    const keptShown = JSON.stringify(kept);
+    assert.equal(get(kept, 'stopped'), true, keptShown);
+    assert.match(text(get(kept, 'endedThrough')), /^(keeper|signal)$/, keptShown);
+    assert.match(
+      text(get(kept, 'notClosedBecause')),
+      /^it was asked to close and was still running 3 seconds later; its tree does not quit on a close by itself \(auto_accept_quit is off\)/,
+      keptShown,
+    );
+    assert.match(
+      text(get(kept, 'note')),
+      /It was asked to close first and was not ended by that: it was asked/,
+      keptShown,
+    );
+    assert.match(text(get(kept, 'note')), /Ended that way, the game ran none of its own close\./, keptShown);
+    assert.deepEqual(noted('stays'), ['close_request', 'ready'], 'the close reached it and it stayed');
+    assert.equal(isAlive(asNumber(get(staying, 'runtime', 'pid'))), false, 'and it has gone');
+
+    // Asked not to: no close reaches the game.
+    await start('killed');
+    const killed = await call({ op: 'stop', graceful: false });
+    const killedShown = JSON.stringify(killed);
+    assert.equal(get(killed, 'stopped'), true, killedShown);
+    assert.match(text(get(killed, 'endedThrough')), /^(keeper|signal)$/, killedShown);
+    assert.equal(get(killed, 'notClosedBecause'), undefined, killedShown);
+    assert.match(
+      text(get(killed, 'note')),
+      /It was not asked to close first, since graceful was false, so it ran none of its own close/,
+      killedShown,
+    );
+    assert.deepEqual(noted('killed'), ['ready'], 'no close reached it');
+
+    // A runtime announced under the game's number for another project is not asked: a close ends a
+    // game as surely as a kill, and the number alone does not say whose game it is.
+    const disowned = asNumber(get(await start('disowned'), 'runtime', 'pid'));
+    const announcement = readdirSync(runtime, { recursive: true, encoding: 'utf8' })
+      .map((name) => join(runtime, name))
+      .find((file) => {
+        try {
+          return get(JSON.parse(readFileSync(file, 'utf8')) as unknown, 'pid') === disowned;
+        } catch {
+          return false;
+        }
+      });
+    assert.ok(announcement !== undefined, `the game's announcement under ${runtime}`);
+    const announced = JSON.parse(readFileSync(announcement, 'utf8')) as Record<string, unknown>;
+    const elsewhere = join(notes, 'elsewhere');
+    writeFileSync(
+      announcement,
+      JSON.stringify({ ...announced, project: { name: 'Elsewhere', path: elsewhere } }),
+    );
+    const refused = await call({ op: 'stop' });
+    const refusedShown = JSON.stringify(refused);
+    assert.equal(get(refused, 'stopped'), true, refusedShown);
+    assert.match(text(get(refused, 'endedThrough')), /^(keeper|signal)$/, refusedShown);
+    assert.equal(
+      get(refused, 'notClosedBecause'),
+      `the runtime announced under pid ${disowned} is a game of ${elsewhere}, not of this run's project`,
+      refusedShown,
+    );
+    assert.deepEqual(noted('disowned'), ['ready'], 'no close reached it');
+
+    // A start that ends the run before it closes that run the same way.
+    await start('replaced');
+    const replacing = await start('replacing');
+    assert.equal(
+      get(replacing, 'endedPreviousRunThrough'),
+      'close',
+      `the start closed the run before it: ${JSON.stringify(replacing)}`,
+    );
+    assert.deepEqual(noted('replaced'), ['close_request', 'exit_tree', 'ready'], 'the replaced run closed');
+    const last = await call({ op: 'stop' });
+    assert.equal(get(last, 'endedThrough'), 'close', JSON.stringify(last));
+  } finally {
+    for (const game of games) {
+      if (isAlive(game)) {
+        process.kill(game);
+      }
+    }
+    await server.stop().catch(() => undefined);
+    sweep(project);
+    sweep(runtime);
+    sweep(notes);
   }
 }
 
@@ -13266,6 +13554,176 @@ async function testAClickThatDoesNotProcessSaysWhy(): Promise<void> {
       'the pause, and the root it inherits pausable from',
     );
     await stopItsRun(server);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
+ * A click in a native window the platform has not said the pointer entered presses what it lands on.
+ *
+ * Reported from Tall Tales Inn as #1122: with subwindow embedding off, Godot hovers a control in a
+ * native window only after the platform's mouse-enter, which an injected event never brings, and a
+ * BaseButton takes a press only while hovered, so a click on its first-run "Yes", in a borderless
+ * window at the screen's right edge, answered `landed: false, hovered: null` and pressed nothing.
+ *
+ * Windowed, which needs CI: the game's window goes to the right edge of the screen, away from where
+ * any pointer rests, and opens a second native window beside it. Three buttons in the first, one
+ * clicked by path, one by its position and one under a panel that stops the pointer, which the panel
+ * takes, and one in the second. Headless as well, wherever this runs: the engine fakes the root's
+ * mouse-enter there, since the headless platform puts its pointer at the origin, inside the window,
+ * so the engine hovers by itself and nothing may be supplied or entered twice over it.
+ */
+async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('click in a window nothing entered regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unentered-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unentered-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Unentered"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[display]\n\nwindow/size/viewport_width=64\nwindow/size/viewport_height=64\n' +
+        'window/size/borderless=true\nwindow/size/no_focus=true\nwindow/subwindows/embed_subwindows=false\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Control',
+        '',
+        'var pressed: Array[String] = []',
+        'var entered: Array[String] = []',
+        'var left: Array[String] = []',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\t# A headless engine embeds whatever the project says, and nothing is shown yet to refuse it.',
+        '\tget_tree().root.gui_embed_subwindows = false',
+        '\tvar buttons: Array[Button] = [$Yes, $No, $Covered]',
+        '\tif DisplayServer.get_name() != "headless":',
+        '\t\tvar screen: Rect2i = DisplayServer.screen_get_usable_rect()',
+        '\t\tget_window().position = Vector2i(screen.end.x - 80, screen.position.y + 16)',
+        '\t\tvar second: Window = Window.new()',
+        '\t\tsecond.name = "Second"',
+        '\t\tsecond.borderless = true',
+        '\t\tsecond.unfocusable = true',
+        '\t\tsecond.size = Vector2i(64, 64)',
+        '\t\tsecond.position = Vector2i(screen.end.x - 160, screen.position.y + 16)',
+        '\t\tvar other: Button = Button.new()',
+        '\t\tother.name = "Other"',
+        '\t\tother.text = "O"',
+        '\t\tother.position = Vector2(4, 4)',
+        '\t\tother.size = Vector2(56, 40)',
+        '\t\tsecond.add_child(other)',
+        '\t\tadd_child(second)',
+        '\t\tbuttons.append(other)',
+        '\tfor button: Button in buttons:',
+        '\t\tvar named: String = button.name',
+        '\t\tvar _p: int = button.pressed.connect(func() -> void: pressed.append(named))',
+        '\t\tvar _e: int = button.mouse_entered.connect(func() -> void: entered.append(named))',
+        '\t\tvar _l: int = button.mouse_exited.connect(func() -> void: left.append(named))',
+        '',
+        '',
+        'func record() -> Dictionary:',
+        '\treturn {"pressed": pressed, "entered": entered, "left": left}',
+        '',
+      ].join('\n'),
+    );
+    // Inside the 64 by 64 viewport a headless game draws.
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\noffset_right = 64.0\noffset_bottom = 64.0\nmouse_filter = 2\nscript = ExtResource("1")\n\n' +
+        '[node name="Yes" type="Button" parent="."]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Y"\n\n' +
+        '[node name="No" type="Button" parent="."]\noffset_left = 34.0\noffset_right = 62.0\noffset_bottom = 20.0\ntext = "N"\n\n' +
+        '[node name="Covered" type="Button" parent="."]\noffset_top = 30.0\noffset_right = 30.0\noffset_bottom = 60.0\ntext = "C"\n\n' +
+        '[node name="Over" type="Panel" parent="."]\noffset_top = 28.0\noffset_right = 40.0\noffset_bottom = 62.0\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return parseTextContent(response) ?? textOf(response);
+    };
+    const read = async (property: string): Promise<unknown> =>
+      get(
+        await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'record' }),
+        'result',
+        property,
+      );
+    const run = async (headless: boolean): Promise<void> => {
+      const how = headless ? 'headless' : 'windowed';
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless,
+        runtimeWaitMs: headless ? 30_000 : WINDOWED_BOOT_MS,
+      });
+      assert.equal(get(started, 'runtime', 'listening'), true, `${how}: ${JSON.stringify(started)}`);
+
+      const yes = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Yes' });
+      const yesShown = `${how}: ${JSON.stringify(yes)}`;
+      assert.equal(get(yes, 'landed'), true, yesShown);
+      assert.equal(get(yes, 'hovered'), '/root/Main/Yes', yesShown);
+      if (headless) {
+        assert.equal(get(yes, 'hover_supplied'), undefined, `the engine hovered by itself: ${yesShown}`);
+      }
+      assert.deepEqual(await read('pressed'), ['Yes'], `${how}: the click pressed it`);
+
+      // By position, as mouse_click sends it: the hover moves, so Yes is left and No entered.
+      await call('runtime_input', { op: 'mouse_click', x: 48, y: 10 });
+      assert.deepEqual(await read('pressed'), ['Yes', 'No'], `${how}: the click at its position pressed it`);
+      assert.deepEqual(await read('entered'), ['Yes', 'No'], `${how}: each was entered once`);
+      assert.deepEqual(await read('left'), ['Yes'], `${how}: and the first left when the pointer moved on`);
+
+      // Under a panel that stops the pointer, which takes the click.
+      const covered = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Covered' });
+      const coveredShown = `${how}: ${JSON.stringify(covered)}`;
+      assert.equal(get(covered, 'landed'), false, coveredShown);
+      assert.equal(get(covered, 'hovered'), '/root/Main/Over', coveredShown);
+      assert.deepEqual(await read('pressed'), ['Yes', 'No'], `${how}: nothing under the panel was pressed`);
+      assert.deepEqual(await read('left'), ['Yes', 'No'], `${how}: No was left for the panel`);
+
+      if (!headless) {
+        const other = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Second/Other' });
+        const otherShown = JSON.stringify(other);
+        assert.equal(get(other, 'landed'), true, otherShown);
+        assert.equal(get(other, 'hovered'), '/root/Main/Second/Other', otherShown);
+        assert.deepEqual(
+          await read('pressed'),
+          ['Yes', 'No', 'Other'],
+          `the button in the second window: ${otherShown}`,
+        );
+      }
+      await stopItsRun(server);
+    };
+    await run(true);
+    const refused = windowedRunRefused();
+    if (refused === null) {
+      await run(false);
+    } else {
+      console.log(`click in a window nothing entered: the windowed half skipped (${refused})`);
+    }
   } finally {
     await server.stop();
     sweep(project);
@@ -20735,7 +21193,9 @@ async function testAStoppedSpawnedRunGivesWayToAPlay(): Promise<void> {
         runtimeWaitMs: 20_000,
       });
       assert.equal(get(started, 'through'), 'gdharness', JSON.stringify(started));
-      const stopped = await call('editor_run', { op: 'stop' });
+      // Ended by its process, since the signal is what this case reads back; a close would end it
+      // with a code of its own.
+      const stopped = await call('editor_run', { op: 'stop', graceful: false });
       assert.equal(
         get(stopped, 'exitedBeforeStop'),
         false,
@@ -20822,7 +21282,8 @@ async function testAKilledRunHasNoExitCode(): Promise<void> {
         runtimeWaitMs: 20_000,
       });
       assert.equal(get(kept, 'through'), 'gdharness', JSON.stringify(kept));
-      const stopped = await call('editor_run', { op: 'stop' });
+      // Killed rather than closed, since the kill is what has no code.
+      const stopped = await call('editor_run', { op: 'stop', graceful: false });
       assert.equal(
         get(stopped, 'exitCode'),
         null,
@@ -31281,7 +31742,9 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         assert.ok(Date.now() < framesBy, `ten frames of the profile within a minute: ${going}`);
         await delay(250);
       }
-      const stopped = await call({ op: 'stop' });
+      // Ended by its process: a game that closes quits its tree, and the runtime sends the totals as
+      // a game quits whatever the stop does.
+      const stopped = await call({ op: 'stop', graceful: false });
       assert.match(stopped, /"endedThrough": "(keeper|signal)"/, stopped);
       const after = await call({ op: 'profile', limit: 100, callersOf: '@pace_getter' });
       assert.ok(after.trimStart().startsWith('{'), `the stopped run's profile: ${after}`);
@@ -39520,12 +39983,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWorktreeFindsItsMainCheckoutsEngine,
   testAPointerOnTheHiddenDesktopIsNoted,
   testAClickThatDoesNotProcessSaysWhy,
+  testAClickInAWindowNothingEnteredPresses,
   testAHeadlessGameSaysItHasNoWindow,
   testTheKeeperAnswersAStop,
   testTheKeeperAnswersItsDebuggersQuestions,
   testAKeptGamesStackAndValuesRead,
   testAnExitedGamesLastMessagesAreRead,
   testAStopGoesThroughTheKeeper,
+  testAStopAsksTheGameToCloseFirst,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testAGameIsFoundThroughALinkToItsProject,
@@ -39632,6 +40097,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
   testANoEditorRefusalNamesWhatNeedsNone,
+  testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,
