@@ -6209,6 +6209,10 @@ class GodotServer {
   private async diagnosticsOf(
     args: OperationParams,
   ): Promise<{ answer: OperationParams } | { refusal: ToolResponse; perScript: boolean }> {
+    const waited = await this.waitForTheEditorOpenedHere(args, []);
+    if (waited !== null) {
+      return { refusal: waited, perScript: false };
+    }
     const answer = await this.handleLSP('lsp_get_diagnostics', args);
     const payload = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     const refused = this.languageServerRefusal(payload, 'Diagnostics');
@@ -6418,8 +6422,34 @@ class GodotServer {
     return handleLSPTool(await this.lsp(), toolName, args);
   }
 
+  /**
+   * The editor this server opened, waited for when it has not connected yet, so that a call for its
+   * language server is asked on the port it serves. Until the editor says which port that is, the
+   * default is all there is to ask on, and an editor opened here beside another project's is moved
+   * off the default: a diagnostics call made straight after the open was asked of the other
+   * project's editor and refused for it. Null when nothing is on its way or once it has connected,
+   * and the refusal the bridge's calls give when it never does.
+   */
+  private async waitForTheEditorOpenedHere(
+    args: OperationParams,
+    instead: readonly string[],
+  ): Promise<ToolResponse | null> {
+    if (
+      this.godotBridge.isConnected() ||
+      this.launchedEditor === null ||
+      !(await this.launchedEditorIsUp())
+    ) {
+      return null;
+    }
+    return await this.noEditorYet(args, instead);
+  }
+
   /** A script_info question for the language server, whose refusal is the caller's error. */
   private async askScriptInfo(toolName: string, asked: string, args: OperationParams): Promise<ToolResponse> {
+    const waited = await this.waitForTheEditorOpenedHere(args, []);
+    if (waited !== null) {
+      return waited;
+    }
     const answer = await this.handleLSP(toolName, args);
     const refused = this.languageServerRefusal(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), asked);
     return refused === null ? answer : refused.refusal;
@@ -11425,6 +11455,10 @@ class GodotServer {
     const moveTo = asked === undefined ? null : resolveWithinProject(projectPath, asked);
     if (moveTo !== null && !moveTo.ok) {
       return this.createErrorResponse(moveTo.reason);
+    }
+    const waited = await this.waitForTheEditorOpenedHere(args, []);
+    if (waited !== null) {
+      return waited;
     }
 
     // Held in an object rather than a variable, because it is set inside the calls below and read
