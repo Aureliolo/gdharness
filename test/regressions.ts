@@ -19321,6 +19321,33 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
       const current = await call({ op: 'status', resourcePath: 'good.png' });
       assert.equal(get(current, 'resources', 0, 'status'), 'up_to_date', JSON.stringify(current));
 
+      // A name the importer has no option for is said to be one, after the reimport that left it
+      // out: a probe gave a texture `filter`, was told it was updated, and the texture filtered as
+      // before. The option beside it that is real is said to have been applied, which it was.
+      const unknownOption = await server.request(
+        'tools/call',
+        {
+          name: 'project_import',
+          arguments: {
+            projectPath: project,
+            op: 'set_options',
+            resourcePath: 'good.png',
+            options: { filter: 0, 'compress/mode': 0 },
+          },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const refusedText = textOf(unknownOption) ?? '';
+      assert.equal(get(unknownOption, 'result', 'isError'), true, refusedText);
+      assert.match(
+        refusedText,
+        /^filter is not an option of this resource's importer: the reimport left it out of the import file, so it changed nothing\. compress\/mode was applied\. Its options are: [^.]*compress\/mode[^.]*\./,
+        refusedText,
+      );
+      const after = readFileSync(join(project, 'good.png.import'), 'utf8');
+      assert.match(after, /^compress\/mode=0$/m, `the real option was applied:\n${after}`);
+      assert.doesNotMatch(after, /^filter=/m, `and the import file holds no filter:\n${after}`);
+
       // A scene is loaded as it is and never imported. Asked for by name, it ran a pass and came
       // back as not reimported, which reads as its import failing.
       writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
