@@ -13321,6 +13321,11 @@ async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
     assert.equal(get(killed, 'stopped'), true, killedShown);
     assert.match(text(get(killed, 'endedThrough')), /^(keeper|signal)$/, killedShown);
     assert.equal(get(killed, 'notClosedBecause'), undefined, killedShown);
+    assert.match(
+      text(get(killed, 'note')),
+      /It was not asked to close first, since graceful was false, so it ran none of its own close/,
+      killedShown,
+    );
     assert.deepEqual(noted('killed'), ['ready'], 'no close reached it');
 
     // A runtime announced under the game's number for another project is not asked: a close ends a

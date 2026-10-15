@@ -978,6 +978,8 @@ export function stopVerdict(stop: {
   readonly endedThrough?: EndedThrough;
   /** Why the game was not ended by the close the stop asked for first. */
   readonly notClosedBecause?: string;
+  /** False for a stop given graceful: false, which asks no close. */
+  readonly graceful?: boolean;
 }): StopVerdict {
   const notClosed =
     stop.notClosedBecause === undefined
@@ -1043,7 +1045,11 @@ export function stopVerdict(stop: {
           : 'The editor was asked to stop the scene it is playing.'
         : 'The process named under endedPid was ended.'
     }${stop.exitSignal === null ? '' : ` It was ended by ${stop.exitSignal} and so has no exit code.`}${notClosed}${
-      stop.notClosedBecause === undefined ? '' : ' Ended that way, the game ran none of its own close.'
+      stop.notClosedBecause !== undefined
+        ? ' Ended that way, the game ran none of its own close.'
+        : stop.graceful === false
+          ? ' It was not asked to close first, since graceful was false, so it ran none of its own close, which a game keeping a crash mark reads as a crash.'
+          : ''
     }`,
     withChildren: true,
   };
@@ -10817,6 +10823,7 @@ class GodotServer {
       ...(stopped.notEndedBecause === undefined ? {} : { notEndedBecause: stopped.notEndedBecause }),
       ...(stopped.endedThrough === undefined ? {} : { endedThrough: stopped.endedThrough }),
       ...(stopped.notClosedBecause === undefined ? {} : { notClosedBecause: stopped.notClosedBecause }),
+      graceful: readBoolean(args, 'graceful') !== false,
     });
     return this.jsonTextResponse({
       stopped: verdict.stopped,
