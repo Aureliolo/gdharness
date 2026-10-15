@@ -157,7 +157,7 @@ import {
   normalizeLSPError,
 } from './lsp_client.js';
 import { launchOutsideTheTree } from './outside.js';
-import { isSameDirectory, isWithinRoot, realPathOr, resolveWithinProject } from './paths.js';
+import { exportedBuild, isSameDirectory, isWithinRoot, realPathOr, resolveWithinProject } from './paths.js';
 import { acceptsConnections, notListeningNote } from './port-probe.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import {
@@ -7793,6 +7793,22 @@ class GodotServer {
     if (sceneToRun && !sceneToRun.ok) {
       return this.createErrorResponse(sceneToRun.reason, PATH_SOLUTIONS);
     }
+    const build = readNonEmptyString(args, 'executable');
+    const exported = build === undefined ? null : exportedBuild(project.value.path, build);
+    if (exported !== null && !exported.ok) {
+      return this.createErrorResponse(exported.reason, PATH_SOLUTIONS);
+    }
+    if (exported !== null && scene !== undefined) {
+      return this.createErrorResponse(
+        'An exported build runs the main scene its pack holds, and takes no scene: leave scene out, or run the project without executable.',
+      );
+    }
+    // A release build refuses the debugger's flags and quits, and the profiler is the debugger.
+    if (exported !== null && readBoolean(args, 'profile') === true) {
+      return this.createErrorResponse(
+        'A profile is read through the debugger, and an exported build is started without one, since a release build quits when given --remote-debug. Profile the project without executable.',
+      );
+    }
     const given = this.gameArguments(args);
     if (!given.ok) {
       return given.response;
@@ -7816,13 +7832,15 @@ class GodotServer {
     }
     // Asked to run a project with no main scene, the engine puts up a modal box and waits for
     // a click, even headless on Windows: a process on a pipe that never exits.
-    if (!sceneToRun && !hasMainScene(project.value.file)) {
+    if (exported === null && !sceneToRun && !hasMainScene(project.value.file)) {
       return this.createErrorResponse('The project sets no main scene, so there is nothing to run.', [
         'Pass scene to run one scene',
         'Choose the main scene with project_settings set_main_scene',
       ]);
     }
-    const engine = await this.engine();
+    // An exported build is its own engine, so it needs no Godot here to start.
+    const engine =
+      exported?.ok === true ? { ok: true as const, value: exported.absolutePath } : await this.engine();
     if (!engine.ok) {
       return engine.response;
     }
@@ -7926,6 +7944,7 @@ class GodotServer {
     const silent = resolveSilent(args['silent'], process.env) && !headless;
     const profiled = readBoolean(args, 'profile') === true;
     if (
+      exported === null &&
       this.godotBridge.isConnected() &&
       editorWouldPlay &&
       given.value.length === 0 &&
@@ -7946,7 +7965,7 @@ class GodotServer {
     }
 
     const cmdArgs = runArguments({
-      projectPath: project.value.path,
+      projectPath: exported === null ? project.value.path : null,
       headless,
       scene: sceneArgument,
       userArgs: given.value,
@@ -7965,6 +7984,7 @@ class GodotServer {
       // unless the caller asked to see it. A headless run has no window to put anywhere.
       headless || args['visible'] === true ? undefined : HIDDEN_DESKTOP,
       profiled,
+      exported === null,
     );
     if ('error' in started) {
       return this.createErrorResponse(`The game could not be started: ${started.error}`, [
@@ -7985,14 +8005,18 @@ class GodotServer {
     // arguments has been handed a game that editor is not holding, so the debug tools will not
     // answer about it however connected the editor is.
     const spawnedInstead =
-      this.godotBridge.isConnected() && editorWouldPlay && (given.value.length > 0 || flags.value.length > 0)
-        ? ` The editor cannot be handed arguments for a game it plays, so this one was started here.${OWN_DEBUGGER}`
-        : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
-          ? ` The editor plays a game with its own environment, so a run given one was started here.${OWN_DEBUGGER}`
-          : this.godotBridge.isConnected() && editorWouldPlay && silent
-            ? ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
-              `started here${args['silent'] === true ? '' : ', silent because GDHARNESS_SILENT says so'}, and silent: false plays it through the editor.${OWN_DEBUGGER}`
-            : '';
+      exported !== null
+        ? ' An exported build is started without a debugger, since a release build quits when given one, so breakpoints and debug_state do not reach it.'
+        : this.godotBridge.isConnected() &&
+            editorWouldPlay &&
+            (given.value.length > 0 || flags.value.length > 0)
+          ? ` The editor cannot be handed arguments for a game it plays, so this one was started here.${OWN_DEBUGGER}`
+          : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
+            ? ` The editor plays a game with its own environment, so a run given one was started here.${OWN_DEBUGGER}`
+            : this.godotBridge.isConnected() && editorWouldPlay && silent
+              ? ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
+                `started here${args['silent'] === true ? '' : ', silent because GDHARNESS_SILENT says so'}, and silent: false plays it through the editor.${OWN_DEBUGGER}`
+              : '';
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
     // in `ended`, because ending a run goes through the sweep that drops these, so the start left
@@ -8011,6 +8035,7 @@ class GodotServer {
       through: 'gdharness',
       alsoRunning: stranded.length === 0 ? undefined : stranded.map((one) => one.pid),
       pid: started.pid,
+      executable: exported?.ok === true ? exported.relativePath : undefined,
       arguments: cmdArgs,
       argsNote: engineFlagsNote(given.value),
       // Named here rather than only by editor_output, because a caller who wants to watch the
@@ -8035,12 +8060,12 @@ class GodotServer {
       endedPreviousRun: endedPreviousRun(ended),
       previousRunLeft: previousRunLeft(ended),
       ...previousRunHow(ended),
-      runtime: await this.runtimeUp(
-        project.value.path,
-        alreadyPlaying,
-        runtimeWaitMs,
-        given.value.length > 0,
-      ),
+      // Not waited for: a release export ships without the runtime addon, and one that keeps it
+      // announces the folder it runs from rather than this project.
+      runtime:
+        exported !== null
+          ? undefined
+          : await this.runtimeUp(project.value.path, alreadyPlaying, runtimeWaitMs, given.value.length > 0),
       message: `Use editor_output for what it prints and editor_run stop to end it.${started.keeper !== undefined && handed.length > 0 ? ' It stops at the lines under breakpoints, and debug_state stack reads where it is held.' : ''}${spawnedInstead}${endedForThis}${alsoRunning}`,
     });
   }
@@ -8931,6 +8956,7 @@ class GodotServer {
     env?: NodeJS.ProcessEnv,
     desktop?: string,
     profiled = false,
+    debugged = true,
   ): Promise<GodotProcess | { error: string }> {
     const startedAt = Date.now();
     const transcript = openTranscript(startedAt);
@@ -8953,7 +8979,7 @@ class GodotServer {
         projectPath,
         ...this.servedBy(),
         ...(profile === undefined ? {} : { profile }),
-        breakpoints: this.breakpointsForAGame(projectPath),
+        ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
       },
       ...(desktop === undefined ? {} : { desktop }),
     });

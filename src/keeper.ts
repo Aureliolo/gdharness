@@ -319,7 +319,7 @@ async function keep(): Promise<void> {
   // engine dials once, as it starts, and runs with no debugger if nobody answers.
   const profiled = run?.profile === undefined ? null : profiledBy(run.profile, run.projectPath);
   const debuggerPeer =
-    run === undefined
+    run === undefined || run.debugged === false
       ? null
       : await GameDebugger.open(run.breakpoints ?? [], profiled === null ? [] : [profiled.observer]);
   const toStart =

@@ -1212,6 +1212,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           "start: run the game with no sound out of the machine, by starting the engine with --audio-driver Dummy: every stream still plays and every playback position still advances, so what is playing can still be asked. The editor takes no engine flags for a game it plays, so a silent windowed run is started by this server, whose keeper is its debugger rather than the editor. A headless run, check's included, is silent already. Default false, or true when GDHARNESS_SILENT is set in the server's environment to anything but 0 or false; silent: false then plays through the editor as before.",
       },
+      executable: {
+        type: 'string',
+        ops: ['start'],
+        description:
+          'start: an exported build to run instead of the project, as a path inside the project such as export/windows/game.exe, so what a player runs can be measured. It takes args, engineArgs, savesIn, env, headless and visible as the project does, goes on the hidden desktop the same way, and is ended by stop, but takes no scene (its pack holds the main scene) and no profile, and has no debugger: a release build quits when given one. Its runtime is not waited for.',
+      },
       savesIn: {
         type: 'string',
         ops: ['start', 'check'],

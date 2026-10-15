@@ -1,4 +1,4 @@
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 /**
@@ -165,4 +165,35 @@ export function resolveWithinProject(projectPath: string, candidatePath: string)
   }
 
   return { ok: true, absolutePath, relativePath };
+}
+
+/**
+ * An exported build to start, which must already be a file inside the project, judged by where it
+ * really is. Followed through links because this is a file this server will run: a link inside the
+ * project pointing at any program on the machine would otherwise be started as the game.
+ */
+export function exportedBuild(projectPath: string, candidatePath: string): Containment {
+  const found = resolveWithinProject(projectPath, candidatePath);
+  if (!found.ok) {
+    return found;
+  }
+  let real: string;
+  try {
+    real = realpathSync.native(found.absolutePath);
+  } catch {
+    return {
+      ok: false,
+      reason: `There is no ${found.relativePath} in the project to start: export the build first, with project_export run.`,
+    };
+  }
+  if (!isWithinRoot(realPathOr(projectPath), real)) {
+    return {
+      ok: false,
+      reason: `${found.relativePath} leads outside the project, to ${real}, so it is not started.`,
+    };
+  }
+  if (!statSync(real).isFile()) {
+    return { ok: false, reason: `${found.relativePath} is not a file, so there is nothing to start.` };
+  }
+  return { ok: true, absolutePath: real, relativePath: found.relativePath };
 }
