@@ -16,7 +16,7 @@ import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, wri
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DESKTOP_VARIABLE, throughHelper } from './desktop.js';
+import { DESKTOP_VARIABLE, ensureHelperCompiled, throughHelper } from './desktop.js';
 import { GameDebugger } from './game-debugger.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
 import {
@@ -99,6 +99,12 @@ async function startThroughHelper(
   const errorFile = join(scratch, 'error');
   const where = spec.desktop === undefined ? 'without activation' : `on the ${spec.desktop} desktop`;
   try {
+    // Under its own budget, before the start's, so a slow compile is neither counted as a slow
+    // start nor ended halfway by one.
+    const compiled = await ensureHelperCompiled();
+    if (compiled !== null) {
+      return { error: `it could not be started ${where}: ${compiled}` };
+    }
     const wrapper = throughHelper({ ...spec, directory: process.cwd() }, spec.command, spec.args, {
       spec: join(scratch, 'spec.json'),
       pid: pidFile,
@@ -126,7 +132,6 @@ async function startThroughHelper(
     started.child.once('exit', () => {
       exited.now = true;
     });
-    // Compiling the helper takes a few seconds the first time, and an engine is quick to start after.
     for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
       const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8').trim()) : Number.NaN;
       if (Number.isInteger(pid) && pid > 0) {

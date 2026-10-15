@@ -67,7 +67,7 @@ import {
 import { classNotePath, readClassNote } from '../src/class-note.js';
 import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
-import { HIDDEN_DESKTOP, windowsCommandLine } from '../src/desktop.js';
+import { ensureHelperCompiled, HIDDEN_DESKTOP, helperAssembly, windowsCommandLine } from '../src/desktop.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import {
   bursts,
@@ -10397,6 +10397,63 @@ async function testALaunchWithoutActivationSaysSo(): Promise<void> {
     assert.doesNotMatch(quiet, new RegExp(HIDDEN_DESKTOP), `on the desktop in use: ${quiet}`);
   } finally {
     sweep(scratch);
+  }
+}
+
+/**
+ * The desktop helper is compiled once, apart from any start, and a compile that died leaves nothing
+ * holding the next one.
+ *
+ * It used to be compiled inside the first windowed start on a machine. On a loaded Windows CI runner
+ * that compile ran past the start's sixty seconds, the keeper ended it half done, and the next start
+ * compiled it again. Now the first server compiles it as it starts, and a start waits for that compile
+ * under a budget of its own. A real Windows PowerShell does the compiling, into a directory of this
+ * case's own, so the machine's own copy is neither used nor touched.
+ */
+async function testTheDesktopHelperIsCompiledOnce(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('desktop helper regression skipped (Windows only)');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-'));
+  try {
+    const assembly = helperAssembly(directory);
+    const lock = `${assembly}.compiling`;
+
+    // Held by a process that is running: a server starting up goes on without it, and a start
+    // waits for it until its budget runs out.
+    writeFileSync(lock, String(process.pid));
+    assert.equal(await ensureHelperCompiled(directory, 5_000, false), null, 'a server starting goes on');
+    assert.equal(existsSync(assembly), false, 'without compiling beside the one holding the lock');
+    assert.equal(
+      await ensureHelperCompiled(directory, 1_000),
+      'the desktop helper was not compiled within 1000 ms',
+      'a start waits for the compile it found under way, for its budget and no longer',
+    );
+
+    // Held by a process that has gone, as a server ended mid-compile leaves it: taken at once.
+    const ended = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
+    assert.ok(ended > 0 && !alive(ended), 'the case needs a pid that has gone');
+    writeFileSync(lock, String(ended));
+    // Two at once, as a suite's servers start: one compiles and the other waits for its assembly.
+    const startedAt = Date.now();
+    const both = await Promise.all([
+      ensureHelperCompiled(directory, 90_000),
+      ensureHelperCompiled(directory, 90_000),
+    ]);
+    assert.deepEqual(both, [null, null], `both see the helper compiled: ${JSON.stringify(both)}`);
+    assert.ok(existsSync(assembly), 'the helper is compiled');
+    assert.ok(Date.now() - startedAt < 120_000, 'and the dead lock held nothing up');
+    assert.deepEqual(
+      readdirSync(directory).filter((name) => name !== basename(assembly)),
+      [],
+      `no lock, partial assembly or source is left beside it: ${readdirSync(directory).join(', ')}`,
+    );
+    const compiledAt = statSync(assembly).mtimeMs;
+    assert.equal(await ensureHelperCompiled(directory), null, 'a later call finds it');
+    assert.equal(statSync(assembly).mtimeMs, compiledAt, 'and compiles nothing');
+  } finally {
+    sweep(directory);
   }
 }
 
@@ -39307,6 +39364,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunOnItsOwnDesktopIsThere,
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,
+  testTheDesktopHelperIsCompiledOnce,
   testARunOutlivesItsServersTree,
   testAnotherProjectsRunLeavesOursStoppable,
   testAGameNoNoteNamesIsStoppedByItsNumber,
