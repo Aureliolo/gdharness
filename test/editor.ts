@@ -1465,6 +1465,120 @@ async function testSceneSignals({ call, project }: Editor): Promise<void> {
   assert.equal(asArray(get(await call('scene_signal', { ...scene, op: 'list' }), 'connections')).length, 0);
 }
 
+/**
+ * A scene instanced into another and nodes placed among their siblings, asserted against the file.
+ *
+ * A probe session asked to instance a panel scene into the main scene and was refused, since add
+ * took only a class, and asked to move a Label above another with nothing to do it. An instance is
+ * asserted as the instance line the editor's own Instantiate Child Scene writes, without the
+ * instanced scene's nodes copied in, because a copy reads the same in the tree and stops following
+ * the scene it came from.
+ */
+async function testAScenesInstancedAndPlaced({ call, refusal, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'bits'), { recursive: true });
+  writeFileSync(
+    join(project, 'bits', 'badge.tscn'),
+    [
+      '[gd_scene format=3]',
+      '',
+      '[node name="Badge" type="PanelContainer"]',
+      '',
+      '[node name="Caption" type="Label" parent="."]',
+      'text = "Hello"',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'bits', 'host.tscn'),
+    [
+      '[gd_scene format=3]',
+      '',
+      '[node name="Host" type="VBoxContainer"]',
+      '',
+      '[node name="First" type="Label" parent="."]',
+      '',
+      '[node name="Second" type="Label" parent="."]',
+      '',
+    ].join('\n'),
+  );
+  const host = { projectPath: project, scenePath: 'res://bits/host.tscn' };
+  const order = (): string[] =>
+    [...fileText(project, 'bits/host.tscn').matchAll(/^\[node name="([^"]+)"/gm)].map(
+      (found) => found[1] ?? '',
+    );
+  try {
+    await call('editor_rescan', { projectPath: project });
+    const added = await call('scene_node', {
+      ...host,
+      op: 'add',
+      instancePath: 'bits/badge.tscn',
+      nodeName: 'Badge',
+      index: 1,
+      properties: { visible: false },
+    });
+    assert.deepEqual(
+      {
+        instanceOf: get(added, 'instanceOf'),
+        nodeType: get(added, 'nodeType'),
+        index: get(added, 'index'),
+      },
+      { instanceOf: 'res://bits/badge.tscn', nodeType: 'PanelContainer', index: 1 },
+      text(added),
+    );
+    const saved = fileText(project, 'bits/host.tscn');
+    assert.match(
+      saved,
+      /\[node name="Badge" parent="\."[^\]\n]* instance=ExtResource\("[^"]+"\)\]\nvisible = false/,
+      saved,
+    );
+    assert.match(saved, /\[ext_resource type="PackedScene"[^\]]* path="res:\/\/bits\/badge\.tscn"/, saved);
+    assert.doesNotMatch(saved, /name="Caption"/, `the instance's own nodes stay in its file: ${saved}`);
+    assert.deepEqual(order(), ['Host', 'First', 'Badge', 'Second'], 'and it went where it was put');
+
+    const moved = await call('scene_node', {
+      ...host,
+      op: 'reparent',
+      nodePath: 'Second',
+      newParentPath: '.',
+      index: 0,
+    });
+    assert.equal(get(moved, 'index'), 0, text(moved));
+    assert.deepEqual(order(), ['Host', 'Second', 'First', 'Badge'], 'a move among siblings is saved');
+
+    // Each refusal for the reason only it has, and the file left as the last write made it.
+    const before = fileText(project, 'bits/host.tscn');
+    const badge = { projectPath: project, scenePath: 'res://bits/badge.tscn' };
+    for (const [args, reason] of [
+      [
+        { ...badge, instancePath: 'bits/host.tscn', nodeName: 'Loop' },
+        /host\.tscn cannot be instanced into res:\/\/bits\/badge\.tscn: it instances it/,
+      ],
+      [
+        { ...host, instancePath: 'bits/host.tscn', nodeName: 'Self' },
+        /cannot be instanced into res:\/\/bits\/host\.tscn: it is that scene/,
+      ],
+      [
+        { ...host, nodeType: 'res://bits/badge.tscn', nodeName: 'Typed' },
+        /is a scene: pass it as instancePath to instance it/,
+      ],
+      [
+        { ...host, nodeType: 'Label', instancePath: 'bits/badge.tscn', nodeName: 'Both' },
+        /and one of them only/,
+      ],
+      [
+        { ...host, nodeType: 'Label', nodeName: 'Far', index: 9 },
+        /index 9 is not a place among the 3 other children of Host: give 0 to 3/,
+      ],
+    ] as const) {
+      assert.match(await refusal('scene_node', { ...args, op: 'add' }), reason);
+    }
+    assert.equal(fileText(project, 'bits/host.tscn'), before, 'and none of the refusals changed the file');
+  } finally {
+    rmSync(join(project, 'bits'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
 /** An animation and a track on it, read back out of the sub-resources the scene gained. */
 async function testSceneAnimation({ call, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: SCENE };
@@ -6012,6 +6126,7 @@ async function main(): Promise<void> {
     ['testAClassWrittenUnderTheEditorNeedsARescan', testAClassWrittenUnderTheEditorNeedsARescan],
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
+    ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [
       'testAClassReloadedOnceItsBaseExistsReachesItsUsers',

@@ -101,8 +101,16 @@ export function isWithinRoot(rootPath: string, candidatePath: string): boolean {
  * The one caller that legitimately holds a leading slash is the `godot://` URI reader, where
  * `URL` put it there. It strips it itself, being the only place that knows the string is a URL
  * pathname rather than something a caller typed.
+ *
+ * The project directory itself is refused unless [param options] allows it, for a caller asking
+ * about a folder, where the whole project is one: "res://" given to such a caller was refused as
+ * not a file while every folder inside it was taken.
  */
-export function resolveWithinProject(projectPath: string, candidatePath: string): Containment {
+export function resolveWithinProject(
+  projectPath: string,
+  candidatePath: string,
+  options: { root?: boolean } = {},
+): Containment {
   const trimmed = candidatePath.trim();
   if (trimmed === '') {
     return { ok: false, reason: 'Path is empty.' };
@@ -160,7 +168,7 @@ export function resolveWithinProject(projectPath: string, candidatePath: string)
   }
 
   const relativePath = relative(root, absolutePath).split(sep).join('/');
-  if (relativePath === '') {
+  if (relativePath === '' && options.root !== true) {
     return { ok: false, reason: `Path '${trimmed}' is the project directory itself, not a file in it.` };
   }
 

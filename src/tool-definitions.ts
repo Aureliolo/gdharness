@@ -759,7 +759,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_node',
     title: 'Scene nodes',
     description:
-      'One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene, and for a node that belongs to a scene this one instances or inherits. Needs the editor connected.',
+      'One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties, and another scene is instanced by an add with instancePath. set with name renames a node. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene, and for a node that belongs to a scene this one instances or inherits. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -768,11 +768,30 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         description: 'add: where the node goes. Default the root. duplicate: where the copy goes.',
       },
-      nodeType: { type: 'string', description: 'add: the node class, such as "CharacterBody2D".' },
+      nodeType: {
+        type: 'string',
+        description: 'add: the node class, such as "CharacterBody2D". Give this or instancePath.',
+      },
+      instancePath: {
+        type: 'string',
+        ops: ['add'],
+        description:
+          'add: a scene to instance as the new node instead of a class, such as "ui/panel.tscn". It is saved as an instance of that file, the way the editor\'s Instantiate Child Scene saves one, so changes to that scene reach it; properties set its root. A scene that is the target or instances it is refused.',
+      },
       nodeName: { type: 'string', description: "add: the new node's name." },
       properties: PROPERTIES,
       newName: { type: 'string', description: "duplicate: the copy's name." },
-      newParentPath: { type: 'string', description: 'reparent: the new parent.' },
+      newParentPath: {
+        type: 'string',
+        description: 'reparent: the new parent, which may be the one it has, to move it among its siblings.',
+      },
+      index: {
+        type: 'integer',
+        minimum: 0,
+        ops: ['add', 'reparent'],
+        description:
+          "add and reparent: where the node goes among the parent's children, 0 for first. Default last. Child order is draw order in a CanvasItem and layout order in a Container.",
+      },
       includeDefaults: {
         type: 'boolean',
         description: 'get: include properties still at their default. Default false.',
@@ -785,7 +804,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath', 'scenePath'],
     operations: {
-      add: { effect: 'additive', summary: 'add a node of any class', requires: ['nodeType', 'nodeName'] },
+      add: {
+        effect: 'additive',
+        summary: 'add a node of any class, or an instance of a scene',
+        requires: ['nodeName'],
+      },
       get: {
         effect: 'read',
         summary:
@@ -804,7 +827,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       reparent: {
         effect: 'destructive',
-        summary: 'move a node under another parent',
+        summary: 'move a node under another parent, or to another place among its siblings',
         requires: ['nodePath', 'newParentPath'],
       },
       delete: { effect: 'destructive', summary: 'remove a node and its children', requires: ['nodePath'] },

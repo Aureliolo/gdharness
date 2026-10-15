@@ -2337,6 +2337,7 @@ const PATH_SOLUTIONS = [
  */
 export const PROJECT_FILE_ARGUMENTS = [
   'scenePath',
+  'instancePath',
   'scriptPath',
   'resourcePath',
   'newPath',
@@ -2936,7 +2937,7 @@ export function scriptsToDiagnose(
 ): { ok: true; value: string[] | null } | { ok: false; reason: string } {
   const listed = Array.isArray(given);
   if (!listed) {
-    const one = typeof given === 'string' ? resolveWithinProject(projectPath, given) : null;
+    const one = typeof given === 'string' ? resolveWithinProject(projectPath, given, { root: true }) : null;
     if (one === null || !one.ok || !isDirectory(one.absolutePath)) {
       return { ok: true, value: null };
     }
@@ -2957,7 +2958,7 @@ export function scriptsToDiagnose(
         reason: `scriptPath${listed ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a script or a folder in the project.`,
       };
     }
-    const location = resolveWithinProject(projectPath, entry);
+    const location = resolveWithinProject(projectPath, entry, { root: true });
     if (!location.ok) {
       return { ok: false, reason: location.reason };
     }

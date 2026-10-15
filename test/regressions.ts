@@ -13307,6 +13307,17 @@ async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
       `the game should announce: ${JSON.stringify(started)}`,
     );
     games.push(asNumber(get(started, 'runtime', 'pid')));
+    // The runtime is an autoload, in the tree before the main scene, so it can announce before the
+    // scene's _ready has run. A stop that kills at once then met a game that had not reached it,
+    // and its notes read [] on a loaded Windows runner. Each step is about a game that is running.
+    const ready = join(notes, name, 'ready');
+    for (const deadline = Date.now() + ENGINE_CALL_TIMEOUT_MS; !existsSync(ready); ) {
+      assert.ok(
+        Date.now() < deadline,
+        `the ${name} game should reach its _ready: ${JSON.stringify(started)}`,
+      );
+      await delay(50);
+    }
     return started;
   };
   const noted = (name: string): string[] => readdirSync(join(notes, name)).sort();
@@ -17323,6 +17334,15 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       ok: true,
       value: ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd'],
     });
+    // The project itself is a folder too, which is how a caller asks for every script in it.
+    const everyScript = ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd', 'ui/shop.gd'];
+    for (const root of ['res://', '.', ['res://']]) {
+      assert.deepEqual(
+        scriptsToDiagnose(project, root),
+        { ok: true, value: everyScript },
+        `${JSON.stringify(root)} names every script in the project`,
+      );
+    }
     assert.deepEqual(scriptsToDiagnose(project, ['ui', 'scripts/sub', 'ui/shop.gd', 'scripts/gone.gd']), {
       ok: true,
       value: ['ui/shop.gd', 'scripts/sub/b.gd', 'scripts/gone.gd'],
