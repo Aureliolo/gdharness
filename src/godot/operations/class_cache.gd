@@ -93,13 +93,13 @@ func _entry_for(path: String, skipped: Array[Dictionary]) -> Dictionary:
 	if declared.is_empty():
 		return {}
 
-	var base: String = _base_of(path, header, skipped)
-	if base.is_empty():
+	var base: Variant = _base_of(path, header, skipped)
+	if base == null:
 		return {}
 
 	# The field order is the editor's, so a rebuilt file reads as one the editor wrote.
 	return {
-		"base": StringName(base),
+		"base": StringName(str(base)),
 		"class": StringName(declared),
 		"icon": str(header.get("icon", "")),
 		"is_abstract": Read.as_bool(header.get("abstract", false)),
@@ -109,46 +109,157 @@ func _entry_for(path: String, skipped: Array[Dictionary]) -> Dictionary:
 	}
 
 
-# What the editor records as the base: the nearest ancestor with a class_name, else the native
-# class at the top of the chain. A script that extends by path is followed to its own header.
-func _base_of(path: String, header: Dictionary, skipped: Array[Dictionary]) -> String:
-	var visited: Array[String] = [path]
-	var current: Dictionary = header
+# What the editor records as the base, worked out as the engine's own class scan works it out,
+# measured on 4.7.2 against `--import`, so a rebuilt list is the one the editor would write and a
+# rebuild over a current list changes nothing:
+#
+# - nothing extended: RefCounted;
+# - one name, a global class or a native one: that name, unresolved;
+# - a dotted name, `Heard.Named`, an inner class of a global class: nothing, as the scan does not
+#   look names up;
+# - a path: what that script's class records, after walking into the inner classes named after
+#   the path, `"res://heard.gd".Named`, so a parent with a class_name is passed over for its own
+#   base. A path the engine cannot open records nothing, and it opens a relative one from the
+#   project root rather than from the script's folder.
+#
+# Null for a script that extends itself, which is left out of the list and named in [param skipped].
+func _base_of(path: String, header: Dictionary, skipped: Array[Dictionary]) -> Variant:
+	var visited: Array[String] = [path + ":"]
+	var extends_what: Variant = header.get("extends", null)
 	while true:
-		var extends_what: String = str(current.get("extends", ""))
-		if extends_what.is_empty():
+		if extends_what == null:
 			return "RefCounted"
-		if not (extends_what.begins_with('"') or extends_what.begins_with("'")):
-			return extends_what
-		var parent_path: String = extends_what.substr(1, extends_what.length() - 2)
-		if not parent_path.begins_with("res://"):
-			parent_path = visited[visited.size() - 1].get_base_dir().path_join(parent_path)
-		if not FileAccess.file_exists(parent_path):
-			skipped.append({"path": path, "reason": "extends a script that does not exist: " + parent_path})
+		var parts: Dictionary = _extends_parts(str(extends_what))
+		var parent_path: String = parts["path"]
+		var names: Array[String] = parts["names"]
+		if parent_path.is_empty():
+			return names[0] if names.size() == 1 else ""
+		var opened: String = _as_the_engine_opens(parent_path)
+		if not FileAccess.file_exists(opened):
 			return ""
-		if parent_path in visited:
+		var reached: String = opened + ":" + ".".join(PackedStringArray(names))
+		if reached in visited:
 			skipped.append({"path": path, "reason": "extends itself through " + parent_path})
+			return null
+		visited.append(reached)
+		var lines: PackedStringArray = FileAccess.get_file_as_string(opened).split("\n")
+		if names.is_empty():
+			extends_what = _header_in(lines).get("extends", null)
+			continue
+		var inner: Dictionary = _inner_class(lines, names)
+		if inner.is_empty():
 			return ""
-		visited.append(parent_path)
-		current = _header_of(parent_path)
-		var parent_name: String = str(current.get("class_name", ""))
-		if not parent_name.is_empty():
-			return parent_name
+		extends_what = inner.get("extends", null)
 	return ""
 
 
-# The declarations at the top of a script: class_name, what it extends (a class name, or a
-# quoted path), and the @tool, @abstract and @icon annotations. Reading stops at the first
-# statement that is none of those, which is where the body begins.
+# The path and the class names an `extends` names, from the text after the keyword:
+# `"res://heard.gd".Named` is the path and ["Named"], `Heard.Named` no path and two names. The
+# reading stops at whatever follows, a colon or a comment.
+static func _extends_parts(text: String) -> Dictionary:
+	var rest: String = text.strip_edges()
+	var path: String = ""
+	if rest.begins_with('"') or rest.begins_with("'"):
+		var closing: int = rest.find(rest[0], 1)
+		if closing == -1:
+			return {"path": "", "names": [] as Array[String]}
+		path = rest.substr(1, closing - 1)
+		rest = rest.substr(closing + 1)
+	var names: Array[String] = []
+	var name_at: RegEx = Patterns.compiled("^([A-Za-z_][A-Za-z0-9_]*)")
+	var dotted: bool = not path.is_empty()
+	while true:
+		if dotted:
+			if not rest.begins_with("."):
+				break
+			rest = rest.substr(1)
+		dotted = true
+		var found: RegExMatch = name_at.search(rest)
+		if found == null:
+			break
+		names.append(found.get_string(1))
+		rest = rest.substr(found.get_end())
+	return {"path": path, "names": names}
+
+
+# The file the engine's class scan reads for an `extends` path. It opens the path as written, and
+# the engine runs from the project root, so a relative path is read from there.
+static func _as_the_engine_opens(path: String) -> String:
+	if path.is_absolute_path():
+		return path
+	var absolute: String = ProjectSettings.globalize_path("res://").path_join(path).simplify_path()
+	return ProjectSettings.localize_path(absolute)
+
+
+# The inner class [param names] reaches in a script of [param lines], one class inside the
+# previous, as {"found": true, "extends": the text after its keyword} with no "extends" for one that
+# extends nothing, or {} when one of them is not there.
+func _inner_class(lines: PackedStringArray, names: Array[String]) -> Dictionary:
+	var class_line: RegEx = Patterns.compiled("^class\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(.*)$")
+	var inline_extends: RegEx = Patterns.compiled("^extends\\s+(.*)$")
+	var start: int = 0
+	var end: int = lines.size()
+	var depth: int = 0
+	var found: Dictionary = {}
+	for name: String in names:
+		var at: int = -1
+		found = {"found": true}
+		for index: int in range(start, end):
+			var text: String = lines[index].strip_edges()
+			if text.is_empty() or text.begins_with("#") or _indent(lines[index]) != depth:
+				continue
+			var declared: RegExMatch = class_line.search(text)
+			if declared == null or declared.get_string(1) != name:
+				continue
+			at = index
+			var inline: RegExMatch = inline_extends.search(declared.get_string(2).strip_edges())
+			if inline != null:
+				found["extends"] = inline.get_string(1)
+			break
+		if at == -1:
+			return {}
+		start = at + 1
+		var body_end: int = start
+		var body_depth: int = -1
+		for index: int in range(start, end):
+			var text: String = lines[index].strip_edges()
+			if not text.is_empty() and not text.begins_with("#"):
+				var width: int = _indent(lines[index])
+				if width <= depth:
+					break
+				if body_depth == -1:
+					body_depth = width
+			body_end = index + 1
+		end = body_end
+		depth = body_depth
+		if not found.has("extends"):
+			var body: Dictionary = _header_in(lines.slice(start, end))
+			if body.has("extends"):
+				found["extends"] = body["extends"]
+	return found
+
+
+static func _indent(line: String) -> int:
+	return line.length() - line.lstrip(" \t").length()
+
+
 func _header_of(path: String) -> Dictionary:
+	if not FileAccess.file_exists(path):
+		return {}
+	return _header_in(FileAccess.get_file_as_string(path).split("\n"))
+
+
+# The declarations at the top of a script: class_name, what it extends (the text after the
+# keyword, a class name or a quoted path, either followed by inner class names), and the @tool,
+# @abstract and @icon annotations. Reading stops at the first statement that is none of those,
+# which is where the body begins.
+func _header_in(lines: PackedStringArray) -> Dictionary:
 	var header: Dictionary = {}
-	var file: FileAccess = FileAccess.open(path, FileAccess.READ)
-	if not file:
-		return header
 	var annotation: RegEx = Patterns.compiled('^@([a-z_]+)(?:\\(\\s*(?:"([^"]*)")?[^)]*\\))?\\s*')
-	var extends_line: RegEx = Patterns.compiled("^extends\\s+(\\S+)")
-	while not file.eof_reached():
-		var rest: String = file.get_line().strip_edges()
+	var extends_line: RegEx = Patterns.compiled("^extends\\s+(.*)$")
+	var same_line: RegEx = Patterns.compiled("^\\s+extends\\s+(.*)$")
+	for line: String in lines:
+		var rest: String = line.strip_edges()
 		# Annotations may share a line with what they annotate, as in `@abstract class_name X`.
 		var annotated: RegExMatch = annotation.search(rest)
 		while annotated != null:
@@ -167,15 +278,15 @@ func _header_of(path: String) -> Dictionary:
 			var declared: RegExMatch = Patterns.declared_class(rest)
 			if declared != null:
 				header["class_name"] = declared.get_string(1)
-				if not declared.get_string(2).is_empty():
-					header["extends"] = declared.get_string(2)
+				var after: RegExMatch = same_line.search(rest.substr(declared.get_end(1)))
+				if after != null:
+					header["extends"] = after.get_string(1)
 		elif rest.begins_with("extends"):
 			var parent: RegExMatch = extends_line.search(rest)
 			if parent != null:
 				header["extends"] = parent.get_string(1)
 		else:
 			break
-	file.close()
 	return header
 
 

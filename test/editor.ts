@@ -1288,6 +1288,91 @@ async function testAValueTheSceneCannotHoldIsRefused({ call, refusal, project }:
 }
 
 /**
+ * A colon path writes one component of a vector, a colour or a rectangle, as the runtime tools do,
+ * and leaves the rest of the value as it was. Found by a probe pass: "position:x" was refused as a
+ * property Sprite2D does not have, so moving a node along one axis meant reading the vector first
+ * and restating the other axis. A component is typed as itself, so an integer vector's axis refuses
+ * a fraction the way an int property does.
+ */
+async function testAPathWritesOneComponent({ call, refusal, project }: Editor): Promise<void> {
+  const scene = { projectPath: project, scenePath: SCENE };
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Sprite2D', nodeName: 'Placed' });
+  const set = (properties: Record<string, unknown>) => ({
+    ...scene,
+    op: 'set',
+    nodePath: 'Placed',
+    properties,
+  });
+
+  await call(
+    'scene_node',
+    set({ position: { x: 10.5, y: -3 }, region_rect: { position: { x: 1, y: 2 }, size: { x: 30, y: 40 } } }),
+  );
+  const answered = await call(
+    'scene_node',
+    set({ 'position:x': 4, 'region_rect:size:y': 12, 'modulate:a': 0.5, hframes: 4, 'frame_coords:x': 2 }),
+  );
+  assert.deepEqual(
+    get(answered, 'properties', 'position:x'),
+    4,
+    `the answer reads the component back under the path given: ${text(answered)}`,
+  );
+  const read = await call('scene_node', { ...scene, op: 'get', nodePath: 'Placed' });
+  assert.deepEqual(
+    {
+      position: [get(read, 'properties', 'position', 'x'), get(read, 'properties', 'position', 'y')],
+      size: [
+        get(read, 'properties', 'region_rect', 'size', 'x'),
+        get(read, 'properties', 'region_rect', 'size', 'y'),
+      ],
+      alpha: get(read, 'properties', 'modulate', 'a'),
+      red: get(read, 'properties', 'modulate', 'r'),
+      // frame_coords is not stored; the frame it sets is, column 2 of the first row.
+      frame: get(read, 'properties', 'frame'),
+    },
+    { position: [4, -3], size: [30, 12], alpha: 0.5, red: 1, frame: 2 },
+    `each write changed its component and nothing beside it: ${text(read)}`,
+  );
+  const saved = fileText(project, 'fixture.tscn');
+  assert.match(saved, /position = Vector2\(4, -3\)/, saved);
+  assert.match(saved, /region_rect = Rect2\(1, 2, 30, 12\)/, saved);
+  assert.match(saved, /modulate = Color\(1, 1, 1, 0\.5\)/, saved);
+
+  assert.match(
+    await refusal('scene_node', set({ 'position:z': 1 })),
+    /Sprite2D\.position is a Vector2, so it has no z; it has x, y/,
+    'a component the value does not have is refused, naming the ones it has',
+  );
+  assert.match(
+    await refusal('scene_node', set({ 'frame_coords:y': 1.5 })),
+    /frame_coords:y holds whole numbers, and 1\.5 would be cut to fit/,
+    "an integer vector's axis refuses a fraction",
+  );
+  assert.match(
+    await refusal('scene_node', set({ 'hframes:x': 1 })),
+    /Sprite2D\.hframes is an int, which a path does not step into/,
+    'and a number has no components to step into',
+  );
+  assert.match(
+    await refusal('scene_node', set({ 'nonesuch:x': 1 })),
+    /Sprite2D has no property nonesuch\b/,
+    'and the property a path starts from is named when it is missing',
+  );
+  assert.equal(fileText(project, 'fixture.tscn'), saved, 'and none of the refusals changed the file');
+
+  const label = { projectPath: project, resourcePath: 'res://path.tres' };
+  await call('resource_edit', { ...label, op: 'create', resourceType: 'LabelSettings' });
+  await call('resource_edit', { ...label, op: 'modify', properties: { 'shadow_offset:y': 5 } });
+  assert.match(
+    fileText(project, 'path.tres'),
+    /shadow_offset = Vector2\(1, 5\)/,
+    'a resource takes a path the same way, keeping the axis it was not given',
+  );
+
+  await call('scene_node', { ...scene, op: 'delete', nodePath: 'Placed' });
+}
+
+/**
  * Connecting and disconnecting a signal, asserted against the scene file.
  *
  * The file rather than the answer, because the answer was right while the file was not: a
@@ -1304,11 +1389,34 @@ async function testSceneSignals({ call, project }: Editor): Promise<void> {
     methodName: '_on_pressed',
   };
 
-  await call('scene_signal', { ...scene, op: 'connect', ...connection });
+  const first = await call('scene_signal', { ...scene, op: 'connect', ...connection });
+  assert.equal(
+    get(first, 'alreadyConnected'),
+    undefined,
+    `a new connection is not one already there: ${text(first)}`,
+  );
   assert.match(
     fileText(project, 'fixture.tscn'),
     /\[connection signal="pressed" from="Press" to="\." method="_on_pressed"\]/,
     'the connection should be in the saved scene',
+  );
+
+  // The same pair again says it was already connected, and a change of flags says what they were.
+  const again = await call('scene_signal', { ...scene, op: 'connect', ...connection });
+  assert.deepEqual(
+    { already: get(again, 'alreadyConnected'), before: get(again, 'flagsBefore') },
+    { already: true, before: undefined },
+    text(again),
+  );
+  const deferred = await call('scene_signal', { ...scene, op: 'connect', ...connection, flags: 1 });
+  assert.deepEqual(
+    {
+      already: get(deferred, 'alreadyConnected'),
+      before: get(deferred, 'flagsBefore'),
+      now: get(deferred, 'flagNames'),
+    },
+    { already: true, before: ['persist'], now: ['deferred', 'persist'] },
+    text(deferred),
   );
 
   const listed = asArray(get(await call('scene_signal', { ...scene, op: 'list' }), 'connections'));
@@ -5687,6 +5795,7 @@ async function main(): Promise<void> {
     ['testSceneNodes', testSceneNodes],
     ['testValuesSurviveBeingRead', testValuesSurviveBeingRead],
     ['testAValueTheSceneCannotHoldIsRefused', testAValueTheSceneCannotHoldIsRefused],
+    ['testAPathWritesOneComponent', testAPathWritesOneComponent],
     ['testSceneSignals', testSceneSignals],
     ['testSceneAnimation', testSceneAnimation],
     ['testResources', testResources],

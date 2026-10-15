@@ -221,7 +221,7 @@ const NODE_PATH: JsonSchema = {
 const PROPERTIES: JsonSchema = {
   type: 'object',
   description:
-    'Properties to set, keyed by Godot property name. Vectors, colours and the like may be written as {"x": 1, "y": 2} or tagged {"_type": "Vector2", "x": 1, "y": 2}, which is the form a read answers with, so a value read off one node can be written straight to another. A property holding a node takes the path to it from the node being set, such as "../Player". Each value is read back once set, and one the engine changed or refused is refused with what it holds.',
+    'Properties to set, keyed by Godot property name. Vectors, colours and the like may be written as {"x": 1, "y": 2} or tagged {"_type": "Vector2", "x": 1, "y": 2}, which is the form a read answers with, so a value read off one node can be written straight to another. A key may also be a colon path into one of the components of a vector, a colour, a rectangle or a transform, as GDScript names them, so one axis is written alone: "position:x", "modulate:a", "region_rect:size:y"; a component the value does not have is refused, naming the ones it has. A property holding a node takes the path to it from the node being set, such as "../Player". Each value is read back once set, and one the engine changed or refused is refused with what it holds.',
   additionalProperties: true,
 };
 const XY: JsonSchema = {
@@ -722,7 +722,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: ['projectPath', 'scenePath'],
     operations: {
       create: { effect: 'destructive', summary: 'a new scene with one root node', requires: [] },
-      save: { effect: 'destructive', summary: 'save the scene as it is in the editor', requires: [] },
+      save: {
+        effect: 'destructive',
+        summary:
+          'save the scene as it is in the editor, or as the file loads when the editor does not have it open; from says which',
+        requires: [],
+      },
       save_as: { effect: 'destructive', summary: 'save a copy under newPath', requires: ['newPath'] },
     },
     defaultOperation: 'create',
@@ -800,7 +805,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_signal',
     title: 'Scene signals',
     description:
-      'Signal connections in a scene file. Each connection answers with its flags as the number and as flagNames; persist is on every connection, since a scene saves no other kind. Needs the editor connected.',
+      'Signal connections in a scene file. Each connection answers with its flags as the number and as flagNames; persist is on every connection, since a scene saves no other kind. A connect of a pair already connected says alreadyConnected, with flagsBefore when it changed the flags. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,

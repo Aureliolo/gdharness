@@ -162,6 +162,9 @@ func cannot_hold(
 ## max_value) is set once more after the rest, so the order a caller wrote them in does not decide
 ## what is saved.
 ##
+## A name may be a colon path into a property's components, "position:x" or "region_rect:size:y",
+## spelled as the runtime tools spell it, so one axis can be written without restating the others.
+##
 ## Nothing here saves, so a refusal partway leaves the change in memory and the file as it was. The
 ## caller returns the refusal instead of saving.
 func write_all(target: Object, properties: Dictionary) -> String:
@@ -169,19 +172,23 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	for key: Variant in properties:
 		var property: String = str(key)
 		var declared: Dictionary = declaration(target, property)
+		if declared.is_empty() and ":" in property:
+			declared = _component_slot(target, property)
+			if declared.has("refused"):
+				return str(declared["refused"])
 		if declared.is_empty():
 			return "%s has no property %s" % [target.get_class(), property]
 		var value: Array = value_for(target, declared, properties[key])
 		if not value[0]:
 			return str(value[1])
-		target.set(property, value[1])
+		_write(target, property, value[1])
 		given[property] = value[1]
 
 	for property: String in given:
-		if not same(target.get(property), given[property]):
-			target.set(property, given[property])
+		if not same(read_at(target, property), given[property]):
+			_write(target, property, given[property])
 	for property: String in given:
-		var held: Variant = target.get(property)
+		var held: Variant = read_at(target, property)
 		if not same(held, given[property]):
 			return (
 				(
@@ -191,6 +198,58 @@ func write_all(target: Object, properties: Dictionary) -> String:
 				% [target.get_class(), property, shown(given[property]), shown(held)]
 			)
 	return ""
+
+
+## What [param target] holds under [param key], a property or a colon path into one's components.
+func read_at(target: Object, key: String) -> Variant:
+	if ":" in key and declaration(target, key).is_empty():
+		return target.get_indexed(NodePath(key))
+	return target.get(key)
+
+
+## Writes [param value] under [param key], putting a changed component back into the property it
+## was read out of, and that one into the one above it.
+func _write(target: Object, key: String, value: Variant) -> void:
+	if ":" in key and declaration(target, key).is_empty():
+		target.set_indexed(NodePath(key), value)
+	else:
+		target.set(key, value)
+
+
+## The declaration the last step of [param path] would have, typed as the component it reaches, so
+## a fraction for an integer vector's axis is refused as one for an int property is; or
+## {"refused": why} for the first step that is not there.
+func _component_slot(target: Object, path: String) -> Dictionary:
+	var steps: PackedStringArray = path.split(":")
+	var owner: String = target.get_class()
+	if declaration(target, steps[0]).is_empty():
+		return {"refused": "%s has no property %s" % [owner, steps[0]]}
+	var value: Variant = target.get(steps[0])
+	var walked: String = steps[0]
+	for index: int in range(1, steps.size()):
+		var step: String = steps[index]
+		var has: PackedStringArray = Serialisation.components_of(value)
+		var kind: String = type_string(typeof(value))
+		var sort: String = ("an " if kind.left(1).to_upper() in ["A", "E", "I", "O", "U"] else "a ") + kind
+		if has.is_empty():
+			return {
+				"refused":
+				(
+					(
+						"%s.%s is %s, which a path does not step into: a path reaches the components of a "
+						+ "vector, a colour, a rectangle or a transform."
+					)
+					% [owner, walked, sort]
+				)
+			}
+		if not step in has:
+			return {
+				"refused":
+				"%s.%s is %s, so it has no %s; it has %s" % [owner, walked, sort, step, ", ".join(has)]
+			}
+		value = value[step]
+		walked += ":" + step
+	return {"name": path, "type": typeof(value), "usage": PROPERTY_USAGE_DEFAULT}
 
 
 ## [param raw] as the value [param declared] takes, as [ok, value] or [false, why not].
@@ -607,57 +666,24 @@ func _parse_new_resource(type_tag: String, value: Dictionary) -> Array:
 	return [true, built]
 
 
-## A dictionary with no tag, read against the type the property declares. Anything else is a
-## dictionary the property genuinely wants, and its values are read as values in their own right:
-## kept as the tags they arrived as, a Vector2 read off one node and written to another was saved as
-## a dictionary holding the word "Vector2".
+## A dictionary with no tag, read against the type the property declares, by the fields the tagged
+## form of that type carries: the shape a read answers with, untagged, is a value too. A rectangle
+## written as the position and size a read gave was refused while the four numbers were taken, and
+## a Rect2i, an AABB or a transform had no untagged form at all. Anything else is a dictionary the
+## property genuinely wants, and its values are read as values in their own right: kept as the tags
+## they arrived as, a Vector2 read off one node and written to another was saved as a dictionary
+## holding the word "Vector2".
 func _parse_shaped_dictionary(value: Dictionary, expected_type: int, elements: Array) -> Variant:
-	match expected_type:
-		TYPE_VECTOR2:
-			if value.has("x") and value.has("y"):
-				return Vector2(Read.as_float(value["x"]), Read.as_float(value["y"]))
-		TYPE_VECTOR2I:
-			if value.has("x") and value.has("y"):
-				return Vector2i(Read.as_int(value["x"]), Read.as_int(value["y"]))
-		TYPE_VECTOR3:
-			if value.has("x") and value.has("y") and value.has("z"):
-				return Vector3(
-					Read.as_float(value["x"]), Read.as_float(value["y"]), Read.as_float(value["z"])
-				)
-		TYPE_VECTOR3I:
-			if value.has("x") and value.has("y") and value.has("z"):
-				return Vector3i(Read.as_int(value["x"]), Read.as_int(value["y"]), Read.as_int(value["z"]))
-		TYPE_VECTOR4:
-			if value.has("x") and value.has("y") and value.has("z") and value.has("w"):
-				return Vector4(
-					Read.as_float(value["x"]),
-					Read.as_float(value["y"]),
-					Read.as_float(value["z"]),
-					Read.as_float(value["w"])
-				)
-		TYPE_COLOR:
-			if value.has("r") and value.has("g") and value.has("b"):
-				return Color(
-					Read.as_float(value["r"]),
-					Read.as_float(value["g"]),
-					Read.as_float(value["b"]),
-					Read.as_float(value.get("a", 1), 1.0)
-				)
-		TYPE_RECT2:
-			if value.has("x") and value.has("y") and value.has("width") and value.has("height"):
-				return Rect2(
-					Read.as_float(value["x"]),
-					Read.as_float(value["y"]),
-					Read.as_float(value["width"]),
-					Read.as_float(value["height"])
-				)
-		TYPE_NODE_PATH:
-			if value.has("path"):
-				return NodePath(str(value["path"]))
-	if expected_type != TYPE_NIL and expected_type != TYPE_DICTIONARY:
-		return value
-
-	return _parse_entries(value, elements)
+	if expected_type == TYPE_NIL or expected_type == TYPE_DICTIONARY:
+		return _parse_entries(value, elements)
+	var tag: String = type_string(expected_type)
+	if Serialisation.REQUIRED.has(tag):
+		var tagged: Dictionary = value.duplicate()
+		tagged["_type"] = tag
+		var built: Variant = _values.deserialize_value(tagged)
+		if typeof(built) == expected_type:
+			return built
+	return value
 
 
 ## The entries of a dictionary a property holds, each value read as a value in its own right, and
