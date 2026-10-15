@@ -4672,7 +4672,14 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
     const said = textOf(await behind.request('tools/call', { name: 'editor_status', arguments: {} })) ?? '';
     assert.match(said, /"projectIs": "0\.0\.1"/, said);
     assert.match(said, /project_addons_behind_this_server/, `the older direction is its own notice: ${said}`);
-    assert.match(said, /gdharness upgrade in the project/, `naming the remedy that works: ${said}`);
+    assert.ok(
+      said.includes(
+        JSON.stringify(
+          `offer to run  npx -y gdharness@${SERVER_VERSION} upgrade "${project}"  in a shell`,
+        ).slice(1, -1),
+      ),
+      `naming the remedy that works, as the command to type: ${said}`,
+    );
     assert.doesNotMatch(said, /project_upgraded_under_this_server/, said);
   } finally {
     await behind.stop();
@@ -4685,18 +4692,19 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
  *
  * An editor older than the server was always told to restart. When the project's own addons are as
  * old as the editor's, a restart loads them again and its own answer says to restart again; what
- * works is gdharness upgrade in the project first.
+ * works is an upgrade of the project first.
  */
 function testAStaleNoteKnowsWhatARestartLoads(): void {
   const onDiskOld = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest', 'old-digest');
-  assert.match(
-    onDiskOld ?? '',
-    /gdharness upgrade in the project installs the 1\.1\.5 addons/,
+  assert.ok(
+    (onDiskOld ?? '').includes(
+      'run  npx -y gdharness@1.1.5 upgrade  in a shell in the project directory, which installs the 1.1.5 addons',
+    ),
     String(onDiskOld),
   );
   const onDiskNew = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest', 'new-digest');
   assert.match(onDiskNew ?? '', /Restart it with editor_launch restart/, String(onDiskNew));
-  assert.doesNotMatch(onDiskNew ?? '', /gdharness upgrade/, String(onDiskNew));
+  assert.doesNotMatch(onDiskNew ?? '', /\bupgrade\b/, String(onDiskNew));
   const noProject = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest');
   assert.match(noProject ?? '', /Restart it with editor_launch restart/, String(noProject));
 }
@@ -12735,7 +12743,9 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
     older,
   );
   assert.ok(
-    older.includes(`gdharness upgrade in ${where} installs the ${SERVER_VERSION} addons`),
+    older.includes(
+      `run  npx -y gdharness@${SERVER_VERSION} upgrade "${where}"  in a shell, which installs the ${SERVER_VERSION} addons`,
+    ),
     `a project holding the old addon is told to upgrade, by its own path: ${older}`,
   );
   const restartable = note({ version: '1.1.20', digest: 'an older digest' }, shipped) ?? '';
@@ -12743,11 +12753,7 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
     restartable,
     /The project holds this server's runtime addon, so the game picks it up when it next starts\./,
   );
-  assert.doesNotMatch(
-    restartable,
-    /gdharness upgrade/,
-    `a current project is not sent to upgrade: ${restartable}`,
-  );
+  assert.doesNotMatch(restartable, /\bupgrade\b/, `a current project is not sent to upgrade: ${restartable}`);
 
   const before = note(undefined, 'an older digest') ?? '';
   assert.match(
@@ -12755,7 +12761,7 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
     /is running a runtime addon from before games reported theirs, while this server ships /,
     before,
   );
-  assert.match(before, /gdharness upgrade in /, before);
+  assert.match(before, /npx -y gdharness@\S+ upgrade "/, before);
 
   const rebuilt = note({ version: SERVER_VERSION, digest: 'another build' }, shipped) ?? '';
   assert.match(
@@ -15439,7 +15445,7 @@ async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
   const oldOnDisk = await statusFor('0'.repeat(64), '0'.repeat(64));
   assert.match(
     text(get(oldOnDisk, 'editor', 'staleNote')),
-    /gdharness upgrade in the project/,
+    /npx -y gdharness@\S+ upgrade {2}in a shell in the project directory/,
     `old addons on disk are named as what a restart would load: ${JSON.stringify(oldOnDisk)}`,
   );
   const newOnDisk = await statusFor('0'.repeat(64), shipped);
@@ -15450,7 +15456,7 @@ async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
   );
   assert.doesNotMatch(
     text(get(newOnDisk, 'editor', 'staleNote')),
-    /gdharness upgrade/,
+    /\bupgrade\b/,
     `addons on disk that match this server need only the restart: ${JSON.stringify(newOnDisk)}`,
   );
   assert.equal(

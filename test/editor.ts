@@ -430,7 +430,43 @@ const HOOKS_GD = [
   '\t\t\troot.add_child(added)',
   '\t\t\tadded.owner = root',
   '\t\t\tEditorInterface.mark_scene_as_unsaved()',
+  // A script in a tab of the script editor, as a person reading it has one, and edits typed into it
+  // and not saved, which close_file then throws away.
+  '\t\t"tab_open":',
+  '\t\t\tvar opened: Resource = load(path)',
+  '\t\t\tif opened is Script:',
+  '\t\t\t\tEditorInterface.edit_script(opened)',
+  '\t\t\treturn _tab(path)',
+  '\t\t"tab_text":',
+  '\t\t\treturn _tab(path)',
+  '\t\t"tab_type":',
+  '\t\t\tvar code: CodeEdit = _code_of(path)',
+  '\t\t\tif code != null:',
+  '\t\t\t\tcode.insert_line_at(0, "# typed in the tab")',
+  '\t\t\treturn _tab(path)',
+  '\t\t"tab_close":',
+  '\t\t\treturn {"closed": EditorInterface.get_script_editor().close_file(path) == OK}',
   '\treturn _report(path)',
+  '',
+  '',
+  'func _code_of(path: String) -> CodeEdit:',
+  '\tvar scripts: ScriptEditor = EditorInterface.get_script_editor()',
+  '\tvar open: Array[Script] = scripts.get_open_scripts()',
+  '\tvar editors: Array[ScriptEditorBase] = scripts.get_open_script_editors()',
+  '\tfor at: int in range(mini(open.size(), editors.size())):',
+  '\t\tvar base: Control = editors[at].get_base_editor()',
+  '\t\tif open[at].resource_path == path and base is CodeEdit:',
+  '\t\t\treturn base',
+  '\treturn null',
+  '',
+  '',
+  'func _tab(path: String) -> Dictionary:',
+  '\tvar code: CodeEdit = _code_of(path)',
+  '\treturn {',
+  '\t\t"tabOpen": code != null,',
+  '\t\t"text": code.text if code != null else "",',
+  '\t\t"unsaved": path in EditorInterface.get_script_editor().get_unsaved_files(),',
+  '\t}',
   '',
   '',
   'func _held_children(path: String) -> Array[String]:',
@@ -3249,6 +3285,96 @@ async function testAClassWrittenUnderTheEditorNeedsARescan({ call, project }: Ed
 }
 
 /**
+ * A method script_edit modify adds is one the editor's own answers see, and an open tab shows it.
+ *
+ * A probe session added a handler with script_edit modify, connected a signal to it, and was told
+ * methodFound false, while the game the editor played ran the handler. The editor had loaded the
+ * script before, and keeps the copy it compiled until something reloads it: Godot rereads a changed
+ * script when its window takes the focus, and a hidden editor's never does. Connected first with
+ * the method missing, so the editor holds the script before the write, which is the state the
+ * report had and an editor that never loaded it does not.
+ */
+async function testAMethodScriptEditAddsIsSeenByTheEditor({ call, project }: Editor): Promise<void> {
+  const script = 'res://chime.gd';
+  writeFileSync(
+    join(project, 'chime.gd'),
+    ['extends Node', '', '', 'func ring() -> void:', '\tpass', ''].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'chime.tscn'),
+    [
+      '[gd_scene load_steps=2 format=3]',
+      '',
+      `[ext_resource type="Script" path="${script}" id="1_chime"]`,
+      '',
+      '[node name="Chime" type="Node"]',
+      'script = ExtResource("1_chime")',
+      '',
+      '[node name="Striker" type="Node" parent="."]',
+      '',
+    ].join('\n'),
+  );
+  try {
+    await call('editor_rescan', { projectPath: project });
+    const scene = { projectPath: project, scenePath: 'res://chime.tscn' };
+    const connection = {
+      sourceNodePath: 'Striker',
+      signalName: 'renamed',
+      targetNodePath: '.',
+      methodName: '_on_struck',
+    };
+    const missing = await call('scene_signal', { ...scene, op: 'connect', ...connection });
+    assert.equal(get(missing, 'methodFound'), false, `nothing declares it yet: ${text(missing)}`);
+    const opened = await hook(project, { op: 'tab_open', path: script });
+    assert.equal(get(opened, 'tabOpen'), true, `the script is open in a tab: ${JSON.stringify(opened)}`);
+
+    const modify = (name: string): Promise<unknown> =>
+      call('script_edit', {
+        projectPath: project,
+        scriptPath: script,
+        op: 'modify',
+        modifications: [{ type: 'add_function', name, body: 'pass' }],
+      });
+    const added = await modify('_on_struck');
+    assert.equal(get(added, 'editorReloaded'), true, text(added));
+    assert.equal(get(added, 'editorNote'), undefined, text(added));
+    const found = await call('scene_signal', { ...scene, op: 'connect', ...connection });
+    assert.equal(get(found, 'methodFound'), true, `the editor holds the script as written: ${text(found)}`);
+    const shown = await hook(project, { op: 'tab_text', path: script });
+    assert.match(
+      String(get(shown, 'text')),
+      /func _on_struck\(/,
+      `and the tab shows it: ${JSON.stringify(shown)}`,
+    );
+    assert.equal(get(shown, 'unsaved'), false, JSON.stringify(shown));
+
+    // A tab with edits nobody saved is not reread, since rereading asks what to keep, and saving it
+    // writes the tab's text over the file: the answer says so, and the file keeps what was written.
+    const typed = await hook(project, { op: 'tab_type', path: script });
+    assert.equal(get(typed, 'unsaved'), true, `the tab holds unsaved edits: ${JSON.stringify(typed)}`);
+    const over = await modify('_on_rung');
+    assert.equal(get(over, 'unsavedInEditor'), true, text(over));
+    assert.match(
+      String(get(over, 'editorNote')),
+      new RegExp(
+        `^${script.replaceAll('.', '\\.')} is open in the editor's script tab with unsaved edits, and saving that tab there writes its text over what was written here`,
+      ),
+      text(over),
+    );
+    assert.equal(get(await hook(project, { op: 'tab_close', path: script }), 'closed'), true);
+    assert.match(
+      fileText(project, 'chime.gd'),
+      /func _on_rung\(/,
+      'closing the tab unsaved leaves the file as written',
+    );
+  } finally {
+    rmSync(join(project, 'chime.gd'), { force: true });
+    rmSync(join(project, 'chime.tscn'), { force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/**
  * A method added to a type the language server has already analysed is resolved without being told.
  *
  * The other half of #387, and the half that does *not* misbehave here. A project reported a method
@@ -5885,6 +6011,7 @@ async function main(): Promise<void> {
     ['testLanguageServer', testLanguageServer],
     ['testAClassWrittenUnderTheEditorNeedsARescan', testAClassWrittenUnderTheEditorNeedsARescan],
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
+    ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [
       'testAClassReloadedOnceItsBaseExistsReachesItsUsers',
