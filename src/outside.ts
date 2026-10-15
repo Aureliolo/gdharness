@@ -38,6 +38,11 @@ export interface OutsideSpec {
      * the same reason it is a profiled run's.
      */
     readonly breakpoints?: readonly string[];
+    /**
+     * False for a game that must not be given the debugger's flags: a release export, which
+     * refuses `--remote-debug` and quits ("compiled without debug. Aborting.").
+     */
+    readonly debugged?: boolean;
   };
   /** A Windows desktop to start it on, where its windows neither show nor take the focus. */
   readonly desktop?: string;
