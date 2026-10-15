@@ -1,7 +1,7 @@
-import type { ChildProcess } from 'node:child_process';
 import type { McpServer, Tool } from '@modelcontextprotocol/server';
 import type { GameLog } from './game-log.js';
 import type { EditorPlay } from './run-record.js';
+import type { ChildProcess } from './spawn.js';
 
 /** The game editor_run started, and everything it has said. */
 export interface GodotProcess {

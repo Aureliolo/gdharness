@@ -5,7 +5,6 @@
  * Godot on each side so that what is asserted is the relay and not the engine.
  */
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { accessSync, constants, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -16,6 +15,7 @@ import { type RawData, WebSocket } from 'ws';
 import { RUNTIME_PROTOCOL } from '../src/runtime-client.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { shippedRuntimeDigest } from '../src/setup.js';
+import { spawnHidden } from '../src/spawn.js';
 import { asArray, asObject, get, text } from './support/json.js';
 import {
   isRecord,
@@ -279,7 +279,7 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
 /** The id of a process that has already exited, for an announcement nobody is behind. */
 function deadProcessId(): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' });
+    const child = spawnHidden(process.execPath, ['-e', '0'], { stdio: 'ignore' });
     child.once('error', reject);
     child.once('exit', () => {
       if (child.pid === undefined) {

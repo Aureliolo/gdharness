@@ -7,7 +7,6 @@
  * fresh each time, so an upgrade never leaves a file of the old version behind.
  */
 
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   cpSync,
@@ -27,6 +26,7 @@ import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headl
 import { VERSION_MARKER } from './project-scan.js';
 import { parseProjectGodot } from './resources.js';
 import { SERVER_VERSION } from './server-version.js';
+import { spawnSyncHidden } from './spawn.js';
 import { readString } from './tool-args.js';
 
 /** The addons the package ships, by directory name under addons/. */
@@ -423,7 +423,7 @@ function trackedByGit(projectPath: string, wanted: readonly string[]): Set<strin
   }
   // -z, because git quotes a path with a space or a non-ASCII character in it otherwise and the
   // quoted spelling matches nothing we asked about.
-  const asked = spawnSync('git', ['ls-files', '-z', '--', ...wanted], {
+  const asked = spawnSyncHidden('git', ['ls-files', '-z', '--', ...wanted], {
     cwd: projectPath,
     encoding: 'utf8',
   });

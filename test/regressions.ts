@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { type ChildProcess, execFile, type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
@@ -25,7 +24,6 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
 import { inflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
@@ -290,6 +288,15 @@ import {
   shippedRuntimeDigest,
 } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
+import {
+  type ChildProcess,
+  runHidden,
+  runSyncHidden,
+  type SpawnSyncReturns,
+  spawnHidden,
+  spawnShown,
+  spawnSyncHidden,
+} from '../src/spawn.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -304,6 +311,7 @@ import { argumentShape, namedType, renderToolsMarkdown } from '../src/tool-refer
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { askWindows } from '../src/windows-ask.js';
 import { withHome } from './support/cli-home.js';
+import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
 import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
@@ -2066,7 +2074,7 @@ function testSceneToolsVectorRegression(): void {
       `extends SceneTree\n\nfunc _fail(message: String) -> void:\n\tprinterr(message)\n\tquit(1)\n\nfunc _init() -> void:\n\tvar root := Node2D.new()\n\troot.name = "Root"\n\tvar packed := PackedScene.new()\n\tif packed.pack(root) != OK:\n\t\t_fail("failed to pack root scene")\n\t\treturn\n\tif ResourceSaver.save(packed, "res://scenes/Test.tscn") != OK:\n\t\t_fail("failed to save root scene")\n\t\treturn\n\troot.queue_free()\n\n\tvar scene_tools = load("res://addons/gdharness_editor/tools/scene_tools.gd").new()\n\tvar project_path := ProjectSettings.globalize_path("res://")\n\n\tvar add_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "Node2D",\n\t\t"nodeName": "TestNode",\n\t\t"parentNodePath": ".",\n\t\t"properties": {\n\t\t\t"position": {"x": 100, "y": 200},\n\t\t\t"scale": {"_type": "Vector2", "x": 2, "y": 2}\n\t\t}\n\t})\n\tif not add_result.get("ok", false):\n\t\t_fail("add_node failed: %s" % JSON.stringify(add_result))\n\t\treturn\n\n\tvar set_result: Dictionary = scene_tools.set_node_properties({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodePath": "TestNode",\n\t\t"properties": {\n\t\t\t"position": [300, 400]\n\t\t}\n\t})\n\tif not set_result.get("ok", false):\n\t\t_fail("set_node_properties failed: %s" % JSON.stringify(set_result))\n\t\treturn\n\n\t# A tagged Resource class is built on the spot, which is how a region gets its polygon and a\n\t# tree its root without a wrapper tool per node class.\n\tvar nav_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "NavigationRegion2D",\n\t\t"nodeName": "Walkable",\n\t\t"parentNodePath": ".",\n\t\t"properties": {"navigation_polygon": {"_type": "NavigationPolygon"}}\n\t})\n\tif not nav_result.get("ok", false):\n\t\t_fail("add_node NavigationRegion2D failed: %s" % JSON.stringify(nav_result))\n\t\treturn\n\tvar tree_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "AnimationTree",\n\t\t"nodeName": "Tree",\n\t\t"parentNodePath": ".",\n\t\t"properties": {\n\t\t\t"anim_player": {"_type": "NodePath", "path": "../TestNode"},\n\t\t\t"tree_root": {"_type": "AnimationNodeStateMachine"}\n\t\t}\n\t})\n\tif not tree_result.get("ok", false):\n\t\t_fail("add_node AnimationTree failed: %s" % JSON.stringify(tree_result))\n\t\treturn\n\n\tvar loaded := load("res://scenes/Test.tscn") as PackedScene\n\tif loaded == null:\n\t\t_fail("failed to reload saved scene")\n\t\treturn\n\n\tvar instance := loaded.instantiate()\n\tvar node := instance.get_node_or_null("TestNode") as Node2D\n\tif node == null:\n\t\t_fail("saved node missing")\n\t\treturn\n\n\tif node.position != Vector2(300, 400):\n\t\t_fail("position mismatch: %s" % node.position)\n\t\treturn\n\tif node.scale != Vector2(2, 2):\n\t\t_fail("scale mismatch: %s" % node.scale)\n\t\treturn\n\tvar walkable := instance.get_node_or_null("Walkable") as NavigationRegion2D\n\tif walkable == null or walkable.navigation_polygon == null:\n\t\t_fail("the tagged NavigationPolygon should be built and saved")\n\t\treturn\n\tvar tree := instance.get_node_or_null("Tree") as AnimationTree\n\tif tree == null or not (tree.tree_root is AnimationNodeStateMachine) or tree.anim_player != NodePath("../TestNode"):\n\t\t_fail("the tagged AnimationNodeStateMachine and NodePath should be built and saved")\n\t\treturn\n\n\tprint(JSON.stringify({"ok": true, "position": [node.position.x, node.position.y], "scale": [node.scale.x, node.scale.y]}))\n\tinstance.queue_free()\n\tquit(0)\n`,
     );
 
-    const run = spawnSync(
+    const run = spawnSyncHidden(
       godotPath,
       ['--headless', '--path', projectDir, '--script', join(projectDir, 'runner.gd')],
       {
@@ -4627,7 +4635,7 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     );
     // What a server that crashed leaves behind: an announcement for this port naming a process that
     // is gone. Nothing is going to let go of the port on its behalf, so it is not waited on.
-    const gone = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+    const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
     mkdirSync(dirname(announcementPath(project)), { recursive: true });
     writeFileSync(
       announcementPath(project),
@@ -4757,7 +4765,7 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
     );
     mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
     // A server that has gone, so the note reads as a restart left unfinished rather than one under way.
-    const ended = spawnSync(process.execPath, ['-e', '0']).pid;
+    const ended = spawnSyncHidden(process.execPath, ['-e', '0']).pid;
     noteRestartBegun({
       projectPath: project,
       editorPid: 27040,
@@ -4773,10 +4781,9 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
       cpSync(process.execPath, runtime);
     }
     writeFileSync(join(project, 'hold.js'), 'setTimeout(() => {}, 120000);\n');
-    standIn = spawn(runtime, [join(project, 'hold.js'), '--path', project, '--editor'], {
+    standIn = spawnHidden(runtime, [join(project, 'hold.js'), '--path', project, '--editor'], {
       detached: true,
       stdio: 'ignore',
-      windowsHide: true,
     });
     const pid = standIn.pid;
     assert.ok(pid !== undefined, 'the stand-in editor starts');
@@ -4908,7 +4915,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     assert.equal(get(reused, 'mayYetConnect'), false, JSON.stringify(reused));
 
     // Nor is a young note: the server that wrote this one has gone, so nothing will launch.
-    const ended = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
+    const ended = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
     assert.ok(ended > 0 && !alive(ended), 'the fixture needs a pid that has gone');
     begun(ended, new Date().toISOString());
     const orphaned = await editorOf();
@@ -5714,7 +5721,7 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
     '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="SlowExit"\n',
   );
   // Detached so it is nobody's job object and outlives nothing by accident; ended in the finally.
-  const lingering = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+  const lingering = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
     detached: true,
     stdio: 'ignore',
   });
@@ -5982,7 +5989,10 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
     `${settings}\n[debug]\n\ngdscript/warnings/unused_variable=0\n`,
   );
   const standIn = () =>
-    spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { detached: true, stdio: 'ignore' });
+    spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
   const stays = standIn();
   const goes = standIn();
 
@@ -7704,7 +7714,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
   const project = join(sandbox, 'game');
   const elsewhere = join(sandbox, 'not-a-project');
   const cli = (cwd: string): { status: number | null; output: string } => {
-    const run = spawnSync(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor'], {
+    const run = spawnSyncHidden(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor'], {
       encoding: 'utf8',
       cwd,
       timeout: 60000,
@@ -7727,7 +7737,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
     // A flag where the path used to be. With the directory optional this is the natural thing to
     // type, and it is what the install guide tells people to run; taken positionally, `--json`
     // was resolved as a directory and the command refused itself.
-    const flagged = spawnSync(
+    const flagged = spawnSyncHidden(
       process.execPath,
       [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'],
       { encoding: 'utf8', cwd: project, timeout: 60000, env: withHome(process.env, join(sandbox, 'home')) },
@@ -7755,7 +7765,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
       ['doctor', '--jsonn'],
       ['uninstall', '--claude'],
     ]) {
-      const refused = spawnSync(process.execPath, [join(process.cwd(), 'build', 'cli.js'), ...typo], {
+      const refused = spawnSyncHidden(process.execPath, [join(process.cwd(), 'build', 'cli.js'), ...typo], {
         encoding: 'utf8',
         cwd: project,
         timeout: 60000,
@@ -8002,14 +8012,18 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
 function testAnAutoloadGitWillNotCarry(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
   const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
-    spawnSync('git', gitArgs, { cwd: project, encoding: 'utf8', timeout: 60000 });
+    spawnSyncHidden('git', gitArgs, { cwd: project, encoding: 'utf8', timeout: 60000 });
   const troubles = (where: string): string[] => {
-    const run = spawnSync(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'], {
-      encoding: 'utf8',
-      cwd: where,
-      timeout: 60000,
-      env: withHome(process.env, join(project, '.home')),
-    });
+    const run = spawnSyncHidden(
+      process.execPath,
+      [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'],
+      {
+        encoding: 'utf8',
+        cwd: where,
+        timeout: 60000,
+        env: withHome(process.env, join(project, '.home')),
+      },
+    );
     return asArray(get(JSON.parse(run.stdout), 'problems'))
       .map(text)
       .filter((problem) => problem.includes('autoload names'));
@@ -8052,7 +8066,10 @@ function testAnAutoloadGitWillNotCarry(): void {
     // repository, and this case is about git having no answer rather than about absent files.
     const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-nogit-'));
     try {
-      const outside = spawnSync('git', ['rev-parse', '--git-dir'], { cwd: elsewhere, encoding: 'utf8' });
+      const outside = spawnSyncHidden('git', ['rev-parse', '--git-dir'], {
+        cwd: elsewhere,
+        encoding: 'utf8',
+      });
       if (outside.status !== 0) {
         cpSync(join(project, 'project.godot'), join(elsewhere, 'project.godot'));
         mkdirSync(join(elsewhere, 'addons', 'thing'), { recursive: true });
@@ -8087,7 +8104,7 @@ function testAnAutoloadGitWillNotCarry(): void {
 function testAnAutoloadNamingAFileThatIsNotThere(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-gone-'));
   const doctor = (...more: string[]): SpawnSyncReturns<string> =>
-    spawnSync(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor', ...more], {
+    spawnSyncHidden(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor', ...more], {
       encoding: 'utf8',
       cwd: project,
       timeout: 60000,
@@ -8356,11 +8373,15 @@ function testTheEngineWritesItsSavesWhereItWasTold(): void {
       join(projectDir, 'probe.gd'),
       'extends SceneTree\n\n\nfunc _init() -> void:\n\tprint("USER_DATA_DIR=" + OS.get_user_data_dir())\n\tquit()\n',
     );
-    const run = spawnSync(godotPath, ['--headless', '--path', projectDir, '--script', 'res://probe.gd'], {
-      encoding: 'utf8',
-      env: userDataIn(home),
-      timeout: ENGINE_CALL_TIMEOUT_MS,
-    });
+    const run = spawnSyncHidden(
+      godotPath,
+      ['--headless', '--path', projectDir, '--script', 'res://probe.gd'],
+      {
+        encoding: 'utf8',
+        env: userDataIn(home),
+        timeout: ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
     const printed = /USER_DATA_DIR=(.+)/.exec(run.stdout)?.[1]?.trim();
     assert.ok(printed, `the probe should print where user:// is:\n${run.stdout}\n${run.stderr}`);
     // Compared as spellings rather than resolved, because the engine may not have created the
@@ -8399,11 +8420,15 @@ function testTheEngineWritesItsSavesWhereItWasTold(): void {
         '\tprint("WROTE=" + str(FileAccess.file_exists("user://probe.txt")) + " AT=" + OS.get_user_data_dir())\n' +
         '\tquit()\n',
     );
-    const made = spawnSync(godotPath, ['--headless', '--path', projectDir, '--script', 'res://writes.gd'], {
-      encoding: 'utf8',
-      env: userDataIn(never),
-      timeout: ENGINE_CALL_TIMEOUT_MS,
-    });
+    const made = spawnSyncHidden(
+      godotPath,
+      ['--headless', '--path', projectDir, '--script', 'res://writes.gd'],
+      {
+        encoding: 'utf8',
+        env: userDataIn(never),
+        timeout: ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
     assert.match(
       made.stdout,
       /WROTE=true/,
@@ -8509,7 +8534,7 @@ function testAGameThatAnnouncedAndWentIsSaidSo(): void {
     mkdirSync(directory, { recursive: true });
     // A process that has certainly ended: spawned to exit at once and waited for right here, so the
     // number names nothing by the time the sweep reads it.
-    const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], {
+    const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['--eval', ''], {
       encoding: 'utf8',
     });
     assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
@@ -8547,8 +8572,12 @@ function testAGameThatAnnouncedAndWentIsSaidSo(): void {
     // A second and a third that went the same way are counted, so a game crashing three times in a
     // minute is not answered as one crash. The most recent is still the one named, because its
     // output is the one worth reading, and the count is what says the others happened.
-    const again: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
-    const third: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
+    const again: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['--eval', ''], {
+      encoding: 'utf8',
+    });
+    const third: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['--eval', ''], {
+      encoding: 'utf8',
+    });
     for (const pid of [again.pid, third.pid]) {
       writeFileSync(
         join(directory, `runtime-${pid}.json`),
@@ -8710,12 +8739,14 @@ async function testAnAnnouncementIsItsOwnProcess(): Promise<void> {
  */
 async function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): Promise<void> {
   const before = Date.now();
-  const newcomer = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const newcomer = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   const root = mkdtempSync(join(tmpdir(), 'gdharness-came-round-'));
   try {
     const pid = newcomer.pid;
     assert.ok(typeof pid === 'number', 'the fixture needs a live process to have taken the number');
-    const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
+    const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['--eval', ''], {
+      encoding: 'utf8',
+    });
     assert.ok(ended.pid > 0, 'and one that has gone, to be left out of the answer');
 
     const said = await startTimesOf([pid, process.pid, ended.pid]);
@@ -8802,7 +8833,9 @@ function testAnAnnouncementBeingWrittenIsNotSwept(): void {
   try {
     const directory = join(root, 'gdharness');
     mkdirSync(directory, { recursive: true });
-    const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
+    const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['--eval', ''], {
+      encoding: 'utf8',
+    });
     assert.ok(ended.pid > 0, 'the fixture needs a number nobody holds');
     const beingWritten = join(directory, `runtime-${process.pid}.json`);
     const abandoned = join(directory, `runtime-${ended.pid}.json`);
@@ -9200,7 +9233,7 @@ async function testAnEditorStartedByAnEditorSaysSo(): Promise<void> {
       );
       await server.initialize('regression-test');
       const inherited = how === 'by an editor';
-      editor = spawn(
+      editor = spawnHidden(
         godotPath,
         [
           '--editor',
@@ -9824,7 +9857,7 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
         `setInterval(() => {}, 1000);`,
       ].join('\n'),
     );
-    const standIn = spawn(process.execPath, [server], { stdio: 'ignore' });
+    const standIn = spawnHidden(process.execPath, [server], { stdio: 'ignore' });
     standInPid = standIn.pid ?? 0;
     for (let waited = 0; waited < 20_000 && !existsSync(pidFile); waited += 100) {
       await delay(100);
@@ -9892,10 +9925,9 @@ function testAKeeperHoldsARunWhoseNoteItCannotWrite(): void {
         `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
       ].join('\n'),
     );
-    const ran = spawnSync(process.execPath, [launcher], {
+    const ran = spawnSyncHidden(process.execPath, [launcher], {
       encoding: 'utf8',
       timeout: 60_000,
-      windowsHide: true,
       env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
     });
     const said: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
@@ -9945,11 +9977,61 @@ function testAWindowsCommandLineReadsBackAsItsArguments(): void {
     console.log('command line round trip skipped (the C runtime rule is Windows only)');
     return;
   }
-  const run = spawnSync(process.execPath, [line.slice(2)], {
+  const run = spawnSyncHidden(process.execPath, [line.slice(2)], {
     windowsVerbatimArguments: true,
     encoding: 'utf8',
   });
   assert.deepEqual(JSON.parse(run.stdout) as unknown, awkward, `read back: ${run.stdout} ${run.stderr}`);
+}
+
+/**
+ * A console program compiled into [param scratch] that writes, to the path it is given, the startup
+ * information Windows gave it and whether it has a console window: `flags=… show=… console=0|1
+ * desktop=…`. Compiled rather than asked of PowerShell, since Windows PowerShell started detached
+ * runs nothing, and PowerShell's own startup information would be the one read.
+ */
+function startupProbe(scratch: string): string {
+  const probe = join(scratch, 'probe.exe');
+  const source = [
+    'using System;',
+    'using System.IO;',
+    'using System.Runtime.InteropServices;',
+    'public static class Probe {',
+    // Pointers rather than strings: the structure is the system's, and a marshalled string would be
+    // freed on the way back, which corrupts the heap.
+    '  [StructLayout(LayoutKind.Sequential)]',
+    '  struct StartupInfo {',
+    '    public int cb; public IntPtr reserved, desktop, title;',
+    '    public int x, y, xSize, ySize, xCount, yCount, fill, flags;',
+    '    public short show, reservedSize;',
+    '    public IntPtr reservedBytes, input, output, error;',
+    '  }',
+    '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern void GetStartupInfoW(ref StartupInfo info);',
+    '  [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();',
+    '  public static void Main(string[] args) {',
+    '    StartupInfo info = new StartupInfo();',
+    '    info.cb = Marshal.SizeOf(typeof(StartupInfo));',
+    '    GetStartupInfoW(ref info);',
+    '    string console = GetConsoleWindow() == IntPtr.Zero ? "0" : "1";',
+    // Written beside and moved into place, because the wait below is for the file to exist and
+    // WriteAllText creates it before it writes: a Windows runner read it empty in between.
+    '    File.WriteAllText(args[0] + ".part", "flags=" + info.flags + " show=" + info.show + " console=" + console + " desktop=" + Marshal.PtrToStringUni(info.desktop));',
+    '    File.Move(args[0] + ".part", args[0]);',
+    '  }',
+    '}',
+  ].join('\n');
+  const compiled = spawnSyncHidden(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `Add-Type -TypeDefinition @'\n${source}\n'@ -OutputAssembly '${probe}' -OutputType ConsoleApplication`,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.ok(existsSync(probe), `the probe should compile: ${compiled.stdout} ${compiled.stderr}`);
+  return probe;
 }
 
 /**
@@ -9970,44 +10052,7 @@ async function testALaunchWithoutActivationSaysSo(): Promise<void> {
   }
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-noactivate-'));
   try {
-    const probe = join(scratch, 'probe.exe');
-    const source = [
-      'using System;',
-      'using System.IO;',
-      'using System.Runtime.InteropServices;',
-      'public static class Probe {',
-      // Pointers rather than strings: the structure is the system's, and a marshalled string would be
-      // freed on the way back, which corrupts the heap.
-      '  [StructLayout(LayoutKind.Sequential)]',
-      '  struct StartupInfo {',
-      '    public int cb; public IntPtr reserved, desktop, title;',
-      '    public int x, y, xSize, ySize, xCount, yCount, fill, flags;',
-      '    public short show, reservedSize;',
-      '    public IntPtr reservedBytes, input, output, error;',
-      '  }',
-      '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern void GetStartupInfoW(ref StartupInfo info);',
-      '  public static void Main(string[] args) {',
-      '    StartupInfo info = new StartupInfo();',
-      '    info.cb = Marshal.SizeOf(typeof(StartupInfo));',
-      '    GetStartupInfoW(ref info);',
-      // Written beside and moved into place, because the wait below is for the file to exist and
-      // WriteAllText creates it before it writes: a Windows runner read it empty in between.
-      '    File.WriteAllText(args[0] + ".part", "flags=" + info.flags + " show=" + info.show + " desktop=" + Marshal.PtrToStringUni(info.desktop));',
-      '    File.Move(args[0] + ".part", args[0]);',
-      '  }',
-      '}',
-    ].join('\n');
-    const compiled = spawnSync(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `Add-Type -TypeDefinition @'\n${source}\n'@ -OutputAssembly '${probe}' -OutputType ConsoleApplication`,
-      ],
-      { encoding: 'utf8', windowsHide: true },
-    );
-    assert.ok(existsSync(probe), `the probe should compile: ${compiled.stdout} ${compiled.stderr}`);
+    const probe = startupProbe(scratch);
 
     const said = async (name: string, noActivate: boolean): Promise<string> => {
       const written = join(scratch, `${name}.txt`);
@@ -10023,10 +10068,9 @@ async function testALaunchWithoutActivationSaysSo(): Promise<void> {
           `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
         ].join('\n'),
       );
-      const ran = spawnSync(process.execPath, [launcher], {
+      const ran = spawnSyncHidden(process.execPath, [launcher], {
         encoding: 'utf8',
         timeout: 90_000,
-        windowsHide: true,
       });
       const launched: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
       // The pid rather than the absence of an error: a launcher that wrote no answer has no error
@@ -10060,6 +10104,110 @@ async function testALaunchWithoutActivationSaysSo(): Promise<void> {
     assert.equal(flags % 2, 1, `the start should name a show state: ${quiet}`);
     assert.match(quiet, /show=4 /, `and it should be SW_SHOWNOACTIVATE: ${quiet}`);
     assert.doesNotMatch(quiet, new RegExp(HIDDEN_DESKTOP), `on the desktop in use: ${quiet}`);
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * Every start `src/spawn.ts` offers as hidden is hidden, under Bun, which runs the suites and the
+ * scripts, and under Node, which runs the server; so is each start in the prelude a test hands to
+ * Node. Read back by the process started, which reports the show state its start named and whether
+ * it has a console window: the flag that keeps a console program's window off the screen names
+ * SW_HIDE, and a start that names no show state at all leaves the window to the program. The
+ * shown start is the control, naming a show state of its own. Detached, so that it gets no console
+ * either way and opens nothing on the desktop of whoever runs the suite.
+ */
+async function testEveryHiddenStartIsStartedHidden(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('hidden start regression skipped (a Windows show state)');
+    return;
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-hidden-start-'));
+  try {
+    const probe = startupProbe(scratch);
+    const at = (name: string): string => join(scratch, `${name}.txt`);
+    const hidden: Record<string, (file: string) => Promise<unknown>> = {
+      spawnHidden: (file) => Promise.resolve(spawnHidden(probe, [file], { stdio: 'ignore' })),
+      runHidden: (file) => runHidden(probe, [file]),
+      runSyncHidden: (file) => Promise.resolve(runSyncHidden(probe, [file], { encoding: 'utf8' })),
+      spawnSyncHidden: (file) => Promise.resolve(spawnSyncHidden(probe, [file])),
+    };
+    const offered = Object.entries(await import('../src/spawn.js'))
+      .filter(([, value]) => typeof value === 'function')
+      .map(([name]) => name)
+      .sort();
+    assert.deepEqual(
+      offered,
+      [...Object.keys(hidden), 'spawnShown'].sort(),
+      'every start src/spawn.ts offers is measured here',
+    );
+
+    for (const [name, start] of Object.entries(hidden)) {
+      await start(at(`bun-${name}`));
+    }
+    spawnShown(probe, [at('bun-spawnShown')], { stdio: 'ignore', detached: true });
+
+    const underNode = join(scratch, 'under-node.mjs');
+    writeFileSync(
+      underNode,
+      [
+        `import { runHidden, runSyncHidden, spawnHidden, spawnShown, spawnSyncHidden } from ${JSON.stringify(pathToFileURL(resolve('build', 'spawn.js')).href)};`,
+        `const [probe, scratch] = process.argv.slice(2);`,
+        `const at = (name) => scratch + '/node-' + name + '.txt';`,
+        `spawnHidden(probe, [at('spawnHidden')], { stdio: 'ignore' });`,
+        `await runHidden(probe, [at('runHidden')]);`,
+        `runSyncHidden(probe, [at('runSyncHidden')], { encoding: 'utf8' });`,
+        `spawnSyncHidden(probe, [at('spawnSyncHidden')]);`,
+        `spawnShown(probe, [at('spawnShown')], { stdio: 'ignore', detached: true });`,
+      ].join('\n'),
+    );
+    const node = spawnSyncHidden('node', [underNode, probe, scratch], { encoding: 'utf8', timeout: 90_000 });
+    assert.equal(node.status, 0, `the starts under Node should run: ${node.stdout} ${node.stderr}`);
+    const prelude = spawnSyncHidden(
+      'node',
+      [
+        '-e',
+        `${HIDDEN_SPAWN_PRELUDE} spawnSyncHidden(process.argv[1], [process.argv[2]]); spawnHidden(process.argv[1], [process.argv[3]], { stdio: 'ignore' });`,
+        probe,
+        at('prelude-spawnSyncHidden'),
+        at('prelude-spawnHidden'),
+      ],
+      { encoding: 'utf8', timeout: 90_000 },
+    );
+    assert.equal(prelude.status, 0, `the prelude's starts should run: ${prelude.stdout} ${prelude.stderr}`);
+
+    const said = async (name: string): Promise<string> => {
+      const written = at(name);
+      for (let waited = 0; waited < 30_000 && !existsSync(written); waited += 200) {
+        await delay(200);
+      }
+      return existsSync(written) ? readFileSync(written, 'utf8') : 'nothing written in 30s';
+    };
+    // Every start read before any is judged, so one that is not hidden is named with every other.
+    const starts = [
+      ...['bun', 'node'].flatMap((runtime) => Object.keys(hidden).map((name) => `${runtime}-${name}`)),
+      'prelude-spawnHidden',
+      'prelude-spawnSyncHidden',
+    ];
+    const reported = new Map<string, string>();
+    for (const start of [...starts, 'bun-spawnShown', 'node-spawnShown']) {
+      reported.set(start, await said(start));
+    }
+    // STARTF_USESHOWWINDOW is 1, so the flags are odd, and SW_HIDE is 0.
+    const named = (start: string, state: RegExp): boolean => state.test(reported.get(start) ?? '');
+    assert.deepEqual(
+      ['bun-spawnShown', 'node-spawnShown'].filter(
+        (start) => !named(start, /^flags=\d*[13579] show=(?!0 )\d+ /),
+      ),
+      [],
+      `the shown starts are the control, naming a shown state: ${JSON.stringify(Object.fromEntries(reported))}`,
+    );
+    assert.deepEqual(
+      starts.filter((start) => !named(start, /^flags=\d*[13579] show=0 console=0 /)),
+      [],
+      `every hidden start names SW_HIDE and has no console window: ${JSON.stringify(Object.fromEntries(reported))}`,
+    );
   } finally {
     sweep(scratch);
   }
@@ -10101,12 +10249,12 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
   // parent's desktop, so the answer is the launched process's. Written to a file as well as printed,
   // for the launch with no run, which is how an editor starts and has no transcript.
   const asker = [
-    "const { spawnSync } = require('node:child_process');",
+    HIDDEN_SPAWN_PRELUDE,
     "const { writeFileSync } = require('node:fs');",
     // Asked after the launch has answered and its launcher has gone, the way an editor starts a game
     // long after it was opened: whatever held the desktop for the launch may have gone with it.
     'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);',
-    `const asked = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', ${JSON.stringify(Buffer.from(probe, 'utf16le').toString('base64'))}], { encoding: 'utf8', windowsHide: true });`,
+    `const asked = spawnSyncHidden('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', ${JSON.stringify(Buffer.from(probe, 'utf16le').toString('base64'))}], { encoding: 'utf8' });`,
     "const said = 'pid=' + process.pid + ' ' + asked.stdout.trim();",
     'writeFileSync(process.argv[1], said);',
     'console.log(said);',
@@ -10139,10 +10287,9 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
         `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
       ].join('\n'),
     );
-    const run = spawnSync(process.execPath, [launcher], {
+    const run = spawnSyncHidden(process.execPath, [launcher], {
       env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
       timeout: 90_000,
-      windowsHide: true,
     });
     assert.ok(existsSync(answer), `the launch should answer: ${String(run.stderr)}`);
     const launched: unknown = JSON.parse(readFileSync(answer, 'utf8'));
@@ -10754,7 +10901,7 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-by-number-runtime-'));
   const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
   // Something alive whose number is not a game of this project, to be refused.
-  const bystander = spawn(process.execPath, ['--eval', 'setTimeout(() => {}, 120_000)', project], {
+  const bystander = spawnHidden(process.execPath, ['--eval', 'setTimeout(() => {}, 120_000)', project], {
     stdio: 'ignore',
   });
   // The first server is started as one started from an editor's terminal would be, with that
@@ -11142,7 +11289,7 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
     );
 
     clearEditorLog(project);
-    const editor = spawn(
+    const editor = spawnHidden(
       godotPath,
       [...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project), true), '--quit-after', '2000'],
       { stdio: 'ignore' },
@@ -13183,7 +13330,7 @@ async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
       });
       socket.on('error', () => {});
     });
-    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const holder = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     const server = new ServerProcess({
       env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
     });
@@ -13270,7 +13417,7 @@ async function testRuntimeConnectedIsAboutThisProjectsGames(): Promise<void> {
     listening.push(answering);
     await listenOnAReservedPort(answering);
     // A live process for the announcement to name, since one naming a process that is gone is swept.
-    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const holder = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     children.push(holder);
     const pid = holder.pid ?? 0;
     writeFileSync(
@@ -13385,7 +13532,7 @@ async function testACallBesideAnotherOnTheGameSaysSo(): Promise<void> {
     });
     listening.push(answering);
     await listenOnAReservedPort(answering);
-    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const holder = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     children.push(holder);
     const pid = holder.pid ?? 0;
     writeFileSync(
@@ -13871,7 +14018,7 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
     // Two in one look, as a game and a worker it started can be: both are handed back, since which
     // is the game is for the caller to tell, and the directory's order says nothing about it.
     const pair = [0, 1].map(() =>
-      spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }),
+      spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }),
     );
     try {
       const pids = pair.map((one) => one.pid ?? 0);
@@ -16903,10 +17050,10 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
  * and on Windows the helper that asks PowerShell running out of time and being refused.
  */
 async function testAListingFailureSaysWhichFailureItWas(): Promise<void> {
-  const run = promisify(execFile);
+  const run = runHidden;
   const failureOf = async (args: string[], timeout: number): Promise<unknown> => {
     try {
-      await run(process.execPath, args, { timeout, windowsHide: true });
+      await run(process.execPath, args, { timeout });
     } catch (error) {
       return error;
     }
@@ -16976,7 +17123,9 @@ async function testThePowerShellHelperGoesWithItsProcess(): Promise<void> {
     console.log('PowerShell helper regression skipped (only Windows asks PowerShell)');
     return;
   }
-  const helperModule = pathToFileURL(resolve('src', 'windows-ask.ts')).href;
+  // The built module, which is what both runtimes would run: its imports are to the `.js` files
+  // beside it, which Node stripping the types from the source cannot find.
+  const helperModule = pathToFileURL(resolve('build', 'windows-ask.js')).href;
   // Two questions at once, the second waiting on the first: Bun counts a pipe's refs, and a helper
   // held once per question and let go once at the end kept a finished process running.
   const asking = `import(${JSON.stringify(helperModule)}).then(async ({ askWindows }) => { const [pid] = await Promise.all([askWindows("$PID", 60000), askWindows("$PID", 60000)]); console.log("helper " + pid.trim()); if (process.argv.includes("stay")) setInterval(() => {}, 1000); })`;
@@ -16984,7 +17133,6 @@ async function testThePowerShellHelperGoesWithItsProcess(): Promise<void> {
     ['bun', process.execPath],
     ['node', 'node'],
   ] as const) {
-    const flags = runtime === 'node' ? ['--experimental-strip-types', '--no-warnings'] : [];
     const helperOf = (child: ChildProcess): Promise<number> =>
       new Promise((resolvePid, reject) => {
         let said = '';
@@ -17007,7 +17155,9 @@ async function testThePowerShellHelperGoesWithItsProcess(): Promise<void> {
     };
 
     // Killed without warning.
-    const killed = spawn(command, [...flags, '-e', asking, 'stay'], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const killed = spawnHidden(command, ['-e', asking, 'stay'], {
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
     const killedHelper = await helperOf(killed);
     assert.ok(alive(killedHelper), `${runtime}: the helper is running while its process is`);
     killed.kill();
@@ -17017,7 +17167,7 @@ async function testThePowerShellHelperGoesWithItsProcess(): Promise<void> {
     );
 
     // Nothing left to do.
-    const idle = spawn(command, [...flags, '-e', asking], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const idle = spawnHidden(command, ['-e', asking], { stdio: ['ignore', 'pipe', 'inherit'] });
     const idleHelper = await helperOf(idle);
     const exited = await Promise.race([
       new Promise<boolean>((resolveExit) => {
@@ -18976,7 +19126,7 @@ async function testAHeldScratchDirectoryGoesOnceLetGo(): Promise<void> {
   let holder: ChildProcess | null = null;
   try {
     if (process.platform === 'win32') {
-      holder = spawn(
+      holder = spawnHidden(
         'powershell',
         [
           '-NoProfile',
@@ -19030,7 +19180,7 @@ async function testAHeldScratchDirectoryGoesOnceLetGo(): Promise<void> {
 async function testAnAbandonedScratchDirectoryIsSweptAndNothingElse(): Promise<void> {
   const parent = mkdtempSync(join(tmpdir(), 'gdharness-abandoned-scratch-'));
   try {
-    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    const exited = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
     await new Promise((resolve) => exited.once('exit', resolve));
     const gone = exited.pid ?? 0;
     assert.equal(alive(gone), false, 'the owner stood in for has to have gone');
@@ -20519,7 +20669,7 @@ function testAnExportedBuildIsFoundInsideTheProject(): void {
  * main scene, which a project run would be refused for.
  */
 async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
-  const node = spawnSync('node', ['-p', 'process.execPath'], { encoding: 'utf8' });
+  const node = spawnSyncHidden('node', ['-p', 'process.execPath'], { encoding: 'utf8' });
   const nodePath = node.status === 0 ? node.stdout.trim() : '';
   if (nodePath === '') {
     console.log('exported build regression skipped (no node on PATH to stand in for a build)');
@@ -20774,7 +20924,7 @@ async function testAHeldLibraryCopyIsSetAsideAndSweptLater(): Promise<void> {
     cpSync(join(system, 'version.dll'), join(project, 'bin', 'game.dll'));
     const copy = join(project, 'bin', '~game.dll');
     cpSync(join(system, 'version.dll'), copy);
-    holder = spawn(
+    holder = spawnHidden(
       join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
       [
         '-NoProfile',
@@ -22095,11 +22245,11 @@ async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
           (tool) => {
             if (tool === 'play_scene') {
               playing = true;
-              const game = spawn(
+              const game = spawnHidden(
                 process.execPath,
                 [
                   '-e',
-                  "const w = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(w.pid); setInterval(() => {}, 1000);",
+                  `${HIDDEN_SPAWN_PRELUDE} const w = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(w.pid); setInterval(() => {}, 1000);`,
                 ],
                 { stdio: ['ignore', 'pipe', 'ignore'] },
               );
@@ -22561,7 +22711,7 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
   let announcesAfterMs = 6_500;
   const games: ChildProcess[] = [];
   const openGame = (): number => {
-    const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     games.push(game);
     assert.ok(typeof game.pid === 'number', 'the fixture needs a live game to announce');
     return game.pid;
@@ -22841,7 +22991,9 @@ async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
           // wait, and a loaded runner can take longer over it than any timer that has to lose to the
           // wait allows.
           if (tool === 'play_scene') {
-            played.game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+            played.game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+              stdio: 'ignore',
+            });
             gamePid = played.game.pid ?? 0;
             return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
           }
@@ -22946,7 +23098,7 @@ async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
 async function testTheEditorsGameIsToldFromAnotherOfTheSameProject(): Promise<void> {
   const games: ChildProcess[] = [];
   const aGame = (): number => {
-    const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     games.push(game);
     assert.ok(typeof game.pid === 'number', 'the fixture needs live processes to announce');
     return game.pid;
@@ -23542,7 +23694,7 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
           // renderer: Forward+ on a macOS runner's paravirtual Metal device spent twenty
           // seconds compiling its pipelines before the scene ran, with nothing said but the
           // device's name. What the engine says is kept for the next time it does not announce.
-          held.game = spawn(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
+          held.game = spawnShown(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: {
               ...process.env,
@@ -23741,7 +23893,7 @@ async function testACaptureBeforeTheFirstFrameWaitsForIt(): Promise<void> {
     ({ adapter, project, runtimeDir }) =>
       (tool) => {
         if (tool === 'play_scene') {
-          held.game = spawn(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
+          held.game = spawnShown(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: {
               ...process.env,
@@ -24888,7 +25040,7 @@ async function testACaptureOfOneNodeIsThatNodeAtItsOwnPixels(): Promise<void> {
     ({ adapter, project, runtimeDir }) =>
       (tool) => {
         if (tool === 'play_scene') {
-          held.game = spawn(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
+          held.game = spawnShown(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: {
               ...process.env,
@@ -25131,7 +25283,7 @@ async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
   // not arrive.
   const printed = new Map<number, string[]>();
   const engine = (args: string[]): ChildProcess => {
-    const started = spawn(godotPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const started = spawnHidden(godotPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
     const lines: string[] = [];
     printed.set(started.pid ?? 0, lines);
     started.stdout.on('data', (chunk: Buffer) => lines.push(String(chunk)));
@@ -25498,7 +25650,7 @@ async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
     ({ adapter, project, runtimeDir }) =>
       (tool) => {
         if (tool === 'play_scene') {
-          held.game = spawn(engine, ['--headless', '--path', project], {
+          held.game = spawnHidden(engine, ['--headless', '--path', project], {
             stdio: 'ignore',
             env: {
               ...process.env,
@@ -25677,7 +25829,7 @@ async function testAPlayedGamesConsoleKeepsItsOrder(): Promise<void> {
     ({ adapter: port, project, runtimeDir }) =>
       (tool) => {
         if (tool === 'play_scene') {
-          const game = spawn(engine, ['--headless', '--path', project], {
+          const game = spawnHidden(engine, ['--headless', '--path', project], {
             stdio: ['ignore', 'pipe', 'ignore'],
             env: {
               ...process.env,
@@ -25879,7 +26031,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
     ({ adapter, project, runtimeDir }) =>
       (tool) => {
         if (tool === 'play_scene') {
-          held.game = spawn(engine, ['--headless', '--path', project], {
+          held.game = spawnHidden(engine, ['--headless', '--path', project], {
             stdio: 'ignore',
             env: {
               ...process.env,
@@ -25945,7 +26097,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       // Linux runner took the two minutes the import is given and said nothing else.
       const importing = Date.now();
       const imported = await new Promise<{ status: number | null; output: string }>((resolveRun) => {
-        const run = spawn(engine, ['--headless', '--path', project, '--import']);
+        const run = spawnHidden(engine, ['--headless', '--path', project, '--import']);
         let output = '';
         run.stdout.on('data', (chunk: Buffer) => {
           output += String(chunk);
@@ -26842,7 +26994,9 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
   const processes: ChildProcess[] = [];
   const sockets: Server[] = [];
   const aGame = async (name: string): Promise<{ pid: number; port: number }> => {
-    const process_ = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const process_ = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
     processes.push(process_);
     assert.ok(typeof process_.pid === 'number', 'the fixture needs live processes to announce');
     const answering = createServer((socket) => {
@@ -27085,6 +27239,23 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
   assert.deepEqual(descendantsIn(tree, 10), [11, 12, 13]);
   assert.deepEqual(descendantsIn(tree, 12), [13]);
   assert.deepEqual(descendantsIn(tree, 20), []);
+  // The console host a hidden console program is given is listed as its child, written the way
+  // Windows lists it; a program of the same name anywhere else is a child like any other.
+  const systemRoot = process.env['SystemRoot'] ?? 'C:\\Windows';
+  const hosted = parseProcessTable(
+    [
+      '10 1 engine',
+      `11 10 \\??\\${systemRoot}\\system32\\conhost.exe 0x4`,
+      '12 10 worker',
+      `13 12 "${systemRoot.toUpperCase()}\\SYSTEM32\\CONHOST.EXE" 0x4`,
+      '14 12 C:\\Games\\conhost.exe',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    descendantsIn(hosted, 10),
+    [12, 14],
+    'a console host is the console of the process listed above it, not something that process started',
+  );
   assert.deepEqual(
     ancestorsIn(tree, 13, 10),
     [12, 11, 10],
@@ -27147,7 +27318,7 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
  */
 async function testACommandLineOutsideAsciiIsListedWhole(): Promise<void> {
   const named = 'Müller-ß-€';
-  const probe = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', named], {
+  const probe = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', named], {
     stdio: 'ignore',
   });
   try {
@@ -27184,7 +27355,7 @@ async function testACommandLineOutsideAsciiIsListedWhole(): Promise<void> {
  * for the platform that forgets rather than the one that remembers.
  */
 async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
-  const probe = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const probe = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   try {
     assert.ok(typeof probe.pid === 'number');
     const listed = await childrenOf(process.pid);
@@ -27217,12 +27388,12 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
   // The grandchild is started detached, the way a game starts a worker: a child Node keeps in its
   // job object on Windows dies with its parent, which is Node's doing and not the platform's, and
   // what is measured here is what the platform does with an orphan.
-  const parent = spawn(
+  const parent = spawnHidden(
     process.execPath,
     [
       '-e',
-      "const { spawn } = require('node:child_process');" +
-        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true });" +
+      HIDDEN_SPAWN_PRELUDE +
+        "const child = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true });" +
         'child.unref();' +
         "process.stdout.write(String(child.pid) + '\\n');" +
         'setInterval(() => {}, 1000);',
@@ -27307,12 +27478,12 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
       ({ adapter, project, runtimeDir }) =>
         async (tool) => {
           if (tool === 'play_scene') {
-            const started = spawn(
+            const started = spawnHidden(
               process.execPath,
               [
                 '-e',
-                "const { spawn } = require('node:child_process');" +
-                  "const child = () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });" +
+                HIDDEN_SPAWN_PRELUDE +
+                  "const child = () => spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });" +
                   'const worker = child(); const other = child();' +
                   "process.stdout.write(JSON.stringify({ worker: worker.pid, other: other.pid }) + '\\n');" +
                   'setInterval(() => {}, 1000);',
@@ -27468,7 +27639,9 @@ async function testAStopTakesTheEndedGamesAnnouncementDown(): Promise<void> {
     ({ adapter, project, runtimeDir }) =>
       (tool) => {
         if (tool === 'play_scene') {
-          const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+          const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+            stdio: 'ignore',
+          });
           held.game = game;
           const pid = game.pid;
           assert.ok(typeof pid === 'number', 'the fixture needs a live game');
@@ -28019,7 +28192,7 @@ async function withAHeldGame(
     connections += 1;
   });
   await listenOnAReservedPort(held);
-  const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   const gamePid = game.pid;
   assert.ok(typeof gamePid === 'number' && alive(gamePid), 'the fixture needs a live process to announce');
   const server = new ServerProcess({
@@ -28254,7 +28427,7 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
   //
   // The long spelling of the eval flag, because `-e` is how the engine this stands in for is told
   // to come up as an editor, and a stand-in wearing it is judged one.
-  const held = spawn(process.execPath, ['--eval', 'setTimeout(() => {}, 120_000)', marker], {
+  const held = spawnHidden(process.execPath, ['--eval', 'setTimeout(() => {}, 120_000)', marker], {
     stdio: 'ignore',
   });
   const pid = held.pid ?? 0;
@@ -28589,7 +28762,9 @@ function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
  */
 async function testTheRunAdoptedIsTheLatestStarted(): Promise<void> {
   const ended = (): number => {
-    const gone: SpawnSyncReturns<string> = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+    const gone: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], {
+      encoding: 'utf8',
+    });
     assert.ok(gone.pid > 0, 'the fixture needs processes that have been and gone');
     return gone.pid;
   };
@@ -28682,7 +28857,7 @@ async function testTheRunAdoptedIsTheLatestStarted(): Promise<void> {
  * it, since a stop takes the note away, so a run picked up has to take it from the note as it is.
  */
 async function testAPickedUpRunKeepsItsProfile(): Promise<void> {
-  const gone: SpawnSyncReturns<string> = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  const gone: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
   assert.ok(gone.pid > 0, 'the fixture needs a process that has been and gone');
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-picked-up-profile-'));
   const project = join(runtimeDir, 'project');
@@ -28761,7 +28936,7 @@ async function testAPickedUpRunKeepsItsProfile(): Promise<void> {
  * was a code or a signal. A signal read back as nothing would say nobody was waiting on the run.
  */
 async function testARecordedEndingIsReadBack(): Promise<void> {
-  const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
   assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
   const endings = [
     { recorded: { exitSignal: 'SIGKILL' }, exitCode: null, exitSignal: 'SIGKILL', said: /sent it SIGKILL/ },
@@ -28837,7 +29012,7 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
 
     // A process that has certainly ended: spawned to exit at once and waited for right here, so
     // the number names nothing by the time the server reads it.
-    const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['-e', ''], {
+    const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], {
       encoding: 'utf8',
     });
     assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
@@ -29055,7 +29230,7 @@ async function benchThroughAStart(
   // a bench the identity check disowns would be spared for a reason this fixture is not about.
   const recorded = join(runtimeDir, owner);
   const benchErrors = join(runtimeDir, 'bench.err');
-  const bench = spawn(
+  const bench = spawnHidden(
     process.execPath,
     [
       // The long spelling of the eval flag: `-e` is how the engine this stands in for is told to
@@ -29697,7 +29872,7 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
         });
       });
       const { [PROFILE_FROM_START]: _unset, ...inherited } = process.env;
-      const game = spawn(
+      const game = spawnHidden(
         engine,
         [
           '--headless',
@@ -29792,7 +29967,7 @@ async function testAProfileIsWrittenPastAReader(): Promise<void> {
   });
   // The holder opens the file, says so, and keeps it open for [param ms].
   const heldFor = async (ms: number): Promise<ChildProcess> => {
-    const holder = spawn(
+    const holder = spawnHidden(
       process.execPath,
       [
         '-e',
@@ -29915,10 +30090,14 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
     });
     assert.ok(built.success, `the rewriter bundles: ${built.logs.map(String).join('\n')}`);
     mark('bundled');
-    const rewriter = spawn('node', [join(runtimeDir, 'built', 'rewrite.js'), JSON.stringify(record), stop], {
-      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtimeDir },
-      stdio: ['ignore', 'pipe', 'inherit'],
-    });
+    const rewriter = spawnHidden(
+      'node',
+      [join(runtimeDir, 'built', 'rewrite.js'), JSON.stringify(record), stop],
+      {
+        env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtimeDir },
+        stdio: ['ignore', 'pipe', 'inherit'],
+      },
+    );
     let rewrites = '';
     // The reader starts once every note is being rewritten rather than beside the start of Node,
     // which on a Windows runner took longer than the whole read: the reader saw one note.
@@ -29940,7 +30119,7 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
     // writer's own count does not: a write waits out a reader holding the note on Windows, so the
     // reader slows the writer, and a runner that made 90 rounds failed a floor on rounds while every
     // one of its reads parsed.
-    const reader = spawn(
+    const reader = spawnHidden(
       process.execPath,
       [
         '-e',
@@ -32622,7 +32801,7 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
   // file the command is about to rewrite.
   const { GODOT_PATH: _path, GODOT: _godot, PATH: _search, Path: _windowsPath, ...blind } = process.env;
   const cli = (...cliArgs: string[]): { status: number | null; output: string } => {
-    const run = spawnSync(process.execPath, ['build/cli.js', ...cliArgs], {
+    const run = spawnSyncHidden(process.execPath, ['build/cli.js', ...cliArgs], {
       encoding: 'utf8',
       timeout: 180000,
       env: withHome(blind, join(projectDir, '.home')),
@@ -32748,6 +32927,123 @@ function testNoShippedScriptParsesJsonLoudly(): void {
 }
 
 /**
+ * The top-level arguments of the call whose opening bracket is at [param open] in [param source],
+ * GDScript: brackets inside strings and comments are not counted, and neither are commas.
+ */
+function gdscriptArguments(source: string, open: number): string[] {
+  const found: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let current = '';
+  for (let at = open + 1; at < source.length; at += 1) {
+    const char = source[at] ?? '';
+    if (quote !== null) {
+      current += char;
+      if (char === '\\') {
+        at += 1;
+        current += source[at] ?? '';
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === '#') {
+      const end = source.indexOf('\n', at);
+      at = end === -1 ? source.length : end - 1;
+      continue;
+    }
+    if (char === ',' && depth === 0) {
+      found.push(current.trim());
+      current = '';
+      continue;
+    }
+    if ((char === ')' || char === ']' || char === '}') && depth === 0) {
+      const last = current.trim();
+      return last === '' ? found : [...found, last];
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === '(' || char === '[' || char === '{') {
+      depth += 1;
+    } else if (char === ')' || char === ']' || char === '}') {
+      depth -= 1;
+    }
+    current += char;
+  }
+  return found;
+}
+
+/**
+ * Nothing in the package, its scripts or its tests starts a process except through `src/spawn.ts`,
+ * whose every start passes `windowsHide`, or the prelude that does the same for a script a test
+ * hands to Node. A process with no console gives every console program it starts a window of its
+ * own on the desktop in use, and a gate run detached after a push put about twenty of them on the
+ * screen of the person at the machine. Walked rather than listed, so a file added later is covered;
+ * a stand-in started from a string counts, which is why the words are searched for and not the
+ * imports. GDScript starts through Godot's own calls, which open no console unless asked to with
+ * `open_console`, so the shipped scripts never ask.
+ */
+function testEveryProcessStartsThroughTheHiddenSpawn(): void {
+  // Built from parts, because this file is one of the files walked.
+  const starters = [['child', 'process'].join('_'), ['Bun', 'spawn'].join('.'), ['Bun', '$'].join('.')];
+  const shell = new RegExp(['from', "'bun'"].join(' '));
+  const roots = ['src', 'scripts', 'test'];
+  const walked = roots.flatMap((root) =>
+    readdirSync(root, { recursive: true })
+      .map(String)
+      .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
+      .map((entry) => join(root, entry)),
+  );
+  assert.ok(walked.length >= 110, `the sources were walked: ${walked.length}`);
+  const starting = walked
+    .filter((file) => {
+      const source = readFileSync(file, 'utf8');
+      return starters.some((word) => source.includes(word)) || shell.test(source);
+    })
+    .sort();
+  assert.deepEqual(
+    starting,
+    [join('src', 'spawn.ts'), join('test', 'support', 'hidden-spawn.ts')],
+    'start a process with spawnHidden, runHidden, runSyncHidden or spawnSyncHidden from src/spawn.ts, ' +
+      'spawnShown for a game somebody asked to see, or HIDDEN_SPAWN_PRELUDE in a script handed to Node',
+  );
+
+  // Godot's own: `OS.create_process(path, arguments, open_console)` and
+  // `OS.execute(path, arguments, output, read_stderr, open_console)`.
+  const consoleArgument: Record<string, number> = { create_process: 2, execute: 4 };
+  // A comma and a bracket in a string, and a comment holding the argument the walk looks for: each
+  // is skipped by one line of the reading, and the shipped call has none of them.
+  const awkward = 'OS.create_process("a, (b", [\'c)\'],  # , true)\n\tfalse)';
+  assert.deepEqual(
+    gdscriptArguments(awkward, awkward.indexOf('(')),
+    ['"a, (b"', "['c)']", 'false'],
+    'the arguments are read as GDScript reads them',
+  );
+  const scripts = ['src', 'test'].flatMap((root) =>
+    readdirSync(root, { recursive: true })
+      .map(String)
+      .filter((entry) => entry.endsWith('.gd'))
+      .map((entry) => join(root, entry)),
+  );
+  const starts: string[] = [];
+  const consoles: string[] = [];
+  for (const script of scripts) {
+    const source = readFileSync(script, 'utf8');
+    for (const call of source.matchAll(/\bOS\s*\.\s*(create_process|execute)\s*\(/g)) {
+      const name = call[1] ?? '';
+      const given = gdscriptArguments(source, call.index + call[0].length - 1);
+      starts.push(`${script} ${name}`);
+      const asked = given[consoleArgument[name] ?? Number.POSITIVE_INFINITY];
+      if (asked !== undefined && asked !== 'false') {
+        consoles.push(`${script} ${name}(${given.join(', ')})`);
+      }
+    }
+  }
+  assert.ok(starts.length >= 1, `the scripts' process starts were found: ${JSON.stringify(starts)}`);
+  assert.deepEqual(consoles, [], 'a process a script starts opens no console window');
+}
+
+/**
  * Taking the addons out removes `addons/` only when that leaves it empty, and only when something
  * of gdharness was there to take: a project's own addon keeps the directory, and an empty one that
  * gdharness never filled is not its to remove.
@@ -32789,7 +33085,7 @@ function testCommandLineSetup(): void {
 
   const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-cli-'));
   const cli = (...cliArgs: string[]): { status: number | null; stdout: string; stderr: string } => {
-    const run = spawnSync(process.execPath, ['build/cli.js', ...cliArgs], {
+    const run = spawnSyncHidden(process.execPath, ['build/cli.js', ...cliArgs], {
       encoding: 'utf8',
       timeout: 180000,
       env: withHome({ ...process.env, GODOT_PATH: godotPath }, join(projectDir, '.home')),
@@ -33142,12 +33438,16 @@ function testCommandLineSetup(): void {
 function answersVersion(command: string): SpawnSyncReturns<string> {
   const options = { encoding: 'utf8' as const, timeout: 60000 };
   if (process.platform === 'win32' && command.toLowerCase().endsWith('.cmd')) {
-    return spawnSync(process.env['ComSpec'] ?? 'cmd.exe', ['/d', '/s', '/c', `"${command}" --version`], {
-      ...options,
-      windowsVerbatimArguments: true,
-    });
+    return spawnSyncHidden(
+      process.env['ComSpec'] ?? 'cmd.exe',
+      ['/d', '/s', '/c', `"${command}" --version`],
+      {
+        ...options,
+        windowsVerbatimArguments: true,
+      },
+    );
   }
-  return spawnSync(command, ['--version'], options);
+  return spawnSyncHidden(command, ['--version'], options);
 }
 
 /**
@@ -33178,7 +33478,7 @@ function testTheWrittenConfigNamesAProgramThatStarts(): void {
       '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ConfigRegression"\n',
     );
 
-    const setup = spawnSync(process.execPath, ['build/cli.js', 'setup', projectDir, '--claude-code'], {
+    const setup = spawnSyncHidden(process.execPath, ['build/cli.js', 'setup', projectDir, '--claude-code'], {
       encoding: 'utf8',
       timeout: 180000,
       env: withHome({ ...process.env, GODOT_PATH: godotPath }, join(projectDir, '.home')),
@@ -36102,7 +36402,9 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
       // with -s or --quit turns the editor away, and it never reaches the server.
       const standIns: ChildProcess[] = [];
       const anEditorProcess = (): number => {
-        const standIn = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+        const standIn = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+          stdio: 'ignore',
+        });
         standIns.push(standIn);
         assert.ok(typeof standIn.pid === 'number', 'the fixture needs a live process for each editor');
         return standIn.pid;
@@ -37822,10 +38124,14 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       join(project, 'probe.gd'),
       `extends SceneTree\n\n\nfunc _init() -> void:\n\tprint("UID PATH ", ResourceUID.get_id_path(ResourceUID.text_to_id("${uid.trim()}")))\n\tquit()\n`,
     );
-    const probed = spawnSync(godotPath, ['--headless', '--path', project, '--script', 'res://probe.gd'], {
-      encoding: 'utf8',
-      timeout: 120_000,
-    });
+    const probed = spawnSyncHidden(
+      godotPath,
+      ['--headless', '--path', project, '--script', 'res://probe.gd'],
+      {
+        encoding: 'utf8',
+        timeout: 120_000,
+      },
+    );
     assert.match(probed.stdout, /UID PATH res:\/\/words\/wording\.gd/, `${probed.stdout}\n${probed.stderr}`);
     rmSync(join(project, 'probe.gd'));
 
@@ -38002,7 +38308,7 @@ async function rescanAsTheEditorOpens(godotPath: string, count: number): Promise
     assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
     rmSync(join(project, '.godot', 'editor'), { recursive: true, force: true });
     await server.initialize('cold-rescan');
-    editor = spawn(godotPath, ['--editor', '--headless', '--path', project], {
+    editor = spawnHidden(godotPath, ['--editor', '--headless', '--path', project], {
       env: { ...process.env, ...own, GDHARNESS_BRIDGE_PORT: String(bridgePort) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -38203,6 +38509,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
   testALaunchWithoutActivationSaysSo,
+  testEveryHiddenStartIsStartedHidden,
   testARunOutlivesItsServersTree,
   testAnotherProjectsRunLeavesOursStoppable,
   testAGameNoNoteNamesIsStoppedByItsNumber,
@@ -38407,6 +38714,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testCommandLineSetup,
   testUninstallLeavesAddonsItDidNotMake,
   testNoShippedScriptParsesJsonLoudly,
+  testEveryProcessStartsThroughTheHiddenSpawn,
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,

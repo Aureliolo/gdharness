@@ -12,11 +12,11 @@
  */
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
+import { spawnHidden } from '../src/spawn.js';
 
 const HOST = '127.0.0.1';
 const ENTRY = 'build/index.js';
@@ -57,7 +57,7 @@ function upgrades(port: number, path: string, timeoutMs: number): Promise<boolea
 
 const port = await freePort();
 // stdin stays open: the server speaks MCP over stdio and stops the moment it reads EOF.
-const child = spawn('node', [ENTRY], {
+const child = spawnHidden('node', [ENTRY], {
   env: { ...process.env, GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_BRIDGE_HOST: HOST },
   stdio: ['pipe', 'pipe', 'pipe'],
 });

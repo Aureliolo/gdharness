@@ -6,9 +6,9 @@
  * a boot that warns once per resource, was ended by Node and answered as an engine fault.
  */
 
-import { spawn } from 'node:child_process';
 import { callSignal } from './call-signal.js';
 import { GameLog } from './game-log.js';
+import { spawnHidden } from './spawn.js';
 
 export interface EngineRun {
   /** Both streams, finished. */
@@ -33,9 +33,8 @@ export function runEngine(
     const log = new GameLog();
     let failure: string | null = null;
     const signal = callSignal();
-    const child = spawn(executable, [...args], {
+    const child = spawnHidden(executable, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
       ...(signal === undefined ? {} : { signal }),
     });
     child.stdout.on('data', (chunk: Buffer) => {

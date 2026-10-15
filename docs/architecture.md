@@ -558,6 +558,16 @@ by after a reconnect. A file rather than a pipe
 because a pipe with no reader fills and then blocks the writer: surviving the server down a pipe
 would only trade a killed run for a wedged one.
 
+Every process the server, its scripts and its tests start is started through `src/spawn.ts`, which
+starts it with `windowsHide`. A process with no console, which a server under a harness can be and a
+gate run detached always is, gives each console program it starts a console window of its own on
+the desktop in use: one gate run put about twenty Godot consoles on the screen of the person at the
+machine. The exception is a game, whose window is what it is run for and which the same flag would
+hide; the keeper starts it detached, so it gets no console either. Godot's own `OS.create_process`
+and `OS.execute` open no console unless asked to, and the shipped scripts never ask. A regression
+walks the source for any other way of starting a process, and another reads back, from the process
+started, the show state each start named.
+
 The keeper writes the note once the game is up and its exit into the note when it ends, since it
 is the one process that can wait on the game; the server that started the run and any server that
 picks it up read the exit from there alike. Every note, and a profiled run's profile, is written

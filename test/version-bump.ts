@@ -5,6 +5,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { type Answer, type Ask, createRef, refState } from '../scripts/github-ref.js';
+import { spawnSyncHidden } from '../src/spawn.js';
 import { get } from './support/json.js';
 
 const root = path.join(import.meta.dirname, '..');
@@ -33,14 +34,10 @@ try {
   }
 
   // When: the release version is bumped once.
-  const bump = Bun.spawnSync([process.execPath, 'scripts/bump-version.ts', '0.2.0'], {
-    cwd: fixtureRoot,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
+  const bump = spawnSyncHidden(process.execPath, ['scripts/bump-version.ts', '0.2.0'], { cwd: fixtureRoot });
 
   // Then: metadata and every maintained download/install reference move together.
-  assert.equal(bump.exitCode, 0, bump.stderr.toString());
+  assert.equal(bump.status, 0, bump.stderr.toString());
   for (const manifest of ['package.json', 'server.json']) {
     const parsed: unknown = JSON.parse(await readFile(path.join(fixtureRoot, manifest), 'utf8'));
     assert.equal(get(parsed, 'version'), '0.2.0', `${manifest} should carry the new version`);

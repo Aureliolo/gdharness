@@ -5,6 +5,7 @@ import { chmod, cp, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from
 import os from 'node:os';
 import path from 'node:path';
 import sourcePackage from '../package.json' with { type: 'json' };
+import { spawnSyncHidden } from '../src/spawn.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const outputDirectory = path.join(root, 'dist');
@@ -67,15 +68,12 @@ try {
   }
 
   const stagedArchive = path.join(stagingRoot, archiveName);
-  const pack = Bun.spawnSync(
-    [process.execPath, 'pm', 'pack', '--ignore-scripts', '--filename', stagedArchive, '--quiet'],
-    {
-      cwd: stagingRoot,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    },
+  const pack = spawnSyncHidden(
+    process.execPath,
+    ['pm', 'pack', '--ignore-scripts', '--filename', stagedArchive, '--quiet'],
+    { cwd: stagingRoot },
   );
-  if (pack.exitCode !== 0) {
+  if (pack.status !== 0) {
     throw new Error(`bun pm pack failed:\n${pack.stderr.toString().trim()}`);
   }
 

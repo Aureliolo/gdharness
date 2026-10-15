@@ -15,7 +15,6 @@
  * below so that a partial update cannot install anything.
  */
 
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +22,7 @@ import { dirname, join, resolve } from 'node:path';
 import { inflateRawSync } from 'node:zlib';
 
 import { isWithinRoot } from '../src/paths.js';
+import { runSyncHidden } from '../src/spawn.js';
 
 /**
  * Per platform: the release tag, the SHA-512 of the asset as published, and where the executable
@@ -303,7 +303,7 @@ async function main(): Promise<void> {
 
   // A path that exists is not an engine. Ask it what it is, and fail here rather than leave a
   // broken install for the suite to report as "no Godot found".
-  const reported = execFileSync(executable, ['--version'], { encoding: 'utf8', timeout: 120000 }).trim();
+  const reported = runSyncHidden(executable, ['--version'], { encoding: 'utf8', timeout: 120000 }).trim();
   if (!reported.startsWith(tag.replace('-', '.'))) {
     throw new Error(`${executable} reports ${reported}, which is not ${tag}.`);
   }

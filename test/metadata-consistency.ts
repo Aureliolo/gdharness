@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import process from 'node:process';
 import pkg from '../package.json' with { type: 'json' };
@@ -8,6 +7,7 @@ import serverManifest from '../server.json' with { type: 'json' };
 import { HARNESSES } from '../src/harnesses.js';
 import { PROMPT_SPECS } from '../src/prompts.js';
 import { RESOURCE_COUNT } from '../src/resources.js';
+import { runSyncHidden } from '../src/spawn.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { isRecord } from './support/json-rpc.js';
 import { ServerProcess, serverIdentity } from './support/server.js';
@@ -165,7 +165,7 @@ assert.ok(
   'server.json description must satisfy the MCP schema 100-character limit',
 );
 
-const versionOutput = execFileSync(process.execPath, ['./build/cli.js', 'version'], {
+const versionOutput = runSyncHidden(process.execPath, ['./build/cli.js', 'version'], {
   cwd: process.cwd(),
   encoding: 'utf8',
 }).trim();

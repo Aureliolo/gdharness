@@ -12,7 +12,7 @@
  * the answer never comes the run still fails, saying which of the two it was.
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawnSyncHidden } from '../src/spawn.js';
 
 const ATTEMPTS = 4;
 
@@ -40,7 +40,7 @@ type Attempt =
   | { ran: false; why: string };
 
 function auditOnce(): Attempt {
-  const run = spawnSync('bun', ['audit', '--prod'], {
+  const run = spawnSyncHidden('bun', ['audit', '--prod'], {
     encoding: 'utf8',
     shell: process.platform === 'win32',
   });

@@ -13,8 +13,8 @@
  * the walk to follow.
  */
 
-import { type ChildProcess, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { type ChildProcess, spawnHidden } from './spawn.js';
 
 /** What to start, and for a run, where its output goes and how its record reads. */
 export interface OutsideSpec {
@@ -148,9 +148,8 @@ export async function launchOutsideTheTree(
   keeper = KEEPER_SCRIPT,
 ): Promise<Launched> {
   return await new Promise<Launched>((resolve) => {
-    const launcher = spawn(runtime, [keeper, 'launch'], {
+    const launcher = spawnHidden(runtime, [keeper, 'launch'], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
     });
     sendSpec(launcher, {
       command: spec.command,

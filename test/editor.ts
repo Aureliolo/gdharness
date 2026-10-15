@@ -15,7 +15,6 @@
  */
 
 import assert from 'node:assert/strict';
-import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -43,6 +42,7 @@ import { readLatestRun } from '../src/run-record.js';
 import { frameFunctionsFor, queuedMessagesOf } from '../src/script-profile.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { RUNTIME_AUTOLOAD } from '../src/setup.js';
+import { type ChildProcess, spawnHidden, spawnSyncHidden } from '../src/spawn.js';
 import { endEnginesUnder } from './support/engines.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
 import { parseTextContent, textOf } from './support/json-rpc.js';
@@ -342,7 +342,7 @@ interface Editor {
 
 /** True when the binary at this path answers --version, which is the only test that counts. */
 function godotRuns(candidate: string): boolean {
-  const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', timeout: 60000 });
+  const probe = spawnSyncHidden(candidate, ['--version'], { encoding: 'utf8', timeout: 60000 });
   return probe.status === 0;
 }
 
@@ -1005,7 +1005,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     return run;
   };
 
-  const editor: ChildProcess = spawn(
+  const editor: ChildProcess = spawnHidden(
     godotPath,
     [
       '--editor',

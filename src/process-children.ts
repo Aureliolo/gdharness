@@ -1,9 +1,6 @@
-import { execFile } from 'node:child_process';
 import { basename } from 'node:path';
-import { promisify } from 'node:util';
+import { runHidden as run } from './spawn.js';
 import { askWindows, WindowsAskFailure } from './windows-ask.js';
-
-const run = promisify(execFile);
 
 /**
  * When each of [param pids] started, as milliseconds, for the ones the platform will say.
@@ -54,11 +51,13 @@ export async function startTimesOf(pids: readonly number[]): Promise<Map<number,
 
 /** What [param command] printed to stdout, whatever it exited with. */
 function printedBy(command: string, args: readonly string[], env: NodeJS.ProcessEnv): Promise<string> {
-  return new Promise((resolve) => {
-    execFile(command, [...args], { encoding: 'utf8', timeout: ASK_TIMEOUT_MS, env }, (_error, stdout) => {
-      resolve(stdout);
-    });
-  });
+  return run(command, args, { timeout: ASK_TIMEOUT_MS, env }).then(
+    ({ stdout }) => stdout,
+    (error: unknown) => {
+      const printed = (error as { stdout?: unknown }).stdout;
+      return typeof printed === 'string' ? printed : '';
+    },
+  );
 }
 
 /**
@@ -204,11 +203,33 @@ function linked(tree: ProcessTree, child: number, parent: number): boolean {
   return from.startedAt >= to.startedAt;
 }
 
-/** The processes whose parent is [param pid], as [param tree] has them. */
+/**
+ * Whether [param listed] is the console host Windows starts for a console program given a console
+ * with no window, which is how every process here is started. It is listed as that program's child,
+ * but it is the program's console rather than anything the program started, and it ends with the
+ * last process using it: a stop that named one as a child left running, or ended it, would be wrong
+ * about what the run had started. Known by its path in the system directory rather than its name,
+ * since anything can be called conhost.exe.
+ */
+function isConsoleHost(listed: ListedProcess): boolean {
+  const executable = commandWords(listed.command)[0];
+  if (executable === undefined) {
+    return false;
+  }
+  const host = `${process.env['SystemRoot'] ?? 'C:\\Windows'}\\System32\\conhost.exe`;
+  return (
+    executable
+      .replace(/^\\\?\?\\/, '')
+      .replaceAll('/', '\\')
+      .toLowerCase() === host.toLowerCase()
+  );
+}
+
+/** The processes whose parent is [param pid], as [param tree] has them, console hosts aside. */
 function childrenIn(tree: ProcessTree, pid: number): number[] {
   const children: number[] = [];
-  for (const child of tree.keys()) {
-    if (linked(tree, child, pid)) {
+  for (const [child, listed] of tree) {
+    if (linked(tree, child, pid) && !isConsoleHost(listed)) {
       children.push(child);
     }
   }

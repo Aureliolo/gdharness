@@ -1,8 +1,5 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { runHidden as run } from './spawn.js';
 import { askWindows } from './windows-ask.js';
-
-const run = promisify(execFile);
 
 /**
  * Long enough for the operating system to answer about one process on a machine that is busy,
