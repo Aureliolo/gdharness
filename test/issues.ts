@@ -20,6 +20,7 @@ import {
   feedbackNotice,
 } from '../src/issues.js';
 import { portFromEnv } from '../src/ports.js';
+import { spawnSyncHidden } from '../src/spawn.js';
 
 const report = defectReport('editor_scene op=open', new TypeError('Cannot read properties of undefined'));
 
@@ -176,13 +177,11 @@ assert.ok(new Refusal('x') instanceof Error, 'a refusal is still an Error wherev
 // The same line has to hold at the command line, where it is drawn by a class rather than a
 // catch: a mistyped command is the caller's, and answering one with a bug report would have
 // people filing their own typos.
-const mistyped = Bun.spawnSync([process.execPath, 'src/cli.ts', 'nonsense-command'], {
+const mistyped = spawnSyncHidden(process.execPath, ['src/cli.ts', 'nonsense-command'], {
   cwd: join(import.meta.dirname, '..'),
-  stdout: 'pipe',
-  stderr: 'pipe',
 });
 const said = mistyped.stderr.toString();
-assert.equal(mistyped.exitCode, 2, `a mistyped command should exit 2, said: ${said}`);
+assert.equal(mistyped.status, 2, `a mistyped command should exit 2, said: ${said}`);
 assert.match(said, /Unknown command/, 'and name what was wrong with it');
 assert.doesNotMatch(said, /Do not open an issue/, 'and never read as a defect in gdharness');
 

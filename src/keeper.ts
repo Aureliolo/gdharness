@@ -12,7 +12,6 @@
  * Both are handed their spec down stdin, never on the command line: see `SentSpec`.
  */
 
-import { type ChildProcess, spawn } from 'node:child_process';
 import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +37,7 @@ import {
   withEngineArguments,
   writeProfileFile,
 } from './script-profile.js';
+import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
 
 /**
  * The target started detached, so it is in no job object and no process group of this process;
@@ -57,10 +57,9 @@ async function startDirectly(
   directory: string = process.cwd(),
 ): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
   return await new Promise((resolve) => {
-    const child = spawn(spec.command, [...spec.args], {
+    const child = (hidden ? spawnHidden : spawnShown)(spec.command, spec.args, {
       stdio: ['ignore', output, errors],
       detached,
-      windowsHide: hidden,
       env: withChanges(process.env, spec.envChanges),
       cwd: directory,
     });
@@ -261,10 +260,9 @@ async function launch(): Promise<void> {
     }
     process.exit(0);
   }
-  const keeper = spawn(process.execPath, [KEEPER_SCRIPT, 'keep'], {
+  const keeper = spawnHidden(process.execPath, [KEEPER_SCRIPT, 'keep'], {
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: true,
-    windowsHide: true,
   });
   let printed = '';
   let complained = '';

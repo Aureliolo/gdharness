@@ -1,8 +1,8 @@
-import { spawnSync } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from '../../src/alive.js';
+import { spawnSyncHidden } from '../../src/spawn.js';
 
 /** One engine ended because it was still holding a fixture's directory, and the directory it held. */
 export interface EndedEngine {
@@ -33,7 +33,7 @@ export async function endEnginesUnder(...given: string[]): Promise<EndedEngine[]
   // discriminator anyway, and a name filter can only subtract from that.
   const listing =
     process.platform === 'win32'
-      ? spawnSync(
+      ? spawnSyncHidden(
           'powershell',
           [
             '-NoProfile',
@@ -42,7 +42,7 @@ export async function endEnginesUnder(...given: string[]): Promise<EndedEngine[]
           ],
           { encoding: 'utf8', timeout: 30_000 },
         )
-      : spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 30_000 });
+      : spawnSyncHidden('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 30_000 });
 
   // A listing that did not happen is the failure this had for months, and it looks exactly like a
   // machine with nothing to clean up. Said out loud, because the cost of it lands on the next run
