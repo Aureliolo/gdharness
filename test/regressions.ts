@@ -40114,6 +40114,12 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
     );
     assert.match(text(get(tree, 'readBy')), /headless engine, since no editor serves this project/);
     assert.equal(get(tree, 'unsavedInEditor'), undefined, 'only an editor can say what it holds unsaved');
+    // The editor's answer is these with unsavedInEditor for readBy; engine messages come and go.
+    const answerKeys = (answer: unknown): string[] =>
+      Object.keys(asObject(answer))
+        .filter((key) => !key.startsWith('engine_'))
+        .sort();
+    assert.deepEqual(answerKeys(tree), ['readBy', 'tree'], JSON.stringify(tree));
     assert.ok(!existsSync(join(project, 'init_ran.txt')), 'the read ran a node script of the scene');
 
     const shown = get(
@@ -40151,6 +40157,11 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       'corner_radius_top_left',
     ]);
     assert.match(text(get(panel, 'readBy')), /headless engine/);
+    assert.deepEqual(
+      answerKeys(panel),
+      ['properties', 'readBy', 'resourcePath', 'resourceType'],
+      JSON.stringify(panel),
+    );
 
     // Each read handed the other's file says which one reads it, where the scene read printed the
     // loader's error and the resource read answered a scene's packed bundle as its properties.
