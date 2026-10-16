@@ -244,6 +244,7 @@ import {
   movieRefusal,
   noCodeWillCome,
   notRunNote,
+  ourRunEnded,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
@@ -12140,6 +12141,31 @@ function testAPidPicksOneOfSeveralGames(): void {
  * exactly where the difference matters, since that is the boot most likely to outlast a budget.
  */
 /**
+ * A runtime call after this server's run has ended says that run ended and how. The stop is
+ * exercised with a real game in testAHeadlessGameSaysItHasNoWindow; the endings a stop never
+ * produces are rendered here: a game that quit by itself, one a signal ended, a played run with no
+ * pid, and one nobody saw end.
+ */
+function testARuntimeCallAfterOurRunEndedSaysSo(): void {
+  const base = { pid: 41, throughEditor: false, exitCode: null, exitSignal: null } as const;
+  const quit = ourRunEnded({ ...base, exitCode: 3, endedAt: 10_000 }, 15_000);
+  assert.equal(
+    quit,
+    'No game with the runtime addon is running: the game this server started (pid 41) ended 5s ago, and it exited by itself with code 3. editor_output has what it printed, and editor_run start runs it again.',
+  );
+  const signalled = ourRunEnded({ ...base, exitSignal: 'SIGKILL', endedAt: 10_000 }, 10_000);
+  assert.match(signalled, /ended 0s ago, and it was ended by SIGKILL\./, signalled);
+  const played = ourRunEnded({ ...base, pid: null, throughEditor: true, endedThrough: 'editor' }, 0);
+  assert.match(
+    played,
+    /the game this server played in the editor ended, and this server asked the editor to stop it\./,
+    played,
+  );
+  const unseen = ourRunEnded(base, 0);
+  assert.match(unseen, /\(pid 41\) ended, and it is no longer running\./, unseen);
+}
+
+/**
  * A run over with no exit code says why there is none, in terms of the run it was.
  *
  * One sentence served every such run and named a restart for all of them: a game the editor played
@@ -13598,7 +13624,6 @@ async function testAClickThatDoesNotProcessSaysWhy(): Promise<void> {
       join(project, 'main.gd'),
       'extends Control\n\n\nfunc pause_now() -> void:\n\tget_tree().paused = true\n',
     );
-    // Inside the 64 by 64 viewport a headless game draws.
     writeFileSync(
       join(project, 'main.tscn'),
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
@@ -13741,7 +13766,6 @@ async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
         '',
       ].join('\n'),
     );
-    // Inside the 64 by 64 viewport a headless game draws.
     writeFileSync(
       join(project, 'main.tscn'),
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
@@ -13830,13 +13854,14 @@ async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
 }
 
 /**
- * A headless game says it has no window when a click or a capture needs one.
+ * A headless game lays out at the size the project opens its window at, and says it has no window
+ * when a click or a capture needs one.
  *
  * Found by driving the tools through a model: a click by the words on a button twenty pixels in
- * from the corner was refused as "no control on screen says Go", which read as though the button
- * were not there, when the only screen a headless game has is the engine's 64 by 64; and a capture
- * was told to restore a window the game never had. The button inside the 64 by 64 is the positive:
- * a click by words reaches it, so the refusal beside it is about where the other one is.
+ * from the corner was refused, when the only screen a headless game had was the engine's 64 by 64,
+ * and a capture was told to restore a window the game never had. The runtime now gives the root the
+ * project's window size, so the button a hundred pixels in is clicked, and one past the project's
+ * width is refused with the size it is outside of.
  */
 async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -13857,7 +13882,8 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       join(project, 'project.godot'),
       '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="NoWindow"\n' +
         'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
-        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[display]\n\nwindow/size/viewport_width=800\nwindow/size/viewport_height=600\n',
     );
     writeFileSync(
       join(project, 'main.gd'),
@@ -13868,7 +13894,8 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
         '[node name="Main" type="Control"]\nscript = ExtResource("1")\n\n' +
         '[node name="Near" type="Button" parent="."]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Near"\n\n' +
-        '[node name="Far" type="Button" parent="."]\noffset_left = 100.0\noffset_top = 20.0\noffset_right = 160.0\noffset_bottom = 50.0\ntext = "Far"\n',
+        '[node name="Far" type="Button" parent="."]\noffset_left = 100.0\noffset_top = 20.0\noffset_right = 160.0\noffset_bottom = 50.0\ntext = "Far"\n\n' +
+        '[node name="Beyond" type="Button" parent="."]\noffset_left = 900.0\noffset_top = 20.0\noffset_right = 960.0\noffset_bottom = 50.0\ntext = "Beyond"\n',
     );
     cpSync(
       join('src', 'godot', 'addons', 'gdharness_runtime'),
@@ -13905,13 +13932,21 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       JSON.stringify(held),
     );
 
+    const size = await call('runtime_inspect', { op: 'property', nodePath: '/root', property: 'size' });
+    assert.match(size, /"x": 800,\s*"y": 600/, `the root has the project's window size: ${size}`);
     assert.match(await call('runtime_input', { op: 'click', says: 'Near' }), /"type": "clicked"/);
-    const far = await call('runtime_input', { op: 'click', says: 'Far' });
     assert.match(
-      far,
-      /no control on screen says "Far", so nothing was clicked; 1 control says it outside what the screen shows\. This game has no window, and a game with no window has a 64 by 64 viewport/,
-      far,
+      await call('runtime_input', { op: 'click', says: 'Far' }),
+      /"type": "clicked"/,
+      'a button a hundred pixels in, outside the engine 64 by 64, is clicked',
     );
+    const beyond = await call('runtime_input', { op: 'click', says: 'Beyond' });
+    assert.match(
+      beyond,
+      /no control on screen says "Beyond", so nothing was clicked; 1 control says it outside what the screen shows\. This game has no window, and its viewport is 800 by 600/,
+      beyond,
+    );
+    assert.doesNotMatch(beyond, /run it with a window|64 by 64/, beyond);
     const captured = await call('runtime_capture', { op: 'screenshot' });
     assert.match(
       captured,
@@ -13919,7 +13954,20 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       captured,
     );
     assert.doesNotMatch(captured, /Restore the window/, captured);
-    await stopItsRun(server);
+    const pidOf = /"pid": (\d+)/.exec(started)?.[1];
+    assert.ok(pidOf !== undefined, started);
+    assert.match(await call('editor_run', { op: 'stop' }), /"stopped": true/);
+    // After its own stop, the server says the run it started ended and how, rather than the
+    // sentence a project that never ran a game is given.
+    const after = await call('runtime_inspect', { op: 'tree', nodePath: '/root' });
+    assert.match(
+      after,
+      new RegExp(
+        `No game with the runtime addon is running: the game this server started \\(pid ${pidOf}\\) ended \\d+s ago, and this server (asked it to close|ended it through the keeper holding it|signalled it)\\. editor_output has what it printed, and editor_run start runs it again\\.`,
+      ),
+      after,
+    );
+    assert.doesNotMatch(after, /play the project from the editor/, after);
   } finally {
     await server.stop();
     sweep(project);
@@ -41361,6 +41409,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheRunAdoptedIsTheLatestStarted,
   testAPickedUpRunKeepsItsProfile,
   testARecordedEndingIsReadBack,
+  testARuntimeCallAfterOurRunEndedSaysSo,
   testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,

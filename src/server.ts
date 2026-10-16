@@ -955,6 +955,44 @@ export function endedWithoutACode(run: {
 }
 
 /**
+ * What a runtime call is told when no game is running and the run this server started has ended.
+ *
+ * The plain refusal says to start a game or play one from the editor, which reads as though nothing
+ * had ever run; a caller that had just stopped its run with editor_run stop, or whose game quit on
+ * its own, was given the same sentence as one that never started any.
+ */
+export function ourRunEnded(
+  run: {
+    readonly pid: number | null;
+    readonly throughEditor: boolean;
+    readonly endedAt?: number;
+    readonly endedThrough?: EndedThrough;
+    readonly exitCode: number | null;
+    readonly exitSignal: string | null;
+  },
+  now: number,
+): string {
+  const which = `${run.throughEditor ? 'played in the editor' : 'started'}${run.pid === null ? '' : ` (pid ${run.pid})`}`;
+  const when =
+    run.endedAt === undefined ? '' : ` ${Math.max(0, Math.round((now - run.endedAt) / 1000))}s ago`;
+  const how =
+    run.endedThrough === 'close'
+      ? 'this server asked it to close'
+      : run.endedThrough === 'keeper'
+        ? 'this server ended it through the keeper holding it'
+        : run.endedThrough === 'signal'
+          ? 'this server signalled it'
+          : run.endedThrough === 'editor'
+            ? 'this server asked the editor to stop it'
+            : run.exitCode !== null
+              ? `it exited by itself with code ${run.exitCode}`
+              : run.exitSignal === null
+                ? 'it is no longer running'
+                : `it was ended by ${run.exitSignal}`;
+  return `No game with the runtime addon is running: the game this server ${which} ended${when}, and ${how}. editor_output has what it printed, and editor_run start runs it again.`;
+}
+
+/**
  * How a stop went: the run is gone; it was signalled and was still there when the wait ran out; or
  * nothing was signalled, because its pid no longer answers as the process the run was started as.
  */
@@ -13130,6 +13168,21 @@ class GodotServer {
       typeof pid === 'number' ? pid : own,
     );
     if ('problem' in choice) {
+      const ended = this.activeProcess;
+      const nothingAnnounced =
+        typeof pid !== 'number' &&
+        announced.unspoken.length === 0 &&
+        !announced.running.some((one) => wanted === undefined || isSameDirectory(one.project.path, wanted));
+      if (
+        nothingAnnounced &&
+        ended !== null &&
+        !stillRunning(ended) &&
+        (wanted === undefined || ended.projectPath === null || isSameDirectory(ended.projectPath, wanted))
+      ) {
+        return this.createErrorResponse(
+          ourRunEnded({ ...ended, pid: ended.pid ?? ended.announcedPid ?? null }, Date.now()),
+        );
+      }
       return this.createErrorResponse(choice.problem);
     }
     // Said when it was a choice: several games of the project are running and this one was

@@ -267,6 +267,7 @@ const PROVOKED: Readonly<Record<string, readonly RegExp[]>> = {
   runtime_change: [
     /^ERROR: Error calling method from 'callv': 'Node::take': Cannot convert argument 1 from Object to Object\.$/,
     /^ERROR: noisy said so$/,
+    /^WARNING: noisy only warned$/,
     /^ERROR: Attempted to assign an object into a TypedArray, that does not inherit from 'GDScript'\.$/,
     /^ERROR: Unable to convert array index 0 from "Object" to "Object"\.$/,
     /^ERROR: Attempted to assign an object into a TypedDictionary\.Value, that does not inherit from 'GDScript'\.$/,
