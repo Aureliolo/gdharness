@@ -32,7 +32,7 @@ export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string
     uid: 'get_uid',
     refresh_classes: 'refresh_class_cache',
   }),
-  project_export: dictionary({ list: 'list_export_presets' }),
+  project_export: dictionary({ list: 'list_export_presets', add_preset: 'add_export_preset' }),
   script_edit: dictionary({ create: 'create_script', modify: 'modify_script' }),
   script_info: dictionary({ structure: 'get_script_info' }),
   editor_classes: dictionary({

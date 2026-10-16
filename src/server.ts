@@ -1768,7 +1768,7 @@ export function exportPresetRefusal(projectPath: string, preset: string): string
   try {
     text = readFileSync(join(projectPath, 'export_presets.cfg'), 'utf8');
   } catch {
-    return `This project has no export_presets.cfg, so it has no preset '${preset}' to export with. The editor writes the file when a preset is added in Project > Export.`;
+    return `This project has no export_presets.cfg, so it has no preset '${preset}' to export with. project_export add_preset writes one, as the editor's Project > Export does.`;
   }
   const names: string[] = [];
   let inPreset = false;
@@ -1787,7 +1787,7 @@ export function exportPresetRefusal(projectPath: string, preset: string): string
     return null;
   }
   return names.length === 0
-    ? `export_presets.cfg names no preset, so there is no '${preset}' to export with. The editor adds one in Project > Export.`
+    ? `export_presets.cfg names no preset, so there is no '${preset}' to export with. project_export add_preset adds one.`
     : `This project has no export preset named '${preset}'. Its presets are ${names.map((name) => `'${name}'`).join(', ')}.`;
 }
 
@@ -1797,12 +1797,17 @@ export function exportPresetRefusal(projectPath: string, preset: string): string
  *
  * Exported means this run wrote the file. A file an earlier export left there read as this one's, so
  * an export that exited cleanly having written nothing was answered as having exported.
+ *
+ * [param beside] is what else the run wrote into the output's directory. A Windows or Linux export
+ * writes the game's pack beside the executable unless the preset embeds it, and the build does not
+ * start without it, so an answer naming only the executable sent the caller to ship half a game.
  */
 export function exportAnswer(
   ending: EngineRun,
   asked: { readonly preset: string; readonly outputPath: string; readonly debug: boolean },
   before: number | null,
   after: number | null,
+  beside: readonly string[] = [],
 ): ToolResponse {
   const { log } = ending;
   const written = after !== null && after !== before;
@@ -1815,6 +1820,7 @@ export function exportAnswer(
     failure: ending.failure ?? undefined,
     errors: log.count('error'),
     warnings: log.count('warning'),
+    ...(beside.length === 0 ? {} : { alsoWritten: beside }),
     ...(notCopied.length === 0
       ? {}
       : {
@@ -1844,6 +1850,38 @@ export function exportAnswer(
     ],
     isError: true,
   };
+}
+
+/**
+ * What an export wrote beside [param output] in the folder it wrote into, as project paths: every
+ * file in [param after] that [param before] did not hold, or held written at another time.
+ * [param within] is the folder's own project path, `.` for the project's root.
+ */
+export function writtenBeside(
+  before: ReadonlyMap<string, number>,
+  after: ReadonlyMap<string, number>,
+  output: string,
+  within: string,
+): string[] {
+  return [...after]
+    .filter(([name, at]) => name !== output && before.get(name) !== at)
+    .map(([name]) => (within === '.' ? name : `${within}/${name}`))
+    .sort();
+}
+
+/** The files directly inside [param folder], each with when it was last written. */
+function filesIn(folder: string): Map<string, number> {
+  const found = new Map<string, number>();
+  try {
+    for (const entry of readdirSync(folder, { withFileTypes: true })) {
+      if (entry.isFile()) {
+        found.set(entry.name, statSync(join(folder, entry.name)).mtimeMs);
+      }
+    }
+  } catch {
+    // A folder that cannot be listed holds nothing this answer can name.
+  }
+  return found;
 }
 
 /**
@@ -2329,6 +2367,11 @@ const RUN_POLL_MS = 250;
 const PATH_SOLUTIONS = [
   'Give the path relative to the project, such as "scenes/main.tscn" or "res://scenes/main.tscn"',
   'Point projectPath at the project the file belongs to',
+];
+
+/** The same for an export's output, which is a file to write rather than one the project holds. */
+const OUTPUT_PATH_SOLUTIONS = [
+  'Give outputPath inside the project, relative to it, such as "build/game.exe" or "res://build/game.exe"; copy the build elsewhere once it is exported',
 ];
 
 /**
@@ -4119,6 +4162,9 @@ class GodotServer {
     if (tool === 'project_import' && op === 'set_options') {
       return await this.handleSetImportOptions(args);
     }
+    if (tool === 'project_export' && op === 'add_preset') {
+      return await this.handleAddExportPreset(args);
+    }
     const headless = HEADLESS_OPERATIONS[tool]?.[op];
     if (headless !== undefined) {
       // Asked of the editor instead, when the caller said so. The two are not the same reading and
@@ -5689,6 +5735,44 @@ class GodotServer {
   }
 
   /**
+   * project_export add_preset, written by a headless engine, with outputPath judged against the
+   * project as run judges it.
+   *
+   * An editor open on the project read export_presets.cfg when it started and reads it again only
+   * when an export platform comes or goes (Godot's EditorExport), so it lists none of this, and the
+   * next save of its own presets writes its list over the file.
+   */
+  private async handleAddExportPreset(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const given = readNonEmptyString(args, 'outputPath');
+    const output = given === undefined ? null : resolveWithinProject(project.value.path, given);
+    if (output !== null && !output.ok) {
+      return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
+    }
+    const outcome = await this.operation(
+      'add_export_preset',
+      {
+        preset: readString(args, 'preset') ?? '',
+        platform: readString(args, 'platform') ?? '',
+        outputPath: output?.relativePath ?? '',
+      },
+      project.value.path,
+    );
+    if (!outcome.ok || !this.editorHasOpen(project.value.path)) {
+      return this.answer(outcome);
+    }
+    return this.jsonTextResponse({
+      ...outcome.payload,
+      editorNote:
+        'The editor open on this project read export_presets.cfg when it started and does not list this preset, and saving presets in its Export dialog writes its own list over the file. editor_launch restart loads the file; an export through project_export run reads the file and needs no restart.',
+      ...engineExtras(outcome),
+    });
+  }
+
+  /**
    * project_export run: the engine's own export, which is not an operation of the script. The
    * destination is documented as inside the project and is contained like every other path.
    */
@@ -5700,11 +5784,14 @@ class GodotServer {
     const preset = readNonEmptyString(args, 'preset') ?? '';
     const output = resolveWithinProject(project.value.path, readString(args, 'outputPath') ?? '');
     if (!output.ok) {
-      return this.createErrorResponse(output.reason, PATH_SOLUTIONS);
+      return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
     const noPreset = exportPresetRefusal(project.value.path, preset);
     if (noPreset !== null) {
-      return this.createErrorResponse(noPreset, ['project_export list reads the presets the project has']);
+      return this.createErrorResponse(noPreset, [
+        'project_export list reads the presets the project has',
+        'project_export add_preset adds one',
+      ]);
     }
     const engine = await this.engine();
     if (!engine.ok) {
@@ -5749,6 +5836,7 @@ class GodotServer {
     const writtenAt = (): number | null =>
       existsSync(output.absolutePath) ? statSync(output.absolutePath).mtimeMs : null;
     const before = writtenAt();
+    const listedBefore = filesIn(folder);
     const freed = freeLibraryCopies(project.value.path);
     if (freed.setAside.length > 0 || freed.swept.length > 0) {
       this.logDebug(
@@ -5767,7 +5855,19 @@ class GodotServer {
         `Export could not be run: ${ending.failure ?? 'the engine gave no exit status'}`,
       );
     }
-    return exportAnswer(ending, { preset, outputPath: output.relativePath, debug }, before, writtenAt());
+    const beside = writtenBeside(
+      listedBefore,
+      filesIn(folder),
+      basename(output.absolutePath),
+      dirname(output.relativePath).replaceAll('\\', '/'),
+    );
+    return exportAnswer(
+      ending,
+      { preset, outputPath: output.relativePath, debug },
+      before,
+      writtenAt(),
+      beside,
+    );
   }
 
   /**

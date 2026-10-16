@@ -1,5 +1,6 @@
 extends RefCounted
 
+const ExportPresets = preload("export_presets.gd")
 const Read = preload("reading.gd")
 const Serialisation = preload("serialisation.gd")
 const FileWalk = preload("file_walk.gd")
@@ -319,63 +320,6 @@ static func _all_ints(held: Variant, keys: bool) -> bool:
 	return true
 
 
-# The names of the project's export presets, in the order export_presets.cfg holds them.
-static func _preset_names() -> Array[String]:
-	var names: Array[String] = []
-	var config: ConfigFile = ConfigFile.new()
-	if config.load("res://export_presets.cfg") != OK:
-		return names
-	var index: int = 0
-	while config.has_section("preset." + str(index)):
-		names.append(str(config.get_value("preset." + str(index), "name", "")))
-		index += 1
-	return names
-
-
-# List export presets
-func list_export_presets(_params: Dictionary) -> Dictionary:
-	_log.info("Listing export presets")
-
-	var presets_file: String = "res://export_presets.cfg"
-
-	if not FileAccess.file_exists(presets_file):
-		return {
-			"presets": [],
-			"presets_file_exists": false,
-			"note": "No export_presets.cfg found. Configure export presets in the Godot editor."
-		}
-
-	var config: ConfigFile = ConfigFile.new()
-	var err: Error = config.load(presets_file)
-
-	if err != OK:
-		return _log.failure("Failed to parse export_presets.cfg: " + str(err))
-
-	# Export presets are stored as [preset.0], [preset.1], etc.
-	var presets: Array[Dictionary] = []
-	var preset_idx: int = 0
-	while config.has_section("preset." + str(preset_idx)):
-		var section: String = "preset." + str(preset_idx)
-		var preset: Dictionary = {
-			"index": preset_idx,
-			"name": config.get_value(section, "name", "Unknown"),
-			"platform": config.get_value(section, "platform", "Unknown"),
-			"runnable": config.get_value(section, "runnable", false),
-			"export_path": config.get_value(section, "export_path", ""),
-			"export_filter": config.get_value(section, "export_filter", "all_resources"),
-			"include_filter": config.get_value(section, "include_filter", ""),
-			"exclude_filter": config.get_value(section, "exclude_filter", "")
-		}
-
-		if config.has_section_key(section, "custom_features"):
-			preset["custom_features"] = config.get_value(section, "custom_features", "")
-
-		presets.append(preset)
-		preset_idx += 1
-
-	return {"presets": presets, "presets_file_exists": true, "total_presets": preset_idx}
-
-
 # Validate project for export
 func validate_project(params: Dictionary) -> Dictionary:
 	var preset_name: String = str(params.get("preset", ""))
@@ -429,7 +373,7 @@ func validate_project(params: Dictionary) -> Dictionary:
 				"warning",
 				"export_presets",
 				"No export presets configured",
-				"Configure export presets in Godot editor: Project > Export",
+				"Add a preset with project_export add_preset, or in the editor: Project > Export",
 				include_suggestions
 			)
 		)
@@ -438,7 +382,7 @@ func validate_project(params: Dictionary) -> Dictionary:
 	# does not exist answered valid, as though it had been checked.
 	if not preset_name.is_empty():
 		checks_performed.append("export_preset")
-		var named: Array[String] = _preset_names()
+		var named: Array[String] = ExportPresets.names()
 		if preset_name not in named:
 			issues.append(
 				_finding(
@@ -453,7 +397,7 @@ func validate_project(params: Dictionary) -> Dictionary:
 							else ": the presets are " + ", ".join(named)
 						)
 					),
-					"Pass one of the preset names, or add the preset in the editor: Project > Export",
+					"Pass one of the preset names, or add the preset with project_export add_preset",
 					include_suggestions
 				)
 			)

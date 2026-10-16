@@ -73,8 +73,9 @@ function announced(line: string): { severity: Severity; text: string; byScript: 
  *
  * Bytes arrive in the chunks the pipe makes of them, which can cut a character as easily as a
  * line, so each stream is decoded here and its last piece held back until the newline that
- * ends it turns up. An indented line after a headline is the headline's detail; anything else
- * starts an entry of its own.
+ * ends it turns up. An indented line after a headline is the headline's detail, and so are the
+ * lines of a stderr error message that ends in a colon, up to its first indented line; anything
+ * else starts an entry of its own.
  */
 /** The sources a log is written into as bytes arrive, as against the debugger's own entries. */
 type Stream = 'stdout' | 'stderr' | 'transcript';
@@ -261,7 +262,7 @@ export class GameLog {
    * headline for both streams a `PASSED` line landing after a stderr error became that error's
    * detail and was gone from what the run printed, which the suite counts are read off.
    */
-  private readonly lastHeadline: Record<Stream, { detail: string[] } | null> = {
+  private readonly lastHeadline: Record<Stream, { detail: string[]; continues: boolean } | null> = {
     stdout: null,
     stderr: null,
     transcript: null,
@@ -339,9 +340,14 @@ export class GameLog {
     const owner = this.lastHeadline[source];
     if (owner !== null && /^\s/.test(line)) {
       owner.detail.push(line.trim());
+      owner.continues = false;
       return;
     }
     const headline = announced(line);
+    if (owner?.continues === true && headline === null) {
+      owner.detail.push(line.trim());
+      return;
+    }
     const detail: string[] = [];
     const entry: LogEntry = {
       index: this.entries.length,
@@ -354,7 +360,14 @@ export class GameLog {
     if (headline?.byScript === true) {
       this.byScript.add(entry.index);
     }
-    this.lastHeadline[source] = headline ? { detail } : null;
+    // An engine error whose message runs over several lines prints them unindented, with its `at:`
+    // line after them: an export refused for configuration errors ends its headline in a colon and
+    // names every missing template on the lines below, which read as prints of their own and never
+    // reached the answer. Only stderr, where the engine's errors go, so a game printing a line that
+    // looks like a headline does not take the prints after it.
+    this.lastHeadline[source] = headline
+      ? { detail, continues: source === 'stderr' && headline.text.endsWith(':') }
+      : null;
   }
 
   /** Whether the engine headed [param entry] `SCRIPT ERROR`, for an entry of this log or a copy. */

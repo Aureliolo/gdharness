@@ -266,6 +266,7 @@ import {
   withoutUidUnder,
   withPreviousCut,
   withUidsMissing,
+  writtenBeside,
 } from '../src/server.js';
 import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
@@ -312,6 +313,7 @@ import { argumentShape, namedType, renderToolsMarkdown } from '../src/tool-refer
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { askWindows } from '../src/windows-ask.js';
 import { withHome } from './support/cli-home.js';
+import { containedEngine } from './support/contained-engine.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
 import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
@@ -792,6 +794,47 @@ function testEngineEntriesFoldAndScriptErrorsAreKnown(): void {
       ['stdout', 'info', '  res://tests/overflow_test.gd > test_runs_away PASSED 87ms', []],
     ],
     JSON.stringify(piped.all),
+  );
+
+  // An error message of several lines, as Godot's exporter prints it: the lines after the headline
+  // are unindented, and only the `at:` line ends the message. A message not ending in a colon takes
+  // no line after it, a line after the `at:` is the run's own, and stdout never continues a message.
+  const multiline = new GameLog();
+  for (const said of [
+    'ERROR: Cannot export project with preset "Penguin" due to configuration errors:',
+    'No export template found at the expected path:',
+    'C:/templates/4.7.2.stable/linux_debug.x86_64',
+    '',
+    '   at: _fs_changed (editor/editor_node.cpp:1401)',
+    'a print after it',
+    'ERROR: Project export for preset "Penguin" failed.',
+    'a print after a message that announced nothing more',
+  ]) {
+    multiline.append('stderr', `${said}\n`);
+  }
+  multiline.append('stdout', 'WARNING: printed by the game:\n');
+  multiline.append('stdout', 'the game goes on\n');
+  multiline.finish();
+  assert.deepEqual(
+    multiline.all.map((entry) => [entry.source, entry.severity, entry.text, entry.detail]),
+    [
+      [
+        'stderr',
+        'error',
+        'Cannot export project with preset "Penguin" due to configuration errors:',
+        [
+          'No export template found at the expected path:',
+          'C:/templates/4.7.2.stable/linux_debug.x86_64',
+          'at: _fs_changed (editor/editor_node.cpp:1401)',
+        ],
+      ],
+      ['stderr', 'info', 'a print after it', []],
+      ['stderr', 'error', 'Project export for preset "Penguin" failed.', []],
+      ['stderr', 'info', 'a print after a message that announced nothing more', []],
+      ['stdout', 'warning', 'printed by the game:', []],
+      ['stdout', 'info', 'the game goes on', []],
+    ],
+    JSON.stringify(multiline.all),
   );
 
   // Every answer listing a run's entries folds them before its limit, so the limit and the count of
@@ -15008,7 +15051,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 49, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 50, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -21483,6 +21526,36 @@ function testAnExportIsJudgedByTheFileItWrote(): void {
     [true, "Export with preset 'Linux' did not produce builds/game.x86_64."],
     'and with no file at all there is nothing from before to mention',
   );
+
+  // What else the export wrote beside the build: a pack new or rewritten, and not a file it left
+  // alone or the build itself.
+  const before = new Map([
+    ['game.x86_64', 10],
+    ['game.pck', 10],
+    ['notes.txt', 10],
+  ]);
+  const after = new Map([
+    ['game.x86_64', 20],
+    ['game.pck', 20],
+    ['notes.txt', 10],
+    ['libgame.so', 20],
+  ]);
+  assert.deepEqual(writtenBeside(before, after, 'game.x86_64', 'builds'), [
+    'builds/game.pck',
+    'builds/libgame.so',
+  ]);
+  assert.deepEqual(writtenBeside(new Map(), new Map([['game.pck', 5]]), 'game.exe', '.'), ['game.pck']);
+  assert.deepEqual(
+    get(
+      parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000, ['builds/game.pck']) }),
+      'alsoWritten',
+    ),
+    ['builds/game.pck'],
+  );
+  assert.equal(
+    get(parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000) }), 'alsoWritten'),
+    undefined,
+  );
 }
 
 /**
@@ -21514,6 +21587,199 @@ function testAnExportOfAMissingPresetIsRefusedFirst(): void {
     assert.match(exportPresetRefusal(project, 'Linux') ?? '', /^export_presets\.cfg names no preset/);
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * A preset add_preset writes is one the engine's exporter takes, and the answer's word on export
+ * templates is the one the export bears out.
+ *
+ * No tool wrote a preset, so a project without export_presets.cfg could not be exported at all, and
+ * every refusal sent the caller to the editor's Export dialog. Linux on every host, because the
+ * engine exports for any platform it has templates of and a Linux build needs no signing.
+ */
+/**
+ * A self-contained engine's export templates are looked for beside it, and judged per platform.
+ *
+ * Run here as well as in the engine fixtures because the engine legs run those on Linux and Windows
+ * only, and macOS is where the marker is looked for in a second place: beside the read-only bundle.
+ */
+async function testASelfContainedEngineKeepsItsTemplates(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('self-contained templates regression skipped (Godot not found)');
+    return;
+  }
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contained-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contained-project-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contained-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Contained"\n',
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: containedEngine(godotPath, home),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<unknown> =>
+    parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'project_export', arguments: { projectPath: project, ...args } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+  try {
+    await server.initialize('contained');
+    const added = await call({ op: 'add_preset', preset: 'Penguin', platform: 'Linux' });
+    const templates = text(get(added, 'templates'));
+    assert.ok(
+      resolve(templates).startsWith(resolve(home, 'editor_data', 'export_templates')),
+      `the templates are looked for beside the engine: ${JSON.stringify(added)}`,
+    );
+    assert.equal(get(added, 'templates_installed'), false, JSON.stringify(added));
+
+    mkdirSync(templates, { recursive: true });
+    writeFileSync(join(templates, 'windows_release_x86_64.exe'), '');
+    const windowsOnly = await call({ op: 'list' });
+    assert.deepEqual(
+      [get(windowsOnly, 'templates'), get(windowsOnly, 'presets', 0, 'templates_installed')],
+      [templates, false],
+      `the Windows templates are not the Linux ones: ${JSON.stringify(windowsOnly)}`,
+    );
+    writeFileSync(join(templates, 'linux_release.x86_64'), '');
+    const both = await call({ op: 'list' });
+    assert.equal(get(both, 'presets', 0, 'templates_installed'), true, JSON.stringify(both));
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir, home);
+  }
+}
+
+async function testAnAddedPresetExports(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('added preset regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-add-preset-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-add-preset-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Preset"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: 'project_export', arguments: { projectPath: project, ...args } },
+      300_000,
+    );
+  try {
+    await server.initialize('add-preset');
+    const before =
+      textOf(await call({ op: 'run', preset: 'Penguin', outputPath: 'build/game.x86_64' })) ?? '';
+    assert.match(before, /project_export add_preset writes one/, before);
+
+    const added = parseTextContent(
+      await call({
+        op: 'add_preset',
+        preset: 'Penguin',
+        platform: 'Linux',
+        outputPath: 'res://build/game.x86_64',
+      }),
+    );
+    assert.deepEqual(
+      [
+        get(added, 'preset'),
+        get(added, 'platform'),
+        get(added, 'runnable'),
+        get(added, 'export_path'),
+        get(added, 'editorNote'),
+      ],
+      ['Penguin', 'Linux', true, 'build/game.x86_64', undefined],
+      `no editor is open, so none is warned about: ${JSON.stringify(added)}`,
+    );
+    const outside =
+      textOf(await call({ op: 'add_preset', preset: 'Out', platform: 'Linux', outputPath: '../out.bin' })) ??
+      '';
+    assert.match(outside, /resolves outside the project directory/, outside);
+    assert.match(
+      outside,
+      /Give outputPath inside the project, relative to it, such as "build\/game\.exe"/,
+      outside,
+    );
+    const listed = parseTextContent(await call({ op: 'list' }));
+    assert.deepEqual(
+      asArray(get(listed, 'presets'), 'presets').map((preset) => get(preset, 'name')),
+      ['Penguin'],
+      `the refused preset was not written: ${JSON.stringify(listed)}`,
+    );
+
+    const exported = await call({ op: 'run', preset: 'Penguin', outputPath: 'build/game.x86_64' });
+    const blocks = (get(exported, 'result', 'content') as { text?: string }[] | undefined) ?? [];
+    const verdict = blocks
+      .map((block) => {
+        try {
+          return JSON.parse(block.text ?? '') as unknown;
+        } catch {
+          return undefined;
+        }
+      })
+      .find((parsed) => get(parsed, 'exported') !== undefined);
+    const shown = JSON.stringify(exported);
+    if (get(added, 'templates_installed') === true) {
+      assert.equal(
+        get(verdict, 'exported'),
+        true,
+        `templates are installed, so the export is made: ${shown}`,
+      );
+      assert.ok(existsSync(join(project, 'build', 'game.x86_64')), shown);
+      // The pack the build cannot start without, written beside it, is named with it.
+      assert.ok(existsSync(join(project, 'build', 'game.pck')), shown);
+      assert.deepEqual(get(verdict, 'alsoWritten'), ['build/game.pck'], shown);
+      const again = await call({ op: 'run', preset: 'Penguin', outputPath: 'build/game.x86_64' });
+      assert.deepEqual(
+        get(parseTextContent(again), 'alsoWritten'),
+        ['build/game.pck'],
+        `a second export rewrites the pack and says so: ${JSON.stringify(again)}`,
+      );
+    } else {
+      assert.equal(get(verdict, 'exported'), false, shown);
+      assert.match(
+        shown,
+        /No export template found at the expected path:[^\]]*linux_release\.x86_64/,
+        `with no templates, the export fails for want of them, and says which: ${shown}`,
+      );
+      assert.match(
+        text(get(added, 'templates_note')),
+        /No Linux export templates for this engine are at /,
+        shown,
+      );
+    }
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
   }
 }
 
@@ -35721,10 +35987,10 @@ function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
  * the same change and somebody confirms the removal was meant.
  */
-const TOOL_NAME_MENTIONS = 520;
+const TOOL_NAME_MENTIONS = 1039;
 
 /** The same, for phrases naming a tool and one of its multi-word ops. */
-const TOOL_OP_MENTIONS = 18;
+const TOOL_OP_MENTIONS = 42;
 
 /**
  * Every tool this server names in something it says is a tool it has.
@@ -35748,7 +36014,8 @@ function testEveryToolNamedInProseIsATool(): void {
   // Words this project owns or reads that are shaped like a tool and are not one: the fields the
   // bridge sends the addon, the autoload the runtime installs, a section of project.godot, the
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
-  // debugger speaks in, which the keeper's debugger reads. Named one
+  // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
+  // export_presets.cfg and the directory a self-contained editor keeps its data in. Named one
   // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
   // and called a tool or called vocabulary.
   const notTools = new Set([
@@ -35772,6 +36039,8 @@ function testEveryToolNamedInProseIsATool(): void {
     'debug_data',
     'debug_enter',
     'debug_exit',
+    'script_export_mode',
+    'editor_data',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
@@ -40770,6 +41039,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExportIsJudgedByTheFileItWrote,
   testAnExportThatCouldNotCopyALibrarySaysSo,
   testAnExportOfAMissingPresetIsRefusedFirst,
+  testAnAddedPresetExports,
+  testASelfContainedEngineKeepsItsTemplates,
   testAnExportedBuildIsFoundInsideTheProject,
   testAnExportedBuildIsStartedAndStopped,
   testLibraryCopiesAreMovedAsideAndSwept,
