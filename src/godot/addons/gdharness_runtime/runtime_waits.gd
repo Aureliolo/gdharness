@@ -102,9 +102,9 @@ func wait_signal(params: Dictionary) -> Dictionary:
 	}
 	if not catcher.fired:
 		answer["note"] = (
-			"A call sent beside this wait to set the signal off may have run only after it answered, as a"
-			+ " client can run its calls in turn. Arm runtime_wait watch first, make the call, then wait"
-			+ " with signal and that watch"
+			"If a call meant to set the signal off was sent beside this wait, it may have run only after"
+			+ " the wait answered, as a client can run its calls in turn: arm runtime_wait watch first,"
+			+ " make the call, then wait with signal and that watch"
 		)
 	return answer
 

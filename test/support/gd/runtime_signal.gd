@@ -102,7 +102,9 @@ func _check_signal() -> void:
 		_fail("a signal with six arguments is caught with all six: %s" % str(six))
 	if fired.get("args") != []:
 		_fail("a signal with none is caught with none: %s" % str(fired))
-	if not str(expired.get("note", "")).contains("Arm runtime_wait watch first"):
+	if not str(expired.get("note", "")).contains(
+		"If a call meant to set the signal off was sent beside this wait"
+	):
 		_fail("a wait that ran out says how to catch a signal a call sets off: %s" % str(expired))
 	if fired.has("note"):
 		_fail("and one that fired says nothing of it: %s" % str(fired))
