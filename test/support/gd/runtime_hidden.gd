@@ -7,7 +7,7 @@ extends SceneTree
 ## while the game's menu was open. Each refusal is checked beside the call that works once nothing
 ## hides the node, so a check refusing everything fails too.
 ##
-## Everything sits in the 64 by 64 viewport a game with no window has.
+## Everything sits in the 64 by 64 viewport a script run with no window has.
 
 const Checked = preload("checked.gd")
 const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")

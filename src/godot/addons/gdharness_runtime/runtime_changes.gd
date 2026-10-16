@@ -441,14 +441,22 @@ func call_method(params: Dictionary) -> Dictionary:
 		"result": _values.serialize(result),
 		"elapsed_usec": elapsed
 	}
-	if not caught.raised.is_empty():
-		answer["errors"] = caught.raised.slice(0, ERRORS_KEPT)
-		if caught.raised.size() > ERRORS_KEPT:
-			answer["errors_not_shown"] = caught.raised.size() - ERRORS_KEPT
+	_keep_reported(answer, "errors", caught.raised)
+	_keep_reported(answer, "warnings", caught.warned)
 	var asked: Variant = params.get("properties")
 	if _reads_the_result(asked):
 		answer.merge(_read_off_result(result, asked))
 	return answer
+
+
+## Puts the first [constant ERRORS_KEPT] of [param reported] in [param answer] under [param field],
+## with how many more there were, when anything was reported.
+static func _keep_reported(answer: Dictionary, field: String, reported: Array[String]) -> void:
+	if reported.is_empty():
+		return
+	answer[field] = reported.slice(0, ERRORS_KEPT)
+	if reported.size() > ERRORS_KEPT:
+		answer[field + "_not_shown"] = reported.size() - ERRORS_KEPT
 
 
 ## Why [param named], the last step of a call's method, names no method of [param holder] to call, or

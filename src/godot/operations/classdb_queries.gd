@@ -21,6 +21,17 @@ const CATEGORY_BASES: Dictionary = {
 	"visual": ["VisualInstance3D"],
 	"animation": ["AnimationMixer"],
 }
+## The engine's MethodFlags, each by the name an answer gives it.
+const METHOD_FLAG_NAMES: Dictionary[int, String] = {
+	METHOD_FLAG_NORMAL: "normal",
+	METHOD_FLAG_EDITOR: "editor",
+	METHOD_FLAG_CONST: "const",
+	METHOD_FLAG_VIRTUAL: "virtual",
+	METHOD_FLAG_VARARG: "vararg",
+	METHOD_FLAG_STATIC: "static",
+	METHOD_FLAG_OBJECT_CORE: "object_core",
+	METHOD_FLAG_VIRTUAL_REQUIRED: "virtual_required",
+}
 
 var _log: Log
 var _values: Serialisation = Serialisation.new()
@@ -333,6 +344,7 @@ func _methods_of(class_name_str: String, include_inherited: bool) -> Array[Dicti
 						"class_name": return_info.get("class_name", "")
 					},
 					"flags": m.get("flags", 0),
+					"flag_names": _flag_names(Read.as_int(m.get("flags", 0))),
 					# As values, tagged the way every other answer tags one: JSON writes a Vector2i it is
 					# handed as its text, so TileMapLayer.set_cell's default atlas coords read "(-1, -1)".
 					"default_args": _values.serialize_value(m.get("default_args", []))
@@ -341,6 +353,16 @@ func _methods_of(class_name_str: String, include_inherited: bool) -> Array[Dicti
 		)
 
 	return methods
+
+
+# The MethodFlags set in [param flags] by name, beside the number the engine reports, which reads as
+# nothing without its enum: 1 is normal, and a const method is 5.
+static func _flag_names(flags: int) -> Array[String]:
+	var named: Array[String] = []
+	for flag: int in METHOD_FLAG_NAMES:
+		if flags & flag:
+			named.append(METHOD_FLAG_NAMES[flag])
+	return named
 
 
 # What [param info]'s type is called: its class for an object of one, and otherwise the engine's own

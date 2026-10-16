@@ -32,6 +32,7 @@ const ProjectDiagnostics = preload("project_diagnostics.gd")
 const Read = preload("reading.gd")
 const RenameChecks = preload("rename_checks.gd")
 const ResourceFiles = preload("resource_files.gd")
+const ScriptCheck = preload("script_check.gd")
 
 ## Printed once the answer is written, after which the engine runs the project's autoloads. Kept in
 ## step with `ANSWERED` in src/headless.ts.
@@ -218,7 +219,7 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 		"names_taken":
 			payload = RenameChecks.new(_log).names_taken(params)
 		"check_scripts":
-			payload = RenameChecks.new(_log).check_scripts(params)
+			payload = ScriptCheck.new(_log).check_scripts(params)
 
 		# Plugins and input
 		"list_plugins":

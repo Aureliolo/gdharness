@@ -5,7 +5,7 @@ extends SceneTree
 ## move ran out on a clock left stopped. Each toggle here is checked beside a plain button, which
 ## answers no state, so a check that wrote the field everywhere fails too.
 ##
-## Everything sits in the 64 by 64 viewport a game with no window has.
+## Everything sits in the 64 by 64 viewport a script run with no window has.
 
 const Checked = preload("checked.gd")
 const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")

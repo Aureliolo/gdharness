@@ -52,8 +52,8 @@ func _fail(message: String) -> void:
 
 
 func _run() -> void:
-	# A headless window is 64 by 64 and the GUI delivers nothing outside the window; the new
-	# size is only in force from the next frame.
+	# A headless script run's window is 64 by 64 and the GUI delivers nothing outside the window;
+	# the new size is only in force from the next frame.
 	root.size = Vector2i(640, 480)
 	await process_frame
 
@@ -114,13 +114,14 @@ func _check_click() -> void:
 		or not str(off_screen.get("message", "")).contains("outside the viewport")
 	):
 		_fail("a control outside the window cannot be clicked, and the answer says so: %s" % str(off_screen))
-	# This engine is headless, so a window is what it would take to reach anything out there and
-	# the refusal has to say so: the rect on its own does not. It does not claim 64 by 64 here,
-	# because this fixture resized the root and the rect printed beside it would contradict it.
-	if not str(off_screen.get("message", "")).contains("run it with a window"):
-		_fail("and names the window as what it would take: %s" % str(off_screen))
-	if str(off_screen.get("message", "")).contains("64 by 64"):
-		_fail("and does not claim a size the rect beside it disagrees with: %s" % str(off_screen))
+	# This engine is headless and the fixture gave its root a size, so the refusal names that size,
+	# which the rect printed beside it agrees with. A window of the same size would not reach the
+	# control either, so it is not offered one, and 64 by 64 is not claimed.
+	var said: String = str(off_screen.get("message", ""))
+	if not said.contains("This game has no window, and its viewport is 640 by 480"):
+		_fail("and names the viewport the game has: %s" % str(off_screen))
+	if said.contains("run it with a window") or said.contains("64 by 64"):
+		_fail("and neither offers a window nor claims the engine's own size: %s" % str(off_screen))
 	far.free()
 
 	await _check_below_the_fold()

@@ -1,10 +1,13 @@
 extends RefCounted
 
+const Dependencies = preload("dependencies.gd")
 const Patterns = preload("patterns.gd")
 const Read = preload("reading.gd")
 const Log = preload("logger.gd")
 
 var _log: Log
+## Kept for the call, so the project's class names are read once however many bases are walked.
+var _dependencies: Dependencies = null
 
 
 func _init(p_log: Log) -> void:
@@ -136,6 +139,21 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	# its first function would otherwise be judged against the default.
 	_mark_virtuals(functions, extends_name, full_script_path)
 
+	# A script typed by its class_name is depended on as surely as one preloaded, and the answer
+	# listed only the preloads: a `var stats: Stats` left stats.gd out, while project_dependencies
+	# named it. The same reading as that tool's, so the two agree.
+	var classes_used: Array[Dictionary] = []
+	if _dependencies == null:
+		_dependencies = Dependencies.new(_log)
+	var declared_by: Dictionary = _dependencies.classes_declared()
+	for used: String in Dependencies.classes_used_in(content, declared_by):
+		var declaring: String = str(declared_by[used])
+		if declaring == full_script_path:
+			continue
+		classes_used.append({"name": used, "path": declaring})
+		if not declaring in dependencies:
+			dependencies.append(declaring)
+
 	var answer: Dictionary = {
 		"path": script_path,
 		"full_path": full_script_path,
@@ -148,6 +166,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		"enums": enums,
 		"inner_classes": inner_classes,
 		"dependencies": dependencies,
+		"classes_used": classes_used,
 		"line_count": lines.size()
 	}
 	if Read.as_bool(params.get("include_inherited", false)):

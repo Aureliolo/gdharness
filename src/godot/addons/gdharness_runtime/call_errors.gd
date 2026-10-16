@@ -12,8 +12,10 @@ const REFUSED: String = "Error calling method from 'callv': "
 
 ## The engine's reason for refusing the call, without [constant REFUSED], or "" when it ran.
 var refused: String = ""
-## What was reported while it ran, a line each, warnings marked as such.
+## The errors reported while it ran, a line each.
 var raised: Array[String] = []
+## The warnings reported while it ran, a line each.
+var warned: Array[String] = []
 
 
 func _log_message(_message: String, _error: bool) -> void:
@@ -39,4 +41,7 @@ func _log_error(
 	if function == "callv" and text.begins_with(REFUSED) and refused.is_empty():
 		refused = text.trim_prefix(REFUSED)
 		return
-	raised.append(("WARNING: " if error_type == ERROR_TYPE_WARNING else "") + text)
+	if error_type == ERROR_TYPE_WARNING:
+		warned.append(text)
+	else:
+		raised.append(text)

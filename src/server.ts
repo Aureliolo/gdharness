@@ -955,6 +955,44 @@ export function endedWithoutACode(run: {
 }
 
 /**
+ * What a runtime call is told when no game is running and the run this server started has ended.
+ *
+ * The plain refusal says to start a game or play one from the editor, which reads as though nothing
+ * had ever run; a caller that had just stopped its run with editor_run stop, or whose game quit on
+ * its own, was given the same sentence as one that never started any.
+ */
+export function ourRunEnded(
+  run: {
+    readonly pid: number | null;
+    readonly throughEditor: boolean;
+    readonly endedAt?: number;
+    readonly endedThrough?: EndedThrough;
+    readonly exitCode: number | null;
+    readonly exitSignal: string | null;
+  },
+  now: number,
+): string {
+  const which = `${run.throughEditor ? 'played in the editor' : 'started'}${run.pid === null ? '' : ` (pid ${run.pid})`}`;
+  const when =
+    run.endedAt === undefined ? '' : ` ${Math.max(0, Math.round((now - run.endedAt) / 1000))}s ago`;
+  const how =
+    run.endedThrough === 'close'
+      ? 'this server asked it to close'
+      : run.endedThrough === 'keeper'
+        ? 'this server ended it through the keeper holding it'
+        : run.endedThrough === 'signal'
+          ? 'this server signalled it'
+          : run.endedThrough === 'editor'
+            ? 'this server asked the editor to stop it'
+            : run.exitCode !== null
+              ? `it exited by itself with code ${run.exitCode}`
+              : run.exitSignal === null
+                ? 'it is no longer running'
+                : `it was ended by ${run.exitSignal}`;
+  return `No game with the runtime addon is running: the game this server ${which} ended${when}, and ${how}. editor_output has what it printed, and editor_run start runs it again.`;
+}
+
+/**
  * How a stop went: the run is gone; it was signalled and was still there when the wait ran out; or
  * nothing was signalled, because its pid no longer answers as the process the run was started as.
  */
@@ -3023,6 +3061,25 @@ export function scriptsToDiagnose(
     return { ok: false, reason: `No .gd script is under ${empty.join(' or ')}.` };
   }
   return { ok: true, value: unique };
+}
+
+/** Why no language server of the project answered, and what the refusal would have offered. */
+interface Unanswered {
+  readonly reason: string;
+  readonly solutions: string[];
+}
+
+/**
+ * What diagnostics compiled by a headless engine say beside them: why no language server answered,
+ * in [param why], and what the engine's check leaves out, so that warnings: null and a diagnostic
+ * without a column are not read as a script with nothing to warn about.
+ */
+function engineChecked(why: string): OperationParams {
+  return {
+    checkedBy: 'engine',
+    languageServer: why,
+    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, and no warnings, which the engine tells only an editor: warnings is null rather than 0. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both.",
+  };
 }
 
 /** A diagnostic naming only the member of another class it could not resolve. */
@@ -5197,11 +5254,6 @@ class GodotServer {
     return outcome.ok ? this.jsonTextResponse(outcome.payload) : outcome.response;
   }
 
-  /**
-   * project_import set_options: the options written to the sidecar, then applied by a reimport
-   * unless the caller said not to. Written alone, they reach the import only when the editor's next
-   * scan finds the sidecar changed.
-   */
   /** Whether the editor on the bridge has [param projectPath] open. */
   private editorHasOpen(projectPath: string): boolean {
     const open = this.godotBridge.getStatus().projectPath;
@@ -5296,6 +5348,11 @@ class GodotServer {
     }
   }
 
+  /**
+   * project_import set_options: the options written to the sidecar, then applied by a reimport
+   * unless the caller said not to. Written alone, they reach the import only when the editor's next
+   * scan finds the sidecar changed.
+   */
   private async handleSetImportOptions(args: OperationParams): Promise<ToolResponse> {
     const project = this.project(args);
     if (!project.ok) {
@@ -6426,6 +6483,18 @@ class GodotServer {
     }
     if (scripts?.value == null) {
       const one = await this.diagnosticsOf(args);
+      if ('noLanguageServer' in one) {
+        const checked = project.ok
+          ? await this.engineDiagnostics(
+              project.value.path,
+              [readString(args, 'scriptPath') ?? ''],
+              one.noLanguageServer,
+            )
+          : { refusal: project.response };
+        return 'refusal' in checked
+          ? checked.refusal
+          : this.jsonTextResponse({ ...checked.answers[0], ...engineChecked(one.noLanguageServer.reason) });
+      }
       return 'refusal' in one ? one.refusal : this.jsonTextResponse(this.markedIfStale(one.answer));
     }
     const progress = callProgress();
@@ -6435,6 +6504,7 @@ class GodotServer {
     let errors = 0;
     let warnings = 0;
     let unread = 0;
+    let byEngine: string | null = null;
     for (const [at, scriptPath] of scripts.value.entries()) {
       // Nobody is left to read the answer, and a folder can take minutes.
       if (cancelled?.aborted === true) {
@@ -6442,6 +6512,30 @@ class GodotServer {
       }
       progress?.(at + 1, `${at + 1} of ${scripts.value.length}: ${scriptPath}`);
       const one = await this.diagnosticsOf({ ...args, scriptPath });
+      if ('noLanguageServer' in one) {
+        // The rest in one engine, since what kept the language server from answering this script
+        // keeps it from answering the others.
+        const rest = scripts.value.slice(at);
+        progress?.(at + 1, `${rest.length} script(s) left, compiled by a headless engine`);
+        const checked = await this.engineDiagnostics(
+          project.ok ? project.value.path : '',
+          rest,
+          one.noLanguageServer,
+        );
+        if ('refusal' in checked) {
+          return checked.refusal;
+        }
+        for (const answer of checked.answers) {
+          errors += Number(answer['errors']);
+          if (readArray(answer, 'diagnostics')?.length === 0) {
+            nothingReported.push(String(answer['scriptPath']));
+          } else {
+            reported.push(answer);
+          }
+        }
+        byEngine = one.noLanguageServer.reason;
+        break;
+      }
       if ('refusal' in one) {
         if (!one.perScript) {
           return one.refusal;
@@ -6464,12 +6558,107 @@ class GodotServer {
         clean: errors === 0 && unread === 0,
         scriptsChecked: scripts.value.length,
         errors,
-        warnings,
+        // Unknown once any script was compiled by the engine, which reports no warnings.
+        warnings: byEngine === null ? warnings : null,
         ...(unread > 0 ? { scriptsNotRead: unread } : {}),
         scripts: reported,
         nothingReported,
+        ...(byEngine === null ? {} : engineChecked(byEngine)),
       }),
     );
+  }
+
+  /**
+   * Whether each of [param paths], res:// paths, compiles, by as many headless engines as it takes:
+   * an engine stops at the first script that raises an error, since every script after it that
+   * depends on the failed one compiles in silence there, and the rest go to the next. One engine for
+   * a project that compiles, and one more for each script that does not.
+   */
+  private async compileScripts(
+    projectPath: string,
+    paths: readonly string[],
+  ): Promise<
+    | {
+        ok: true;
+        payload: { checked: string[]; failed: string[]; scripts: unknown[] };
+        extras: OperationParams;
+      }
+    | { ok: false; message: string }
+  > {
+    const payload = { checked: [] as string[], failed: [] as string[], scripts: [] as unknown[] };
+    const messages: LogEntry[] = [];
+    let left = [...paths];
+    while (left.length > 0) {
+      const ran = await this.operation('check_scripts', { paths: left }, projectPath);
+      if (!ran.ok) {
+        return { ok: false, message: ran.message };
+      }
+      const checked = (readArray(ran.payload, 'checked') ?? []).map(String);
+      // An engine that read nothing would be asked the same again for ever.
+      if (checked.length === 0) {
+        return { ok: false, message: `check_scripts read none of ${left.length} script(s)` };
+      }
+      payload.checked.push(...checked);
+      payload.failed.push(...(readArray(ran.payload, 'failed') ?? []).map(String));
+      payload.scripts.push(...(readArray(ran.payload, 'scripts') ?? []));
+      messages.push(...ran.messages);
+      left = left.slice(checked.length);
+    }
+    return { ok: true, payload, extras: engineExtras({ messages }) };
+  }
+
+  /**
+   * [param scripts], paths inside the project, compiled by headless engines and answered each in
+   * the shape the language server's diagnostics are, for a project whose editor's language server
+   * cannot answer. Without an editor open the tool answered nothing at all, while the engine the
+   * other headless tools start reports every error that stops a script compiling, at its line.
+   * Warnings are left as null rather than 0: the engine reports them only to an editor or a debugger,
+   * so none counted is not none found. [param why] is what the language server answered, which a
+   * refusal gives first, since it is the reason the engine was asked at all.
+   */
+  private async engineDiagnostics(
+    projectPath: string,
+    scripts: readonly string[],
+    why: Unanswered,
+  ): Promise<{ answers: OperationParams[] } | { refusal: ToolResponse }> {
+    const named = scripts.map((script) => {
+      const contained = resolveWithinProject(projectPath, script);
+      return contained.ok ? `res://${contained.relativePath}` : script;
+    });
+    const checked = await this.compileScripts(projectPath, named);
+    if (!checked.ok) {
+      return {
+        refusal: this.createErrorResponse(
+          `Diagnostics unavailable: ${why.reason.replace(/\.?$/, '.')} No headless engine could compile the scripts instead: ${checked.message}`,
+          why.solutions,
+        ),
+      };
+    }
+    const failures = new Map(
+      (readArray(checked.payload, 'scripts') ?? []).map((entry) => [
+        String(asParams(entry)['path']),
+        asParams(entry),
+      ]),
+    );
+    return {
+      answers: scripts.map((scriptPath, at) => {
+        const failure = failures.get(named[at] ?? '');
+        const diagnostics = (readArray(failure ?? {}, 'errors') ?? []).map((entry) => {
+          const { line, message } = asParams(entry);
+          // Line 0 is the engine's for the whole script, a dependency that failed to compile.
+          return { severity: 'error', message, ...(typeof line === 'number' && line > 0 ? { line } : {}) };
+        });
+        const dependencies = readArray(failure ?? {}, 'dependencies_with_errors');
+        return {
+          scriptPath,
+          clean: diagnostics.length === 0,
+          errors: diagnostics.length,
+          warnings: null,
+          diagnostics,
+          ...(dependencies === undefined ? {} : { dependenciesWithErrors: dependencies }),
+        };
+      }),
+    };
   }
 
   /**
@@ -6503,7 +6692,11 @@ class GodotServer {
    */
   private async diagnosticsOf(
     args: OperationParams,
-  ): Promise<{ answer: OperationParams } | { refusal: ToolResponse; perScript: boolean }> {
+  ): Promise<
+    | { answer: OperationParams }
+    | { refusal: ToolResponse; perScript: boolean }
+    | { noLanguageServer: Unanswered }
+  > {
     const waited = await this.waitForTheEditorOpenedHere(args, []);
     if (waited !== null) {
       return { refusal: waited, perScript: false };
@@ -6511,6 +6704,20 @@ class GodotServer {
     const answer = await this.handleLSP('lsp_get_diagnostics', args);
     const payload = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     const refused = this.languageServerRefusal(payload, 'Diagnostics');
+    // Compiled by an engine only when no editor of this project is on the bridge. A server still
+    // reading the project is the right one and answers a call made again, and this project's own
+    // editor is the authority on its scripts, so a language server of it that does not answer is
+    // that editor's fault to name; an engine started beside it also waits on its next scan.
+    const project = this.project(args);
+    const ownEditor = project.ok && this.editorHasOpen(project.value.path);
+    if (refused !== null && !refused.perScript && payload['stillReading'] !== true && !ownEditor) {
+      return {
+        noLanguageServer: {
+          reason: typeof payload['error'] === 'string' ? payload['error'] : JSON.stringify(payload['error']),
+          solutions: this.languageServerSolutions(payload),
+        },
+      };
+    }
     if (refused !== null) {
       return refused;
     }
@@ -6810,23 +7017,31 @@ class GodotServer {
     if (payload['stillReading'] === true) {
       return { refusal: this.createErrorResponse(`${asked} unavailable: ${reason}`), perScript: false };
     }
-    if (typeof payload['serves'] === 'string') {
-      return {
-        refusal: this.createErrorResponse(`${asked} unavailable: ${reason}`, [
-          'editor_status names the editor on the bridge and the port it says it serves',
-          "editor_launch opens this project's own editor, on a language server port of its own",
-          'GDHARNESS_LSP_PORT points this server at the right one',
-        ]),
-        perScript: false,
-      };
-    }
     return {
-      refusal: this.createErrorResponse(`${asked} unavailable: ${reason}`, [
-        `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
-        'GDHARNESS_LSP_PORT points this server at another one',
-      ]),
-      perScript: payload['aboutThisFile'] === true,
+      refusal: this.createErrorResponse(
+        `${asked} unavailable: ${reason}`,
+        this.languageServerSolutions(payload),
+      ),
+      perScript: typeof payload['serves'] !== 'string' && payload['aboutThisFile'] === true,
     };
+  }
+
+  /** What to do about a language server that refused [param payload]'s call for itself. */
+  private languageServerSolutions(payload: OperationParams): string[] {
+    if (typeof payload['serves'] === 'string') {
+      return [
+        // Only with an editor there to name: with none, the status call answers nothing about the port.
+        ...(this.godotBridge.getStatus().connected
+          ? ['editor_status names the editor on the bridge and the port it says it serves']
+          : []),
+        "editor_launch opens this project's own editor, on a language server port of its own",
+        'GDHARNESS_LSP_PORT points this server at the right one',
+      ];
+    }
+    return [
+      `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
+      'GDHARNESS_LSP_PORT points this server at another one',
+    ];
   }
 
   /** The client for the language server of the editor this server follows, on the port it serves. */
@@ -12413,11 +12628,11 @@ class GodotServer {
       ok &&= rebuilt.ok;
     }
     if (changed.length > 0) {
-      const compiled = await this.operation('check_scripts', { paths: [...changed] }, projectPath);
+      const compiled = await this.compileScripts(projectPath, [...changed]);
       report['compiled'] = compiled.ok
-        ? { ...compiled.payload, ...engineExtras(compiled) }
+        ? { ...compiled.payload, ...compiled.extras }
         : { problem: compiled.message };
-      ok &&= compiled.ok && (readArray(compiled.payload, 'failed') ?? []).length === 0;
+      ok &&= compiled.ok && compiled.payload.failed.length === 0;
     }
     return { ok, report };
   }
@@ -12953,6 +13168,21 @@ class GodotServer {
       typeof pid === 'number' ? pid : own,
     );
     if ('problem' in choice) {
+      const ended = this.activeProcess;
+      const nothingAnnounced =
+        typeof pid !== 'number' &&
+        announced.unspoken.length === 0 &&
+        !announced.running.some((one) => wanted === undefined || isSameDirectory(one.project.path, wanted));
+      if (
+        nothingAnnounced &&
+        ended !== null &&
+        !stillRunning(ended) &&
+        (wanted === undefined || ended.projectPath === null || isSameDirectory(ended.projectPath, wanted))
+      ) {
+        return this.createErrorResponse(
+          ourRunEnded({ ...ended, pid: ended.pid ?? ended.announcedPid ?? null }, Date.now()),
+        );
+      }
       return this.createErrorResponse(choice.problem);
     }
     // Said when it was a choice: several games of the project are running and this one was
@@ -13190,7 +13420,28 @@ class GodotServer {
       );
     }
 
+    if (op === 'watch') {
+      return await this.handleRuntimeCommand(
+        'watch_signal',
+        {
+          ...whichGame(args),
+          path: readNonEmptyString(args, 'nodePath') ?? '',
+          signal: readString(args, 'signal') ?? '',
+        },
+        { tool: 'runtime_wait', op },
+      );
+    }
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
+    const watch = readPositiveNumber(args, 'watch');
+    if (
+      op === 'signal' &&
+      watch === undefined &&
+      (readNonEmptyString(args, 'nodePath') === undefined || readNonEmptyString(args, 'signal') === undefined)
+    ) {
+      return this.createErrorResponse(
+        'runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered.',
+      );
+    }
     const asked = readNonEmptyString(args, 'nodePath');
     // Words are waited for anywhere in the game when no node is named, which is what the skill
     // told callers to do and the tool refused. A property belongs to one node, so it has none to
@@ -13211,6 +13462,7 @@ class GodotServer {
             path: nodePath,
             signal: readString(args, 'signal') ?? '',
             timeout_ms: timeoutMs,
+            ...(watch === undefined ? {} : { watch }),
           },
           { tool: 'runtime_wait', op, patience },
         )

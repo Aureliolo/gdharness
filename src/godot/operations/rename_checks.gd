@@ -1,6 +1,5 @@
 extends RefCounted
 
-const GdscriptAuthoring = preload("gdscript_authoring.gd")
 const Log = preload("logger.gd")
 
 var _log: Log
@@ -63,21 +62,3 @@ static func _named(entries: Array[Dictionary], name: String) -> bool:
 		if str(entry.get("name", "")) == name:
 			return true
 	return false
-
-
-# Whether each script compiles in a fresh engine, which reads the class cache as it starts and so
-# resolves every class the cache lists. The engine's reasons go to stderr and come back with the
-# answer. It names the scripts it checked rather than counting them, since a caller told one was
-# checked could not say which.
-func check_scripts(params: Dictionary) -> Dictionary:
-	var paths: Array = params.get("paths", [])
-	var checked: Array[String] = []
-	var failed: Array[String] = []
-	for value: Variant in paths:
-		var path: String = str(value)
-		checked.append(path)
-		var script: Script = ResourceLoader.load(path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
-		if not GdscriptAuthoring._parses(script):
-			_log.error("Does not compile: " + path)
-			failed.append(path)
-	return {"checked": checked, "failed": failed}

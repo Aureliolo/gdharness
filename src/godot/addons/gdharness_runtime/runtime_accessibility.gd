@@ -108,6 +108,9 @@ try {
     }
     $p = Patterned $element 'RangeValue'
     if ($p) {
+      # A reader speaks the Value pattern's words, such as "75%" for a slider whose game sets them,
+      # and the number would otherwise replace them.
+      if ($node.Contains('value') -and "$($node.value)") { $node.value_text = $node.value }
       $node.value = $p.Current.Value
       $node.range = @($p.Current.Minimum, $p.Current.Maximum)
       if (-not $p.Current.IsReadOnly) { $actions += 'set_value' }
@@ -389,17 +392,18 @@ static func _narrow(result: Dictionary, params: Dictionary) -> void:
 
 
 ## Whether [param element] is made by the node at [param under] or one below it, and says
-## [param said], each where asked: words as find matches them, in the element's name or value.
+## [param said], each where asked: words as find matches them, in the element's name, value or
+## value_text.
 static func _matches(element: Dictionary, under: String, said: String) -> bool:
 	if not under.is_empty():
 		var path: String = str(element.get("node", element.get("part_of", "")))
 		if path != under and not path.begins_with(under + "/"):
 			return false
 	if not said.is_empty():
-		var name: String = str(element.get("name", ""))
-		var value: String = str(element.get("value", ""))
-		if not Says.matches(name, said) and not Says.matches(value, said):
-			return false
+		for field: String in ["name", "value", "value_text"]:
+			if element.has(field) and Says.matches(str(element[field]), said):
+				return true
+		return false
 	return true
 
 

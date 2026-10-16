@@ -18,6 +18,7 @@ const InputCommands = preload("runtime_input.gd")
 const Pad = preload("runtime_pad.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
+const Targets = preload("runtime_targets.gd")
 const Typing = preload("runtime_typing.gd")
 const Values = preload("runtime_values.gd")
 const Waits = preload("runtime_waits.gd")
@@ -153,11 +154,42 @@ func _init() -> void:
 		"choose": _typing.choose,
 		"wait_frames": _waits.wait_frames,
 		"wait_signal": _waits.wait_signal,
+		"watch_signal": _waits.watch_signal,
 		"wait_until": _waits.wait_until,
 		"send_profile": _send_profile_now,
 		"close_game": _close_game,
 	}
 	_wait_for_the_profiler()
+
+
+## Gives a game with no window the size the project opens its window at. Measured: a
+## headless engine's root viewport is 64 by 64 whatever the project settings or --resolution say, so
+## a headless game laid its interface out in 64 pixels, and a button every windowed run shows was
+## refused as off screen. The root takes a size set once the autoloads are in the tree, before the
+## main scene enters it, and the scene lays out at it from its first frame. A size set at the
+## autoload's construction does not hold: the root is a 100 by 100 placeholder then, and the engine
+## gives it the 64 by 64 afterwards. A script run is not a game and keeps the viewport its own code
+## gives it, and a release build is left as the engine made it.
+func _size_a_windowless_game() -> void:
+	if DisplayServer.get_name() != "headless" or _script_run() or not OS.is_debug_build():
+		return
+	var root: Window = get_tree().root
+	if Vector2(root.size) != Targets.HEADLESS_VIEWPORT:
+		return
+	root.size = Vector2i(_window_dimension("width", 1152), _window_dimension("height", 648))
+
+
+## The window's [param axis] as the project opens it: the override when one is set, otherwise the
+## viewport's size, whose engine default is [param fallback].
+static func _window_dimension(axis: String, fallback: int) -> int:
+	var override: int = Read.as_int(
+		ProjectSettings.get_setting("display/window/size/window_%s_override" % axis, 0)
+	)
+	if override > 0:
+		return override
+	return Read.as_int(
+		ProjectSettings.get_setting("display/window/size/viewport_%s" % axis, fallback), fallback
+	)
 
 
 ## Holds the game's start until the profiler is on, when whatever started the game asked for a
@@ -197,6 +229,7 @@ func _ready() -> void:
 	# even be un-paused over the socket. A debug server has to stay responsive while the game
 	# is frozen, to inspect, capture, inject or resume it.
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	_size_a_windowless_game()
 	var watched: int = get_tree().root.tree_exiting.connect(_send_the_profile)
 	if watched != OK:
 		push_error("gdharness could not watch for the game quitting: %d" % watched)

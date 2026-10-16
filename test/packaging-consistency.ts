@@ -93,6 +93,7 @@ const operationsModules = [
   'reading.gd',
   'rename_checks.gd',
   'resource_files.gd',
+  'script_check.gd',
   'serialisation.gd',
 ];
 
