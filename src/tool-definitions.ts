@@ -904,7 +904,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['read_states', 'add_state', 'connect_states'],
         description: 'The AnimationTree node.',
       },
-      stateName: { type: 'string', ops: ['add_state'], description: 'add_state: the state to add.' },
+      stateName: {
+        type: 'string',
+        ops: ['add_state'],
+        description:
+          "add_state: the state to add. It goes right of the rightmost state in the editor's graph, answered under position.",
+      },
       stateMachinePath: {
         type: 'string',
         ops: ['read_states', 'add_state', 'connect_states'],

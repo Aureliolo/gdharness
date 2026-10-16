@@ -40289,6 +40289,20 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       JSON.stringify(machine),
     );
     assert.deepEqual(answerKeys(machine), ['readBy', 'states', 'transitions'], JSON.stringify(machine));
+    const noMachine =
+      textOf(
+        await call('scene_animation', {
+          op: 'read_states',
+          scenePath: 'moves.tscn',
+          animTreePath: 'Tree',
+          stateMachinePath: 'ground',
+        }),
+      ) ?? '';
+    assert.match(
+      noMachine,
+      /The root state machine has no state ground\. Its states are: idle, jump\./,
+      noMachine,
+    );
     assert.ok(!existsSync(join(project, 'init_ran.txt')), 'reading the animations ran the player script');
 
     // A resource kept inside a file, by the path a read answers a property holding one with.

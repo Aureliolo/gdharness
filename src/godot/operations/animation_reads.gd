@@ -160,11 +160,48 @@ static func state_machine(tree: AnimationTree, state_machine_path: String) -> An
 	return current
 
 
+## Why [method state_machine] found none at [param state_machine_path] in [param tree]: the step of
+## the path that failed, and what is there instead.
+static func no_machine(tree: AnimationTree, state_machine_path: String) -> String:
+	if tree == null or tree.tree_root == null:
+		return "The AnimationTree has no tree_root."
+	var current: AnimationNodeStateMachine = tree.tree_root as AnimationNodeStateMachine
+	if current == null:
+		return (
+			"The AnimationTree's tree_root is not a state machine: its type is %s."
+			% tree.tree_root.get_class()
+		)
+	var walked: PackedStringArray = []
+	for segment: String in state_machine_path.split("/", false):
+		var where: String = "the root state machine"
+		if not walked.is_empty():
+			where = "the state machine at " + "/".join(walked)
+		if not current.has_node(StringName(segment)):
+			var names: PackedStringArray = []
+			for state: StringName in current.get_node_list():
+				if state != &"Start" and state != &"End":
+					var _listed: bool = names.push_back(str(state))
+			var held: String = ", ".join(names) if not names.is_empty() else "none"
+			return (
+				"%s has no state %s. Its states are: %s."
+				% [where.to_upper()[0] + where.substr(1), segment, held]
+			)
+		var next: AnimationNode = current.get_node(StringName(segment))
+		if not next is AnimationNodeStateMachine:
+			return (
+				"The state %s in %s is not a state machine: its type is %s."
+				% [segment, where, next.get_class()]
+			)
+		current = next
+		var _walked: bool = walked.push_back(segment)
+	return "No state machine at " + state_machine_path
+
+
 ## The states and transitions of the state machine at [param state_machine_path] in [param tree].
 static func states(tree: AnimationTree, state_machine_path: String) -> Dictionary:
 	var sm: AnimationNodeStateMachine = state_machine(tree, state_machine_path)
 	if sm == null:
-		return {"ok": false, "error": "AnimationNodeStateMachine not found"}
+		return {"ok": false, "error": no_machine(tree, state_machine_path)}
 	var listed: Array[Dictionary] = []
 	for state: StringName in sm.get_node_list():
 		var node: AnimationNode = sm.get_node(state)

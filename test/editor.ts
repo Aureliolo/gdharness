@@ -2002,20 +2002,28 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
   );
 
   const states = { projectPath: project, scenePath: 'res://states.tscn' };
-  await call('scene_animation', {
+  const idleAdded = await call('scene_animation', {
     ...states,
     op: 'add_state',
     animTreePath: 'Tree',
     stateName: 'idle',
     animationName: 'stand',
   });
-  await call('scene_animation', {
+  const walkAdded = await call('scene_animation', {
     ...states,
     op: 'add_state',
     animTreePath: 'Tree',
     stateName: 'walk',
     animationName: 'step',
   });
+  // Each goes right of every state before it, where add_node alone stacked them all at the origin.
+  const across = (answer: unknown): number => asNumber(get(answer, 'position', 'x'));
+  assert.ok(across(idleAdded) > 0, JSON.stringify(idleAdded));
+  assert.ok(
+    across(walkAdded) > across(idleAdded),
+    `${JSON.stringify(idleAdded)} ${JSON.stringify(walkAdded)}`,
+  );
+  assert.match(fileText(project, 'states.tscn'), /states\/walk\/position = Vector2\([1-9]/);
   await call('scene_animation', {
     ...states,
     op: 'connect_states',
@@ -2070,7 +2078,7 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
       animTreePath: 'Tree',
       stateMachinePath: 'idle',
     }),
-    /AnimationNodeStateMachine not found/,
+    /The state idle in the root state machine is not a state machine: its type is AnimationNodeAnimation\./,
   );
 }
 

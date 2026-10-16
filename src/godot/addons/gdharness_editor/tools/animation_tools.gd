@@ -7,6 +7,11 @@ const AnimationReads = preload("../animation_reads.gd")
 const PropertyValues = preload("../property_values.gd")
 const Read = preload("../reading.gd")
 const SceneFile = preload("../scene_file.gd")
+const Serialisation = preload("../serialisation.gd")
+
+## How far right of the rightmost state a new one goes in the editor's graph, wider than a state's
+## box there.
+const STATE_SPACING: float = 200.0
 
 var _editor_plugin: EditorPlugin = null
 var _properties: PropertyValues = PropertyValues.new()
@@ -159,7 +164,7 @@ func _library_of(player: AnimationPlayer, animation_name: String) -> AnimationLi
 func _machine(scene: SceneFile, anim_tree: AnimationTree, state_machine_path: String) -> Array:
 	var sm: AnimationNodeStateMachine = AnimationReads.state_machine(anim_tree, state_machine_path)
 	if not sm:
-		return [null, {}, "AnimationNodeStateMachine not found"]
+		return [null, {}, AnimationReads.no_machine(anim_tree, state_machine_path)]
 	var homes: Array = _homes(scene, [[sm, "state machine"]])
 	if not homes[0]:
 		return [null, {}, homes[1]]
@@ -490,7 +495,15 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 
 	var anim_node: AnimationNodeAnimation = AnimationNodeAnimation.new()
 	anim_node.animation = StringName(animation_name)
-	sm.add_node(StringName(state_name), anim_node)
+	# Beside the rightmost state: add_node puts a state at the origin, where the editor's graph
+	# draws it over whatever is already there, Start included.
+	var rightmost: Vector2 = Vector2.ZERO
+	for state: StringName in sm.get_node_list():
+		var held: Vector2 = sm.get_node_position(state)
+		if held.x > rightmost.x:
+			rightmost = held
+	var position: Vector2 = rightmost + Vector2(STATE_SPACING, 0)
+	sm.add_node(StringName(state_name), anim_node, position)
 	if not sm.has_node(StringName(state_name)):
 		return scene.refuse("The state machine did not take the state %s." % state_name)
 
@@ -500,6 +513,7 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 		"animationName": animation_name,
 		# False when the tree has no player to look the animation up in.
 		"animationFound": player != null,
+		"position": Serialisation.new().serialize_value(position),
 	}
 	var files: Dictionary = machine[1]
 	return _finish(scene, Callable(), files, answer)
