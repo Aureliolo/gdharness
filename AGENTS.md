@@ -40,11 +40,12 @@ in `test/support/gd` compile under those settings too: one tried in a scratch pr
 warnings passed there and failed on the leg for discarding what `ItemList.add_item` returns.
 
 The modules listed in `scripts/sync-shared-gd.ts` (`reading.gd`, `serialisation.gd`,
-`property_values.gd` and `file_reads.gd`) are edited in `src/godot/operations/` only; `bun run sync:gd`
-writes the copies inside the addons, and a regression fails on a copy that has drifted. Commit the
-`.gd.uid` Godot writes beside every new addon script, and add a new operations module to the list
-in `test/packaging-consistency.ts`. `test:packaging` checks both and runs only on Linux and macOS,
-so from Windows the push is the first run that sees them.
+`property_values.gd`, `file_reads.gd` and `animation_reads.gd`) are edited in
+`src/godot/operations/` only; `bun run sync:gd` writes the copies inside the addons, and a
+regression fails on a copy that has drifted. Commit the `.gd.uid` Godot writes beside every new
+addon script, and add a new operations module to the list in `test/packaging-consistency.ts`.
+`test:packaging` checks both and runs only on Linux and macOS, so from Windows the push is the
+first run that sees them.
 
 `src/` is the TypeScript MCP server (entry points `server-entry.ts` and `cli.ts`). Every tool is
 one entry in `src/tool-definitions.ts`: the server dispatches from it, and the site and the skill
