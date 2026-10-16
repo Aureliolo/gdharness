@@ -1,0 +1,33 @@
+name: Dependency review
+
+# Refuses a pull request that adds or moves a dependency to a licence outside the owner's list
+# (permissive, plus MPL-2.0), or to a version with a known vulnerability of moderate severity or
+# above. Only what the pull request changes is checked, so a Renovate bump is where it bites.
+#
+# No paths filter: it is a required check, and a required check a filter stopped from running
+# never reports, which leaves the pull request waiting on it forever.
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: dependency-review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # Compares the two sides' dependency graphs; it writes nothing.
+
+    steps:
+      - name: Review the dependencies the pull request changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, 0BSD, Unlicense, CC0-1.0, BSL-1.0, Python-2.0, MPL-2.0
