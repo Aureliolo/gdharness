@@ -25,7 +25,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { ANSWERED, engineExtras, runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
+import {
+  ANSWERED,
+  BEGUN,
+  engineExtras,
+  runOperation as runThroughTheServersOwnPath,
+  WAITING,
+} from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
 import { type SpawnSyncReturns, spawnHidden, spawnSyncHidden } from '../src/spawn.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
@@ -516,11 +522,11 @@ function runOperation(
   // Anything on stderr from an operation that succeeded is the engine complaining about
   // something the operation did, a leaked object or a resource still in use at exit included,
   // and the server hands every such line on to the caller. So an operation that passes here is
-  // one that answers cleanly. The line saying the answer is written is the script's own, and the
-  // only one.
+  // one that answers cleanly. The lines marking when it began and answered are the script's own,
+  // and the only ones.
   const complaints = run.stderr
     .split(/\r?\n/)
-    .filter((line) => line.trim() !== ANSWERED)
+    .filter((line) => ![ANSWERED, WAITING, BEGUN].includes(line.trim()))
     .join('\n')
     .trim();
   assert.equal(complaints, '', `${operation} succeeded but wrote to stderr:\n${run.stderr.trim()}`);
@@ -3121,6 +3127,128 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
   }
 }
 
+/**
+ * A script naming an autoload compiles headless as it does in the game. The engine knows the name
+ * only once the autoload is in the tree, after the operations script's `_init`, so compiled there
+ * every such script failed with "Identifier not found". A wrong use of one still fails: the analyser
+ * types the autoload from its script, which a type mismatch shows and a missing method does not,
+ * since the engine warns about that one on any base but self.
+ */
+async function testAScriptNamingAnAutoloadCompiles(godotPath: string): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-autoloads-'));
+  try {
+    writeFileSync(
+      join(dir, 'project.godot'),
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        'config/name="Autoloads"',
+        '',
+        '[autoload]',
+        'Thing="*res://thing.gd"',
+        'Noisy="*res://noisy.gd"',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(dir, 'thing.gd'), 'extends Node\n\n\nfunc hello() -> int:\n\treturn 1\n');
+    writeFileSync(
+      join(dir, 'noisy.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tpush_error("raised by the noisy autoload")',
+        '\tif FileAccess.file_exists("res://die_at_start"):',
+        '\t\tvar _killed: Error = OS.kill(OS.get_process_id())',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(dir, 'user.gd'), 'extends RefCounted\n\n\nfunc f() -> int:\n\treturn Thing.hello()\n');
+    writeFileSync(
+      join(dir, 'wrong.gd'),
+      'extends RefCounted\n\n\nfunc f() -> String:\n\tvar said: String = Thing.hello()\n\treturn said\n',
+    );
+    const engine = { godotPath, script: resolve('src/godot/operations/godot_operations.gd'), debug: false };
+
+    const checked = await runThroughTheServersOwnPath(
+      engine,
+      'check_scripts',
+      { paths: ['res://user.gd', 'res://wrong.gd'] },
+      dir,
+    );
+    assert.ok(checked.ok, `the check should answer: ${checked.ok ? '' : checked.message}`);
+    assert.deepEqual(
+      [get(checked.payload, 'checked'), get(checked.payload, 'scripts')],
+      [
+        ['res://user.gd', 'res://wrong.gd'],
+        [
+          {
+            path: 'res://wrong.gd',
+            errors: [
+              {
+                line: 5,
+                message:
+                  'Parse Error: Cannot assign a value of type int to variable "said" with specified type String.',
+              },
+            ],
+          },
+        ],
+      ],
+      `the autoload resolves, and a wrong use of it is still an error at its line: ${JSON.stringify(checked.payload)}`,
+    );
+    // What the autoloads raised as they started is theirs, not the check's.
+    const raised = (entries: readonly { text: string }[] | undefined): boolean =>
+      (entries ?? []).some((entry) => entry.text === 'raised by the noisy autoload');
+    assert.ok(raised(checked.beforeOperationMessages), JSON.stringify(checked.beforeOperationMessages));
+    assert.ok(!raised(checked.messages), `and not as the operation's: ${JSON.stringify(checked.messages)}`);
+    const extras = engineExtras(checked);
+    assert.match(
+      String(get(extras, 'engine_messages_before_operation_note')),
+      /^Printed while the engine started the project's autoloads, before this operation ran/,
+      JSON.stringify(extras),
+    );
+
+    const created = await runThroughTheServersOwnPath(
+      engine,
+      'create_script',
+      { scriptPath: 'made.gd', content: 'extends Node\n\n\nfunc f() -> int:\n\treturn Thing.hello()\n' },
+      dir,
+    );
+    const modified = await runThroughTheServersOwnPath(
+      engine,
+      'modify_script',
+      {
+        scriptPath: 'made.gd',
+        modifications: [{ type: 'add_function', name: 'greet', body: 'print(Thing.hello())' }],
+      },
+      dir,
+    );
+    assert.deepEqual(
+      [created, modified].map((made) => (made.ok ? get(made.payload, 'parses') : made.message)),
+      [true, true],
+      `a script written naming an autoload parses: ${JSON.stringify([created, modified])}`,
+    );
+
+    writeFileSync(join(dir, 'die_at_start'), '');
+    const died = await runThroughTheServersOwnPath(
+      engine,
+      'check_scripts',
+      { paths: ['res://user.gd'] },
+      dir,
+    );
+    assert.ok(!died.ok, `an engine that died before the check is no answer: ${JSON.stringify(died)}`);
+    assert.match(
+      died.message,
+      /^check_scripts never ran: the engine ended \(.+\) while it started the project's autoloads, which this operation waits for\. The last it reported: raised by the noisy autoload$/,
+      died.message,
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
 function testTheOperationsSurviveEveryWarning(godotPath: string): void {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-strict-'));
   try {
@@ -3407,6 +3535,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
     testTheOperationsSurviveEveryWarning(godotPath);
   },
   answer: (godotPath) => testTheAnswerIsTheOperations(godotPath),
+  autoloads: (godotPath) => testAScriptNamingAnAutoloadCompiles(godotPath),
   binaryScenes: testBinaryScenesAreScenes,
   classBases: (godotPath) => {
     testTheClassListIsTheEnginesOwn(godotPath);

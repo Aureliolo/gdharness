@@ -38,6 +38,17 @@ const ScriptCheck = preload("script_check.gd")
 ## step with `ANSWERED` in src/headless.ts.
 const ANSWERED: String = "[gdharness] answered"
 
+## Printed in `_init` by an operation that runs once the project's autoloads are in the tree, and
+## when it begins there. Kept in step with `WAITING` and `BEGUN` in src/headless.ts, which files
+## what the autoloads print in between as theirs rather than the operation's.
+const WAITING: String = "[gdharness] waiting for the autoloads"
+const BEGUN: String = "[gdharness] begun"
+
+## The operations that compile the project's scripts. The engine knows an autoload's name only once
+## the autoload is in the tree, which is after `_init`, so a script naming one compiled here failed
+## with "Identifier not found" while the game and the editor ran it.
+const AFTER_THE_AUTOLOADS: Array[String] = ["check_scripts", "create_script", "modify_script"]
+
 var _log: Log
 
 
@@ -76,12 +87,31 @@ func _init() -> void:
 
 	_log.info("Executing operation: " + operation)
 
+	var answer_path: String = args[answer_index]
+	if operation in AFTER_THE_AUTOLOADS:
+		printerr(WAITING)
+		var waiting: int = process_frame.connect(
+			_answer_after_the_autoloads.bind(operation, params, answer_path), CONNECT_ONE_SHOT
+		)
+		if waiting != OK:
+			_log.error("Could not wait for the project's autoloads: " + error_string(waiting))
+			quit(1)
+		return
+	_answer(operation, params, answer_path)
+
+
+func _answer_after_the_autoloads(operation: String, params: Dictionary, answer_path: String) -> void:
+	printerr(BEGUN)
+	_answer(operation, params, answer_path)
+
+
+## Runs [param operation] and writes its answer to [param answer_path], then quits.
+func _answer(operation: String, params: Dictionary, answer_path: String) -> void:
 	var payload: Dictionary = _run(operation, params)
 	if payload.is_empty():
 		quit(1)
 		return
 
-	var answer_path: String = args[answer_index]
 	var answer: FileAccess = FileAccess.open(answer_path, FileAccess.WRITE)
 	if answer == null:
 		_log.error(
