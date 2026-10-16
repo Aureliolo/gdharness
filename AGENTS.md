@@ -316,7 +316,7 @@ bump, merge the pull request it opens, and `release-tag.yml` tags whatever versi
 `main`. `.github/release-process.md` covers how a release is cut, signed and verified.
 
 Merge nothing else while a release pull request is open. The ruleset on `main` requires branches to
-be up to date, so every other merge puts the release branch behind and costs it all thirteen checks
+be up to date, so every other merge puts the release branch behind and costs it all fourteen checks
 again. Cut the release last, let it through, then carry on. It is a convention rather than a
 setting, and it costs nothing: the work is already done by the time the release is cut.
 
