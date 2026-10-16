@@ -35951,6 +35951,134 @@ async function testAReadAskedOfTheEditorIsNotAnsweredFromDisk(): Promise<void> {
 }
 
 /**
+ * A tool the editor turns away because it is scanning or importing is asked for again until the
+ * editor takes it, and the caller is told when the editor stays busy for the whole wait.
+ *
+ * A save during a scan updates the file list the scan's thread is writing out, so the addon turns
+ * away every call that could save until the scan is over. The fixture editor turns calls away as
+ * told, which a real one does only for as long as a scan lasts; the move is the vehicle because it
+ * reports what the editor answered, and the busy answer is the same for every tool.
+ */
+async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-move-busy-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-move-busy-rt-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Busy"\n');
+  writeFileSync(join(project, 'hero.tscn'), '[gd_scene format=3]\n\n[node name="Hero" type="Node2D"]\n');
+  writeFileSync(
+    join(project, 'stage.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="PackedScene" path="res://hero.tscn" id="1_hero"]\n\n' +
+      '[node name="Stage" type="Node2D"]\n\n[node name="Hero" parent="." instance=ExtResource("1_hero")]\n',
+  );
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_SCAN_WAIT_MS: '1500',
+    },
+  });
+  let busyFor = 0;
+  const told: string[] = [];
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      let result: Record<string, unknown> = {};
+      if (tool === 'scan_status') {
+        result = { scanning: false, importing: false, pending: false };
+      } else if (tool === 'files_moved') {
+        told.push(busyFor > 0 ? 'busy' : 'done');
+        if (busyFor > 0) {
+          busyFor -= 1;
+          socket.send(
+            JSON.stringify({
+              type: 'tool_result',
+              id: message['id'],
+              success: false,
+              busy: true,
+              error: 'The editor is scanning or importing its files, so files_moved was not run.',
+            }),
+          );
+          return;
+        }
+        result = { retargetedTabs: [], reloadedScenes: ['res://stage.tscn'], unsavedScenes: [] };
+      }
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: SERVER_VERSION,
+        editor_pid: FAKE_EDITOR_PID,
+      }),
+    );
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = get(parseTextContent(status), 'editor', 'connected') === true;
+    }
+    assert.ok(knows, 'the fixture editor should have connected, or this proves nothing');
+    const move = async (from: string, to: string): Promise<unknown> =>
+      parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'resource_edit',
+            arguments: { op: 'move', projectPath: project, resourcePath: from, newPath: to },
+          },
+          60_000,
+        ),
+      );
+
+    busyFor = 1;
+    const waited = await move('res://hero.tscn', 'res://actors/hero.tscn');
+    assert.deepEqual(
+      told,
+      ['busy', 'done'],
+      `the editor busy once is asked again: ${JSON.stringify(waited)}`,
+    );
+    assert.deepEqual(get(waited, 'editor', 'reloadedScenes'), ['res://stage.tscn'], JSON.stringify(waited));
+    assert.equal(get(waited, 'ok'), true, JSON.stringify(waited));
+
+    told.length = 0;
+    busyFor = Number.POSITIVE_INFINITY;
+    const gaveUp = await move('res://actors/hero.tscn', 'res://hero.tscn');
+    assert.ok(
+      told.length >= 2 && told.every((one) => one === 'busy'),
+      `asked until the wait ran out: ${told.join(', ')}`,
+    );
+    assert.match(
+      text(get(gaveUp, 'note')),
+      /was scanning or importing its files for all of 2 s, so files_moved was not run and nothing it would change was changed/,
+      JSON.stringify(gaveUp),
+    );
+    assert.equal(get(gaveUp, 'ok'), false, 'an editor left on the old paths is not a move that settled');
+    assert.ok(existsSync(join(project, 'hero.tscn')), 'the move itself is made whatever the editor says');
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * The editor answers for the project it has open, and a call naming another one is told so.
  *
  * An editor has one project open and no way to look in a second, so it answers about its own
@@ -40400,6 +40528,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,
+  testAToolWaitsOutTheEditorsScan,
   testAnUnlistedValueIsRefusedRatherThanDefaulted,
   testEveryFixtureIsCalled,
   testBothEndsAgreeAboutTheAnnouncement,

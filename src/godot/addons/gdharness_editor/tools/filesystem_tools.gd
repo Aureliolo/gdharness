@@ -5,6 +5,7 @@ extends Node
 ## files moved under it.
 
 const Read = preload("../reading.gd")
+const SceneFile = preload("../scene_file.gd")
 
 var _editor_plugin: EditorPlugin = null
 
@@ -171,6 +172,7 @@ func scan_status(_args: Dictionary) -> Dictionary:
 		"ok": true,
 		"scanning": filesystem.is_scanning(),
 		"importing": filesystem.is_importing(),
+		"pending": SceneFile.scan_due,
 		"sinceScanFinishedMs":
 		-1 if _scan_finished_at_msec < 0 else Time.get_ticks_msec() - _scan_finished_at_msec,
 		"reimportsCompleted": _reimports_completed,

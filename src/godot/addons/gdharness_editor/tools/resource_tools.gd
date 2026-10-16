@@ -47,7 +47,7 @@ func _written(path: String) -> void:
 	if ResourceLoader.has_cached(path):
 		var _replaced: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REPLACE)
 	if _editor_plugin:
-		EditorInterface.get_resource_filesystem().scan()
+		SceneFile.scan_later()
 
 
 ## Why a tool that creates [param path] must not write there, or "". Saving over a file that was

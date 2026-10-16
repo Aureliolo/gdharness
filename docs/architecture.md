@@ -465,6 +465,18 @@ the one compared. A scan still going after thirty seconds is an import of large 
 a script scan, and the engine starts anyway with a `scanNote`. An editor that does not answer, or
 whose addon predates `scan_status`, is not waited for.
 
+Nothing the addon does saves a file while the editor scans or imports. A scan's thread ends by
+writing the editor's file list out to `.godot`, walking the list as it goes, and every save in the
+editor updates an entry of that list from the main thread, freeing what the entry held; a scene
+saved while a resource's scan was ending was followed by garbage decoded as text and a dropped
+connection. So the addon turns away every call but the few that only read or wait (`scan_status`,
+the rescan, the reimport, the play status and stop, the profile read) with `busy`, and the bridge
+asks again every tenth of a second for as long as a game start waits on a scan, then answers that
+nothing was run. A turned-away call did nothing, so asking again never runs it twice and one given
+up on never runs later. The scan a write asks for starts at the end of the frame rather than at
+once, so it begins after every save the write makes, and `scan_status` reports it as `pending`
+until then.
+
 The editor writes that file on every save as well, so an editor holding a shorter list than the
 files takes the same classes out of it between any two rebuilds, and each rebuild puts them back.
 Every rebuild the server runs, for `refresh_classes`, for a test run or after a scan, writes what

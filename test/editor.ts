@@ -453,6 +453,41 @@ const HOOKS_GD = [
   '\t\t"save_scenes":',
   '\t\t\tEditorInterface.save_all_scenes()',
   '\t\t\treturn {"saved": true}',
+  // A scan asked for the way a write asks for one, then one started, with the addon's gate read
+  // after each, in one frame.
+  '\t\t"scan_gate":',
+  '\t\t\tvar filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()',
+  '\t\t\tvar scene_file: GDScript = load("res://addons/gdharness_editor/scene_file.gd")',
+  // Found before the scan starts: the search walks the whole editor, which outlasts a small scan.
+  '\t\t\tvar plugin: Node = EditorInterface.get_base_control().get_tree().root.find_child("GdharnessBridgeClient", true, false).get_parent()',
+  '\t\t\tvar idle: bool = not filesystem.is_scanning() and not filesystem.is_importing()',
+  '\t\t\tvar _asked: Variant = scene_file.call("scan_later")',
+  '\t\t\tvar due: bool = scene_file.get("scan_due")',
+  '\t\t\tvar scanning_while_due: bool = filesystem.is_scanning()',
+  '\t\t\tvar turned_away_while_due: bool = plugin.call("turned_away", "add_node")',
+  '\t\t\tfilesystem.scan()',
+  '\t\t\tvar scanning: bool = filesystem.is_scanning()',
+  '\t\t\tvar add_node: bool = plugin.call("turned_away", "add_node")',
+  '\t\t\tvar create_resource: bool = plugin.call("turned_away", "create_resource")',
+  '\t\t\tvar scan_status: bool = plugin.call("turned_away", "scan_status")',
+  '\t\t\tvar playing_status: bool = plugin.call("turned_away", "playing_status")',
+  '\t\t\treturn {',
+  '\t\t\t\t"idle": idle,',
+  '\t\t\t\t"due": due,',
+  '\t\t\t\t"scanningWhileDue": scanning_while_due,',
+  '\t\t\t\t"turnedAwayWhileDue": turned_away_while_due,',
+  '\t\t\t\t"scanning": scanning,',
+  '\t\t\t\t"addNode": add_node,',
+  '\t\t\t\t"createResource": create_resource,',
+  '\t\t\t\t"scanStatus": scan_status,',
+  '\t\t\t\t"playingStatus": playing_status,',
+  // The scan thread clears its own flag, and a small project's scan can end between two reads.
+  '\t\t\t\t"stillScanning": filesystem.is_scanning(),',
+  '\t\t\t}',
+  '\t\t"scan_due":',
+  '\t\t\tvar scene_file: GDScript = load("res://addons/gdharness_editor/scene_file.gd")',
+  '\t\t\tvar due: bool = scene_file.get("scan_due")',
+  '\t\t\treturn {"due": due}',
   '\treturn _report(path)',
   '',
   '',
@@ -2293,6 +2328,70 @@ async function testAnEditInTheEditorIsKept({ call, refusal, project }: Editor): 
 
   // The main scene back in front, as the cases after this one found the editor.
   await hook(project, { op: 'open', path: 'res://main.tscn' });
+}
+
+/**
+ * A scan a call asks for starts after the call, and while a scan runs every call that could save
+ * is turned away.
+ *
+ * A scan's thread writes the editor's file list out as it ends, and each save in the editor
+ * updates that list on the main thread. A scene saved 250 ms after a resource's scan began was
+ * followed by garbage decoded as text and a dropped connection. The hook asks for a scan the way a
+ * write does, reads the gate, then starts one itself and reads it again, all in one frame, which
+ * is the only way to hold a scan still while it is asked about.
+ */
+async function testAWriteWaitsForTheEditorsScan({ call, project }: Editor): Promise<void> {
+  let gate: unknown = null;
+  // An earlier scan can still be running, or over and not yet joined, which makes the hook's own
+  // scan do nothing, and the scan thread can end it between two of the hook's reads. The hook is
+  // asked again until it caught the editor idle and its scan ran through every read.
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    gate = await hook(project, { op: 'scan_gate' });
+    if (get(gate, 'idle') === true && get(gate, 'scanning') === true && get(gate, 'stillScanning') === true) {
+      break;
+    }
+    await delay(250);
+  }
+  assert.deepEqual(
+    [get(gate, 'idle'), get(gate, 'scanning'), get(gate, 'stillScanning')],
+    [true, true, true],
+    `the hook should have caught the editor idle and read the gate while its scan ran: ${JSON.stringify(gate)}`,
+  );
+  assert.deepEqual(
+    [get(gate, 'due'), get(gate, 'scanningWhileDue'), get(gate, 'turnedAwayWhileDue')],
+    [true, false, false],
+    `a scan asked for during a call is due and not started, so the rest of the call can still save: ${JSON.stringify(gate)}`,
+  );
+  assert.deepEqual(
+    [get(gate, 'addNode'), get(gate, 'createResource'), get(gate, 'scanStatus'), get(gate, 'playingStatus')],
+    [true, true, false, false],
+    `while the scan runs, the calls that save are turned away and the ones that wait on it are not: ${JSON.stringify(gate)}`,
+  );
+
+  // The scan left due waits out the hook's own scan, then starts.
+  let after: unknown = null;
+  for (let waited = 0; waited < 10_000; waited += 100) {
+    after = await hook(project, { op: 'scan_due' });
+    if (get(after, 'due') === false) {
+      break;
+    }
+    await delay(100);
+  }
+  assert.equal(
+    get(after, 'due'),
+    false,
+    `the scan asked for was started once the one running ended: ${JSON.stringify(after)}`,
+  );
+
+  // Asked for at once, while that scan may still be running: taken once it is over.
+  const scene = { projectPath: project, scenePath: 'res://scan_gate.tscn' };
+  await call('scene_create', { ...scene, rootNodeType: 'Node2D' });
+  const added = await call('scene_node', { ...scene, op: 'add', nodeType: 'Sprite2D', nodeName: 'Picture' });
+  assert.equal(
+    get(added, 'nodePath'),
+    'Picture',
+    `a write asked for beside a scan is made: ${JSON.stringify(added)}`,
+  );
 }
 
 /**
@@ -6263,6 +6362,7 @@ async function main(): Promise<void> {
     ['testAMoveBringsTheEditorAlong', testAMoveBringsTheEditorAlong],
     ['testAnEditInTheEditorIsKept', testAnEditInTheEditorIsKept],
     ['testASetIsReadBack', testASetIsReadBack],
+    ['testAWriteWaitsForTheEditorsScan', testAWriteWaitsForTheEditorsScan],
     ['testSignalsAreTheFilesOwn', testSignalsAreTheFilesOwn],
     ['testAnimationEditsLandWhereKept', testAnimationEditsLandWhereKept],
     ['testTilesDrawWhatTheyName', testTilesDrawWhatTheyName],

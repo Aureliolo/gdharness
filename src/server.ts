@@ -8386,11 +8386,16 @@ class GodotServer {
     let editorSaysGoing = true;
     let editorAsks = 0;
     const waitBegan = Date.now();
+    // Counted from the run's start rather than from here, since the boot the budget is sized to is
+    // measured from there and the answer says "within" the budget: counted from here, whatever the
+    // start did after the play lengthened the wait unsaid, and a loaded machine that took two
+    // seconds over it found a game announcing two seconds past a five-second budget.
+    const runBegan = Math.min(this.activeProcess?.startedAt ?? waitBegan, waitBegan);
     // Read through a call rather than directly, since the variable is written from the closure
     // below and the type checker reads it as never changing.
     const lastSaid = (): string => (editorSaysGoing ? 'playing' : 'not playing');
     const fresh = await announcedSince(projectPath, before, {
-      budgetMs,
+      budgetMs: Math.max(runBegan + budgetMs - waitBegan, 0),
       // Not a game of this project that somebody else started: for a run the editor plays, one
       // naming another editor as the one that played it, or none where the project's games name
       // theirs; for a run started here, one naming the editor at all, since a game this server
