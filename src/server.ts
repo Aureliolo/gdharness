@@ -12001,7 +12001,6 @@ class GodotServer {
       return this.answer(outcome);
     }
     return this.jsonTextResponse({
-      ok: true,
       ...outcome.payload,
       readBy:
         'a headless engine, since no editor serves this project; unsaved changes in an editor are not seen',
