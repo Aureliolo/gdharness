@@ -1545,6 +1545,25 @@ async function testAScenesInstancedAndPlaced({ call, refusal, project }: Editor)
     assert.equal(get(moved, 'index'), 0, text(moved));
     assert.deepEqual(order(), ['Host', 'Second', 'First', 'Badge'], 'a move among siblings is saved');
 
+    // The tree says which node is an instance, and of what, and says it of nothing else: not the
+    // root, whose file is the scene itself, nor a node the scene declares, nor the instance's own.
+    const tree = await call('scene_tree', host);
+    const instancing = (node: unknown): Array<[string, unknown]> => [
+      [String(get(node, 'path')), get(node, 'instanceOf')],
+      ...asArray(get(node, 'children')).flatMap(instancing),
+    ];
+    assert.deepEqual(
+      instancing(get(tree, 'tree')),
+      [
+        ['.', undefined],
+        ['Second', undefined],
+        ['First', undefined],
+        ['Badge', 'res://bits/badge.tscn'],
+        ['Badge/Caption', undefined],
+      ],
+      text(tree),
+    );
+
     // Each refusal for the reason only it has, and the file left as the last write made it.
     const before = fileText(project, 'bits/host.tscn');
     const badge = { projectPath: project, scenePath: 'res://bits/badge.tscn' };

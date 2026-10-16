@@ -747,7 +747,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Scene tree',
     effect: 'read',
     description:
-      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. Needs the editor connected. For the nodes of a game that is running, runtime_inspect tree, which needs no editor.',
+      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. A node that instances another scene names that file under instanceOf, and the nodes listed under it come from that file rather than this one. Needs the editor connected. For the nodes of a game that is running, runtime_inspect tree, which needs no editor.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
