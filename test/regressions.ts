@@ -8221,7 +8221,7 @@ function testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome(): void {
     assert.equal(typeof line, 'string', `package.json should define the ${script} script`);
     const words = String(line).split(/\s+/);
     return words
-      .slice(words[0] === 'bun' && /\.ts$/.test(words[1] ?? '') ? 2 : 1)
+      .slice(words[0] === 'bun' && (words[1] ?? '').endsWith('.ts') ? 2 : 1)
       .filter((word) => word !== '' && !word.startsWith('-'));
   };
 

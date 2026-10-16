@@ -1810,9 +1810,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'runtime_input',
     title: 'Send input to the game',
     description:
-      "Input to the running game: a whole click on a Control or a 3D node named by path or on a control named by the words on it, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it. On gdharness's own desktop, where a windowed run goes, Windows refuses to say where the pointer is: every pointer answer there carries pointer_on_hidden_desktop, and the first of the run pointer_note saying why it matters: get_mouse_position() on the root window, and the mouse positions derived from it, read a meaningless position, while what reads the event itself (the control under it, hover, tooltips, input handlers) gets the injected position. A native window no real pointer has entered gets no hover from Godot, so the runtime supplies it there and the answers say hover_supplied.",
+      "Input to the running game: a whole click on a Control or a 3D node named by path or on a control named by the words on it, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button, mouse motion or drag. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it. On gdharness's own desktop, where a windowed run goes, Windows refuses to say where the pointer is: every pointer answer there carries pointer_on_hidden_desktop, and the first of the run pointer_note saying why it matters: get_mouse_position() on the root window, and the mouse positions derived from it, read a meaningless position, while what reads the event itself (the control under it, hover, tooltips, input handlers) gets the injected position. A native window no real pointer has entered gets no hover from Godot, so the runtime supplies it there and the answers say hover_supplied.",
     answer:
-      'click: what was under the pointer, and what became of the control: in_tree, removed or freed. Named by says, found says which match it was, and found.pressedOn says "the words" for words in a RichTextLabel pressed where they are drawn, or "the middle of the label" with a note saying why they could not be placed; on a rich label link_pressed says whether the press reached a link, with link_meta giving the meta the label reports clicked, an empty one included. A control scrolled into view first is scrolled each container out from it a frame after the one inside, and scrolled_into_view says whether a scroll value changed. A button in toggle mode, a CheckBox or CheckButton included, answers pressed with before and after, its button_pressed either side of the click: the same value twice is a click the game undid, and after is null when the click freed it. A refusal for a pointer turned off names where mouse_behavior_recursive was set. On a 3D node landed says the interface did not swallow the press: no control under the pointer stopped it, a control letting the pointer pass included, and every viewport on the way out from the room had the pointer over what shows the room. choose: what was chosen, read before the press, which is heard rather than assumed; what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick); and what the button in front of the menu shows now when it is still there. A menu is opened rather than clicked because its items are drawn rather than built, and the item is looked for as the menu stands once open, since a game can fill a menu as it opens. action, key, mouse_click and joypad_button: the event as it was sent, with whole saying whether the press was let go of again, for a key the keycode, physical_keycode and unicode it carried, and for a controller button its number, its name and the device. mouse_motion: the position and the relative movement sent. joypad_motion: the axis by number and name, the value and the device. None of these is aimed at anything, so none says what the event reached: click on a nodePath or says answers what was under the pointer.',
+      'click: what was under the pointer, and what became of the control: in_tree, removed or freed. Named by says, found says which match it was, and found.pressedOn says "the words" for words in a RichTextLabel pressed where they are drawn, or "the middle of the label" with a note saying why they could not be placed; on a rich label link_pressed says whether the press reached a link, with link_meta giving the meta the label reports clicked, an empty one included. A control scrolled into view first is scrolled each container out from it a frame after the one inside, and scrolled_into_view says whether a scroll value changed. A button in toggle mode, a CheckBox or CheckButton included, answers pressed with before and after, its button_pressed either side of the click: the same value twice is a click the game undid, and after is null when the click freed it. A refusal for a pointer turned off names where mouse_behavior_recursive was set. On a 3D node landed says the interface did not swallow the press: no control under the pointer stopped it, a control letting the pointer pass included, and every viewport on the way out from the room had the pointer over what shows the room. choose: what was chosen, read before the press, which is heard rather than assumed; what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick); and what the button in front of the menu shows now when it is still there. A menu is opened rather than clicked because its items are drawn rather than built, and the item is looked for as the menu stands once open, since a game can fill a menu as it opens. action, key, mouse_click and joypad_button: the event as it was sent, with whole saying whether the press was let go of again, for a key the keycode, physical_keycode and unicode it carried, and for a controller button its number, its name and the device. mouse_motion: the position and the relative movement sent. mouse_drag: from, to, motions sent and relative_total. joypad_motion: the axis by number and name, the value and the device. None of these is aimed at anything, so none says what the event reached: click on a nodePath or says answers what was under the pointer.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
@@ -1884,19 +1884,40 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       alt: { type: 'boolean', ops: ['key'], description: 'key: hold Alt with it. Default false.' },
       x: {
         type: 'number',
-        ops: ['mouse_click', 'mouse_motion'],
-        description: 'mouse_click, mouse_motion: window pixels.',
+        ops: ['mouse_click', 'mouse_motion', 'mouse_drag'],
+        description: 'mouse_click, mouse_motion: window pixels. mouse_drag: where the press is.',
       },
       y: {
         type: 'number',
-        ops: ['mouse_click', 'mouse_motion'],
-        description: 'mouse_click, mouse_motion: window pixels.',
+        ops: ['mouse_click', 'mouse_motion', 'mouse_drag'],
+        description: 'mouse_click, mouse_motion: window pixels. mouse_drag: where the press is.',
+      },
+      toX: {
+        type: 'number',
+        ops: ['mouse_drag'],
+        description: 'mouse_drag: where the release is, in window pixels.',
+      },
+      toY: { type: 'number', ops: ['mouse_drag'], description: 'mouse_drag: as toX.' },
+      via: {
+        type: 'array',
+        items: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+        ops: ['mouse_drag'],
+        description:
+          'mouse_drag: points the stroke passes through on the way, in order, each [x, y]. The motions are spread along the whole stroke by distance. Default none: a straight line.',
+      },
+      frames: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 600,
+        ops: ['mouse_drag'],
+        description:
+          'mouse_drag: how many process frames the stroke takes, one motion each, as a real mouse sends one a frame; a hand takes about 20 to 60 for a stroke across a screen.',
       },
       button: {
         type: ['string', 'number'],
-        ops: ['click', 'mouse_click', 'joypad_button'],
+        ops: ['click', 'mouse_click', 'mouse_drag', 'joypad_button'],
         description:
-          'click, mouse_click: left, right, middle, wheel_up or wheel_down, or a button number. Default left. joypad_button: the controller button, by name (a, b, x, y, back, guide, start, left_stick, right_stick, left_shoulder, right_shoulder, dpad_up, dpad_down, dpad_left, dpad_right, misc1, paddle1 to paddle4, touchpad) or by its JoyButton number; a, b, x and y are the bottom, right, left and top face buttons, as Godot names them, whatever the controller prints on them.',
+          'click, mouse_click, mouse_drag: left, right, middle, wheel_up or wheel_down, or a button number. Default left. joypad_button: the controller button, by name (a, b, x, y, back, guide, start, left_stick, right_stick, left_shoulder, right_shoulder, dpad_up, dpad_down, dpad_left, dpad_right, misc1, paddle1 to paddle4, touchpad) or by its JoyButton number; a, b, x and y are the bottom, right, left and top face buttons, as Godot names them, whatever the controller prints on them.',
       },
       axis: {
         type: ['string', 'number'],
@@ -1965,14 +1986,20 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       mouse_click: {
         effect: 'additive',
         summary:
-          'click a mouse button at a position, pressed and released a frame apart, each event carrying the buttons held once it has happened; the answer says whole. A drag is a press held with pressed true, motions, and a release with pressed false. A wheel button is always a whole step, press and release together as a mouse sends one: a lone wheel press holds the viewport on the control that took it, so every click after it lands there',
+          'click a mouse button at a position, pressed and released a frame apart, each event carrying the buttons held once it has happened; the answer says whole. A drag is mouse_drag. A wheel button is always a whole step, press and release together as a mouse sends one: a lone wheel press holds the viewport on the control that took it, so every click after it lands there',
         requires: ['x', 'y'],
       },
       mouse_motion: {
         effect: 'additive',
         summary:
-          'move the mouse to a position, carrying the distance from where the last injected event put it unless relativeX and relativeY say otherwise, and the buttons held, so a control that drags moves under a run of these between a held mouse_click and its release',
+          'move the mouse to a position, carrying the distance from where the last injected event put it unless relativeX and relativeY say otherwise, and the buttons held',
         requires: ['x', 'y'],
+      },
+      mouse_drag: {
+        effect: 'additive',
+        summary:
+          'a whole drag in one call, as a hand makes one: press at x, y, a motion each frame for frames frames, and release at toX, toY; for a stir, a paint stroke or a slow slider',
+        requires: ['x', 'y', 'toX', 'toY', 'frames'],
       },
       joypad_button: {
         effect: 'additive',
