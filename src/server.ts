@@ -13420,7 +13420,28 @@ class GodotServer {
       );
     }
 
+    if (op === 'watch') {
+      return await this.handleRuntimeCommand(
+        'watch_signal',
+        {
+          ...whichGame(args),
+          path: readNonEmptyString(args, 'nodePath') ?? '',
+          signal: readString(args, 'signal') ?? '',
+        },
+        { tool: 'runtime_wait', op },
+      );
+    }
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
+    const watch = readPositiveNumber(args, 'watch');
+    if (
+      op === 'signal' &&
+      watch === undefined &&
+      (readNonEmptyString(args, 'nodePath') === undefined || readNonEmptyString(args, 'signal') === undefined)
+    ) {
+      return this.createErrorResponse(
+        'runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered.',
+      );
+    }
     const asked = readNonEmptyString(args, 'nodePath');
     // Words are waited for anywhere in the game when no node is named, which is what the skill
     // told callers to do and the tool refused. A property belongs to one node, so it has none to
@@ -13441,6 +13462,7 @@ class GodotServer {
             path: nodePath,
             signal: readString(args, 'signal') ?? '',
             timeout_ms: timeoutMs,
+            ...(watch === undefined ? {} : { watch }),
           },
           { tool: 'runtime_wait', op, patience },
         )

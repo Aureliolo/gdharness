@@ -26,8 +26,13 @@ const LOOKS_APART: int = 9
 ## two looks and a wait for 32 never sees it.
 const COMPARES: Array[String] = ["==", "!=", ">=", "<=", ">", "<"]
 
+## The most signal watches kept at once; arming one past this lets the oldest go.
+const MOST_WATCHES: int = 16
+
 var _host: Node
 var _values: Values
+var _watches: Dictionary[int, Watch] = {}
+var _next_watch: int = 1
 
 
 func _init(host: Node, values: Values) -> void:
@@ -56,13 +61,16 @@ func wait_frames(params: Dictionary) -> Dictionary:
 	return {"type": "waited", "frames": frames, "elapsed_ms": Time.get_ticks_msec() - started}
 
 
-## Waits for a signal to fire, and answers with what it carried, or that the time ran out.
+## Waits for a signal to fire, and answers with what it carried, or that the time ran out. Given a
+## watch, collects that instead: see [method watch_signal].
 func wait_signal(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var signal_name: String = str(params.get("signal", ""))
 	var timeout_ms: int = Read.as_int(params.get("timeout_ms", 5000), 5000)
 	if timeout_ms < 1 or timeout_ms > CEILING_MSEC:
 		return _out_of_range("timeout_ms", timeout_ms, 1, CEILING_MSEC)
+	if params.has("watch"):
+		return await _collect(Read.as_int(params["watch"], 0), timeout_ms)
 	if node_path.is_empty() or signal_name.is_empty():
 		return {"type": "error", "message": "Node path and signal name required"}
 
@@ -84,7 +92,7 @@ func wait_signal(params: Dictionary) -> Dictionary:
 	if not catcher.fired and is_instance_valid(node) and node.is_connected(signal_name, callable):
 		node.disconnect(signal_name, callable)
 
-	return {
+	var answer: Dictionary = {
 		"type": "signal",
 		"path": node_path,
 		"signal": signal_name,
@@ -92,6 +100,90 @@ func wait_signal(params: Dictionary) -> Dictionary:
 		"args": _values.serialize(catcher.args),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 	}
+	if not catcher.fired:
+		answer["note"] = (
+			"A call sent beside this wait to set the signal off may have run only after it answered, as a"
+			+ " client can run its calls in turn. Arm runtime_wait watch first, make the call, then wait"
+			+ " with signal and that watch"
+		)
+	return answer
+
+
+## Starts recording a signal and answers at once with the watch to collect it by.
+##
+## A wait sent beside the call meant to set its signal off does not see it when the client runs the
+## two in turn: Claude Code ran a key press only after the signal wait beside it had answered, so the
+## wait ran out and the press landed after it. A watch is armed before the call and collected after.
+func watch_signal(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	var signal_name: String = str(params.get("signal", ""))
+	if node_path.is_empty() or signal_name.is_empty():
+		return {"type": "error", "message": "Node path and signal name required"}
+	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
+	if not node.has_signal(signal_name):
+		return {"type": "error", "message": "%s has no signal %s" % [node_path, signal_name]}
+	var watch: Watch = Watch.new(node, node_path, signal_name)
+	var listening: Error = node.connect(signal_name, watch.catcher._on_fired)
+	if listening != OK:
+		return {"type": "error", "message": "Could not listen to signal: " + signal_name}
+	while _watches.size() >= MOST_WATCHES:
+		var oldest: int = _watches.keys().min()
+		_let_go(oldest)
+	var id: int = _next_watch
+	_next_watch += 1
+	_watches[id] = watch
+	return {"type": "watching", "watch": id, "path": node_path, "signal": signal_name}
+
+
+## Answers at once with the first emission recorded since watch [param id] was armed, otherwise
+## waits for the next until the time runs out. The watch goes either way.
+func _collect(id: int, timeout_ms: int) -> Dictionary:
+	if not _watches.has(id):
+		return {
+			"type": "error",
+			"message":
+			(
+				(
+					"No watch %d is armed in this game: it was collected already, %d armed after it let it"
+					+ " go, or the game started again since"
+				)
+				% [id, MOST_WATCHES]
+			),
+		}
+	var watch: Watch = _watches[id]
+	var started: int = Time.get_ticks_msec()
+	var before: bool = watch.catcher.fired
+	while not watch.catcher.fired and Time.get_ticks_msec() - started < timeout_ms:
+		await _host.get_tree().process_frame
+	_let_go(id)
+	var answer: Dictionary = {
+		"type": "signal",
+		"path": watch.node_path,
+		"signal": watch.signal_name,
+		"watch": id,
+		"fired": watch.catcher.fired,
+		"times": watch.catcher.times,
+		"args": _values.serialize(watch.catcher.args),
+		"elapsed_ms": Time.get_ticks_msec() - started,
+	}
+	if before:
+		answer["fired_before_wait"] = true
+	return answer
+
+
+func _let_go(id: int) -> void:
+	var watch: Watch = _watches.get(id)
+	var _gone: bool = _watches.erase(id)
+	if watch == null:
+		return
+	var held: Object = watch.node.get_ref()
+	var node: Node = held as Node
+	var callable: Callable = watch.catcher._on_fired
+	if node != null and node.is_connected(watch.signal_name, callable):
+		node.disconnect(watch.signal_name, callable)
 
 
 ## Waits until a property reads as the value given, or until something under the path says what
@@ -492,8 +584,26 @@ func _anything_says(node_path: String, said: String, include_hidden: bool) -> bo
 class SignalCatcher:
 	extends RefCounted
 	var fired: bool = false
+	## How many times it fired; [member args] holds what the first carried.
+	var times: int = 0
 	var args: Array = []
 
 	func _on_fired(...carried: Array) -> void:
+		if not fired:
+			args = carried
 		fired = true
-		args = carried
+		times += 1
+
+
+## A signal recorded from when it was armed until it is collected.
+class Watch:
+	extends RefCounted
+	var node: WeakRef
+	var node_path: String
+	var signal_name: String
+	var catcher: SignalCatcher = SignalCatcher.new()
+
+	func _init(watched: Node, path: String, named: String) -> void:
+		node = weakref(watched)
+		node_path = path
+		signal_name = named

@@ -154,6 +154,7 @@ func _init() -> void:
 		"choose": _typing.choose,
 		"wait_frames": _waits.wait_frames,
 		"wait_signal": _waits.wait_signal,
+		"watch_signal": _waits.watch_signal,
 		"wait_until": _waits.wait_until,
 		"send_profile": _send_profile_now,
 		"close_game": _close_game,

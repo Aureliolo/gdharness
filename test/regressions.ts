@@ -13954,6 +13954,22 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       captured,
     );
     assert.doesNotMatch(captured, /Restore the window/, captured);
+
+    // Claude Code runs an input call only after a wait sent beside it has answered, so a signal the
+    // input sets off is caught by a watch armed before it and collected after.
+    const armed = await call('runtime_wait', { op: 'watch', nodePath: '/root/Main/Near', signal: 'pressed' });
+    const watch = /"watch": (\d+)/.exec(armed)?.[1];
+    assert.ok(watch !== undefined, armed);
+    assert.match(await call('runtime_input', { op: 'click', says: 'Near' }), /"type": "clicked"/);
+    const collected = await call('runtime_wait', { op: 'signal', watch: Number(watch), timeoutMs: 2000 });
+    assert.match(collected, /"fired": true/, collected);
+    assert.match(collected, /"fired_before_wait": true/, collected);
+    assert.match(collected, /"times": 1/, collected);
+    assert.match(
+      await call('runtime_wait', { op: 'signal', timeoutMs: 100 }),
+      /runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered/,
+    );
+
     const pidOf = /"pid": (\d+)/.exec(started)?.[1];
     assert.ok(pidOf !== undefined, started);
     assert.match(await call('editor_run', { op: 'stop' }), /"stopped": true/);

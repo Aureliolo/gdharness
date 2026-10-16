@@ -2055,11 +2055,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       nodePath: {
         type: 'string',
-        ops: ['signal', 'until'],
+        ops: ['signal', 'watch', 'until'],
         description:
-          'signal, until: the node. Needed for a signal and for a property; for says it defaults to /root, the whole screen.',
+          'signal, watch, until: the node. Needed for a signal without a watch, a watch and a property; for says it defaults to /root, the whole screen.',
       },
-      signal: { type: 'string', ops: ['signal'], description: 'signal: the signal name.' },
+      signal: { type: 'string', ops: ['signal', 'watch'], description: 'signal, watch: the signal name.' },
+      watch: {
+        type: 'integer',
+        minimum: 1,
+        ops: ['signal'],
+        description:
+          'signal: the watch an earlier watch answered, in place of nodePath and signal. Answers at once, with fired_before_wait, when the signal fired after the watch was armed, and otherwise waits for it; times counts how often it fired, and args is what the first carried. The watch goes with the answer.',
+      },
       property: {
         type: 'string',
         ops: ['until'],
@@ -2104,6 +2111,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       signal: {
         effect: 'read',
         summary: 'wait for a signal and answer with what it carried',
+        // nodePath and signal, or a watch in their place, which the declaration cannot say, so the
+        // handler asks.
+        requires: [],
+      },
+      watch: {
+        effect: 'read',
+        summary:
+          'start recording a signal and answer at once with a watch; arm it before the call meant to set the signal off, then collect it with signal and the watch. A client can run a call sent beside a wait only after the wait answers, so a wait sent with the call misses it',
         requires: ['nodePath', 'signal'],
       },
       until: {
