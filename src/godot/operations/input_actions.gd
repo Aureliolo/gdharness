@@ -170,19 +170,63 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	if action.is_empty():
 		return {}
 
+	# An action that exists is rebound, which is how one of the engine's ui_ actions is changed, so
+	# what it held is answered rather than lost without a word.
+	var setting: String = "input/" + action_name
+	var answer: Dictionary = {
+		"action_name": action_name,
+		"events_count": events_config.size(),
+		"deadzone": deadzone,
+		"events": events_config,
+		"was_new": not ProjectSettings.has_setting(setting),
+	}
+	if not answer["was_new"]:
+		var held: Variant = ProjectSettings.get_setting(setting)
+		var old: Dictionary = held if held is Dictionary else {}
+		var old_events: Array[Dictionary] = []
+		var listed: Variant = old.get("events", [])
+		if listed is Array:
+			var events_held: Array = listed
+			for event: Variant in events_held:
+				if event is InputEvent:
+					var bound: InputEvent = event
+					old_events.append(_shaped(bound))
+		answer["old_events"] = old_events
+		answer["old_deadzone"] = Read.as_float(old.get("deadzone", 0.5), 0.5)
+
 	# Through ProjectSettings so the file is saved the way the editor saves it, header and
 	# every other line kept; a ConfigFile of project.godot drops the comments on the way out.
-	ProjectSettings.set_setting("input/" + action_name, action)
+	ProjectSettings.set_setting(setting, action)
 	var err: Error = ProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
-	return {
-		"action_name": action_name,
-		"events_count": events_config.size(),
-		"deadzone": deadzone,
-		"events": events_config
-	}
+	return answer
+
+
+## [param event] in the form add_input_action answers its events with, and as the engine names it
+## under text, which also covers a kind of event that form has no fields for.
+static func _shaped(event: InputEvent) -> Dictionary:
+	var shaped: Dictionary = {"class_name": event.get_class(), "text": event.as_text()}
+	if event is InputEventKey:
+		var key: InputEventKey = event
+		shaped["keycode"] = key.keycode
+		if key.physical_keycode != KEY_NONE:
+			shaped["physical_keycode"] = key.physical_keycode
+		for modifier: String in ["ctrl_pressed", "alt_pressed", "shift_pressed"]:
+			if key.get(modifier):
+				shaped[modifier] = true
+	elif event is InputEventMouseButton:
+		var mouse: InputEventMouseButton = event
+		shaped["button_index"] = mouse.button_index
+	elif event is InputEventJoypadButton:
+		var pad: InputEventJoypadButton = event
+		shaped["button_index"] = pad.button_index
+	elif event is InputEventJoypadMotion:
+		var motion: InputEventJoypadMotion = event
+		shaped["axis"] = motion.axis
+		shaped["axis_value"] = motion.axis_value
+	return shaped
 
 
 # Remove an input action the project defines, which add_input_action had no way back from.

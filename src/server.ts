@@ -157,7 +157,14 @@ import {
   normalizeLSPError,
 } from './lsp_client.js';
 import { launchOutsideTheTree } from './outside.js';
-import { exportedBuild, isSameDirectory, isWithinRoot, realPathOr, resolveWithinProject } from './paths.js';
+import {
+  exportedBuild,
+  isSameDirectory,
+  isWithinRoot,
+  keptInside,
+  realPathOr,
+  resolveWithinProject,
+} from './paths.js';
 import { acceptsConnections, notListeningNote } from './port-probe.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import {
@@ -4191,6 +4198,11 @@ class GodotServer {
           args,
           'scenePath',
           'read_scene_tree',
+          (file) => ({
+            scenePath: file,
+            depth: readNumber(args, 'depth') ?? -1,
+            includeProperties: readBoolean(args, 'includeProperties') ?? false,
+          }),
           async () => await bridge('list_scene_nodes'),
         );
       case 'scene_node':
@@ -4222,9 +4234,29 @@ class GodotServer {
       case 'scene_animation':
         switch (op) {
           case 'read':
-            return await bridge('read_animations');
+            return await this.readFromFile(
+              args,
+              'scenePath',
+              'read_animations',
+              (file) => ({
+                scenePath: file,
+                playerNodePath: readNonEmptyString(args, 'playerNodePath') ?? '.',
+                animationName: readString(args, 'animationName') ?? '',
+              }),
+              async () => await bridge('read_animations'),
+            );
           case 'read_states':
-            return await bridge('read_animation_states');
+            return await this.readFromFile(
+              args,
+              'scenePath',
+              'read_animation_states',
+              (file) => ({
+                scenePath: file,
+                animTreePath: readString(args, 'animTreePath') ?? '',
+                stateMachinePath: readString(args, 'stateMachinePath') ?? '',
+              }),
+              async () => await bridge('read_animation_states'),
+            );
           case 'create':
             return await bridge('create_animation');
           case 'add_track':
@@ -4253,13 +4285,21 @@ class GodotServer {
         switch (op) {
           case 'move':
             return await this.handleMoveFile(args);
-          case 'read':
+          case 'read': {
+            const { file, inner } = keptInside(readString(args, 'resourcePath') ?? '');
+            const kept: OperationParams =
+              inner === undefined ? {} : { resourcePath: file, subResource: inner };
             return await this.readFromFile(
-              args,
+              { ...args, ...kept },
               'resourcePath',
               'read_resource',
-              async () => await bridge('read_resource'),
+              (found) => ({
+                resourcePath: inner === undefined ? found : `${found}::${inner}`,
+                includeDefaults: readBoolean(args, 'includeDefaults') ?? false,
+              }),
+              async () => await bridge('read_resource', kept),
             );
+          }
           case 'create':
             return await bridge('create_resource');
           case 'modify':
@@ -11968,7 +12008,8 @@ class GodotServer {
   private async readFromFile(
     args: OperationParams,
     pathKey: 'scenePath' | 'resourcePath',
-    operation: 'read_scene_tree' | 'read_resource',
+    operation: 'read_scene_tree' | 'read_resource' | 'read_animations' | 'read_animation_states',
+    paramsFor: (file: string) => OperationParams,
     throughTheEditor: () => Promise<ToolResponse>,
   ): Promise<ToolResponse> {
     const project = this.project(args);
@@ -11988,15 +12029,7 @@ class GodotServer {
     if (file === null) {
       return this.createErrorResponse(`${pathKey} must name a file inside the project.`);
     }
-    const params: OperationParams =
-      operation === 'read_scene_tree'
-        ? {
-            scenePath: file,
-            depth: readNumber(args, 'depth') ?? -1,
-            includeProperties: readBoolean(args, 'includeProperties') ?? false,
-          }
-        : { resourcePath: file, includeDefaults: readBoolean(args, 'includeDefaults') ?? false };
-    const outcome = await this.operation(operation, params, projectPath);
+    const outcome = await this.operation(operation, paramsFor(file), projectPath);
     if (!outcome.ok) {
       return this.answer(outcome);
     }

@@ -71,6 +71,7 @@ assert.equal(
 // one missing from the archive is a tool that fails only once somebody asks for it.
 const operationsModules = [
   'godot_operations.gd',
+  'animation_reads.gd',
   'audio_buses.gd',
   'class_cache.gd',
   'classdb_queries.gd',

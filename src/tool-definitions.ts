@@ -383,7 +383,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_settings',
     title: 'Project settings',
     description:
-      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. Every write keeps the sections and keys of project.godot in the order the file had them, so a change touches only its own lines. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
+      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events and deadzone, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. Every write keeps the sections and keys of project.godot in the order the file had them, so a change touches only its own lines. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
     parameters: {
       projectPath: PROJECT_PATH,
       setting: {
@@ -490,8 +490,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         requires: ['scenePath'],
       },
       add_input_action: {
-        effect: 'additive',
-        summary: 'register an input action and its events',
+        effect: 'destructive',
+        summary: 'register an input action and its events, or rebind one that exists',
         requires: ['actionName', 'events'],
       },
       remove_input_action: {
@@ -871,7 +871,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_animation',
     title: 'Animations',
     description:
-      'Animations in an AnimationPlayer and states in an AnimationTree state machine. read answers with every track of an animation in the shape add_track takes, so a track read off one animation can be added to another. Needs the editor connected.',
+      "Animations in an AnimationPlayer and states in an AnimationTree state machine. read answers with every track of an animation in the shape add_track takes, so a track read off one animation can be added to another. read and read_states need no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without running the scene's scripts. The ops that write need the editor connected.",
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -904,7 +904,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['read_states', 'add_state', 'connect_states'],
         description: 'The AnimationTree node.',
       },
-      stateName: { type: 'string', ops: ['add_state'], description: 'add_state: the state to add.' },
+      stateName: {
+        type: 'string',
+        ops: ['add_state'],
+        description:
+          "add_state: the state to add. It goes right of the rightmost state in the editor's graph, answered under position.",
+      },
       stateMachinePath: {
         type: 'string',
         ops: ['read_states', 'add_state', 'connect_states'],
@@ -1099,7 +1104,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: PROJECT_PATH,
       resourcePath: {
         ...RESOURCE_PATH,
-        description: `${RESOURCE_FILE} move: a directory too.`,
+        description: `${RESOURCE_FILE} move: a directory too. read: also a resource kept inside a scene or resource file, by the path a read answers a property holding it with, such as "res://hero.tscn::Animation_jump".`,
       },
       resourceType: {
         type: 'string',

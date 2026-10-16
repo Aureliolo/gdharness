@@ -86,6 +86,19 @@ export function isWithinRoot(rootPath: string, candidatePath: string): boolean {
   return step !== '..' && !step.startsWith(`..${sep}`) && !isAbsolute(step);
 }
 
+/** The id Godot gives a resource kept inside a scene or resource file, as written after `::`. */
+const KEPT_ID = /^[A-Za-z0-9_]+$/;
+
+/**
+ * A path naming a resource kept inside a file, as a read answers a property holding one
+ * (`res://hero.tscn::Animation_jump`): the file and the id. A path naming a file has no id.
+ */
+export function keptInside(given: string): { file: string; inner: string | undefined } {
+  const at = given.indexOf('::');
+  const inner = at === -1 ? '' : given.slice(at + 2);
+  return KEPT_ID.test(inner) ? { file: given.slice(0, at), inner } : { file: given, inner: undefined };
+}
+
 /**
  * A caller-supplied path read as a location inside the project.
  *
@@ -153,6 +166,13 @@ export function resolveWithinProject(
   // which node:path resolves against the project instead) or as an alternate data stream
   // (`script.gd:hidden` writes beside the file where nothing lists it), and Godot refuses one in
   // any resource path, so nothing inside a project is ever spelled with it on any platform.
+  const kept = keptInside(trimmed);
+  if (kept.inner !== undefined) {
+    return {
+      ok: false,
+      reason: `Path '${trimmed}' names the resource ${kept.inner} kept inside ${kept.file}, not a file. resource_edit read reads one by that path; this argument takes a file.`,
+    };
+  }
   if (withoutScheme.includes(':')) {
     return {
       ok: false,

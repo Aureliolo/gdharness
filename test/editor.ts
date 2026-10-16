@@ -875,6 +875,32 @@ function createProject(): string {
       '',
     ].join('\n'),
   );
+  // A tree whose player is not its sibling, so the path anim_player holds ("../Body/Player") is not
+  // the one from the scene root that playerNodePath takes.
+  writeFileSync(
+    join(dir, 'moves', 'treed.tscn'),
+    [
+      '[gd_scene load_steps=3 format=3]',
+      '',
+      '[ext_resource type="AnimationLibrary" path="res://moves/library.tres" id="1_library"]',
+      '',
+      '[sub_resource type="AnimationNodeStateMachine" id="StateMachine_1"]',
+      '',
+      '[node name="Root" type="Node2D"]',
+      '',
+      '[node name="Body" type="Node2D" parent="."]',
+      '',
+      '[node name="Player" type="AnimationPlayer" parent="Body"]',
+      'libraries = {',
+      '&"moves": ExtResource("1_library")',
+      '}',
+      '',
+      '[node name="Tree" type="AnimationTree" parent="."]',
+      'tree_root = SubResource("StateMachine_1")',
+      'anim_player = NodePath("../Body/Player")',
+      '',
+    ].join('\n'),
+  );
 
   return dir;
 }
@@ -1976,20 +2002,28 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
   );
 
   const states = { projectPath: project, scenePath: 'res://states.tscn' };
-  await call('scene_animation', {
+  const idleAdded = await call('scene_animation', {
     ...states,
     op: 'add_state',
     animTreePath: 'Tree',
     stateName: 'idle',
     animationName: 'stand',
   });
-  await call('scene_animation', {
+  const walkAdded = await call('scene_animation', {
     ...states,
     op: 'add_state',
     animTreePath: 'Tree',
     stateName: 'walk',
     animationName: 'step',
   });
+  // Each goes right of every state before it, where add_node alone stacked them all at the origin.
+  const across = (answer: unknown): number => asNumber(get(answer, 'position', 'x'));
+  assert.ok(across(idleAdded) > 0, JSON.stringify(idleAdded));
+  assert.ok(
+    across(walkAdded) > across(idleAdded),
+    `${JSON.stringify(idleAdded)} ${JSON.stringify(walkAdded)}`,
+  );
+  assert.match(fileText(project, 'states.tscn'), /states\/walk\/position = Vector2\([1-9]/);
   await call('scene_animation', {
     ...states,
     op: 'connect_states',
@@ -2044,7 +2078,7 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
       animTreePath: 'Tree',
       stateMachinePath: 'idle',
     }),
-    /AnimationNodeStateMachine not found/,
+    /The state idle in the root state machine is not a state machine: its type is AnimationNodeAnimation\./,
   );
 }
 
@@ -2779,6 +2813,27 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
     }),
     /No transition can leave End/,
   );
+  assert.match(
+    await refusal('scene_animation', {
+      projectPath: project,
+      scenePath: 'res://moves/treed.tscn',
+      animTreePath: 'Tree',
+      op: 'add_state',
+      stateName: 'Lost',
+      animationName: 'moves/missing',
+    }),
+    /The AnimationPlayer at Body\/Player has no animation moves\/missing for the state to play\./,
+  );
+
+  // A resource kept inside a file, read through the editor by the path a read answers it with.
+  for (const [inner, type] of [
+    ['res://moves/library.tres::Animation_idle', 'Animation'],
+    ['res://states.tscn::StateMachine_1', 'AnimationNodeStateMachine'],
+  ] as const) {
+    const kept = await call('resource_edit', { projectPath: project, op: 'read', resourcePath: inner });
+    assert.equal(get(kept, 'resourceType'), type, JSON.stringify(kept));
+    assert.equal(get(kept, 'resourcePath'), inner, JSON.stringify(kept));
+  }
 }
 
 /**

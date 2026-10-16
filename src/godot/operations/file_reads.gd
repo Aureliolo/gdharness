@@ -19,6 +19,30 @@ const Serialisation = preload("serialisation.gd")
 ## instances another scene and every stored property when [param include_properties] is set, the
 ## file's value or the default where it sets none. [param depth] -1 reads every level.
 static func scene_tree(scene_path: String, depth: int, include_properties: bool) -> Dictionary:
+	var laid: Dictionary = _laid(scene_path)
+	if not laid.get("ok", false):
+		return laid
+	var nodes: Dictionary = laid["nodes"]
+	return {"ok": true, "tree": _entry(nodes, ".", include_properties, depth, 0)}
+
+
+## The node at [param node_path] in [param scene_path] as {ok, name, type, properties}, laid as
+## [method scene_tree] lays it, with only the properties the files set; {} when the scene has no
+## node there, and a refusal when the file does not read as a scene.
+static func scene_node(scene_path: String, node_path: String) -> Dictionary:
+	var laid: Dictionary = _laid(scene_path)
+	if not laid.get("ok", false):
+		return laid
+	var nodes: Dictionary = laid["nodes"]
+	var path: String = _joined(".", node_path)
+	if not nodes.has(path):
+		return {}
+	var found: Dictionary = nodes[path]
+	return {"ok": true, "name": found["name"], "type": found["type"], "properties": found["properties"]}
+
+
+## Every node of [param scene_path] as {ok, nodes}, keyed by path, or a refusal.
+static func _laid(scene_path: String) -> Dictionary:
 	if not FileAccess.file_exists(scene_path):
 		return {"ok": false, "error": "Scene not found: " + scene_path}
 	# Loaded without naming the type, so a resource handed in by mistake loads as what it is and the
@@ -42,7 +66,7 @@ static func scene_tree(scene_path: String, depth: int, include_properties: bool)
 		return {"ok": false, "error": refused}
 	if not nodes.has("."):
 		return {"ok": false, "error": "%s holds no nodes" % scene_path}
-	return {"ok": true, "tree": _entry(nodes, ".", include_properties, depth, 0)}
+	return {"ok": true, "nodes": nodes}
 
 
 ## Lays the nodes of [param state] into [param nodes] under [param prefix], keyed by their path
@@ -192,12 +216,22 @@ static func _stored(type: String, given: Dictionary) -> Dictionary:
 ## What a resource file holds, in the form modify takes, so a value read here can be written back.
 ## Read from the file rather than a cached copy, since the file is what the writes change and what
 ## the project loads.
+##
+## [param res_path] may name a resource kept inside a file, as "res://hero.tscn::Animation_jump",
+## the path a property holding one is read back with.
 static func resource(res_path: String, include_defaults: bool) -> Dictionary:
-	if not FileAccess.file_exists(res_path):
-		return {"ok": false, "error": "No resource at " + res_path}
-	var loaded: Resource = ResourceLoader.load(res_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	var file: String = res_path.get_slice("::", 0)
+	if not FileAccess.file_exists(file):
+		return {"ok": false, "error": "No resource at " + file}
+	var loaded: Resource = ResourceLoader.load(file, "", ResourceLoader.CACHE_MODE_IGNORE)
 	if loaded == null:
-		return {"ok": false, "error": "%s did not load as a resource." % res_path}
+		return {"ok": false, "error": "%s did not load as a resource." % file}
+	if file != res_path:
+		var id: String = res_path.trim_prefix(file + "::")
+		var inner: Resource = _kept_in(loaded, file, id, {})
+		if inner == null:
+			return {"ok": false, "error": "%s keeps no resource with the id %s." % [file, id]}
+		loaded = inner
 	# A scene's own properties are its packed bundle, which says nothing a caller can use.
 	if loaded is PackedScene:
 		return {
@@ -235,3 +269,40 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	if script != null:
 		answer["script"] = script.resource_path
 	return answer
+
+
+## The resource [param file] keeps under [param id], found in [param value] or anything it holds.
+## The engine loads such a path only while the file is cached, and a read loads the file uncached,
+## so it is looked for among what the file holds. A resource of another file is neither taken nor
+## walked into: ids are unique only within one file, and a scene instancing another holds that
+## file's resources under ids of the other file's.
+static func _kept_in(value: Variant, file: String, id: String, seen: Dictionary) -> Resource:
+	if value is Resource:
+		var held: Resource = value
+		if seen.has(held.get_instance_id()):
+			return null
+		seen[held.get_instance_id()] = true
+		var at: String = held.resource_path
+		if not at.is_empty() and at.get_slice("::", 0) != file:
+			return null
+		if held.resource_scene_unique_id == id:
+			return held
+		for p: Dictionary in held.get_property_list():
+			if Read.as_int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+				var found: Resource = _kept_in(held.get(str(p.get("name", ""))), file, id, seen)
+				if found != null:
+					return found
+	elif value is Array:
+		var items: Array = value
+		for item: Variant in items:
+			var found: Resource = _kept_in(item, file, id, seen)
+			if found != null:
+				return found
+	elif value is Dictionary:
+		var entries: Dictionary = value
+		for key: Variant in entries:
+			for side: Variant in [key, entries[key]]:
+				var found: Resource = _kept_in(side, file, id, seen)
+				if found != null:
+					return found
+	return null
