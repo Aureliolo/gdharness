@@ -146,6 +146,7 @@ func _init() -> void:
 		"inject_text": _typing.inject_text,
 		"inject_mouse_click": _input.inject_mouse_click,
 		"inject_mouse_motion": _input.inject_mouse_motion,
+		"inject_mouse_drag": _input.inject_mouse_drag,
 		"inject_joypad_button": _pad.inject_joypad_button,
 		"inject_joypad_motion": _pad.inject_joypad_motion,
 		"click": _input.click,

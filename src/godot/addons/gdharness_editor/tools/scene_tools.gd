@@ -3,6 +3,7 @@ extends Node
 
 ## Scenes and their nodes, edited in the open editor and read back from what it holds.
 
+const FileReads = preload("../file_reads.gd")
 const Read = preload("../reading.gd")
 const Placing = preload("scene_placing.gd")
 const PropertyValues = preload("../property_values.gd")
@@ -115,81 +116,6 @@ func _kept(scene: SceneFile, saved: Node, node: Node, names: Array) -> String:
 	return ""
 
 
-## Owns [param node] and the nodes under it to [param root], except those an instanced scene
-## inside it owns: giving those to the root made the pack write the instance's own nodes into this
-## scene as overrides.
-func _copy(source: Node, root: Node, copies: Dictionary) -> Node:
-	var copy: Node = null
-	if not source.scene_file_path.is_empty():
-		# An instanced scene made again from its file, so the copy is an instance too. Node.duplicate
-		# makes a plain node of the instance's class, and the pack saved it with every property of the
-		# instance's root frozen into this scene.
-		var packed: PackedScene = ResourceLoader.load(source.scene_file_path, "PackedScene") as PackedScene
-		if packed == null:
-			return null
-		copy = packed.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE)
-		for declared: Dictionary in source.get_property_list():
-			if not (Read.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
-				continue
-			var property: String = str(declared.get("name", ""))
-			var value: Variant = source.get(property)
-			if not PropertyValues.same(copy.get(property), value):
-				copy.set(property, value)
-		for group: StringName in source.get_groups():
-			if not copy.is_in_group(group):
-				copy.add_to_group(group, true)
-	else:
-		copy = source.duplicate(Node.DUPLICATE_GROUPS | Node.DUPLICATE_SCRIPTS)
-		for child: Node in copy.get_children():
-			copy.remove_child(child)
-			child.free()
-	copy.name = source.name
-	copies[source] = copy
-	# Only what this scene owns: an instance's own nodes come with the instance.
-	for child: Node in source.get_children():
-		if child.owner == root:
-			var copied: Node = _copy(child, root, copies)
-			if copied == null:
-				return null
-			copy.add_child(copied)
-	return copy
-
-
-## Gives each copy in [param copies] the persistent connections its source has, to the copy of the
-## target when the target was copied too. A connection an instance makes inside itself is skipped:
-## the instance made again from its file already has it.
-func _reconnect(copies: Dictionary, top: Node) -> void:
-	for key: Variant in copies:
-		var source: Node = key
-		var copy: Node = copies[key]
-		for info: Dictionary in source.get_signal_list():
-			var signal_name: String = str(info.get("name", ""))
-			for conn: Dictionary in source.get_signal_connection_list(signal_name):
-				var flags: int = Read.as_int(conn.get("flags", 0))
-				var callable: Callable = conn.get("callable", Callable())
-				var target: Object = callable.get_object()
-				if not flags & Object.CONNECT_PERSIST or target == null:
-					continue
-				var to: Object = copies.get(target, target)
-				if to == target and target is Node and (target == top or top.is_ancestor_of(target as Node)):
-					continue
-				var copied: Callable = Callable(to, callable.get_method())
-				if (
-					not copy.is_connected(signal_name, copied)
-					and copy.connect(signal_name, copied, flags) != OK
-				):
-					push_error(
-						"gdharness: could not copy the connection %s of %s" % [signal_name, source.name]
-					)
-
-
-func _own(node: Node, root: Node) -> void:
-	node.owner = root
-	for child: Node in node.get_children():
-		if child.owner == null or child.owner == root:
-			_own(child, root)
-
-
 ## [param node]'s stored properties as a read answers them. A property holding a node is answered
 ## as the path to it: the copy read here is never in the tree, and an object description named a
 ## node that was freed when the call ended.
@@ -240,27 +166,6 @@ func _parse_properties_arg(raw_properties: Variant) -> Dictionary:
 		if typeof(parsed) == TYPE_DICTIONARY:
 			return parsed
 	return {}
-
-
-func _build_node_tree(
-	node: Node, include_properties: bool, depth: int, current_depth: int, node_path: String
-) -> Dictionary:
-	var children: Array[Dictionary] = []
-	var data: Dictionary = {
-		"name": str(node.name), "type": node.get_class(), "path": node_path, "children": children
-	}
-
-	if include_properties:
-		data["properties"] = _properties_of(node, true, {})
-
-	if depth >= 0 and current_depth >= depth:
-		return data
-
-	for child: Node in node.get_children():
-		var child_path: String = str(child.name) if node_path == "." else node_path + "/" + str(child.name)
-		children.append(_build_node_tree(child, include_properties, depth, current_depth + 1, child_path))
-
-	return data
 
 
 func _collect_nodes_recursive(node: Node, path: String, out_nodes: Array) -> void:
@@ -351,15 +256,12 @@ func list_scene_nodes(args: Dictionary) -> Dictionary:
 	var depth: int = Read.as_int(args.get("depth", -1), -1)
 	var include_properties: bool = Read.as_bool(args.get("includeProperties", false))
 
-	var opened: Array = _open(scene_path, false)
-	var scene: SceneFile = opened[0]
-	var refused: Dictionary = opened[1]
-	if not refused.is_empty():
-		return refused
-
-	var tree: Dictionary = _build_node_tree(scene.root, include_properties, depth, 0, ".")
-	scene.close()
-	return {"ok": true, "tree": tree, "unsavedInEditor": SceneFile.unsaved(scene_path)}
+	# Read as a headless engine reads it with no editor connected, so the answer does not depend on
+	# whether one is.
+	var read: Dictionary = FileReads.scene_tree(scene_path, depth, include_properties)
+	if read.get("ok", false):
+		read["unsavedInEditor"] = SceneFile.unsaved(scene_path)
+	return read
 
 
 func add_node(args: Dictionary) -> Dictionary:
@@ -404,7 +306,7 @@ func add_node(args: Dictionary) -> Dictionary:
 	new_node.name = node_name
 	parent.add_child(new_node)
 	Placing.place(new_node, place)
-	_own(new_node, root)
+	Placing.own(new_node, root)
 	var refused_property: String = _properties.write_all(new_node, properties)
 	if not refused_property.is_empty():
 		return scene.refuse(refused_property)
@@ -505,14 +407,14 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 		return scene.refuse(unusable)
 
 	var copies: Dictionary = {}
-	var duplicated_node: Node = _copy(source, root, copies)
+	var duplicated_node: Node = Placing.copied(source, root, copies)
 	if not duplicated_node:
 		return scene.refuse("Failed to duplicate node: " + node_path)
 
 	duplicated_node.name = new_name
 	target_parent.add_child(duplicated_node)
-	_own(duplicated_node, root)
-	_reconnect(copies, source)
+	Placing.own(duplicated_node, root)
+	Placing.reconnect(copies, source)
 
 	var new_path: String = scene.path_of(duplicated_node)
 	var written: Dictionary = scene.write(
@@ -575,7 +477,7 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	node.get_parent().remove_child(node)
 	new_parent.add_child(node)
 	Placing.place(node, place)
-	_own(node, root)
+	Placing.own(node, root)
 
 	var new_path: String = scene.path_of(node)
 	var index: int = node.get_index()

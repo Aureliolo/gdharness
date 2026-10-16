@@ -767,6 +767,49 @@ function testOperations(godotPath: string, projectDir: string): void {
     `the constant sits after the header and before the variables:\n${withConstant}`,
   );
 
+  // Functions are spaced the way gdformat writes them, two blank lines on each side counting those
+  // already there, and the file still ends with a newline; one placed after _ready goes above the
+  // doc comment and the annotation line of the function that follows, not between them and it. The
+  // comment indented in _ready's body is the end of that body and stays there.
+  const spacedPath = join(projectDir, 'made', 'spaced.gd');
+  writeFileSync(
+    spacedPath,
+    'extends Node\n\n\nfunc _ready() -> void:\n\tpass\n\t# the end of ready\n\n\n## Moves it.\n@rpc\nfunc move() -> void:\n\tpass\n',
+  );
+  const spaced = operation('modify_script', {
+    script_path: 'made/spaced.gd',
+    modifications: [
+      { type: 'add_function', name: 'first' },
+      { type: 'add_function', name: 'second' },
+      { type: 'add_function', name: 'between', position: 'after_ready' },
+    ],
+  });
+  assert.equal(get(spaced, 'parses'), true, JSON.stringify(spaced));
+  assert.equal(
+    readFileSync(spacedPath, 'utf8'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\tpass\n\t# the end of ready\n\n\nfunc between() -> void:\n\tpass\n\n\n## Moves it.\n@rpc\nfunc move() -> void:\n\tpass\n\n\nfunc first() -> void:\n\tpass\n\n\nfunc second() -> void:\n\tpass\n',
+    "each function two blank lines from its neighbours, above the next one's doc comment, and a newline at the end",
+  );
+  assert.deepEqual(
+    asArray(get(spaced, 'modifications_applied')).map((applied) => get(applied, 'line')),
+    [19, 23, 9],
+    `each answered on the line its declaration is on in the file written: ${JSON.stringify(spaced)}`,
+  );
+  writeFileSync(
+    spacedPath,
+    'extends Node\n\n\nfunc _init() -> void:\n\tpass\n\t# the end of init\nfunc later() -> void:\n\tpass\n',
+  );
+  operation('modify_script', {
+    script_path: 'made/spaced.gd',
+    modifications: [{ type: 'add_function', name: 'tucked', position: 'after_init' }],
+  });
+  assert.equal(
+    readFileSync(spacedPath, 'utf8'),
+    'extends Node\n\n\nfunc _init() -> void:\n\tpass\n\t# the end of init\n\n\nfunc tucked() -> void:\n\tpass\n\n\nfunc later() -> void:\n\tpass\n',
+    'a comment indented into the body above stays in that body, with no blank line to set it off',
+  );
+  rmSync(spacedPath);
+
   const info = operation('get_script_info', { script_path: 'made/hero.gd' });
   assert.equal(get(info, 'class_name'), 'FixtureHero');
   assert.equal(get(info, 'extends'), 'Node2D');
@@ -3170,6 +3213,7 @@ async function main(): Promise<void> {
     }
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
+    runFixture(godotPath, projectDir, 'runtime_drag');
     runFixture(godotPath, projectDir, 'runtime_pad');
     runFixture(godotPath, projectDir, 'runtime_accessibility');
     runFixture(godotPath, projectDir, 'runtime_query');
