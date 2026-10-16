@@ -6880,75 +6880,106 @@ async function testArgumentsOfTheWrongTypeAreRefused(): Promise<void> {
  *
  * A probe session that had started a game headless asked scene_tree for its nodes and was told only
  * to open an editor, which it had been asked not to do; runtime_inspect tree answers about a running
- * game with none. A tool with no such alternative is told nothing of the kind.
+ * game with none. With no game of the project running it answers nothing, so it is not offered then,
+ * nor beside a game of another project. A tool with no such alternative is told nothing of the kind.
  */
 async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
   const projectPath = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-editor-'));
+  const announced = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-editor-runtimes-'));
+  // This process's pid, so the reader takes the game for alive rather than sweeping it.
+  const announce = (path: string): void => {
+    writeFileSync(
+      join(announced, `runtime-${process.pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid: process.pid,
+        port: 51_236,
+        address: '127.0.0.1',
+        project: { name: 'Game', path },
+      }),
+      'utf8',
+    );
+  };
+  const insteadSaid = /runtime_inspect tree reads the nodes of a game that is running, and needs no editor/;
   try {
     writeFileSync(join(projectPath, 'project.godot'), 'config_version=5\n');
-    await withStdioServer(async (call) => {
-      const tree = await call('scene_tree', { projectPath, scenePath: 'res://main.tscn' });
-      assert.match(tree, /^Editor not connected/, tree);
-      assert.match(
-        tree,
-        /runtime_inspect tree reads the nodes of a game that is running, and needs no editor/,
-        tree,
-      );
-      const create = await call('scene_create', {
-        projectPath,
-        scenePath: 'res://made.tscn',
-        rootNodeType: 'Node',
-      });
-      assert.match(create, /^Editor not connected/, create);
-      assert.doesNotMatch(create, /runtime_inspect/, create);
+    await withStdioServer(
+      async (call) => {
+        const tree = async (): Promise<string> =>
+          await call('scene_tree', { projectPath, scenePath: 'res://main.tscn' });
+        const idle = await tree();
+        assert.match(idle, /^Editor not connected/, idle);
+        assert.doesNotMatch(idle, /runtime_inspect/, `with no game running: ${idle}`);
+        announce(join(projectPath, 'elsewhere'));
+        const elsewhere = await tree();
+        assert.match(elsewhere, /^Editor not connected/, elsewhere);
+        assert.doesNotMatch(elsewhere, /runtime_inspect/, `beside a game of another project: ${elsewhere}`);
+        announce(projectPath);
+        const playing = await tree();
+        assert.match(playing, /^Editor not connected/, playing);
+        assert.match(playing, insteadSaid, `beside a game of the project: ${playing}`);
+        const create = await call('scene_create', {
+          projectPath,
+          scenePath: 'res://made.tscn',
+          rootNodeType: 'Node',
+        });
+        assert.match(create, /^Editor not connected/, create);
+        assert.doesNotMatch(create, /runtime_inspect/, create);
 
-      // A project never set up has no addon to enable and no editor that could dial in, so the
-      // refusal says that and how to install it. Each half of the addon check gets the shape only it
-      // refuses, as editor_launch's does, and then the project that has both, which an editor could
-      // still connect from.
-      const ask = async (): Promise<string> =>
-        await call('scene_create', { projectPath, scenePath: 'res://made.tscn', rootNodeType: 'Node' });
-      assert.ok(
-        create.startsWith(
-          `Editor not connected, and no editor of this project can connect: the gdharness editor addon is not installed in ${projectPath}.`,
-        ),
-        create,
-      );
-      // Named as the command to type, since no tool installs it and a caller holding only the tools
-      // went looking for one called setup.
-      assert.ok(
-        create.includes(
-          `No gdharness tool installs the addon: run  npx -y gdharness@${SERVER_VERSION} setup "${projectPath}" --no-connect  in a shell`,
-        ),
-        create,
-      );
-      assert.doesNotMatch(create, /Enable the addon under/, create);
-      const settings = readFileSync(join(projectPath, 'project.godot'), 'utf8');
-      const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
-      writeFileSync(join(projectPath, 'project.godot'), enabled);
-      const enabledOnly = await ask();
-      assert.match(enabledOnly, /addon is not installed in /, `enabled and not installed: ${enabledOnly}`);
-      writeFileSync(join(projectPath, 'project.godot'), settings);
-      mkdirSync(join(projectPath, 'addons', 'gdharness_editor'), { recursive: true });
-      const installedOnly = await ask();
-      assert.match(installedOnly, /addon is not enabled in /, `installed and not enabled: ${installedOnly}`);
-      assert.match(
-        installedOnly,
-        /project_settings enable_plugin with pluginName gdharness_editor enables it/,
-        installedOnly,
-      );
-      writeFileSync(join(projectPath, 'project.godot'), enabled);
-      const ready = await ask();
-      assert.ok(
-        ready.startsWith(
-          'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
-        ),
-        `a project an editor could connect from: ${ready}`,
-      );
-      assert.match(ready, /Open the project in the editor with editor_launch/, ready);
-    });
+        // A project never set up has no addon to enable and no editor that could dial in, so the
+        // refusal says that and how to install it. Each half of the addon check gets the shape only it
+        // refuses, as editor_launch's does, and then the project that has both, which an editor could
+        // still connect from.
+        const ask = async (): Promise<string> =>
+          await call('scene_create', { projectPath, scenePath: 'res://made.tscn', rootNodeType: 'Node' });
+        assert.ok(
+          create.startsWith(
+            `Editor not connected, and no editor of this project can connect: the gdharness editor addon is not installed in ${projectPath}.`,
+          ),
+          create,
+        );
+        // Named as the command to type, since no tool installs it and a caller holding only the tools
+        // went looking for one called setup.
+        assert.ok(
+          create.includes(
+            `No gdharness tool installs the addon: run  npx -y gdharness@${SERVER_VERSION} setup "${projectPath}" --no-connect  in a shell`,
+          ),
+          create,
+        );
+        assert.doesNotMatch(create, /Enable the addon under/, create);
+        const settings = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+        const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
+        writeFileSync(join(projectPath, 'project.godot'), enabled);
+        const enabledOnly = await ask();
+        assert.match(enabledOnly, /addon is not installed in /, `enabled and not installed: ${enabledOnly}`);
+        writeFileSync(join(projectPath, 'project.godot'), settings);
+        mkdirSync(join(projectPath, 'addons', 'gdharness_editor'), { recursive: true });
+        const installedOnly = await ask();
+        assert.match(
+          installedOnly,
+          /addon is not enabled in /,
+          `installed and not enabled: ${installedOnly}`,
+        );
+        assert.match(
+          installedOnly,
+          /project_settings enable_plugin with pluginName gdharness_editor enables it/,
+          installedOnly,
+        );
+        writeFileSync(join(projectPath, 'project.godot'), enabled);
+        const ready = await ask();
+        assert.ok(
+          ready.startsWith(
+            'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
+          ),
+          `a project an editor could connect from: ${ready}`,
+        );
+        assert.match(ready, /Open the project in the editor with editor_launch/, ready);
+      },
+      { GDHARNESS_RUNTIME_DIR: announced },
+    );
   } finally {
     sweep(projectPath);
+    sweep(announced);
   }
 }
 
@@ -39586,6 +39617,8 @@ function testAMoveThatCannotBeMadeIsRefused(): void {
   const project = moveProject();
   try {
     mkdirSync(join(project, '.hidden'));
+    mkdirSync(join(project, '.godot'));
+    writeFileSync(join(project, '.godot', 'uid_cache.bin'), '');
     mkdirSync(join(project, 'kit'));
     writeFileSync(join(project, 'kit', '.gdignore'), '');
     mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
@@ -39596,7 +39629,13 @@ function testAMoveThatCannotBeMadeIsRefused(): void {
       ['scenes/gone.tscn', 'levels/gone.tscn', /There is nothing at res:\/\/scenes\/gone\.tscn to move/],
       ['scenes/hero.tscn', 'scenes/main.tscn', /res:\/\/scenes\/main\.tscn already exists/],
       ['scenes', 'scenes/inner', /res:\/\/scenes cannot be moved into itself/],
-      ['project.godot', 'config/project.godot', /belongs to the engine where it is/],
+      [
+        'project.godot',
+        'config/project.godot',
+        /belongs to the engine where it is: it marks the project's root/,
+      ],
+      ['.godot', 'cache', /belongs to the engine where it is: \.godot is the engine's own cache/],
+      ['.godot/uid_cache.bin', 'uid_cache.bin', /belongs to the engine where it is: \.godot is the engine's/],
       ['scenes/hero.tscn', '.hidden/hero.tscn', /under \.hidden, and the engine passes over/],
       ['scenes/hero.tscn', 'kit/hero.tscn', /holding a \.gdignore/],
       [
@@ -39765,10 +39804,12 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
     assert.equal(get(renamed, 'written'), true);
     assert.equal(get(renamed, 'note'), undefined, 'a rename that settled has nothing to explain');
     assert.deepEqual(get(renamed, 'compiled', 'failed'), [], JSON.stringify(get(renamed, 'compiled')));
-    assert.equal(
-      asNumber(get(renamed, 'compiled', 'checked')),
-      3,
-      'the moved script, its subclass and its user',
+    assert.deepEqual(
+      asArray(get(renamed, 'compiled', 'checked'))
+        .map((one) => text(one))
+        .sort(),
+      ['res://loud.gd', 'res://user.gd', 'res://words/wording.gd'],
+      'the moved script, its subclass and its user, each by name',
     );
     assert.equal(get(renamed, 'uidTable'), 'rebuilt by an import pass');
     assert.ok(!existsSync(join(project, 'told.gd')) && !existsSync(join(project, 'told.gd.uid')));

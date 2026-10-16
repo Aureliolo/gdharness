@@ -1919,11 +1919,13 @@ function engineFlagsNote(args: readonly string[]): string | undefined {
 }
 
 /**
- * What answers without an editor, for an editor tool a caller reached for with none connected.
+ * What answers without an editor while a game of the project is running, for an editor tool a
+ * caller reached for with none connected.
  *
  * A probe session that had started a game headless asked scene_tree for its nodes and was told to
  * open an editor, which it had been asked not to do, while runtime_inspect tree answers about the
- * running game with no editor at all.
+ * running game with no editor at all. With no game running it answers nothing, and a probe told of
+ * it then found the advice useless, so it is offered only beside a game that would answer.
  */
 const EDITOR_FREE_INSTEAD: Readonly<Record<string, string>> = {
   scene_tree:
@@ -12454,8 +12456,13 @@ class GodotServer {
     const named = askedAs ?? toolName;
     if (!this.godotBridge.isConnected()) {
       const tool = askedAs?.split(' ')[0];
+      const meant = readNonEmptyString(args, 'projectPath');
       const alternative =
-        tool !== undefined && Object.hasOwn(EDITOR_FREE_INSTEAD, tool)
+        tool !== undefined &&
+        Object.hasOwn(EDITOR_FREE_INSTEAD, tool) &&
+        discoverRuntimes().some(
+          (endpoint) => meant === undefined || isSameDirectory(endpoint.project.path, meant),
+        )
           ? EDITOR_FREE_INSTEAD[tool]
           : undefined;
       const refused = await this.noEditorYet(args, alternative === undefined ? [] : [alternative]);

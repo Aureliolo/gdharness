@@ -177,10 +177,16 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     return { ok: false, reason: `${from} is already there; nothing to move.` };
   }
   const isDirectory = statSync(absoluteFrom).isDirectory();
-  if (from === 'res://project.godot' || from === 'res://.godot' || from.startsWith('res://.godot/')) {
+  if (from === 'res://project.godot') {
     return {
       ok: false,
-      reason: `${from} belongs to the engine where it is: project.godot marks the project root, and .godot is the engine's own cache.`,
+      reason: `${from} belongs to the engine where it is: it marks the project's root, so the project is wherever it sits.`,
+    };
+  }
+  if (from === 'res://.godot' || from.startsWith('res://.godot/')) {
+    return {
+      ok: false,
+      reason: `${from} belongs to the engine where it is: .godot is the engine's own cache, which it rebuilds from the project's files.`,
     };
   }
   const addon = installedAddonOf(projectPath, from);
