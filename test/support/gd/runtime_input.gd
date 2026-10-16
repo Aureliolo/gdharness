@@ -488,7 +488,7 @@ func _check_a_dialog(input: InputCommands) -> void:
 	asking.queue_free()
 
 
-## A button placed inside the 64 by 64 viewport a headless game has, its words clipped so the text
+## A button placed inside the 64 by 64 viewport a headless script run has, its words clipped so the text
 ## does not widen it past the edge, counting its presses under the meta `presses`.
 func _small_button(parent: Node, words: String, at: Vector2) -> Button:
 	var button: Button = Button.new()
@@ -978,7 +978,7 @@ func _check_a_click_by_words_ranked(input: InputCommands) -> void:
 	await root.get_tree().process_frame
 
 
-## A label inside the 64 by 64 viewport a headless game has, clipped to the size of a small button.
+## A label inside the 64 by 64 viewport a headless script run has, clipped to the size of a small button.
 func _small_label(parent: Node, words: String, at: Vector2) -> Label:
 	var label: Label = Label.new()
 	label.text = words

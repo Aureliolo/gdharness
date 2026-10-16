@@ -412,17 +412,19 @@ static func _outside_note(outside: int, root: Node) -> String:
 ## headless game's button twenty pixels in from the corner was refused as off screen, and the
 ## refusal read as though the button were not there.
 ##
-## The size is only claimed where it is true: the rect is printed beside this, so naming 64 by 64
-## over a viewport somebody has resized says two different things in one sentence.
+## The size named is the one in force, which the rect printed beside it agrees with. A game the
+## runtime started headless has the size the project opens its window at, and a window of that size
+## would not reach the control either, so only the engine's own 64 by 64 is answered with a window.
 static func no_window_note(viewport: Viewport, root: Window) -> String:
 	if viewport != root or root.can_draw():
 		return ""
-	if viewport.get_visible_rect().size == HEADLESS_VIEWPORT:
+	var size: Vector2 = viewport.get_visible_rect().size
+	if size == HEADLESS_VIEWPORT:
 		return (
 			". This game has no window, and a game with no window has a 64 by 64 viewport whatever "
 			+ "the project settings say: run it with a window to reach this control"
 		)
-	return ". This game has no window: run it with a window to reach this control"
+	return ". This game has no window, and its viewport is %d by %d" % [roundi(size.x), roundi(size.y)]
 
 
 ## What to add to a refusal that found nothing on screen, when the controls saying it are covered.
@@ -771,7 +773,7 @@ static func _where_it_lands(target: Control, point: Vector2) -> Dictionary[Scrol
 ## Whether a click could not reach [param target] however it scrolled: its centre, where the click
 ## would bring it, outside its viewport or the one showing that on the screen, or clipped away by a
 ## container the click does not scroll. A drawer parked off the side of the screen, or anything
-## outside the 64 by 64 viewport of a game with no window, was listed among the controls on screen.
+## outside the viewport of a game with no window, was listed among the controls on screen.
 static func _off_screen(target: Control) -> bool:
 	var moves: Dictionary[ScrollContainer, Vector2] = _scrolls_for(target)
 	var point: Vector2 = _centre_of(target) + _moved_by(target, moves)

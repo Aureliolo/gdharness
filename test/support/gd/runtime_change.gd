@@ -48,6 +48,7 @@ func many(first: int, ...rest: Array) -> int:
 
 func noisy() -> int:
 	push_error("noisy said so")
+	push_warning("noisy only warned")
 	return 1
 
 
@@ -253,7 +254,10 @@ func _check_the_argument_count() -> void:
 	if noisy.get("type") != "method_result" or noisy.get("result") != 1:
 		_fail("a method that reports an error still answers what it returned: %s" % JSON.stringify(noisy))
 	if raised.size() != 1 or not str(raised[0]).contains("noisy said so"):
-		_fail("with what it reported: %s" % JSON.stringify(noisy))
+		_fail("with the error it reported, and no warning among the errors: %s" % JSON.stringify(noisy))
+	var warned: Array = noisy.get("warnings", [])
+	if warned.size() != 1 or str(warned[0]) != "noisy only warned":
+		_fail("and the warning under warnings: %s" % JSON.stringify(noisy))
 
 
 ## A Vector2 given as its fields with no tag, the way scene_node and resource_edit take one, is

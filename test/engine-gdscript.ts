@@ -267,6 +267,7 @@ const PROVOKED: Readonly<Record<string, readonly RegExp[]>> = {
   runtime_change: [
     /^ERROR: Error calling method from 'callv': 'Node::take': Cannot convert argument 1 from Object to Object\.$/,
     /^ERROR: noisy said so$/,
+    /^WARNING: noisy only warned$/,
     /^ERROR: Attempted to assign an object into a TypedArray, that does not inherit from 'GDScript'\.$/,
     /^ERROR: Unable to convert array index 0 from "Object" to "Object"\.$/,
     /^ERROR: Attempted to assign an object into a TypedDictionary\.Value, that does not inherit from 'GDScript'\.$/,
@@ -384,10 +385,7 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   assert.ok(leaf, 'the walk should recurse from middle into leaf');
 
   assert.equal(get(payload, 'summary', 'total_resources'), 1, 'one resource was asked for');
-  assert.ok(
-    asNumber(get(payload, 'summary', 'total_dependencies')) >= 2,
-    'the chain has at least two dependencies',
-  );
+  assert.equal(get(payload, 'summary', 'total_dependencies'), 2, 'the chain has two dependencies');
 
   // A cycle has to be reported rather than walked forever.
   const cyclicPayload = runOperation(godotPath, projectDir, 'get_dependencies', {
@@ -396,6 +394,12 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   assert.ok(
     asArray(get(cyclicPayload, 'circular_references')).length > 0,
     'the walk should report the cycle it found rather than silently stopping',
+  );
+  // The cycle's way back names ouro itself, which is not one of its own dependencies.
+  assert.deepEqual(
+    [get(cyclicPayload, 'summary', 'total_dependencies'), get(cyclicPayload, 'summary', 'total_references')],
+    [1, 2],
+    `ouro depends on boros alone: ${JSON.stringify(get(cyclicPayload, 'summary'))}`,
   );
 
   // addons/ is project content and often shipping content, so it is walked like anything
@@ -1872,6 +1876,16 @@ function testOperations(godotPath: string, projectDir: string): void {
     [-1, { _type: 'Vector2i', x: -1, y: -1 }, 0],
     JSON.stringify(memberOf('TileMapLayer', 'set_cell')),
   );
+  // The flags by name beside the number, which reads as nothing without the engine's enum.
+  assert.deepEqual(
+    [
+      get(memberOf('CharacterBody2D', 'move_and_slide'), 'flag_names'),
+      get(memberOf('Node', 'get_child_count'), 'flag_names'),
+      get(memberOf('Object', 'call'), 'flag_names'),
+    ],
+    [['normal'], ['normal', 'const'], ['normal', 'vararg']],
+    'a plain method, a const one and one taking any number of arguments',
+  );
 
   const inheritance = operation('inspect_inheritance', { class_name: 'Node2D' });
   assert.ok(asArray(get(inheritance, 'ancestors')).includes('CanvasItem'));
@@ -2647,6 +2661,33 @@ function testEveryUseIsFound(godotPath: string): void {
       { class_name: 1, comment: 1 },
       'the declaration uses it; the string and node do not',
     );
+    // The forward walk follows the same use, and the reverse answer above is the one it has to agree with.
+    assert.deepEqual(
+      get(operation('get_dependencies', { resource_path: 'spawner.gd' }), 'dependencies', 'res://spawner.gd'),
+      [{ path: 'res://enemy.gd', exists: true, by_class: 'Enemy' }],
+      'a script depends on the script whose class_name it types a variable with',
+    );
+    writeFileSync(
+      join(dir, 'herald.gd'),
+      'extends Node\n## Announces an Enemy.\n\n\nfunc say() -> void:\n\tprint("Enemy")  # an Enemy\n',
+    );
+    assert.deepEqual(
+      get(operation('get_dependencies', { resource_path: 'herald.gd' }), 'dependencies', 'res://herald.gd'),
+      [],
+      'a class named in a string, a comment or documentation is not depended on',
+    );
+    // script_info structure reads the same uses, so the two tools name the same dependencies.
+    const structure = (path: string): unknown[] => {
+      const info = operation('get_script_info', { script_path: path });
+      return [get(info, 'dependencies'), get(info, 'classes_used')];
+    };
+    assert.deepEqual(
+      structure('spawner.gd'),
+      [['res://enemy.gd'], [{ name: 'Enemy', path: 'res://enemy.gd' }]],
+      'script_info lists the script whose class_name the code uses',
+    );
+    assert.deepEqual(structure('herald.gd'), [[], []], 'and not one named only in words');
+    assert.deepEqual(structure('enemy.gd'), [[], []], 'nor a script for its own name');
 
     // Five deep and a shortcut to the middle: at depth three the middle is first reached two down,
     // where its list stops short, and then again one down, where it does not.
@@ -2677,6 +2718,86 @@ function testEveryUseIsFound(godotPath: string): void {
       ]),
       [['res://sub/chain_d.gd', ['res://sub/chain_e.gd']]],
       `one down, the middle has its whole list: ${JSON.stringify(walked)}`,
+    );
+    // Reached through b and directly, c, d and e each sit in the tree twice and are four files.
+    const whole = operation('get_dependencies', { resource_path: 'sub/chain_a.gd' });
+    assert.deepEqual(
+      [get(whole, 'summary', 'total_dependencies'), get(whole, 'summary', 'total_references')],
+      [4, 7],
+      `four files, seven entries: ${JSON.stringify(get(whole, 'dependencies'))}`,
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
+ * Each script compiled as the engine loads it, judged by the errors it raises. An abstract class
+ * compiles and cannot be instantiated, and a script whose dependency fails is handed back as one
+ * that can, so neither can_instantiate() answer says whether a script compiles.
+ */
+function testScriptsAreCompiled(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    mkdirSync(join(dir, 'checked'));
+    writeFileSync(
+      join(dir, 'checked', 'broken.gd'),
+      'extends Node\n\n\nfunc hit() -> void:\n\trage()\n\tprint(undefined_thing)\n',
+    );
+    writeFileSync(
+      join(dir, 'checked', 'dependent.gd'),
+      'extends Node\n\nconst Broken = preload("res://checked/broken.gd")\n',
+    );
+    writeFileSync(join(dir, 'checked', 'shape.gd'), '@abstract\nclass_name Shape\nextends Node\n');
+    writeFileSync(join(dir, 'checked', 'fine.gd'), 'extends Node\n');
+    // Through the run rather than runOperation, which refuses anything on stderr: the engine prints
+    // every compile error it raises there as well.
+    const check = (...names: string[]): unknown => {
+      const run = runOperationScript(godotPath, dir, 'check_scripts', {
+        paths: names.map((name) => `res://checked/${name}.gd`),
+      });
+      assert.equal(run.status, 0, run.stderr);
+      return run.answer;
+    };
+
+    // Up to the first failure and no further, since a script loaded after it that loads it would
+    // compile in silence in the same engine.
+    const first = check('shape', 'fine', 'broken', 'dependent');
+    assert.deepEqual(
+      [get(first, 'checked'), get(first, 'failed')],
+      [
+        ['res://checked/shape.gd', 'res://checked/fine.gd', 'res://checked/broken.gd'],
+        ['res://checked/broken.gd'],
+      ],
+      `the abstract script compiles, and the run ends at the broken one: ${JSON.stringify(first)}`,
+    );
+    assert.deepEqual(
+      get(first, 'scripts'),
+      [
+        {
+          path: 'res://checked/broken.gd',
+          errors: [
+            { line: 5, message: 'Parse Error: Function "rage()" not found in base self.' },
+            {
+              line: 6,
+              message: 'Parse Error: Identifier "undefined_thing" not declared in the current scope.',
+            },
+          ],
+        },
+      ],
+      `each error at its own line: ${JSON.stringify(first)}`,
+    );
+    const rest = check('dependent');
+    assert.deepEqual(
+      get(rest, 'scripts'),
+      [
+        {
+          path: 'res://checked/dependent.gd',
+          errors: [{ line: 0, message: 'Compile Error: Failed to compile depended scripts.' }],
+          dependencies_with_errors: ['res://checked/broken.gd'],
+        },
+      ],
+      `a script whose dependency fails, in an engine of its own, says so: ${JSON.stringify(rest)}`,
     );
   } finally {
     sweep(dir);
@@ -3268,6 +3389,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   },
   everyUse: (godotPath) => {
     testEveryUseIsFound(godotPath);
+  },
+  scriptCheck: (godotPath) => {
+    testScriptsAreCompiled(godotPath);
   },
   overrides: (godotPath) => {
     testASettingSaysWhatReplacesIt(godotPath);

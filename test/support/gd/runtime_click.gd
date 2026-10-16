@@ -5,7 +5,7 @@ extends SceneTree
 ## the press, a control that has to be scrolled to, and a 3D node behind the interface. Each refusal
 ## is checked beside the call that works, so a check refusing everything fails too.
 ##
-## Everything sits in the 64 by 64 viewport a game with no window has.
+## Everything sits in the 64 by 64 viewport a script run with no window has.
 
 const Checked = preload("checked.gd")
 const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
@@ -53,6 +53,7 @@ func _everything() -> void:
 	await _check_choosing_by_what_it_says()
 	await _check_scrolling_to_a_control()
 	await _check_a_control_in_a_subviewport()
+	await _check_a_control_past_the_engine_viewport()
 	await _check_the_world_behind_the_interface()
 	await _check_words_nobody_can_click()
 	await _check_words_in_a_rich_label()
@@ -427,6 +428,29 @@ func _check_a_control_in_a_subviewport() -> void:
 	if taken.get("landed") != true or _presses("Within") != 1:
 		_fail("and one inside it is pressed: %s" % JSON.stringify(taken))
 	shown.queue_free()
+	await process_frame
+
+
+## A control outside the engine's own 64 by 64, which a headless script run keeps because nothing
+## gave its root a size: a window would reach it, so the refusal says to run with one.
+func _check_a_control_past_the_engine_viewport() -> void:
+	var overhang: Button = _button("Overhang", Vector2(80, 5), root)
+	var corner: Button = _button("Corner", Vector2(5, 5), root)
+	await process_frame
+	var refused: Dictionary = await input.click({"path": "/root/Overhang"})
+	if (
+		not _says(refused, "a game with no window has a 64 by 64 viewport")
+		or not _says(refused, "run it with a window to reach this control")
+		or _presses("Overhang") != 0
+	):
+		_fail(
+			"a control past the engine's 64 by 64 is refused naming the window: %s" % JSON.stringify(refused)
+		)
+	var taken: Dictionary = await input.click({"path": "/root/Corner"})
+	if taken.get("landed") != true or _presses("Corner") != 1:
+		_fail("and one inside it is pressed: %s" % JSON.stringify(taken))
+	overhang.queue_free()
+	corner.queue_free()
 	await process_frame
 
 
