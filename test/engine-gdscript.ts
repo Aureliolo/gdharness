@@ -384,10 +384,7 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   assert.ok(leaf, 'the walk should recurse from middle into leaf');
 
   assert.equal(get(payload, 'summary', 'total_resources'), 1, 'one resource was asked for');
-  assert.ok(
-    asNumber(get(payload, 'summary', 'total_dependencies')) >= 2,
-    'the chain has at least two dependencies',
-  );
+  assert.equal(get(payload, 'summary', 'total_dependencies'), 2, 'the chain has two dependencies');
 
   // A cycle has to be reported rather than walked forever.
   const cyclicPayload = runOperation(godotPath, projectDir, 'get_dependencies', {
@@ -396,6 +393,12 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   assert.ok(
     asArray(get(cyclicPayload, 'circular_references')).length > 0,
     'the walk should report the cycle it found rather than silently stopping',
+  );
+  // The cycle's way back names ouro itself, which is not one of its own dependencies.
+  assert.deepEqual(
+    [get(cyclicPayload, 'summary', 'total_dependencies'), get(cyclicPayload, 'summary', 'total_references')],
+    [1, 2],
+    `ouro depends on boros alone: ${JSON.stringify(get(cyclicPayload, 'summary'))}`,
   );
 
   // addons/ is project content and often shipping content, so it is walked like anything
@@ -2647,6 +2650,21 @@ function testEveryUseIsFound(godotPath: string): void {
       { class_name: 1, comment: 1 },
       'the declaration uses it; the string and node do not',
     );
+    // The forward walk follows the same use, and the reverse answer above is the one it has to agree with.
+    assert.deepEqual(
+      get(operation('get_dependencies', { resource_path: 'spawner.gd' }), 'dependencies', 'res://spawner.gd'),
+      [{ path: 'res://enemy.gd', exists: true, by_class: 'Enemy' }],
+      'a script depends on the script whose class_name it types a variable with',
+    );
+    writeFileSync(
+      join(dir, 'herald.gd'),
+      'extends Node\n## Announces an Enemy.\n\n\nfunc say() -> void:\n\tprint("Enemy")  # an Enemy\n',
+    );
+    assert.deepEqual(
+      get(operation('get_dependencies', { resource_path: 'herald.gd' }), 'dependencies', 'res://herald.gd'),
+      [],
+      'a class named in a string, a comment or documentation is not depended on',
+    );
 
     // Five deep and a shortcut to the middle: at depth three the middle is first reached two down,
     // where its list stops short, and then again one down, where it does not.
@@ -2677,6 +2695,13 @@ function testEveryUseIsFound(godotPath: string): void {
       ]),
       [['res://sub/chain_d.gd', ['res://sub/chain_e.gd']]],
       `one down, the middle has its whole list: ${JSON.stringify(walked)}`,
+    );
+    // Reached through b and directly, c, d and e each sit in the tree twice and are four files.
+    const whole = operation('get_dependencies', { resource_path: 'sub/chain_a.gd' });
+    assert.deepEqual(
+      [get(whole, 'summary', 'total_dependencies'), get(whole, 'summary', 'total_references')],
+      [4, 7],
+      `four files, seven entries: ${JSON.stringify(get(whole, 'dependencies'))}`,
     );
   } finally {
     sweep(dir);
