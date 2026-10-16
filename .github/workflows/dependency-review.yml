@@ -1,7 +1,8 @@
 name: Dependency review
 
 # Refuses a pull request that adds or moves a dependency to a licence outside the owner's list
-# (permissive, plus MPL-2.0), or to a version with a known vulnerability of any severity. Only what the pull request changes is checked, so a Renovate bump is where it bites.
+# (permissive, plus MPL-2.0), or to a version with a known vulnerability of any severity. Only what
+# the pull request changes is checked, so a Renovate bump is where it bites.
 #
 # A licence outside the list is the owner's to allow, and a dependency carrying one passes by name
 # rather than by widening the list: yamllint (GPL-3.0) and regex (CNRI-Python, through gdtoolkit's
