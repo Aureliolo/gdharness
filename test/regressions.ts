@@ -7096,6 +7096,35 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       'while the argument start does read reaches the project check',
     );
 
+    // A create given the additions a modify takes wrote the bare template and answered success, so
+    // the script looked complete. Found by a probe driving the tools through a model.
+    const additions = [{ type: 'add_signal', name: 'died', params: 'points: int' }];
+    assert.match(
+      await call('script_edit', {
+        op: 'create',
+        projectPath: '/p',
+        scriptPath: 'a.gd',
+        modifications: additions,
+      }),
+      /script_edit create does not take modifications\. create takes: projectPath, scriptPath, className, extends, content, template\./,
+      'additions are refused on create, naming what create takes',
+    );
+    assert.match(
+      await call('script_edit', { op: 'modify', projectPath: '/p', scriptPath: 'a.gd', className: 'Enemy' }),
+      /script_edit modify does not take className/,
+      'and what only create reads is refused on modify',
+    );
+    assert.match(
+      await call('script_edit', {
+        op: 'modify',
+        projectPath: '/p',
+        scriptPath: 'a.gd',
+        modifications: additions,
+      }),
+      /Not a Godot project/,
+      'while modify with its additions reaches the project check',
+    );
+
     // The editor's console is read off disk on every call, so there is no mark to be since and no
     // process to ask for processor time. Both would have been accepted and ignored.
     assert.match(
@@ -7210,6 +7239,46 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
       }
     }
   }
+}
+
+/** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
+const READ_IN_WORDS = 130;
+
+/**
+ * An argument whose description opens by naming the ops that read it declares them.
+ *
+ * Without the declaration every op takes it, and the ones that do not read it answer as though
+ * they had: script_edit create was given the additions only modify reads and answered success
+ * over a bare template.
+ */
+function testAnArgumentScopedInWordsIsScopedInItsSchema(): void {
+  let read = 0;
+  for (const spec of TOOL_SPECS) {
+    const ops = Object.keys(spec.operations ?? {});
+    if (ops.length < 2) {
+      continue;
+    }
+    for (const [name, schema] of Object.entries(spec.parameters)) {
+      const said = typeof schema['description'] === 'string' ? schema['description'] : '';
+      const head = /^([a-z_]+(?:(?:, | and |, and )[a-z_]+)*):/.exec(said)?.[1];
+      const named = head?.split(/, and |, | and /).filter((word) => ops.includes(word)) ?? [];
+      if (named.length === 0) {
+        continue;
+      }
+      read += 1;
+      assert.ok(
+        schema.ops !== undefined,
+        `${spec.name}.${name} says it is for ${named.join(', ')} and every op takes it`,
+      );
+      for (const op of named) {
+        assert.ok(
+          schema.ops.includes(op),
+          `${spec.name}.${name} says it is for ${op} and ${op} does not take it`,
+        );
+      }
+    }
+  }
+  assert.equal(read, READ_IN_WORDS, 'the arguments whose descriptions open by naming their ops');
 }
 
 /**
@@ -41510,6 +41579,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testANoEditorRefusalSaysWhetherOneCanConnect,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
+  testAnArgumentScopedInWordsIsScopedInItsSchema,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,
   testAPromptIsRenderedWithWhatWasGiven,
