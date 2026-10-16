@@ -641,21 +641,38 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'project_export',
     title: 'Export',
-    description: 'Export presets and exports.',
+    description:
+      "Export presets and exports. add_preset writes a preset to export_presets.cfg with the keys the editor's Project > Export writes for a new one, every platform option left at its default, and makes it the platform's runnable preset when the platform has none. It answers where this engine's export templates belong and whether the preset's platform has them, since an export needs them; list says the same for every preset. An editor open on the project does not see a preset added this way until it restarts. run names, as alsoWritten, what else the export wrote beside its output, such as the .pck a Windows or Linux build cannot start without.",
     parameters: {
       projectPath: PROJECT_PATH,
-      preset: { type: 'string', description: 'Preset name from export_presets.cfg.' },
+      preset: {
+        type: 'string',
+        ops: ['run', 'add_preset'],
+        description: 'Preset name from export_presets.cfg. add_preset: the name of the new one.',
+      },
+      platform: {
+        type: 'string',
+        ops: ['add_preset'],
+        enum: ['Windows Desktop', 'Linux', 'macOS', 'Android', 'iOS', 'Web'],
+        description: 'add_preset: the platform the preset exports for.',
+      },
       outputPath: {
         type: 'string',
+        ops: ['run', 'add_preset'],
         description:
-          'Where the export is written, inside the project. The directory is created if it is not there: Godot\'s command-line exporter refuses a missing one with "The given export path doesn\'t exist", which reads as a wrong path in the preset.',
+          'Where the export is written, inside the project. The directory is created if it is not there: Godot\'s command-line exporter refuses a missing one with "The given export path doesn\'t exist", which reads as a wrong path in the preset. add_preset: the path the preset exports to from the editor, optional.',
       },
-      debug: { type: 'boolean', description: 'run: a debug export. Default false.' },
+      debug: { type: 'boolean', ops: ['run'], description: 'run: a debug export. Default false.' },
     },
     requires: ['projectPath'],
     operations: {
       list: { effect: 'read', summary: 'the presets in export_presets.cfg', requires: [] },
       run: { effect: 'destructive', summary: 'export with a preset', requires: ['preset', 'outputPath'] },
+      add_preset: {
+        effect: 'additive',
+        summary: 'add an export preset to export_presets.cfg',
+        requires: ['preset', 'platform'],
+      },
     },
   },
   {

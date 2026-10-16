@@ -820,6 +820,16 @@ hands it the node from the scene it opens; with no editor, the operation builds 
 script left off, and asks that, so the libraries and the tree root are the ones the file stores
 and no script of the scene runs.
 
+`project_export add_preset` writes `export_presets.cfg` from an operation in `export_presets.gd`,
+with the keys the editor's Export dialog writes for a new preset; the exporter fills every platform
+option the file leaves out with its default. An open editor is the one reader this misses. Godot
+reads the file when the editor starts and again only when an export platform comes or goes, so the
+editor does not list the new preset, and the next save of its Export dialog writes its own list
+over the file. The answer says so when an editor is connected; an export through `project_export
+run` starts an engine of its own, which reads the file. Whether templates are installed is read per
+platform, from the files in the engine version's templates directory, because that directory holds
+whichever platforms were installed into it.
+
 That serialiser is one file, copied into each addon by `bun run sync:gd` because an addon is
 installed as a directory and cannot preload out of one, and a fixture refuses a copy that has
 drifted. It used to be three, and the three disagreed: the same `Vector2` came back tagged `_type`

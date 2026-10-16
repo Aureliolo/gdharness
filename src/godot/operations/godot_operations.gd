@@ -19,6 +19,7 @@ const AudioBuses = preload("audio_buses.gd")
 const ClassCache = preload("class_cache.gd")
 const ClassDbQueries = preload("classdb_queries.gd")
 const Dependencies = preload("dependencies.gd")
+const ExportPresets = preload("export_presets.gd")
 const FileReads = preload("file_reads.gd")
 const GdscriptAnalysis = preload("gdscript_analysis.gd")
 const GdscriptAuthoring = preload("gdscript_authoring.gd")
@@ -179,7 +180,9 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 		"set_import_options":
 			payload = ImportPipeline.new(_log).set_import_options(params)
 		"list_export_presets":
-			payload = ImportPipeline.new(_log).list_export_presets(params)
+			payload = ExportPresets.new(_log).list_export_presets(params)
+		"add_export_preset":
+			payload = ExportPresets.new(_log).add_export_preset(params)
 		"validate_project":
 			payload = ImportPipeline.new(_log).validate_project(params)
 

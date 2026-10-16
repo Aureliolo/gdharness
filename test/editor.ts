@@ -3451,6 +3451,38 @@ async function testTheClassCheckKnowsWhichProjectItIsAbout({ call, project }: Ed
  * file alone, the editor went on answering the old value and would have saved it back over the new
  * one, and the answer said nothing.
  */
+/**
+ * A preset added beside an open editor is written, and the caller is told the editor does not see
+ * it: Godot reads export_presets.cfg when the editor starts and again only when an export platform
+ * comes or goes, and the next save of its Export dialog writes its own list over the file.
+ */
+async function testAPresetAddedBesideTheEditorIsNoted({ call, project }: Editor): Promise<void> {
+  const presets = join(project, 'export_presets.cfg');
+  assert.equal(existsSync(presets), false, 'the fixture project starts with no presets');
+  try {
+    const added = await call('project_export', {
+      projectPath: project,
+      op: 'add_preset',
+      preset: 'Beside',
+      platform: 'Linux',
+      outputPath: 'build/beside.x86_64',
+    });
+    assert.deepEqual(
+      [get(added, 'preset'), get(added, 'runnable'), get(added, 'export_path')],
+      ['Beside', true, 'build/beside.x86_64'],
+      JSON.stringify(added),
+    );
+    assert.match(
+      asString(get(added, 'editorNote')),
+      /^The editor open on this project read export_presets\.cfg when it started and does not list this preset/,
+      JSON.stringify(added),
+    );
+    assert.match(readFileSync(presets, 'utf8'), /name="Beside"/);
+  } finally {
+    rmSync(presets, { force: true });
+  }
+}
+
 async function testASettingReadFromTheEditor({ call, refusal, project }: Editor): Promise<void> {
   const named = 'application/config/description';
   const written = 'what only the file says';
@@ -6431,6 +6463,7 @@ async function main(): Promise<void> {
     ['testARescanDropsAClassWhoseScriptIsGone', testARescanDropsAClassWhoseScriptIsGone],
     ['testTheClassCheckKnowsWhichProjectItIsAbout', testTheClassCheckKnowsWhichProjectItIsAbout],
     ['testASettingReadFromTheEditor', testASettingReadFromTheEditor],
+    ['testAPresetAddedBesideTheEditorIsNoted', testAPresetAddedBesideTheEditorIsNoted],
     ['testLanguageServer', testLanguageServer],
     ['testAClassWrittenUnderTheEditorNeedsARescan', testAClassWrittenUnderTheEditorNeedsARescan],
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
