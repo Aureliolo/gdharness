@@ -3,6 +3,7 @@ extends Node
 
 ## Scenes and their nodes, edited in the open editor and read back from what it holds.
 
+const FileReads = preload("../file_reads.gd")
 const Read = preload("../reading.gd")
 const Placing = preload("scene_placing.gd")
 const PropertyValues = preload("../property_values.gd")
@@ -167,31 +168,6 @@ func _parse_properties_arg(raw_properties: Variant) -> Dictionary:
 	return {}
 
 
-func _build_node_tree(
-	node: Node, include_properties: bool, depth: int, current_depth: int, node_path: String
-) -> Dictionary:
-	var children: Array[Dictionary] = []
-	var data: Dictionary = {
-		"name": str(node.name), "type": node.get_class(), "path": node_path, "children": children
-	}
-	# The root's is the scene's own file. Any other node with one is an instance, which read as a
-	# plain node of its root's class with the instance's own nodes under it as if this scene held them.
-	if node_path != "." and not node.scene_file_path.is_empty():
-		data["instanceOf"] = node.scene_file_path
-
-	if include_properties:
-		data["properties"] = _properties_of(node, true, {})
-
-	if depth >= 0 and current_depth >= depth:
-		return data
-
-	for child: Node in node.get_children():
-		var child_path: String = str(child.name) if node_path == "." else node_path + "/" + str(child.name)
-		children.append(_build_node_tree(child, include_properties, depth, current_depth + 1, child_path))
-
-	return data
-
-
 func _collect_nodes_recursive(node: Node, path: String, out_nodes: Array) -> void:
 	out_nodes.append({"path": path, "node": node})
 	for child: Node in node.get_children():
@@ -280,15 +256,12 @@ func list_scene_nodes(args: Dictionary) -> Dictionary:
 	var depth: int = Read.as_int(args.get("depth", -1), -1)
 	var include_properties: bool = Read.as_bool(args.get("includeProperties", false))
 
-	var opened: Array = _open(scene_path, false)
-	var scene: SceneFile = opened[0]
-	var refused: Dictionary = opened[1]
-	if not refused.is_empty():
-		return refused
-
-	var tree: Dictionary = _build_node_tree(scene.root, include_properties, depth, 0, ".")
-	scene.close()
-	return {"ok": true, "tree": tree, "unsavedInEditor": SceneFile.unsaved(scene_path)}
+	# Read as a headless engine reads it with no editor connected, so the answer does not depend on
+	# whether one is.
+	var read: Dictionary = FileReads.scene_tree(scene_path, depth, include_properties)
+	if read.get("ok", false):
+		read["unsavedInEditor"] = SceneFile.unsaved(scene_path)
+	return read
 
 
 func add_node(args: Dictionary) -> Dictionary:

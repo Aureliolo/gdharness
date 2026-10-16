@@ -149,9 +149,11 @@ so take it off when the question it was for is answered.
 
 ## Editing
 
-\`scene_tree\` for what a scene holds, rather than what the \`.tscn\` text implies. \`scene_node\`,
-\`scene_signal\` and \`resource_edit\` other than \`move\` change it through the editor, so the files keep their
-formatting. \`script_diagnostics\` and \`script_info\` come from the editor's own language server.
+\`scene_tree\` for what a scene holds, rather than what the \`.tscn\` text implies, and
+\`resource_edit read\` for a resource: both read the file through the editor when one serves the
+project and through a headless engine when none does, with the same answer. \`scene_node\`,
+\`scene_signal\` and the other \`resource_edit\` ops but \`move\` change it through the editor, so the
+files keep their formatting. \`script_diagnostics\` and \`script_info\` come from the editor's own language server.
 
 \`project_info\`, \`project_dependencies\`, \`project_settings\`, \`project_import\`,
 \`project_export\`, \`project_test\`, \`script_edit\`, \`script_info structure\` and

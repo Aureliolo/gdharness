@@ -745,7 +745,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Scene tree',
     effect: 'read',
     description:
-      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. A node that instances another scene names that file under instanceOf, and the nodes listed under it come from that file rather than this one. Needs the editor connected. For the nodes of a game that is running, runtime_inspect tree, which needs no editor.',
+      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. A node that instances another scene names that file under instanceOf, and the nodes listed under it come from that file rather than this one. Needs no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without making its nodes, so no script of theirs runs (autoloads still start once it has answered, as in every headless call). For the nodes of a game that is running, runtime_inspect tree.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -1094,7 +1094,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'resource_edit',
     title: 'Edit resources',
     description:
-      'Resource files: read one, create any ClassDB resource as .tres, change one, write a shader, build a TileSet, or set a Theme colour or font size. A material is a create with resourceType StandardMaterial3D, ShaderMaterial or CanvasItemMaterial. read answers with the properties the file sets, in the form modify takes, and a Theme lists its items there as "Button/colors/font_color". move takes any file of the project, a script or an image as much as a resource, or a directory, and works from the files, so it needs no editor; one serving the project is brought up to it as after a move in its own FileSystem dock, its open scenes and cached resources named for the new paths and the project settings the move rewrote taken from the file. Every op but move, read among them, needs the editor connected.',
+      'Resource files: read one, create any ClassDB resource as .tres, change one, write a shader, build a TileSet, or set a Theme colour or font size. A material is a create with resourceType StandardMaterial3D, ShaderMaterial or CanvasItemMaterial. read answers with the properties the file sets, in the form modify takes, and a Theme lists its items there as "Button/colors/font_color". move takes any file of the project, a script or an image as much as a resource, or a directory, and works from the files, so it needs no editor; one serving the project is brought up to it as after a move in its own FileSystem dock, its open scenes and cached resources named for the new paths and the project settings the move rewrote taken from the file. read needs no editor either: with none serving the project, a headless engine reads the file. The ops that write a resource need the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       resourcePath: {

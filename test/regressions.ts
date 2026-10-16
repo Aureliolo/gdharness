@@ -6876,55 +6876,21 @@ async function testArgumentsOfTheWrongTypeAreRefused(): Promise<void> {
 }
 
 /**
- * An editor tool asked with no editor connected names what answers without one, where something does.
- *
- * A probe session that had started a game headless asked scene_tree for its nodes and was told only
- * to open an editor, which it had been asked not to do; runtime_inspect tree answers about a running
- * game with none. With no game of the project running it answers nothing, so it is not offered then,
- * nor beside a game of another project. A tool with no such alternative is told nothing of the kind.
+ * An editor tool asked with no editor connected says whether one could connect, and how to make it.
  */
-async function testANoEditorRefusalNamesWhatNeedsNone(): Promise<void> {
+async function testANoEditorRefusalSaysWhetherOneCanConnect(): Promise<void> {
   const projectPath = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-editor-'));
   const announced = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-editor-runtimes-'));
-  // This process's pid, so the reader takes the game for alive rather than sweeping it.
-  const announce = (path: string): void => {
-    writeFileSync(
-      join(announced, `runtime-${process.pid}.json`),
-      JSON.stringify({
-        protocol: RUNTIME_PROTOCOL,
-        pid: process.pid,
-        port: 51_236,
-        address: '127.0.0.1',
-        project: { name: 'Game', path },
-      }),
-      'utf8',
-    );
-  };
-  const insteadSaid = /runtime_inspect tree reads the nodes of a game that is running, and needs no editor/;
   try {
     writeFileSync(join(projectPath, 'project.godot'), 'config_version=5\n');
     await withStdioServer(
       async (call) => {
-        const tree = async (): Promise<string> =>
-          await call('scene_tree', { projectPath, scenePath: 'res://main.tscn' });
-        const idle = await tree();
-        assert.match(idle, /^Editor not connected/, idle);
-        assert.doesNotMatch(idle, /runtime_inspect/, `with no game running: ${idle}`);
-        announce(join(projectPath, 'elsewhere'));
-        const elsewhere = await tree();
-        assert.match(elsewhere, /^Editor not connected/, elsewhere);
-        assert.doesNotMatch(elsewhere, /runtime_inspect/, `beside a game of another project: ${elsewhere}`);
-        announce(projectPath);
-        const playing = await tree();
-        assert.match(playing, /^Editor not connected/, playing);
-        assert.match(playing, insteadSaid, `beside a game of the project: ${playing}`);
         const create = await call('scene_create', {
           projectPath,
           scenePath: 'res://made.tscn',
           rootNodeType: 'Node',
         });
         assert.match(create, /^Editor not connected/, create);
-        assert.doesNotMatch(create, /runtime_inspect/, create);
 
         // A project never set up has no addon to enable and no editor that could dial in, so the
         // refusal says that and how to install it. Each half of the addon check gets the shape only it
@@ -36049,9 +36015,10 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
     }
     assert.ok(knows, 'the fixture editor should have told the server its project, or this proves nothing');
 
+    // A call only an editor answers: scene_tree reads the other project's file without one.
     const other = await server.request('tools/call', {
-      name: 'scene_tree',
-      arguments: { projectPath: elsewhere, scenePath: 'res://main.tscn' },
+      name: 'scene_node',
+      arguments: { op: 'get', projectPath: elsewhere, scenePath: 'res://main.tscn', nodePath: '.' },
     });
     const refused = textOf(other) ?? JSON.stringify(other);
     // By its process id too: a headless engine run that holds the bridge has no window to look for.
@@ -36061,7 +36028,7 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
     );
     assert.match(refused, /gdharness-editor-has-not/, `and the one that was asked for: ${refused}`);
     assert.equal(
-      asked.includes('list_scene_nodes'),
+      asked.includes('get_node_properties'),
       false,
       'and the editor was never asked about a project it cannot see',
     );
@@ -36088,8 +36055,8 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
     // with the editor's own answer. Without this the fixture is satisfied by a bridge that refuses
     // everything, which is what a broken one does.
     const its = await server.request('tools/call', {
-      name: 'scene_tree',
-      arguments: { projectPath: open, scenePath: 'res://main.tscn' },
+      name: 'scene_node',
+      arguments: { op: 'get', projectPath: open, scenePath: 'res://main.tscn', nodePath: '.' },
     });
     assert.equal(
       text(get(parseTextContent(its), 'answered_by')),
@@ -36097,8 +36064,8 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
       `the editor's own project is served: ${textOf(its) ?? JSON.stringify(its)}`,
     );
     assert.deepEqual(
-      asked.filter((one) => one === 'list_scene_nodes'),
-      ['list_scene_nodes'],
+      asked.filter((one) => one === 'get_node_properties'),
+      ['get_node_properties'],
       'and the call reached the editor exactly once',
     );
   } finally {
@@ -39923,6 +39890,153 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
 }
 
 /**
+ * scene_tree and resource_edit read with no editor answer from the file through a headless engine,
+ * as the editor would, and run none of the scene's node scripts.
+ *
+ * The scene is the shape a reading off the file alone gets wrong: an instance of an inherited scene
+ * with a node of the base overridden and one added inside it at an index, and a control whose
+ * anchors preset sets how it grows. A node script writing a file from _init shows whether the read
+ * ran it, beside the read's own answer, which shows the read happened.
+ */
+async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('read without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-read-engine-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-read-engine-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Read"\n',
+    'base.tscn':
+      '[gd_scene format=3]\n\n[node name="Base" type="Node2D"]\nposition = Vector2(1, 2)\n\n' +
+      '[node name="Body" type="Sprite2D" parent="."]\n\n[node name="Tail" type="Node2D" parent="Body"]\n',
+    'derived.tscn':
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="PackedScene" path="res://base.tscn" id="1_base"]\n\n' +
+      '[node name="Derived" instance=ExtResource("1_base")]\nposition = Vector2(5, 6)\n\n' +
+      '[node name="Body" parent="." index="0"]\nvisible = false\n\n' +
+      '[node name="Extra" type="Label" parent="Body"]\ntext = "hi"\n',
+    'loud.gd':
+      'extends Node2D\n\n@export var speed: int = 3\n\n\nfunc _init() -> void:\n' +
+      '\tFileAccess.open("res://init_ran.txt", FileAccess.WRITE).store_string("ran")\n',
+    'loud.tscn':
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://loud.gd" id="1_loud"]\n\n' +
+      '[node name="Loud" type="Node2D"]\nscript = ExtResource("1_loud")\nspeed = 9\n',
+    'world.tscn':
+      '[gd_scene load_steps=3 format=3]\n\n' +
+      '[ext_resource type="PackedScene" path="res://derived.tscn" id="1_derived"]\n' +
+      '[ext_resource type="PackedScene" path="res://loud.tscn" id="2_loud"]\n\n' +
+      '[node name="World" type="Control"]\nlayout_mode = 3\nanchors_preset = 15\nanchor_right = 1.0\nanchor_bottom = 1.0\n\n' +
+      '[node name="First" type="Node2D" parent="."]\n\n' +
+      '[node name="Pet" parent="." instance=ExtResource("1_derived")]\nposition = Vector2(9, 9)\n\n' +
+      '[node name="Loud" parent="." instance=ExtResource("2_loud")]\n\n' +
+      '[node name="Added" type="Node2D" parent="Pet/Body" index="0"]\n\n[editable path="Pet"]\n',
+    'panel.tres':
+      '[gd_resource type="StyleBoxFlat" format=3]\n\n[resource]\nbg_color = Color(1, 0, 0, 1)\ncorner_radius_top_left = 4\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  const flat = (entry: unknown): string[] => [
+    `${text(get(entry, 'path'))} ${text(get(entry, 'type'))} ${text(get(entry, 'name'))}${
+      get(entry, 'instanceOf') === undefined ? '' : ` <${text(get(entry, 'instanceOf'))}`
+    }`,
+    ...asArray(get(entry, 'children')).flatMap(flat),
+  ];
+  const at = (entry: unknown, path: string): unknown =>
+    get(entry, 'path') === path
+      ? entry
+      : asArray(get(entry, 'children'))
+          .map((child) => at(child, path))
+          .find((found) => found !== undefined);
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    rmSync(join(project, 'init_ran.txt'), { force: true });
+    await server.initialize('read-engine');
+
+    const tree = parseTextContent(await call('scene_tree', { scenePath: 'res://world.tscn' }));
+    assert.deepEqual(
+      flat(get(tree, 'tree')),
+      [
+        '. Control World',
+        'First Node2D First',
+        'Pet Node2D Pet <res://derived.tscn',
+        'Pet/Body Sprite2D Body',
+        'Pet/Body/Added Node2D Added',
+        'Pet/Body/Tail Node2D Tail',
+        'Pet/Body/Extra Label Extra',
+        'Loud Node2D Loud <res://loud.tscn',
+      ],
+      JSON.stringify(tree),
+    );
+    assert.match(text(get(tree, 'readBy')), /headless engine, since no editor serves this project/);
+    assert.equal(get(tree, 'unsavedInEditor'), undefined, 'only an editor can say what it holds unsaved');
+    assert.ok(!existsSync(join(project, 'init_ran.txt')), 'the read ran a node script of the scene');
+
+    const shown = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'world.tscn', includeProperties: true })),
+      'tree',
+    );
+    assert.deepEqual(get(at(shown, 'Pet'), 'properties', 'position'), { x: 9, y: 9, _type: 'Vector2' });
+    assert.equal(get(at(shown, 'Pet/Body'), 'properties', 'visible'), false, 'the inherited scene hides it');
+    assert.equal(get(at(shown, 'Pet/Body/Tail'), 'properties', 'visible'), true, 'a default is listed');
+    assert.equal(get(at(shown, 'Loud'), 'properties', 'speed'), 9, 'a script property the file sets');
+    assert.equal(get(at(shown, '.'), 'properties', 'grow_horizontal'), 2, 'what the anchors preset set');
+    assert.ok(!existsSync(join(project, 'init_ran.txt')), 'reading the properties ran a node script');
+
+    // Read on its own, since inside world.tscn the instancing scene renames the root.
+    const derived = get(parseTextContent(await call('scene_tree', { scenePath: 'derived.tscn' })), 'tree');
+    assert.deepEqual(flat(derived), [
+      '. Node2D Derived',
+      'Body Sprite2D Body',
+      'Body/Tail Node2D Tail',
+      'Body/Extra Label Extra',
+    ]);
+
+    const shallow = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'world.tscn', depth: 1 })),
+      'tree',
+    );
+    assert.deepEqual(asArray(get(at(shallow, 'Pet'), 'children')), [], 'depth 1 stops at the root children');
+
+    const panel = parseTextContent(
+      await call('resource_edit', { op: 'read', resourcePath: 'res://panel.tres' }),
+    );
+    assert.equal(get(panel, 'resourceType'), 'StyleBoxFlat', JSON.stringify(panel));
+    assert.deepEqual(Object.keys(asObject(get(panel, 'properties'))).sort(), [
+      'bg_color',
+      'corner_radius_top_left',
+    ]);
+    assert.match(text(get(panel, 'readBy')), /headless engine/);
+
+    const missing = textOf(await call('scene_tree', { scenePath: 'res://nope.tscn' })) ?? '';
+    assert.match(missing, /Scene not found: res:\/\/nope\.tscn/, missing);
+    const outside =
+      textOf(await call('resource_edit', { op: 'read', resourcePath: '../elsewhere.tres' })) ?? '';
+    assert.match(outside, /outside|inside the project/i, outside);
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * resource_edit move with no editor, through the server and a real engine: a preview writes
  * nothing, and the move of a directory holding a global class leaves the class cache naming it at
  * its new path and every changed script compiling in a fresh engine. Needs no editor, which the
@@ -40250,6 +40364,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveCanChangeOnlyTheCase,
   testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight,
   testAMoveWithNoEditorLeavesTheProjectLoading,
+  testAReadWithNoEditorAnswersFromTheFile,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
   testEveryFileArgumentIsContained,
@@ -40588,7 +40703,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testToolAndOpLookupsCannotReachThePrototype,
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
-  testANoEditorRefusalNamesWhatNeedsNone,
+  testANoEditorRefusalSaysWhetherOneCanConnect,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testEveryToolTellsAClientWhatItCanChange,

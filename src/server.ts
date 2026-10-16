@@ -175,7 +175,13 @@ import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
 import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
-import { type NameTaken, type RenameOutcome, renameSymbol, writeLeftAloneDetail } from './rename-symbol.js';
+import {
+  type NameTaken,
+  type RenameOutcome,
+  renameSymbol,
+  resourcePathOf,
+  writeLeftAloneDetail,
+} from './rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
 import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
@@ -1917,20 +1923,6 @@ function engineFlagsNote(args: readonly string[]): string | undefined {
   const named = among.join(', ');
   return `${named} ${among.length === 1 ? 'is a flag' : 'are flags'} the engine reads, and args goes to the game after --, where the engine does not read ${among.length === 1 ? 'it' : 'them'}. engineArgs hands the engine its own flags; ${among.length === 1 ? 'leave it' : 'leave them'} in args only for a game that reads ${among.length === 1 ? 'that flag' : 'those flags'} itself.`;
 }
-
-/**
- * What answers without an editor while a game of the project is running, for an editor tool a
- * caller reached for with none connected.
- *
- * A probe session that had started a game headless asked scene_tree for its nodes and was told to
- * open an editor, which it had been asked not to do, while runtime_inspect tree answers about the
- * running game with no editor at all. With no game running it answers nothing, and a probe told of
- * it then found the advice useless, so it is offered only beside a game that would answer.
- */
-const EDITOR_FREE_INSTEAD: Readonly<Record<string, string>> = {
-  scene_tree:
-    'runtime_inspect tree reads the nodes of a game that is running, and needs no editor; scene_tree reads a scene file through the editor',
-};
 
 /** What a script tab holding unsaved edits to each of [param scripts] does to what was written. */
 function unsavedInEditorNote(scripts: readonly string[]): string {
@@ -4195,7 +4187,12 @@ class GodotServer {
       case 'scene_create':
         return op === 'create' ? await bridge('create_scene') : await bridge('save_scene');
       case 'scene_tree':
-        return await bridge('list_scene_nodes');
+        return await this.readFromFile(
+          args,
+          'scenePath',
+          'read_scene_tree',
+          async () => await bridge('list_scene_nodes'),
+        );
       case 'scene_node':
         switch (op) {
           case 'add':
@@ -4257,7 +4254,12 @@ class GodotServer {
           case 'move':
             return await this.handleMoveFile(args);
           case 'read':
-            return await bridge('read_resource');
+            return await this.readFromFile(
+              args,
+              'resourcePath',
+              'read_resource',
+              async () => await bridge('read_resource'),
+            );
           case 'create':
             return await bridge('create_resource');
           case 'modify':
@@ -11949,6 +11951,59 @@ class GodotServer {
    * own FileSystem dock brings itself up after a move, since it holds the old paths in its open
    * scenes, its cached resources and the project settings it would save back over the file.
    */
+  /**
+   * scene_tree and resource_edit read, which only read a file: through the editor serving the
+   * project when there is one, so the answer says whether it holds unsaved changes, and otherwise by
+   * a headless engine running the editor's own read on the file.
+   *
+   * An editor this server opened is waited for first, since one importing the project as it starts
+   * is no engine to boot a second beside; one that never connects leaves the file to read all the
+   * same.
+   */
+  private async readFromFile(
+    args: OperationParams,
+    pathKey: 'scenePath' | 'resourcePath',
+    operation: 'read_scene_tree' | 'read_resource',
+    throughTheEditor: () => Promise<ToolResponse>,
+  ): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const projectPath = project.value.path;
+    await this.waitForTheEditorOpenedHere(args, []);
+    if (this.editorHasOpen(projectPath)) {
+      return await throughTheEditor();
+    }
+    const where = resolveWithinProject(projectPath, readNonEmptyString(args, pathKey) ?? '');
+    if (!where.ok) {
+      return this.createErrorResponse(where.reason);
+    }
+    const file = resourcePathOf(projectPath, where.absolutePath);
+    if (file === null) {
+      return this.createErrorResponse(`${pathKey} must name a file inside the project.`);
+    }
+    const params: OperationParams =
+      operation === 'read_scene_tree'
+        ? {
+            scenePath: file,
+            depth: readNumber(args, 'depth') ?? -1,
+            includeProperties: readBoolean(args, 'includeProperties') ?? false,
+          }
+        : { resourcePath: file, includeDefaults: readBoolean(args, 'includeDefaults') ?? false };
+    const outcome = await this.operation(operation, params, projectPath);
+    if (!outcome.ok) {
+      return this.answer(outcome);
+    }
+    return this.jsonTextResponse({
+      ok: true,
+      ...outcome.payload,
+      readBy:
+        'a headless engine, since no editor serves this project; unsaved changes in an editor are not seen',
+      ...engineExtras(outcome),
+    });
+  }
+
   private async handleMoveFile(given: OperationParams): Promise<ToolResponse> {
     const project = this.project(given);
     if (!project.ok) {
@@ -12455,17 +12510,7 @@ class GodotServer {
   ): Promise<ToolResponse | BridgeTimeout> {
     const named = askedAs ?? toolName;
     if (!this.godotBridge.isConnected()) {
-      const tool = askedAs?.split(' ')[0];
-      const meant = readNonEmptyString(args, 'projectPath');
-      const alternative =
-        tool !== undefined &&
-        Object.hasOwn(EDITOR_FREE_INSTEAD, tool) &&
-        discoverRuntimes().some(
-          (endpoint) => meant === undefined || isSameDirectory(endpoint.project.path, meant),
-        )
-          ? EDITOR_FREE_INSTEAD[tool]
-          : undefined;
-      const refused = await this.noEditorYet(args, alternative === undefined ? [] : [alternative]);
+      const refused = await this.noEditorYet(args, []);
       if (refused !== null) {
         return refused;
       }

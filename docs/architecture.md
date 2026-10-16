@@ -788,6 +788,16 @@ for. Both readings run their values through the same serialiser, so a `Vector2` 
 the same either way and a caller can compare the two. Only reads take the argument: a write goes
 to the file whichever way it is phrased, so there is nothing to choose between.
 
+`scene_tree` and `resource_edit read` have no such choice to offer, because the editor reads them
+from the file as well: both go through `file_reads.gd`, which the editor's tools call and an
+operation runs when no editor serves the project. The answer differs only in what the editor
+alone can say, whether it holds unsaved changes to the scene, and the headless answer carries
+`readBy` instead. A scene is read off its `SceneState`, with each instanced scene laid where it
+is instanced, rather than instantiated: outside the editor, instantiating runs every node
+script's member initialisers and `_init`, so a read would have run the game's code on every node.
+The stored properties come from a bare node of each engine class with the file's values set on
+it, since what a node lists depends on its values and some setters set others.
+
 That serialiser is one file, copied into each addon by `bun run sync:gd` because an addon is
 installed as a directory and cannot preload out of one, and a fixture refuses a copy that has
 drifted. It used to be three, and the three disagreed: the same `Vector2` came back tagged `_type`
@@ -816,7 +826,8 @@ int key came back as `"1"`, and a dictionary read and written back had words for
 whole-number key is built back as an int, since JSON gives every number as a float and a dictionary
 keys `1.0` apart from `1`.
 
-The other direction, a value arriving to be written, is `property_values.gd` on the editor side. It
+The other direction, a value arriving to be written, is `property_values.gd`, which the editor
+addon carries as a copy, as it does `file_reads.gd`. It
 reads the serialiser's tags, so every shape a read answers with is a shape a write accepts, and adds
 the part only a property knows: the type wanted, so a dictionary shaped like a vector, or a bare pair
 of numbers, is read as one. `scene_node set`, `resource_edit` and `scene_animation` all go through
