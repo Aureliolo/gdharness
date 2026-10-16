@@ -156,8 +156,6 @@ const MAIN_GD = [
   '\tvar press: Button = Button.new()',
   '\tpress.name = "Press"',
   '\tpress.text = "Go"',
-  // A headless engine's window is 64 by 64 whatever the project asks for, and the GUI only
-  // delivers to what is inside it, so the button has to be small and near the corner.
   '\tpress.position = Vector2(2, 2)',
   '\tpress.size = Vector2(40, 20)',
   '\tadd_child(press)',

@@ -23,6 +23,11 @@ const REFERENCE_PATTERNS: Array[String] = [
 
 var _log: Log
 var _files: FileWalk = FileWalk.new()
+## The project's class names and the scripts declaring them, read the first time a script is walked
+## and kept for the call: walking every resource starts a walk per root, and each reading every
+## script again made the whole-project answer quadratic in the number of scripts.
+var _classes_declared: Dictionary = {}
+var _classes_read: bool = false
 
 
 # Everything one dependency walk carries: the settings it was started with, and the state it
@@ -91,12 +96,14 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 
 		total_resources = all_resources.size()
 
-	var dep_count: int = 0
+	var references: int = 0
+	var distinct: Dictionary = {}
 	for key: String in dependencies:
 		# Through a typed local: what comes out of a Dictionary is Variant, and a project that
 		# errors on handing one to a typed parameter will not compile this script at all.
 		var walked: Array[Dictionary] = dependencies[key]
-		dep_count += _count_recursive(walked)
+		references += _count_recursive(walked)
+		_gather_paths(walked, key, distinct)
 
 	return {
 		"dependencies": dependencies,
@@ -104,7 +111,10 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 		"summary":
 		{
 			"total_resources": total_resources,
-			"total_dependencies": dep_count,
+			# The files depended on, each once. The tree names a file again under everything that
+			# loads it, and counting its entries answered 11 for a scene with six dependencies.
+			"total_dependencies": distinct.size(),
+			"total_references": references,
 			"circular_count": circular_references.size()
 		}
 	}
@@ -332,9 +342,24 @@ func _regex_escaped(text: String) -> String:
 	return escaped
 
 
-func _count_recursive(deps: Array[Dictionary]) -> int:
-	var count: int = deps.size()
+# [param root] is left out: a cycle leads back to it, and it is not one of its own dependencies.
+func _gather_paths(deps: Array[Dictionary], root: String, into: Dictionary) -> void:
 	for dep: Dictionary in deps:
+		var path: String = str(dep.get("path", ""))
+		if path != root:
+			into[path] = true
+		if dep.has("dependencies"):
+			var deeper: Array[Dictionary] = dep["dependencies"]
+			_gather_paths(deeper, root, into)
+
+
+# A circular entry is not counted: it marks that the entry holding it was reached again, which that
+# entry already counts as one reference.
+func _count_recursive(deps: Array[Dictionary]) -> int:
+	var count: int = 0
+	for dep: Dictionary in deps:
+		if not dep.get("circular", false):
+			count += 1
 		if dep.has("dependencies"):
 			var deeper: Array[Dictionary] = dep["dependencies"]
 			count += _count_recursive(deeper)
@@ -390,27 +415,72 @@ func _analyze_resource(path: String, current_depth: int, walk: DependencyWalk) -
 				if not walk.include_built_in and dep_path.begins_with("res://."):
 					continue
 
-				if dep_path == path:
-					continue
+				_depend(deps, path, dep_path, "", current_depth, walk)
 
-				var dep_info: Dictionary = {"path": dep_path, "exists": FileAccess.file_exists(dep_path)}
-
-				if dep_info["exists"] and current_depth + 1 < walk.max_depth:
-					var sub_deps: Array[Dictionary] = _analyze_resource(dep_path, current_depth + 1, walk)
-					if sub_deps.size() > 0:
-						dep_info["dependencies"] = sub_deps
-
-				var already_added: bool = false
-				for existing: Dictionary in deps:
-					if existing.get("path", "") == dep_path:
-						already_added = true
-						break
-				if not already_added:
-					deps.append(dep_info)
+		# A script uses another by its class_name as surely as by a preload, and only the reverse walk
+		# looked for that: asked what a script depends on, the answer left out the script it typed a
+		# variable with, while asking what used that script named this one.
+		if path.get_extension() == "gd":
+			var classes: Dictionary = classes_declared()
+			for used: String in classes_used_in(content, classes):
+				_depend(deps, path, str(classes[used]), used, current_depth, walk)
 
 	walk.path_stack.pop_back()
 	walk.visited[path] = {"deps": deps, "remaining": remaining}
 	return deps
+
+
+# Adds [param dep_path] to [param deps], what [param path] depends on, walked as far as the depth left
+# allows, once however many times it is named. [param by_class] is the class name it was named by,
+# or empty for a path.
+func _depend(
+	deps: Array[Dictionary],
+	path: String,
+	dep_path: String,
+	by_class: String,
+	current_depth: int,
+	walk: DependencyWalk
+) -> void:
+	if dep_path == path:
+		return
+	for existing: Dictionary in deps:
+		if existing.get("path", "") == dep_path:
+			return
+	var dep_info: Dictionary = {"path": dep_path, "exists": FileAccess.file_exists(dep_path)}
+	if not by_class.is_empty():
+		dep_info["by_class"] = by_class
+	if dep_info["exists"] and current_depth + 1 < walk.max_depth:
+		var sub_deps: Array[Dictionary] = _analyze_resource(dep_path, current_depth + 1, walk)
+		if sub_deps.size() > 0:
+			dep_info["dependencies"] = sub_deps
+	deps.append(dep_info)
+
+
+## Every class_name the project's scripts declare, with the script declaring it.
+func classes_declared() -> Dictionary:
+	if _classes_read:
+		return _classes_declared
+	_classes_read = true
+	for script: String in _files.find_files("res://", ".gd"):
+		var declared: String = _declared_class_name(script)
+		if not declared.is_empty():
+			_classes_declared[declared] = script
+	return _classes_declared
+
+
+## The names in [param classes] that the code in [param content] uses, in the order first used: words
+## outside strings and comments, so a class named in prose or in a message is not a use of it.
+static func classes_used_in(content: String, classes: Dictionary) -> Array[String]:
+	var used: Array[String] = []
+	if classes.is_empty():
+		return used
+	var word: RegEx = Patterns.compiled("[A-Za-z_][A-Za-z0-9_]*")
+	for line: String in content.split("\n"):
+		for m: RegExMatch in word.search_all(_code_of(line)):
+			var name: String = m.get_string()
+			if classes.has(name) and not name in used:
+				used.append(name)
+	return used
 
 
 # [param written] as the res:// path the engine would load from [param from]: a uid:// by what the
