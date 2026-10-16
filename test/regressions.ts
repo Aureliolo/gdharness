@@ -21660,9 +21660,7 @@ async function testASelfContainedEngineKeepsItsTemplates(): Promise<void> {
     assert.equal(get(both, 'presets', 0, 'templates_installed'), true, JSON.stringify(both));
   } finally {
     await server.stop();
-    rmSync(project, { recursive: true, force: true });
-    rmSync(runtimeDir, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
+    sweep(project, runtimeDir, home);
   }
 }
 
@@ -21781,8 +21779,7 @@ async function testAnAddedPresetExports(): Promise<void> {
     }
   } finally {
     await server.stop();
-    rmSync(project, { recursive: true, force: true });
-    rmSync(runtimeDir, { recursive: true, force: true });
+    sweep(project, runtimeDir);
   }
 }
 

@@ -492,7 +492,7 @@ function checkTemplatesArePerPlatform(godotPath: string, projectDir: string): vo
       `the list judges each preset by its own platform: ${JSON.stringify(listed)}`,
     );
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    sweep(home);
   }
 }
 
