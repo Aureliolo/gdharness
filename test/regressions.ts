@@ -40024,6 +40024,19 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
     ]);
     assert.match(text(get(panel, 'readBy')), /headless engine/);
 
+    // Each read handed the other's file says which one reads it, where the scene read printed the
+    // loader's error and the resource read answered a scene's packed bundle as its properties.
+    const notAScene = textOf(await call('scene_tree', { scenePath: 'res://panel.tres' })) ?? '';
+    assert.match(
+      notAScene,
+      /res:\/\/panel\.tres is a StyleBoxFlat, not a scene: resource_edit read/,
+      notAScene,
+    );
+    assert.doesNotMatch(notAScene, /No loader found/, notAScene);
+    const notAResource =
+      textOf(await call('resource_edit', { op: 'read', resourcePath: 'world.tscn' })) ?? '';
+    assert.match(notAResource, /res:\/\/world\.tscn is a scene: scene_tree reads its nodes/, notAResource);
+
     const missing = textOf(await call('scene_tree', { scenePath: 'res://nope.tscn' })) ?? '';
     assert.match(missing, /Scene not found: res:\/\/nope\.tscn/, missing);
     const outside =

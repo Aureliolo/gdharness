@@ -21,11 +21,21 @@ const Serialisation = preload("serialisation.gd")
 static func scene_tree(scene_path: String, depth: int, include_properties: bool) -> Dictionary:
 	if not FileAccess.file_exists(scene_path):
 		return {"ok": false, "error": "Scene not found: " + scene_path}
-	var packed: PackedScene = (
-		ResourceLoader.load(scene_path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
-	)
-	if packed == null:
+	# Loaded without naming the type, so a resource handed in by mistake loads as what it is and the
+	# refusal can say so, where asking for a PackedScene printed the loader's error and a backtrace.
+	var loaded: Resource = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	if loaded == null:
 		return {"ok": false, "error": "Failed to load %s as a scene" % scene_path}
+	if not loaded is PackedScene:
+		return {
+			"ok": false,
+			"error":
+			(
+				"%s is a %s, not a scene: resource_edit read reads its properties."
+				% [scene_path, loaded.get_class()]
+			)
+		}
+	var packed: PackedScene = loaded
 	var nodes: Dictionary = {}
 	var refused: String = _lay(packed.get_state(), ".", nodes, [scene_path])
 	if not refused.is_empty():
@@ -188,6 +198,13 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	var loaded: Resource = ResourceLoader.load(res_path, "", ResourceLoader.CACHE_MODE_IGNORE)
 	if loaded == null:
 		return {"ok": false, "error": "%s did not load as a resource." % res_path}
+	# A scene's own properties are its packed bundle, which says nothing a caller can use.
+	if loaded is PackedScene:
+		return {
+			"ok": false,
+			"error":
+			"%s is a scene: scene_tree reads its nodes, and scene_node get one node's properties." % res_path
+		}
 
 	var script: Script = loaded.get_script()
 	var scripted: Dictionary = {}
