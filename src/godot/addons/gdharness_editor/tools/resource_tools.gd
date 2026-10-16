@@ -3,10 +3,10 @@ extends Node
 
 ## Resource files, shaders, tilesets and themes, written through the open editor.
 
+const FileReads = preload("../file_reads.gd")
 const PropertyValues = preload("../property_values.gd")
 const Read = preload("../reading.gd")
 const SceneFile = preload("../scene_file.gd")
-const Serialisation = preload("../serialisation.gd")
 
 # The minimal shader of a type: its declaration and the one function the engine calls for it.
 const SHADER_EMPTY: String = """shader_type %s;
@@ -23,7 +23,6 @@ const CELLS_SHOWN: int = 1000
 
 var _editor_plugin: EditorPlugin = null
 var _properties: PropertyValues = PropertyValues.new()
-var _values: Serialisation = Serialisation.new()
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
@@ -48,7 +47,7 @@ func _written(path: String) -> void:
 	if ResourceLoader.has_cached(path):
 		var _replaced: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REPLACE)
 	if _editor_plugin:
-		EditorInterface.get_resource_filesystem().scan()
+		SceneFile.scan_later()
 
 
 ## Why a tool that creates [param path] must not write there, or "". Saving over a file that was
@@ -239,48 +238,12 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	return {"ok": true, "resourcePath": res_path}
 
 
-## What a resource file holds, in the form modify takes, so a value read here can be written back.
-## Read from the file rather than the editor's cached copy, since the file is what the other ops
-## write and what the project loads.
+## What a resource file holds, read as a headless engine reads it with no editor connected.
 func read_resource(args: Dictionary) -> Dictionary:
 	var res_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
-	var include_defaults: bool = Read.as_bool(args.get("includeDefaults", false))
 	if res_path == "res://":
 		return {"ok": false, "error": "resourcePath is required"}
-	if not FileAccess.file_exists(res_path):
-		return {"ok": false, "error": "No resource at " + res_path}
-	var resource: Resource = ResourceLoader.load(res_path, "", ResourceLoader.CACHE_MODE_IGNORE)
-	if resource == null:
-		return {"ok": false, "error": "%s did not load as a resource." % res_path}
-
-	var script: Script = resource.get_script()
-	var scripted: Dictionary = {}
-	if script != null:
-		for declared: Dictionary in script.get_script_property_list():
-			scripted[str(declared.get("name", ""))] = true
-	var properties: Dictionary = {}
-	for p: Dictionary in resource.get_property_list():
-		var property: String = str(p.get("name", ""))
-		if property.is_empty() or property == "script":
-			continue
-		if not (Read.as_int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
-			continue
-		var value: Variant = resource.get(property)
-		if not include_defaults:
-			var default: Variant = (
-				script.get_property_default_value(property)
-				if scripted.has(property)
-				else ClassDB.class_get_property_default_value(resource.get_class(), property)
-			)
-			if PropertyValues.same(value, default):
-				continue
-		properties[property] = _values.serialize_value(value)
-	var answer: Dictionary = {
-		"ok": true, "resourcePath": res_path, "resourceType": resource.get_class(), "properties": properties
-	}
-	if script != null:
-		answer["script"] = script.resource_path
-	return answer
+	return FileReads.resource(res_path, Read.as_bool(args.get("includeDefaults", false)))
 
 
 func create_shader(args: Dictionary) -> Dictionary:
