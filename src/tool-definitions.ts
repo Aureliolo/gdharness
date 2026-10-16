@@ -210,10 +210,8 @@ const SCRIPT_PATH: JsonSchema = {
   type: 'string',
   description: 'Script file inside the project, such as "scripts/player.gd".',
 };
-const RESOURCE_PATH: JsonSchema = {
-  type: 'string',
-  description: 'File inside the project, such as "sprites/hero.png" or "materials/steel.tres".',
-};
+const RESOURCE_FILE = 'File inside the project, such as "sprites/hero.png" or "materials/steel.tres".';
+const RESOURCE_PATH: JsonSchema = { type: 'string', description: RESOURCE_FILE };
 const NODE_PATH: JsonSchema = {
   type: 'string',
   description: 'Node path from the scene root, such as "Player/Sprite2D". "." is the root.',
@@ -285,7 +283,8 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
       position: {
         type: 'string',
         enum: ['end', 'after_ready', 'after_init'],
-        description: 'Functions: where to insert.',
+        description:
+          'Functions: where to insert. end, the default, is the end of the file; after_ready and after_init are after _ready or _init, above the comments and annotation lines that open the function after it, and the end when nothing follows. A function goes in with two blank lines on each side, as gdformat writes them.',
       },
     },
     required: ['type', 'name'],
@@ -746,7 +745,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Scene tree',
     effect: 'read',
     description:
-      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. Needs the editor connected. For the nodes of a game that is running, runtime_inspect tree, which needs no editor.',
+      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. A node that instances another scene names that file under instanceOf, and the nodes listed under it come from that file rather than this one. Needs no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without making its nodes, so no script of theirs runs (autoloads still start once it has answered, as in every headless call). For the nodes of a game that is running, runtime_inspect tree.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -1095,10 +1094,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'resource_edit',
     title: 'Edit resources',
     description:
-      'Resource files: read one, create any ClassDB resource as .tres, change one, write a shader, build a TileSet, or set a Theme colour or font size. A material is a create with resourceType StandardMaterial3D, ShaderMaterial or CanvasItemMaterial. read answers with the properties the file sets, in the form modify takes, and a Theme lists its items there as "Button/colors/font_color". Needs the editor connected.',
+      'Resource files: read one, create any ClassDB resource as .tres, change one, write a shader, build a TileSet, or set a Theme colour or font size. A material is a create with resourceType StandardMaterial3D, ShaderMaterial or CanvasItemMaterial. read answers with the properties the file sets, in the form modify takes, and a Theme lists its items there as "Button/colors/font_color". move takes any file of the project, a script or an image as much as a resource, or a directory, and works from the files, so it needs no editor; one serving the project is brought up to it as after a move in its own FileSystem dock, its open scenes and cached resources named for the new paths and the project settings the move rewrote taken from the file. read needs no editor either: with none serving the project, a headless engine reads the file. The ops that write a resource need the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
-      resourcePath: RESOURCE_PATH,
+      resourcePath: {
+        ...RESOURCE_PATH,
+        description: `${RESOURCE_FILE} move: a directory too.`,
+      },
       resourceType: {
         type: 'string',
         ops: ['create'],
@@ -1127,6 +1129,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description: 'create_shader: the shader source. Default: a minimal shader of that type.',
       },
       sources: { ...TILESET_SOURCES, ops: ['create_tileset'] },
+      newPath: {
+        type: 'string',
+        ops: ['move'],
+        description:
+          'move: where it goes, inside the project, and for a file with the extension it has. A file goes with its .import and .uid, and a directory with everything in it. Every path naming what moved in a scene, resource, script, project.godot or other text file is rewritten in the style it was written in, res:// or relative, and so is every relative path inside a moved file. A string naming it any other way, such as the start of a path built at run time, is answered under leftAlone rather than changed, and so is a scene or resource saved as .scn or .res, which this cannot rewrite.',
+      },
+      preview: {
+        type: 'boolean',
+        ops: ['move'],
+        description: 'move: answer with what would move and change, and write nothing. Default false.',
+      },
       controlType: {
         type: 'string',
         ops: ['set_theme_color', 'set_theme_font_size'],
@@ -1169,6 +1182,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         effect: 'destructive',
         summary: 'a font size in a Theme',
         requires: ['controlType', 'fontSizeName', 'size'],
+      },
+      move: {
+        effect: 'destructive',
+        summary: 'move or rename a file or a directory, and every path in the project naming it',
+        requires: ['newPath'],
       },
     },
   },
@@ -1441,7 +1459,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'Whether the editor addon is connected, which Godot answers, whether the editor is playing something, and which games with the runtime addon are reachable, of this project and of every other on the machine. Read connected with mayYetConnect: the editor dials this server and backs off between tries, so for the first half-minute after a server starts false means not reached yet as often as no editor; mayYetConnect true is worth waiting out, false is final, and editorCannotConnect, restartInterrupted, restartUnderway, closedHere and editorsNotYetConnected say why. An editor that has connected and not yet greeted reports nothing about itself, and every other call made in that window waits up to ten seconds for it to settle. playingInEditor null means unanswered rather than nothing playing: processActive and runtimes do not depend on the editor answering. game.run names the run editor_output and editor_run stop answer for, and stays named after it ends. addonIsStale, on the editor and on each game, says it runs addon code other than what this server ships, and staleNote says which half moves: the project, by a gdharness upgrade it spells out to run in a shell, the editor by a restart, or this server by a reconnect. A false editor.lspListening or editor.dapListening comes with serversNote, and editor_launch restart binds the port again. editor.scan says whether the editor is scanning, which editor_run waits out before starting a game. A game announced in a protocol this server does not speak is listed under unreadable, during an upgrade that moves the protocol, until the halves match.',
     answer:
       "server names this server: its pid, its version, and lifecycleLog, the file every gdharness server of the user appends a line to when it starts, when its client first names itself, when it replaces another server of its project, and when it ends, with why it ended (the client closing its end as stdin:end, a signal by name, superseded with the successor's pid, an uncaught exception or rejection with its stack, or the exit code) and the calls it was answering then. The parent's command line follows on its own line a few seconds after the start. A server killed without warning writes no ended line, and on Windows every kill is that, so a started line with no ended line after it is a server something killed. " +
-      'runtimeConnected counts the games of the project this server serves, and runtimes lists every game on the machine with ofThisProject saying which is which, since a game of another project is reached only by naming its projectPath. playingInEditor is null when the editor was not asked or did not answer, which is not the same as a no: with no editor connected there is nobody to ask, and an editor that does not serve the question is given a moment and then left. A game can be playing while this is null, so read it as unanswered rather than as nothing playing, and use processActive and runtimes, which come from elsewhere and do not depend on the editor answering. game.run names the run processActive is about, the one editor_output and editor_run stop answer for: its pid, its project, and adopted true when this server read it back from another server rather than starting it. It stays named after the run ends, beside processActive false, so editor_output can still read what that run printed; null when there is no run at all. startedAt says when it began, and endedAt when it ended, wherever something saw the end: a run adopted from a note another server wrote can have ended hours before this server started. editor.lspListening and editor.dapListening say whether anything accepts connections on the ports the editor names, lspPort and dapPort: Godot binds each once, as the editor starts, and reports a failure only in the log panel of the editor itself, so a false comes with serversNote, and editor_launch restart binds it again. editor.scan says whether the editor is scanning or importing and how many milliseconds ago its last scan finished (finishedMsAgo), or is null when it did not answer: the editor rewrites the class cache just after a scan, and editor_run waits that out before starting a game, saying so under waitedForEditorScanMs. Each game under runtimes is pinged with a short wait, so one held at a breakpoint is listed as unreachable rather than making this call wait out the runtime timeout; for the run this server is reporting on, heldAt says whether that is what it is, with the same three answers editor_output gives. A game the editor played announces the editor under editorPid, and so does whatever that game started for itself; a game some other server started announces none, which is how the two are told apart when both are running from one project. Each game also says which runtime addon it loaded, under addonVersion (null when it cannot say); addonIsStale is true when that code is not what this server ships, and staleNote says whether the project needs the gdharness upgrade command, spelled out to run in a shell, the game a restart, or this server a reconnect. A second checkout of a project, such as a git worktree, carries addons of its own and is where this shows. Every runtime_* answer from such a game carries addonIsStale and staleNote too. When connected is false, mayYetConnect says whether that is final: the editor dials this server rather than the other way round and backs off between tries, so for the first half-minute after a server starts, false means "not reached yet" as often as it means "no editor". True is worth waiting out; false is an editor that is not there. False beside editorCannotConnect is a project without the gdharness editor addon installed or enabled, where no editor can ever dial in, however young the server or whichever editor is open; its remedies say how to install or enable it. False beside restartInterrupted is one that an editor_launch restart on a previous server asked to quit, where the launch half never ran because that server was ended in between, usually by the reconnect the restart was taken for; editor_launch open finishes it. True beside restartUnderway is a restart still in progress, its server alive and within the wait for the old editor to go: the editor is coming, and opening another would put two on one project. listeningSince is when this server took the bridge port, which is what that window is measured from and what a caller wanting its own window should read. An editor this server opened counts for as long as its process lives, however far past that window the import runs, and awaitingLaunchedEditor names its pid so the two reasons for true are told apart. Any editor of this project running and not yet connected, whoever opened it, makes it true as well and is named under editorsNotYetConnected with its pid and start time, so a restart a reconnect interrupted after its launch is not read as nothing being there. settingsDropped appears here once when the editor this server opened saved project.godot on its way in, which is the same reading editor_launch restart makes in its own answer. A game that has announced itself in a protocol this server does not speak is listed under unreadable rather than left out, with the protocol it speaks and whether the server or the addon is the older half. This happens during an upgrade that moves the runtime protocol, which most do not: installing replaces the addon on disk as soon as the pin moves, while a server that is already running stays on the version it started with, so the two speak different protocols until the server is reconnected. Those games are real and running, but no tool here can reach them until the halves match, so runtimes stays empty and runtimeConnected stays false. An upgrade that leaves the protocol alone opens no such window and this list stays empty through it. addonIsStale is decided by the code of the editor addons rather than their version, so an editor started before an upgrade that left that code alone reports the older addonVersion, is not stale, and addonNote says so: it needs no restart. port is the one the editor bridge is on; when that is not the one this server was configured with, portWanted names the configured one and portNote says why it moved and, when it was the server this one replaced, which pid kept it. A server replacing another of its project that holds the configured port waits for it to stand down and takes the port over, which takes a few seconds; bridgeHandover says so while it waits, and it moves only if that server has not let go within the wait. An editor that has connected and not yet greeted, which lasts a frame and longer while it imports, reports nothing about itself: greeting says so, addonIsStale is absent rather than guessed, and a restart asked then waits for the greeting to learn who opened it. startedByAnEditor is an editor another editor started, by Godot\'s own restart or the project manager, which has none of the arguments a server gave the one before it; startedByAnEditorNote says what that costs. An engine run that loads the editor addon to do one job and quit, such as a gate\'s godot --headless --import, an export or a script, is not taken as the editor: a process that greets without a server\'s mark has its command line read first, and while that is read identifying is true and connected false; one started with such an option is turned away, and turnedAway names the last one, its pid and the option. Every other call made while an editor is arriving, before its greeting or while it is looked up, waits up to ten seconds for it to settle rather than acting on connected as it reads in that window.',
+      'runtimeConnected counts the games of the project this server serves, and runtimes lists every game on the machine with ofThisProject saying which is which, since a game of another project is reached only by naming its projectPath. playingInEditor is null when the editor was not asked or did not answer, which is not the same as a no: with no editor connected there is nobody to ask, and an editor that does not serve the question is given a moment and then left. A game can be playing while this is null, so read it as unanswered rather than as nothing playing, and use processActive and runtimes, which come from elsewhere and do not depend on the editor answering. Its play says which play the editor is on: play.play counts the plays that editor has started since it opened, whoever started them, and play.editorPid is the editor, so two reads with different pairs are two plays even when both say playing. game.run names the run processActive is about, the one editor_output and editor_run stop answer for: its pid, its project, and adopted true when this server read it back from another server rather than starting it. It stays named after the run ends, beside processActive false, so editor_output can still read what that run printed; null when there is no run at all. startedAt says when it began, and endedAt when it ended, wherever something saw the end: a run adopted from a note another server wrote can have ended hours before this server started. editor.lspListening and editor.dapListening say whether anything accepts connections on the ports the editor names, lspPort and dapPort: Godot binds each once, as the editor starts, and reports a failure only in the log panel of the editor itself, so a false comes with serversNote, and editor_launch restart binds it again. editor.scan says whether the editor is scanning or importing and how many milliseconds ago its last scan finished (finishedMsAgo), or is null when it did not answer: the editor rewrites the class cache just after a scan, and editor_run waits that out before starting a game, saying so under waitedForEditorScanMs. Each game under runtimes is pinged with a short wait, so one held at a breakpoint is listed as unreachable rather than making this call wait out the runtime timeout; for the run this server is reporting on, heldAt says whether that is what it is, with the same three answers editor_output gives. A game the editor played announces the editor under editorPid, and so does whatever that game started for itself; a game some other server started announces none, which is how the two are told apart when both are running from one project. Each game also says which runtime addon it loaded, under addonVersion (null when it cannot say); addonIsStale is true when that code is not what this server ships, and staleNote says whether the project needs the gdharness upgrade command, spelled out to run in a shell, the game a restart, or this server a reconnect. A second checkout of a project, such as a git worktree, carries addons of its own and is where this shows. Every runtime_* answer from such a game carries addonIsStale and staleNote too. When connected is false, mayYetConnect says whether that is final: the editor dials this server rather than the other way round and backs off between tries, so for the first half-minute after a server starts, false means "not reached yet" as often as it means "no editor". True is worth waiting out; false is an editor that is not there. False beside editorCannotConnect is a project without the gdharness editor addon installed or enabled, where no editor can ever dial in, however young the server or whichever editor is open; its remedies say how to install or enable it. False beside restartInterrupted is one that an editor_launch restart on a previous server asked to quit, where the launch half never ran because that server was ended in between, usually by the reconnect the restart was taken for; editor_launch open finishes it. True beside restartUnderway is a restart still in progress, its server alive and within the wait for the old editor to go: the editor is coming, and opening another would put two on one project. listeningSince is when this server took the bridge port, which is what that window is measured from and what a caller wanting its own window should read. An editor this server opened counts for as long as its process lives, however far past that window the import runs, and awaitingLaunchedEditor names its pid so the two reasons for true are told apart. Any editor of this project running and not yet connected, whoever opened it, makes it true as well and is named under editorsNotYetConnected with its pid and start time, so a restart a reconnect interrupted after its launch is not read as nothing being there. settingsDropped appears here once when the editor this server opened saved project.godot on its way in, which is the same reading editor_launch restart makes in its own answer. A game that has announced itself in a protocol this server does not speak is listed under unreadable rather than left out, with the protocol it speaks and whether the server or the addon is the older half. This happens during an upgrade that moves the runtime protocol, which most do not: installing replaces the addon on disk as soon as the pin moves, while a server that is already running stays on the version it started with, so the two speak different protocols until the server is reconnected. Those games are real and running, but no tool here can reach them until the halves match, so runtimes stays empty and runtimeConnected stays false. An upgrade that leaves the protocol alone opens no such window and this list stays empty through it. addonIsStale is decided by the code of the editor addons rather than their version, so an editor started before an upgrade that left that code alone reports the older addonVersion, is not stale, and addonNote says so: it needs no restart. port is the one the editor bridge is on; when that is not the one this server was configured with, portWanted names the configured one and portNote says why it moved and, when it was the server this one replaced, which pid kept it. A server replacing another of its project that holds the configured port waits for it to stand down and takes the port over, which takes a few seconds; bridgeHandover says so while it waits, and it moves only if that server has not let go within the wait. An editor that has connected and not yet greeted, which lasts a frame and longer while it imports, reports nothing about itself: greeting says so, addonIsStale is absent rather than guessed, and a restart asked then waits for the greeting to learn who opened it. startedByAnEditor is an editor another editor started, by Godot\'s own restart or the project manager, which has none of the arguments a server gave the one before it; startedByAnEditorNote says what that costs. An engine run that loads the editor addon to do one job and quit, such as a gate\'s godot --headless --import, an export or a script, is not taken as the editor: a process that greets without a server\'s mark has its command line read first, and while that is read identifying is true and connected false; one started with such an option is turned away, and turnedAway names the last one, its pid and the option. Every other call made while an editor is arriving, before its greeting or while it is looked up, waits up to ten seconds for it to settle rather than acting on connected as it reads in that window.',
     parameters: {},
     requires: [],
   },
@@ -1792,9 +1810,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'runtime_input',
     title: 'Send input to the game',
     description:
-      "Input to the running game: a whole click on a Control or a 3D node named by path or on a control named by the words on it, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it. On gdharness's own desktop, where a windowed run goes, Windows refuses to say where the pointer is: every pointer answer there carries pointer_on_hidden_desktop, and the first of the run pointer_note saying why it matters: get_mouse_position() on the root window, and the mouse positions derived from it, read a meaningless position, while what reads the event itself (the control under it, hover, tooltips, input handlers) gets the injected position. A native window no real pointer has entered gets no hover from Godot, so the runtime supplies it there and the answers say hover_supplied.",
+      "Input to the running game: a whole click on a Control or a 3D node named by path or on a control named by the words on it, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button, mouse motion or drag. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it. On gdharness's own desktop, where a windowed run goes, Windows refuses to say where the pointer is: every pointer answer there carries pointer_on_hidden_desktop, and the first of the run pointer_note saying why it matters: get_mouse_position() on the root window, and the mouse positions derived from it, read a meaningless position, while what reads the event itself (the control under it, hover, tooltips, input handlers) gets the injected position. A native window no real pointer has entered gets no hover from Godot, so the runtime supplies it there and the answers say hover_supplied.",
     answer:
-      'click: what was under the pointer, and what became of the control: in_tree, removed or freed. Named by says, found says which match it was, and found.pressedOn says "the words" for words in a RichTextLabel pressed where they are drawn, or "the middle of the label" with a note saying why they could not be placed; on a rich label link_pressed says whether the press reached a link, with link_meta giving the meta the label reports clicked, an empty one included. A control scrolled into view first is scrolled each container out from it a frame after the one inside, and scrolled_into_view says whether a scroll value changed. A button in toggle mode, a CheckBox or CheckButton included, answers pressed with before and after, its button_pressed either side of the click: the same value twice is a click the game undid, and after is null when the click freed it. A refusal for a pointer turned off names where mouse_behavior_recursive was set. On a 3D node landed says the interface did not swallow the press: no control under the pointer stopped it, a control letting the pointer pass included, and every viewport on the way out from the room had the pointer over what shows the room. choose: what was chosen, read before the press, which is heard rather than assumed; what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick); and what the button in front of the menu shows now when it is still there. A menu is opened rather than clicked because its items are drawn rather than built, and the item is looked for as the menu stands once open, since a game can fill a menu as it opens. action, key, mouse_click and joypad_button: the event as it was sent, with whole saying whether the press was let go of again, for a key the keycode, physical_keycode and unicode it carried, and for a controller button its number, its name and the device. mouse_motion: the position and the relative movement sent. joypad_motion: the axis by number and name, the value and the device. None of these is aimed at anything, so none says what the event reached: click on a nodePath or says answers what was under the pointer.',
+      'click: what was under the pointer, and what became of the control: in_tree, removed or freed. Named by says, found says which match it was, and found.pressedOn says "the words" for words in a RichTextLabel pressed where they are drawn, or "the middle of the label" with a note saying why they could not be placed; on a rich label link_pressed says whether the press reached a link, with link_meta giving the meta the label reports clicked, an empty one included. A control scrolled into view first is scrolled each container out from it a frame after the one inside, and scrolled_into_view says whether a scroll value changed. A button in toggle mode, a CheckBox or CheckButton included, answers pressed with before and after, its button_pressed either side of the click: the same value twice is a click the game undid, and after is null when the click freed it. A refusal for a pointer turned off names where mouse_behavior_recursive was set. On a 3D node landed says the interface did not swallow the press: no control under the pointer stopped it, a control letting the pointer pass included, and every viewport on the way out from the room had the pointer over what shows the room. choose: what was chosen, read before the press, which is heard rather than assumed; what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick); and what the button in front of the menu shows now when it is still there. A menu is opened rather than clicked because its items are drawn rather than built, and the item is looked for as the menu stands once open, since a game can fill a menu as it opens. action, key, mouse_click and joypad_button: the event as it was sent, with whole saying whether the press was let go of again, for a key the keycode, physical_keycode and unicode it carried, and for a controller button its number, its name and the device. mouse_motion: the position and the relative movement sent. mouse_drag: from, to, motions sent and relative_total. joypad_motion: the axis by number and name, the value and the device. None of these is aimed at anything, so none says what the event reached: click on a nodePath or says answers what was under the pointer.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
@@ -1866,19 +1884,40 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       alt: { type: 'boolean', ops: ['key'], description: 'key: hold Alt with it. Default false.' },
       x: {
         type: 'number',
-        ops: ['mouse_click', 'mouse_motion'],
-        description: 'mouse_click, mouse_motion: window pixels.',
+        ops: ['mouse_click', 'mouse_motion', 'mouse_drag'],
+        description: 'mouse_click, mouse_motion: window pixels. mouse_drag: where the press is.',
       },
       y: {
         type: 'number',
-        ops: ['mouse_click', 'mouse_motion'],
-        description: 'mouse_click, mouse_motion: window pixels.',
+        ops: ['mouse_click', 'mouse_motion', 'mouse_drag'],
+        description: 'mouse_click, mouse_motion: window pixels. mouse_drag: where the press is.',
+      },
+      toX: {
+        type: 'number',
+        ops: ['mouse_drag'],
+        description: 'mouse_drag: where the release is, in window pixels.',
+      },
+      toY: { type: 'number', ops: ['mouse_drag'], description: 'mouse_drag: as toX.' },
+      via: {
+        type: 'array',
+        items: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+        ops: ['mouse_drag'],
+        description:
+          'mouse_drag: points the stroke passes through on the way, in order, each [x, y]. The motions are spread along the whole stroke by distance. Default none: a straight line.',
+      },
+      frames: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 600,
+        ops: ['mouse_drag'],
+        description:
+          'mouse_drag: how many process frames the stroke takes, one motion each, as a real mouse sends one a frame; a hand takes about 20 to 60 for a stroke across a screen.',
       },
       button: {
         type: ['string', 'number'],
-        ops: ['click', 'mouse_click', 'joypad_button'],
+        ops: ['click', 'mouse_click', 'mouse_drag', 'joypad_button'],
         description:
-          'click, mouse_click: left, right, middle, wheel_up or wheel_down, or a button number. Default left. joypad_button: the controller button, by name (a, b, x, y, back, guide, start, left_stick, right_stick, left_shoulder, right_shoulder, dpad_up, dpad_down, dpad_left, dpad_right, misc1, paddle1 to paddle4, touchpad) or by its JoyButton number; a, b, x and y are the bottom, right, left and top face buttons, as Godot names them, whatever the controller prints on them.',
+          'click, mouse_click, mouse_drag: left, right, middle, wheel_up or wheel_down, or a button number. Default left. joypad_button: the controller button, by name (a, b, x, y, back, guide, start, left_stick, right_stick, left_shoulder, right_shoulder, dpad_up, dpad_down, dpad_left, dpad_right, misc1, paddle1 to paddle4, touchpad) or by its JoyButton number; a, b, x and y are the bottom, right, left and top face buttons, as Godot names them, whatever the controller prints on them.',
       },
       axis: {
         type: ['string', 'number'],
@@ -1947,14 +1986,20 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       mouse_click: {
         effect: 'additive',
         summary:
-          'click a mouse button at a position, pressed and released a frame apart, each event carrying the buttons held once it has happened; the answer says whole. A drag is a press held with pressed true, motions, and a release with pressed false. A wheel button is always a whole step, press and release together as a mouse sends one: a lone wheel press holds the viewport on the control that took it, so every click after it lands there',
+          'click a mouse button at a position, pressed and released a frame apart, each event carrying the buttons held once it has happened; the answer says whole. A drag is mouse_drag. A wheel button is always a whole step, press and release together as a mouse sends one: a lone wheel press holds the viewport on the control that took it, so every click after it lands there',
         requires: ['x', 'y'],
       },
       mouse_motion: {
         effect: 'additive',
         summary:
-          'move the mouse to a position, carrying the distance from where the last injected event put it unless relativeX and relativeY say otherwise, and the buttons held, so a control that drags moves under a run of these between a held mouse_click and its release',
+          'move the mouse to a position, carrying the distance from where the last injected event put it unless relativeX and relativeY say otherwise, and the buttons held',
         requires: ['x', 'y'],
+      },
+      mouse_drag: {
+        effect: 'additive',
+        summary:
+          'a whole drag in one call, as a hand makes one: press at x, y, a motion each frame for frames frames, and release at toX, toY; for a stir, a paint stroke or a slow slider',
+        requires: ['x', 'y', 'toX', 'toY', 'frames'],
       },
       joypad_button: {
         effect: 'additive',
@@ -2156,6 +2201,21 @@ function servedDescription(spec: ToolSpec): string {
   return `${spec.description}${describeOperations(spec)}${answer}`;
 }
 
+/**
+ * The sentence a parameter's served description ends with when only some of its tool's ops read it,
+ * or '' when every op does.
+ *
+ * An op's line in the tool description names only what that op needs, so an optional argument read
+ * by one op reached a client described as if every op took it. A session passed projectPath to
+ * editor_launch close, which the schema it was sent gave no reason to doubt, and was refused.
+ */
+function onlyForOps(spec: ToolSpec, ops: readonly string[] | undefined): string {
+  if (ops === undefined || Object.keys(spec.operations ?? {}).every((op) => ops.includes(op))) {
+    return '';
+  }
+  return ops.length === 1 ? `Only for op ${ops[0]}.` : `Only for ops ${ops.join(', ')}.`;
+}
+
 /** The specs as the protocol carries them. */
 export function buildToolDefinitions(): MCPToolDefinition[] {
   return TOOL_SPECS.map((spec) => {
@@ -2169,9 +2229,14 @@ export function buildToolDefinitions(): MCPToolDefinition[] {
     }
     for (const [name, schema] of Object.entries(spec.parameters)) {
       // `ops` is ours rather than JSON Schema's, and a client handed a key its validator does not
-      // know is a client that may refuse the whole tool. Which ops take what is in the description.
-      const { ops: _ops, blank: _blank, ...carried } = schema;
-      properties[name] = carried;
+      // know is a client that may refuse the whole tool, so which ops read it goes into the text.
+      const { ops, blank: _blank, ...carried } = schema;
+      const only = onlyForOps(spec, ops);
+      const said = carried['description'];
+      properties[name] =
+        only === ''
+          ? carried
+          : { ...carried, description: typeof said === 'string' ? `${said} ${only}` : only };
     }
 
     const required = [...spec.requires];

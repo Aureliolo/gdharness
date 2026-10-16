@@ -403,11 +403,12 @@ once the server is there, rather than waiting for somebody to restart it.
 
 | Tools                                                                                    | Route                                                               | Needs running                                   |
 | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------- |
-| `scene_*`, `resource_edit`, `editor_rescan`, `editor_launch restart` and `close`         | Editor bridge                                                       | The editor, addon enabled                       |
+| `scene_*`, `resource_edit` but `move`, `editor_rescan`, `editor_launch restart`, `close` | Editor bridge                                                       | The editor, addon enabled                       |
 | `script_diagnostics`, `script_info` except `structure`, `script_edit rename` of a member | Language server                                                     | The editor                                      |
 | `debug_*`, and the console `editor_output` returns                                       | Debug adapter                                                       | A game the editor is playing                    |
 | `runtime_*`                                                                              | Runtime                                                             | A game with the runtime autoload                |
-| `project_*`, `editor_classes`, `script_info structure`, `script_edit` otherwise          | Headless operations                                                 | Nothing                                         |
+| `project_*`, `editor_classes`, `script_info structure`, `script_edit` otherwise, and     | Headless operations                                                 | Nothing                                         |
+| `resource_edit move`                                                                     |                                                                     |                                                 |
 | `editor_run`                                                                             | Editor bridge when an editor is connected, otherwise a spawned game | Nothing, though the editor changes what it does |
 | `editor_status`                                                                          | All of them, reporting what answers                                 | Nothing                                         |
 
@@ -428,6 +429,17 @@ again, its moved script's old path included, which is what makes it drop the old
 alone picks up a class that has appeared and keeps one that has gone. With no editor the class
 cache is rebuilt, the UID table too when a script moved, and the changed scripts are compiled in
 a fresh engine.
+
+`resource_edit move` (`src/file-move.ts`) is the same path rewriting for any file or directory,
+with the file's `.import` and `.uid` moving beside it, and it reads and writes the files itself as
+the rename does. A scene or resource saved as `.scn` or `.res` cannot be rewritten and is answered
+instead. An editor serving the project is then told what moved, as its own FileSystem dock tells
+itself: cached resources take over their new paths, open tabs are renamed and read again, and the
+settings the move rewrote in `project.godot` are taken from the file, which a rename moving an
+autoload's script does too. Each of those holds an old path the editor would otherwise save back.
+The editor keeps a tab's path twice, on the scene's root and in its own list of scenes, and a
+script can set only the first; reading the tab again is what renews the second. With no editor,
+an import pass rebuilds the UID table and the class cache, and the changed scripts are compiled.
 
 `project_import refresh_classes` is the one headless call that also asks the editor what classes
 it holds, when one is connected and open on the same project. Rewriting the cache does not reach
@@ -452,6 +464,18 @@ cache rebuild waits before it reads the cache it compares against, so the list t
 the one compared. A scan still going after thirty seconds is an import of large assets rather than
 a script scan, and the engine starts anyway with a `scanNote`. An editor that does not answer, or
 whose addon predates `scan_status`, is not waited for.
+
+Nothing the addon does saves a file while the editor scans or imports. A scan's thread ends by
+writing the editor's file list out to `.godot`, walking the list as it goes, and every save in the
+editor updates an entry of that list from the main thread, freeing what the entry held; a scene
+saved while a resource's scan was ending was followed by garbage decoded as text and a dropped
+connection. So the addon turns away every call but the few that only read or wait (`scan_status`,
+the rescan, the reimport, the play status and stop, the profile read) with `busy`, and the bridge
+asks again every tenth of a second for as long as a game start waits on a scan, then answers that
+nothing was run. A turned-away call did nothing, so asking again never runs it twice and one given
+up on never runs later. The scan a write asks for starts at the end of the frame rather than at
+once, so it begins after every save the write makes, and `scan_status` reports it as `pending`
+until then.
 
 The editor writes that file on every save as well, so an editor holding a shorter list than the
 files takes the same classes out of it between any two rebuilds, and each rebuild puts them back.
@@ -776,6 +800,16 @@ for. Both readings run their values through the same serialiser, so a `Vector2` 
 the same either way and a caller can compare the two. Only reads take the argument: a write goes
 to the file whichever way it is phrased, so there is nothing to choose between.
 
+`scene_tree` and `resource_edit read` have no such choice to offer, because the editor reads them
+from the file as well: both go through `file_reads.gd`, which the editor's tools call and an
+operation runs when no editor serves the project. The answer differs only in what the editor
+alone can say, whether it holds unsaved changes to the scene, and the headless answer carries
+`readBy` instead. A scene is read off its `SceneState`, with each instanced scene laid where it
+is instanced, rather than instantiated: outside the editor, instantiating runs every node
+script's member initialisers and `_init`, so a read would have run the game's code on every node.
+The stored properties come from a bare node of each engine class with the file's values set on
+it, since what a node lists depends on its values and some setters set others.
+
 That serialiser is one file, copied into each addon by `bun run sync:gd` because an addon is
 installed as a directory and cannot preload out of one, and a fixture refuses a copy that has
 drifted. It used to be three, and the three disagreed: the same `Vector2` came back tagged `_type`
@@ -804,7 +838,8 @@ int key came back as `"1"`, and a dictionary read and written back had words for
 whole-number key is built back as an int, since JSON gives every number as a float and a dictionary
 keys `1.0` apart from `1`.
 
-The other direction, a value arriving to be written, is `property_values.gd` on the editor side. It
+The other direction, a value arriving to be written, is `property_values.gd`, which the editor
+addon carries as a copy, as it does `file_reads.gd`. It
 reads the serialiser's tags, so every shape a read answers with is a shape a write accepts, and adds
 the part only a property knows: the type wanted, so a dictionary shaped like a vector, or a bare pair
 of numbers, is read as one. `scene_node set`, `resource_edit` and `scene_animation` all go through

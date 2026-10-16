@@ -103,7 +103,7 @@ const WHAT: Record<DeclarationKind, string> = {
 };
 
 /** [param absolute] as the `res://` path the walk spells it with, or null outside the project. */
-function resourcePathOf(projectPath: string, absolute: string): string | null {
+export function resourcePathOf(projectPath: string, absolute: string): string | null {
   const inside = relative(onDiskSpelling(projectPath), onDiskSpelling(absolute));
   if (inside === '' || inside.startsWith('..') || /^[A-Za-z]:/.test(inside)) {
     return null;
@@ -118,7 +118,7 @@ function resourcePathOf(projectPath: string, absolute: string): string | null {
  * (`C:\Users\RUNNER~1\...`) against a project root resolved to its long one, so a target inside
  * the project read as outside it.
  */
-function onDiskSpelling(path: string): string {
+export function onDiskSpelling(path: string): string {
   const missing: string[] = [];
   let at = resolve(path);
   for (;;) {
@@ -380,14 +380,14 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       {
         texts,
         scripts,
-        from: declaringPath,
-        to: moveTo,
+        moves: new Map([[declaringPath, moveTo]]),
+        named: [declaringPath],
         exists: (path) => existsSync(`${projectPath}/${path.slice('res://'.length)}`),
       },
       plan,
     );
   }
-  plan = mentionIgnored(plan, ignoredTexts(projectPath), symbol, moveTo === null ? null : declaringPath);
+  plan = mentionIgnored(plan, ignoredTexts(projectPath), symbol, moveTo === null ? [] : [declaringPath]);
   const left = leftAloneReport(plan.mentions);
   const rewrites = rewritesOf(
     plan,
@@ -531,7 +531,10 @@ interface LanguageServerTook {
 }
 
 /** Each changed file with its changed lines as they now read. */
-function changedReport(edits: readonly Edit[], rewrites: readonly Rewrite[]): Record<string, unknown>[] {
+export function changedReport(
+  edits: readonly Edit[],
+  rewrites: readonly Rewrite[],
+): Record<string, unknown>[] {
   return rewrites.map((rewrite) => {
     const lines = rewrite.after.split('\n');
     const byLine = new Map<number, Set<EditKind>>();
@@ -577,7 +580,7 @@ function changedReport(edits: readonly Edit[], rewrites: readonly Rewrite[]): Re
  * uses, 309 kilobytes a caller had to dig the edits out of. What stays quoted is code that might
  * still be the member, a value whose type the analyser could not tell.
  */
-function leftAloneReport(mentions: readonly Mention[]): LeftAlone {
+export function leftAloneReport(mentions: readonly Mention[]): LeftAlone {
   const full: Mention[] = [];
   const prose = new Map<string, { file: string; kind: string; lines: number[] }>();
   // By reason first, so a reason is said once however many files it covers: said per file, the
@@ -721,13 +724,13 @@ export function writeLeftAloneDetail(projectPath: string, symbol: string, detail
 const PROSE_KINDS: ReadonlySet<string> = new Set(['comment', 'doc', 'string', 'text']);
 
 /** The left-alone lists for the answer, and how many occurrences each holds. */
-interface LeftAlone {
+export interface LeftAlone {
   readonly lists: Record<string, unknown>;
   readonly detail: LeftAloneDetail | null;
   readonly counts: { readonly quoted: number; readonly inProse: number; readonly otherSymbols: number };
 }
 
-function summaryOf(
+export function summaryOf(
   edits: readonly Edit[],
   mentions: readonly Mention[],
   rewrites: readonly Rewrite[],

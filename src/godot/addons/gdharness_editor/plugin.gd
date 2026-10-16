@@ -8,6 +8,17 @@ extends EditorPlugin
 const BridgeClient = preload("bridge_client.gd")
 const ToolExecutor = preload("tool_executor.gd")
 
+## The tools answered while the editor scans or imports, because none of them saves a file: the
+## ones a caller waits on a scan with, and the ones that only read or stop a played game.
+const ANSWERED_WHILE_SCANNING: Array[String] = [
+	"scan_status",
+	"rescan_filesystem",
+	"reimport_files",
+	"playing_status",
+	"stop_playing",
+	"profile_read",
+]
+
 var _client: BridgeClient
 var _tool_executor: ToolExecutor
 var _status_label: Label
@@ -85,8 +96,24 @@ func _on_disconnected() -> void:
 		_status_label.add_theme_color_override("font_color", Color.RED)
 
 
+## Whether [param tool_name] waits for the editor to finish scanning or importing. A save during a
+## scan updates the file list the scan's thread is writing out (see SceneFile.scan_later), and an
+## import can run frames of the editor from inside itself, the one handling this call among them.
+func turned_away(tool_name: String) -> bool:
+	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
+	return (
+		not ANSWERED_WHILE_SCANNING.has(tool_name) and (filesystem.is_scanning() or filesystem.is_importing())
+	)
+
+
 func _on_tool_requested(request_id: String, tool_name: String, args: Dictionary) -> void:
 	if _tool_executor == null or _client == null:
+		return
+
+	# Turned away rather than held, so the server asks again: a call held here could run after the
+	# server had given up on it.
+	if turned_away(tool_name):
+		_client.send_busy(request_id, tool_name)
 		return
 
 	var result: Dictionary = _tool_executor.execute_tool(tool_name, args)

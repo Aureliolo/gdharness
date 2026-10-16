@@ -27,6 +27,8 @@ const ADDONS = join('src', 'godot', 'addons');
 
 /** Which helpers are shared, and which addons hold a copy of each. */
 export const SHARED_GDSCRIPT: Readonly<Record<string, readonly string[]>> = {
+  'file_reads.gd': ['gdharness_editor'],
+  'property_values.gd': ['gdharness_editor'],
   'reading.gd': ['gdharness_editor', 'gdharness_runtime'],
   'serialisation.gd': ['gdharness_editor', 'gdharness_runtime'],
 };

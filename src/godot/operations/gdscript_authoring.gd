@@ -5,6 +5,7 @@ const Log = preload("logger.gd")
 const Patterns = preload("patterns.gd")
 
 const MODIFICATION_TYPES: Array[String] = ["add_constant", "add_variable", "add_signal", "add_function"]
+const BLANKS_AROUND_FUNCTIONS: int = 2
 
 var _log: Log
 
@@ -371,7 +372,12 @@ func _add_signal(lines: Array[String], mod: Dictionary, placed: Array[Dictionary
 	return insert_line if _insert(lines, insert_line, [signal_line], placed) else -1
 
 
-# Answers with the zero-based index of the `func` line, below the blank line that separates it.
+# Answers with the zero-based index of the `func` line, below the blank lines that separate it.
+#
+# Two blank lines on each side, counting those already there, because that is the spacing GDScript's
+# style guide gives functions and the one gdformat writes and gdlint checks: one blank line passed
+# the engine and failed every project gating on either. A function last in the file ends it with a
+# newline, which the file is written with only when its last line is empty.
 func _add_function(lines: Array[String], mod: Dictionary, placed: Array[Dictionary]) -> int:
 	var func_name: String = str(mod.get("name", ""))
 	var func_params: String = str(mod.get("params", ""))
@@ -383,21 +389,34 @@ func _add_function(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	var body: String = str(mod.get("body", "pass"))
 	var position: String = str(mod.get("position", "end"))
 
+	var insert_line: int = _function_insertion_point(lines, position)
 	var func_lines: Array[String] = []
-	var func_decl: String = "func " + func_name + "(" + func_params + ") -> " + return_type + ":"
-	func_lines.append("")
-	func_lines.append(func_decl)
+	for i: int in range(_blank_run(lines, insert_line - 1, -1), BLANKS_AROUND_FUNCTIONS):
+		func_lines.append("")
+	var declared_at: int = insert_line + func_lines.size()
+	func_lines.append("func " + func_name + "(" + func_params + ") -> " + return_type + ":")
 
 	for bl: String in body.split("\n"):
 		func_lines.append("\t" + bl)
 
-	var insert_line: int = _function_insertion_point(lines, position)
-	# A separator on the far side too when something follows, since `after_ready` and `after_init`
-	# put the new function immediately above an existing one and left the two declarations touching.
-	if insert_line < lines.size():
+	var below: int = _blank_run(lines, insert_line, 1)
+	if insert_line + below < lines.size():
+		for i: int in range(below, BLANKS_AROUND_FUNCTIONS):
+			func_lines.append("")
+	elif below == 0:
 		func_lines.append("")
 
-	return insert_line + 1 if _insert(lines, insert_line, func_lines, placed) else -1
+	return declared_at if _insert(lines, insert_line, func_lines, placed) else -1
+
+
+# How many blank lines run from [param from] on in the direction of [param step], 1 or -1.
+static func _blank_run(lines: Array[String], from: int, step: int) -> int:
+	var count: int = 0
+	var at: int = from
+	while at >= 0 and at < lines.size() and lines[at].strip_edges().is_empty():
+		count += 1
+		at += step
+	return count
 
 
 func _variable_insertion_point(lines: Array[String]) -> int:
@@ -467,8 +486,28 @@ func _line_after_function(lines: Array[String], prefix: String) -> int:
 		if line.begins_with(prefix):
 			inside = true
 		elif inside and (line.begins_with("func ") or line.begins_with("static func ")):
-			return i
+			return _start_of_declaration(lines, i)
 	return lines.size()
+
+
+# The first line belonging to the declaration on [param at]: the comments and the lines holding only
+# annotations directly above it, at its indentation. A function placed on [param at] itself takes the
+# next function's doc comment, which then documents the wrong one, and its `@rpc` line, which then
+# annotates it. A comment indented further is the end of the body above, and stays with it.
+static func _start_of_declaration(lines: Array[String], at: int) -> int:
+	var indent: String = _indentation(lines[at])
+	var start: int = at
+	while start > 0 and _indentation(lines[start - 1]) == indent:
+		var above: String = lines[start - 1].strip_edges()
+		var annotation_only: bool = above.begins_with("@") and Patterns.without_annotations(above).is_empty()
+		if not above.begins_with("#") and not annotation_only:
+			break
+		start -= 1
+	return start
+
+
+static func _indentation(line: String) -> String:
+	return line.substr(0, line.length() - line.strip_edges(true, false).length())
 
 
 func _script_template(template_name: String) -> String:

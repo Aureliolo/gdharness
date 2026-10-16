@@ -4,6 +4,7 @@ import http from 'node:http';
 import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
 import { errorMessage, Refusal, toError } from './errors.js';
+import { envValue } from './launch.js';
 import { isSameDirectory } from './paths.js';
 import { portFromEnv } from './ports.js';
 
@@ -93,6 +94,8 @@ interface ToolResultMessage {
   success: boolean;
   result?: unknown;
   error?: string;
+  /** The tool was not run because the editor was scanning or importing, and can be asked again. */
+  busy?: boolean;
 }
 
 interface PingMessage {
@@ -353,6 +356,26 @@ export class BridgeTimeout extends Error {
     this.waitedMs = waitedMs;
   }
 }
+
+/** The editor turned a tool away unrun because it was scanning or importing its files. */
+class EditorBusy extends Error {
+  constructor(toolName: string) {
+    super(`The editor was scanning or importing its files, so ${toolName} was not run.`);
+  }
+}
+
+/**
+ * How long a tool the editor turns away while it scans or imports is asked for again. The scan wait
+ * a game start is given, since it is the same scan: a few seconds covers a few hundred scripts, and
+ * what runs longer is an import of large assets. GDHARNESS_SCAN_WAIT_MS sets another.
+ */
+function busyWaitMs(): number {
+  const override = Number.parseInt(envValue('GDHARNESS_SCAN_WAIT_MS') ?? '', 10);
+  return Number.isInteger(override) && override > 0 ? override : 30_000;
+}
+
+/** How often a tool turned away by a busy editor is asked for again. */
+const BUSY_RETRY_MS = 100;
 
 export class GodotBridge extends EventEmitter {
   /**
@@ -636,12 +659,42 @@ export class GodotBridge extends EventEmitter {
     const counted = options.counted ?? true;
     const resourceKey = this.getResourceKey(args);
     if (!resourceKey) {
-      return this.invokeToolDirect(toolName, args, counted);
+      return this.invokeUntilTaken(toolName, args, counted);
     }
 
     return this.enqueueResourceRequest(resourceKey, () =>
-      this.invokeToolDirect(toolName, args, counted, resourceKey),
+      this.invokeUntilTaken(toolName, args, counted, resourceKey),
     );
+  }
+
+  /**
+   * The tool, asked again for as long as the editor turns it away while it scans or imports. A
+   * turned-away call did nothing, so asking again cannot run it twice, and one given up on cannot
+   * run later.
+   */
+  private async invokeUntilTaken(
+    toolName: string,
+    args: Record<string, unknown>,
+    counted: boolean,
+    resourceKey?: string,
+  ): Promise<unknown> {
+    const waitMs = busyWaitMs();
+    const giveUpAt = Date.now() + waitMs;
+    for (;;) {
+      try {
+        return await this.invokeToolDirect(toolName, args, counted, resourceKey);
+      } catch (error) {
+        if (!(error instanceof EditorBusy)) {
+          throw error;
+        }
+        if (Date.now() >= giveUpAt) {
+          throw new Error(
+            `The editor was scanning or importing its files for all of ${Math.round(waitMs / 1000)} s, so ${toolName} was not run and nothing it would change was changed. editor_rescan says when the scan is over.`,
+          );
+        }
+      }
+      await new Promise((settle) => setTimeout(settle, BUSY_RETRY_MS));
+    }
   }
 
   private getRequestPathname(url: string | undefined): string {
@@ -779,6 +832,8 @@ export class GodotBridge extends EventEmitter {
 
         if (message.success) {
           pending.resolve(message.result);
+        } else if (message.busy === true) {
+          pending.reject(new EditorBusy(pending.toolName));
         } else {
           pending.reject(new Error(message.error ?? `Tool ${pending.toolName} failed`));
         }
@@ -1136,7 +1191,8 @@ export class GodotBridge extends EventEmitter {
     return (
       typeof message['id'] === 'string' &&
       typeof message['success'] === 'boolean' &&
-      (message['error'] === undefined || typeof message['error'] === 'string')
+      (message['error'] === undefined || typeof message['error'] === 'string') &&
+      (message['busy'] === undefined || typeof message['busy'] === 'boolean')
     );
   }
 

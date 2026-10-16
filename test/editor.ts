@@ -446,6 +446,48 @@ const HOOKS_GD = [
   '\t\t\treturn _tab(path)',
   '\t\t"tab_close":',
   '\t\t\treturn {"closed": EditorInterface.get_script_editor().close_file(path) == OK}',
+  // What the editor does with the settings it holds on many of its own actions: writes them all
+  // back over project.godot.
+  '\t\t"save_settings":',
+  '\t\t\treturn {"saved": ProjectSettings.save() == OK}',
+  '\t\t"save_scenes":',
+  '\t\t\tEditorInterface.save_all_scenes()',
+  '\t\t\treturn {"saved": true}',
+  // A scan asked for the way a write asks for one, then one started, with the addon's gate read
+  // after each, in one frame.
+  '\t\t"scan_gate":',
+  '\t\t\tvar filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()',
+  '\t\t\tvar scene_file: GDScript = load("res://addons/gdharness_editor/scene_file.gd")',
+  // Found before the scan starts: the search walks the whole editor, which outlasts a small scan.
+  '\t\t\tvar plugin: Node = EditorInterface.get_base_control().get_tree().root.find_child("GdharnessBridgeClient", true, false).get_parent()',
+  '\t\t\tvar idle: bool = not filesystem.is_scanning() and not filesystem.is_importing()',
+  '\t\t\tvar _asked: Variant = scene_file.call("scan_later")',
+  '\t\t\tvar due: bool = scene_file.get("scan_due")',
+  '\t\t\tvar scanning_while_due: bool = filesystem.is_scanning()',
+  '\t\t\tvar turned_away_while_due: bool = plugin.call("turned_away", "add_node")',
+  '\t\t\tfilesystem.scan()',
+  '\t\t\tvar scanning: bool = filesystem.is_scanning()',
+  '\t\t\tvar add_node: bool = plugin.call("turned_away", "add_node")',
+  '\t\t\tvar create_resource: bool = plugin.call("turned_away", "create_resource")',
+  '\t\t\tvar scan_status: bool = plugin.call("turned_away", "scan_status")',
+  '\t\t\tvar playing_status: bool = plugin.call("turned_away", "playing_status")',
+  '\t\t\treturn {',
+  '\t\t\t\t"idle": idle,',
+  '\t\t\t\t"due": due,',
+  '\t\t\t\t"scanningWhileDue": scanning_while_due,',
+  '\t\t\t\t"turnedAwayWhileDue": turned_away_while_due,',
+  '\t\t\t\t"scanning": scanning,',
+  '\t\t\t\t"addNode": add_node,',
+  '\t\t\t\t"createResource": create_resource,',
+  '\t\t\t\t"scanStatus": scan_status,',
+  '\t\t\t\t"playingStatus": playing_status,',
+  // The scan thread clears its own flag, and a small project's scan can end between two reads.
+  '\t\t\t\t"stillScanning": filesystem.is_scanning(),',
+  '\t\t\t}',
+  '\t\t"scan_due":',
+  '\t\t\tvar scene_file: GDScript = load("res://addons/gdharness_editor/scene_file.gd")',
+  '\t\t\tvar due: bool = scene_file.get("scan_due")',
+  '\t\t\treturn {"due": due}',
   '\treturn _report(path)',
   '',
   '',
@@ -1545,6 +1587,25 @@ async function testAScenesInstancedAndPlaced({ call, refusal, project }: Editor)
     assert.equal(get(moved, 'index'), 0, text(moved));
     assert.deepEqual(order(), ['Host', 'Second', 'First', 'Badge'], 'a move among siblings is saved');
 
+    // The tree says which node is an instance, and of what, and says it of nothing else: not the
+    // root, whose file is the scene itself, nor a node the scene declares, nor the instance's own.
+    const tree = await call('scene_tree', host);
+    const instancing = (node: unknown): Array<[string, unknown]> => [
+      [String(get(node, 'path')), get(node, 'instanceOf')],
+      ...asArray(get(node, 'children')).flatMap(instancing),
+    ];
+    assert.deepEqual(
+      instancing(get(tree, 'tree')),
+      [
+        ['.', undefined],
+        ['Second', undefined],
+        ['First', undefined],
+        ['Badge', 'res://bits/badge.tscn'],
+        ['Badge/Caption', undefined],
+      ],
+      text(tree),
+    );
+
     // Each refusal for the reason only it has, and the file left as the last write made it.
     const before = fileText(project, 'bits/host.tscn');
     const badge = { projectPath: project, scenePath: 'res://bits/badge.tscn' };
@@ -2101,6 +2162,113 @@ async function testAHeldSceneIsWrittenFromItsFile({ call, project }: Editor): Pr
 }
 
 /**
+ * A move with the editor open brings the editor along, as a move in its own FileSystem dock does:
+ * the open scenes that moved are named for their new paths, a moved scene the editor holds in its
+ * cache is held at its new path, an open scene the move rewrote is read again, and an autoload the
+ * move rewrote in project.godot is taken from the file. Left holding the old paths, the editor
+ * saved them back: a saved tab recreated the scene at its old path, and a settings save put the
+ * old autoload path back in the file that starts the game.
+ */
+async function testAMoveBringsTheEditorAlong({ call, project }: Editor): Promise<void> {
+  const dir = join(project, 'moving');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'hero.tscn'),
+    '[gd_scene format=3]\n\n[node name="Hero" type="Node2D"]\n\n[node name="Sprite" type="Sprite2D" parent="."]\n',
+  );
+  writeFileSync(
+    join(dir, 'stage.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="PackedScene" path="res://moving/hero.tscn" id="1_hero"]\n\n[node name="Stage" type="Node2D"]\n\n[node name="Hero" parent="." instance=ExtResource("1_hero")]\n',
+  );
+  writeFileSync(join(dir, 'mover.gd'), 'extends Node\n');
+  await call('editor_rescan', { projectPath: project });
+  await call('project_settings', {
+    projectPath: project,
+    op: 'add_autoload',
+    name: 'Mover',
+    path: 'res://moving/mover.gd',
+  });
+  const held = await hook(project, { op: 'hold', path: 'res://moving/hero.tscn' });
+  assert.equal(get(held, 'cached'), true, `the editor should hold the scene: ${JSON.stringify(held)}`);
+  await hook(project, { op: 'open', path: 'res://moving/hero.tscn' });
+  const opened = await hook(project, { op: 'open', path: 'res://moving/stage.tscn' });
+  assert.ok(
+    asArray(get(opened, 'open')).includes('res://moving/stage.tscn'),
+    `both scenes should be open: ${JSON.stringify(opened)}`,
+  );
+
+  const moved = await call('resource_edit', {
+    op: 'move',
+    projectPath: project,
+    resourcePath: 'res://moving',
+    newPath: 'res://moved',
+  });
+  assert.equal(get(moved, 'ok'), true, `the move settled: ${JSON.stringify(moved)}`);
+
+  const tabs = await hook(project, { op: 'report', path: 'res://moved/stage.tscn' });
+  const open = asArray(get(tabs, 'open')).map(String);
+  assert.ok(
+    open.includes('res://moved/stage.tscn') && open.includes('res://moved/hero.tscn'),
+    `the tabs are named for the new paths: ${JSON.stringify(tabs)}`,
+  );
+  assert.ok(!open.some((path) => path.startsWith('res://moving/')), JSON.stringify(tabs));
+  assert.deepEqual(get(tabs, 'children'), ['Hero'], 'the reloaded stage still instances the hero');
+  const holding = await hook(project, { op: 'held', path: 'res://moved/hero.tscn' });
+  assert.deepEqual(
+    get(holding, 'children'),
+    ['Sprite'],
+    `the cached scene is held at its new path: ${JSON.stringify(holding)}`,
+  );
+
+  const autoload = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: 'autoload/Mover',
+    from: 'editor',
+  });
+  assert.equal(get(autoload, 'value'), '*res://moved/mover.gd', JSON.stringify(autoload));
+  const saved = await hook(project, { op: 'save_settings' });
+  assert.equal(get(saved, 'saved'), true, JSON.stringify(saved));
+  assert.match(
+    fileText(project, 'project.godot'),
+    /^Mover="\*res:\/\/moved\/mover\.gd"$/m,
+    'a settings save by the editor keeps the new path',
+  );
+
+  await call('scene_node', {
+    projectPath: project,
+    scenePath: 'res://moved/stage.tscn',
+    op: 'add',
+    nodeType: 'Node2D',
+    nodeName: 'Added',
+  });
+  assert.match(fileText(project, 'moved/stage.tscn'), /path="res:\/\/moved\/hero\.tscn"/);
+  const scenesSaved = await hook(project, { op: 'save_scenes' });
+  assert.equal(get(scenesSaved, 'saved'), true, JSON.stringify(scenesSaved));
+  assert.ok(!existsSync(dir), 'an editor saving every open tab does not recreate the old directory');
+  assert.match(fileText(project, 'moved/stage.tscn'), /path="res:\/\/moved\/hero\.tscn"/);
+
+  assert.deepEqual(
+    asArray(get(moved, 'editor', 'retargetedTabs'))
+      .map(String)
+      .sort(),
+    ['res://moving/hero.tscn', 'res://moving/stage.tscn'],
+    JSON.stringify(get(moved, 'editor')),
+  );
+  assert.deepEqual(
+    get(moved, 'editor', 'reloadedScenes'),
+    ['res://moved/hero.tscn', 'res://moved/stage.tscn'],
+    `every moved tab is read again, which is what names it for its new path: ${JSON.stringify(moved)}`,
+  );
+  assert.ok(
+    asArray(get(moved, 'editor', 'settingsAdopted')).includes('autoload/Mover'),
+    JSON.stringify(get(moved, 'editor')),
+  );
+
+  await call('project_settings', { projectPath: project, op: 'remove_autoload', name: 'Mover' });
+}
+
+/**
  * The editor's own copy of a scene is neither overwritten nor left behind.
  *
  * Measured on 4.7.2: reloading a scene from its file drops the edits the editor holds without a
@@ -2160,6 +2328,70 @@ async function testAnEditInTheEditorIsKept({ call, refusal, project }: Editor): 
 
   // The main scene back in front, as the cases after this one found the editor.
   await hook(project, { op: 'open', path: 'res://main.tscn' });
+}
+
+/**
+ * A scan a call asks for starts after the call, and while a scan runs every call that could save
+ * is turned away.
+ *
+ * A scan's thread writes the editor's file list out as it ends, and each save in the editor
+ * updates that list on the main thread. A scene saved 250 ms after a resource's scan began was
+ * followed by garbage decoded as text and a dropped connection. The hook asks for a scan the way a
+ * write does, reads the gate, then starts one itself and reads it again, all in one frame, which
+ * is the only way to hold a scan still while it is asked about.
+ */
+async function testAWriteWaitsForTheEditorsScan({ call, project }: Editor): Promise<void> {
+  let gate: unknown = null;
+  // An earlier scan can still be running, or over and not yet joined, which makes the hook's own
+  // scan do nothing, and the scan thread can end it between two of the hook's reads. The hook is
+  // asked again until it caught the editor idle and its scan ran through every read.
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    gate = await hook(project, { op: 'scan_gate' });
+    if (get(gate, 'idle') === true && get(gate, 'scanning') === true && get(gate, 'stillScanning') === true) {
+      break;
+    }
+    await delay(250);
+  }
+  assert.deepEqual(
+    [get(gate, 'idle'), get(gate, 'scanning'), get(gate, 'stillScanning')],
+    [true, true, true],
+    `the hook should have caught the editor idle and read the gate while its scan ran: ${JSON.stringify(gate)}`,
+  );
+  assert.deepEqual(
+    [get(gate, 'due'), get(gate, 'scanningWhileDue'), get(gate, 'turnedAwayWhileDue')],
+    [true, false, false],
+    `a scan asked for during a call is due and not started, so the rest of the call can still save: ${JSON.stringify(gate)}`,
+  );
+  assert.deepEqual(
+    [get(gate, 'addNode'), get(gate, 'createResource'), get(gate, 'scanStatus'), get(gate, 'playingStatus')],
+    [true, true, false, false],
+    `while the scan runs, the calls that save are turned away and the ones that wait on it are not: ${JSON.stringify(gate)}`,
+  );
+
+  // The scan left due waits out the hook's own scan, then starts.
+  let after: unknown = null;
+  for (let waited = 0; waited < 10_000; waited += 100) {
+    after = await hook(project, { op: 'scan_due' });
+    if (get(after, 'due') === false) {
+      break;
+    }
+    await delay(100);
+  }
+  assert.equal(
+    get(after, 'due'),
+    false,
+    `the scan asked for was started once the one running ended: ${JSON.stringify(after)}`,
+  );
+
+  // Asked for at once, while that scan may still be running: taken once it is over.
+  const scene = { projectPath: project, scenePath: 'res://scan_gate.tscn' };
+  await call('scene_create', { ...scene, rootNodeType: 'Node2D' });
+  const added = await call('scene_node', { ...scene, op: 'add', nodeType: 'Sprite2D', nodeName: 'Picture' });
+  assert.equal(
+    get(added, 'nodePath'),
+    'Picture',
+    `a write asked for beside a scan is made: ${JSON.stringify(added)}`,
+  );
 }
 
 /**
@@ -4162,6 +4394,14 @@ async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<v
     `every changed script was reloaded, the subclass after its base: ${JSON.stringify(member)}`,
   );
 
+  // An autoload naming the script, which the move rewrites in project.godot and the editor has to
+  // take from there, or it saves the old path back the next time it saves its settings.
+  await call('project_settings', {
+    projectPath: project,
+    op: 'add_autoload',
+    name: 'Speaking',
+    path: 'res://renamed/speaker.gd',
+  });
   const moved = await call('script_edit', {
     op: 'rename',
     projectPath: project,
@@ -4171,6 +4411,18 @@ async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<v
     newScriptPath: 'res://renamed/orator.gd',
   });
   assert.equal(get(moved, 'ok'), true, `the class rename settled: ${JSON.stringify(moved)}`);
+  const autoload = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: 'autoload/Speaking',
+    from: 'editor',
+  });
+  assert.equal(get(autoload, 'value'), '*res://renamed/orator.gd', JSON.stringify(autoload));
+  assert.ok(
+    asArray(get(moved, 'editor', 'settingsAdopted')).includes('autoload/Speaking'),
+    JSON.stringify(get(moved, 'editor')),
+  );
+  await call('project_settings', { projectPath: project, op: 'remove_autoload', name: 'Speaking' });
   assert.equal(get(moved, 'editor', 'stillHolds'), undefined, JSON.stringify(moved));
   const after = await call('editor_rescan', { projectPath: project });
   assert.equal(
@@ -6107,8 +6359,10 @@ async function main(): Promise<void> {
     ['testResourcesOnNodes', testResourcesOnNodes],
     ['testAWriteKeepsWhatTheSceneComesFrom', testAWriteKeepsWhatTheSceneComesFrom],
     ['testAHeldSceneIsWrittenFromItsFile', testAHeldSceneIsWrittenFromItsFile],
+    ['testAMoveBringsTheEditorAlong', testAMoveBringsTheEditorAlong],
     ['testAnEditInTheEditorIsKept', testAnEditInTheEditorIsKept],
     ['testASetIsReadBack', testASetIsReadBack],
+    ['testAWriteWaitsForTheEditorsScan', testAWriteWaitsForTheEditorsScan],
     ['testSignalsAreTheFilesOwn', testSignalsAreTheFilesOwn],
     ['testAnimationEditsLandWhereKept', testAnimationEditsLandWhereKept],
     ['testTilesDrawWhatTheyName', testTilesDrawWhatTheyName],

@@ -19,6 +19,10 @@ extends RefCounted
 
 const PropertyValues = preload("property_values.gd")
 
+## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
+## for the editor's files to settle has to wait through as well.
+static var scan_due: bool = false
+
 var root: Node = null
 var path: String = ""
 var _base_paths: Dictionary = {}
@@ -249,9 +253,42 @@ static func save_packed(packed: PackedScene, scene_path: String) -> Dictionary:
 static func refresh(scene_path: String) -> void:
 	if ResourceLoader.has_cached(scene_path):
 		var _replaced: Resource = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_REPLACE)
-	EditorInterface.get_resource_filesystem().scan()
+	scan_later()
 	if EditorInterface.get_open_scenes().has(scene_path):
 		EditorInterface.reload_scene_from_path(scene_path)
+
+
+## Has the editor scan its files once the call in hand has answered, rather than now.
+##
+## A scan's thread ends by writing the editor's file list to its cache, walking the list as it goes,
+## while each save made in the editor updates an entry of that list on the main thread and frees
+## what the entry held (4.7.2's [code]_save_filesystem_cache[/code] and
+## [code]EditorNode::_resource_saved[/code]). A scene saved 250 ms after a resource's scan began was
+## followed by garbage decoded as text and a dropped connection. Started at the end of the frame,
+## the scan begins after every save the call makes, and the plugin turns away calls that could save
+## until it is over.
+static func scan_later() -> void:
+	if scan_due:
+		return
+	scan_due = true
+	_start_scan.call_deferred()
+
+
+## [method EditorFileSystem.scan] does nothing, and says nothing, while the thread of the scan
+## before it is still to be joined, which is a frame or two after that scan stops reporting itself,
+## so a scan that leaves the editor not scanning is asked for once more once that is over. Asked of
+## a scan that ended within the call, the second costs one more scan.
+static func _start_scan() -> void:
+	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
+	var tree: SceneTree = Engine.get_main_loop()
+	while filesystem.is_scanning() or filesystem.is_importing():
+		await tree.process_frame
+	filesystem.scan()
+	if not filesystem.is_scanning():
+		await tree.process_frame
+		await tree.process_frame
+		filesystem.scan()
+	scan_due = false
 
 
 ## Whether the editor holds unsaved changes to [param scene_path], for a read to say that the file

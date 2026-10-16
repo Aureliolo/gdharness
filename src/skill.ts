@@ -101,6 +101,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | Pick something out of a dropdown | \`runtime_input choose\` on it, by what the item says, rather than a click and keys: the menu opens as a window of its own that an injected key never reaches, so Enter closes it with nothing chosen |
 | Answer a dialog | \`runtime_input click\` on its button, or \`runtime_input key\` with \`keycode\` \`Escape\` to dismiss it: an [AcceptDialog] reads that key itself and never asks the InputMap, so \`ui_cancel\` leaves it standing |
 | Press a bound key | \`runtime_input action\` with the action's name, or \`runtime_input key\` with \`keycode\`, a whole press unless you hold it |
+| Drag, stir, paint or draw a line | \`runtime_input mouse_drag\` from \`x\`, \`y\` to \`toX\`, \`toY\` over \`frames\`, with \`via\` for the points between: one call sends a motion a frame, as a hand does, where a press, a few motions and a release as separate calls is a stroke a game sees as a handful of jumps |
 | Where a 3D node is on screen | \`runtime_inspect\` \`rect\`, rather than unprojecting by hand |
 | Wait for whichever of several screens comes next | \`runtime_wait until\` with \`says\` naming each, separated by \`|\`: \`"*won*|*lost*|*turn 3*"\` is met by the first of them to appear. Read as one glob, the bars were characters no screen says and the wait ran out its whole timeout |
 | Ask the game a question its own code answers | \`runtime_invoke call\` on the method that answers it, reached through what a node holds (\`_ladder:encounter:opponent:most_answered\`), with object arguments given as paths to what the game holds and a list of paths for a list: the game's own rules answer, in the running game, before anything is committed |
@@ -148,9 +149,11 @@ so take it off when the question it was for is answered.
 
 ## Editing
 
-\`scene_tree\` for what a scene holds, rather than what the \`.tscn\` text implies. \`scene_node\`,
-\`scene_signal\` and \`resource_edit\` change it through the editor, so the files keep their
-formatting. \`script_diagnostics\` and \`script_info\` come from the editor's own language server.
+\`scene_tree\` for what a scene holds, rather than what the \`.tscn\` text implies, and
+\`resource_edit read\` for a resource: both read the file through the editor when one serves the
+project and through a headless engine when none does, with the same answer. \`scene_node\`,
+\`scene_signal\` and the other \`resource_edit\` ops but \`move\` change it through the editor, so the
+files keep their formatting. \`script_diagnostics\` and \`script_info\` come from the editor's own language server.
 
 \`project_info\`, \`project_dependencies\`, \`project_settings\`, \`project_import\`,
 \`project_export\`, \`project_test\`, \`script_edit\`, \`script_info structure\` and
@@ -168,6 +171,14 @@ every other occurrence of the word for you to read: a string that is the name wh
 line under \`leftAloneInProse\`, and a local or another class's member of the same name by line
 under \`leftAloneOtherSymbols\`; a common name's lines go to the file \`leftAloneDetail\` names. Pass \`preview\` first on a large rename. If the answer has \`ok: false\`
 beside \`written: true\`, the files were changed and a script did not compile afterwards.
+
+To move or rename a scene, a resource, an image or a directory, use \`resource_edit move\` rather
+than moving the file: it takes the \`.import\` and \`.uid\` along, rewrites every path naming what
+moved in scenes, resources, scripts and \`project.godot\`, and brings an open editor up to it so the
+editor does not save the old paths back. It needs no editor. A scene saved as \`.scn\` or a
+resource saved as \`.res\` cannot be rewritten and is listed under \`leftAlone\`; it still finds
+a moved file by its UID. To move a script with its class, use \`script_edit rename\` with
+\`newScriptPath\`.
 
 Editing a file while a game is running does not change the running game. \`auto_reload\` is an
 editor plugin and reloads into the editor's own process; the game is a separate process holding

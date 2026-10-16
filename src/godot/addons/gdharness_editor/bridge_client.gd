@@ -517,6 +517,20 @@ func _handle_message(json_string: String) -> void:
 			pass
 
 
+## Says [param tool_name] was not run because the editor is scanning or importing, for the server to
+## ask again once that is over. An older server reads it as an ordinary refusal.
+func send_busy(request_id: String, tool_name: String) -> void:
+	_send_message(
+		{
+			"type": "tool_result",
+			"id": request_id,
+			"success": false,
+			"busy": true,
+			"error": "The editor is scanning or importing its files, so %s was not run." % tool_name,
+		}
+	)
+
+
 func send_tool_result(request_id: String, success: bool, result: Variant = null, error: String = "") -> void:
 	var response: Dictionary = {"type": "tool_result", "id": request_id, "success": success}
 

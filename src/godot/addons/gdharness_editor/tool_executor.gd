@@ -95,6 +95,7 @@ func _init_tools() -> void:
 		"rescan_filesystem": [_filesystem_tools, "rescan_filesystem"],
 		"scan_status": [_filesystem_tools, "scan_status"],
 		"reimport_files": [_filesystem_tools, "reimport_files"],
+		"files_moved": [_filesystem_tools, "files_moved"],
 		"global_classes": [_class_tools, "global_classes"],
 		"reload_script": [_class_tools, "reload_script"],
 		# Settings, for a caller that asked the editor rather than the file on disk

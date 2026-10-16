@@ -67,14 +67,17 @@ static func _named(entries: Array[Dictionary], name: String) -> bool:
 
 # Whether each script compiles in a fresh engine, which reads the class cache as it starts and so
 # resolves every class the cache lists. The engine's reasons go to stderr and come back with the
-# answer.
+# answer. It names the scripts it checked rather than counting them, since a caller told one was
+# checked could not say which.
 func check_scripts(params: Dictionary) -> Dictionary:
 	var paths: Array = params.get("paths", [])
+	var checked: Array[String] = []
 	var failed: Array[String] = []
 	for value: Variant in paths:
 		var path: String = str(value)
+		checked.append(path)
 		var script: Script = ResourceLoader.load(path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
 		if not GdscriptAuthoring._parses(script):
 			_log.error("Does not compile: " + path)
 			failed.append(path)
-	return {"checked": paths.size(), "failed": failed}
+	return {"checked": checked, "failed": failed}

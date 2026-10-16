@@ -18,6 +18,7 @@ const AudioBuses = preload("audio_buses.gd")
 const ClassCache = preload("class_cache.gd")
 const ClassDbQueries = preload("classdb_queries.gd")
 const Dependencies = preload("dependencies.gd")
+const FileReads = preload("file_reads.gd")
 const GdscriptAnalysis = preload("gdscript_analysis.gd")
 const GdscriptAuthoring = preload("gdscript_authoring.gd")
 const ImportPipeline = preload("import_pipeline.gd")
@@ -26,6 +27,7 @@ const Log = preload("logger.gd")
 const Plugins = preload("plugins.gd")
 const ProjectConfig = preload("project_config.gd")
 const ProjectDiagnostics = preload("project_diagnostics.gd")
+const Read = preload("reading.gd")
 const RenameChecks = preload("rename_checks.gd")
 const ResourceFiles = preload("resource_files.gd")
 
@@ -137,6 +139,20 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = ResourceFiles.new(_log).get_uid(params)
 		"refresh_class_cache":
 			payload = ClassCache.new(_log).refresh_class_cache(params)
+		"read_scene_tree":
+			payload = _read(
+				FileReads.scene_tree(
+					str(params.get("scene_path", "")),
+					Read.as_int(params.get("depth", -1), -1),
+					Read.as_bool(params.get("include_properties", false))
+				)
+			)
+		"read_resource":
+			payload = _read(
+				FileReads.resource(
+					str(params.get("resource_path", "")), Read.as_bool(params.get("include_defaults", false))
+				)
+			)
 
 		# Import and export pipeline
 		"get_import_status":
@@ -220,3 +236,11 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			_log.error("Unknown operation: " + operation)
 
 	return payload
+
+
+## A read the editor answers too, in the shape an operation answers: its refusal as the run's error.
+func _read(read: Dictionary) -> Dictionary:
+	if not read.get("ok", false):
+		return _log.failure(str(read.get("error", "the read failed")))
+	var _answered: bool = read.erase("ok")
+	return read

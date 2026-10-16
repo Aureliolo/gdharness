@@ -390,6 +390,34 @@ async function main(): Promise<void> {
         `${text(get(tool, 'name'))} is closed`,
       );
     }
+    // An argument only some ops read says which, since the schema cannot: an op names only what it
+    // needs, and editor_launch close refused the projectPath its schema described as for every op.
+    const described = (tool: string, argument: string) =>
+      text(
+        get(
+          tools.find((listed) => get(listed, 'name') === tool),
+          'inputSchema',
+          'properties',
+          argument,
+          'description',
+        ),
+      );
+    assert.match(described('editor_launch', 'projectPath'), /\. Only for op open\.$/, 'one op is named');
+    assert.match(
+      described('scene_node', 'index'),
+      /\. Only for ops add, reparent\.$/,
+      'several ops are named',
+    );
+    assert.match(
+      described('editor_launch', 'hidden'),
+      /\. Only for ops open, restart\.$/,
+      'every op but one',
+    );
+    assert.doesNotMatch(
+      described('scene_node', 'scenePath'),
+      /Only for/,
+      'an argument every op reads names none',
+    );
 
     // Refusals come from the spec, before anything is looked up or spawned.
     const unknownTool = await call('scene_nodes', {});

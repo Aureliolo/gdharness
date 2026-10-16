@@ -14,6 +14,7 @@ const Typing = preload("res://addons/gdharness_runtime/runtime_typing.gd")
 const Checked = preload("checked.gd")
 const Read = preload("res://addons/gdharness_runtime/reading.gd")
 const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
+const Mouse = preload("res://addons/gdharness_runtime/runtime_mouse.gd")
 
 
 ## Counts both halves of a press, which is the only way to see one that is over by the time the
@@ -189,9 +190,9 @@ func _check_mouse(input: InputCommands) -> void:
 	if nested_motion.get("relative", []) != [7.0, 8.0]:
 		_fail("nested motion: %s" % JSON.stringify(nested_motion))
 
-	if input._resolve_mouse_button("WHEEL_UP") != MOUSE_BUTTON_WHEEL_UP:
+	if Mouse.button_of("WHEEL_UP") != MOUSE_BUTTON_WHEEL_UP:
 		_fail("button names are read in any case")
-	if input._resolve_mouse_button(2) != MOUSE_BUTTON_RIGHT:
+	if Mouse.button_of(2) != MOUSE_BUTTON_RIGHT:
 		_fail("a numeric button is taken as it is")
 
 	# A spelling nobody recognises used to come back as the left button, so a right click asked for

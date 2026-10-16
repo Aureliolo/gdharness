@@ -39,7 +39,8 @@ with the engine passed a runtime addon that failed to compile on the Linux engin
 in `test/support/gd` compile under those settings too: one tried in a scratch project with default
 warnings passed there and failed on the leg for discarding what `ItemList.add_item` returns.
 
-`reading.gd` and `serialisation.gd` are edited in `src/godot/operations/` only; `bun run sync:gd`
+The modules listed in `scripts/sync-shared-gd.ts` (`reading.gd`, `serialisation.gd`,
+`property_values.gd` and `file_reads.gd`) are edited in `src/godot/operations/` only; `bun run sync:gd`
 writes the copies inside the addons, and a regression fails on a copy that has drifted. Commit the
 `.gd.uid` Godot writes beside every new addon script, and add a new operations module to the list
 in `test/packaging-consistency.ts`. `test:packaging` checks both and runs only on Linux and macOS,
