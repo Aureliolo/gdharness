@@ -86,6 +86,7 @@ import {
 } from './editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
+import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
 import {
   answersTo,
@@ -174,7 +175,13 @@ import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
 import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
-import { type NameTaken, type RenameOutcome, renameSymbol, writeLeftAloneDetail } from './rename-symbol.js';
+import {
+  type NameTaken,
+  type RenameOutcome,
+  renameSymbol,
+  resourcePathOf,
+  writeLeftAloneDetail,
+} from './rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
 import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
@@ -1916,18 +1923,6 @@ function engineFlagsNote(args: readonly string[]): string | undefined {
   const named = among.join(', ');
   return `${named} ${among.length === 1 ? 'is a flag' : 'are flags'} the engine reads, and args goes to the game after --, where the engine does not read ${among.length === 1 ? 'it' : 'them'}. engineArgs hands the engine its own flags; ${among.length === 1 ? 'leave it' : 'leave them'} in args only for a game that reads ${among.length === 1 ? 'that flag' : 'those flags'} itself.`;
 }
-
-/**
- * What answers without an editor, for an editor tool a caller reached for with none connected.
- *
- * A probe session that had started a game headless asked scene_tree for its nodes and was told to
- * open an editor, which it had been asked not to do, while runtime_inspect tree answers about the
- * running game with no editor at all.
- */
-const EDITOR_FREE_INSTEAD: Readonly<Record<string, string>> = {
-  scene_tree:
-    'runtime_inspect tree reads the nodes of a game that is running, and needs no editor; scene_tree reads a scene file through the editor',
-};
 
 /** What a script tab holding unsaved edits to each of [param scripts] does to what was written. */
 function unsavedInEditorNote(scripts: readonly string[]): string {
@@ -4192,7 +4187,12 @@ class GodotServer {
       case 'scene_create':
         return op === 'create' ? await bridge('create_scene') : await bridge('save_scene');
       case 'scene_tree':
-        return await bridge('list_scene_nodes');
+        return await this.readFromFile(
+          args,
+          'scenePath',
+          'read_scene_tree',
+          async () => await bridge('list_scene_nodes'),
+        );
       case 'scene_node':
         switch (op) {
           case 'add':
@@ -4251,8 +4251,15 @@ class GodotServer {
 
       case 'resource_edit':
         switch (op) {
+          case 'move':
+            return await this.handleMoveFile(args);
           case 'read':
-            return await bridge('read_resource');
+            return await this.readFromFile(
+              args,
+              'resourcePath',
+              'read_resource',
+              async () => await bridge('read_resource'),
+            );
           case 'create':
             return await bridge('create_resource');
           case 'modify':
@@ -4445,9 +4452,12 @@ class GodotServer {
           );
         }
         {
-          // A held press answers once it has let go, so it is given as long as a frames wait of
-          // the same length.
-          const holding = readPositiveNumber(args, 'holdFrames');
+          // A held press answers once it has let go, and a drag once its stroke is over, so each is
+          // given as long as a frames wait of the same length.
+          const holding =
+            op === 'mouse_drag'
+              ? (readPositiveNumber(args, 'frames') ?? 1) + 2
+              : readPositiveNumber(args, 'holdFrames');
           return await this.handleRuntimeCommand(`inject_${op}`, args, {
             tool: 'runtime_input',
             op,
@@ -8376,11 +8386,16 @@ class GodotServer {
     let editorSaysGoing = true;
     let editorAsks = 0;
     const waitBegan = Date.now();
+    // Counted from the run's start rather than from here, since the boot the budget is sized to is
+    // measured from there and the answer says "within" the budget: counted from here, whatever the
+    // start did after the play lengthened the wait unsaid, and a loaded machine that took two
+    // seconds over it found a game announcing two seconds past a five-second budget.
+    const runBegan = Math.min(this.activeProcess?.startedAt ?? waitBegan, waitBegan);
     // Read through a call rather than directly, since the variable is written from the closure
     // below and the type checker reads it as never changing.
     const lastSaid = (): string => (editorSaysGoing ? 'playing' : 'not playing');
     const fresh = await announcedSince(projectPath, before, {
-      budgetMs,
+      budgetMs: Math.max(runBegan + budgetMs - waitBegan, 0),
       // Not a game of this project that somebody else started: for a run the editor plays, one
       // naming another editor as the one that played it, or none where the project's games name
       // theirs; for a run started here, one naming the editor at all, since a game this server
@@ -11873,13 +11888,16 @@ class GodotServer {
       return this.jsonTextResponse({ preview: true, ...outcome.report });
     }
 
+    // A script moved under an autoload is renamed in project.godot too, which an editor serving the
+    // project has to take up or it saves the old path back.
+    const settingsBefore = this.editorHasOpen(projectPath) ? this.settingKeysOf(projectPath) : null;
     try {
       applyRewrites(outcome.rewrites);
     } catch (error) {
       return this.createErrorResponse(`Nothing was renamed: ${errorMessage(error)}`);
     }
 
-    const settled = this.godotBridge.isConnected()
+    const editorSettled = this.godotBridge.isConnected()
       ? await this.settleRenameInEditor(projectPath, outcome.scriptsInOrder, {
           gone: outcome.moved === null ? [] : [outcome.moved.from],
           oldClass: outcome.isClass ? symbol : null,
@@ -11889,6 +11907,30 @@ class GodotServer {
           rebuildCache: outcome.isClass || outcome.moved !== null,
           moved: outcome.moved !== null,
         });
+    const settings =
+      settingsBefore === null ? null : await this.editorTakesSettingsWritten(projectPath, settingsBefore);
+    const settled =
+      settings === null
+        ? editorSettled
+        : {
+            ok: editorSettled.ok && settings.ok,
+            report: {
+              ...editorSettled.report,
+              editor: {
+                ...asParams(editorSettled.report['editor']),
+                ...Object.fromEntries(
+                  Object.entries(settings.report).filter(([key]) => key !== 'settingsNote'),
+                ),
+              },
+              ...(typeof settings.report['settingsNote'] === 'string'
+                ? {
+                    note: [readString(editorSettled.report, 'note'), settings.report['settingsNote']]
+                      .filter((one) => one !== undefined)
+                      .join(' '),
+                  }
+                : {}),
+            },
+          };
     // ok answers for the whole rename, the compile included, so a false one beside a list of
     // changed files has to say that the files were still written, or it reads as nothing done.
     const said = readString(settled.report, 'note');
@@ -11905,6 +11947,224 @@ class GodotServer {
       ...settled.report,
       ...(leftChanged === undefined ? {} : { note: leftChanged }),
     });
+  }
+
+  /**
+   * resource_edit move: a file with its .import and .uid, or a directory with everything in it, and
+   * every path in the project naming one of them rewritten to name where it went. Made from the
+   * files, so it needs no editor. An editor serving the project is then brought up to it the way its
+   * own FileSystem dock brings itself up after a move, since it holds the old paths in its open
+   * scenes, its cached resources and the project settings it would save back over the file.
+   */
+  /**
+   * scene_tree and resource_edit read, which only read a file: through the editor serving the
+   * project when there is one, so the answer says whether it holds unsaved changes, and otherwise by
+   * a headless engine running the editor's own read on the file.
+   *
+   * An editor this server opened is waited for first, since one importing the project as it starts
+   * is no engine to boot a second beside; one that never connects leaves the file to read all the
+   * same.
+   */
+  private async readFromFile(
+    args: OperationParams,
+    pathKey: 'scenePath' | 'resourcePath',
+    operation: 'read_scene_tree' | 'read_resource',
+    throughTheEditor: () => Promise<ToolResponse>,
+  ): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const projectPath = project.value.path;
+    await this.waitForTheEditorOpenedHere(args, []);
+    if (this.editorHasOpen(projectPath)) {
+      return await throughTheEditor();
+    }
+    const where = resolveWithinProject(projectPath, readNonEmptyString(args, pathKey) ?? '');
+    if (!where.ok) {
+      return this.createErrorResponse(where.reason);
+    }
+    const file = resourcePathOf(projectPath, where.absolutePath);
+    if (file === null) {
+      return this.createErrorResponse(`${pathKey} must name a file inside the project.`);
+    }
+    const params: OperationParams =
+      operation === 'read_scene_tree'
+        ? {
+            scenePath: file,
+            depth: readNumber(args, 'depth') ?? -1,
+            includeProperties: readBoolean(args, 'includeProperties') ?? false,
+          }
+        : { resourcePath: file, includeDefaults: readBoolean(args, 'includeDefaults') ?? false };
+    const outcome = await this.operation(operation, params, projectPath);
+    if (!outcome.ok) {
+      return this.answer(outcome);
+    }
+    return this.jsonTextResponse({
+      ok: true,
+      ...outcome.payload,
+      readBy:
+        'a headless engine, since no editor serves this project; unsaved changes in an editor are not seen',
+      ...engineExtras(outcome),
+    });
+  }
+
+  private async handleMoveFile(given: OperationParams): Promise<ToolResponse> {
+    const project = this.project(given);
+    if (!project.ok) {
+      return project.response;
+    }
+    const contained = this.containProjectFiles(given);
+    if (!contained.ok) {
+      return contained.response;
+    }
+    const args = contained.value;
+    const projectPath = project.value.path;
+    const from = resolveWithinProject(projectPath, readNonEmptyString(args, 'resourcePath') ?? '');
+    if (!from.ok) {
+      return this.createErrorResponse(from.reason);
+    }
+    const to = resolveWithinProject(projectPath, readNonEmptyString(args, 'newPath') ?? '');
+    if (!to.ok) {
+      return this.createErrorResponse(to.reason);
+    }
+    const waited = await this.waitForTheEditorOpenedHere(args, []);
+    if (waited !== null) {
+      return waited;
+    }
+    const outcome = planFileMove(projectPath, from.absolutePath, to.absolutePath);
+    if (!outcome.ok) {
+      return this.createErrorResponse(outcome.reason, outcome.advice ?? []);
+    }
+    if (outcome.detail !== null) {
+      const file = writeLeftAloneDetail(projectPath, 'move', outcome.detail);
+      outcome.report['leftAloneDetail'] = {
+        file,
+        note: `Too many lines were left alone to list here: every comment, documentation line, string and text file line naming the moved path that is not a path the engine reads is in ${file} with its text. The newest ten of these files are kept and older ones removed as new ones are written.`,
+        ...asParams(outcome.report['leftAloneDetail']),
+      };
+    }
+    if (readBoolean(args, 'preview') === true) {
+      return this.jsonTextResponse({ preview: true, ...outcome.report });
+    }
+
+    const served = this.editorHasOpen(projectPath);
+    const settingsBefore = served ? this.settingKeysOf(projectPath) : null;
+    try {
+      applyFileMove(outcome);
+    } catch (error) {
+      return this.createErrorResponse(`Nothing was moved: ${errorMessage(error)}`);
+    }
+    // With no editor, the import pass rebuilding the UID table writes the class cache as well, so a
+    // moved global class needs no rebuild of its own.
+    const settled = served
+      ? await this.settleMoveInEditor(projectPath, outcome, settingsBefore)
+      : await this.settleRenameOnDisk(projectPath, [...outcome.scriptsInOrder], {
+          rebuildCache: false,
+          moved: true,
+        });
+    const said = readString(settled.report, 'note');
+    const note = settled.ok
+      ? said
+      : [
+          'The move was made: every file under moved and changed is where and as shown there and is left that way. ok is false for what came after the move, said under editor or compiled.',
+          ...(said === undefined ? [] : [said]),
+        ].join(' ');
+    return this.jsonTextResponse({
+      ok: settled.ok,
+      written: true,
+      ...outcome.report,
+      ...settled.report,
+      ...(note === undefined ? {} : { note }),
+    });
+  }
+
+  /**
+   * After a move with the editor open, what its own FileSystem dock does after one: the cached
+   * resources and the open scenes named for where they now are, the scenes rewritten on disk read
+   * again, and the project settings the move rewrote taken from the file. Then the scan and the
+   * script reloads a rename ends with.
+   */
+  private async settleMoveInEditor(
+    projectPath: string,
+    outcome: Extract<MoveOutcome, { ok: true }>,
+    settingsBefore: ReadonlyMap<string, unknown> | null,
+  ): Promise<{ ok: boolean; report: Record<string, unknown> }> {
+    const moved = outcome.moved.map(({ from, to }) => ({ from, to }));
+    const told: OperationParams = {};
+    const refused = await this.editorTakes('files_moved', { moved, changed: outcome.scenesChanged }, told);
+    const settings = await this.editorTakesSettingsWritten(projectPath, settingsBefore);
+    const settled = await this.settleRenameInEditor(projectPath, outcome.scriptsInOrder, {
+      gone: moved.map((one) => one.from),
+      oldClass: null,
+      newClass: null,
+    });
+    const unsavedScenes = (readArray(told, 'unsavedScenes') ?? []).map(String);
+    const editorNote = readString(refused, 'editorNote');
+    const settledNote = readString(settled.report, 'note');
+    const notes = [
+      ...(editorNote === undefined ? [] : [editorNote]),
+      ...(unsavedScenes.length > 0
+        ? [
+            `${unsavedScenes.join(', ')} ${unsavedScenes.length === 1 ? 'is' : 'are'} open in the editor with unsaved edits, so ${unsavedScenes.length === 1 ? 'it was' : 'they were'} not read again from the file: the editor names the moved files there by their new paths, and saving keeps them.`,
+          ]
+        : []),
+      ...(typeof settings.report['settingsNote'] === 'string' ? [settings.report['settingsNote']] : []),
+      ...(settledNote === undefined ? [] : [settledNote]),
+    ];
+    const { settingsNote: _said, ...adopted } = settings.report;
+    return {
+      ok: editorNote === undefined && settings.ok && settled.ok,
+      report: {
+        editor: {
+          ...asParams(settled.report['editor']),
+          retargetedTabs: (readArray(told, 'retargetedTabs') ?? []).map(String),
+          reloadedScenes: (readArray(told, 'reloadedScenes') ?? []).map(String),
+          ...(unsavedScenes.length > 0 ? { unsavedScenes } : {}),
+          ...adopted,
+        },
+        ...(notes.length > 0 ? { note: notes.join(' ') } : {}),
+      },
+    };
+  }
+
+  /**
+   * The settings a write to project.godot changed, handed to the editor serving the project to
+   * take from the file, as a project_settings write hands them. Left out, the editor goes on holding
+   * the old values and writes them back over the file the next time it saves the project settings,
+   * which for a moved main scene or autoload undoes the move in the file that starts the game.
+   */
+  private async editorTakesSettingsWritten(
+    projectPath: string,
+    before: ReadonlyMap<string, unknown> | null,
+  ): Promise<{ ok: boolean; report: Record<string, unknown> }> {
+    const changed = changedSettings(before, this.settingKeysOf(projectPath));
+    if (changed === null) {
+      return {
+        ok: false,
+        report: {
+          settingsNote:
+            'project.godot could not be read on both sides of the write, so what it changed is unknown and the open editor was not told: it may still hold the old values and write them back the next time it saves. editor_launch restart loads the file.',
+        },
+      };
+    }
+    if (changed.length === 0) {
+      return { ok: true, report: {} };
+    }
+    const adopting: OperationParams = {};
+    const taken = await this.editorTakes('adopt_project_settings', { settings: changed }, adopting);
+    if (taken['editorNote'] !== undefined) {
+      return { ok: false, report: { settingsNote: taken['editorNote'] } };
+    }
+    const adopted = Array.isArray(adopting['adopted']) ? adopting['adopted'].map(String) : [];
+    const passedOver = changed.filter((name) => !adopted.includes(name));
+    return {
+      ok: passedOver.length === 0,
+      report: {
+        settingsAdopted: adopted,
+        ...(passedOver.length > 0 ? { settingsPassedOver: passedOver } : {}),
+      },
+    };
   }
 
   /**
@@ -12255,12 +12515,7 @@ class GodotServer {
   ): Promise<ToolResponse | BridgeTimeout> {
     const named = askedAs ?? toolName;
     if (!this.godotBridge.isConnected()) {
-      const tool = askedAs?.split(' ')[0];
-      const alternative =
-        tool !== undefined && Object.hasOwn(EDITOR_FREE_INSTEAD, tool)
-          ? EDITOR_FREE_INSTEAD[tool]
-          : undefined;
-      const refused = await this.noEditorYet(args, alternative === undefined ? [] : [alternative]);
+      const refused = await this.noEditorYet(args, []);
       if (refused !== null) {
         return refused;
       }
@@ -12309,8 +12564,22 @@ class GodotServer {
           shippedEditorDigest(),
           this.editorCodeOnDisk(),
         );
+        // The addon this server ships has every command, so one of the same build lacking one did not
+        // load all of itself: a script of it that fails to compile in this engine leaves the commands
+        // it holds unregistered, and telling the caller to update an addon that is current sent them
+        // to restart into the same failure.
+        if (remedy === undefined) {
+          const log =
+            open === undefined || open === ''
+              ? "the editor's Output panel"
+              : `${editorLogPath(open)} for an editor editor_launch opened, or the Output panel of one opened by hand`;
+          return this.createErrorResponse(
+            `The editor's gdharness addon is this ${SERVER_VERSION} server's own and still has no ${named}, so a script of the addon failed to load in this editor and the commands it holds were never registered. The script and the error are in ${log}.`,
+            ['editor_status says which addon the editor holds'],
+          );
+        }
         return this.createErrorResponse(
-          `The editor's gdharness addon is older than this ${SERVER_VERSION} server and has no ${named}, so it cannot answer this call. ${remedy ?? 'Restart it with editor_launch restart to load the addon the project holds.'}`,
+          `The editor's gdharness addon is older than this ${SERVER_VERSION} server and has no ${named}, so it cannot answer this call. ${remedy}`,
           ['editor_status says which addon the editor holds'],
         );
       }

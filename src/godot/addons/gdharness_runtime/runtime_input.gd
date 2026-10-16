@@ -14,6 +14,7 @@ const Read = preload("reading.gd")
 const Hover = preload("runtime_hover.gd")
 const Screen = preload("runtime_screen.gd")
 const Targets = preload("runtime_targets.gd")
+const Mouse = preload("runtime_mouse.gd")
 
 ## The distance from a capital letter to its small one in Unicode. A keycode holds the capital.
 const TO_SMALL: int = 32
@@ -273,22 +274,6 @@ func _glyph_of(keycode: Key, shifted: bool) -> int:
 	return keycode
 
 
-## A point the tool schema sends as two flat numbers, or the older form of one [x, y] value.
-## Answers a Vector2, or the String that says what was wrong with it.
-func _read_point(params: Dictionary, x_key: String, y_key: String, pair_key: String) -> Variant:
-	if params.has(x_key) and params.has(y_key):
-		return Vector2(Read.as_float(params[x_key]), Read.as_float(params[y_key]))
-	var raw: Variant = params.get(pair_key, Vector2.ZERO)
-	if raw is Vector2:
-		return raw
-	if raw is Array:
-		var pair: Array = raw
-		if pair.size() < 2:
-			return "%s array must contain [x, y]" % pair_key
-		return Vector2(Read.as_float(pair[0]), Read.as_float(pair[1]))
-	return "%s must be Vector2 or [x, y]" % pair_key
-
-
 ## Clicks a mouse button at a position, and lets go of it again unless asked to hold it.
 ##
 ## The whole click by default, for the reason [method inject_action] is the whole press, and
@@ -298,20 +283,20 @@ func _read_point(params: Dictionary, x_key: String, y_key: String, pair_key: Str
 ## `pressed` is how a caller asks for one half, the way a drag is made: true holds the button down,
 ## false lets go of one being held.
 func inject_mouse_click(params: Dictionary) -> Dictionary:
-	var point: Variant = _read_point(params, "x", "y", "position")
+	var point: Variant = Mouse.read_point(params, "x", "y", "position")
 	if point is String:
 		return {"type": "error", "message": point}
 	var position: Vector2 = point
-	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
+	var button: int = Mouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
-		return _no_such_button(params.get("button"))
+		return Mouse.no_such_button(params.get("button"))
 	var held: bool = Read.as_bool(params.get("pressed", true), true)
 	var double: bool = Read.as_bool(params.get("doubleClick", false))
 	# A wheel step is a press and a release together, as a mouse sends one: there is no holding a
 	# wheel. A lone wheel press left the viewport's mouse focus on the control that took it, with
 	# the wheel's bit in the focus mask, and every click after it landed on that control rather
 	# than under the pointer, landing true and doing nothing, until a release was sent by hand.
-	var notch: bool = held and _mask_of(button) == 0
+	var notch: bool = held and Mouse.mask_of(button) == 0
 	var whole: bool = notch or not params.has("pressed")
 	var holding: Variant = Values.held_for(params)
 	if holding is String:
@@ -363,7 +348,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 ## would have carried. A relative the caller gives is kept, since a game may want to read a motion
 ## the position does not show.
 func inject_mouse_motion(params: Dictionary) -> Dictionary:
-	var point: Variant = _read_point(params, "x", "y", "position")
+	var point: Variant = Mouse.read_point(params, "x", "y", "position")
 	if point is String:
 		return {"type": "error", "message": point}
 	var position: Vector2 = point
@@ -373,7 +358,7 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 			Read.as_float(params.get("relativeX", 0.0)), Read.as_float(params.get("relativeY", 0.0))
 		)
 	elif params.has("relative"):
-		var movement: Variant = _read_point(params, "relativeX", "relativeY", "relative")
+		var movement: Variant = Mouse.read_point(params, "relativeX", "relativeY", "relative")
 		if movement is String:
 			return {"type": "error", "message": movement}
 		relative = movement
@@ -388,6 +373,69 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 				"input_type": "mouse_motion",
 				"position": [position.x, position.y],
 				"relative": [relative.x, relative.y]
+			},
+			supplied
+		)
+	)
+
+
+## Drags with a mouse button from one point to another, through any points between, as a hand does:
+## the press, one motion each process frame along the stroke, and the release where the last motion
+## left the pointer, a frame after it. A game acting on every motion it gets sees as many as a real
+## stroke over that many frames sends. Made of calls, a stroke cost a round trip a motion, so the
+## one a caller could afford was three or four motions where a hand sends dozens, and a stir that
+## moves a few cells a motion moved two for a stroke.
+##
+## Each motion goes in a frame of its own because the engine merges the motions it is given within
+## one frame into a single event, as it does a real mouse's, and a game counting motions counts one.
+func inject_mouse_drag(params: Dictionary) -> Dictionary:
+	var stroke: Variant = Mouse.stroke_of(params)
+	if stroke is String:
+		return {"type": "error", "message": stroke}
+	var points: Array[Vector2] = stroke
+	var button: int = Mouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))
+	if button < 0:
+		return Mouse.no_such_button(params.get("button"))
+	var own: int = Mouse.mask_of(button)
+	if own == 0:
+		return {
+			"type": "error",
+			"message": "A wheel step has no held position to drag from: give left, right or middle."
+		}
+	var frames: int = Read.as_int(params.get("frames", 0), 0)
+	if frames < 1 or frames > Values.MOST_HELD:
+		return {
+			"type": "error", "message": "frames is %d, and it takes 1 to %d." % [frames, Values.MOST_HELD]
+		}
+
+	var lengths: Array[float] = Mouse.lengths_of(points)
+	var start: Vector2 = points[0]
+	var end: Vector2 = points[points.size() - 1]
+	var _moved: Vector2 = _arrive(start)
+	var supplied: bool = _follow_in_the_window(start)
+	Input.parse_input_event(_button(start, button, true, false))
+	var travelled: Vector2 = Vector2.ZERO
+	for step: int in range(1, frames + 1):
+		await _host.get_tree().process_frame
+		var at: Vector2 = Mouse.along(points, lengths, float(step) / frames)
+		var relative: Vector2 = _arrive(at)
+		travelled += relative
+		supplied = _follow_in_the_window(at) or supplied
+		Input.parse_input_event(_motion(at, relative))
+	await _host.get_tree().process_frame
+	Input.parse_input_event(_button(end, button, false, false))
+	await _host.get_tree().process_frame
+
+	return _pointer_noted(
+		_hover_noted(
+			{
+				"type": "input_injected",
+				"input_type": "mouse_drag",
+				"from": [start.x, start.y],
+				"to": [end.x, end.y],
+				"button": button,
+				"motions": frames,
+				"relative_total": [travelled.x, travelled.y],
 			},
 			supplied
 		)
@@ -546,9 +594,9 @@ func click(params: Dictionary) -> Dictionary:
 	var out_there: String = _out_of_reach(control, node_path, local, reached, scrolled)
 	if not out_there.is_empty():
 		return {"type": "error", "message": out_there}
-	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
+	var button: int = Mouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
-		return _no_such_button(params.get("button"))
+		return Mouse.no_such_button(params.get("button"))
 	var double: bool = Read.as_bool(params.get("double", false))
 
 	# Pushed into the viewport rather than through Input: Input accumulates events and flushes
@@ -801,9 +849,9 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 			)
 		}
 	var position: Vector2 = arriving.get_final_transform() * reached_point
-	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
+	var button: int = Mouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
-		return _no_such_button(params.get("button"))
+		return Mouse.no_such_button(params.get("button"))
 	var double: bool = Read.as_bool(params.get("double", false))
 
 	arriving.push_input(_motion(position, _arrive(position)))
@@ -923,53 +971,6 @@ func _button(position: Vector2, button: int, pressed: bool, double: bool) -> Inp
 	event.pressed = pressed
 	event.double_click = double
 	var held: int = Input.get_mouse_button_mask()
-	var own: int = _mask_of(button)
+	var own: int = Mouse.mask_of(button)
 	event.button_mask = (held | own) if pressed else (held & ~own)
 	return event
-
-
-## The mask bit for a button, which is the engine's own mapping: left 1, right 2, middle 4, the
-## two extra buttons 128 and 256. The wheel steps between have none.
-func _mask_of(button: int) -> int:
-	if button >= MOUSE_BUTTON_WHEEL_UP and button <= MOUSE_BUTTON_WHEEL_RIGHT:
-		return 0
-	return 1 << (button - 1)
-
-
-## What to say about a name that is not a mouse button, with the ones that are.
-func _no_such_button(named: Variant) -> Dictionary:
-	return {
-		"type": "error",
-		"message":
-		(
-			"%s is not a mouse button. It takes: left, right, middle, wheel_up, wheel_down, or the number of one."
-			% JSON.stringify(named)
-		)
-	}
-
-
-## The button [param raw] names, or -1 for a name that is not one of them.
-##
-## A name nobody recognises used to come back as the left button, so a right click asked for by a
-## spelling this does not know went to the left button and reported the left button. The caller
-## reads the answer and believes it, which is the whole reason nothing here guesses.
-func _resolve_mouse_button(raw: Variant) -> int:
-	if raw is String:
-		var named: String = raw
-		match named.to_lower():
-			"left":
-				return MOUSE_BUTTON_LEFT
-			"right":
-				return MOUSE_BUTTON_RIGHT
-			"middle":
-				return MOUSE_BUTTON_MIDDLE
-			"wheel_up", "wheelup":
-				return MOUSE_BUTTON_WHEEL_UP
-			"wheel_down", "wheeldown":
-				return MOUSE_BUTTON_WHEEL_DOWN
-			_:
-				return -1
-	# The engine's buttons run from 1 to 9: 0 is MOUSE_BUTTON_NONE, which no event carries, and a
-	# number past the two extra buttons names nothing a mask bit can be made for.
-	var number: int = Read.as_int(raw, -1)
-	return number if number >= MOUSE_BUTTON_LEFT and number <= MOUSE_BUTTON_XBUTTON2 else -1
