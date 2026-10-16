@@ -1512,6 +1512,41 @@ function testOperations(godotPath: string, projectDir: string): void {
     JSON.stringify(boundTo),
   );
   assert.match(String(get(boundTo, 'text')), /Space/, JSON.stringify(boundTo));
+  assert.equal(get(action, 'was_new'), true, JSON.stringify(action));
+  assert.equal(get(action, 'old_events'), undefined, JSON.stringify(action));
+
+  // Adding an action that exists rebinds it: the old events go, and the answer says what they were.
+  const rebound = operation('add_input_action', {
+    action_name: 'fixture_jump',
+    events: [{ type: 'key', keycode: 'W' }],
+    deadzone: 0.2,
+  });
+  assert.deepEqual(
+    [get(rebound, 'was_new'), get(rebound, 'old_deadzone'), get(rebound, 'events_count')],
+    [false, 0.5, 1],
+    JSON.stringify(rebound),
+  );
+  const oldEvents = asArray(get(rebound, 'old_events'));
+  assert.equal(oldEvents.length, 1, JSON.stringify(rebound));
+  assert.deepEqual(
+    [get(oldEvents[0], 'class_name'), get(oldEvents[0], 'keycode'), get(oldEvents[0], 'ctrl_pressed')],
+    ['InputEventKey', 32, true],
+    JSON.stringify(rebound),
+  );
+  assert.match(String(get(oldEvents[0], 'text')), /Space/, JSON.stringify(rebound));
+  // One of the engine's own actions, which only add_input_action can change, has the engine's
+  // bindings until then, and those are what it answers as replaced.
+  const beforeUi = readFileSync(projectFile, 'utf8');
+  const accept = operation('add_input_action', {
+    action_name: 'ui_accept',
+    events: [{ type: 'key', keycode: 'E' }],
+  });
+  assert.equal(get(accept, 'was_new'), false, JSON.stringify(accept));
+  assert.ok(
+    asArray(get(accept, 'old_events')).some((event) => String(get(event, 'text')).includes('Enter')),
+    `the engine binds ui_accept to Enter: ${JSON.stringify(accept)}`,
+  );
+  writeFileSync(projectFile, beforeUi);
 
   // Audio buses live in the AudioServer and only survive the run if the layout is saved. Before any
   // change there is no layout file, and the setting names its path all the same.
