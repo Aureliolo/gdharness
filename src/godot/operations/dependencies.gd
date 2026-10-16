@@ -421,8 +421,8 @@ func _analyze_resource(path: String, current_depth: int, walk: DependencyWalk) -
 		# looked for that: asked what a script depends on, the answer left out the script it typed a
 		# variable with, while asking what used that script named this one.
 		if path.get_extension() == "gd":
-			var classes: Dictionary = _classes()
-			for used: String in _classes_used(content, classes):
+			var classes: Dictionary = classes_declared()
+			for used: String in classes_used_in(content, classes):
 				_depend(deps, path, str(classes[used]), used, current_depth, walk)
 
 	walk.path_stack.pop_back()
@@ -456,8 +456,8 @@ func _depend(
 	deps.append(dep_info)
 
 
-# Every class_name the project's scripts declare, with the script declaring it.
-func _classes() -> Dictionary:
+## Every class_name the project's scripts declare, with the script declaring it.
+func classes_declared() -> Dictionary:
 	if _classes_read:
 		return _classes_declared
 	_classes_read = true
@@ -468,9 +468,9 @@ func _classes() -> Dictionary:
 	return _classes_declared
 
 
-# The names in [param classes] that the code in [param content] uses, in the order first used: words
-# outside strings and comments, so a class named in prose or in a message is not a use of it.
-static func _classes_used(content: String, classes: Dictionary) -> Array[String]:
+## The names in [param classes] that the code in [param content] uses, in the order first used: words
+## outside strings and comments, so a class named in prose or in a message is not a use of it.
+static func classes_used_in(content: String, classes: Dictionary) -> Array[String]:
 	var used: Array[String] = []
 	if classes.is_empty():
 		return used

@@ -3146,6 +3146,11 @@ async function testTheLanguageServerOfAnotherProjectIsRefused(): Promise<void> {
             `naming the project it serves and the one asked about: ${said}`,
           );
           assert.match(said, /editor_launch opens this project's own editor/, `with what to do: ${said}`);
+          assert.doesNotMatch(
+            said,
+            /editor_status names the editor on the bridge/,
+            `and not a status call, with no editor on the bridge for it to name: ${said}`,
+          );
           assert.equal(
             seen.filter((message) => message.method === 'textDocument/didOpen').length,
             0,
@@ -17591,7 +17596,8 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       },
     );
 
-    // Nobody listening: refused once, as the call for one script is.
+    // Nobody listening and no engine to compile the scripts instead: refused once, with both reasons,
+    // as the call for one script is.
     const closed = new ServerProcess({
       env: {
         GDHARNESS_BRIDGE_PORT: String(await reservePort()),
@@ -17612,13 +17618,128 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
             60_000,
           ),
         ) ?? '';
-      assert.match(refused, /^Diagnostics unavailable: Godot LSP is unavailable on port \d+/, refused);
+      assert.match(
+        refused,
+        /^Diagnostics unavailable: Godot LSP is unavailable on port \d+.* No headless engine could compile the scripts instead: .*gdharness-no-such-godot/s,
+        refused,
+      );
       assert.doesNotMatch(refused, /"scripts"/, refused);
     } finally {
       await closed.stop();
     }
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * With no language server of the project to ask, the scripts are compiled by a headless engine and
+ * answered in the language server's shape, saying so. The tool used to refuse here, so a caller
+ * with no editor open had no way to learn that a script did not compile short of running the game.
+ */
+async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('engine diagnostics regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-diagnostics-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-engine-diagnostics-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Checked"\n',
+  );
+  mkdirSync(join(project, 'checked'));
+  writeFileSync(
+    join(project, 'checked', 'broken.gd'),
+    'extends Node\n\n\nfunc hit() -> void:\n\trage()\n\tprint(undefined_thing)\n',
+  );
+  writeFileSync(
+    join(project, 'checked', 'dependent.gd'),
+    'extends Node\n\nconst Broken = preload("res://checked/broken.gd")\n',
+  );
+  writeFileSync(join(project, 'checked', 'fine.gd'), 'extends Node\n');
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: engine,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+    },
+  });
+  const diagnose = async (scriptPath: unknown): Promise<JsonRpcMessage> =>
+    server.request(
+      'tools/call',
+      { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  try {
+    await server.initialize('regression-test');
+    const one = await diagnose('checked/broken.gd');
+    const shown = textOf(one) ?? JSON.stringify(one);
+    const answered = parseTextContent(one);
+    assert.deepEqual(
+      [
+        get(answered, 'scriptPath'),
+        get(answered, 'clean'),
+        get(answered, 'errors'),
+        get(answered, 'warnings'),
+      ],
+      ['checked/broken.gd', false, 2, null],
+      `one script compiled by the engine, its warnings unread rather than none: ${shown}`,
+    );
+    assert.deepEqual(
+      get(answered, 'diagnostics'),
+      [
+        { severity: 'error', message: 'Parse Error: Function "rage()" not found in base self.', line: 5 },
+        {
+          severity: 'error',
+          message: 'Parse Error: Identifier "undefined_thing" not declared in the current scope.',
+          line: 6,
+        },
+      ],
+      `each error at its line: ${shown}`,
+    );
+    assert.equal(get(answered, 'checkedBy'), 'engine', shown);
+    assert.match(text(get(answered, 'languageServer')), /^Godot LSP is unavailable on port \d+/, shown);
+    assert.match(
+      text(get(answered, 'note')),
+      /^No language server of this project's editor answered, so a headless engine compiled the scripts .* warnings is null rather than 0\. editor_launch with hidden: true/,
+      shown,
+    );
+
+    const folder = await diagnose('checked');
+    const all = parseTextContent(folder);
+    const said = textOf(folder) ?? JSON.stringify(folder);
+    assert.deepEqual(
+      [
+        get(all, 'clean'),
+        get(all, 'scriptsChecked'),
+        get(all, 'errors'),
+        get(all, 'warnings'),
+        get(all, 'nothingReported'),
+        get(all, 'checkedBy'),
+      ],
+      [false, 3, 3, null, ['checked/fine.gd'], 'engine'],
+      `a folder compiled whole, an engine past each failure, the clean script named apart: ${said}`,
+    );
+    const dependent = asArray(get(all, 'scripts')).find(
+      (entry) => get(entry, 'scriptPath') === 'checked/dependent.gd',
+    );
+    assert.deepEqual(
+      [get(dependent, 'diagnostics'), get(dependent, 'dependenciesWithErrors')],
+      [
+        [{ severity: 'error', message: 'Compile Error: Failed to compile depended scripts.' }],
+        ['res://checked/broken.gd'],
+      ],
+      `a script failing for what it loads says which, without a line of its own: ${said}`,
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
   }
 }
 
@@ -26052,8 +26173,9 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
   );
   writeFileSync(
     join(project, 'main.tscn'),
-    '[gd_scene load_steps=3 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n' +
-      '[ext_resource type="Script" path="res://page.gd" id="2"]\n\n' +
+    '[gd_scene load_steps=4 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n' +
+      '[ext_resource type="Script" path="res://page.gd" id="2"]\n' +
+      '[ext_resource type="Script" path="res://volume.gd" id="3"]\n\n' +
       '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
       '[node name="Page" type="Control" parent="."]\noffset_right = 200.0\noffset_bottom = 100.0\n' +
       'focus_mode = 2\naccessibility_name = "Page"\nscript = ExtResource("2")\n\n' +
@@ -26076,7 +26198,22 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       'text = "Beneath words, Above words"\n\n' +
       // Named so its path begins with the log's, which a narrowing to the log must not take.
       '[node name="Logbook" type="Label" parent="."]\noffset_top = 270.0\noffset_right = 300.0\noffset_bottom = 293.0\n' +
-      'text = "Logbook words"\n',
+      'text = "Logbook words"\n\n' +
+      // A slider whose game says its value in words, as fantasy-guild-manager's volume does.
+      '[node name="Volume" type="HSlider" parent="."]\noffset_top = 310.0\noffset_right = 200.0\noffset_bottom = 330.0\n' +
+      'value = 75.0\nscript = ExtResource("3")\n',
+  );
+  writeFileSync(
+    join(project, 'volume.gd'),
+    [
+      'extends HSlider',
+      '',
+      '',
+      'func _notification(what: int) -> void:',
+      '\tif what == NOTIFICATION_ACCESSIBILITY_UPDATE:',
+      '\t\tDisplayServer.accessibility_update_set_value(get_accessibility_element(), "%d%%" % roundi(value))',
+      '',
+    ].join('\n'),
   );
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
@@ -26155,6 +26292,7 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
         { nodePath: '/root/Main/Log' },
         { says: 'Above words' },
         { nodePath: '/root/Main/Page', properties: ['role', 'name'], limit: 2 },
+        { says: '75%', properties: ['node', 'value_text'] },
       ],
     );
     stopped = true;
@@ -26264,6 +26402,12 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       '/root/Main/Caption',
       `the Label over them is its own element: ${shown}`,
     );
+    const volume = children.find((child) => get(child, 'node') === '/root/Main/Volume');
+    assert.deepEqual(
+      [get(volume, 'role'), get(volume, 'value'), get(volume, 'value_text'), get(volume, 'range')],
+      ['slider', 75, '75%', [0, 100]],
+      `the slider's number, and beside it the words a reader speaks for it: ${shown}`,
+    );
     assert.equal(get(tree, 'node_note'), undefined, shown);
     assert.equal(get(tree, 'description_note'), undefined, shown);
     assert.deepEqual(
@@ -26278,7 +26422,7 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
     );
 
     // Narrowed: one node's elements, one element by its words, and the fields and count cut.
-    const [underLog, sayingAbove, cutPage] = narrowed.map((answer) => parseTextContent(answer));
+    const [underLog, sayingAbove, cutPage, sayingVolume] = narrowed.map((answer) => parseTextContent(answer));
     const keptUnder = (answer: unknown): unknown[] => asArray(get(answer, 'windows', 0, 'children'));
     const logParts = keptUnder(underLog);
     assert.ok(logParts.length > 0, `the log's elements are kept: ${JSON.stringify(underLog)}`);
@@ -26311,6 +26455,11 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       [get(cutPage, 'omitted'), get(cutPage, 'elements'), get(cutPage, 'matched')],
       [2, 3, 1],
       `two lines cut, the window and two elements left, one match: ${JSON.stringify(cutPage)}`,
+    );
+    assert.deepEqual(
+      keptUnder(sayingVolume),
+      [{ node: '/root/Main/Volume', value_text: '75%', children: [] }],
+      `the slider is found by the words a reader speaks for it: ${JSON.stringify(sayingVolume)}`,
     );
   } finally {
     if (!stopped) {
@@ -40227,6 +40376,16 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       ['res://broken.gd'],
       JSON.stringify(get(inPlace, 'compiled')),
     );
+    assert.deepEqual(
+      get(inPlace, 'compiled', 'scripts'),
+      [
+        {
+          path: 'res://broken.gd',
+          errors: [{ line: 7, message: 'Parse Error: Function "not_declared()" not found in base self.' }],
+        },
+      ],
+      `with the reason it did not compile: ${JSON.stringify(get(inPlace, 'compiled'))}`,
+    );
     const recached = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
     assert.match(recached, /"class": &"Shouter",[\s\S]*?"path": "res:\/\/loud\.gd"/);
     assert.doesNotMatch(recached, /&"Loud"/);
@@ -41097,6 +41256,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStaleStaticFunctionIsNamed,
   testAFailedReloadSaysWhatItKept,
   testDiagnosticsNameAStaleEnumMember,
+  testDiagnosticsWithoutAnEditorComeFromTheEngine,
   testDiagnosticsFindAMemberInAProjectBase,
   testDiagnosticsAnswerSeveralScripts,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
