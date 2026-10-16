@@ -17707,7 +17707,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     assert.match(text(get(answered, 'languageServer')), /^Godot LSP is unavailable on port \d+/, shown);
     assert.match(
       text(get(answered, 'note')),
-      /^No language server of this project's editor answered, so a headless engine compiled the scripts .* warnings is null rather than 0\. editor_launch with hidden: true/,
+      /^No editor of this project is open to ask, so a headless engine compiled the scripts .* warnings is null rather than 0\. editor_launch with hidden: true/,
       shown,
     );
 

@@ -3040,7 +3040,7 @@ function engineChecked(why: string): OperationParams {
   return {
     checkedBy: 'engine',
     languageServer: why,
-    note: "No language server of this project's editor answered, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, and no warnings, which the engine tells only an editor: warnings is null rather than 0. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both.",
+    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, and no warnings, which the engine tells only an editor: warnings is null rather than 0. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both.",
   };
 }
 
@@ -5216,11 +5216,6 @@ class GodotServer {
     return outcome.ok ? this.jsonTextResponse(outcome.payload) : outcome.response;
   }
 
-  /**
-   * project_import set_options: the options written to the sidecar, then applied by a reimport
-   * unless the caller said not to. Written alone, they reach the import only when the editor's next
-   * scan finds the sidecar changed.
-   */
   /** Whether the editor on the bridge has [param projectPath] open. */
   private editorHasOpen(projectPath: string): boolean {
     const open = this.godotBridge.getStatus().projectPath;
@@ -5315,6 +5310,11 @@ class GodotServer {
     }
   }
 
+  /**
+   * project_import set_options: the options written to the sidecar, then applied by a reimport
+   * unless the caller said not to. Written alone, they reach the import only when the editor's next
+   * scan finds the sidecar changed.
+   */
   private async handleSetImportOptions(args: OperationParams): Promise<ToolResponse> {
     const project = this.project(args);
     if (!project.ok) {
@@ -6666,9 +6666,13 @@ class GodotServer {
     const answer = await this.handleLSP('lsp_get_diagnostics', args);
     const payload = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     const refused = this.languageServerRefusal(payload, 'Diagnostics');
-    // A server still reading the project is the right one and answers a call made again; any other
-    // refusal not about this script is no language server of this project to ask.
-    if (refused !== null && !refused.perScript && payload['stillReading'] !== true) {
+    // Compiled by an engine only when no editor of this project is on the bridge. A server still
+    // reading the project is the right one and answers a call made again, and this project's own
+    // editor is the authority on its scripts, so a language server of it that does not answer is
+    // that editor's fault to name; an engine started beside it also waits on its next scan.
+    const project = this.project(args);
+    const ownEditor = project.ok && this.editorHasOpen(project.value.path);
+    if (refused !== null && !refused.perScript && payload['stillReading'] !== true && !ownEditor) {
       return {
         noLanguageServer: {
           reason: typeof payload['error'] === 'string' ? payload['error'] : JSON.stringify(payload['error']),
