@@ -148,7 +148,9 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		recommendations.append("Address critical issues to improve project stability")
 	# A project still being made has no presets yet, which is no fault in it.
 	if "config" in check_categories and not FileAccess.file_exists("res://export_presets.cfg"):
-		recommendations.append("No export presets are configured: add them before exporting")
+		recommendations.append(
+			"No export presets are configured: project_export add_preset adds one before exporting"
+		)
 
 	# Every detail costs points, so each is an issue; `issues` was always empty beside them, and a
 	# category said passed next to the failure it had just found.

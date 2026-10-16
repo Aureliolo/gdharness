@@ -1768,7 +1768,7 @@ export function exportPresetRefusal(projectPath: string, preset: string): string
   try {
     text = readFileSync(join(projectPath, 'export_presets.cfg'), 'utf8');
   } catch {
-    return `This project has no export_presets.cfg, so it has no preset '${preset}' to export with. The editor writes the file when a preset is added in Project > Export.`;
+    return `This project has no export_presets.cfg, so it has no preset '${preset}' to export with. project_export add_preset writes one, as the editor's Project > Export does.`;
   }
   const names: string[] = [];
   let inPreset = false;
@@ -1787,7 +1787,7 @@ export function exportPresetRefusal(projectPath: string, preset: string): string
     return null;
   }
   return names.length === 0
-    ? `export_presets.cfg names no preset, so there is no '${preset}' to export with. The editor adds one in Project > Export.`
+    ? `export_presets.cfg names no preset, so there is no '${preset}' to export with. project_export add_preset adds one.`
     : `This project has no export preset named '${preset}'. Its presets are ${names.map((name) => `'${name}'`).join(', ')}.`;
 }
 
@@ -4119,6 +4119,9 @@ class GodotServer {
     if (tool === 'project_import' && op === 'set_options') {
       return await this.handleSetImportOptions(args);
     }
+    if (tool === 'project_export' && op === 'add_preset') {
+      return await this.handleAddExportPreset(args);
+    }
     const headless = HEADLESS_OPERATIONS[tool]?.[op];
     if (headless !== undefined) {
       // Asked of the editor instead, when the caller said so. The two are not the same reading and
@@ -5689,6 +5692,44 @@ class GodotServer {
   }
 
   /**
+   * project_export add_preset, written by a headless engine, with outputPath judged against the
+   * project as run judges it.
+   *
+   * An editor open on the project read export_presets.cfg when it started and reads it again only
+   * when an export platform comes or goes (Godot's EditorExport), so it lists none of this, and the
+   * next save of its own presets writes its list over the file.
+   */
+  private async handleAddExportPreset(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const given = readNonEmptyString(args, 'outputPath');
+    const output = given === undefined ? null : resolveWithinProject(project.value.path, given);
+    if (output !== null && !output.ok) {
+      return this.createErrorResponse(output.reason, PATH_SOLUTIONS);
+    }
+    const outcome = await this.operation(
+      'add_export_preset',
+      {
+        preset: readString(args, 'preset') ?? '',
+        platform: readString(args, 'platform') ?? '',
+        outputPath: output?.relativePath ?? '',
+      },
+      project.value.path,
+    );
+    if (!outcome.ok || !this.editorHasOpen(project.value.path)) {
+      return this.answer(outcome);
+    }
+    return this.jsonTextResponse({
+      ...outcome.payload,
+      editorNote:
+        'The editor open on this project read export_presets.cfg when it started and does not list this preset, and saving presets in its Export dialog writes its own list over the file. editor_launch restart loads the file; an export through project_export run reads the file and needs no restart.',
+      ...engineExtras(outcome),
+    });
+  }
+
+  /**
    * project_export run: the engine's own export, which is not an operation of the script. The
    * destination is documented as inside the project and is contained like every other path.
    */
@@ -5704,7 +5745,10 @@ class GodotServer {
     }
     const noPreset = exportPresetRefusal(project.value.path, preset);
     if (noPreset !== null) {
-      return this.createErrorResponse(noPreset, ['project_export list reads the presets the project has']);
+      return this.createErrorResponse(noPreset, [
+        'project_export list reads the presets the project has',
+        'project_export add_preset adds one',
+      ]);
     }
     const engine = await this.engine();
     if (!engine.ok) {
