@@ -403,11 +403,12 @@ once the server is there, rather than waiting for somebody to restart it.
 
 | Tools                                                                                    | Route                                                               | Needs running                                   |
 | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------- |
-| `scene_*`, `resource_edit`, `editor_rescan`, `editor_launch restart` and `close`         | Editor bridge                                                       | The editor, addon enabled                       |
+| `scene_*`, `resource_edit` but `move`, `editor_rescan`, `editor_launch restart`, `close` | Editor bridge                                                       | The editor, addon enabled                       |
 | `script_diagnostics`, `script_info` except `structure`, `script_edit rename` of a member | Language server                                                     | The editor                                      |
 | `debug_*`, and the console `editor_output` returns                                       | Debug adapter                                                       | A game the editor is playing                    |
 | `runtime_*`                                                                              | Runtime                                                             | A game with the runtime autoload                |
-| `project_*`, `editor_classes`, `script_info structure`, `script_edit` otherwise          | Headless operations                                                 | Nothing                                         |
+| `project_*`, `editor_classes`, `script_info structure`, `script_edit` otherwise, and     | Headless operations                                                 | Nothing                                         |
+| `resource_edit move`                                                                     |                                                                     |                                                 |
 | `editor_run`                                                                             | Editor bridge when an editor is connected, otherwise a spawned game | Nothing, though the editor changes what it does |
 | `editor_status`                                                                          | All of them, reporting what answers                                 | Nothing                                         |
 
@@ -428,6 +429,17 @@ again, its moved script's old path included, which is what makes it drop the old
 alone picks up a class that has appeared and keeps one that has gone. With no editor the class
 cache is rebuilt, the UID table too when a script moved, and the changed scripts are compiled in
 a fresh engine.
+
+`resource_edit move` (`src/file-move.ts`) is the same path rewriting for any file or directory,
+with the file's `.import` and `.uid` moving beside it, and it reads and writes the files itself as
+the rename does. A scene or resource saved as `.scn` or `.res` cannot be rewritten and is answered
+instead. An editor serving the project is then told what moved, as its own FileSystem dock tells
+itself: cached resources take over their new paths, open tabs are renamed and read again, and the
+settings the move rewrote in `project.godot` are taken from the file, which a rename moving an
+autoload's script does too. Each of those holds an old path the editor would otherwise save back.
+The editor keeps a tab's path twice, on the scene's root and in its own list of scenes, and a
+script can set only the first; reading the tab again is what renews the second. With no editor,
+an import pass rebuilds the UID table and the class cache, and the changed scripts are compiled.
 
 `project_import refresh_classes` is the one headless call that also asks the editor what classes
 it holds, when one is connected and open on the same project. Rewriting the cache does not reach

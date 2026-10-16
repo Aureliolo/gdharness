@@ -1,7 +1,8 @@
 @tool
 extends Node
 
-## The editor's view of the files on disk: scans, the reimports asked for, and where each stands.
+## The editor's view of the files on disk: scans, the reimports asked for, where each stands, and
+## files moved under it.
 
 const Read = preload("../reading.gd")
 
@@ -204,6 +205,66 @@ func reimport_files(args: Dictionary) -> Dictionary:
 		"importing": filesystem.is_importing(),
 		"reimportsCompletedBefore": _reimports_completed,
 	}
+
+
+## Brings the editor up to files moved under it, the way its FileSystem dock brings itself up after
+## a move of its own: each cached resource and each open scene named for where it now is, so what
+## holds them saves the new path, the editor's file list told of both ends, and each open scene that
+## moved or that the move rewrote read again from the file. A scene with unsaved edits is left as it
+## is and named, since reading it again would discard them; its root names the new path either way.
+##
+## A moved tab is read again even when its text did not change: the editor keeps each tab's path
+## twice, on the root and in its own list, and a script can set only the first. The second is what
+## [method EditorInterface.get_open_scenes] answers, and reading the scene again is what writes it.
+func files_moved(args: Dictionary) -> Dictionary:
+	var renames: Dictionary[String, String] = {}
+	var given: Variant = args.get("moved", [])
+	if given is Array:
+		var pairs: Array = given
+		for pair: Variant in pairs:
+			if pair is Dictionary:
+				var named: Dictionary = pair
+				renames[str(named.get("from", ""))] = str(named.get("to", ""))
+	for from: String in renames:
+		if ResourceLoader.has_cached(from):
+			var held: Resource = ResourceLoader.get_cached_ref(from)
+			if held != null:
+				held.take_over_path(renames[from])
+	var dirty: Array[String] = []
+	for path: String in EditorInterface.get_unsaved_scenes():
+		dirty.append(renames.get(path, path))
+	var retargeted: Array[String] = []
+	var reread: Array[String] = []
+	for root: Node in EditorInterface.get_open_scene_roots():
+		var path: String = root.scene_file_path
+		if renames.has(path):
+			root.scene_file_path = renames[path]
+			retargeted.append(path)
+			reread.append(renames[path])
+	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
+	for from: String in renames:
+		filesystem.update_file(from)
+		filesystem.update_file(renames[from])
+	var open: Array[String] = []
+	for root: Node in EditorInterface.get_open_scene_roots():
+		open.append(root.scene_file_path)
+	var changed: Variant = args.get("changed", [])
+	if changed is Array:
+		var paths: Array = changed
+		for path: Variant in paths:
+			if open.has(str(path)) and not reread.has(str(path)):
+				reread.append(str(path))
+	var reloaded: Array[String] = []
+	var unsaved: Array[String] = []
+	for scene: String in reread:
+		if dirty.has(scene):
+			unsaved.append(scene)
+		else:
+			EditorInterface.reload_scene_from_path(scene)
+			reloaded.append(scene)
+	reloaded.sort()
+	unsaved.sort()
+	return {"ok": true, "retargetedTabs": retargeted, "reloadedScenes": reloaded, "unsavedScenes": unsaved}
 
 
 func _reimport(paths: PackedStringArray) -> void:

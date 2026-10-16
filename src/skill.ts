@@ -149,7 +149,7 @@ so take it off when the question it was for is answered.
 ## Editing
 
 \`scene_tree\` for what a scene holds, rather than what the \`.tscn\` text implies. \`scene_node\`,
-\`scene_signal\` and \`resource_edit\` change it through the editor, so the files keep their
+\`scene_signal\` and \`resource_edit\` other than \`move\` change it through the editor, so the files keep their
 formatting. \`script_diagnostics\` and \`script_info\` come from the editor's own language server.
 
 \`project_info\`, \`project_dependencies\`, \`project_settings\`, \`project_import\`,
@@ -168,6 +168,14 @@ every other occurrence of the word for you to read: a string that is the name wh
 line under \`leftAloneInProse\`, and a local or another class's member of the same name by line
 under \`leftAloneOtherSymbols\`; a common name's lines go to the file \`leftAloneDetail\` names. Pass \`preview\` first on a large rename. If the answer has \`ok: false\`
 beside \`written: true\`, the files were changed and a script did not compile afterwards.
+
+To move or rename a scene, a resource, an image or a directory, use \`resource_edit move\` rather
+than moving the file: it takes the \`.import\` and \`.uid\` along, rewrites every path naming what
+moved in scenes, resources, scripts and \`project.godot\`, and brings an open editor up to it so the
+editor does not save the old paths back. It needs no editor. A scene saved as \`.scn\` or a
+resource saved as \`.res\` cannot be rewritten and is listed under \`leftAlone\`; it still finds
+a moved file by its UID. To move a script with its class, use \`script_edit rename\` with
+\`newScriptPath\`.
 
 Editing a file while a game is running does not change the running game. \`auto_reload\` is an
 editor plugin and reloads into the editor's own process; the game is a separate process holding

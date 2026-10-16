@@ -50,9 +50,10 @@ export interface Edit {
 /**
  * Where an occurrence was left alone. code, string, comment, doc and nodePath are the tokenizer's
  * view of a script; scene is a scene or resource file; text is any other file; ignored is any file
- * under a directory holding a `.gdignore`.
+ * under a directory holding a `.gdignore`; binary is a scene or resource saved as .scn or .res,
+ * which names its dependencies in bytes this cannot rewrite.
  */
-type MentionKind = RegionKind | 'scene' | 'text' | 'ignored';
+type MentionKind = RegionKind | 'scene' | 'text' | 'ignored' | 'binary';
 
 export interface Mention {
   readonly file: string;
@@ -893,8 +894,13 @@ function planScenes(
 export interface MoveArguments {
   readonly texts: readonly ProjectText[];
   readonly scripts: ReadonlyMap<string, Script>;
-  readonly from: string;
-  readonly to: string;
+  /** Each file that moves, by its `res://` path, to where it goes. */
+  readonly moves: ReadonlyMap<string, string>;
+  /**
+   * The paths whose every other occurrence is answered as a mention: the file moved, or the
+   * directory, whose path also opens strings that build a path inside it at run time.
+   */
+  readonly named: readonly string[];
   /** Whether a `res://` path names a file, text or not. */
   readonly exists: (path: string) => boolean;
 }
@@ -927,12 +933,12 @@ function literalsOf(file: ProjectText, script: Script | undefined): { offset: nu
 }
 
 /**
- * The edits moving a script: every string naming it by path, as a res:// path or relative to the
- * file it is in, written to name the new place in the same style; and in the moved script itself,
- * every relative path, which names a different file once the script is somewhere else.
+ * The edits moving files: every string naming one by path, as a res:// path or relative to the
+ * file it is in, written to name the new place in the same style; and in each moved file, every
+ * relative path, which names a different file once it is somewhere else.
  */
 export function planMove(args: MoveArguments, plan: Plan): Plan {
-  const { texts, scripts, from, to, exists } = args;
+  const { texts, scripts, moves, named, exists } = args;
   const edits = [...plan.edits];
   const mentions = [...plan.mentions];
   const editedAt = new Set(edits.map((one) => `${one.file}:${one.offset}`));
@@ -944,6 +950,7 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
   };
   for (const file of texts) {
     const script = scripts.get(file.path);
+    const goesTo = moves.get(file.path);
     for (const literal of literalsOf(file, script)) {
       const autoload = literal.value.startsWith('*') ? '*' : '';
       const written = literal.value.slice(autoload.length);
@@ -952,28 +959,41 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
       }
       const isAbsolute = written.startsWith('res://');
       const target = resolvedPath(written, file.path);
-      if (target === from) {
-        const replacement = isAbsolute ? to : relativeTo(to, file.path === from ? to : file.path);
+      const targetGoesTo = moves.get(target);
+      const replacement =
+        targetGoesTo !== undefined
+          ? isAbsolute
+            ? targetGoesTo
+            : relativeTo(targetGoesTo, goesTo ?? file.path)
+          : goesTo !== undefined && !isAbsolute && /\.[a-z0-9]+$/i.test(written) && exists(target)
+            ? relativeTo(target, goesTo)
+            : null;
+      // A relative path between two files that moved together reads the same afterwards, and is
+      // not an edit: counted as one, the answer listed files as changed that were written as they were.
+      if (replacement !== null && replacement !== written) {
         add(file.path, literal.offset + autoload.length, written.length, replacement);
-      } else if (file.path === from && !isAbsolute && /\.[a-z0-9]+$/i.test(written) && exists(target)) {
-        add(file.path, literal.offset, written.length, relativeTo(target, to));
       }
     }
     const lines = script?.lines ?? new Lines(file.text);
-    for (const match of file.text.matchAll(new RegExp(from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'), 'g'))) {
-      const offset = match.index;
-      const covered = edits.some(
-        (one) => one.file === file.path && one.offset <= offset && offset < one.offset + one.length,
-      );
-      if (!covered) {
-        const region = script?.regions.find((one) => one.start <= offset && offset < one.end);
-        mentions.push({
-          file: file.path,
-          line: lines.positionOf(offset).line + 1,
-          kind: region !== undefined ? region.kind : /\.(tscn|tres)$/.test(file.path) ? 'scene' : 'text',
-          text: lines.lineAt(offset).trim(),
-          why: `names ${from} outside a string the engine reads as a path`,
-        });
+    for (const path of named) {
+      // Not a longer name that only begins with it: res://levels is not res://levels_old or
+      // res://levels.old, and a full stop ending a sentence after it is not part of it.
+      const spelled = new RegExp(`${path.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w-]|\\.\\w)`, 'g');
+      for (const match of file.text.matchAll(spelled)) {
+        const offset = match.index;
+        const covered = edits.some(
+          (one) => one.file === file.path && one.offset <= offset && offset < one.offset + one.length,
+        );
+        if (!covered) {
+          const region = script?.regions.find((one) => one.start <= offset && offset < one.end);
+          mentions.push({
+            file: file.path,
+            line: lines.positionOf(offset).line + 1,
+            kind: region !== undefined ? region.kind : /\.(tscn|tres)$/.test(file.path) ? 'scene' : 'text',
+            text: lines.lineAt(offset).trim(),
+            why: `names ${path} outside a string the engine reads as a path`,
+          });
+        }
       }
     }
   }
@@ -984,29 +1004,33 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
 }
 
 /**
- * The plan with every occurrence of [param name], and of [param movedFrom] when the script moves,
- * in [param ignored] added as a mention. Those files are not changed: the engine does not load
- * them, so nothing says which of their words are uses, but a copy kept there to be shipped or
- * vendored back is broken by the rename all the same, and is answered rather than passed over.
+ * The plan with every occurrence of [param name], when something is renamed, and of each path in
+ * [param movedFrom] in [param ignored] added as a mention. Those files are not changed: the engine
+ * does not load them, so nothing says which of their words are uses, but a copy kept there to be
+ * shipped or vendored back is broken by the change all the same, and is answered rather than
+ * passed over.
  */
 export function mentionIgnored(
   plan: Plan,
   ignored: readonly ProjectText[],
-  name: string,
-  movedFrom: string | null,
+  name: string | null,
+  movedFrom: readonly string[],
 ): Plan {
   const mentions = [...plan.mentions];
   const why = 'under a directory holding a .gdignore, which the engine does not load, so it was not changed';
   for (const file of ignored) {
     const lines = new Lines(file.text);
-    const offsets = occurrencesOf(file.text, name, [{ kind: 'code', start: 0, end: file.text.length }]).map(
-      (one) => one.offset,
-    );
-    if (movedFrom !== null) {
-      let at = file.text.indexOf(movedFrom);
+    const offsets =
+      name === null
+        ? []
+        : occurrencesOf(file.text, name, [{ kind: 'code', start: 0, end: file.text.length }]).map(
+            (one) => one.offset,
+          );
+    for (const path of movedFrom) {
+      let at = file.text.indexOf(path);
       while (at >= 0) {
         offsets.push(at);
-        at = file.text.indexOf(movedFrom, at + movedFrom.length);
+        at = file.text.indexOf(path, at + path.length);
       }
     }
     const seen = new Set<number>();

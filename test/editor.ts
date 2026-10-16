@@ -446,6 +446,13 @@ const HOOKS_GD = [
   '\t\t\treturn _tab(path)',
   '\t\t"tab_close":',
   '\t\t\treturn {"closed": EditorInterface.get_script_editor().close_file(path) == OK}',
+  // What the editor does with the settings it holds on many of its own actions: writes them all
+  // back over project.godot.
+  '\t\t"save_settings":',
+  '\t\t\treturn {"saved": ProjectSettings.save() == OK}',
+  '\t\t"save_scenes":',
+  '\t\t\tEditorInterface.save_all_scenes()',
+  '\t\t\treturn {"saved": true}',
   '\treturn _report(path)',
   '',
   '',
@@ -2117,6 +2124,113 @@ async function testAHeldSceneIsWrittenFromItsFile({ call, project }: Editor): Pr
   const after = fileText(project, 'layers/held.tscn');
   assert.match(after, /name="Outside"/, `a write should keep what was changed on disk: ${after}`);
   assert.match(after, /name="Third"/, `and add its own: ${after}`);
+}
+
+/**
+ * A move with the editor open brings the editor along, as a move in its own FileSystem dock does:
+ * the open scenes that moved are named for their new paths, a moved scene the editor holds in its
+ * cache is held at its new path, an open scene the move rewrote is read again, and an autoload the
+ * move rewrote in project.godot is taken from the file. Left holding the old paths, the editor
+ * saved them back: a saved tab recreated the scene at its old path, and a settings save put the
+ * old autoload path back in the file that starts the game.
+ */
+async function testAMoveBringsTheEditorAlong({ call, project }: Editor): Promise<void> {
+  const dir = join(project, 'moving');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'hero.tscn'),
+    '[gd_scene format=3]\n\n[node name="Hero" type="Node2D"]\n\n[node name="Sprite" type="Sprite2D" parent="."]\n',
+  );
+  writeFileSync(
+    join(dir, 'stage.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="PackedScene" path="res://moving/hero.tscn" id="1_hero"]\n\n[node name="Stage" type="Node2D"]\n\n[node name="Hero" parent="." instance=ExtResource("1_hero")]\n',
+  );
+  writeFileSync(join(dir, 'mover.gd'), 'extends Node\n');
+  await call('editor_rescan', { projectPath: project });
+  await call('project_settings', {
+    projectPath: project,
+    op: 'add_autoload',
+    name: 'Mover',
+    path: 'res://moving/mover.gd',
+  });
+  const held = await hook(project, { op: 'hold', path: 'res://moving/hero.tscn' });
+  assert.equal(get(held, 'cached'), true, `the editor should hold the scene: ${JSON.stringify(held)}`);
+  await hook(project, { op: 'open', path: 'res://moving/hero.tscn' });
+  const opened = await hook(project, { op: 'open', path: 'res://moving/stage.tscn' });
+  assert.ok(
+    asArray(get(opened, 'open')).includes('res://moving/stage.tscn'),
+    `both scenes should be open: ${JSON.stringify(opened)}`,
+  );
+
+  const moved = await call('resource_edit', {
+    op: 'move',
+    projectPath: project,
+    resourcePath: 'res://moving',
+    newPath: 'res://moved',
+  });
+  assert.equal(get(moved, 'ok'), true, `the move settled: ${JSON.stringify(moved)}`);
+
+  const tabs = await hook(project, { op: 'report', path: 'res://moved/stage.tscn' });
+  const open = asArray(get(tabs, 'open')).map(String);
+  assert.ok(
+    open.includes('res://moved/stage.tscn') && open.includes('res://moved/hero.tscn'),
+    `the tabs are named for the new paths: ${JSON.stringify(tabs)}`,
+  );
+  assert.ok(!open.some((path) => path.startsWith('res://moving/')), JSON.stringify(tabs));
+  assert.deepEqual(get(tabs, 'children'), ['Hero'], 'the reloaded stage still instances the hero');
+  const holding = await hook(project, { op: 'held', path: 'res://moved/hero.tscn' });
+  assert.deepEqual(
+    get(holding, 'children'),
+    ['Sprite'],
+    `the cached scene is held at its new path: ${JSON.stringify(holding)}`,
+  );
+
+  const autoload = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: 'autoload/Mover',
+    from: 'editor',
+  });
+  assert.equal(get(autoload, 'value'), '*res://moved/mover.gd', JSON.stringify(autoload));
+  const saved = await hook(project, { op: 'save_settings' });
+  assert.equal(get(saved, 'saved'), true, JSON.stringify(saved));
+  assert.match(
+    fileText(project, 'project.godot'),
+    /^Mover="\*res:\/\/moved\/mover\.gd"$/m,
+    'a settings save by the editor keeps the new path',
+  );
+
+  await call('scene_node', {
+    projectPath: project,
+    scenePath: 'res://moved/stage.tscn',
+    op: 'add',
+    nodeType: 'Node2D',
+    nodeName: 'Added',
+  });
+  assert.match(fileText(project, 'moved/stage.tscn'), /path="res:\/\/moved\/hero\.tscn"/);
+  const scenesSaved = await hook(project, { op: 'save_scenes' });
+  assert.equal(get(scenesSaved, 'saved'), true, JSON.stringify(scenesSaved));
+  assert.ok(!existsSync(dir), 'an editor saving every open tab does not recreate the old directory');
+  assert.match(fileText(project, 'moved/stage.tscn'), /path="res:\/\/moved\/hero\.tscn"/);
+
+  assert.deepEqual(
+    asArray(get(moved, 'editor', 'retargetedTabs'))
+      .map(String)
+      .sort(),
+    ['res://moving/hero.tscn', 'res://moving/stage.tscn'],
+    JSON.stringify(get(moved, 'editor')),
+  );
+  assert.deepEqual(
+    get(moved, 'editor', 'reloadedScenes'),
+    ['res://moved/hero.tscn', 'res://moved/stage.tscn'],
+    `every moved tab is read again, which is what names it for its new path: ${JSON.stringify(moved)}`,
+  );
+  assert.ok(
+    asArray(get(moved, 'editor', 'settingsAdopted')).includes('autoload/Mover'),
+    JSON.stringify(get(moved, 'editor')),
+  );
+
+  await call('project_settings', { projectPath: project, op: 'remove_autoload', name: 'Mover' });
 }
 
 /**
@@ -4181,6 +4295,14 @@ async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<v
     `every changed script was reloaded, the subclass after its base: ${JSON.stringify(member)}`,
   );
 
+  // An autoload naming the script, which the move rewrites in project.godot and the editor has to
+  // take from there, or it saves the old path back the next time it saves its settings.
+  await call('project_settings', {
+    projectPath: project,
+    op: 'add_autoload',
+    name: 'Speaking',
+    path: 'res://renamed/speaker.gd',
+  });
   const moved = await call('script_edit', {
     op: 'rename',
     projectPath: project,
@@ -4190,6 +4312,18 @@ async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<v
     newScriptPath: 'res://renamed/orator.gd',
   });
   assert.equal(get(moved, 'ok'), true, `the class rename settled: ${JSON.stringify(moved)}`);
+  const autoload = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: 'autoload/Speaking',
+    from: 'editor',
+  });
+  assert.equal(get(autoload, 'value'), '*res://renamed/orator.gd', JSON.stringify(autoload));
+  assert.ok(
+    asArray(get(moved, 'editor', 'settingsAdopted')).includes('autoload/Speaking'),
+    JSON.stringify(get(moved, 'editor')),
+  );
+  await call('project_settings', { projectPath: project, op: 'remove_autoload', name: 'Speaking' });
   assert.equal(get(moved, 'editor', 'stillHolds'), undefined, JSON.stringify(moved));
   const after = await call('editor_rescan', { projectPath: project });
   assert.equal(
@@ -6126,6 +6260,7 @@ async function main(): Promise<void> {
     ['testResourcesOnNodes', testResourcesOnNodes],
     ['testAWriteKeepsWhatTheSceneComesFrom', testAWriteKeepsWhatTheSceneComesFrom],
     ['testAHeldSceneIsWrittenFromItsFile', testAHeldSceneIsWrittenFromItsFile],
+    ['testAMoveBringsTheEditorAlong', testAMoveBringsTheEditorAlong],
     ['testAnEditInTheEditorIsKept', testAnEditInTheEditorIsKept],
     ['testASetIsReadBack', testASetIsReadBack],
     ['testSignalsAreTheFilesOwn', testSignalsAreTheFilesOwn],

@@ -210,10 +210,8 @@ const SCRIPT_PATH: JsonSchema = {
   type: 'string',
   description: 'Script file inside the project, such as "scripts/player.gd".',
 };
-const RESOURCE_PATH: JsonSchema = {
-  type: 'string',
-  description: 'File inside the project, such as "sprites/hero.png" or "materials/steel.tres".',
-};
+const RESOURCE_FILE = 'File inside the project, such as "sprites/hero.png" or "materials/steel.tres".';
+const RESOURCE_PATH: JsonSchema = { type: 'string', description: RESOURCE_FILE };
 const NODE_PATH: JsonSchema = {
   type: 'string',
   description: 'Node path from the scene root, such as "Player/Sprite2D". "." is the root.',
@@ -1096,10 +1094,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'resource_edit',
     title: 'Edit resources',
     description:
-      'Resource files: read one, create any ClassDB resource as .tres, change one, write a shader, build a TileSet, or set a Theme colour or font size. A material is a create with resourceType StandardMaterial3D, ShaderMaterial or CanvasItemMaterial. read answers with the properties the file sets, in the form modify takes, and a Theme lists its items there as "Button/colors/font_color". Needs the editor connected.',
+      'Resource files: read one, create any ClassDB resource as .tres, change one, write a shader, build a TileSet, or set a Theme colour or font size. A material is a create with resourceType StandardMaterial3D, ShaderMaterial or CanvasItemMaterial. read answers with the properties the file sets, in the form modify takes, and a Theme lists its items there as "Button/colors/font_color". move takes any file of the project, a script or an image as much as a resource, or a directory, and works from the files, so it needs no editor; one serving the project is brought up to it as after a move in its own FileSystem dock, its open scenes and cached resources named for the new paths and the project settings the move rewrote taken from the file. Every other op needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
-      resourcePath: RESOURCE_PATH,
+      resourcePath: {
+        ...RESOURCE_PATH,
+        description: `${RESOURCE_FILE} move: a directory too.`,
+      },
       resourceType: {
         type: 'string',
         ops: ['create'],
@@ -1128,6 +1129,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description: 'create_shader: the shader source. Default: a minimal shader of that type.',
       },
       sources: { ...TILESET_SOURCES, ops: ['create_tileset'] },
+      newPath: {
+        type: 'string',
+        ops: ['move'],
+        description:
+          'move: where it goes, inside the project, and for a file with the extension it has. A file goes with its .import and .uid, and a directory with everything in it. Every path naming what moved in a scene, resource, script, project.godot or other text file is rewritten in the style it was written in, res:// or relative, and so is every relative path inside a moved file. A string naming it any other way, such as the start of a path built at run time, is answered under leftAlone rather than changed, and so is a scene or resource saved as .scn or .res, which this cannot rewrite.',
+      },
+      preview: {
+        type: 'boolean',
+        ops: ['move'],
+        description: 'move: answer with what would move and change, and write nothing. Default false.',
+      },
       controlType: {
         type: 'string',
         ops: ['set_theme_color', 'set_theme_font_size'],
@@ -1170,6 +1182,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         effect: 'destructive',
         summary: 'a font size in a Theme',
         requires: ['controlType', 'fontSizeName', 'size'],
+      },
+      move: {
+        effect: 'destructive',
+        summary: 'move or rename a file or a directory, and every path in the project naming it',
+        requires: ['newPath'],
       },
     },
   },
