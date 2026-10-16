@@ -40064,6 +40064,37 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       '[node name="Added" type="Node2D" parent="Pet/Body" index="0"]\n\n[editable path="Pet"]\n',
     'panel.tres':
       '[gd_resource type="StyleBoxFlat" format=3]\n\n[resource]\nbg_color = Color(1, 0, 0, 1)\ncorner_radius_top_left = 4\n',
+    'loud_player.gd':
+      'extends AnimationPlayer\n\n\nfunc _init() -> void:\n' +
+      '\tFileAccess.open("res://init_ran.txt", FileAccess.WRITE).store_string("ran")\n',
+    // Everything the player and the tree play is kept inside the scene, as the editor saves it.
+    'moves.tscn':
+      '[gd_scene load_steps=9 format=3]\n\n' +
+      '[ext_resource type="Script" path="res://loud_player.gd" id="1_loud"]\n\n' +
+      '[sub_resource type="Animation" id="Animation_idle"]\n\n' +
+      '[sub_resource type="Animation" id="Animation_jump"]\nlength = 0.5\n' +
+      'tracks/0/type = "value"\ntracks/0/imported = false\ntracks/0/enabled = true\n' +
+      'tracks/0/path = NodePath("Sprite:position")\ntracks/0/interp = 1\ntracks/0/loop_wrap = true\n' +
+      'tracks/0/keys = {\n"times": PackedFloat32Array(0, 0.5),\n"transitions": PackedFloat32Array(1, 1),\n' +
+      '"update": 0,\n"values": [Vector2(0, 0), Vector2(0, -40)]\n}\n\n' +
+      '[sub_resource type="AnimationLibrary" id="AnimationLibrary_moves"]\n' +
+      '_data = {\n&"idle": SubResource("Animation_idle"),\n&"jump": SubResource("Animation_jump")\n}\n\n' +
+      '[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_idle"]\nanimation = &"idle"\n\n' +
+      '[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_jump"]\nanimation = &"jump"\n\n' +
+      '[sub_resource type="AnimationNodeStateMachineTransition" id="AnimationNodeStateMachineTransition_up"]\n' +
+      'advance_mode = 2\nadvance_condition = &"jumped"\n\n' +
+      '[sub_resource type="AnimationNodeStateMachine" id="AnimationNodeStateMachine_root"]\n' +
+      'states/idle/node = SubResource("AnimationNodeAnimation_idle")\n' +
+      'states/jump/node = SubResource("AnimationNodeAnimation_jump")\n' +
+      'transitions = ["idle", "jump", SubResource("AnimationNodeStateMachineTransition_up")]\n\n' +
+      '[node name="Hero" type="Node2D"]\n\n[node name="Sprite" type="Sprite2D" parent="."]\n\n' +
+      '[node name="Anim" type="AnimationPlayer" parent="."]\nscript = ExtResource("1_loud")\n' +
+      'libraries/ = SubResource("AnimationLibrary_moves")\n\n' +
+      '[node name="Tree" type="AnimationTree" parent="."]\n' +
+      'tree_root = SubResource("AnimationNodeStateMachine_root")\nanim_player = NodePath("../Anim")\n',
+    'stage.tscn':
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="PackedScene" path="res://moves.tscn" id="1_moves"]\n\n' +
+      '[node name="Stage" type="Node"]\n\n[node name="Pet" parent="." instance=ExtResource("1_moves")]\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -40175,6 +40206,116 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
     const notAResource =
       textOf(await call('resource_edit', { op: 'read', resourcePath: 'world.tscn' })) ?? '';
     assert.match(notAResource, /res:\/\/world\.tscn is a scene: scene_tree reads its nodes/, notAResource);
+
+    // The player's own script would write init_ran.txt when made.
+    const animations = parseTextContent(
+      await call('scene_animation', { op: 'read', scenePath: 'moves.tscn', playerNodePath: 'Anim' }),
+    );
+    assert.deepEqual(
+      asArray(get(animations, 'animations')).map(
+        (entry) =>
+          `${text(get(entry, 'animationName'))} ${String(get(entry, 'length'))} ${String(get(entry, 'tracks'))}`,
+      ),
+      ['idle 1 0', 'jump 0.5 1'],
+      JSON.stringify(animations),
+    );
+    assert.match(text(get(animations, 'readBy')), /headless engine, since no editor serves this project/);
+    assert.deepEqual(answerKeys(animations), ['animations', 'readBy'], JSON.stringify(animations));
+    const jump = parseTextContent(
+      await call('scene_animation', {
+        op: 'read',
+        scenePath: 'res://moves.tscn',
+        playerNodePath: 'Anim',
+        animationName: 'jump',
+      }),
+    );
+    assert.deepEqual(
+      get(jump, 'tracks'),
+      [
+        {
+          type: 'property',
+          nodePath: 'Sprite',
+          property: 'position',
+          keyframes: [
+            { time: 0, value: { x: 0, y: 0, _type: 'Vector2' } },
+            { time: 0.5, value: { x: 0, y: -40, _type: 'Vector2' } },
+          ],
+        },
+      ],
+      JSON.stringify(jump),
+    );
+    assert.deepEqual(
+      answerKeys(jump),
+      ['animationName', 'length', 'loopMode', 'readBy', 'step', 'tracks'],
+      JSON.stringify(jump),
+    );
+    // Laid through the instance, as scene_tree lays it.
+    const instanced = parseTextContent(
+      await call('scene_animation', { op: 'read', scenePath: 'stage.tscn', playerNodePath: 'Pet/Anim' }),
+    );
+    assert.deepEqual(
+      asArray(get(instanced, 'animations')).map((entry) => get(entry, 'animationName')),
+      ['idle', 'jump'],
+      JSON.stringify(instanced),
+    );
+    const noRun =
+      textOf(
+        await call('scene_animation', {
+          op: 'read',
+          scenePath: 'moves.tscn',
+          playerNodePath: 'Anim',
+          animationName: 'run',
+        }),
+      ) ?? '';
+    assert.match(noRun, /Anim has no animation run\. It has: idle, jump\./, noRun);
+    const notAPlayer =
+      textOf(
+        await call('scene_animation', { op: 'read', scenePath: 'moves.tscn', playerNodePath: 'Sprite' }),
+      ) ?? '';
+    assert.match(notAPlayer, /AnimationPlayer not found at: Sprite/, notAPlayer);
+    const machine = parseTextContent(
+      await call('scene_animation', { op: 'read_states', scenePath: 'moves.tscn', animTreePath: 'Tree' }),
+    );
+    assert.deepEqual(
+      asArray(get(machine, 'states'))
+        .filter((state) => get(state, 'animationName') !== undefined)
+        .map((state) => `${text(get(state, 'stateName'))} plays ${text(get(state, 'animationName'))}`),
+      ['idle plays idle', 'jump plays jump'],
+      JSON.stringify(machine),
+    );
+    assert.deepEqual(
+      get(machine, 'transitions'),
+      [{ from: 'idle', to: 'jump', transitionType: 'immediate', advanceCondition: 'jumped' }],
+      JSON.stringify(machine),
+    );
+    assert.deepEqual(answerKeys(machine), ['readBy', 'states', 'transitions'], JSON.stringify(machine));
+    assert.ok(!existsSync(join(project, 'init_ran.txt')), 'reading the animations ran the player script');
+
+    // A resource kept inside a file, by the path a read answers a property holding one with.
+    const kept = parseTextContent(
+      await call('resource_edit', { op: 'read', resourcePath: 'res://moves.tscn::Animation_jump' }),
+    );
+    assert.equal(get(kept, 'resourceType'), 'Animation', JSON.stringify(kept));
+    assert.equal(get(kept, 'resourcePath'), 'res://moves.tscn::Animation_jump', JSON.stringify(kept));
+    assert.equal(get(kept, 'properties', 'length'), 0.5, JSON.stringify(kept));
+    const transition = parseTextContent(
+      await call('resource_edit', {
+        op: 'read',
+        resourcePath: 'moves.tscn::AnimationNodeStateMachineTransition_up',
+      }),
+    );
+    assert.equal(get(transition, 'properties', 'advance_condition'), 'jumped', JSON.stringify(transition));
+    // stage.tscn holds moves.tscn, whose ids are moves.tscn's own and not stage.tscn's.
+    const elsewhere =
+      textOf(await call('resource_edit', { op: 'read', resourcePath: 'res://stage.tscn::Animation_jump' })) ??
+      '';
+    assert.match(elsewhere, /res:\/\/stage\.tscn keeps no resource with the id Animation_jump/, elsewhere);
+    const notAFile = textOf(await call('scene_tree', { scenePath: 'moves.tscn::Animation_jump' })) ?? '';
+    assert.match(
+      notAFile,
+      /names the resource Animation_jump kept inside moves\.tscn, not a file\. resource_edit read reads one/,
+      notAFile,
+    );
 
     const missing = textOf(await call('scene_tree', { scenePath: 'res://nope.tscn' })) ?? '';
     assert.match(missing, /Scene not found: res:\/\/nope\.tscn/, missing);

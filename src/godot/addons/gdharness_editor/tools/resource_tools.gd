@@ -243,6 +243,10 @@ func read_resource(args: Dictionary) -> Dictionary:
 	var res_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	if res_path == "res://":
 		return {"ok": false, "error": "resourcePath is required"}
+	# The server takes a resource kept inside a file apart, so the boundary judges the file alone.
+	var inner: String = str(args.get("subResource", ""))
+	if not inner.is_empty():
+		res_path += "::" + inner
 	return FileReads.resource(res_path, Read.as_bool(args.get("includeDefaults", false)))
 
 

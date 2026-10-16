@@ -808,7 +808,17 @@ alone can say, whether it holds unsaved changes to the scene, and the headless a
 is instanced, rather than instantiated: outside the editor, instantiating runs every node
 script's member initialisers and `_init`, so a read would have run the game's code on every node.
 The stored properties come from a bare node of each engine class with the file's values set on
-it, since what a node lists depends on its values and some setters set others.
+it, since what a node lists depends on its values and some setters set others. A resource kept
+inside a file (`res://hero.tscn::Animation_jump`, the path a property holding one is answered
+with) is found among what the file holds, because the engine loads such a path only while the
+file is cached and a read loads it uncached; the server takes the id off before the project
+boundary judges the path, which is a file's.
+
+`scene_animation read` and `read_states` share `animation_reads.gd` the same way. The editor
+hands it the node from the scene it opens; with no editor, the operation builds a bare
+`AnimationPlayer` or `AnimationTree` from the properties `file_reads.gd` lays for that node, its
+script left off, and asks that, so the libraries and the tree root are the ones the file stores
+and no script of the scene runs.
 
 That serialiser is one file, copied into each addon by `bun run sync:gd` because an addon is
 installed as a directory and cannot preload out of one, and a fixture refuses a copy that has

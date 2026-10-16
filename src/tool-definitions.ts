@@ -871,7 +871,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_animation',
     title: 'Animations',
     description:
-      'Animations in an AnimationPlayer and states in an AnimationTree state machine. read answers with every track of an animation in the shape add_track takes, so a track read off one animation can be added to another. Needs the editor connected.',
+      "Animations in an AnimationPlayer and states in an AnimationTree state machine. read answers with every track of an animation in the shape add_track takes, so a track read off one animation can be added to another. read and read_states need no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without running the scene's scripts. The ops that write need the editor connected.",
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -1099,7 +1099,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: PROJECT_PATH,
       resourcePath: {
         ...RESOURCE_PATH,
-        description: `${RESOURCE_FILE} move: a directory too.`,
+        description: `${RESOURCE_FILE} move: a directory too. read: also a resource kept inside a scene or resource file, by the path a read answers a property holding it with, such as "res://hero.tscn::Animation_jump".`,
       },
       resourceType: {
         type: 'string',

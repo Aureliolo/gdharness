@@ -14,6 +14,7 @@ extends SceneTree
 # the operations directory ships inside the server package and is handed to the engine as an
 # absolute path outside the project. A res:// path would only resolve in the test fixture.
 
+const AnimationReads = preload("animation_reads.gd")
 const AudioBuses = preload("audio_buses.gd")
 const ClassCache = preload("class_cache.gd")
 const ClassDbQueries = preload("classdb_queries.gd")
@@ -151,6 +152,22 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = _read(
 				FileReads.resource(
 					str(params.get("resource_path", "")), Read.as_bool(params.get("include_defaults", false))
+				)
+			)
+		"read_animations":
+			payload = _read(
+				AnimationReads.scene_animations(
+					str(params.get("scene_path", "")),
+					str(params.get("player_node_path", ".")),
+					str(params.get("animation_name", ""))
+				)
+			)
+		"read_animation_states":
+			payload = _read(
+				AnimationReads.scene_states(
+					str(params.get("scene_path", "")),
+					str(params.get("anim_tree_path", "")),
+					str(params.get("state_machine_path", ""))
 				)
 			)
 
