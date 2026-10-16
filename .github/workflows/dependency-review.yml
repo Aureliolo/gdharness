@@ -4,6 +4,10 @@ name: Dependency review
 # (permissive, plus MPL-2.0), or to a version with a known vulnerability of moderate severity or
 # above. Only what the pull request changes is checked, so a Renovate bump is where it bites.
 #
+# A licence outside the list is the owner's to allow, and a dependency carrying one passes by name
+# rather than by widening the list: yamllint (GPL-3.0) and regex (CNRI-Python, through gdtoolkit's
+# lark) are development tools behind the lint gates, and the package ships neither.
+#
 # No paths filter: it is a required check, and a required check a filter stopped from running
 # never reports, which leaves the pull request waiting on it forever.
 on:
@@ -30,4 +34,7 @@ jobs:
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: moderate
-          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, 0BSD, Unlicense, CC0-1.0, BSL-1.0, Python-2.0, MPL-2.0
+          allow-licenses: >-
+            MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, Zlib,
+            0BSD, Unlicense, CC0-1.0, BSL-1.0, Python-2.0, MPL-2.0, Unicode-3.0, CDLA-Permissive-2.0
+          allow-dependencies-licenses: pkg:pypi/yamllint, pkg:pypi/regex
