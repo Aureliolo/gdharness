@@ -266,6 +266,7 @@ import {
   withoutUidUnder,
   withPreviousCut,
   withUidsMissing,
+  writtenBeside,
 } from '../src/server.js';
 import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
@@ -312,6 +313,7 @@ import { argumentShape, namedType, renderToolsMarkdown } from '../src/tool-refer
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { askWindows } from '../src/windows-ask.js';
 import { withHome } from './support/cli-home.js';
+import { containedEngine } from './support/contained-engine.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
 import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
@@ -21524,6 +21526,36 @@ function testAnExportIsJudgedByTheFileItWrote(): void {
     [true, "Export with preset 'Linux' did not produce builds/game.x86_64."],
     'and with no file at all there is nothing from before to mention',
   );
+
+  // What else the export wrote beside the build: a pack new or rewritten, and not a file it left
+  // alone or the build itself.
+  const before = new Map([
+    ['game.x86_64', 10],
+    ['game.pck', 10],
+    ['notes.txt', 10],
+  ]);
+  const after = new Map([
+    ['game.x86_64', 20],
+    ['game.pck', 20],
+    ['notes.txt', 10],
+    ['libgame.so', 20],
+  ]);
+  assert.deepEqual(writtenBeside(before, after, 'game.x86_64', 'builds'), [
+    'builds/game.pck',
+    'builds/libgame.so',
+  ]);
+  assert.deepEqual(writtenBeside(new Map(), new Map([['game.pck', 5]]), 'game.exe', '.'), ['game.pck']);
+  assert.deepEqual(
+    get(
+      parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000, ['builds/game.pck']) }),
+      'alsoWritten',
+    ),
+    ['builds/game.pck'],
+  );
+  assert.equal(
+    get(parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000) }), 'alsoWritten'),
+    undefined,
+  );
 }
 
 /**
@@ -21566,6 +21598,74 @@ function testAnExportOfAMissingPresetIsRefusedFirst(): void {
  * every refusal sent the caller to the editor's Export dialog. Linux on every host, because the
  * engine exports for any platform it has templates of and a Linux build needs no signing.
  */
+/**
+ * A self-contained engine's export templates are looked for beside it, and judged per platform.
+ *
+ * Run here as well as in the engine fixtures because the engine legs run those on Linux and Windows
+ * only, and macOS is where the marker is looked for in a second place: beside the read-only bundle.
+ */
+async function testASelfContainedEngineKeepsItsTemplates(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('self-contained templates regression skipped (Godot not found)');
+    return;
+  }
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contained-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contained-project-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contained-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Contained"\n',
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: containedEngine(godotPath, home),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<unknown> =>
+    parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'project_export', arguments: { projectPath: project, ...args } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+  try {
+    await server.initialize('contained');
+    const added = await call({ op: 'add_preset', preset: 'Penguin', platform: 'Linux' });
+    const templates = text(get(added, 'templates'));
+    assert.ok(
+      resolve(templates).startsWith(resolve(home, 'editor_data', 'export_templates')),
+      `the templates are looked for beside the engine: ${JSON.stringify(added)}`,
+    );
+    assert.equal(get(added, 'templates_installed'), false, JSON.stringify(added));
+
+    mkdirSync(templates, { recursive: true });
+    writeFileSync(join(templates, 'windows_release_x86_64.exe'), '');
+    const windowsOnly = await call({ op: 'list' });
+    assert.deepEqual(
+      [get(windowsOnly, 'templates'), get(windowsOnly, 'presets', 0, 'templates_installed')],
+      [templates, false],
+      `the Windows templates are not the Linux ones: ${JSON.stringify(windowsOnly)}`,
+    );
+    writeFileSync(join(templates, 'linux_release.x86_64'), '');
+    const both = await call({ op: 'list' });
+    assert.equal(get(both, 'presets', 0, 'templates_installed'), true, JSON.stringify(both));
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
 async function testAnAddedPresetExports(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -21626,6 +21726,11 @@ async function testAnAddedPresetExports(): Promise<void> {
       textOf(await call({ op: 'add_preset', preset: 'Out', platform: 'Linux', outputPath: '../out.bin' })) ??
       '';
     assert.match(outside, /resolves outside the project directory/, outside);
+    assert.match(
+      outside,
+      /Give outputPath inside the project, relative to it, such as "build\/game\.exe"/,
+      outside,
+    );
     const listed = parseTextContent(await call({ op: 'list' }));
     assert.deepEqual(
       asArray(get(listed, 'presets'), 'presets').map((preset) => get(preset, 'name')),
@@ -21652,6 +21757,15 @@ async function testAnAddedPresetExports(): Promise<void> {
         `templates are installed, so the export is made: ${shown}`,
       );
       assert.ok(existsSync(join(project, 'build', 'game.x86_64')), shown);
+      // The pack the build cannot start without, written beside it, is named with it.
+      assert.ok(existsSync(join(project, 'build', 'game.pck')), shown);
+      assert.deepEqual(get(verdict, 'alsoWritten'), ['build/game.pck'], shown);
+      const again = await call({ op: 'run', preset: 'Penguin', outputPath: 'build/game.x86_64' });
+      assert.deepEqual(
+        get(parseTextContent(again), 'alsoWritten'),
+        ['build/game.pck'],
+        `a second export rewrites the pack and says so: ${JSON.stringify(again)}`,
+      );
     } else {
       assert.equal(get(verdict, 'exported'), false, shown);
       assert.match(
@@ -40929,6 +41043,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExportThatCouldNotCopyALibrarySaysSo,
   testAnExportOfAMissingPresetIsRefusedFirst,
   testAnAddedPresetExports,
+  testASelfContainedEngineKeepsItsTemplates,
   testAnExportedBuildIsFoundInsideTheProject,
   testAnExportedBuildIsStartedAndStopped,
   testLibraryCopiesAreMovedAsideAndSwept,

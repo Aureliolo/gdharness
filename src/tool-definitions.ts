@@ -642,7 +642,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_export',
     title: 'Export',
     description:
-      "Export presets and exports. add_preset writes a preset to export_presets.cfg with the keys the editor's Project > Export writes for a new one, every platform option left at its default, and makes it the platform's runnable preset when the platform has none. It answers where this engine's export templates belong and whether they are there, since an export needs them. An editor open on the project does not see a preset added this way until it restarts.",
+      "Export presets and exports. add_preset writes a preset to export_presets.cfg with the keys the editor's Project > Export writes for a new one, every platform option left at its default, and makes it the platform's runnable preset when the platform has none. It answers where this engine's export templates belong and whether the preset's platform has them, since an export needs them; list says the same for every preset. An editor open on the project does not see a preset added this way until it restarts. run names, as alsoWritten, what else the export wrote beside its output, such as the .pck a Windows or Linux build cannot start without.",
     parameters: {
       projectPath: PROJECT_PATH,
       preset: {

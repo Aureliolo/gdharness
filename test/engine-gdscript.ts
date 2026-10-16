@@ -29,6 +29,7 @@ import { ANSWERED, engineExtras, runOperation as runThroughTheServersOwnPath } f
 import { userDataIn } from '../src/launch.js';
 import { type SpawnSyncReturns, spawnHidden, spawnSyncHidden } from '../src/spawn.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
+import { containedEngine } from './support/contained-engine.js';
 import { asArray, asNumber, asObject, asString, get, lastJsonLine, text } from './support/json.js';
 import { solidPng } from './support/png.js';
 import { sweep } from './support/sweep.js';
@@ -442,28 +443,14 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
  *
  * The directory is one per engine version and holds whichever platforms were installed into it.
  * Its being there was taken as the templates being installed, so an engine with only the Windows
- * templates answered yes for a Linux preset whose export then failed for want of them. On macOS
- * the marker goes beside the bundle, which is where that editor looks for it.
+ * templates answered yes for a Linux preset whose export then failed for want of them. The engine
+ * legs run these fixtures on Linux and Windows only, so testASelfContainedEngineKeepsItsTemplates
+ * in the regressions holds the macOS bundle.
  */
 function checkTemplatesArePerPlatform(godotPath: string, projectDir: string): void {
   const home = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contained-'));
   try {
-    const bundle = /^(.*\.app)[\\/]Contents[\\/]MacOS[\\/][^\\/]+$/.exec(godotPath)?.[1];
-    let engine: string;
-    if (bundle !== undefined) {
-      const copied = join(home, 'Godot.app');
-      cpSync(bundle, copied, { recursive: true });
-      engine = join(copied, godotPath.slice(bundle.length));
-    } else {
-      engine = join(home, godotPath.split(/[\\/]/).pop() ?? 'godot');
-      cpSync(godotPath, engine);
-      // The Windows console executable starts the one beside it of the same name without the suffix.
-      const windowed = godotPath.replace(/_console(\.exe)$/i, '$1');
-      if (windowed !== godotPath && existsSync(windowed)) {
-        cpSync(windowed, join(home, windowed.split(/[\\/]/).pop() ?? 'godot.exe'));
-      }
-    }
-    writeFileSync(join(home, '._sc_'), '');
+    const engine = containedEngine(godotPath, home);
     const add = (preset: string, platform: string): unknown =>
       runOperation(engine, projectDir, 'add_export_preset', { preset, platform });
 
@@ -490,6 +477,19 @@ function checkTemplatesArePerPlatform(godotPath: string, projectDir: string): vo
       [get(windows, 'templates_installed'), get(windows, 'templates_note')],
       [true, undefined],
       JSON.stringify(windows),
+    );
+    const listed = runOperation(engine, projectDir, 'list_export_presets', {});
+    assert.equal(get(listed, 'templates'), templates, JSON.stringify(listed));
+    assert.deepEqual(
+      asArray(get(listed, 'presets'))
+        .filter((preset) => asString(get(preset, 'name')).startsWith('Contained'))
+        .map((preset) => [get(preset, 'name'), get(preset, 'templates_installed')]),
+      [
+        ['Contained Linux', false],
+        ['Contained Linux 2', false],
+        ['Contained Windows', true],
+      ],
+      `the list judges each preset by its own platform: ${JSON.stringify(listed)}`,
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -1280,18 +1280,27 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.match(presetsText, /\[preset\.1\.options\]/, presetsText);
   const presetList = asArray(get(operation('list_export_presets', {}), 'presets'));
   assert.deepEqual(
-    presetList.map((preset) => [get(preset, 'name'), get(preset, 'platform'), get(preset, 'runnable')]),
+    presetList.map((preset) => [
+      get(preset, 'name'),
+      get(preset, 'platform'),
+      get(preset, 'runnable'),
+      get(preset, 'templates_installed'),
+    ]),
     [
-      ['Desktop', 'Windows Desktop', true],
-      ['Desktop Debug', 'Windows Desktop', false],
+      ['Desktop', 'Windows Desktop', true, get(desktop, 'templates_installed')],
+      ['Desktop Debug', 'Windows Desktop', false, get(desktop, 'templates_installed')],
     ],
-    JSON.stringify(presetList),
+    `the list reads templates as add_preset does: ${JSON.stringify(presetList)}`,
   );
   const taken = runRefusedOperation(godotPath, projectDir, 'add_export_preset', {
     preset: 'Desktop',
     platform: 'Linux',
   });
-  assert.match(taken.stderr, /There is already an export preset named 'Desktop'/, taken.stderr);
+  assert.match(
+    taken.stderr,
+    /There is already an export preset named 'Desktop', for Windows Desktop, exporting to 'build\/game\.exe'\. project_export run exports with it; give another name to add a second\./,
+    taken.stderr,
+  );
   const unknown = runRefusedOperation(godotPath, projectDir, 'add_export_preset', {
     preset: 'Other',
     platform: 'Windows',

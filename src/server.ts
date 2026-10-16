@@ -1797,12 +1797,17 @@ export function exportPresetRefusal(projectPath: string, preset: string): string
  *
  * Exported means this run wrote the file. A file an earlier export left there read as this one's, so
  * an export that exited cleanly having written nothing was answered as having exported.
+ *
+ * [param beside] is what else the run wrote into the output's directory. A Windows or Linux export
+ * writes the game's pack beside the executable unless the preset embeds it, and the build does not
+ * start without it, so an answer naming only the executable sent the caller to ship half a game.
  */
 export function exportAnswer(
   ending: EngineRun,
   asked: { readonly preset: string; readonly outputPath: string; readonly debug: boolean },
   before: number | null,
   after: number | null,
+  beside: readonly string[] = [],
 ): ToolResponse {
   const { log } = ending;
   const written = after !== null && after !== before;
@@ -1815,6 +1820,7 @@ export function exportAnswer(
     failure: ending.failure ?? undefined,
     errors: log.count('error'),
     warnings: log.count('warning'),
+    ...(beside.length === 0 ? {} : { alsoWritten: beside }),
     ...(notCopied.length === 0
       ? {}
       : {
@@ -1844,6 +1850,38 @@ export function exportAnswer(
     ],
     isError: true,
   };
+}
+
+/**
+ * What an export wrote beside [param output] in the folder it wrote into, as project paths: every
+ * file in [param after] that [param before] did not hold, or held written at another time.
+ * [param within] is the folder's own project path, `.` for the project's root.
+ */
+export function writtenBeside(
+  before: ReadonlyMap<string, number>,
+  after: ReadonlyMap<string, number>,
+  output: string,
+  within: string,
+): string[] {
+  return [...after]
+    .filter(([name, at]) => name !== output && before.get(name) !== at)
+    .map(([name]) => (within === '.' ? name : `${within}/${name}`))
+    .sort();
+}
+
+/** The files directly inside [param folder], each with when it was last written. */
+function filesIn(folder: string): Map<string, number> {
+  const found = new Map<string, number>();
+  try {
+    for (const entry of readdirSync(folder, { withFileTypes: true })) {
+      if (entry.isFile()) {
+        found.set(entry.name, statSync(join(folder, entry.name)).mtimeMs);
+      }
+    }
+  } catch {
+    // A folder that cannot be listed holds nothing this answer can name.
+  }
+  return found;
 }
 
 /**
@@ -2329,6 +2367,11 @@ const RUN_POLL_MS = 250;
 const PATH_SOLUTIONS = [
   'Give the path relative to the project, such as "scenes/main.tscn" or "res://scenes/main.tscn"',
   'Point projectPath at the project the file belongs to',
+];
+
+/** The same for an export's output, which is a file to write rather than one the project holds. */
+const OUTPUT_PATH_SOLUTIONS = [
+  'Give outputPath inside the project, relative to it, such as "build/game.exe" or "res://build/game.exe"; copy the build elsewhere once it is exported',
 ];
 
 /**
@@ -5707,7 +5750,7 @@ class GodotServer {
     const given = readNonEmptyString(args, 'outputPath');
     const output = given === undefined ? null : resolveWithinProject(project.value.path, given);
     if (output !== null && !output.ok) {
-      return this.createErrorResponse(output.reason, PATH_SOLUTIONS);
+      return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
     const outcome = await this.operation(
       'add_export_preset',
@@ -5741,7 +5784,7 @@ class GodotServer {
     const preset = readNonEmptyString(args, 'preset') ?? '';
     const output = resolveWithinProject(project.value.path, readString(args, 'outputPath') ?? '');
     if (!output.ok) {
-      return this.createErrorResponse(output.reason, PATH_SOLUTIONS);
+      return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
     const noPreset = exportPresetRefusal(project.value.path, preset);
     if (noPreset !== null) {
@@ -5793,6 +5836,7 @@ class GodotServer {
     const writtenAt = (): number | null =>
       existsSync(output.absolutePath) ? statSync(output.absolutePath).mtimeMs : null;
     const before = writtenAt();
+    const listedBefore = filesIn(folder);
     const freed = freeLibraryCopies(project.value.path);
     if (freed.setAside.length > 0 || freed.swept.length > 0) {
       this.logDebug(
@@ -5811,7 +5855,19 @@ class GodotServer {
         `Export could not be run: ${ending.failure ?? 'the engine gave no exit status'}`,
       );
     }
-    return exportAnswer(ending, { preset, outputPath: output.relativePath, debug }, before, writtenAt());
+    const beside = writtenBeside(
+      listedBefore,
+      filesIn(folder),
+      basename(output.absolutePath),
+      dirname(output.relativePath).replaceAll('\\', '/'),
+    );
+    return exportAnswer(
+      ending,
+      { preset, outputPath: output.relativePath, debug },
+      before,
+      writtenAt(),
+      beside,
+    );
   }
 
   /**

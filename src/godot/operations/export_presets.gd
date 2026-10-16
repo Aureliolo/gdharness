@@ -55,14 +55,16 @@ func list_export_presets(_params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to parse export_presets.cfg: " + error_string(err))
 
+	var templates: String = _templates_dir()
 	var presets: Array[Dictionary] = []
 	var index: int = 0
 	while config.has_section("preset." + str(index)):
 		var section: String = "preset." + str(index)
+		var platform: String = str(config.get_value(section, "platform", "Unknown"))
 		var preset: Dictionary = {
 			"index": index,
 			"name": config.get_value(section, "name", "Unknown"),
-			"platform": config.get_value(section, "platform", "Unknown"),
+			"platform": platform,
 			"runnable": _runnable(config, section),
 			"export_path": config.get_value(section, "export_path", ""),
 			"export_filter": config.get_value(section, "export_filter", "all_resources"),
@@ -71,9 +73,13 @@ func list_export_presets(_params: Dictionary) -> Dictionary:
 		}
 		if config.has_section_key(section, "custom_features"):
 			preset["custom_features"] = config.get_value(section, "custom_features", "")
+		# Left out for a platform this file names and the exporter does not know, which has no
+		# templates to look for.
+		if platform in PLATFORMS:
+			preset["templates_installed"] = _installed(templates, platform)
 		presets.append(preset)
 		index += 1
-	return {"presets": presets, "presets_file_exists": true, "total_presets": index}
+	return {"presets": presets, "presets_file_exists": true, "total_presets": index, "templates": templates}
 
 
 ## Whether the preset in [param section] is the one its platform runs. The editor names that preset
@@ -105,8 +111,21 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 			return _log.failure("Failed to parse export_presets.cfg: " + error_string(loading))
 	var index: int = 0
 	while config.has_section("preset." + str(index)):
-		if str(config.get_value("preset." + str(index), "name", "")) == preset_name:
-			return _log.failure("There is already an export preset named '%s'." % preset_name)
+		var held: String = "preset." + str(index)
+		if str(config.get_value(held, "name", "")) == preset_name:
+			return _log.failure(
+				(
+					(
+						"There is already an export preset named '%s', for %s, exporting to '%s'. "
+						+ "project_export run exports with it; give another name to add a second."
+					)
+					% [
+						preset_name,
+						config.get_value(held, "platform", ""),
+						config.get_value(held, "export_path", "")
+					]
+				)
+			)
 		index += 1
 	# A platform with no preset to run takes the new one, as the editor's dialog does.
 	var runnable: bool = not config.has_section_key(RUNNABLE_SECTION, platform)
@@ -142,12 +161,7 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 		return _log.failure("Failed to save export_presets.cfg: " + error_string(saving))
 
 	var templates: String = _templates_dir()
-	# The directory is one per engine version and holds whichever platforms were installed into it,
-	# so its being there says nothing about this platform.
-	var installed: bool = false
-	if DirAccess.dir_exists_absolute(templates):
-		for file: String in DirAccess.get_files_at(templates):
-			installed = installed or file.begins_with(PLATFORMS[platform])
+	var installed: bool = _installed(templates, platform)
 	var answer: Dictionary = {
 		"preset": preset_name,
 		"platform": platform,
@@ -197,6 +211,18 @@ static func _templates_dir() -> String:
 		"godot" if OS.get_name() in ["Linux", "FreeBSD", "NetBSD", "OpenBSD", "BSD"] else "Godot"
 	)
 	return OS.get_data_dir().path_join(home).path_join("export_templates").path_join(named)
+
+
+## Whether [param templates] holds any of [param platform]'s templates. The directory is one per
+## engine version and holds whichever platforms were installed into it, so its being there says
+## nothing about this platform.
+static func _installed(templates: String, platform: String) -> bool:
+	if not DirAccess.dir_exists_absolute(templates):
+		return false
+	for file: String in DirAccess.get_files_at(templates):
+		if file.begins_with(PLATFORMS[platform]):
+			return true
+	return false
 
 
 static func _marks_self_contained(directory: String) -> bool:
