@@ -3162,9 +3162,11 @@ async function testTheLanguageServerOfAnotherProjectIsRefused(): Promise<void> {
             ['hover', 'Hover'],
             ['completion', 'Completion'],
           ] as const) {
+            // A position only where the op reads one: symbols refuses it as an argument it ignores.
+            const at = op === 'symbols' ? {} : { line: 1, character: 1 };
             const asked = await server.request('tools/call', {
               name: 'script_info',
-              arguments: { projectPath: ours, scriptPath: 'res://hero.gd', op, line: 1, character: 1 },
+              arguments: { projectPath: ours, scriptPath: 'res://hero.gd', op, ...at },
             });
             const told = textOf(asked) ?? '';
             assert.equal(get(asked.result, 'isError'), true, `script_info ${op} is refused as well: ${told}`);
