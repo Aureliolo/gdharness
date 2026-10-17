@@ -315,6 +315,7 @@ import {
 } from '../src/tool-definitions.js';
 import { argumentShape, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
+import { writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
@@ -38414,6 +38415,13 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     // The cache from before any scan here, dated a minute back: rewriting it just before a check
     // would make it newer than the scan the check is told about, which is the editor's own write
     // and not the file it replaces.
+    // The editor saves the cache to a file beside it and renames that over it, so the server never
+    // reads one half written. Bun's writeFileSync writes over the old text and cuts it to length
+    // after: a server reading in between, just after the file's time moved, read the new start and
+    // the old classes behind it, so a class the write dropped read as still held.
+    const editorSaves = (content: string): void => {
+      assert.ok(writeWhole(cache, content), 'the fixture editor should have written the class cache');
+    };
     const cacheBeforeTheScan = (): void => {
       writeFileSync(cache, EMPTY);
       const aMinuteAgo = new Date(Date.now() - 60_000);
@@ -38505,7 +38513,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
           asked = scanAsked.first;
         }
         await delay(Math.max(0, asked + afterMs - Date.now()));
-        writeFileSync(cache, content);
+        editorSaves(content);
       })();
     };
 
@@ -38546,7 +38554,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     scanning = () => false;
     finishedAt = Date.now() - 200;
     const late = delay(1_300).then(() => {
-      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
+      editorSaves(WRITTEN_AFTER_THE_SCAN);
     });
     const unseen = await check();
     await late;
