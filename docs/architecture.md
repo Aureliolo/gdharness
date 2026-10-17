@@ -846,10 +846,15 @@ before. A node with no such script is left alone, because a script runs on its o
 loads, and anything else a pack changes, such as a Control gaining its grow directions from the
 setter of `anchors_preset`, the editor's pack changes too. After the save, the embedded resources
 that carry a script, and the main resource of a resource file, are compared with the file's text
-before the write the same way and put back. What still differs after one round is refused, with the
-file restored, and so is a scene whose script did not compile, which the engine instances without
-it. A headless save also writes back the uid the file had, which an engine with no editor's uid
-cache otherwise drops. An editor of the project that is running and has not reached this server
+before the write the same way and put back. Putting one property back can run a setter that changes
+another already put back, so a scene is packed and put back again until nothing differs, for up to
+four rounds; a resource file gets one. What still differs then is refused, with the file restored,
+and so is a scene whose script did not compile, which the engine instances without it. A line that
+only restates a property's default does not count against a write: the engine reports no default for
+an export initialised by a constructor call, such as `PackedStringArray()`, so every save writes one,
+the editor's too, and that default is read from the declaration in the script instead. A headless
+save also writes back the uid the file had, which an engine with no editor's uid cache otherwise
+drops. An editor of the project that is running and has not reached this server
 holds its own copy of anything it has open, and saving that would put back what the engine wrote,
 so a write waits for it to connect instead.
 
