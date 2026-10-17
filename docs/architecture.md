@@ -701,7 +701,10 @@ handed to the game as it starts, and one set while it runs reaches it at once. T
 pauses a running game, which the editor's adapter cannot, and the engine takes the pause between
 lines of script as well as between frames, so a game spinning in a script loop on its first frame
 can be broken into and asked where it is. Errors do not stop such a game (`--ignore-error-breaks`),
-as they did not when it had no debugger. A profiled run's profiler reads the same connection.
+as they did not when it had no debugger. A profiled run's profiler reads the same connection. A
+mark (`editor_run profile` with `mark`) is the profile's totals at that moment, written beside the
+run's note rather than held in the server, so a server that replaces this one counts
+`since: "mark"` from the same place.
 
 `editor_output` answers with entries rather than lines: each `ERROR:`, `SCRIPT ERROR:` and
 `WARNING:` headline with its `at:` line and backtrace, the counts, and a `clean` verdict. It
@@ -771,12 +774,13 @@ when the answer is written, and what the engine reports after that line comes ba
 `engine_messages_after_answer`, with a note saying whose it is. Mixed into `engine_messages`, a
 failing autoload's errors rode on every settings read and read as the read failing.
 
-The operations that compile the project's scripts (`check_scripts`, `create_script` and
-`modify_script`) run on the first frame instead of in `_init`, after the autoloads have entered the
-tree. Before then the engine does not know an autoload's name, so every script naming one failed to
-compile with "Identifier not found", although the game and the editor ran it. Such an operation
-prints `[gdharness] waiting for the autoloads` in `_init` and `[gdharness] begun` when it starts,
-and what the engine reports between those two lines comes back under
+The operations that compile the project's scripts (`check_scripts`, `create_script`,
+`modify_script`, `run_editor_tool`, and the scene, resource and animation reads, which load the
+scripts a file names) run on the first frame instead of in `_init`, after the autoloads have
+entered the tree. Before then the engine does not know an autoload's name, so every script naming
+one failed to compile with "Identifier not found", although the game and the editor ran it. Such an
+operation prints `[gdharness] waiting for the autoloads` in `_init` and `[gdharness] begun` when it
+starts, and what the engine reports between those two lines comes back under
 `engine_messages_before_operation`. An engine that ends before the second line never ran the
 operation, and the answer says so.
 
@@ -797,6 +801,19 @@ write where the project keeps its logs are the ones that are the point rather th
 and an editor, and a run's log is the run's. `project_test` is neither: its whole `user://` moves
 to a directory of its own, so a suite that saves a game cannot write into the saves somebody
 plays.
+
+An import and an export start the engine as the editor, and Godot crashes as such a run exits when
+the editor's class reference cache is stale. The cache, `editor_doc_cache-<major>.<minor>.res` in
+the editor's cache folder, is keyed on the exact build, so two patch releases of one minor version
+on a machine, such as 4.7.1 and 4.7.2, each leave the other a stale one. The thread that reads the
+cache hands the rebuild to the main thread as a deferred call, the editor frees the class reference
+as it is torn down, and the deferred call runs after that. The run has done its work and written a
+fresh cache by then, so the next run is clean. When an import or an export ends badly and a cache in
+that folder was written while it ran, gdharness runs it once more and says why under
+`docCacheNote`. Windows reports the crash as an access violation, 0xC0000005, and a runtime that
+keeps only the low byte of an exit code, as Bun does, reports it as 5. On macOS the engine's crash
+handler prints the signal and the process then exits 0, so a run whose output holds that report
+counts as ending badly too.
 
 Which tools this covers is worth knowing, because `project_settings get` reads like a look at a
 config file and is not: it starts an engine so that a setting nobody wrote into `project.godot`

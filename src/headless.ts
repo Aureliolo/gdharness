@@ -10,6 +10,7 @@
 import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { emptyRecord } from './dictionary.js';
+import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import type { GameLog, LogEntry } from './game-log.js';
 import { freeLibraryCopies } from './library-copies.js';
@@ -231,6 +232,8 @@ export type ImportOutcome = (
   readonly librariesNotLoaded?: readonly string[];
   /** What a caller is told about the second pass, present whenever there was one. */
   readonly extensionNote?: string;
+  /** Present when a pass crashed on its way out over a stale class reference cache: see {@link docCacheCrash}. */
+  readonly docCacheNote?: string;
 };
 
 /**
@@ -273,7 +276,8 @@ function extensionRetryNote(libraries: readonly string[], stillNotLoaded: readon
 
 /**
  * The engine's own import pass over a project, which is what mints a missing `.uid`, run a second
- * time when the first could not copy an extension library: see {@link librariesNotCopied}.
+ * time when the first could not copy an extension library (see {@link librariesNotCopied}) or
+ * crashed on its way out over a stale class reference cache (see {@link docCacheCrash}).
  *
  * Not an operation: there is no script and no answer to parse, only the exit status and whatever
  * the engine complained about. It is here rather than in the server because it is the same engine
@@ -304,21 +308,34 @@ export async function runImport(
   };
   const first = await pass();
   const collided = librariesNotCopied(first.messages);
-  if (collided.length === 0) {
+  const crash = first.docCacheNote;
+  if (collided.length === 0 && crash === undefined) {
     return first;
   }
-  const second = await pass();
+  const { docCacheNote: _, ...again } = await pass();
+  // A refusal is answered by its message alone, so the note travels inside it.
+  const second =
+    again.ok || crash === undefined
+      ? again
+      : { ...again, message: `${again.message.replace(/[.\s]+$/, '')}. ${crash}` };
   const still = librariesNotCopied(second.messages);
   return {
     ...second,
-    librariesRetried: collided,
-    ...(still.length === 0 ? {} : { librariesNotLoaded: still }),
-    extensionNote: extensionRetryNote(collided, still),
+    ...(collided.length === 0
+      ? {}
+      : {
+          librariesRetried: collided,
+          ...(still.length === 0 ? {} : { librariesNotLoaded: still }),
+          extensionNote: extensionRetryNote(collided, still),
+        }),
+    ...(crash === undefined ? {} : { docCacheNote: crash }),
   };
 }
 
 async function importOnce(godotPath: string, projectPath: string): Promise<ImportOutcome> {
   const logDir = scratchDirectory('import');
+  const caches = editorCacheDirectory(godotPath);
+  const cachesBefore = docCachesWritten(caches);
   let ran: EngineRun;
   try {
     ran = await runEngine(godotPath, [
@@ -333,13 +350,15 @@ async function importOnce(godotPath: string, projectPath: string): Promise<Impor
     discard(logDir);
   }
   const problems = problemsIn(ran.log);
+  const crash = docCacheCrash(ran, cachesBefore, docCachesWritten(caches), 'import');
   if (ran.exitCode === 0 && ran.failure === null) {
-    return { ok: true, ...reported(problems) };
+    return { ok: true, ...reported(problems), ...(crash === null ? {} : { docCacheNote: crash }) };
   }
   return {
     ok: false,
     message: `the import pass failed (${howItEnded(ran)}): ${reason(ran.log, problems)}`,
     ...reported(problems),
+    ...(crash === null ? {} : { docCacheNote: crash }),
   };
 }
 

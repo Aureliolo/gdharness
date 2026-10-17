@@ -210,6 +210,15 @@ export function profilePath(startedAt: number): string {
   return join(runsDirectory(), `run-${startedAt}.profile.json`);
 }
 
+/**
+ * Where the mark `editor_run profile` sets in a run is kept, beside the run's profile, so a server
+ * that replaces the one that set it reads it too. Named by the run's start for a run the editor
+ * plays as well, which has no profile file of its own.
+ */
+export function profileMarkPath(startedAt: number): string {
+  return join(runsDirectory(), `run-${startedAt}.profile-mark.json`);
+}
+
 export function writeRunRecord(record: RunRecord): void {
   mkdirSync(runsDirectory(), { recursive: true });
   const path = runRecordPath(record.projectPath);
@@ -852,6 +861,7 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
   const kept = new Set(
     everyRunRecord().flatMap((record) => [
       record.transcript,
+      profileMarkPath(record.startedAt),
       ...(record.profile === undefined ? [] : [record.profile]),
     ]),
   );
@@ -864,7 +874,8 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
   for (const entry of entries) {
     // A partial file is what a writer that died between writing and renaming left behind.
     const transcript =
-      entry.startsWith('run-') && (entry.endsWith('.log') || entry.endsWith('.profile.json'));
+      entry.startsWith('run-') &&
+      (entry.endsWith('.log') || entry.endsWith('.profile.json') || entry.endsWith('.profile-mark.json'));
     if (!transcript && !entry.endsWith('.partial')) {
       continue;
     }

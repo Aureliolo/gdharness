@@ -77,6 +77,7 @@ import {
 } from './dap_client.js';
 import { ensureHelperCompiled, HIDDEN_DESKTOP } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
+import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import {
   bursts,
   clearEditorLog,
@@ -85,7 +86,7 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from './editor-log.js';
-import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
+import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
@@ -202,6 +203,7 @@ import {
   listeningPid,
   noteIsAbout,
   openTranscript,
+  profileMarkPath,
   profilePath,
   type RunRecord,
   readEditorRunNote,
@@ -246,12 +248,16 @@ import {
   callersOf,
   frameFunctionsFor,
   PROFILE_FROM_START,
+  type ProfileMark,
   type ProfileTotals,
   profiledFunctions,
   queuedMessagesOf,
   readProfileFile,
+  readProfileMark,
   type SourceOf,
+  totalsSince,
   UNNAMED_PREFIX,
+  writeProfileMark,
 } from './script-profile.js';
 import { serverInstructions } from './server-instructions.js';
 import type {
@@ -667,7 +673,7 @@ function exited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): boolean {
 /** How a process that has exited ended, for a sentence. */
 function howItExited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): string {
   return run.exitSignal === null
-    ? `exit code ${run.exitCode ?? 'unknown'}`
+    ? exitCodeText(run.exitCode)
     : `ended by ${run.exitSignal}, with no exit code`;
 }
 
@@ -1003,7 +1009,7 @@ export function ourRunEnded(
           : run.endedThrough === 'editor'
             ? 'this server asked the editor to stop it'
             : run.exitCode !== null
-              ? `it exited by itself with code ${run.exitCode}`
+              ? `it exited by itself with ${exitCodeText(run.exitCode)}`
               : run.exitSignal === null
                 ? 'it is no longer running'
                 : `it was ended by ${run.exitSignal}`;
@@ -1864,6 +1870,7 @@ export function exportAnswer(
   before: number | null,
   after: number | null,
   beside: readonly string[] = [],
+  docCacheNote: string | null = null,
 ): ToolResponse {
   const { log } = ending;
   const written = after !== null && after !== before;
@@ -1883,6 +1890,7 @@ export function exportAnswer(
           librariesNotLoaded: notCopied,
           extensionNote: `The export could not load ${notCopied.join(' and ')}: on Windows an engine running as the editor, which an export is, loads a GDExtension from a ~ copy beside the library, and another engine on this project held that copy: it could not be moved aside before the export, or another engine made a new one in between. Export again once that engine has loaded or exited.`,
         }),
+    ...(docCacheNote === null ? {} : { docCacheNote }),
     ...foldedEntriesAnswer(log),
   };
   if (verdict.exported) {
@@ -2611,6 +2619,12 @@ function playedCap(
 
 /** What a profile answer reads from the run's project rather than from the profile. */
 type ProjectForProfile = Pick<ProfileReading, 'runtimeAddon' | 'sourceOf' | 'callersOf'>;
+
+/** Whether an editor_run profile asked to set the run's mark, and to count from it. */
+interface MarkAsk {
+  readonly mark: boolean;
+  readonly since: boolean;
+}
 
 /** What a callers answer for a property says its places are, which are not calls. */
 const PROPERTY_PLACES =
@@ -5320,6 +5334,7 @@ class GodotServer {
             // caller who knows it by its diff needs telling that the diff is the bug and is gone.
             note: uidsLeftNote(after.length),
             ...(imported.extensionNote === undefined ? {} : { extensionNote: imported.extensionNote }),
+            ...(imported.docCacheNote === undefined ? {} : { docCacheNote: imported.docCacheNote }),
           },
         },
         scanned,
@@ -5681,6 +5696,9 @@ class GodotServer {
       if (imported.extensionNote !== undefined) {
         extra['extensionNote'] = imported.extensionNote;
       }
+      if (imported.docCacheNote !== undefined) {
+        extra['docCacheNote'] = imported.docCacheNote;
+      }
     }
 
     const after = await this.operation('get_import_status', statusAsk, projectPath);
@@ -6000,21 +6018,34 @@ class GodotServer {
     // cleanly and wrote nothing read as exported from the last one's file.
     const writtenAt = (): number | null =>
       existsSync(output.absolutePath) ? statSync(output.absolutePath).mtimeMs : null;
-    const before = writtenAt();
-    const listedBefore = filesIn(folder);
-    const freed = freeLibraryCopies(project.value.path);
-    if (freed.setAside.length > 0 || freed.swept.length > 0) {
-      this.logDebug(
-        `Before the export: set aside ${freed.setAside.join(', ')}; swept ${freed.swept.join(', ')}`,
-      );
-    }
-    let ending: EngineRun;
-    try {
+    const caches = editorCacheDirectory(engine.value);
+    const exportOnce = async () => {
+      const before = writtenAt();
+      const listedBefore = filesIn(folder);
+      const cachesBefore = docCachesWritten(caches);
+      const freed = freeLibraryCopies(project.value.path);
+      if (freed.setAside.length > 0 || freed.swept.length > 0) {
+        this.logDebug(
+          `Before the export: set aside ${freed.setAside.join(', ')}; swept ${freed.swept.join(', ')}`,
+        );
+      }
       // An export of a real project is slow, so it gets five minutes rather than no limit.
-      ending = await runEngine(engine.value, exportArgs, { timeout: { ms: 300000, said: 'five minutes' } });
+      const ending = await runEngine(engine.value, exportArgs, {
+        timeout: { ms: 300000, said: 'five minutes' },
+      });
+      const crash = docCacheCrash(ending, cachesBefore, docCachesWritten(caches), 'export');
+      return { ending, before, listedBefore, crash };
+    };
+    let run: Awaited<ReturnType<typeof exportOnce>>;
+    let docCacheNote: string | null;
+    try {
+      const first = await exportOnce();
+      docCacheNote = first.crash;
+      run = first.crash === null ? first : await exportOnce();
     } finally {
       discard(exportLogs);
     }
+    const { ending, before, listedBefore } = run;
     if (ending.exitSignal === null && ending.exitCode === null) {
       return this.createErrorResponse(
         `Export could not be run: ${ending.failure ?? 'the engine gave no exit status'}`,
@@ -6032,6 +6063,7 @@ class GodotServer {
       before,
       writtenAt(),
       beside,
+      docCacheNote,
     );
   }
 
@@ -6327,7 +6359,7 @@ class GodotServer {
             ? `${uncaught.length === 1 ? 'one script error' : `${uncaught.length} script errors`} that failed no case`
             : undefined) ??
           (exitCode === null ? undefined : verdicts[exitCode]) ??
-          (run.exitSignal === null ? `exit ${exitCode ?? 'unknown'}` : howItExited(run)));
+          howItExited(run));
     const nothingAt = missing.join(' and ');
     const verdict = missing.length === 0 ? ranAs : `${ranAs}; nothing at ${nothingAt}`;
     const missingNote =
@@ -10659,6 +10691,10 @@ class GodotServer {
         ['editor_run profile names each function as it answers; pass one of those'],
       );
     }
+    const asked: MarkAsk = {
+      mark: readBoolean(args, 'mark') === true,
+      since: readString(args, 'since') === 'mark',
+    };
     const going = await this.runStillGoing(run);
     const projectPath = run.projectPath;
     // The profile outlives the project it was taken in: a git worktree removed after its run leaves
@@ -10683,7 +10719,7 @@ class GodotServer {
                 : { callersOf: { name: callersName, scripts: () => projectScripts(projectPath) } }),
             };
     if (run.throughEditor) {
-      return await this.profileOfThePlayedGame(going, projectPath, fromProject, limit);
+      return await this.profileOfThePlayedGame(run, going, fromProject, limit, asked);
     }
     const path = run.profile;
     if (path === undefined) {
@@ -10699,26 +10735,28 @@ class GodotServer {
       ]);
     }
     const totals = file.connected ? file : null;
-    return this.jsonTextResponse(
-      profileAnswer(
-        {
-          through: 'gdharness',
-          running: going,
-          totals,
-          coveredMs: totals?.lastFrameAt == null ? 0 : totals.lastFrameAt - totals.startedAt,
-          ...fromProject,
-        },
-        limit,
-      ),
+    return this.profileReply(
+      run,
+      {
+        through: 'gdharness',
+        running: going,
+        totals,
+        coveredMs: totals?.lastFrameAt == null ? 0 : totals.lastFrameAt - totals.startedAt,
+        ...fromProject,
+      },
+      limit,
+      asked,
     );
   }
 
   private async profileOfThePlayedGame(
+    run: GodotProcess,
     going: boolean,
-    projectPath: string | null,
     fromProject: ProjectForProfile,
     limit: number,
+    asked: MarkAsk,
   ): Promise<ToolResponse> {
+    const { projectPath } = run;
     const read = await this.handleViaBridge('profile_read', {});
     if (read.isError === true) {
       return read;
@@ -10746,14 +10784,19 @@ class GodotServer {
       // was sent: the editor sends it at its own frame rate and the game applies it at its next
       // poll, so "from here on" said at once let the first calls after it go uncounted.
       const on = await this.firstProfiledFrame();
+      // A mark here would be the profile's own start, which an answer without since already counts from.
+      const unmarked =
+        asked.mark || asked.since
+          ? ' Nothing was marked, and nothing is counted from a mark: the profile begins now, so an answer without since covers the same span.'
+          : '';
       return this.jsonTextResponse({
         through: 'editor',
         running: true,
         started: true,
         functions: [],
         note: on
-          ? 'The profiler was switched on now, for the game the editor is playing, and its first frame has arrived, so it covers what the game does from here on. Ask again for the functions; editor_run start with profile: true covers a game from its start.'
-          : `The profiler was switched on for the game the editor is playing, and no frame of it had arrived ${PROFILER_ON_MS}ms later: what the game does before the first one is not counted. Ask again for the functions; editor_run start with profile: true covers a game from its start.`,
+          ? `The profiler was switched on now, for the game the editor is playing, and its first frame has arrived, so it covers what the game does from here on. Ask again for the functions; editor_run start with profile: true covers a game from its start.${unmarked}`
+          : `The profiler was switched on for the game the editor is playing, and no frame of it had arrived ${PROFILER_ON_MS}ms later: what the game does before the first one is not counted. Ask again for the functions; editor_run start with profile: true covers a game from its start.${unmarked}`,
       });
     }
     const functions = asParams(held['functions']);
@@ -10781,18 +10824,103 @@ class GodotServer {
             ),
           }
         : null;
-    return this.jsonTextResponse(
-      profileAnswer(
-        {
-          through: 'editor',
-          running: going,
-          totals,
-          coveredMs: readNonNegativeNumber(held, 'coveredMs') ?? 0,
-          ...fromProject,
-        },
-        limit,
-      ),
+    return this.profileReply(
+      run,
+      {
+        through: 'editor',
+        running: going,
+        totals,
+        coveredMs: readNonNegativeNumber(held, 'coveredMs') ?? 0,
+        ...fromProject,
+      },
+      limit,
+      asked,
     );
+  }
+
+  /**
+   * The profile answer for [param reading], counted from the run's mark when [param asked] says
+   * since, and with the mark set at these totals when it says mark. Since is read first, so one call
+   * with both answers for the span just ended and starts the next.
+   */
+  private profileReply(
+    run: GodotProcess,
+    reading: ProfileReading,
+    limit: number,
+    asked: MarkAsk,
+  ): ToolResponse {
+    const markPath = profileMarkPath(run.startedAt);
+    const now = Date.now();
+    let shown = reading;
+    const lead: string[] = [];
+    let sinceFields: Record<string, unknown> = {};
+    if (asked.since) {
+      const mark = readProfileMark(markPath);
+      if (mark === null || mark.runStartedAt !== run.startedAt || mark.projectPath !== run.projectPath) {
+        return this.createErrorResponse(
+          'No mark has been set in this run, so there is nothing to count from.',
+          ['editor_run profile with mark: true sets one at the totals it answers with'],
+        );
+      }
+      const added = reading.totals === null ? null : totalsSince(reading.totals, mark.totals);
+      if (added === null) {
+        return this.createErrorResponse(
+          'The profile holds less than it did at the mark, so the profiler was started again since, and what it holds now cannot be counted from the mark.',
+          ['editor_run profile with mark: true sets a mark in the profile as it is now'],
+        );
+      }
+      shown = {
+        ...reading,
+        totals: added.totals,
+        coveredMs: Math.max(0, reading.coveredMs - mark.coveredMs),
+      };
+      const ago = now - mark.takenAt;
+      sinceFields = {
+        since: 'mark',
+        markSetMsAgo: ago,
+        ...(added.shrunk > 0 ? { lessThanAtMark: added.shrunk } : {}),
+      };
+      lead.push(
+        `Counted from the mark set ${ago}ms ago: each function's calls and milliseconds are what it added after the mark, frames and coveredMs are those since it, and a function that added no call is left out.`,
+      );
+      if (added.shrunk > 0) {
+        const one = added.shrunk === 1;
+        lead.push(
+          `${one ? 'One function reads' : `${added.shrunk} functions read`} less than at the mark and ${one ? 'is' : 'are'} left out, counted under lessThanAtMark: the engine's own totals arrived after the mark and replaced the frames' sum, and capped totals leave out the functions with the least time.`,
+        );
+      }
+    }
+    if (asked.mark) {
+      if (reading.totals === null) {
+        return this.createErrorResponse(
+          'There is nothing to mark yet: the game has not connected to the profiler.',
+          ['Ask again in a moment, once the game is up'],
+        );
+      }
+      const mark: ProfileMark = {
+        takenAt: now,
+        projectPath: run.projectPath,
+        runStartedAt: run.startedAt,
+        coveredMs: reading.coveredMs,
+        totals: reading.totals,
+      };
+      if (!writeProfileMark(markPath, mark)) {
+        return this.createErrorResponse(`The mark could not be written to ${markPath}, so none is set.`);
+      }
+      lead.push(
+        asked.since
+          ? 'The mark is moved to the totals as they are now, so the next since: "mark" counts from here.'
+          : 'The mark is set at these totals: editor_run profile with since: "mark" answers only what is added after it.',
+      );
+    }
+    const answer = profileAnswer(shown, limit);
+    const note = [...lead, ...(typeof answer['note'] === 'string' ? [answer['note']] : [])].join(' ');
+    return this.jsonTextResponse({
+      ...answer,
+      ...sinceFields,
+      ...(asked.mark ? { marked: true } : {}),
+      note: note === '' ? undefined : note,
+    });
   }
 
   /** Whether a frame of the profile reached the editor within `PROFILER_ON_MS` of being asked. */
