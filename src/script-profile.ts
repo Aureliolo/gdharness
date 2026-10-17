@@ -375,6 +375,86 @@ function isCalibration(signature: string): boolean {
   );
 }
 
+/** What `editor_run profile` with `mark` keeps of a run's profile, for a later answer since it. */
+export interface ProfileMark {
+  /** When the mark was set, in milliseconds since the epoch. */
+  readonly takenAt: number;
+  /** The run the mark belongs to: its project, and when it started. */
+  readonly projectPath: string | null;
+  readonly runStartedAt: number;
+  readonly coveredMs: number;
+  readonly totals: ProfileTotals;
+}
+
+/** Writes [param mark] whole, and answers whether it did. */
+export function writeProfileMark(path: string, mark: ProfileMark): boolean {
+  return writeWhole(path, JSON.stringify(mark));
+}
+
+/** The mark at [param path], or null where there is none or it cannot be read. */
+export function readProfileMark(path: string): ProfileMark | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as ProfileMark;
+    return typeof parsed === 'object' && typeof parsed.totals === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What [param now] holds beyond [param mark]: each function's calls, self and total time added
+ * since, with the functions that added nothing left out. Null when [param now] cannot have come
+ * after [param mark], because it holds fewer frames or the profiler was switched on at another
+ * time, which is a profile started again since.
+ *
+ * The runtime addon's calibration rows are kept whole, since the profiler's cost per call is read
+ * off them and they are called once, as the profiler goes on. A function that reads less than at
+ * the mark is left out and counted under `shrunk`: the engine's own totals replace the frames' sum
+ * when the profiler goes off, and capped ones leave out the functions with the least time.
+ */
+export function totalsSince(
+  now: ProfileTotals,
+  mark: ProfileTotals,
+): { readonly totals: ProfileTotals; readonly shrunk: number } | null {
+  if (now.frames < mark.frames || now.startedAt !== mark.startedAt) {
+    return null;
+  }
+  let shrunk = 0;
+  const functions: Record<string, FunctionTotals> = {};
+  for (const [signature, sum] of Object.entries(now.functions)) {
+    const before = mark.functions[signature];
+    if (isCalibration(signature) || before === undefined) {
+      functions[signature] = sum;
+      continue;
+    }
+    const added = {
+      calls: sum.calls - before.calls,
+      selfSeconds: sum.selfSeconds - before.selfSeconds,
+      totalSeconds: sum.totalSeconds - before.totalSeconds,
+    };
+    if (added.calls < 0 || added.selfSeconds < 0 || added.totalSeconds < 0) {
+      shrunk += 1;
+    } else if (added.calls > 0) {
+      functions[signature] = added;
+    }
+  }
+  shrunk += Object.keys(mark.functions).filter(
+    (signature) => now.functions[signature] === undefined && (mark.functions[signature]?.calls ?? 0) > 0,
+  ).length;
+  return {
+    totals: {
+      ...now,
+      frames: now.frames - mark.frames,
+      unreadable: Math.max(0, now.unreadable - mark.unreadable),
+      ...(now.cappedFrames === undefined
+        ? {}
+        : { cappedFrames: Math.max(0, now.cappedFrames - (mark.cappedFrames ?? 0)) }),
+      functions,
+    },
+    shrunk,
+  };
+}
+
 /**
  * What one call costs the profiler in this run, in microseconds, read off the empty function the
  * runtime addon calls when the profiler goes on; null without the addon, or before it has.

@@ -69,6 +69,7 @@ import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from 
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import { ensureHelperCompiled, HIDDEN_DESKTOP, helperAssembly, windowsCommandLine } from '../src/desktop.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
+import { docCacheCrash, editorCacheDirectory } from '../src/doc-cache.js';
 import {
   bursts,
   clearEditorLog,
@@ -169,6 +170,7 @@ import {
   judgeRun,
   listeningPid,
   listeningPidInNetstat,
+  profileMarkPath,
   readLatestRun,
   readRunRecord,
   readWindowsCommandLine,
@@ -223,6 +225,7 @@ import {
   readProfileFile,
   type SourceOf,
   signatureParts,
+  totalsSince,
   UNNAMED_PREFIX,
   withEngineArguments,
   writeProfileFile,
@@ -7274,7 +7277,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 130;
+const READ_IN_WORDS = 132;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -12252,7 +12255,13 @@ function testARuntimeCallAfterOurRunEndedSaysSo(): void {
   const quit = ourRunEnded({ ...base, exitCode: 3, endedAt: 10_000 }, 15_000);
   assert.equal(
     quit,
-    'No game with the runtime addon is running: the game this server started (pid 41) ended 5s ago, and it exited by itself with code 3. editor_output has what it printed, and editor_run start runs it again.',
+    'No game with the runtime addon is running: the game this server started (pid 41) ended 5s ago, and it exited by itself with exit code 3. editor_output has what it printed, and editor_run start runs it again.',
+  );
+  const crashed = ourRunEnded({ ...base, exitCode: 0xc0000005, endedAt: 10_000 }, 15_000);
+  assert.match(
+    crashed,
+    /, and it exited by itself with exit code 0xC0000005, an access violation, so it crashed\. editor_output/,
+    crashed,
   );
   const signalled = ourRunEnded({ ...base, exitSignal: 'SIGKILL', endedAt: 10_000 }, 10_000);
   assert.match(signalled, /ended 0s ago, and it was ended by SIGKILL\./, signalled);
@@ -18283,6 +18292,290 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
 }
 
 /**
+ * An import or an export that crashed on its way out over a stale class reference cache runs again,
+ * and says so.
+ *
+ * Godot keys `editor_doc_cache-<major>.<minor>.res` on the exact build, so a 4.7.1 and a 4.7.2 on one
+ * machine each leave the other a stale cache, and an import or an export that meets one does its
+ * work, writes a fresh cache and crashes as it exits. The headless write fixture's first import
+ * failed that way three times in ten minutes while another session ran 4.7.1, reported under Bun as
+ * exit code 5, the low byte of an access violation; and project_export answered that it had not
+ * produced a pack it had written in full. The stale cache is made here by rewriting a real one's
+ * key, in a cache directory the fixture owns.
+ */
+async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> {
+  const ran = (
+    exitCode: number | null,
+    exitSignal: string | null = null,
+    failure: string | null = null,
+    printed = '',
+  ) => {
+    const log = new GameLog();
+    log.append('stdout', printed);
+    log.finish();
+    return { exitCode, exitSignal, failure, log };
+  };
+  const cache = join('cache', 'editor_doc_cache-4.7.res');
+  const before = new Map([[cache, 1]]);
+  const rewritten = new Map([[cache, 2]]);
+  assert.deepEqual(
+    [
+      docCacheCrash(ran(0), before, rewritten, 'import'),
+      docCacheCrash(ran(0xc0000005), before, before, 'import'),
+      docCacheCrash(ran(null, 'SIGTERM', 'it ran past its minute'), before, rewritten, 'import'),
+    ],
+    [null, null, null],
+    'a clean run that rebuilt the cache, a crash that left it alone and a run this server ended are not this',
+  );
+  const crashed = docCacheCrash(ran(0xc0000005), before, rewritten, 'export') ?? '';
+  assert.ok(
+    crashed.startsWith(
+      `The first export ended badly (exit code 0xC0000005, an access violation, so it crashed) after rebuilding the editor's class reference cache, ${cache}. `,
+    ) && crashed.endsWith('So the export was run again, and this answer is from that second run.'),
+    crashed || 'a crash that rewrote the cache gave no note',
+  );
+  const fromNone = docCacheCrash(ran(null, 'SIGSEGV'), new Map(), rewritten, 'import') ?? '';
+  assert.ok(
+    fromNone.startsWith(
+      `The first import ended badly (ended by SIGSEGV) after rebuilding the editor's class reference cache, ${cache}. `,
+    ),
+    `a cache written where there was none counts, and a signal is named: ${fromNone}`,
+  );
+  // As an import crashes on macOS: the crash handler reports it and the engine exits 0.
+  const handled = 'handle_crash: Program crashed with signal 11';
+  const exitedZero =
+    docCacheCrash(ran(0, null, null, `${handled}\nEngine version: Godot\n`), before, rewritten, 'import') ??
+    '';
+  assert.ok(
+    exitedZero.startsWith(
+      `The first import ended badly (exit code 0, and its crash handler printed "${handled}") after rebuilding the editor's class reference cache, ${cache}. `,
+    ),
+    exitedZero || 'a crash the handler reported, followed by exit code 0, gave no note',
+  );
+
+  const home = join('home', 'someone');
+  const sc = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sc-'));
+  try {
+    writeFileSync(join(sc, '._sc_'), '');
+    mkdirSync(join(sc, 'mac', 'Godot.app', 'Contents', 'MacOS'), { recursive: true });
+    writeFileSync(join(sc, 'mac', '_sc_'), '');
+    assert.deepEqual(
+      [
+        editorCacheDirectory(join('opt', 'godot'), 'linux', {}, home),
+        editorCacheDirectory(join('opt', 'godot'), 'linux', { XDG_CACHE_HOME: join(sc, 'xdg') }, home),
+        editorCacheDirectory(join('opt', 'godot'), 'linux', { XDG_CACHE_HOME: 'relative' }, home),
+        editorCacheDirectory(join('opt', 'godot.exe'), 'win32', { LOCALAPPDATA: join(sc, 'local') }, home),
+        editorCacheDirectory(
+          join('opt', 'godot.exe'),
+          'win32',
+          { LOCALAPPDATA: '', TEMP: join(sc, 'temp') },
+          home,
+        ),
+        editorCacheDirectory(join('Godot.app', 'Contents', 'MacOS', 'Godot'), 'darwin', {}, home),
+        editorCacheDirectory(join(sc, 'godot.exe'), 'win32', { LOCALAPPDATA: join(sc, 'local') }, home),
+        editorCacheDirectory(join(sc, 'mac', 'Godot.app', 'Contents', 'MacOS', 'Godot'), 'darwin', {}, home),
+        editorCacheDirectory(join(sc, 'mac', 'Godot.app', 'Contents', 'MacOS', 'Godot'), 'linux', {}, home),
+      ],
+      [
+        join(home, '.cache', 'godot'),
+        join(sc, 'xdg', 'godot'),
+        join(home, '.cache', 'godot'),
+        join(sc, 'local', 'Godot'),
+        join(sc, 'temp', 'Godot'),
+        join(home, 'Library', 'Caches', 'Godot'),
+        join(sc, 'editor_data', 'cache'),
+        join(sc, 'mac', 'editor_data', 'cache'),
+        join(home, '.cache', 'godot'),
+      ],
+      'the cache directory is found where the engine looks: the platform folder, or beside a self-contained engine or its app bundle',
+    );
+  } finally {
+    sweep(sc);
+  }
+
+  const outcomes: ImportOutcome[] = [];
+  const stand = (): Promise<ImportOutcome> => {
+    const next = outcomes.shift();
+    assert.ok(next !== undefined, 'no more passes were expected');
+    return Promise.resolve(next);
+  };
+  const failedFirst: ImportOutcome = {
+    ok: false,
+    message: 'the import pass failed (exit code 5): [ DONE ] loading_editor_layout',
+    messages: [],
+    docCacheNote: 'The first import ended badly.',
+  };
+  outcomes.push(failedFirst, { ok: true, messages: [], docCacheNote: 'not the first' });
+  assert.deepEqual(
+    await runImport('godot', 'project', { once: stand }),
+    { ok: true, messages: [], docCacheNote: 'The first import ended badly.' },
+    'the second pass answers, with the first pass’s note',
+  );
+  outcomes.push(failedFirst, {
+    ok: false,
+    message: 'the import pass failed (exit code 1): it broke.',
+    messages: [],
+  });
+  const twice = await runImport('godot', 'project', { once: stand });
+  assert.equal(
+    twice.ok ? '' : twice.message,
+    'the import pass failed (exit code 1): it broke. The first import ended badly.',
+    'and a second pass that fails carries the note in the message it is answered with',
+  );
+  assert.equal(outcomes.length, 0, 'each was run twice');
+
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('stale doc cache regression skipped (Godot not found)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-doc-cache-'));
+  const project = join(root, 'project');
+  const owned = join(root, 'cache-home');
+  // Each platform's engine finds its cache folder through one variable, so the fixture's own
+  // folder takes the place of the user's.
+  const cacheEnv: Record<string, string> =
+    process.platform === 'win32'
+      ? { LOCALAPPDATA: owned }
+      : process.platform === 'darwin'
+        ? { HOME: owned }
+        : { XDG_CACHE_HOME: owned };
+  const cacheDir = editorCacheDirectory(godotPath, process.platform, { ...process.env, ...cacheEnv }, owned);
+  if (!cacheDir.startsWith(owned)) {
+    sweep(root);
+    const why = `GODOT_PATH is a self-contained engine, whose cache at ${cacheDir} this fixture would make stale`;
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error(`GDHARNESS_REQUIRE_GODOT is set and ${why}.`);
+    }
+    console.log(`stale doc cache regression skipped (${why})`);
+    return;
+  }
+  mkdirSync(project, { recursive: true });
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Stale"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  writeFileSync(join(project, 'first.gd'), 'extends Node\n');
+  const staler = join(root, 'staler');
+  mkdirSync(staler);
+  writeFileSync(join(staler, 'project.godot'), 'config_version=5\n');
+  writeFileSync(
+    join(staler, 'stale.gd'),
+    'extends SceneTree\n\n\nfunc _init() -> void:\n' +
+      '\tvar path: String = OS.get_cmdline_user_args()[0]\n' +
+      '\tvar cache: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)\n' +
+      '\tcache.set_meta("version_hash", "stale")\n' +
+      '\tprint("saved ", ResourceSaver.save(cache, path, ResourceSaver.FLAG_COMPRESS))\n' +
+      '\tquit()\n',
+  );
+  const cacheFile = (): string => {
+    const found = existsSync(cacheDir)
+      ? readdirSync(cacheDir).find((name) => /^editor_doc_cache-\d+\.\d+\.res$/.test(name))
+      : undefined;
+    assert.ok(found !== undefined, `the editor wrote its class reference cache in ${cacheDir}`);
+    return join(cacheDir, found);
+  };
+  const makeStale = async (): Promise<number> => {
+    const file = cacheFile();
+    const made = await runEngine(godotPath, [
+      '--headless',
+      '--path',
+      staler,
+      '-s',
+      'res://stale.gd',
+      '--',
+      file,
+    ]);
+    assert.ok(
+      made.log.all.some((entry) => entry.text === 'saved 0'),
+      `the cache's key was rewritten: ${made.log.all.map((entry) => entry.text).join(' | ')}`,
+    );
+    return statSync(file).mtimeMs;
+  };
+
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: join(root, 'runtime'),
+      ...cacheEnv,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 300_000);
+  try {
+    await server.initialize('stale-doc-cache');
+    const fresh = parseTextContent(await call('project_import', { op: 'refresh_uids' }));
+    assert.deepEqual(
+      [get(fresh, 'uidsCreated'), get(fresh, 'docCacheNote')],
+      [['first.gd'], undefined],
+      `an import that made the cache where there was none ran once and cleanly: ${JSON.stringify(fresh)}`,
+    );
+
+    const staleAt = await makeStale();
+    writeFileSync(join(project, 'second.gd'), 'extends Node\n');
+    const importedRaw = await call('project_import', { op: 'refresh_uids' });
+    const imported = parseTextContent(importedRaw);
+    const importNote = text(get(imported, 'docCacheNote'));
+    const shownImport = JSON.stringify(importedRaw);
+    assert.deepEqual(get(imported, 'uidsCreated'), ['second.gd'], shownImport);
+    assert.ok(
+      importNote.startsWith('The first import ended badly (') &&
+        importNote.includes(`after rebuilding the editor's class reference cache, ${cacheFile()}.`),
+      `the import over a stale cache crashed, was run again, and says so: ${shownImport}`,
+    );
+    assert.ok(statSync(cacheFile()).mtimeMs > staleAt, 'and the crashing run left a fresh cache');
+
+    const added = parseTextContent(
+      await call('project_export', {
+        op: 'add_preset',
+        preset: 'Penguin',
+        platform: 'Linux',
+        outputPath: 'res://build/game.x86_64',
+      }),
+    );
+    await makeStale();
+    const exported = await call('project_export', {
+      op: 'run',
+      preset: 'Penguin',
+      outputPath: 'build/game.x86_64',
+    });
+    const shownExport = JSON.stringify(exported);
+    const verdict = ((get(exported, 'result', 'content') as { text?: string }[] | undefined) ?? [])
+      .map((block) => {
+        try {
+          return JSON.parse(block.text ?? '') as unknown;
+        } catch {
+          return undefined;
+        }
+      })
+      .find((parsed) => get(parsed, 'exported') !== undefined);
+    assert.ok(
+      text(get(verdict, 'docCacheNote')).startsWith('The first export ended badly ('),
+      `the export over a stale cache crashed, was run again, and says so: ${shownExport}`,
+    );
+    // Exported with templates and refused without them, the second run ends in 0 or 1, where the
+    // first ended in a crash.
+    assert.ok(
+      [0, 1].includes(Number(get(verdict, 'exitCode'))),
+      `the answer is the second run's: ${shownExport}`,
+    );
+    if (get(added, 'templates_installed') === true) {
+      assert.equal(get(verdict, 'exported'), true, `and its export is made: ${shownExport}`);
+    }
+  } finally {
+    await server.stop();
+    sweep(root);
+  }
+}
+
+/**
  * A process listing that failed says which way it failed.
  *
  * The record kept only the error's message, "Command failed:" and the command, which a listing
@@ -22559,6 +22852,29 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
     [three.exitCode, three.exitSignal, three.failure, howItEnded(three)],
     [3, null, null, 'exit code 3'],
     'a code the process exited with is its own',
+  );
+
+  // Rendered rather than raised: a crashing child under Bun, which runs the suites, reports only
+  // the low byte of the status, and the server reads the whole of it under Node.
+  const ended = (exitCode: number | null) => howItEnded({ exitCode, exitSignal: null, failure: null });
+  assert.deepEqual(
+    [
+      ended(0xc0000005),
+      ended(0xc00000fd),
+      ended(0xc0000135),
+      ended(0xc0000001),
+      ended(0xbfffffff),
+      ended(null),
+    ],
+    [
+      'exit code 0xC0000005, an access violation, so it crashed',
+      'exit code 0xC00000FD, a stack overflow, so it crashed',
+      'exit code 0xC0000135, a library it needs was not found, so it never started',
+      'exit code 0xC0000001, a Windows error status',
+      'exit code 3221225471',
+      'exit code unknown',
+    ],
+    'a Windows exception status is named in hex with what it means, and an ordinary code is left as it is',
   );
 
   // Raced against a deadline, because Node emits no `exit` for a start that failed, and a run
@@ -30241,9 +30557,21 @@ function testRunNotesAreKeptPerProject(): void {
     const aDayAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
     utimesSync(guildLog, aDayAgo, aDayAgo);
     utimesSync(benchLog, aDayAgo, aDayAgo);
+    // A run's profile mark goes with the run: kept while a note names it, swept once old otherwise.
+    const guildMark = profileMarkPath(readRunRecord(guild)?.startedAt ?? 0);
+    const strayMark = join(runs, 'run-3.profile-mark.json');
+    for (const mark of [guildMark, strayMark]) {
+      writeFileSync(mark, '{}');
+      utimesSync(mark, aDayAgo, aDayAgo);
+    }
     sweepTranscripts();
     assert.ok(existsSync(guildLog), "the guild run's transcript is kept while its note names it");
     assert.ok(existsSync(benchLog), "and so is the bench's");
+    assert.deepEqual(
+      [existsSync(guildMark), existsSync(strayMark)],
+      [true, false],
+      "the guild run's mark is kept, and a day-old mark of no run is swept",
+    );
 
     clearRunRecord(bench);
     assert.equal(readRunRecord(bench), null, 'clearing the bench takes its note away');
@@ -32638,6 +32966,272 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       await server.stop();
     }
   } finally {
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A profile since a mark answers for one action apart from the boot.
+ *
+ * #1147: profiling a press in a running game summed everything from the game's start, so the
+ * boot's hundreds of milliseconds sat in the same rows as a press's few, and game-b read callersOf
+ * before and after each action and subtracted by hand, one function per call. This is the check the
+ * issue gives: a scene that runs boot() once in _ready and press() when invoked, marked after the
+ * boot, then pressed three times. The mark is read again by a second server, since the harness can
+ * replace a server between the mark and the read.
+ */
+async function testAProfileSinceAMarkAnswersForOneAction(): Promise<void> {
+  const now: ProfileTotals = {
+    startedAt: 7,
+    lastFrameAt: 900,
+    frames: 30,
+    complete: false,
+    unreadable: 1,
+    cappedFrames: 2,
+    functions: {
+      'res://main.gd::4::boot': { calls: 1, selfSeconds: 0.1, totalSeconds: 0.1 },
+      'res://main.gd::9::press': { calls: 5, selfSeconds: 0.05, totalSeconds: 0.06 },
+      'res://main.gd::14::fresh': { calls: 2, selfSeconds: 0.002, totalSeconds: 0.002 },
+      'res://main.gd::18::shrinking': { calls: 1, selfSeconds: 0.001, totalSeconds: 0.001 },
+      'res://addons/gdharness_runtime/runtime_autoload.gd::40::_profiler_probe': {
+        calls: 100,
+        selfSeconds: 0.0002,
+        totalSeconds: 0.0002,
+      },
+    },
+  };
+  const mark: ProfileTotals = {
+    ...now,
+    frames: 10,
+    unreadable: 0,
+    cappedFrames: 1,
+    functions: {
+      'res://main.gd::4::boot': { calls: 1, selfSeconds: 0.1, totalSeconds: 0.1 },
+      'res://main.gd::9::press': { calls: 2, selfSeconds: 0.02, totalSeconds: 0.025 },
+      'res://main.gd::18::shrinking': { calls: 3, selfSeconds: 0.003, totalSeconds: 0.003 },
+      'res://main.gd::22::gone': { calls: 1, selfSeconds: 0.001, totalSeconds: 0.001 },
+      'res://addons/gdharness_runtime/runtime_autoload.gd::40::_profiler_probe': {
+        calls: 100,
+        selfSeconds: 0.0002,
+        totalSeconds: 0.0002,
+      },
+    },
+  };
+  const since = totalsSince(now, mark);
+  assert.ok(since !== null, 'a profile that went on from the mark counts from it');
+  const press = since.totals.functions['res://main.gd::9::press'];
+  assert.deepEqual(
+    [
+      Object.keys(since.totals.functions).sort(),
+      press?.calls,
+      Math.round((press?.selfSeconds ?? 0) * 1e6),
+      Math.round((press?.totalSeconds ?? 0) * 1e6),
+      since.totals.frames,
+      since.totals.unreadable,
+      since.totals.cappedFrames,
+      since.shrunk,
+    ],
+    [
+      [
+        'res://addons/gdharness_runtime/runtime_autoload.gd::40::_profiler_probe',
+        'res://main.gd::14::fresh',
+        'res://main.gd::9::press',
+      ],
+      3,
+      30000,
+      35000,
+      20,
+      1,
+      1,
+      2,
+    ],
+    'what each function added, a new one whole, the calibration kept whole for the per-call cost, and the two that read less than at the mark left out and counted',
+  );
+  assert.deepEqual(
+    [totalsSince({ ...now, frames: 9 }, mark), totalsSince({ ...now, startedAt: 8 }, mark)],
+    [null, null],
+    'a profile with fewer frames than the mark, or switched on at another time, was started again since',
+  );
+
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('profile mark regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-profile-mark-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-profile-mark-rt-'));
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Marked"\nrun/main_scene="res://main.tscn"\n\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    [
+      'extends Node',
+      '',
+      'var sum := 0',
+      '',
+      '',
+      'func boot() -> void:',
+      '\tfor i in 300000:',
+      '\t\tsum += i % 7',
+      '',
+      '',
+      'func step(n: int) -> int:',
+      '\treturn n % 11',
+      '',
+      '',
+      'func press() -> int:',
+      '\tfor i in 20000:',
+      '\t\tsum += i % 3',
+      '\treturn step(sum)',
+      '',
+      '',
+      'func _ready() -> void:',
+      '\tboot()',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  const env = { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project };
+  const caller = (server: ServerProcess) => async (name: string, args: Record<string, unknown>) => {
+    const said =
+      textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+    return { said, parsed: said.trimStart().startsWith('{') ? (JSON.parse(said) as unknown) : null };
+  };
+  // Undefined for a refusal too, so the assertion reading it prints what was said instead.
+  const callsOf = (answer: unknown, fn: string): number | undefined => {
+    const rows = get(answer, 'functions');
+    return Array.isArray(rows)
+      ? rows.filter((row) => get(row, 'function') === fn).map((row) => Number(get(row, 'calls')))[0]
+      : undefined;
+  };
+  const until = async (
+    ask: () => Promise<{ said: string; parsed: unknown }>,
+    done: (parsed: unknown) => boolean,
+    what: string,
+  ): Promise<unknown> => {
+    const deadline = Date.now() + 30_000;
+    let last = '';
+    while (Date.now() < deadline) {
+      const { said, parsed } = await ask();
+      last = said;
+      if (parsed !== null && done(parsed)) {
+        return parsed;
+      }
+      await delay(250);
+    }
+    throw new assert.AssertionError({ message: `${what}; the last answer was ${last}` });
+  };
+
+  const first = new ServerProcess({ env });
+  let second: ServerProcess | null = null;
+  try {
+    await first.initialize('profile-mark');
+    const call = caller(first);
+    const started = await call('editor_run', {
+      op: 'start',
+      projectPath: project,
+      headless: true,
+      profile: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.match(started.said, /"started": true/, started.said);
+    await until(
+      () => call('editor_run', { op: 'profile' }),
+      (parsed) => callsOf(parsed, 'boot') === 1,
+      'the boot reached the profile',
+    );
+
+    const unmarked = await call('editor_run', { op: 'profile', since: 'mark' });
+    assert.match(
+      unmarked.said,
+      /^No mark has been set in this run, so there is nothing to count from\./,
+      unmarked.said,
+    );
+    const later = await call('editor_run', { op: 'profile', since: 'later' });
+    assert.match(later.said, /^editor_run takes since as one of mark, not "later"\./, later.said);
+
+    const marked = await call('editor_run', { op: 'profile', mark: true });
+    assert.equal(get(marked.parsed, 'marked'), true, marked.said);
+    assert.equal(callsOf(marked.parsed, 'boot'), 1, `the mark answers as usual: ${marked.said}`);
+
+    for (let i = 0; i < 3; i++) {
+      const pressed = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'press',
+        args: [],
+      });
+      assert.ok(pressed.parsed !== null, pressed.said);
+    }
+    const sinceMark = await until(
+      () => call('editor_run', { op: 'profile', since: 'mark', callersOf: 'step' }),
+      (parsed) => callsOf(parsed, 'press') === 3,
+      'three presses since the mark',
+    );
+    const shown = JSON.stringify(sinceMark);
+    assert.equal(
+      callsOf(sinceMark, 'boot'),
+      undefined,
+      `the boot is not in what was added since the mark: ${shown}`,
+    );
+    assert.deepEqual(
+      [get(sinceMark, 'since'), typeof get(sinceMark, 'markSetMsAgo'), callsOf(sinceMark, 'step')],
+      ['mark', 'number', 3],
+      shown,
+    );
+    assert.deepEqual(
+      asArray(get(sinceMark, 'callers', 'sites')).map((one) => [get(one, 'within'), get(one, 'withinCalls')]),
+      [['press', 3]],
+      `callersOf reads the same difference: ${shown}`,
+    );
+    assert.match(String(get(sinceMark, 'note')), /^Counted from the mark set \d+ms ago: /, shown);
+
+    const whole = await call('editor_run', { op: 'profile' });
+    assert.deepEqual(
+      [callsOf(whole.parsed, 'boot'), callsOf(whole.parsed, 'press')],
+      [1, 3],
+      `without since, the whole run as before: ${whole.said}`,
+    );
+
+    // A second server for the project, after the mark, reads the mark the first one set.
+    second = new ServerProcess({ env });
+    await second.initialize('profile-mark-again');
+    const again = caller(second);
+    const read = await again('editor_run', { op: 'profile', since: 'mark' });
+    assert.equal(
+      callsOf(read.parsed, 'press'),
+      3,
+      `a server that replaced the one that set the mark reads it: ${read.said}`,
+    );
+
+    const lap = await again('editor_run', { op: 'profile', since: 'mark', mark: true });
+    assert.deepEqual(
+      [callsOf(lap.parsed, 'press'), get(lap.parsed, 'marked')],
+      [3, true],
+      `since and mark together answer from the old mark and then move it: ${lap.said}`,
+    );
+    await again('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'press', args: [] });
+    await until(
+      () => again('editor_run', { op: 'profile', since: 'mark' }),
+      (parsed) => callsOf(parsed, 'press') === 1,
+      'one press since the moved mark',
+    );
+    await again('editor_run', { op: 'stop' });
+  } finally {
+    await second?.stop();
+    await first.stop();
     sweep(project);
     sweep(runtimeDir);
   }
@@ -36638,7 +37232,8 @@ function testEveryToolNamedInProseIsATool(): void {
   // bridge sends the addon, the autoload the runtime installs, a section of project.godot, the
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
-  // export_presets.cfg and the directory a self-contained editor keeps its data in. Named one
+  // export_presets.cfg, the directory a self-contained editor keeps its data in and the file the
+  // editor caches its class reference in. Named one
   // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
   // and called a tool or called vocabulary.
   const notTools = new Set([
@@ -36664,6 +37259,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'debug_exit',
     'script_export_mode',
     'editor_data',
+    'editor_doc_cache',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
@@ -42293,6 +42889,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,
+  testAnImportOrExportOverAStaleDocCacheRunsAgain,
   testAStaleEnumMemberIsNamed,
   testAStaleStaticFunctionIsNamed,
   testAFailedReloadSaysWhatItKept,
@@ -42419,6 +43016,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,
+  testAProfileSinceAMarkAnswersForOneAction,
   testAProfileFromTheStartWaitsForTheProfiler,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
   testCommandLineSetup,
