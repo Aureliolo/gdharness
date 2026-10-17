@@ -3151,7 +3151,10 @@ async function testAScriptNamingAnAutoloadCompiles(godotPath: string): Promise<v
         '',
       ].join('\n'),
     );
-    writeFileSync(join(dir, 'thing.gd'), 'extends Node\n\n\nfunc hello() -> int:\n\treturn 1\n');
+    writeFileSync(
+      join(dir, 'thing.gd'),
+      'extends Node\n\n\nfunc hello() -> int:\n\treturn 1\n\n\nfunc again() -> int:\n\treturn Thing.hello()\n',
+    );
     writeFileSync(
       join(dir, 'noisy.gd'),
       [
@@ -3229,6 +3232,48 @@ async function testAScriptNamingAnAutoloadCompiles(godotPath: string): Promise<v
       [created, modified].map((made) => (made.ok ? get(made.payload, 'parses') : made.message)),
       [true, true],
       `a script written naming an autoload parses: ${JSON.stringify([created, modified])}`,
+    );
+    // A body written with the function's indent already on, and a blank line inside it.
+    const indented = await runThroughTheServersOwnPath(
+      engine,
+      'modify_script',
+      {
+        scriptPath: 'made.gd',
+        modifications: [
+          { type: 'add_function', name: 'twice', body: '\tvar n: int = Thing.hello()\n\n\tprint(n, n)' },
+        ],
+      },
+      dir,
+    );
+    assert.ok(indented.ok && get(indented.payload, 'parses') === true, JSON.stringify(indented));
+    assert.match(
+      readFileSync(join(dir, 'made.gd'), 'utf8'),
+      /\nfunc greet\(\) -> void:\n\tprint\(Thing\.hello\(\)\)\n\n\nfunc twice\(\) -> void:\n\tvar n: int = Thing\.hello\(\)\n\n\tprint\(n, n\)\n$/,
+      readFileSync(join(dir, 'made.gd'), 'utf8'),
+    );
+    const structure = await runThroughTheServersOwnPath(
+      engine,
+      'get_script_info',
+      { scriptPath: 'made.gd' },
+      dir,
+    );
+    assert.deepEqual(
+      structure.ok
+        ? [get(structure.payload, 'autoloads_used'), get(structure.payload, 'dependencies')]
+        : structure,
+      [[{ name: 'Thing', path: 'res://thing.gd' }], []],
+      `the autoload the script names is answered with its script, apart from what it loads: ${JSON.stringify(structure)}`,
+    );
+    const itself = await runThroughTheServersOwnPath(
+      engine,
+      'get_script_info',
+      { scriptPath: 'thing.gd' },
+      dir,
+    );
+    assert.deepEqual(
+      itself.ok ? get(itself.payload, 'autoloads_used') : itself,
+      [],
+      `an autoload's script naming its own global name uses no other: ${JSON.stringify(itself)}`,
     );
 
     writeFileSync(join(dir, 'die_at_start'), '');
