@@ -743,12 +743,14 @@ func _check_until_at_the_precision_kept() -> void:
 			"wait_until",
 			{"path": "/root/Lines", "property": "max_lines_visible", "value": cut, "timeout_ms": 200}
 		)
-		if refused.get("type") != "error" or not str(refused.get("message", "")).contains("cut to fit"):
+		var said: String = str(refused.get("message", ""))
+		if refused.get("type") != "error" or not said.contains("an int cannot hold without changing it"):
 			_fail("%s waited on an int is refused, not cut to 3: %s" % [str(cut), JSON.stringify(refused)])
 	var truth: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Lines", "property": "visible", "value": 0.2, "timeout_ms": 200}
 	)
-	if truth.get("type") != "error":
+	var truth_said: String = str(truth.get("message", ""))
+	if truth.get("type") != "error" or not truth_said.contains("a bool cannot hold without changing it"):
 		_fail("0.2 waited on a bool is refused, not read as true: %s" % JSON.stringify(truth))
 	lens.queue_free()
 	lines.queue_free()

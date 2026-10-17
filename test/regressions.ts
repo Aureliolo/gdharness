@@ -315,6 +315,7 @@ import {
 } from '../src/tool-definitions.js';
 import { argumentShape, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
+import { writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
@@ -1903,6 +1904,45 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ),
     undefined,
     'and without the runtime addon there is no measurement to report',
+  );
+  // The runtime addon answering runtime_invoke inside the game: probe 60 found its argument check,
+  // named _argument_count_refused, above the press it made, so a limit of one returned gdharness and
+  // not the game. Summed apart, the rows, the count and scriptMs are the game's alone.
+  const served = totals({
+    'res://addons/gdharness_runtime/runtime_changes.gd::565::_argument_count_refused': {
+      calls: 3,
+      selfSeconds: 0.006,
+      totalSeconds: 0.006,
+    },
+    'res://addons/gdharness_runtime/runtime_autoload.gd::120::_send_response': {
+      calls: 3,
+      selfSeconds: 0.001,
+      totalSeconds: 0.001,
+    },
+    'res://main.gd::15::press': { calls: 3, selfSeconds: 0.003, totalSeconds: 0.0035 },
+    'res://main.gd::11::step': { calls: 3, selfSeconds: 0.0005, totalSeconds: 0.0005 },
+  });
+  const servedTable = profiledFunctions(served, 1);
+  assert.deepEqual(
+    [servedTable.functions.map((one) => one.function), servedTable.counted, servedTable.scriptMs],
+    [['press'], 2, 3.5],
+    "a limit of one returns the game's costliest function, and the addon's rows count nowhere in the game's",
+  );
+  const servedAnswer = answer({ totals: served });
+  assert.deepEqual(
+    [get(servedAnswer, 'runtimeAddonMs'), get(servedAnswer, 'runtimeAddonFunctions')],
+    [7, 2],
+    'the addon is summed apart rather than dropped',
+  );
+  assert.match(
+    String(servedAnswer['note']),
+    /The gdharness runtime addon's own functions took 7ms of self time over 2 functions, answering tools such as runtime_invoke and sending the profile\. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs/,
+    `the note says where the addon's time went: ${String(servedAnswer['note'])}`,
+  );
+  assert.equal(
+    get(answer({ totals: calibrated }), 'runtimeAddonMs'),
+    undefined,
+    'the calibration rows are the profiler measuring itself, not the addon serving a tool',
   );
   // Named in the note, since a limit can return none of them: two by name, and seven as the five with
   // the most self time and how many more. Reported from game-b: nine counted, none in the rows.
@@ -14462,6 +14502,114 @@ async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
 }
 
 /**
+ * A capture the wait ran out on keeps its folder until the game has answered.
+ *
+ * Reported from game-a as #1150: a capture sent while the game played 45 days in one
+ * frame answered the timeout, and the server took the capture's folder away while the request sat in
+ * the game. When the frame ended the game saved into a folder that was gone, the engine printed an
+ * error, and the run read clean: false for a game that had raised nothing. The fake game holds the
+ * capture past the wait, then says whether the folder was there to save into.
+ */
+async function testACaptureTheWaitRanOutOnKeepsItsFolder(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-late-capture-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-late-capture-rt-'));
+  const saved: { into: string; folderWasThere: boolean | null } = { into: '', folderWasThere: null };
+  let answered: () => void = () => {};
+  const lateAnswer = new Promise<void>((settle) => {
+    answered = settle;
+  });
+  const game = createServer((socket) => {
+    socket.setEncoding('utf8');
+    socket.write(`${JSON.stringify({ type: 'welcome', protocol: RUNTIME_PROTOCOL })}\n`);
+    let buffered = '';
+    socket.on('data', (chunk: string) => {
+      buffered += chunk;
+      for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+        const asked = JSON.parse(buffered.slice(0, at)) as {
+          id: number;
+          command: string;
+          params: { output_path?: string };
+        };
+        buffered = buffered.slice(at + 1);
+        if (asked.command !== 'capture_screenshot') {
+          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong' })}\n`);
+          continue;
+        }
+        const path = asked.params.output_path ?? '';
+        setTimeout(() => {
+          saved.into = path;
+          saved.folderWasThere = existsSync(dirname(path));
+          if (saved.folderWasThere) {
+            writeFileSync(path, 'png');
+          }
+          socket.write(
+            `${JSON.stringify({ id: asked.id, type: 'screenshot_file', path, width: 1, height: 1, format: 'png' })}\n`,
+          );
+          answered();
+        }, 1_500);
+      }
+    });
+    socket.on('error', () => {});
+  });
+  const holder = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_RUNTIME_TIMEOUT_MS: '500',
+    },
+  });
+  try {
+    await listenOnAReservedPort(game, '127.0.0.1');
+    const pid = holder.pid ?? 0;
+    writeFileSync(
+      join(runtimeDir, `runtime-${pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid,
+        port: portOf(game),
+        address: '127.0.0.1',
+        project: { name: basename(project), path: project },
+      }),
+      'utf8',
+    );
+    await server.initialize('regression-test');
+    const timedOut =
+      textOf(
+        await server.request('tools/call', { name: 'runtime_capture', arguments: { op: 'screenshot' } }),
+      ) ?? '';
+    assert.match(
+      timedOut,
+      /Nothing was cancelled: the game runs it when it gets to it, and what it answers then is not kept, so ask again once the game answers\./,
+      timedOut,
+    );
+    await lateAnswer;
+    assert.equal(
+      saved.folderWasThere,
+      true,
+      `the folder outlived the wait, for the game to save into: ${saved.into}`,
+    );
+    let gone = false;
+    for (let waited = 0; !gone && waited < 5_000; waited += 100) {
+      await delay(100);
+      gone = saved.into !== '' && !existsSync(dirname(saved.into));
+    }
+    assert.ok(gone, `and went once the game had answered: ${saved.into}`);
+  } finally {
+    await server.stop();
+    holder.kill();
+    await new Promise<void>((closed) => {
+      game.close(() => {
+        closed();
+      });
+    });
+    sweep(runtimeDir);
+    sweep(project);
+  }
+}
+
+/**
  * runtimeConnected is about this server's project, and another project's game is listed as such.
  *
  * Reported from game-b, whose server's editor_status said runtimeConnected true while the only
@@ -23432,7 +23580,7 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
         await call('runtime_invoke', { op: 'set', nodePath, property, value: given });
       const cutFor = (slot: string, type: string, given: string): RegExp =>
         new RegExp(
-          `${slot} holds ${type} and the value given is ${given}, which it would have to be cut to fit`,
+          `${slot} holds ${type} and the value given is ${given}, which ${type === 'int' ? 'an int' : 'a bool'} cannot hold without changing it`,
         );
       const cutInt = await set('/root/Main', 'count', 2.5);
       assert.match(cutInt, cutFor('count', 'int', '2\\.5'), cutInt);
@@ -23441,6 +23589,18 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
       assert.match(cutAxis, cutFor('cell\\.y', 'int', '2\\.5'), cutAxis);
       const cutFlag = await set('/root/Main', 'flag', 0.2);
       assert.match(cutFlag, cutFor('flag', 'bool', '0\\.2'), cutFlag);
+      const cutWait = await call('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'count',
+        value: 2.5,
+        timeoutMs: 500,
+      });
+      assert.match(
+        cutWait,
+        /\/root\/Main\.count holds int and the value to wait for is 2\.5, which an int cannot hold without changing it: waiting on it would answer about a state nobody asked for\./,
+        cutWait,
+      );
       await set('/root/Main', 'count', 7);
       assert.equal(await value('/root/Main', 'count'), 7, 'a whole number is written');
       await set('/root/Main', 'flag', 1);
@@ -23455,7 +23615,7 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
       });
       assert.match(
         cutArgument,
-        /step takes int as argument 1 and was given 2\.5, which it would have to be cut to fit/,
+        /step takes int as argument 1 and was given 2\.5, which an int cannot hold without changing it/,
         cutArgument,
       );
       const stepped = await call('runtime_invoke', {
@@ -33160,7 +33320,7 @@ async function testAProfileSinceAMarkAnswersForOneAction(): Promise<void> {
       unmarked.said,
     );
     const later = await call('editor_run', { op: 'profile', since: 'later' });
-    assert.match(later.said, /^editor_run takes since as one of mark, not "later"\./, later.said);
+    assert.match(later.said, /^editor_run takes since only as mark, not "later"\./, later.said);
 
     const marked = await call('editor_run', { op: 'profile', mark: true });
     assert.equal(get(marked.parsed, 'marked'), true, marked.said);
@@ -33197,6 +33357,17 @@ async function testAProfileSinceAMarkAnswersForOneAction(): Promise<void> {
       `callersOf reads the same difference: ${shown}`,
     );
     assert.match(String(get(sinceMark, 'note')), /^Counted from the mark set \d+ms ago: /, shown);
+    // The presses went through runtime_invoke, so the runtime addon served them inside the game.
+    assert.deepEqual(
+      [
+        asArray(get(sinceMark, 'functions')).filter((row) =>
+          String(get(row, 'script')).startsWith('res://addons/gdharness_runtime/'),
+        ).length,
+        typeof get(sinceMark, 'runtimeAddonMs'),
+      ],
+      [0, 'number'],
+      `the addon serving the presses is summed apart from the game's rows: ${shown}`,
+    );
 
     const whole = await call('editor_run', { op: 'profile' });
     assert.deepEqual(
@@ -37911,6 +38082,18 @@ async function testAnUnlistedValueIsRefusedRatherThanDefaulted(): Promise<void> 
     const named = textOf(sections) ?? JSON.stringify(sections);
     assert.match(named, /include\[1\] as one of/, `the stray element is named by position: ${named}`);
     assert.doesNotMatch(named, /include\[0\]/, `and the good one is not: ${named}`);
+
+    // A set of one is a single value, and "one of mark" read as a list cut short.
+    const single = await server.request('tools/call', {
+      name: 'editor_run',
+      arguments: { op: 'profile', since: 'later' },
+    });
+    const only = textOf(single) ?? JSON.stringify(single);
+    assert.match(
+      only,
+      /^editor_run takes since only as mark, not "later"\./,
+      `a set of one is named as such: ${only}`,
+    );
   } finally {
     await server.stop();
   }
@@ -38340,6 +38523,13 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     // The cache from before any scan here, dated a minute back: rewriting it just before a check
     // would make it newer than the scan the check is told about, which is the editor's own write
     // and not the file it replaces.
+    // The editor saves the cache to a file beside it and renames that over it, so the server never
+    // reads one half written. Bun's writeFileSync writes over the old text and cuts it to length
+    // after: a server reading in between, just after the file's time moved, read the new start and
+    // the old classes behind it, so a class the write dropped read as still held.
+    const editorSaves = (content: string): void => {
+      assert.ok(writeWhole(cache, content), 'the fixture editor should have written the class cache');
+    };
     const cacheBeforeTheScan = (): void => {
       writeFileSync(cache, EMPTY);
       const aMinuteAgo = new Date(Date.now() - 60_000);
@@ -38431,7 +38621,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
           asked = scanAsked.first;
         }
         await delay(Math.max(0, asked + afterMs - Date.now()));
-        writeFileSync(cache, content);
+        editorSaves(content);
       })();
     };
 
@@ -38472,7 +38662,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     scanning = () => false;
     finishedAt = Date.now() - 200;
     const late = delay(1_300).then(() => {
-      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
+      editorSaves(WRITTEN_AFTER_THE_SCAN);
     });
     const unseen = await check();
     await late;
@@ -42961,6 +43151,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRuntimeConnectedIsAboutThisProjectsGames,
   testACallBesideAnotherOnTheGameSaysSo,
   testAGameOnEveryInterfaceIsReached,
+  testACaptureTheWaitRanOutOnKeepsItsFolder,
   testAGameOnAnotherRuntimeAddonSaysSo,
   testAGameSaysWhichRuntimeAddonItLoaded,
   testAWorktreeFindsItsMainCheckoutsEngine,

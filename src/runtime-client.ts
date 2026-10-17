@@ -886,7 +886,16 @@ export type RuntimeReply =
       readonly message: string;
       /** For a request the wait ran out on: the id its answer is kept under when it comes. */
       readonly requestId?: number;
+      /** For a request the wait ran out on that is handed to a function rather than kept. */
+      readonly stillWithTheGame?: true;
     };
+
+/**
+ * What a request does once its wait runs out. `drop` stops listening; `keep` keeps the reply under
+ * the request's id for `lateAnswer`; a function is called with the reply when it comes, or with the
+ * failure once the late wait ends, for work that has to outlive the wait without being collected.
+ */
+export type AfterTheWait = 'drop' | 'keep' | ((reply: RuntimeReply) => void);
 
 let nextRequestId = 1;
 
@@ -943,16 +952,15 @@ export function lateAnswer(id: number): LateAnswer | undefined {
  * A request the wait runs out on is not cancelled, and nothing could cancel it: the game has it,
  * and a call that takes longer than the wait goes on and does everything it was asked. The answer
  * used to call that a failure, a game "paused at a breakpoint or stuck in a long frame", and a
- * caller who believed it repeated calls that had already run. With [param keepListening] the socket
- * stays open after the wait, unreferenced, and the reply is kept under the request's id for
- * `lateAnswer`.
+ * caller who believed it repeated calls that had already run. Unless [param afterTheWait] is
+ * `drop`, the socket stays open after the wait, unreferenced, for the reply.
  */
 export function runtimeRequest(
   endpoint: RuntimeEndpoint,
   command: string,
   params: Record<string, unknown>,
   timeoutMs: number,
-  keepListening = false,
+  afterTheWait: AfterTheWait = 'drop',
 ): Promise<RuntimeReply> {
   const id = nextRequestId++;
   const sentAt = Date.now();
@@ -970,13 +978,17 @@ export function runtimeRequest(
           clearTimeout(lateTimer);
         }
         socket.destroy();
+        late = false;
+        if (typeof afterTheWait === 'function') {
+          afterTheWait(reply);
+          return;
+        }
         keepLate(
           id,
           reply.ok || reply.reason === 'error'
             ? { state: 'answered', command, sentAt, answeredAt: Date.now(), reply }
             : { state: 'never', command, sentAt, why: reply.message },
         );
-        late = false;
         return;
       }
       if (done) {
@@ -991,7 +1003,7 @@ export function runtimeRequest(
       const still = welcomed
         ? `The game (${describe(endpoint)}) has the request and did not answer '${command}' within ${timeoutMs}ms.`
         : `The game (${describe(endpoint)}) did not answer '${command}' within ${timeoutMs}ms and had not taken the request: its frame has not ended since it was sent, which a long frame or a breakpoint does, and the request runs when it does.`;
-      if (!keepListening) {
+      if (afterTheWait === 'drop') {
         finish({
           ok: false,
           reason: 'busy',
@@ -1002,7 +1014,9 @@ export function runtimeRequest(
       // Answered now, and still listened for: the reply is kept when it comes.
       done = true;
       late = true;
-      keepLate(id, { state: 'waiting', command, sentAt });
+      if (afterTheWait === 'keep') {
+        keepLate(id, { state: 'waiting', command, sentAt });
+      }
       lateTimer = setTimeout(() => {
         finish({
           ok: false,
@@ -1012,6 +1026,15 @@ export function runtimeRequest(
       }, LATE_ANSWER_MS);
       lateTimer.unref();
       socket.unref();
+      if (afterTheWait !== 'keep') {
+        settle({
+          ok: false,
+          reason: 'busy',
+          stillWithTheGame: true,
+          message: `${still} Nothing was cancelled: the game runs it when it gets to it, and what it answers then is not kept, so ask again once the game answers. A game held at a breakpoint instead is one debug_state stack answers about.`,
+        });
+        return;
+      }
       settle({
         ok: false,
         reason: 'busy',
