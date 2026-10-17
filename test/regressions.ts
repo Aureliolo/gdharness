@@ -14502,6 +14502,157 @@ async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
 }
 
 /**
+ * Calls sent together to one game wait their turn rather than overflow its queue.
+ *
+ * Reported from fantasy-guild-manager as #1152: fourteen runtime_inspect reads sent at once lost four
+ * to ECONNREFUSED, worded as a game starting or stopping. The engine queues eight connections a game
+ * has not taken and refuses the rest, and the game took one a frame. The fake game takes every
+ * connection at once, so it cannot refuse; what it records is the property the fix holds, how many
+ * of this server's connections were waiting for their welcome at the same moment, which it sends a
+ * frame late. Then four slow calls the game has taken, which must not hold up a fifth, and a game
+ * that takes nothing, where a call that never got a place is answered as never sent.
+ */
+async function testCallsSentTogetherWaitTheirTurnAtTheGame(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-call-burst-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-call-burst-rt-'));
+  const seen = { waiting: 0, mostWaiting: 0, answered: 0, slow: 0, taking: true };
+  const game = createServer((socket) => {
+    socket.setEncoding('utf8');
+    socket.on('error', () => {});
+    seen.waiting += 1;
+    seen.mostWaiting = Math.max(seen.mostWaiting, seen.waiting);
+    if (!seen.taking) {
+      return;
+    }
+    // As the game does, nothing is read from a connection before it is taken and welcomed.
+    setTimeout(() => {
+      seen.waiting -= 1;
+      socket.write(`${JSON.stringify({ type: 'welcome', protocol: RUNTIME_PROTOCOL })}\n`);
+      let buffered = '';
+      socket.on('data', (chunk: string) => {
+        buffered += chunk;
+        for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+          const asked = JSON.parse(buffered.slice(0, at)) as { id: number; params: { property?: string } };
+          buffered = buffered.slice(at + 1);
+          if (asked.params.property === 'slow') {
+            seen.slow += 1;
+            continue;
+          }
+          seen.answered += 1;
+          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong' })}\n`);
+        }
+      });
+    }, 50);
+  });
+  const holder = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_RUNTIME_TIMEOUT_MS: '2000',
+    },
+  });
+  try {
+    await listenOnAReservedPort(game, '127.0.0.1');
+    const pid = holder.pid ?? 0;
+    writeFileSync(
+      join(runtimeDir, `runtime-${pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid,
+        port: portOf(game),
+        address: '127.0.0.1',
+        project: { name: basename(project), path: project },
+      }),
+      'utf8',
+    );
+    await server.initialize('regression-test');
+    const read = async (property = 'day'): Promise<string> =>
+      textOf(
+        await server.request(
+          'tools/call',
+          { name: 'runtime_inspect', arguments: { op: 'property', nodePath: '/root/Main', property } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      ) ?? '';
+    seen.mostWaiting = 0;
+    const before = seen.answered;
+    const burst = await Promise.all(Array.from({ length: 14 }, async () => await read()));
+    assert.equal(
+      seen.answered - before,
+      14,
+      `every call of the burst reached the game: ${burst.filter((one) => /ECONNREFUSED|not sent|did not answer/.test(one)).join(' | ')}`,
+    );
+    assert.ok(
+      seen.mostWaiting <= 4,
+      `no more than four of this server's connections waited for the game at once, not ${seen.mostWaiting}`,
+    );
+
+    // A call the game has taken holds no place while it runs, so four slow ones do not hold up a
+    // fifth.
+    const slow = Array.from({ length: 4 }, async () => await read('slow'));
+    for (let waited = 0; seen.slow < 4 && waited < 10_000; waited += 20) {
+      await delay(20);
+    }
+    assert.equal(seen.slow, 4, 'the game had taken all four slow calls');
+    const answeredBefore = seen.answered;
+    const beside = await read();
+    assert.equal(
+      seen.answered - answeredBefore,
+      1,
+      `a call beside four slow ones the game had taken was sent and answered: ${beside}`,
+    );
+    await Promise.all(slow);
+
+    // A port refusing while the game's process lives is the game's queue full, which on Windows is
+    // refused at once, so the call dials again until the game takes it. The listener is closed
+    // without waiting for its connections, since the slow calls' are kept open for their answers.
+    const port = portOf(game);
+    game.close();
+    const refusedFirst = read();
+    await delay(300);
+    game.listen(port, '127.0.0.1');
+    const throughTheRefusal = await refusedFirst;
+    assert.doesNotMatch(throughTheRefusal, /refused|not sent|ECONNREFUSED/, throughTheRefusal);
+    assert.equal(
+      seen.answered - answeredBefore,
+      2,
+      `a call refused at first was answered: ${throughTheRefusal}`,
+    );
+
+    game.close();
+    const refusedThroughout = await read();
+    assert.match(
+      refusedThroughout,
+      /'get_property' was not sent to the game \(.*\) within 2000ms: its port refused all \d+ connections tried, which the engine does while more are waiting for the game than the eight it queues: several servers calling the game at once can fill the queue, and a long frame or a breakpoint stops the game taking them\. Nothing was sent, so nothing ran\./,
+      refusedThroughout,
+    );
+    game.listen(port, '127.0.0.1');
+
+    // A game in one long frame takes nothing, so the first four wait out their turn in its queue and
+    // the fifth never gets a place.
+    seen.taking = false;
+    const held = await Promise.all(Array.from({ length: 5 }, async () => await read()));
+    const neverSent = held.filter((one) => one.includes('was not sent to the game'));
+    assert.equal(neverSent.length, 1, `one call never got a place: ${held.join(' | ')}`);
+    assert.match(
+      neverSent[0] ?? '',
+      /'get_property' was not sent to the game \(.*\) within 2000ms: 4 connections from this server were already waiting for the game to take them, which it does between frames, so a long frame or a breakpoint holds them\. Nothing was sent, so nothing ran\./,
+      neverSent[0] ?? '',
+    );
+  } finally {
+    await server.stop();
+    holder.kill();
+    if (game.listening) {
+      game.close();
+    }
+    sweep(runtimeDir);
+    sweep(project);
+  }
+}
+
+/**
  * A capture the wait ran out on keeps its folder until the game has answered.
  *
  * Reported from fantasy-guild-manager as #1150: a capture sent while the game played 45 days in one
@@ -28448,7 +28599,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         }
         return { ok: true };
       },
-    async ({ server, project, start }) => {
+    async ({ server, project, runtimeDir, start }) => {
       writeFileSync(
         join(project, 'gear.gd'),
         'class_name Gear\nextends RefCounted\n\nvar label: String = ""\n',
@@ -28847,6 +28998,74 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         get(met, 'met'),
         true,
         `a wait on a list's size is met when it gets there: ${JSON.stringify(met)}`,
+      );
+
+      // The game takes every connection waiting each frame, not one, so a queue several servers
+      // filled empties at once. Eight are queued during a long frame, and on the first welcome a
+      // second long call goes down that connection: taking one a frame, the game gets through only
+      // the few frames before the call arrives, and the rest wait out the call.
+      const record = JSON.parse(
+        readFileSync(join(runtimeDir, `runtime-${held.game?.pid ?? 0}.json`), 'utf8'),
+      ) as { port: number };
+      const longFrame = invoke('slow', [1500]);
+      await delay(500);
+      const welcomedAt: number[] = [];
+      let answeredAt = 0;
+      const dialled = Array.from(
+        { length: 8 },
+        async (_, index) =>
+          await new Promise<string>((answer) => {
+            const socket = createConnection({ host: '127.0.0.1', port: record.port });
+            socket.setEncoding('utf8');
+            let buffered = '';
+            let first: string | null = null;
+            const end = (): void => {
+              socket.destroy();
+              answer(first?.includes('"welcome"') === true ? 'welcome' : (first ?? 'nothing'));
+            };
+            socket.setTimeout(20_000, () => {
+              socket.destroy();
+              answer('no welcome within 20s');
+            });
+            socket.on('data', (chunk: string) => {
+              buffered += chunk;
+              for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+                const line = buffered.slice(0, at);
+                buffered = buffered.slice(at + 1);
+                if (first === null) {
+                  first = line;
+                  welcomedAt.push(Date.now());
+                  if (index !== 0) {
+                    end();
+                    return;
+                  }
+                  socket.write(
+                    `${JSON.stringify({ id: 1, command: 'call_method', params: { path: '/root/Main', method: 'slow', args: [1000] } })}\n`,
+                  );
+                } else if (line.includes('"id":1')) {
+                  answeredAt = Date.now();
+                  end();
+                  return;
+                }
+              }
+            });
+            socket.on('error', (error: NodeJS.ErrnoException) => {
+              answer(error.code ?? error.message);
+            });
+          }),
+      );
+      const told = await Promise.all(dialled);
+      await longFrame;
+      assert.deepEqual(
+        told,
+        Array(8).fill('welcome'),
+        `each of eight queued connections was welcomed: ${told.join(', ')}`,
+      );
+      const beforeTheCall = welcomedAt.filter((at) => at <= answeredAt).length;
+      assert.equal(
+        beforeTheCall,
+        8,
+        `all eight were welcomed before a one-second call sent on the first welcome answered, not ${beforeTheCall}`,
       );
 
       await server.request(
@@ -43152,6 +43371,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACallBesideAnotherOnTheGameSaysSo,
   testAGameOnEveryInterfaceIsReached,
   testACaptureTheWaitRanOutOnKeepsItsFolder,
+  testCallsSentTogetherWaitTheirTurnAtTheGame,
   testAGameOnAnotherRuntimeAddonSaysSo,
   testAGameSaysWhichRuntimeAddonItLoaded,
   testAWorktreeFindsItsMainCheckoutsEngine,
