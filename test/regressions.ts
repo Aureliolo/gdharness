@@ -6936,19 +6936,21 @@ async function testANoEditorRefusalSaysWhetherOneCanConnect(): Promise<void> {
     writeFileSync(join(projectPath, 'project.godot'), 'config_version=5\n');
     await withStdioServer(
       async (call) => {
-        const create = await call('scene_create', {
+        const animation = {
+          op: 'create',
           projectPath,
           scenePath: 'res://made.tscn',
-          rootNodeType: 'Node',
-        });
+          playerNodePath: 'Anim',
+          animationName: 'idle',
+        };
+        const create = await call('scene_animation', animation);
         assert.match(create, /^Editor not connected/, create);
 
         // A project never set up has no addon to enable and no editor that could dial in, so the
         // refusal says that and how to install it. Each half of the addon check gets the shape only it
         // refuses, as editor_launch's does, and then the project that has both, which an editor could
         // still connect from.
-        const ask = async (): Promise<string> =>
-          await call('scene_create', { projectPath, scenePath: 'res://made.tscn', rootNodeType: 'Node' });
+        const ask = async (): Promise<string> => await call('scene_animation', animation);
         assert.ok(
           create.startsWith(
             `Editor not connected, and no editor of this project can connect: the gdharness editor addon is not installed in ${projectPath}.`,
@@ -22570,6 +22572,134 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
 }
 
 /**
+ * An RID a call answers with is an argument the next call takes, and a whole number past 2^53 goes
+ * both ways exactly.
+ *
+ * Issue #1140: runtime_invoke answered get_viewport_rid as {"_type": "RID", "id": ...} and refused
+ * that same form as an argument, so RenderingServer's render timing, which takes a viewport's RID,
+ * could not be called at all. JSON numbers are doubles on both sides, so a RefCounted's instance id,
+ * which has its top bit set, came back as a neighbouring id, and a 64-bit seed sent as a number
+ * would be stored as a neighbour of the one sent.
+ */
+async function testAnRidAndAWholeNumberPast2To53GoBothWays(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('RID argument regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Node\n\nvar seed_kept: int = 0\nvar kept: RefCounted = RefCounted.new()\n\n\n' +
+          'func echo(number: int) -> int:\n\treturn number\n\n\n' +
+          'func digits(number: int) -> String:\n\treturn str(number)\n\n\n' +
+          'func counted() -> RefCounted:\n\treturn kept\n\n\n' +
+          'func counted_id() -> String:\n\treturn str(kept.get_instance_id())\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      // A refusal is prose, so it is answered as its text.
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+        const response = await server.request(
+          'tools/call',
+          { name, arguments: args },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        return parseTextContent(response) ?? { message: textOf(response) };
+      };
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        runtimeWaitMs: 30_000,
+      });
+      if (get(started, 'runtime', 'listening') !== true) {
+        const printed = await call('editor_output', { projectPath: project });
+        assert.fail(`the game listens: ${JSON.stringify(started)} printed ${JSON.stringify(printed)}`);
+      }
+      const invoke = (nodePath: string, method: string, args: unknown[] = []): Promise<unknown> =>
+        call('runtime_invoke', { op: 'call', nodePath, method, args });
+
+      const viewport = await invoke('/root', 'get_viewport_rid');
+      const rid = get(viewport, 'result');
+      assert.equal(get(rid, '_type'), 'RID', JSON.stringify(viewport));
+      const measured = await invoke('RenderingServer', 'viewport_set_measure_render_time', [rid, true]);
+      assert.equal(
+        get(measured, 'type'),
+        'method_result',
+        `the RID read off one call is taken by the next: ${JSON.stringify(measured)}`,
+      );
+      const timed = await invoke('RenderingServer', 'viewport_get_measured_render_time_cpu', [rid]);
+      assert.equal(typeof get(timed, 'result'), 'number', `and read back with it: ${JSON.stringify(timed)}`);
+
+      // The digits of a number past 2^53, sent tagged, arrive as that number and come back so.
+      const large = '9007199254740993';
+      const echoed = await invoke('/root/Main', 'echo', [{ _type: 'int', value: large }]);
+      assert.deepEqual(get(echoed, 'result'), { _type: 'int', value: large }, JSON.stringify(echoed));
+      const read = await invoke('/root/Main', 'digits', [{ _type: 'int', value: large }]);
+      assert.equal(get(read, 'result'), large, `the game holds the number sent: ${JSON.stringify(read)}`);
+      // A number below the bound is still a number.
+      const small = await invoke('/root/Main', 'echo', [42]);
+      assert.equal(get(small, 'result'), 42, JSON.stringify(small));
+      // Sent as a number it may already be a neighbour, so it is refused and the tag named.
+      const bare = await invoke('/root/Main', 'echo', [9007199254740994]);
+      assert.match(
+        String(get(bare, 'message')),
+        /Main\.echo takes int as argument 1: 9007199254740994 is 2\^53 or more, .*\{"_type": "int", "value": "\.\.\."\}/,
+        JSON.stringify(bare),
+      );
+      const set = await call('runtime_invoke', {
+        op: 'set',
+        nodePath: '/root/Main',
+        property: 'seed_kept',
+        value: 9007199254740994,
+      });
+      assert.match(
+        text(get(set, 'message')),
+        /Main\.seed_kept holds int: 9007199254740994 is 2\^53/,
+        JSON.stringify(set),
+      );
+      const waited = await call('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'seed_kept',
+        value: 9007199254740994,
+        timeoutMs: 100,
+      });
+      assert.match(
+        String(get(waited, 'message')),
+        /\/root\/Main\.seed_kept holds int: 9007199254740994 is 2\^53/,
+        `a wait is refused the same way: ${JSON.stringify(waited)}`,
+      );
+
+      // A RefCounted's id, which a number cannot hold, is answered as the game has it.
+      const id = await invoke('/root/Main', 'counted_id');
+      const counted = await invoke('/root/Main', 'counted');
+      assert.deepEqual(
+        get(counted, 'result', 'id'),
+        { _type: 'int', value: get(id, 'result') },
+        `the id is the game's own: ${JSON.stringify([id, counted])}`,
+      );
+      await call('editor_run', { op: 'stop' });
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
  * A wait for words leaves the game it watches its speed.
  *
  * It looked through every node on the screen every frame, and asked each for its property list to
@@ -22634,48 +22764,59 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
         runtimeWaitMs: 30_000,
       });
       assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
-      // Frames a second over one wait of each kind, as each wait counted them. The game's own frame
-      // counter read either side of the call also counts the frames of the calls reading it, which
-      // hid a wait running at a third of the rate behind a figure near the unwatched one.
-      const rateOver = async (
-        nodePath: string,
-        args: Record<string, unknown>,
-      ): Promise<{ rate: number; answer: unknown }> => {
-        const answer = await call('runtime_wait', { op: 'until', nodePath, timeoutMs: 2_000, ...args });
-        const said = JSON.stringify(answer);
-        return {
-          rate: asNumber(get(answer, 'frames'), said) / asNumber(get(answer, 'elapsed_ms'), said),
-          answer,
-        };
-      };
+      // Rates are taken from the frames and time each wait counted. The game's own frame counter
+      // read either side of the call also counts the frames of the calls reading it, which hid a
+      // wait running at a third of the rate behind a figure near the unwatched one.
+      const waitOn = (nodePath: string, args: Record<string, unknown>): Promise<unknown> =>
+        call('runtime_wait', { op: 'until', nodePath, timeoutMs: 2_000, ...args });
 
       // How often it looked, over the part of the hall the size of the report's. A look that asks
       // every node for its property list costs over a second here, and pacing then leaves one look
       // in the wait besides the last; read cheaply, a look costs milliseconds and there are dozens.
-      const small = await rateOver('/root/Main/Small', { says: 'words nobody says' });
+      const small = await waitOn('/root/Main/Small', { says: 'words nobody says' });
       assert.ok(
-        asNumber(get(small.answer, 'looks')) >= 5,
-        `a words wait looks many times in two seconds on 3,500 nodes: ${JSON.stringify(small.answer)}`,
+        asNumber(get(small, 'looks')) >= 5,
+        `a words wait looks many times in two seconds on 3,500 nodes: ${JSON.stringify(small)}`,
       );
 
-      const unwatched = await rateOver('/root/Main', { property: 'never', value: 1 });
-      assert.equal(get(unwatched.answer, 'met'), false, JSON.stringify(unwatched.answer));
-      const watched = await rateOver('/root/Main', { says: 'words nobody says' });
-      assert.equal(get(watched.answer, 'met'), false, JSON.stringify(watched.answer));
+      // Three waits of each kind taken in turn and added up. On the macOS runner the game's rate
+      // drifts by up to a third between two windows with nothing changed: a hall nobody watched ran
+      // at 64, 59, 65 and 43 frames a second in four windows in a row. One wait of each compared
+      // that drift as often as the watching, and fell below half twice (41.9 against 84, 36.5
+      // against 73.5) while timing every frame showed the frames between looks keeping the pace of
+      // the waits beside them.
+      const unwatched: unknown[] = [];
+      const watched: unknown[] = [];
+      for (let round = 0; round < 3; round += 1) {
+        const property = await waitOn('/root/Main', { property: 'never', value: 1 });
+        assert.equal(get(property, 'met'), false, JSON.stringify(property));
+        unwatched.push(property);
+        const words = await waitOn('/root/Main', { says: 'words nobody says' });
+        assert.equal(get(words, 'met'), false, JSON.stringify(words));
+        watched.push(words);
+      }
+      const total = (answers: unknown[], field: string): number =>
+        answers.reduce<number>(
+          (sum, answer) => sum + asNumber(get(answer, field), JSON.stringify(answer)),
+          0,
+        );
       // How long the looks took, so a game that lost its speed says whether the looks took it or the
-      // frames between them ran slow. One macOS run fell to 41.9 frames a second against 84, with
-      // four looks: they could not have cost more than about 400ms of its 2076, so most of the loss
-      // was between them, which nothing in the answer could show.
-      const looking = asNumber(get(watched.answer, 'looking_ms'), JSON.stringify(watched.answer));
-      const elapsed = asNumber(get(watched.answer, 'elapsed_ms'), JSON.stringify(watched.answer));
+      // frames between them ran slow.
+      for (const answer of watched) {
+        const took = asNumber(get(answer, 'looking_ms'), JSON.stringify(answer));
+        assert.ok(
+          took > 0 && took <= asNumber(get(answer, 'elapsed_ms')),
+          `the looks took part of the wait: ${JSON.stringify(answer)}`,
+        );
+      }
+      const looking = total(watched, 'looking_ms');
+      const elapsed = total(watched, 'elapsed_ms');
+      const watchedRate = (total(watched, 'frames') / elapsed) * 1000;
+      const unwatchedRate = (total(unwatched, 'frames') / total(unwatched, 'elapsed_ms')) * 1000;
+      const between = (total(watched, 'frames') / (elapsed - looking)) * 1000;
       assert.ok(
-        looking > 0 && looking <= elapsed,
-        `the looks took part of the wait: ${JSON.stringify(watched.answer)}`,
-      );
-      const between = (asNumber(get(watched.answer, 'frames')) / (elapsed - looking)) * 1000;
-      assert.ok(
-        watched.rate >= unwatched.rate / 2,
-        `the game runs at ${watched.rate * 1000} frames a second while words are waited for, against ${unwatched.rate * 1000} while a property is; the looks took ${looking}ms of the ${elapsed}, and the frames between them ran at ${between} a second: ${JSON.stringify(watched.answer)}`,
+        watchedRate >= unwatchedRate / 2,
+        `the game runs at ${watchedRate} frames a second while words are waited for, against ${unwatchedRate} while a property is; the looks took ${looking}ms of the ${elapsed}, and the frames between them ran at ${between} a second: ${JSON.stringify({ watched, unwatched })}`,
       );
 
       // Words that arrive after the last paced look and before the time runs out are still found:
@@ -32639,6 +32780,102 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
   }
 }
 
+/**
+ * A run whose every case raises the same errors over and over answers a size a client can take.
+ *
+ * Issue #1142: nineteen suites on a project whose core had stopped compiling answered 18 MB on one
+ * line, one case carrying 2,062 near-identical reports, and Claude Code closed the connection on it.
+ * Failing assertions rather than the issue's runtime errors, because gdUnit4 ends a case at the
+ * first runtime error in its own body and goes on past a failed assertion: the loop makes 2,000
+ * identical reports, and the hundred and twenty cases beside it, each failing on twenty long lines
+ * of its own, are more than the budget for `failed` holds once folded.
+ */
+async function testARunawayTestRunAnswersASizeTheClientTakes(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('runaway test run regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-test-runaway-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Runaway"\n',
+    );
+    cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(projectDir, 'runaway'));
+    writeFileSync(
+      join(projectDir, 'runaway', 'loop_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_loop() -> void:',
+        '\tfor _pass: int in 2000:',
+        '\t\tassert_int(1).is_equal(2)',
+        '',
+      ].join('\n'),
+    );
+    const cases = Array.from({ length: 120 }, (_, index) =>
+      [
+        '',
+        '',
+        `func test_many_${index}() -> void:`,
+        ...Array.from(
+          { length: 20 },
+          (_, line) => `\tassert_str("${`case ${index} line ${line} `.repeat(30)}").is_equal("other")`,
+        ),
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(projectDir, 'runaway', 'many_test.gd'),
+      `extends GdUnitTestSuite\n${cases.join('\n')}\n`,
+    );
+    await withStdioServer(async (_call, request) => {
+      const response = await request(
+        'tools/call',
+        { name: 'project_test', arguments: { projectPath: projectDir, path: 'res://runaway' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const sent = JSON.stringify(response).length;
+      const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+      const answer: unknown = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}');
+      const failed = asArray(get(answer, 'failed'));
+      const said = `${sent} characters: ${JSON.stringify(answer).slice(0, 2_000)}`;
+      assert.equal(get(answer, 'answerTooLarge'), undefined, `the run bounds its own answer: ${said}`);
+      assert.equal(failed.length, 121, `every failing case is named: ${said}`);
+
+      const loop = failed.find((entry) => get(entry, 'name') === 'test_loop');
+      const listed = get(loop, 'reports');
+      const reports = Array.isArray(listed) ? listed : [];
+      assert.deepEqual(
+        [reports.length, get(reports[0], 'times'), get(loop, 'reportCount')],
+        [1, 2000, 2000],
+        `the loop's one error is answered once, with how many times: ${JSON.stringify(loop).slice(0, 2_000)}`,
+      );
+
+      const briefed = asNumber(get(answer, 'failedWithoutDetail'), said);
+      assert.ok(briefed > 0 && briefed < 121, said);
+      const withoutDetail = failed.filter(
+        (entry) => get(entry, 'detail') === null && get(entry, 'reports') === undefined,
+      );
+      assert.equal(withoutDetail.length, briefed, `the cases past the budget are named alone: ${said}`);
+      assert.match(
+        text(get(answer, 'note')),
+        new RegExp(`The last ${briefed} of the 121 failing cases`),
+        said,
+      );
+      assert.ok(sent < 2_000_000, `the answer is well inside what the client takes: ${sent} characters`);
+    });
+  } finally {
+    sweep(projectDir);
+  }
+}
+
 async function testAStackOverflowIsNotAPass(): Promise<void> {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
@@ -35402,7 +35639,11 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
   // Most are sent by name at the call; the ones a caller reaches with `from: "editor"` are sent
   // out of a table, so the table is where they are read from rather than the source around it.
   const bridged = new Set([
-    ...namesSent(/(?:[Bb]ridge|invokeTool|editorTakes)\(\s*'([a-z_]+)'/g, 'editor commands', 25),
+    ...namesSent(
+      /(?:[Bb]ridge|invokeTool|editorTakes|editorOrEngine)\(\s*'([a-z_]+)'/g,
+      'editor commands',
+      25,
+    ),
     ...Object.values(EDITOR_READS).flatMap((ops) => Object.values(ops)),
   ]);
   for (const command of bridged) {
@@ -36739,10 +36980,107 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
  * describing somebody else's scenes. The bridge already turns away an editor from elsewhere on the
  * way in; this is the same rule read from the caller's end.
  */
+/**
+ * An answer too large for the client is written to a file and answered with where.
+ *
+ * Claude Code closes the connection on a message past 16 MB, which loses the call and every later
+ * tool until the server is reconnected by hand. project_test answered 18 MB on one line; whatever a
+ * tool does not bound itself is bounded here. An editor answering five megabytes stands in for it.
+ */
+async function testAnAnswerTooLargeToSendIsWrittenToAFile(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const open = mkdtempSync(join(tmpdir(), 'gdharness-large-answer-'));
+  writeFileSync(join(open, 'project.godot'), 'config_version=5\n');
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    const large = 'x'.repeat(5_000_000);
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const args = message['args'];
+      const whole = isRecord(args) && (args['node_path'] ?? args['nodePath']) === '.';
+      socket.send(
+        JSON.stringify({
+          type: 'tool_result',
+          id: message['id'],
+          success: true,
+          result: { ok: true, small: whole ? 'kept' : 'small', large: whole ? large : 'short' },
+        }),
+      );
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: open,
+        addon_version: SERVER_VERSION,
+        editor_pid: FAKE_EDITOR_PID,
+      }),
+    );
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      knows =
+        text(get(status, 'editor', 'projectPath')) === open && get(status, 'editor', 'connected') === true;
+    }
+    assert.ok(knows, 'the fixture editor should have told the server its project, or this proves nothing');
+
+    const call = (nodePath: string) =>
+      server.request('tools/call', {
+        name: 'scene_node',
+        arguments: { op: 'get', projectPath: open, scenePath: 'res://main.tscn', nodePath },
+      });
+    // Beside it, an answer of ordinary size goes as it is, so the case below is about the size.
+    const ordinary = parseTextContent(await call('Ordinary'));
+    assert.deepEqual(
+      [get(ordinary, 'small'), get(ordinary, 'large'), get(ordinary, 'answerTooLarge')],
+      ['small', 'short', undefined],
+      JSON.stringify(ordinary),
+    );
+
+    const answered = await call('.');
+    const sent = JSON.stringify(answered).length;
+    assert.ok(sent < 100_000, `the answer sent is small: ${sent} characters`);
+    const answer = parseTextContent(answered);
+    assert.equal(get(answer, 'small'), 'kept', `the short fields are kept: ${JSON.stringify(answer)}`);
+    assert.equal(get(answer, 'large'), undefined, 'and the long one is not');
+    assert.deepEqual(get(answer, 'answerTooLarge', 'leftOut'), ['large'], JSON.stringify(answer));
+    const savedAt = get(answer, 'answerTooLarge', 'savedAt');
+    assert.ok(Array.isArray(savedAt) && savedAt.length === 1, JSON.stringify(answer));
+    const whole: unknown = JSON.parse(readFileSync(String(savedAt[0]), 'utf8'));
+    assert.deepEqual(
+      [get(whole, 'small'), text(get(whole, 'large')).length],
+      ['kept', large.length],
+      'the file holds the whole answer',
+    );
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(open);
+  }
+}
+
 async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
   const port = await reservePort();
   const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
-  const open = join(tmpdir(), 'gdharness-editor-has-this');
+  // A project on disk, as the editor's own always is: a tool for it checks the project before it
+  // asks the editor, and an editor cannot have open a folder holding no project.godot.
+  const open = mkdtempSync(join(tmpdir(), 'gdharness-editor-has-this-'));
+  writeFileSync(join(open, 'project.godot'), 'config_version=5\n');
   // Made rather than only named, since the start below needs a project there to reach the check.
   const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-editor-has-not-'));
   let editor: WebSocket | null = null;
@@ -36794,10 +37132,17 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
     }
     assert.ok(knows, 'the fixture editor should have told the server its project, or this proves nothing');
 
-    // A call only an editor answers: scene_tree reads the other project's file without one.
+    // A call only an editor answers: scene_tree and scene_node read the other project's file without
+    // one, and a scene write goes through a headless engine there.
     const other = await server.request('tools/call', {
-      name: 'scene_node',
-      arguments: { op: 'get', projectPath: elsewhere, scenePath: 'res://main.tscn', nodePath: '.' },
+      name: 'scene_animation',
+      arguments: {
+        op: 'create',
+        projectPath: elsewhere,
+        scenePath: 'res://main.tscn',
+        playerNodePath: 'Anim',
+        animationName: 'idle',
+      },
     });
     const refused = textOf(other) ?? JSON.stringify(other);
     // By its process id too: a headless engine run that holds the bridge has no window to look for.
@@ -36807,7 +37152,7 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
     );
     assert.match(refused, /gdharness-editor-has-not/, `and the one that was asked for: ${refused}`);
     assert.equal(
-      asked.includes('get_node_properties'),
+      asked.includes('create_animation'),
       false,
       'and the editor was never asked about a project it cannot see',
     );
@@ -36851,6 +37196,7 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
     editor?.terminate();
     await server.stop();
     sweep(elsewhere);
+    sweep(open);
   }
 }
 
@@ -41005,6 +41351,311 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
 }
 
 /**
+ * scene_create, scene_node, scene_signal and resource_edit with no editor, through the server and
+ * a real engine. The engine runs every script as it loads a file, where the editor runs only tool
+ * scripts, so busy.gd's _init (modulate) and the setter of its size (scale), and stats.gd's _init
+ * (resource_name) and the setter of its max_hp (hp), would each be saved by a write that never
+ * asked for them. Each write here is read back from the file, line by line.
+ */
+async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('write without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-write-engine-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-write-engine-rt-'));
+  const stats = '[ext_resource type="Script" path="res://stats.gd" id="1_stats"]\n\n';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Write"\n',
+    'busy.gd':
+      'extends Node2D\n\n@export var size: int = 1:\n\tset(value):\n\t\tsize = value\n\t\tscale = Vector2(value, value)\n\n\n' +
+      'func _init() -> void:\n\tmodulate = Color(1, 0, 0)\n',
+    'busy.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://busy.gd" id="1_busy"]\n\n' +
+      // A scale of its own, which the setter of size replaces on loading, so what an instance of it
+      // is put back to is this file's value rather than the class's.
+      '[node name="Busy" type="Node2D"]\nscale = Vector2(5, 5)\nscript = ExtResource("1_busy")\nsize = 2\n',
+    'main.tscn':
+      '[gd_scene format=3 uid="uid://dmainhw2x"]\n\n[ext_resource type="Script" path="res://busy.gd" id="1_busy"]\n' +
+      '[ext_resource type="PackedScene" path="res://busy.tscn" id="2_inst"]\n\n[node name="Main" type="Node2D"]\n\n' +
+      '[node name="Busy" type="Node2D" parent="."]\nscript = ExtResource("1_busy")\nsize = 3\n\n' +
+      '[node name="Plain" type="Node2D" parent="."]\nposition = Vector2(5, 6)\n\n' +
+      '[node name="Inst" parent="." instance=ExtResource("2_inst")]\n\n' +
+      // No script, so any pack saves it differently from this, the editor's too: anchors_preset is
+      // not stored outside the anchors layout mode, which the file does not set.
+      '[node name="Panel" type="Control" parent="."]\nanchors_preset = 15\nanchor_right = 1.0\nanchor_bottom = 1.0\n',
+    'stats.gd':
+      'extends Resource\n\n@export var max_hp: int = 10:\n\tset(value):\n\t\tmax_hp = value\n\t\thp = value\n' +
+      '@export var hp: int = 10\n\n\nfunc _init() -> void:\n\tresource_name = "made by _init"\n',
+    'stats.tres': `[gd_resource type="Resource" format=3 uid="uid://cstatshw4"]\n\n${stats}[resource]\nscript = ExtResource("1_stats")\nmax_hp = 20\n`,
+    'keeps.gd': 'extends Node\n\n@export var stats: Resource\n',
+    'holder.tscn':
+      `[gd_scene format=3]\n\n${stats}[ext_resource type="Script" path="res://keeps.gd" id="2_keeps"]\n\n` +
+      '[sub_resource type="Resource" id="Resource_stats"]\nscript = ExtResource("1_stats")\nmax_hp = 20\n\n' +
+      '[node name="Holder" type="Node"]\nscript = ExtResource("2_keeps")\nstats = SubResource("Resource_stats")\n\n' +
+      '[node name="Other" type="Node2D" parent="."]\n',
+    // Does not compile, so the engine instances the scene without it, where the editor keeps it.
+    'broken.gd': 'extends Node\n\n\nfunc _init() -> void:\n\tnot_declared_anywhere()\n',
+    'broken.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://broken.gd" id="1_broken"]\n\n' +
+      '[node name="Broken" type="Node"]\nscript = ExtResource("1_broken")\n\n[node name="Child" type="Node2D" parent="."]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  const written = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+    const answer = await call(name, args);
+    const payload = parseTextContent(answer);
+    assert.match(
+      text(get(payload, 'writtenBy')),
+      /^a headless engine, since no editor serves this project$/,
+      `${name} ${String(args['op'])}: ${textOf(answer) ?? JSON.stringify(answer)}`,
+    );
+    return payload;
+  };
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  // What a section of the file sets, one line each, with resource ids left out since a save may
+  // renumber them.
+  const sets = (file: string, head: string): string[] => {
+    const whole = fileOf(file);
+    const start = whole.indexOf(head);
+    assert.ok(start >= 0, `${file} has ${head}:\n${whole}`);
+    const next = whole.indexOf('\n[', start + 1);
+    return whole
+      .slice(start, next === -1 ? undefined : next)
+      .split('\n')
+      .slice(1)
+      .filter((line) => line !== '')
+      .map((line) => line.replace(/(Ext|Sub)Resource\("[^"]+"\)/, '$1Resource'));
+  };
+  let standIn: ChildProcess | null = null;
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('write-engine');
+
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Plain',
+      properties: { position: [7, 8] },
+    });
+    assert.deepEqual(sets('main.tscn', '[node name="Plain"'), ['position = Vector2(7, 8)']);
+    assert.deepEqual(
+      sets('main.tscn', '[node name="Busy"'),
+      ['script = ExtResource', 'size = 3'],
+      'neither what _init set nor what the setter set on loading is saved',
+    );
+    assert.deepEqual(
+      sets('main.tscn', '[node name="Inst"'),
+      [],
+      'nor inside the instance, against its own file',
+    );
+    assert.ok(
+      fileOf('main.tscn').startsWith('[gd_scene format=3 uid="uid://dmainhw2x"]'),
+      fileOf('main.tscn'),
+    );
+
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Busy',
+      properties: { size: 4 },
+    });
+    assert.deepEqual(
+      sets('main.tscn', '[node name="Busy"'),
+      ['script = ExtResource', 'size = 4'],
+      'the setter the write ran is not saved either',
+    );
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'main.tscn',
+      nodeName: 'Second',
+      instancePath: 'res://busy.tscn',
+    });
+    assert.deepEqual(sets('main.tscn', '[node name="Second"'), []);
+    await written('scene_node', {
+      op: 'duplicate',
+      scenePath: 'main.tscn',
+      nodePath: 'Busy',
+      newName: 'Copy',
+    });
+    assert.deepEqual(sets('main.tscn', '[node name="Copy"'), ['script = ExtResource', 'size = 4']);
+    await written('scene_signal', {
+      op: 'connect',
+      scenePath: 'main.tscn',
+      sourceNodePath: 'Plain',
+      signalName: 'visibility_changed',
+      targetNodePath: 'Busy',
+      methodName: 'queue_free',
+    });
+    assert.match(
+      fileOf('main.tscn'),
+      /\[connection signal="visibility_changed" from="Plain" to="Busy" method="queue_free"/,
+    );
+
+    const read = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'main.tscn', nodePath: 'Busy' }),
+    );
+    assert.match(
+      text(get(read, 'readBy')),
+      /^a headless engine, since no editor serves this project/,
+      JSON.stringify(read),
+    );
+    assert.deepEqual(
+      Object.keys(asObject(get(read, 'properties'))).sort(),
+      ['script', 'size'],
+      `a read answers what the file holds, not what the scripts set: ${JSON.stringify(read)}`,
+    );
+    assert.equal(get(read, 'unsavedInEditor'), undefined, 'only an editor can say what it holds unsaved');
+    const connections = parseTextContent(await call('scene_signal', { op: 'list', scenePath: 'main.tscn' }));
+    assert.deepEqual(
+      asArray(get(connections, 'connections')).map(
+        (one) =>
+          `${text(get(one, 'sourceNodePath'))} ${text(get(one, 'signalName'))} ${text(get(one, 'methodName'))}`,
+      ),
+      ['Plain visibility_changed queue_free'],
+      JSON.stringify(connections),
+    );
+    assert.equal(get(connections, 'unsavedInEditor'), undefined, JSON.stringify(connections));
+
+    await written('scene_create', {
+      op: 'create',
+      scenePath: 'made.tscn',
+      rootNodeType: 'Node2D',
+      script: 'res://busy.gd',
+    });
+    assert.deepEqual(sets('made.tscn', '[node name="Node2D"'), ['script = ExtResource']);
+    assert.match(
+      fileOf('made.tscn'),
+      /^\[gd_scene format=3 uid="uid:\/\/[a-y0-8]+"\]/,
+      'a new scene gets a uid',
+    );
+
+    await written('resource_edit', {
+      op: 'create',
+      resourcePath: 'made.tres',
+      resourceType: 'Resource',
+      script: 'res://stats.gd',
+      properties: { max_hp: 30 },
+    });
+    assert.deepEqual(sets('made.tres', '[resource]'), ['script = ExtResource', 'max_hp = 30']);
+    await written('resource_edit', { op: 'modify', resourcePath: 'stats.tres', properties: { max_hp: 40 } });
+    assert.deepEqual(sets('stats.tres', '[resource]'), ['script = ExtResource', 'max_hp = 40']);
+    assert.ok(
+      fileOf('stats.tres').startsWith('[gd_resource type="Resource" format=3 uid="uid://cstatshw4"]'),
+      fileOf('stats.tres'),
+    );
+
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'holder.tscn',
+      nodePath: 'Other',
+      properties: { position: [1, 2] },
+    });
+    assert.deepEqual(sets('holder.tscn', '[node name="Other"'), ['position = Vector2(1, 2)']);
+    assert.deepEqual(
+      sets('holder.tscn', '[sub_resource type="Resource"'),
+      ['script = ExtResource', 'max_hp = 20'],
+      'an embedded resource keeps what its file held',
+    );
+
+    // A whole number past 2^53 goes into the file as the digits sent, and sent as a number it is
+    // refused, since a JSON number that large may already be a neighbour of the one meant.
+    await written('resource_edit', {
+      op: 'modify',
+      resourcePath: 'stats.tres',
+      properties: { hp: { _type: 'int', value: '9007199254740993' } },
+    });
+    assert.deepEqual(sets('stats.tres', '[resource]'), [
+      'script = ExtResource',
+      'max_hp = 40',
+      'hp = 9007199254740993',
+    ]);
+    const rounded =
+      textOf(
+        await call('resource_edit', {
+          op: 'modify',
+          resourcePath: 'stats.tres',
+          properties: { hp: 9007199254740994 },
+        }),
+      ) ?? '';
+    assert.match(rounded, /hp holds int: 9007199254740994 is 2\^53 or more/, rounded);
+    assert.match(fileOf('stats.tres'), /\nhp = 9007199254740993\n/, 'and the file is as it was');
+
+    const before = fileOf('broken.tscn');
+    const broken =
+      textOf(
+        await call('scene_node', {
+          op: 'set',
+          scenePath: 'broken.tscn',
+          nodePath: 'Child',
+          properties: { position: [1, 2] },
+        }),
+      ) ?? '';
+    assert.match(
+      broken,
+      /^Nothing was written: the script of Broken did not start when a headless engine instanced res:\/\/broken\.tscn, so the node would be saved without it/,
+      broken,
+    );
+    assert.match(broken, /editor_launch with hidden: true/, broken);
+    assert.equal(fileOf('broken.tscn'), before, 'and the file is as it was');
+
+    // An editor of the project that has not reached this server holds its own copy of what it has
+    // open, so a write waits for it; once it has gone, the same write goes through.
+    const runtime = join(project, `godot-standin${process.platform === 'win32' ? '.exe' : ''}`);
+    try {
+      linkSync(process.execPath, runtime);
+    } catch {
+      cpSync(process.execPath, runtime);
+    }
+    writeFileSync(join(project, 'hold.js'), 'setTimeout(() => {}, 120000);\n');
+    standIn = spawnHidden(runtime, [join(project, 'hold.js'), '--path', project, '--editor'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    const held = standIn.pid;
+    assert.ok(held !== undefined, 'the stand-in editor starts');
+    const move = { op: 'set', scenePath: 'main.tscn', nodePath: 'Plain', properties: { position: [9, 9] } };
+    const waits = textOf(await call('scene_node', move)) ?? '';
+    assert.ok(
+      waits.startsWith(
+        `scene_node set was not run: an editor of this project is running (pid ${held}) and has not reached this server`,
+      ),
+      waits,
+    );
+    assert.deepEqual(sets('main.tscn', '[node name="Plain"'), ['position = Vector2(7, 8)']);
+    standIn.kill();
+    for (let waited = 0; waited < 10_000 && alive(held); waited += 100) {
+      await delay(100);
+    }
+    standIn = null;
+    await written('scene_node', move);
+    assert.deepEqual(sets('main.tscn', '[node name="Plain"'), ['position = Vector2(9, 9)']);
+  } finally {
+    standIn?.kill();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * resource_edit move with no editor, through the server and a real engine: a preview writes
  * nothing, and the move of a directory holding a global class leaves the class cache naming it at
  * its new path and every changed script compiling in a fresh engine. Needs no editor, which the
@@ -41333,6 +41984,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight,
   testAMoveWithNoEditorLeavesTheProjectLoading,
   testAReadWithNoEditorAnswersFromTheFile,
+  testAWriteWithNoEditorGoesThroughAHeadlessEngine,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
   testEveryFileArgumentIsContained,
@@ -41355,6 +42007,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,
+  testAnAnswerTooLargeToSendIsWrittenToAFile,
   testAToolWaitsOutTheEditorsScan,
   testAnUnlistedValueIsRefusedRatherThanDefaulted,
   testEveryFixtureIsCalled,
@@ -41439,6 +42092,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeldLibraryCopyIsSetAsideAndSweptLater,
   testNotRunIsPutDownToFailFastOnlyWhenSet,
   testAWordsWaitLeavesTheGameItsSpeed,
+  testAnRidAndAWholeNumberPast2To53GoBothWays,
   testTheFrameTimeIsTheFrame,
   testThePhysicsRateIsTheStepsTaken,
   testAHeadlessAccessibilityReadNamesWhatItNeeds,
@@ -41604,6 +42258,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAStackOverflowIsNotAPass,
+  testARunawayTestRunAnswersASizeTheClientTakes,
   testATestRunNamesItsLeaksAndItsUnusedIgnores,
   testATestRunsFlagsAreJudgedFirst,
   testAProfileIsWrittenPastAReader,

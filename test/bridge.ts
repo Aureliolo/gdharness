@@ -866,13 +866,19 @@ async function main(): Promise<void> {
 
     const noEditor =
       textOf(
-        await call('scene_create', {
-          project_path: projectPath,
-          scene_path: 'res://test.tscn',
-          root_node_type: 'Node2D',
+        await call('scene_animation', {
+          op: 'create',
+          projectPath,
+          scenePath: 'res://test.tscn',
+          playerNodePath: 'Anim',
+          animationName: 'idle',
         }),
       ) ?? '';
-    assert.match(noEditor, /Editor not connected/, 'scene_create refuses when no editor is connected');
+    assert.match(
+      noEditor,
+      /Editor not connected/,
+      'scene_animation create refuses when no editor is connected',
+    );
 
     // Only the editor's path is served: the bridge port is not a place for a browser tab to
     // reach anything, over WebSocket or over HTTP.

@@ -16,7 +16,16 @@ extends RefCounted
 ## - [code]pack[/code] keeps only what the scene itself owns, so a property set on a node inside an
 ##   instance, a node deleted from one and a node moved out of one were answered as done and were
 ##   not in the file.
+##
+## A headless engine writes for a project no editor serves, and there one more thing differs: the
+## editor gives a script that is not a tool a placeholder, and anywhere else instancing a scene runs
+## every script in it. Measured on 4.7.2, an [code]_init[/code] setting modulate and an exported
+## setter setting scale were both saved into the file by a write to another node, and a root whose
+## script failed in [code]_init[/code] was saved without it. Outside the editor, then, what a node
+## stores is put back to what the file holds wherever the tool did not ask for a change, before
+## anything is saved, and a write is refused when that does not hold. See [HeadlessCheck].
 
+const HeadlessCheck = preload("headless_check.gd")
 const PropertyValues = preload("property_values.gd")
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
@@ -27,6 +36,19 @@ var root: Node = null
 var path: String = ""
 var _base_paths: Dictionary = {}
 var _state: SceneState = null
+## What the file stores on each node it was opened with, by the node's instance id, so a node keeps
+## its record when a tool moves or renames it. Only kept outside the editor.
+var _filed: Dictionary = {}
+## The properties a tool set on each node, by instance id: the differences it asked for.
+var _asked: Dictionary = {}
+## What each node a tool set properties on held before it did, by instance id.
+var _before: Dictionary = {}
+## Each copy a tool made, by instance id, to the instance id of the node it copies.
+var _copied_from: Dictionary = {}
+## The embedded resources a tool reached into through an indexed property, by their id in the file.
+var _reached: Dictionary = {}
+## The file as it was opened, to compare its embedded resources with what the write saves.
+var _text: String = ""
 
 
 ## Opens [param scene_path], answering a refusal, or {} with [member root] set.
@@ -56,12 +78,59 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		for index: int in base.get_node_count():
 			_base_paths[_relative(str(base.get_node_path(index)))] = true
 		base = base.get_base_scene_state()
+	# On a read as well, which would otherwise answer what the scripts set as what the file holds.
+	if not Engine.is_editor_hint():
+		if for_writing:
+			_text = FileAccess.get_file_as_string(path)
+		for index: int in _state.get_node_count():
+			var node: Node = _node_at(str(_state.get_node_path(index)))
+			if node != null:
+				_filed[node.get_instance_id()] = _stored_at(_state, index)
+		var unsettled: String = settle()
+		if not unsettled.is_empty():
+			return refuse(("Nothing was written: " if for_writing else "Not read: ") + unsettled)
 	return {}
+
+
+## Puts back what the scene's scripts changed on every node a tool has not asked to change, as
+## [method write] does, answering "" or why that did not hold. Called once a node has come into the
+## scene, so what its scripts did on the way in is not taken for the tool's own change.
+func settle() -> String:
+	if Engine.is_editor_hint():
+		return ""
+	var packed: PackedScene = PackedScene.new()
+	var packing: Error = packed.pack(root)
+	if packing != OK:
+		return "Failed to pack %s: %s" % [path, error_string(packing)]
+	return _settled(packed)[1]
+
+
+## Takes [param names] on [param node] as the tool's own changes, which a write saves as they are.
+## Called before the tool sets them.
+func asked(node: Node, names: Array) -> void:
+	var id: int = node.get_instance_id()
+	var on: Dictionary = _asked.get_or_add(id, {})
+	if not _before.has(id):
+		_before[id] = HeadlessCheck.stored(node)
+	for name: Variant in names:
+		var property: String = str(name)
+		on[property] = true
+		on[property.get_slice(":", 0)] = true
+		_reached.merge(HeadlessCheck.reached(node, property))
+
+
+## Takes each copy in [param copies], keyed by the node it was made from, as holding what that node's
+## file entry holds.
+func copied(copies: Dictionary) -> void:
+	for source: Variant in copies:
+		var original: Node = source
+		var copy: Node = copies[source]
+		_copied_from[copy.get_instance_id()] = original.get_instance_id()
 
 
 ## Why [param scene_path] cannot be written while the editor has it open, or "".
 static func unsaved_in_editor(scene_path: String) -> String:
-	if not EditorInterface.get_unsaved_scenes().has(scene_path):
+	if not Engine.is_editor_hint() or not EditorInterface.get_unsaved_scenes().has(scene_path):
 		return ""
 	return (
 		(
@@ -148,7 +217,7 @@ static func uncompiled(script: Script, script_path: String) -> String:
 		return ""
 	return (
 		(
-			"%s does not compile in the editor, so it cannot be attached. script_diagnostics on it gives "
+			"%s does not compile here, so it cannot be attached. script_diagnostics on it gives "
 			+ "the parser's errors. If they deny a member that another class's file declares, the "
 			+ "editor's copy of that class is behind: editor_rescan with reloadScript on that class, then "
 			+ "ask again."
@@ -221,6 +290,26 @@ func write(check: Callable = Callable()) -> Dictionary:
 	var packing: Error = packed.pack(root)
 	if packing != OK:
 		return refuse("Failed to pack %s: %s" % [path, error_string(packing)])
+	var headless: bool = not Engine.is_editor_hint()
+	if headless:
+		var settled: Array = _settled(packed)
+		if not str(settled[1]).is_empty():
+			return refuse("Nothing was written: " + str(settled[1]))
+		packed = settled[0]
+		if not path.ends_with(".tscn") and _holds_scripted_embedded():
+			return refuse(
+				(
+					(
+						(
+							"Nothing was written: %s is a binary scene holding an embedded resource with a script "
+							+ "that is not a tool, and what that script changed when a headless engine loaded it "
+							+ "cannot be told apart from the file here. "
+						)
+						% path
+					)
+					+ HeadlessCheck.REMEDY
+				)
+			)
 	if check.is_valid():
 		var saved: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
 		if saved == null:
@@ -230,7 +319,33 @@ func write(check: Callable = Callable()) -> Dictionary:
 		if not missing.is_empty():
 			return refuse("Nothing was written: " + missing)
 	close()
-	return save_packed(packed, path)
+	var previous: Variant = null
+	if FileAccess.file_exists(path):
+		previous = FileAccess.get_file_as_bytes(path)
+	var written: Dictionary = save_packed(packed, path)
+	if not written.is_empty() or not headless or not path.ends_with(".tscn"):
+		return written
+	var state: SceneState = packed.get_state()
+	var values: Array = []
+	for index: int in state.get_node_count():
+		values.append_array(_stored_at(state, index).values())
+	var unkept: String = HeadlessCheck.settle_saved(
+		path, _text, values, null, {}, _reached, func() -> Error: return save_keeping_uid(packed, path)
+	)
+	if unkept.is_empty():
+		return {}
+	return {"ok": false, "error": "Nothing was written: " + unkept + HeadlessCheck.put_back(path, previous)}
+
+
+func _holds_scripted_embedded() -> bool:
+	var seen: Dictionary = {}
+	var nodes: Array[Node] = [root]
+	while not nodes.is_empty():
+		var node: Node = nodes.pop_back()
+		if HeadlessCheck.holds_scripted_embedded(node, seen):
+			return true
+		nodes.append_array(node.get_children())
+	return false
 
 
 ## Writes [param packed] to [param scene_path], making its directory, and brings the editor up to
@@ -241,11 +356,42 @@ static func save_packed(packed: PackedScene, scene_path: String) -> Dictionary:
 		var made: Error = DirAccess.make_dir_recursive_absolute(directory)
 		if made != OK:
 			return {"ok": false, "error": "Could not create %s: %s" % [directory, error_string(made)]}
-	var saving: Error = ResourceSaver.save(packed, scene_path)
+	var saving: Error = save_keeping_uid(packed, scene_path)
 	if saving != OK:
 		return {"ok": false, "error": "Failed to save %s: %s" % [scene_path, error_string(saving)]}
 	refresh(scene_path)
 	return {}
+
+
+## Saves [param resource] at [param file_path], keeping the uid the file already has.
+##
+## The editor saves through its uid cache, which knows every file's. A headless engine that has not
+## imported the project has none, and a resave dropped the uid from the header, so every reference
+## made through it stopped resolving. Read from the file itself, since the loader does not answer it
+## for a text scene there, and a new file is given one as the editor gives it.
+static func save_keeping_uid(resource: Resource, file_path: String) -> Error:
+	if Engine.is_editor_hint():
+		return ResourceSaver.save(resource, file_path)
+	var uid: int = _uid_in(file_path)
+	var saving: Error = ResourceSaver.save(resource, file_path)
+	if saving != OK:
+		return saving
+	if uid == ResourceUID.INVALID_ID:
+		uid = ResourceUID.create_id()
+	return ResourceSaver.set_uid(file_path, uid)
+
+
+## The uid the file at [param file_path] declares, or [constant ResourceUID.INVALID_ID].
+static func _uid_in(file_path: String) -> int:
+	if not FileAccess.file_exists(file_path):
+		return ResourceUID.INVALID_ID
+	var file: FileAccess = FileAccess.open(file_path, FileAccess.READ)
+	if file != null:
+		var header: RegExMatch = RegEx.create_from_string('uid="(uid://[a-z0-9]+)"').search(file.get_line())
+		file.close()
+		if header != null:
+			return ResourceUID.text_to_id(header.get_string(1))
+	return ResourceLoader.get_resource_uid(file_path)
 
 
 ## Brings the editor up to date with a scene file written under it: the cached copy anything holds,
@@ -253,6 +399,8 @@ static func save_packed(packed: PackedScene, scene_path: String) -> Dictionary:
 static func refresh(scene_path: String) -> void:
 	if ResourceLoader.has_cached(scene_path):
 		var _replaced: Resource = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_REPLACE)
+	if not Engine.is_editor_hint():
+		return
 	scan_later()
 	if EditorInterface.get_open_scenes().has(scene_path):
 		EditorInterface.reload_scene_from_path(scene_path)
@@ -294,7 +442,185 @@ static func _start_scan() -> void:
 ## Whether the editor holds unsaved changes to [param scene_path], for a read to say that the file
 ## it answers from is not what the editor shows.
 static func unsaved(scene_path: String) -> bool:
-	return EditorInterface.get_unsaved_scenes().has(scene_path)
+	return Engine.is_editor_hint() and EditorInterface.get_unsaved_scenes().has(scene_path)
+
+
+## [param packed] with what the scene's scripts changed put back, as [pack, ""], or [null, why not].
+##
+## On a node the tool did not ask to change, a difference is put back to what the file holds, or, for
+## a property the file does not set, to what the node would load with without it. On a node it did
+## ask to change, through a script that is not a tool, every property it did not name is put back to
+## what it held before. Packed again afterwards, since a setter can change one property through
+## another, and refused if anything is still different.
+func _settled(packed: PackedScene) -> Array:
+	var stray: Array[Array] = _strays(packed.get_state())
+	var moved: Array[Array] = _moved_by_scripts()
+	if stray.is_empty() and moved.is_empty():
+		return [packed, ""]
+	for found: Array in stray:
+		var node: Node = found[0]
+		var name: String = found[1]
+		node.set(name, found[3] if found[2] else _unset_value(node, name))
+	for found: Array in moved:
+		var node: Node = found[0]
+		var before: Dictionary = _before[node.get_instance_id()]
+		for name: String in found[1]:
+			node.set(name, before.get(name, HeadlessCheck.default_of(node, name)))
+	var again: PackedScene = PackedScene.new()
+	var packing: Error = again.pack(root)
+	if packing != OK:
+		return [null, "Failed to pack %s: %s" % [path, error_string(packing)]]
+	var left: Array[Array] = _strays(again.get_state())
+	left.append_array(_moved_by_scripts())
+	if left.is_empty():
+		return [again, ""]
+	var first: Array = left[0]
+	var stray_node: Node = first[0]
+	var named: String = str(first[1])
+	if first[1] is Array:
+		var names: Array = first[1]
+		named = str(names[0])
+	return [null, _stray_text(stray_node, named)]
+
+
+## Each node the tool asked to change through a script that is not a tool, with the properties it did
+## not name that no longer hold what they held before, as [node, names].
+func _moved_by_scripts() -> Array[Array]:
+	var moved: Array[Array] = []
+	for key: Variant in _asked:
+		var id: int = key
+		var node: Node = instance_from_id(id) as Node
+		if node == null or not root.is_ancestor_of(node) and node != root:
+			continue
+		var on: Dictionary = _asked[id]
+		if not HeadlessCheck.through_script(node, on):
+			continue
+		var before: Dictionary = _before[id]
+		var changed: Array[String] = HeadlessCheck.differing(node, before, on)
+		if not changed.is_empty():
+			moved.append([node, changed])
+	return moved
+
+
+## Every property [param state] stores differently from the file, on a node the tool did not ask to
+## change it on, as [node, name, whether the file stores it, the file's value].
+func _strays(state: SceneState) -> Array[Array]:
+	var stray: Array[Array] = []
+	for index: int in state.get_node_count():
+		var node: Node = _node_at(str(state.get_node_path(index)))
+		if node == null:
+			continue
+		var id: int = node.get_instance_id()
+		if _asked.has(id):
+			continue
+		var filed: Dictionary = _filed.get(id, _filed.get(_copied_from.get(id, 0), {}))
+		# A node is instanced before it is added to its parent, which is before its children are, so
+		# what a script does as a scene loads stays on the script's own node. Anything else a pack
+		# changes is Godot's doing and the editor's pack does it too: a Control saved without its
+		# grow directions gets them back from anchors_preset's setter, and loses an anchors_preset
+		# its layout mode does not store.
+		if not HeadlessCheck.untooled(node.get_script()) and not HeadlessCheck.untooled(filed.get("script")):
+			continue
+		var stored: Dictionary = _stored_at(state, index)
+		var names: Dictionary = filed.duplicate()
+		names.merge(stored)
+		for key: Variant in names:
+			var name: String = str(key)
+			var held: bool = filed.has(name)
+			if held == stored.has(name) and (not held or PropertyValues.same(stored[name], filed[name])):
+				continue
+			stray.append([node, name, held, filed.get(name)])
+	return stray
+
+
+func _stray_text(node: Node, name: String) -> String:
+	var at: String = str(root.name) if node == root else path_of(node)
+	if name == "script":
+		return (
+			(
+				(
+					"the script of %s did not start when a headless engine instanced %s, so the node would be "
+					+ "saved without it; the engine's messages give its errors. "
+				)
+				% [at, path]
+			)
+			+ HeadlessCheck.REMEDY
+		)
+	return (
+		(
+			(
+				"%s.%s would be saved differently from what %s holds, and the call did not ask for it: the "
+				+ "scene's scripts ran when a headless engine instanced it, as they do in the game and not in "
+				+ "an editor. "
+			)
+			% [at, name, path]
+		)
+		+ HeadlessCheck.REMEDY
+	)
+
+
+## What [param node] would load with for [param name] if this file did not set it: what the scenes
+## it comes from store, followed down through every scene instanced or inherited, else its script's
+## or class's default. Read from their files, since instancing them would run their scripts.
+func _unset_value(node: Node, name: String) -> Variant:
+	var base: SceneState = _state.get_base_scene_state() if _state != null else null
+	if node == root or _base_paths.has(path_of(node)):
+		return _value_in(base, path_of(node), node, name)
+	var top: Node = node
+	while top != root and top.owner != root:
+		top = top.get_parent()
+	if top == root or top.scene_file_path.is_empty():
+		return HeadlessCheck.default_of(node, name)
+	if _base_paths.has(path_of(top)):
+		return _value_in(base, path_of(node), node, name)
+	var instanced: PackedScene = ResourceLoader.load(top.scene_file_path) as PackedScene
+	return _value_in(
+		instanced.get_state() if instanced != null else null, str(top.get_path_to(node)), node, name
+	)
+
+
+## What [param state] gives the node at [param at] for [param name], following it into the scene an
+## enclosing node instances, or into the base scene, until a file sets it.
+func _value_in(state: SceneState, at: String, node: Node, name: String) -> Variant:
+	while state != null:
+		var inside: String = ""
+		var instanced: PackedScene = null
+		for index: int in state.get_node_count():
+			var here: String = _relative(str(state.get_node_path(index)))
+			if here == at:
+				for property: int in state.get_node_property_count(index):
+					if str(state.get_node_property_name(index, property)) == name:
+						return state.get_node_property_value(index, property)
+			var scene: PackedScene = state.get_node_instance(index)
+			if scene == null:
+				continue
+			var encloses: bool = here == at or here == "." or at.begins_with(here + "/")
+			if encloses and (instanced == null or here.length() > inside.length() or inside == "."):
+				inside = here
+				instanced = scene
+		if instanced != null:
+			if inside == at:
+				at = "."
+			elif inside != ".":
+				at = at.substr(inside.length() + 1)
+			state = instanced.get_state()
+		else:
+			state = state.get_base_scene_state()
+	return HeadlessCheck.default_of(node, name)
+
+
+func _node_at(node_path: String) -> Node:
+	var at: String = _relative(node_path)
+	return root if at == "." else root.get_node_or_null(NodePath(at))
+
+
+static func _stored_at(state: SceneState, index: int) -> Dictionary:
+	var stored: Dictionary = {}
+	for property: int in state.get_node_property_count(index):
+		stored[str(state.get_node_property_name(index, property))] = (state.get_node_property_value(
+			index, property
+		))
+	return stored
 
 
 func _relative(node_path: String) -> String:

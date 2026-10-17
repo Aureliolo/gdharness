@@ -4,6 +4,7 @@ extends Node
 ## Resource files, shaders, tilesets and themes, written through the open editor.
 
 const FileReads = preload("../file_reads.gd")
+const HeadlessCheck = preload("../headless_check.gd")
 const PropertyValues = preload("../property_values.gd")
 const Read = preload("../reading.gd")
 const SceneFile = preload("../scene_file.gd")
@@ -118,9 +119,12 @@ func _load_theme(theme_path: String) -> Theme:
 ## Read back because a property can be set and still not be saved: one without storage, a
 ## script variable that is not exported. Both were answered as changed.
 func _save_checked(resource: Resource, path: String, names: Array, previous: Variant) -> String:
-	var saving: Error = ResourceSaver.save(resource, path)
+	var saving: Error = SceneFile.save_keeping_uid(resource, path)
 	if saving != OK:
 		return "Failed to save %s: %s" % [path, error_string(saving)]
+	var unkept: String = _unkept_headless(resource, path, names, previous)
+	if not unkept.is_empty():
+		return "Nothing was written: " + unkept + HeadlessCheck.put_back(path, previous)
 	var loaded: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
 	var lost: String = ""
 	if loaded == null:
@@ -141,14 +145,50 @@ func _save_checked(resource: Resource, path: String, names: Array, previous: Var
 	if lost.is_empty():
 		_written(path)
 		return ""
+	return lost + HeadlessCheck.put_back(path, previous)
+
+
+## Outside the editor, puts back in the file just saved at [param path] what a script that is not a
+## tool changed and the call did not ask for, [param names] being what it asked for, and answers ""
+## or why that did not hold. See [HeadlessCheck].
+func _unkept_headless(resource: Resource, path: String, names: Array, previous: Variant) -> String:
+	if Engine.is_editor_hint():
+		return ""
+	var script: Script = resource.get_script()
+	var scripted: bool = script != null and not script.is_tool()
+	if not path.ends_with(".tres"):
+		if scripted or HeadlessCheck.holds_scripted_embedded(resource, {}):
+			return (
+				(
+					(
+						"%s is a binary resource with a script that is not a tool, and what that script "
+						+ "changed when a headless engine loaded it cannot be told apart from the file here. "
+					)
+					% path
+				)
+				+ HeadlessCheck.REMEDY
+			)
+		return ""
+	var before: String = ""
 	if previous is PackedByteArray:
 		var bytes: PackedByteArray = previous
-		var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
-		if file == null or not file.store_buffer(bytes):
-			return lost + " Putting the file back as it was failed too."
-	elif DirAccess.remove_absolute(ProjectSettings.globalize_path(path)) != OK:
-		return lost + " Removing the file it wrote failed too."
-	return lost
+		before = bytes.get_string_from_utf8()
+	var asked: Dictionary = {"script": true}
+	var reached: Dictionary = {}
+	for key: Variant in names:
+		var property: String = str(key)
+		asked[property] = true
+		asked[property.get_slice(":", 0)] = true
+		reached.merge(HeadlessCheck.reached(resource, property))
+	return HeadlessCheck.settle_saved(
+		path,
+		before,
+		HeadlessCheck.stored(resource).values(),
+		resource if scripted else null,
+		asked,
+		reached,
+		func() -> Error: return SceneFile.save_keeping_uid(resource, path)
+	)
 
 
 func create_resource(args: Dictionary) -> Dictionary:
@@ -321,7 +361,7 @@ func create_tileset(args: Dictionary) -> Dictionary:
 	var folder: String = SceneFile.make_folder_for(tileset_path)
 	if not folder.is_empty():
 		return {"ok": false, "error": folder}
-	var saving: Error = ResourceSaver.save(tileset, tileset_path)
+	var saving: Error = SceneFile.save_keeping_uid(tileset, tileset_path)
 	if saving != OK:
 		return {"ok": false, "error": "Failed to save %s: %s" % [tileset_path, error_string(saving)]}
 
@@ -443,6 +483,7 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	# reports placing tiles and a scene that shows none.
 	var tile_set: TileSet = layered.tile_set if layered != null else single.tile_set
 
+	scene.asked(node, ["layer_%d/tile_data" % layer if layered != null else "tile_map_data"])
 	var wanted: Array = []
 	for index: int in placed.size():
 		var cell: Array = _cell(placed[index], index, tile_set)
@@ -621,6 +662,19 @@ func _cell_at(node: Node, layer: int, at: Vector2i) -> Array:
 	return []
 
 
+## Saves [param theme] over [param theme_path] with [param item] changed, answering "" or why not.
+func _save_theme(theme: Theme, theme_path: String, item: String) -> String:
+	var previous: PackedByteArray = FileAccess.get_file_as_bytes(theme_path)
+	var saving: Error = SceneFile.save_keeping_uid(theme, theme_path)
+	if saving != OK:
+		return "Failed to save %s: %s" % [theme_path, error_string(saving)]
+	var unkept: String = _unkept_headless(theme, theme_path, [item], previous)
+	if not unkept.is_empty():
+		return "Nothing was written: " + unkept + HeadlessCheck.put_back(theme_path, previous)
+	_written(theme_path)
+	return ""
+
+
 func set_theme_color(args: Dictionary) -> Dictionary:
 	var theme_path: String = _ensure_res_path(str(args.get("themePath", "")))
 	if theme_path == "res://":
@@ -644,11 +698,9 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 	)
 	theme.set_color(color_name, control_type, color)
 
-	var save_result: Error = ResourceSaver.save(theme, theme_path)
-	if save_result != OK:
-		return {"ok": false, "error": "Failed to save %s: %s" % [theme_path, error_string(save_result)]}
-
-	_written(theme_path)
+	var unsaved: String = _save_theme(theme, theme_path, "%s/colors/%s" % [control_type, color_name])
+	if not unsaved.is_empty():
+		return {"ok": false, "error": unsaved}
 
 	var saved: Theme = _load_theme(theme_path)
 	if saved == null or not saved.has_color(color_name, control_type):
@@ -680,11 +732,9 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 
 	theme.set_font_size(font_size_name, control_type, Read.as_int(args.get("size", 0)))
 
-	var save_result: Error = ResourceSaver.save(theme, theme_path)
-	if save_result != OK:
-		return {"ok": false, "error": "Failed to save %s: %s" % [theme_path, error_string(save_result)]}
-
-	_written(theme_path)
+	var unsaved: String = _save_theme(theme, theme_path, "%s/font_sizes/%s" % [control_type, font_size_name])
+	if not unsaved.is_empty():
+		return {"ok": false, "error": unsaved}
 
 	var saved: Theme = _load_theme(theme_path)
 	if saved == null or not saved.has_font_size(font_size_name, control_type):

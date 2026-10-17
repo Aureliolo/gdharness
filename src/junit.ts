@@ -641,7 +641,10 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
   });
 }
 
-/** A failed case as the answer names it: its first report, and every report when it has several. */
+/** A report standing for every identical one in its case, with how many there were when several. */
+type FoldedReport = CaseReport & { readonly times?: number };
+
+/** A failed case as the answer names it: its first report, and its reports when it has several. */
 export interface FailedCase {
   readonly suite: string;
   readonly name: string;
@@ -650,7 +653,51 @@ export interface FailedCase {
   readonly path: string | null;
   readonly message: string | null;
   readonly detail: string | null;
-  readonly reports?: readonly CaseReport[];
+  /** Identical ones folded into the first, and at most {@link MOST_REPORTS_SHOWN} of the rest. */
+  readonly reports?: readonly FoldedReport[];
+  /** How many reports the case made, when that is more than one. */
+  readonly reportCount?: number;
+  /** How many different reports are not in [member reports], past the ones shown. */
+  readonly reportsLeftOut?: number;
+}
+
+/**
+ * The most different reports one failing case answers with.
+ *
+ * A case calling into a class that no longer compiled raised the same runtime error on every pass
+ * of its loop: one case carried 2,062 reports, the same four errors about five hundred times each,
+ * and a run of 125 such cases answered 18 MB on one line, which Claude Code refuses past 16 MB by
+ * closing the connection, taking the call and every later tool with it. Folding takes such a case
+ * to four; this bounds one whose reports all differ.
+ */
+export const MOST_REPORTS_SHOWN = 20;
+
+/** The most characters of one report's detail an answer carries; the rest are counted. */
+export const LONGEST_DETAIL = 20_000;
+
+function shortened(detail: string | null): string | null {
+  if (detail === null || detail.length <= LONGEST_DETAIL) {
+    return detail;
+  }
+  return `${detail.slice(0, LONGEST_DETAIL)}\n[${detail.length - LONGEST_DETAIL} more characters left out]`;
+}
+
+/** [param reports] with identical ones folded into the first, which says how many there were. */
+function foldedReports(reports: readonly CaseReport[]): FoldedReport[] {
+  const first = new Map<string, { report: CaseReport; times: number }>();
+  for (const report of reports) {
+    const key = JSON.stringify([report.kind, report.message, report.detail]);
+    const seen = first.get(key);
+    if (seen === undefined) {
+      first.set(key, { report, times: 1 });
+    } else {
+      seen.times += 1;
+    }
+  }
+  return [...first.values()].map(({ report, times }) => {
+    const kept = { ...report, detail: shortened(report.detail) };
+    return times === 1 ? kept : { ...kept, times };
+  });
 }
 
 /**
@@ -674,6 +721,8 @@ export function failedCases(report: TestReport, printed: string): FailedCase[] {
   return cases.map(({ entry, path }) => {
     const reports = read.slice(next, next + entry.reports.length);
     next += entry.reports.length;
+    const folded = foldedReports(reports);
+    const shown = folded.slice(0, MOST_REPORTS_SHOWN);
     return {
       suite: entry.suite,
       name: entry.name,
@@ -681,10 +730,36 @@ export function failedCases(report: TestReport, printed: string): FailedCase[] {
       time: entry.time,
       path,
       message: reports[0]?.message ?? null,
-      detail: reports[0]?.detail ?? null,
-      ...(reports.length > 1 ? { reports } : {}),
+      detail: shortened(reports[0]?.detail ?? null),
+      ...(reports.length > 1 ? { reports: shown, reportCount: reports.length } : {}),
+      ...(folded.length > shown.length ? { reportsLeftOut: folded.length - shown.length } : {}),
     };
   });
+}
+
+/**
+ * [param failed] held to about [param budget] characters of JSON: every case still named, with its
+ * first message, and the detail and reports of the cases past the budget left out and counted. A
+ * run whose every case fails on one broken class is the run whose answer matters most, and it is
+ * the one that outgrew the client.
+ */
+export function failedWithin(
+  failed: readonly FailedCase[],
+  budget: number,
+): { readonly failed: readonly FailedCase[]; readonly briefed: number } {
+  let spent = 0;
+  let briefed = 0;
+  const kept = failed.map((entry) => {
+    const size = JSON.stringify(entry).length;
+    if (briefed === 0 && spent + size <= budget) {
+      spent += size;
+      return entry;
+    }
+    briefed += 1;
+    const { detail: _detail, reports: _reports, reportsLeftOut: _left, ...named } = entry;
+    return { ...named, message: entry.message?.slice(0, 500) ?? null, detail: null };
+  });
+  return { failed: kept, briefed };
 }
 
 const MASKED_BRACKET = '[lb]';
