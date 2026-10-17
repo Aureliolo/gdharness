@@ -194,23 +194,36 @@ func _unkept_headless(resource: Resource, path: String, names: Array, previous: 
 func create_resource(args: Dictionary) -> Dictionary:
 	var res_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	var resource_type: String = str(args.get("resourceType", "Resource"))
+	var asked_type: String = resource_type
 	if res_path == "res://":
 		return {"ok": false, "error": "resourcePath is required"}
 	var taken: String = _taken(res_path, "resource_edit op=create")
 	if not taken.is_empty():
 		return {"ok": false, "error": taken}
 
-	if (
-		not ClassDB.class_exists(resource_type)
-		or not ClassDB.is_parent_class(resource_type, "Resource")
-		or not ClassDB.can_instantiate(resource_type)
-	):
+	var script_path: String = str(args.get("script", ""))
+	var made: Dictionary = SceneFile.made_as(
+		resource_type, "" if script_path == "" else _ensure_res_path(script_path), "Resource", "resourceType"
+	)
+	if made.has("error"):
+		return {"ok": false, "error": made["error"]}
+	resource_type = str(made["type"])
+	script_path = str(made["script"])
+	if not ClassDB.class_exists(resource_type):
+		return {
+			"ok": false,
+			"error":
+			(
+				"%s is neither an engine class nor a class_name a script in this project declares."
+				% resource_type
+			)
+		}
+	if not ClassDB.is_parent_class(resource_type, "Resource") or not ClassDB.can_instantiate(resource_type):
 		return {"ok": false, "error": "%s is not a resource class that can be created." % resource_type}
 	var resource: Resource = ClassDB.instantiate(resource_type)
 
 	# A script that did not load was skipped, and a plain resource was saved in place of the custom
 	# one asked for.
-	var script_path: String = str(args.get("script", ""))
 	if script_path != "":
 		var script_file: String = _ensure_res_path(script_path)
 		var script: Script = load(script_file) as Script
@@ -238,7 +251,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 	var failed: String = _save_checked(resource, res_path, properties.keys(), null)
 	if not failed.is_empty():
 		return {"ok": false, "error": failed}
-	return {"ok": true, "resourcePath": res_path, "resourceType": resource.get_class()}
+	return {"ok": true, "resourcePath": res_path, "resourceType": asked_type}
 
 
 func modify_resource(args: Dictionary) -> Dictionary:

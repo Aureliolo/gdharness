@@ -41370,7 +41370,17 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-write-engine-rt-'));
   const stats = '[ext_resource type="Script" path="res://stats.gd" id="1_stats"]\n\n';
   const files: Record<string, string> = {
-    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Write"\n',
+    'project.godot':
+      'config_version=5\n\n[application]\n\nconfig/name="Write"\n\n[autoload]\n\nScore="*res://score.gd"\n',
+    'score.gd': 'extends Node\n\nvar total: int = 0\n',
+    // A class the tools make by its name. _init renames the node and sets speed, whose setter tints
+    // it, so putting speed back tints it again; and _ready names an autoload, which a script compiled
+    // before the autoloads start does not know.
+    'hero.gd':
+      'class_name Hero\nextends Node2D\n\n@export var speed: float = 100.0:\n\tset(value):\n\t\tspeed = value\n\t\tmodulate = Color(1, 1, value / 200.0)\n\n\n' +
+      'func _init() -> void:\n\tname = "RenamedByInit"\n\tspeed = 120.0\n\n\nfunc _ready() -> void:\n\tScore.total += 1\n',
+    // No default the engine can report, since it folds no constructor call, so every save writes it.
+    'bag.gd': 'extends Node\n\n@export var items: PackedStringArray = PackedStringArray()\n',
     'busy.gd':
       'extends Node2D\n\n@export var size: int = 1:\n\tset(value):\n\t\tsize = value\n\t\tscale = Vector2(value, value)\n\n\n' +
       'func _init() -> void:\n\tmodulate = Color(1, 0, 0)\n',
@@ -41381,7 +41391,9 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       '[node name="Busy" type="Node2D"]\nscale = Vector2(5, 5)\nscript = ExtResource("1_busy")\nsize = 2\n',
     'main.tscn':
       '[gd_scene format=3 uid="uid://dmainhw2x"]\n\n[ext_resource type="Script" path="res://busy.gd" id="1_busy"]\n' +
-      '[ext_resource type="PackedScene" path="res://busy.tscn" id="2_inst"]\n\n[node name="Main" type="Node2D"]\n\n' +
+      '[ext_resource type="PackedScene" path="res://busy.tscn" id="2_inst"]\n' +
+      '[ext_resource type="Script" path="res://bag.gd" id="3_bag"]\n\n[node name="Main" type="Node2D"]\n\n' +
+      '[node name="Bag" type="Node" parent="."]\nscript = ExtResource("3_bag")\n\n' +
       '[node name="Busy" type="Node2D" parent="."]\nscript = ExtResource("1_busy")\nsize = 3\n\n' +
       '[node name="Plain" type="Node2D" parent="."]\nposition = Vector2(5, 6)\n\n' +
       '[node name="Inst" parent="." instance=ExtResource("2_inst")]\n\n' +
@@ -41389,10 +41401,16 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       // not stored outside the anchors layout mode, which the file does not set.
       '[node name="Panel" type="Control" parent="."]\nanchors_preset = 15\nanchor_right = 1.0\nanchor_bottom = 1.0\n',
     'stats.gd':
-      'extends Resource\n\n@export var max_hp: int = 10:\n\tset(value):\n\t\tmax_hp = value\n\t\thp = value\n' +
-      '@export var hp: int = 10\n\n\nfunc _init() -> void:\n\tresource_name = "made by _init"\n',
+      'class_name Stats\nextends Resource\n\n@export var max_hp: int = 10:\n\tset(value):\n\t\tmax_hp = value\n\t\thp = value\n' +
+      '@export var hp: int = 10\n@export var tags: PackedStringArray = PackedStringArray()\n\n\n' +
+      'func _init() -> void:\n\tresource_name = "made by _init"\n',
     'stats.tres': `[gd_resource type="Resource" format=3 uid="uid://cstatshw4"]\n\n${stats}[resource]\nscript = ExtResource("1_stats")\nmax_hp = 20\n`,
     'keeps.gd': 'extends Node\n\n@export var stats: Resource\n',
+    'pack.gd': 'extends Resource\n\n@export var inner: Resource\n@export var label: String = ""\n',
+    'pack.tres':
+      `[gd_resource type="Resource" format=3]\n\n${stats}[ext_resource type="Script" path="res://pack.gd" id="2_pack"]\n\n` +
+      '[sub_resource type="Resource" id="Resource_inner"]\nscript = ExtResource("1_stats")\nmax_hp = 20\n\n' +
+      '[resource]\nscript = ExtResource("2_pack")\ninner = SubResource("Resource_inner")\n',
     'holder.tscn':
       `[gd_scene format=3]\n\n${stats}[ext_resource type="Script" path="res://keeps.gd" id="2_keeps"]\n\n` +
       '[sub_resource type="Resource" id="Resource_stats"]\nscript = ExtResource("1_stats")\nmax_hp = 20\n\n' +
@@ -41456,6 +41474,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       properties: { position: [7, 8] },
     });
     assert.deepEqual(sets('main.tscn', '[node name="Plain"'), ['position = Vector2(7, 8)']);
+    assert.deepEqual(
+      sets('main.tscn', '[node name="Bag"'),
+      ['script = ExtResource', 'items = PackedStringArray()'],
+      'a property every save writes at its default does not stop the write',
+    );
     assert.deepEqual(
       sets('main.tscn', '[node name="Busy"'),
       ['script = ExtResource', 'size = 3'],
@@ -41547,6 +41570,79 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       'a new scene gets a uid',
     );
 
+    // A node class a script declares, made with that script. What _init did is not saved, its
+    // rename included, and the setter putting speed back runs again, so modulate is put back after.
+    const hero = await written('scene_create', {
+      op: 'create',
+      scenePath: 'hero.tscn',
+      rootNodeType: 'Hero',
+    });
+    assert.deepEqual(
+      [get(hero, 'rootNodeType'), get(hero, 'rootNodeName')],
+      ['Hero', 'Hero'],
+      JSON.stringify(hero),
+    );
+    assert.deepEqual(sets('hero.tscn', '[node name="Hero" type="Node2D"'), ['script = ExtResource']);
+    assert.match(fileOf('hero.tscn'), /\[ext_resource type="Script" path="res:\/\/hero\.gd"/);
+    const boss = await written('scene_node', {
+      op: 'add',
+      scenePath: 'made.tscn',
+      nodeName: 'Boss',
+      nodeType: 'Hero',
+    });
+    assert.equal(get(boss, 'nodeType'), 'Hero', JSON.stringify(boss));
+    assert.deepEqual(sets('made.tscn', '[node name="Boss" type="Node2D"'), ['script = ExtResource']);
+    const clash =
+      textOf(
+        await call('scene_create', {
+          op: 'create',
+          scenePath: 'clash.tscn',
+          rootNodeType: 'Hero',
+          script: 'res://busy.gd',
+        }),
+      ) ?? '';
+    assert.match(
+      clash,
+      /^rootNodeType Hero is the class res:\/\/hero\.gd declares, and script names res:\/\/busy\.gd/,
+      clash,
+    );
+
+    // A read loads the scene's scripts, so it waits for the autoloads as a write does.
+    const tree = parseTextContent(
+      await call('scene_tree', { scenePath: 'hero.tscn', includeProperties: true }),
+    );
+    assert.equal(get(tree, 'tree', 'name'), 'Hero', JSON.stringify(tree));
+    assert.doesNotMatch(JSON.stringify(tree), /Identifier not found/, JSON.stringify(tree));
+
+    // A move keeps the node owned by the scene without the engine warning that it was not.
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'made.tscn',
+      nodeName: 'Holder',
+      nodeType: 'Node2D',
+    });
+    const into = await written('scene_node', {
+      op: 'reparent',
+      scenePath: 'made.tscn',
+      nodePath: 'Boss',
+      newParentPath: 'Holder',
+    });
+    assert.equal(get(into, 'newNodePath'), 'Holder/Boss', JSON.stringify(into));
+    assert.doesNotMatch(JSON.stringify(into), /inconsistent/, JSON.stringify(into));
+    assert.match(
+      fileOf('made.tscn'),
+      /\[node name="Boss" type="Node2D" parent="Holder"/,
+      fileOf('made.tscn'),
+    );
+
+    const rootless =
+      textOf(await call('scene_node', { op: 'delete', scenePath: 'made.tscn', nodePath: '.' })) ?? '';
+    assert.match(
+      rootless,
+      /^The root cannot be deleted, since a scene has exactly one\. Delete the nodes under it/,
+      rootless,
+    );
+
     await written('resource_edit', {
       op: 'create',
       resourcePath: 'made.tres',
@@ -41554,12 +41650,51 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       script: 'res://stats.gd',
       properties: { max_hp: 30 },
     });
-    assert.deepEqual(sets('made.tres', '[resource]'), ['script = ExtResource', 'max_hp = 30']);
+    // tags is written at its default by every save, the editor's included, since the engine has no
+    // default for it to leave it out against.
+    const tags = 'tags = PackedStringArray()';
+    assert.deepEqual(sets('made.tres', '[resource]'), ['script = ExtResource', 'max_hp = 30', tags]);
     await written('resource_edit', { op: 'modify', resourcePath: 'stats.tres', properties: { max_hp: 40 } });
-    assert.deepEqual(sets('stats.tres', '[resource]'), ['script = ExtResource', 'max_hp = 40']);
-    assert.ok(
-      fileOf('stats.tres').startsWith('[gd_resource type="Resource" format=3 uid="uid://cstatshw4"]'),
-      fileOf('stats.tres'),
+    assert.deepEqual(sets('stats.tres', '[resource]'), ['script = ExtResource', 'max_hp = 40', tags]);
+    // Made by its class_name, as the editor's create dialog offers it.
+    const made = await written('resource_edit', {
+      op: 'create',
+      resourcePath: 'named.tres',
+      resourceType: 'Stats',
+      properties: { max_hp: 50 },
+    });
+    assert.equal(get(made, 'resourceType'), 'Stats', JSON.stringify(made));
+    assert.deepEqual(sets('named.tres', '[resource]'), ['script = ExtResource', 'max_hp = 50', tags]);
+    assert.match(fileOf('named.tres'), /\[ext_resource type="Script" path="res:\/\/stats\.gd"/);
+    const notAClass =
+      textOf(
+        await call('resource_edit', { op: 'create', resourcePath: 'none.tres', resourceType: 'Statz' }),
+      ) ?? '';
+    assert.match(
+      notAClass,
+      /^Statz is neither an engine class nor a class_name a script in this project declares\./,
+      notAClass,
+    );
+    const notANode =
+      textOf(
+        await call('scene_node', { op: 'add', scenePath: 'main.tscn', nodeName: 'Wrong', nodeType: 'Stats' }),
+      ) ?? '';
+    assert.match(
+      notANode,
+      /^Stats, declared in res:\/\/stats\.gd, extends Resource, which is not a Node\./,
+      notANode,
+    );
+    assert.match(fileOf('stats.tres'), /^\[gd_resource type="Resource" [^\]\n]*uid="uid:\/\/cstatshw4"\]/);
+    await written('resource_edit', { op: 'modify', resourcePath: 'pack.tres', properties: { label: 'kit' } });
+    assert.deepEqual(sets('pack.tres', '[resource]'), [
+      'script = ExtResource',
+      'inner = SubResource',
+      'label = "kit"',
+    ]);
+    assert.deepEqual(
+      sets('pack.tres', '[sub_resource type="Resource"'),
+      ['script = ExtResource', 'max_hp = 20', tags],
+      'an embedded resource of a resource file keeps what it held too',
     );
 
     await written('scene_node', {
@@ -41571,7 +41706,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     assert.deepEqual(sets('holder.tscn', '[node name="Other"'), ['position = Vector2(1, 2)']);
     assert.deepEqual(
       sets('holder.tscn', '[sub_resource type="Resource"'),
-      ['script = ExtResource', 'max_hp = 20'],
+      ['script = ExtResource', 'max_hp = 20', tags],
       'an embedded resource keeps what its file held',
     );
 
@@ -41586,6 +41721,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       'script = ExtResource',
       'max_hp = 40',
       'hp = 9007199254740993',
+      tags,
     ]);
     const rounded =
       textOf(

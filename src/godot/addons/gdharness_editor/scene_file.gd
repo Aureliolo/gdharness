@@ -26,6 +26,9 @@ extends RefCounted
 ## anything is saved, and a write is refused when that does not hold. See [HeadlessCheck].
 
 const HeadlessCheck = preload("headless_check.gd")
+
+## How many times what scripts changed is put back before a write is refused for it.
+const PUTTING_BACK_PASSES: int = 4
 const PropertyValues = preload("property_values.gd")
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
@@ -233,6 +236,60 @@ static func uncompiled(script: Script, script_path: String) -> String:
 		)
 		% script_path
 	)
+
+
+## The script a project declares [param type_name] in with class_name, as {"script", "path",
+## "base"} with base the engine class its objects are made as, or {"error"} when that script cannot
+## make one, or an empty dictionary when no script declares it. The editor's create dialogs offer
+## these classes beside the engine's, and ClassDB knows only the engine's.
+static func script_class(type_name: String, kind: String) -> Dictionary:
+	for entry: Dictionary in ProjectSettings.get_global_class_list():
+		if str(entry.get("class", "")) != type_name:
+			continue
+		var declaring: String = str(entry.get("path", ""))
+		if entry.get("is_abstract", false) == true:
+			return {
+				"error":
+				"%s, declared in %s, is abstract, so nothing can be made of it." % [type_name, declaring]
+			}
+		var script: Script = load(declaring) as Script
+		if script == null:
+			return {"error": "%s is declared in %s, which does not load." % [type_name, declaring]}
+		var failed: String = uncompiled(script, declaring)
+		if not failed.is_empty():
+			return {"error": failed}
+		var base: String = str(script.get_instance_base_type())
+		if not ClassDB.is_parent_class(base, kind):
+			return {
+				"error":
+				"%s, declared in %s, extends %s, which is not a %s." % [type_name, declaring, base, kind]
+			}
+		return {"script": script, "path": declaring, "base": base}
+	return {}
+
+
+## The engine class and the script a create makes for [param type_name] and [param given], the
+## res:// path of the script the call named or "", as {"type", "script"}, or {"error"}. A class_name
+## a project script declares is that script on its engine class; [param argument] names the
+## argument the type came in, for the refusal when the call also named another script.
+static func made_as(type_name: String, given: String, kind: String, argument: String) -> Dictionary:
+	if ClassDB.class_exists(type_name):
+		return {"type": type_name, "script": given}
+	var declared: Dictionary = script_class(type_name, kind)
+	if declared.has("error"):
+		return declared
+	if declared.is_empty():
+		return {"type": type_name, "script": given}
+	var declaring: String = str(declared["path"])
+	if not given.is_empty() and given != declaring:
+		return {
+			"error":
+			(
+				"%s %s is the class %s declares, and script names %s: pass one of them."
+				% [argument, type_name, declaring, given]
+			)
+		}
+	return {"type": str(declared["base"]), "script": declaring}
 
 
 ## Why no node can be called [param node_name], wherever it sits, or "".
@@ -459,30 +516,34 @@ static func unsaved(scene_path: String) -> bool:
 ## On a node the tool did not ask to change, a difference is put back to what the file holds, or, for
 ## a property the file does not set, to what the node would load with without it. On a node it did
 ## ask to change, through a script that is not a tool, every property it did not name is put back to
-## what it held before. Packed again afterwards, since a setter can change one property through
-## another, and refused if anything is still different.
+## what it held before. Packed again afterwards and put back again until nothing differs, since
+## putting one property back can run a setter that changes another already put back (a script
+## setting speed in _init, whose setter tints modulate), and refused if something still does.
 func _settled(packed: PackedScene) -> Array:
-	var stray: Array[Array] = _strays(packed.get_state())
-	var moved: Array[Array] = _moved_by_scripts()
-	if stray.is_empty() and moved.is_empty():
-		return [packed, ""]
-	for found: Array in stray:
-		var node: Node = found[0]
-		var name: String = found[1]
-		node.set(name, found[3] if found[2] else _unset_value(node, name))
-	for found: Array in moved:
-		var node: Node = found[0]
-		var before: Dictionary = _before[node.get_instance_id()]
-		for name: String in found[1]:
-			node.set(name, before.get(name, HeadlessCheck.default_of(node, name)))
-	var again: PackedScene = PackedScene.new()
-	var packing: Error = again.pack(root)
-	if packing != OK:
-		return [null, "Failed to pack %s: %s" % [path, error_string(packing)]]
-	var left: Array[Array] = _strays(again.get_state())
-	left.append_array(_moved_by_scripts())
-	if left.is_empty():
-		return [again, ""]
+	var current: PackedScene = packed
+	var left: Array[Array] = []
+	for put_back: int in PUTTING_BACK_PASSES + 1:
+		var stray: Array[Array] = _strays(current.get_state())
+		var moved: Array[Array] = _moved_by_scripts()
+		if stray.is_empty() and moved.is_empty():
+			return [current, ""]
+		if put_back == PUTTING_BACK_PASSES:
+			left = stray
+			left.append_array(moved)
+			break
+		for found: Array in stray:
+			var node: Node = found[0]
+			var name: String = found[1]
+			node.set(name, found[3] if found[2] else _unset_value(node, name))
+		for found: Array in moved:
+			var node: Node = found[0]
+			var before: Dictionary = _before[node.get_instance_id()]
+			for name: String in found[1]:
+				node.set(name, before.get(name, HeadlessCheck.default_of(node, name)))
+		current = PackedScene.new()
+		var packing: Error = current.pack(root)
+		if packing != OK:
+			return [null, "Failed to pack %s: %s" % [path, error_string(packing)]]
 	var first: Array = left[0]
 	var stray_node: Node = first[0]
 	var named: String = str(first[1])
@@ -537,6 +598,8 @@ func _strays(state: SceneState) -> Array[Array]:
 			var name: String = str(key)
 			var held: bool = filed.has(name)
 			if held == stored.has(name) and (not held or PropertyValues.same(stored[name], filed[name])):
+				continue
+			if not held and HeadlessCheck.at_default(node, name):
 				continue
 			stray.append([node, name, held, filed.get(name)])
 	return stray

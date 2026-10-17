@@ -46,10 +46,17 @@ const BEGUN: String = "[gdharness] begun"
 
 ## The operations that compile the project's scripts. The engine knows an autoload's name only once
 ## the autoload is in the tree, which is after `_init`, so a script naming one compiled here failed
-## with "Identifier not found" while the game and the editor ran it. A scene tool loads the scripts
-## of the scene it opens.
+## with "Identifier not found" while the game and the editor ran it. A scene tool, and a read of a
+## scene or a resource, loads the scripts of the file it opens.
 const AFTER_THE_AUTOLOADS: Array[String] = [
-	"check_scripts", "create_script", "modify_script", "run_editor_tool"
+	"check_scripts",
+	"create_script",
+	"modify_script",
+	"read_animation_states",
+	"read_animations",
+	"read_resource",
+	"read_scene_tree",
+	"run_editor_tool",
 ]
 
 var _log: Log

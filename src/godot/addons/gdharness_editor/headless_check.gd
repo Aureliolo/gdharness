@@ -90,8 +90,39 @@ static func default_of(object: Object, name: String) -> Variant:
 	if script != null:
 		for declared: Dictionary in script.get_script_property_list():
 			if str(declared.get("name", "")) == name:
-				return script.get_property_default_value(name)
+				var given: Variant = script.get_property_default_value(name)
+				if given != null:
+					return given
+				return _initialised(script, name, Read.as_int(declared.get("type", TYPE_NIL)))
 	return ClassDB.class_get_property_default_value(object.get_class(), name)
+
+
+## What the declaration of [param name] in [param script] or a script it extends initialises it to,
+## when that is a value written out, such as [code]PackedStringArray()[/code], or null. The engine
+## reports a default only for an initializer it folded into a constant, and it folds no constructor
+## call, so it gives none for such a property; the saver then writes it whatever it holds, and the
+## line read as a change some script had made.
+static func _initialised(script: Script, name: String, type: int) -> Variant:
+	var declaration: RegEx = RegEx.create_from_string(
+		"(?m)^[ \\t]*(?:@[^\\n]*?\\s)?var\\s+" + name + "\\b[^=\\n]*?=\\s*(.+?)\\s*:?[ \\t]*$"
+	)
+	var holder: Script = script
+	while holder != null:
+		var found: RegExMatch = declaration.search(holder.source_code)
+		if found != null:
+			var value: Variant = str_to_var(found.get_string(1))
+			if value == null or type == TYPE_NIL or typeof(value) == type:
+				return value
+			return type_convert(value, type)
+		holder = holder.get_base_script()
+	return null
+
+
+## Whether [param object] holds its default for [param name], so a file that newly writes it says
+## nothing a script did: the saver writes a property whose default the engine cannot report whatever
+## it holds, the editor's save as well.
+static func at_default(object: Object, name: String) -> bool:
+	return PropertyValues.same(object.get(name), default_of(object, name))
 
 
 ## The ids, in the file, of the embedded resources [param property] reaches into on [param object],
@@ -295,17 +326,23 @@ static func settle_saved(
 ) -> String:
 	for attempt: int in 2:
 		var after: String = FileAccess.get_file_as_string(path)
-		var embedded: Array[Array] = embedded_changes(before, after, reached_ids)
+		var by_id: Dictionary = embedded_in(values, {})
+		var embedded: Array[Array] = []
+		for found: Array in embedded_changes(before, after, reached_ids):
+			var holder: Resource = by_id.get(found[0])
+			if found[2] or holder == null or not at_default(holder, str(found[1])):
+				embedded.append(found)
 		var top: Array[Array] = []
 		if main != null:
-			top = main_changes(before, after, asked)
+			for found: Array in main_changes(before, after, asked):
+				if found[1] or not at_default(main, str(found[0])):
+					top.append(found)
 		if embedded.is_empty() and top.is_empty():
 			return ""
 		if attempt == 1:
 			if not embedded.is_empty():
 				return unasked("The embedded resource " + str(embedded[0][0]), str(embedded[0][1]))
 			return unasked(path, str(top[0][0]))
-		var by_id: Dictionary = embedded_in(values, {})
 		for found: Array in embedded:
 			var id: String = found[0]
 			var name: String = found[1]
