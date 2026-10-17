@@ -99,6 +99,14 @@ export async function originsOf(
 
 const RELOADED_AT = /GDScript::reload \((res:\/\/.+):(\d+)\)$/;
 
+/** Every error in [param entries] the engine raised compiling a script, with where it was. */
+export function compileErrorsIn(entries: readonly LogEntry[]): ScriptError[] {
+  return entries.flatMap((entry) => {
+    const at = entry.severity === 'error' ? reloadedAt(entry) : null;
+    return at === null ? [] : [{ ...at, message: entry.text }];
+  });
+}
+
 /** Where an engine error says a script failed to compile, read off the `at` line under it. */
 function reloadedAt(entry: LogEntry): { path: string; line: number | null } | null {
   for (const line of entry.detail) {

@@ -32,6 +32,7 @@ import { McpServer, ProtocolError, ProtocolErrorCode } from '@modelcontextprotoc
 import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server/stdio';
 import { alive } from './alive.js';
 import { answerJson } from './answer-json.js';
+import { autoloadNotCompiled, scriptsAutoloaded } from './autoload-failure.js';
 import { halfAsLongAgain, MAIN_SCENE, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
@@ -238,6 +239,7 @@ import {
 import { discard, scratchDirectory, sweepAbandonedScratch } from './scratch.js';
 import {
   checkWithEngine,
+  compileErrorsIn,
   originsOf,
   type ScriptOrigin,
   type UnconfirmedOrigin,
@@ -2384,16 +2386,93 @@ export function scriptErrorsNote(
 }
 
 /**
+ * What a test run is told when the autoload [param at] did not compile: the first error the engine
+ * raised compiling, which is where to look, and why nothing the suites said is a result.
+ * [param stoppedEarly] is whether the run was stopped on reading it, or had ended before it was read.
+ */
+export function autoloadNotCompiledNote(
+  at: { readonly name: string; readonly path: string },
+  errors: ReturnType<typeof foldedScriptErrors>,
+  stoppedEarly: boolean,
+): string {
+  const first = errors.scriptErrors[0];
+  const where =
+    first === undefined
+      ? ''
+      : `, and the first error the engine raised compiling was at ${first.path}${first.line === null ? '' : `:${first.line}`}: ${first.message}`;
+  const others = errors.scriptErrors.length - 1;
+  const more =
+    others > 0
+      ? ` ${others === 1 ? 'One more error is' : `${others} more errors are`} under scriptErrors.`
+      : '';
+  const through = errors.failedThroughDependency.length;
+  const dependents =
+    through > 0
+      ? ` ${through === 1 ? 'One script' : `${through} scripts`} failed only through ${first === undefined ? 'it' : 'that'}, listed under failedThroughDependency.`
+      : '';
+  const ended = stoppedEarly
+    ? 'The run was stopped as soon as the engine said so rather than left to its timeout'
+    : 'The run ended before that was read, and what its suites said is set aside';
+  // The engine ends most of its messages with a full stop of its own, some inside a parenthesis.
+  const stop = /[.!?]\)?$/.test(where) ? '' : '.';
+  return `No result counts: the autoload ${at.name} (${at.path}) did not compile${where}${stop}${more}${dependents} Every suite runs with the autoloads, so a case calling into a script that did not compile fails the same way on every pass, and one waiting in a loop for the call to succeed never ends. ${ended}. script_diagnostics checks a script without running anything.`;
+}
+
+/** One script error a run printed over and over: its text, where it was raised, and how often. */
+export interface RepeatedError {
+  readonly text: string;
+  readonly where: string | null;
+  readonly times: number;
+}
+
+/** How many identical script errors, the last thing a run printed among them, make a loop. */
+const LOOPING_AFTER = 100;
+
+/**
+ * The script error a run was repeating when it was killed, or null: the last entry it printed, when
+ * that is a script error raised at the same place at least [constant LOOPING_AFTER] times. A run
+ * printing it that often had not stopped and was not getting anywhere either.
+ */
+export function repeatingScriptError(
+  entries: readonly LogEntry[],
+  byScript: (entry: LogEntry) => boolean,
+): RepeatedError | null {
+  const last = entries.at(-1);
+  if (last === undefined || !byScript(last)) {
+    return null;
+  }
+  const where = last.detail[0] ?? null;
+  const times = entries.filter(
+    (entry) => entry.text === last.text && (entry.detail[0] ?? null) === where && byScript(entry),
+  ).length;
+  return times >= LOOPING_AFTER
+    ? { text: last.text, where: where?.replace(/^at: /, '') ?? null, times }
+    : null;
+}
+
+/**
  * What a test run killed at [param timeoutMs] is called, from how long it had printed nothing.
  *
  * Hung is a claim about the run, that it had stopped, and it sends a reader looking for a deadlock
  * in the last suite named. A run printing a passing case every few milliseconds up to the kill had
  * not stopped, and what it wants is a longer timeoutMs or a narrower path. So hung is kept for a
  * run that had been silent for half the timeout, or for thirty seconds of a long one, and anything
- * else is a run the limit cut off while it was going.
+ * else is a run the limit cut off while it was going. A run that ended repeating one script error,
+ * [param repeating], is named for that instead: it printed up to the kill without getting anywhere,
+ * and the advice to give it longer had a session retrying a run that could never finish.
  */
-export function timedOutVerdict(timeoutMs: number, silentForMs: number): { verdict: string; hung: boolean } {
+export function timedOutVerdict(
+  timeoutMs: number,
+  silentForMs: number,
+  repeating: RepeatedError | null = null,
+): { verdict: string; hung: boolean } {
   const quiet = Math.round(silentForMs);
+  if (repeating !== null) {
+    return {
+      verdict: `timed out after ${timeoutMs} ms repeating one script error, printed ${repeating.times} times: ${repeating.text}${repeating.where === null ? '' : ` (${repeating.where})`}. A line that fails on every pass of a loop does this, and a longer timeoutMs would not end it`,
+      hung: false,
+    };
+  }
   return quiet >= Math.min(STALLED_AFTER_MS, timeoutMs / 2)
     ? {
         verdict: `hung: killed after ${timeoutMs} ms, having printed nothing for the last ${quiet} ms`,
@@ -6253,39 +6332,61 @@ class GodotServer {
       lastSaid = Date.now();
     });
     const reporting = this.reportTestProgress(run.log);
+    const autoloaded = scriptsAutoloaded(project.value.path);
     let silentForMs = 0;
+    const stopped: { for: { name: string; path: string } | null } = { for: null };
     const timedOut = await new Promise<boolean>((resolve) => {
+      let read = 0;
+      const watching = setInterval(() => {
+        const entries = run.log.all;
+        for (const entry of entries.slice(read)) {
+          stopped.for ??= autoloadNotCompiled(entry, autoloaded);
+        }
+        read = entries.length;
+        if (stopped.for !== null) {
+          clearInterval(watching);
+          run.process.kill();
+        }
+      }, 100);
       const timer = setTimeout(() => {
+        clearInterval(watching);
         silentForMs = Date.now() - lastSaid;
         run.process.kill();
         resolve(true);
       }, timeoutMs);
-      run.process.once('exit', () => {
+      const ended = (): void => {
+        clearInterval(watching);
         clearTimeout(timer);
         resolve(false);
-      });
-      run.process.once('error', () => {
-        clearTimeout(timer);
-        resolve(false);
-      });
+      };
+      run.process.once('exit', ended);
+      run.process.once('error', ended);
     });
     clearInterval(reporting);
     // A signal is not an exit: the engine still holds its log in the user data directory while it
     // goes, and the removal below would find it there.
-    if (timedOut && run.process.pid !== undefined) {
+    if ((timedOut || stopped.for !== null) && run.process.pid !== undefined) {
       await untilGone([run.process.pid]);
     }
     await run.settled;
+    // Read again once the run is over, so a run that ended between two looks answers as one that
+    // was stopped: whether it got through its suites first is a race, and what they said about
+    // code that did not compile is not an answer either way.
+    const notCompiled =
+      stopped.for ??
+      run.log.all.map((entry) => autoloadNotCompiled(entry, autoloaded)).find((found) => found !== null) ??
+      null;
 
     const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
     let reportProblem: string | null = null;
     try {
-      const written = existsSync(reportsDir)
-        ? readdirSync(reportsDir)
-            .filter((name) => name.startsWith('report_'))
-            .sort((a, b) => Number(a.slice('report_'.length)) - Number(b.slice('report_'.length)))
-        : [];
+      const written =
+        existsSync(reportsDir) && notCompiled === null
+          ? readdirSync(reportsDir)
+              .filter((name) => name.startsWith('report_'))
+              .sort((a, b) => Number(a.slice('report_'.length)) - Number(b.slice('report_'.length)))
+          : [];
       const newest = written.at(-1);
       if (newest !== undefined) {
         report = parseJUnit(readFileSync(join(reportsDir, newest, 'results.xml'), 'utf8'));
@@ -6345,10 +6446,22 @@ class GodotServer {
     // Before the exit code, because gdUnit4 leaves it at zero for a run that found nothing to do,
     // and `passed` is the one word a skimming reader must never be handed for one of those.
     const said = printed.map((entry) => entry.text);
-    const nothingRan = timedOut ? null : whyNoReport(said, asked.join(' and '));
-    const cutShort = timedOut ? timedOutVerdict(timeoutMs, silentForMs) : null;
+    const nothingRan = timedOut || notCompiled !== null ? null : whyNoReport(said, asked.join(' and '));
+    const cutShort =
+      timedOut && notCompiled === null
+        ? timedOutVerdict(
+            timeoutMs,
+            silentForMs,
+            repeatingScriptError(run.log.all, (entry) => run.log.raisedByScript(entry)),
+          )
+        : null;
     const hung = cutShort?.hung ?? false;
-    const printedErrors = timedOut || exitCode !== 105 ? [] : scriptErrorsPrinted(said);
+    const printedErrors =
+      notCompiled !== null
+        ? compileErrorsIn(run.log.all)
+        : timedOut || exitCode !== 105
+          ? []
+          : scriptErrorsPrinted(said);
     // Only on a run that stopped on a class it could not resolve, so the engine is started again
     // for nothing on any other answer.
     const declaring = printedErrors.some((error) => unresolvedClassIn(error.message) !== null)
@@ -6361,17 +6474,19 @@ class GodotServer {
     const scriptErrors: ScriptError[] = [...declaring.origins, ...printedErrors];
     const brokenScripts = new Set(scriptErrors.map((error) => error.path)).size;
     const ranAs =
-      cutShort !== null
-        ? cutShort.verdict
-        : (nothingRan ??
-          (brokenScripts > 0
-            ? `script errors in ${brokenScripts === 1 ? 'one script' : `${brokenScripts} scripts`}, so no suite ran`
-            : undefined) ??
-          (uncaught.length > 0
-            ? `${uncaught.length === 1 ? 'one script error' : `${uncaught.length} script errors`} that failed no case`
-            : undefined) ??
-          (exitCode === null ? undefined : verdicts[exitCode]) ??
-          howItExited(run));
+      notCompiled !== null
+        ? `the autoload ${notCompiled.name} (${notCompiled.path}) did not compile, so no result counts`
+        : cutShort !== null
+          ? cutShort.verdict
+          : (nothingRan ??
+            (brokenScripts > 0
+              ? `script errors in ${brokenScripts === 1 ? 'one script' : `${brokenScripts} scripts`}, so no suite ran`
+              : undefined) ??
+            (uncaught.length > 0
+              ? `${uncaught.length === 1 ? 'one script error' : `${uncaught.length} script errors`} that failed no case`
+              : undefined) ??
+            (exitCode === null ? undefined : verdicts[exitCode]) ??
+            howItExited(run));
     const nothingAt = missing.join(' and ');
     const verdict = missing.length === 0 ? ranAs : `${ranAs}; nothing at ${nothingAt}`;
     const missingNote =
@@ -6417,13 +6532,15 @@ class GodotServer {
         ...(running === null ? {} : { suiteRunning: running }),
       };
       const said =
-        nothingRan !== null
-          ? `No tests ran: ${ranAs}.`
-          : scriptErrors.length > 0
-            ? scriptErrorsNote(printedErrors, declaring)
-            : reportProblem !== null
-              ? `The test run's report could not be read (${reportProblem}); the engine's own verdict was ${ranAs}.`
-              : `The test run wrote no report (${ranAs}).${finishedBeforeTheEnd(finished.length, failing.length, running)}`;
+        notCompiled !== null
+          ? autoloadNotCompiledNote(notCompiled, foldedScriptErrors(scriptErrors), stopped.for !== null)
+          : nothingRan !== null
+            ? `No tests ran: ${ranAs}.`
+            : scriptErrors.length > 0
+              ? scriptErrorsNote(printedErrors, declaring)
+              : reportProblem !== null
+                ? `The test run's report could not be read (${reportProblem}); the engine's own verdict was ${ranAs}.`
+                : `The test run wrote no report (${ranAs}).${finishedBeforeTheEnd(finished.length, failing.length, running)}`;
       const note = missingNote === undefined ? said : `${said} ${missingNote}`;
       // Kept in the project when nobody is left to read the answer, for the next run there to
       // hand back: the client that cut this call off is the one that will ask again.
