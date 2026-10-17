@@ -25,6 +25,8 @@ var by_id: Dictionary = {3: "three", 4.5: "four and a half", Vector2i(1, 2): "a 
 var counts: Dictionary[int, int] = {68: 6}
 var weights: Dictionary[float, String] = {2.0: "two"}
 var tagged: Dictionary[StringName, int] = {&"gold": 3}
+var stock: Dictionary[String, int] = {"base:dew": 1, "base:salt": 2, 'say "hi"': 3, "pick(1)": 4}
+var named_stock: Dictionary = {&"base:dew": 5}
 var spare: RefCounted = RefCounted.new()
 var spot: Vector2 = Vector2.ZERO
 var area: Rect2 = Rect2()
@@ -95,6 +97,7 @@ func _run() -> void:
 	await _check_an_element_declared_as_an_object()
 	await _check_a_map_keyed_by_numbers()
 	await _check_maps_typed_by_key()
+	await _check_a_key_holding_a_colon()
 	await _check_a_value_given_by_its_fields()
 	node._cleanup()
 	# Not checked: both are gone either way by the time the fixture tears itself down.
@@ -396,6 +399,44 @@ func _check_maps_typed_by_key() -> void:
 	var counts: Dictionary = holder.get("counts")
 	if written.get("type") != "property_set" or counts.get(68) != 7 or counts.size() != 1:
 		_fail("counts:68 is written under the number: %s, %s" % [JSON.stringify(written), str(counts)])
+
+
+## A key holding a colon, a quote or a bracket, written in double quotes, is one step: read, written
+## and waited on through it, and listed that way by the refusal for the path split at its colon, so
+## the refusal says how to reach it. Game D keys its stock by namespaced ids, and no path reached
+## one, quoted or not.
+func _check_a_key_holding_a_colon() -> void:
+	var read: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Holder", "property": 'stock:"base:dew"'}
+	)
+	if read.get("value") != 1:
+		_fail('stock:"base:dew" reads its entry: %s' % JSON.stringify(read))
+	var written: Dictionary = await _write('stock:"base:dew"', 2)
+	var stock: Dictionary = holder.get("stock")
+	if written.get("type") != "property_set" or stock.get("base:dew") != 2 or stock.size() != 4:
+		_fail('stock:"base:dew" is written under its key: %s, %s' % [JSON.stringify(written), str(stock)])
+	var met: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Holder", "property": 'stock:"base:dew"', "value": 2, "timeout_ms": 1000}
+	)
+	if met.get("met") != true or Read.as_int(met.get("elapsed_ms"), 1000) >= 1000:
+		_fail('a wait on stock:"base:dew" is met at once: %s' % JSON.stringify(met))
+	var split: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Holder", "property": "stock:base:dew"}
+	)
+	var listed: String = 'has no key base; it is keyed by "base:dew", "base:salt", "say \\"hi\\"", "pick(1)"'
+	if split.get("type") != "error" or not str(split.get("message", "")).contains(listed):
+		_fail("the refusal writes each key as the step reaching it: %s" % JSON.stringify(split))
+	for case: Array in [
+		['stock:"say \\"hi\\""', 3],
+		['stock:"pick(1)"', 4],
+		['named_stock:"base:dew"', 5],
+		['by_id:"4.5"', "four and a half"]
+	]:
+		var reached: Dictionary = await node._execute_command(
+			"get_property", {"path": "/root/Holder", "property": case[0]}
+		)
+		if reached.get("value") != case[1]:
+			_fail("%s reads its entry: %s" % [case[0], JSON.stringify(reached)])
 
 
 ## A map keyed by numbers, stepped into by the number written as text, and written back under the

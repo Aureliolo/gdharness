@@ -23,7 +23,7 @@ static func said_by(node: Node) -> String:
 	var label: Label = node as Label
 	if label != null:
 		return _label_says(label)
-	if _draws_a_list(node):
+	if draws_a_list(node):
 		return "\n".join(lines_said_by(node))
 	var own: String = _text_of(node)
 	# A control showing a picture rather than words is named for a player who cannot see it, and that
@@ -41,37 +41,54 @@ static func said_by(node: Node) -> String:
 ## every label on it and none of those, and a wait for a tab's title or a list item was never met.
 static func lines_said_by(node: Node) -> Array[String]:
 	var lines: Array[String] = []
+	if not draws_a_list(node):
+		_keep(_text_of(node), lines)
+		return lines
+	var tree: Tree = node as Tree
+	if tree != null and tree.column_titles_visible:
+		var titles: Array[String] = []
+		for column: int in tree.columns:
+			_keep(node.atr(tree.get_column_title(column)), titles)
+		_keep("  ".join(titles), lines)
+	for entry: Dictionary in items_of(node):
+		lines.append(str(entry["says"]))
+	return lines
+
+
+## Each item [param node] draws as one of a list, as {"says", "item"}: a tab, a menu title, a list
+## entry or a menu item by its index, and a tree row by its TreeItem. Empty for a node drawing none.
+## Held apart rather than joined, so a click on a tab's title presses that tab: the bar's middle is
+## whichever tab happens to sit there.
+static func items_of(node: Node) -> Array[Dictionary]:
+	var items: Array[Dictionary] = []
 	if node is TabBar:
 		var bar: TabBar = node
 		for tab: int in bar.tab_count:
 			if not bar.is_tab_hidden(tab):
-				_keep(node.atr(bar.get_tab_title(tab)), lines)
+				_keep_item(node.atr(bar.get_tab_title(tab)), tab, items)
 	elif node is MenuBar:
 		var menus: MenuBar = node
 		for menu: int in menus.get_menu_count():
 			if not menus.is_menu_hidden(menu):
-				_keep(node.atr(menus.get_menu_title(menu)), lines)
+				_keep_item(node.atr(menus.get_menu_title(menu)), menu, items)
 	elif node is ItemList:
 		var list: ItemList = node
 		for item: int in list.item_count:
-			_keep(_as_drawn(node, list.get_item_text(item), list.get_item_auto_translate_mode(item)), lines)
+			_keep_item(
+				_as_drawn(node, list.get_item_text(item), list.get_item_auto_translate_mode(item)),
+				item,
+				items
+			)
 	elif node is PopupMenu:
 		# A separator too, by its title: the popup draws a titled one as a heading over the items
 		# below it, and one without a title says nothing and is dropped as an empty line.
 		var menu: PopupMenu = node
 		for item: int in menu.item_count:
-			_keep(item_says(menu, item), lines)
+			_keep_item(item_says(menu, item), item, items)
 	elif node is Tree:
 		var tree: Tree = node
-		if tree.column_titles_visible:
-			var titles: Array[String] = []
-			for column: int in tree.columns:
-				_keep(node.atr(tree.get_column_title(column)), titles)
-			_keep("  ".join(titles), lines)
-		_tree_rows(tree, tree.get_root(), tree.hide_root, lines)
-	else:
-		_keep(_text_of(node), lines)
-	return lines
+		_tree_rows(tree, tree.get_root(), tree.hide_root, items)
+	return items
 
 
 ## What item [param index] of [param menu] shows: the translation where the item has one. A menu is
@@ -86,7 +103,9 @@ static func masked(field: LineEdit) -> String:
 	return field.secret_character.repeat(field.text.length())
 
 
-static func _draws_a_list(node: Node) -> bool:
+## Whether [param node] draws a list of items rather than holding words in a `text`; see
+## [method items_of].
+static func draws_a_list(node: Node) -> bool:
 	return node is TabBar or node is MenuBar or node is ItemList or node is PopupMenu or node is Tree
 
 
@@ -94,6 +113,12 @@ static func _keep(line: String, into: Array[String]) -> void:
 	var trimmed: String = line.strip_edges()
 	if not trimmed.is_empty():
 		into.append(trimmed)
+
+
+static func _keep_item(line: String, item: Variant, into: Array[Dictionary]) -> void:
+	var trimmed: String = line.strip_edges()
+	if not trimmed.is_empty():
+		into.append({"says": trimmed, "item": item})
 
 
 ## [param words] as [param node] draws them, which for a game with translations is the translation
@@ -113,20 +138,25 @@ static func _as_drawn(
 ## The rows of a tree from [param item] down, a row being its columns' text side by side, and
 ## nothing under a collapsed row or a hidden one, since neither is drawn. A hidden root is only the
 ## place its children hang from.
-static func _tree_rows(tree: Tree, item: TreeItem, skip: bool, into: Array[String]) -> void:
+static func _tree_rows(tree: Tree, item: TreeItem, skip: bool, into: Array[Dictionary]) -> void:
 	if item == null or not item.visible:
 		return
 	if not skip:
 		var cells: Array[String] = []
 		for column: int in tree.columns:
-			_keep(_as_drawn(tree, item.get_text(column), item.get_auto_translate_mode(column)), cells)
-		_keep("  ".join(cells), into)
+			_keep(cell_says(tree, item, column), cells)
+		_keep_item("  ".join(cells), item, into)
 		if item.collapsed:
 			return
 	var child: TreeItem = item.get_first_child()
 	while child != null:
 		_tree_rows(tree, child, false, into)
 		child = child.get_next()
+
+
+## What [param column] of the row [param item] of [param tree] shows.
+static func cell_says(tree: Tree, item: TreeItem, column: int) -> String:
+	return _as_drawn(tree, item.get_text(column), item.get_auto_translate_mode(column))
 
 
 ## What a node with a `text` says, as it is drawn.

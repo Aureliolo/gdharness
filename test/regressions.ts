@@ -32325,6 +32325,19 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
     where: '_fails (res://looping/looping_test.gd:6)',
     times: 100,
   });
+  // The kill landing partway through one more copy, which arrives without its `at` line.
+  const cut = new GameLog();
+  cut.append('stderr', failing(100, '_fails (res://looping/looping_test.gd:6)'));
+  cut.append('stderr', "SCRIPT ERROR: Cannot call method 'get_class' on a null value.\n");
+  assert.equal(cut.all.at(-1)?.detail.length, 0, 'the last copy arrives with nothing under it');
+  assert.deepEqual(
+    repeatingScriptError(cut.all, (entry) => cut.raisedByScript(entry)),
+    {
+      text: "Cannot call method 'get_class' on a null value.",
+      where: '_fails (res://looping/looping_test.gd:6)',
+      times: 100,
+    },
+  );
   const looping = timedOutVerdict(25_000, 3, repeatedAt());
   assert.equal(looping.hung, false, JSON.stringify(looping));
   assert.equal(

@@ -2432,6 +2432,10 @@ const LOOPING_AFTER = 100;
  * The script error a run was repeating when it was killed, or null: the last entry it printed, when
  * that is a script error raised at the same place at least [constant LOOPING_AFTER] times. A run
  * printing it that often had not stopped and was not getting anywhere either.
+ *
+ * The kill can land while the engine prints the error once more, so the last copy can arrive
+ * without the lines under it. On a Windows runner it came with no `at` line, and measured against
+ * that copy a loop printed 1,767 times counted one, so the place is read off the last whole copy.
  */
 export function repeatingScriptError(
   entries: readonly LogEntry[],
@@ -2441,7 +2445,13 @@ export function repeatingScriptError(
   if (last === undefined || !byScript(last)) {
     return null;
   }
-  const where = last.detail[0] ?? null;
+  const whole =
+    last.detail.length > 0
+      ? last
+      : (entries.findLast(
+          (entry) => entry.text === last.text && entry.detail.length > 0 && byScript(entry),
+        ) ?? last);
+  const where = whole.detail[0] ?? null;
   const times = entries.filter(
     (entry) => entry.text === last.text && (entry.detail[0] ?? null) === where && byScript(entry),
   ).length;

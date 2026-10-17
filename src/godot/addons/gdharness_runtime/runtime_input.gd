@@ -12,6 +12,7 @@ const Values = preload("runtime_values.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
 const Hover = preload("runtime_hover.gd")
+const Items = preload("runtime_items.gd")
 const Screen = preload("runtime_screen.gd")
 const Targets = preload("runtime_targets.gd")
 const Mouse = preload("runtime_mouse.gd")
@@ -509,6 +510,7 @@ func click(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var wanted: String = str(params.get("says", ""))
 	var found: Variant = null
+	var item: Variant = null
 	if not wanted.is_empty():
 		var picked: Dictionary = Targets.control_saying(
 			_host.get_tree().root, "/root" if node_path.is_empty() else node_path, wanted, params.get("index")
@@ -517,6 +519,7 @@ func click(params: Dictionary) -> Dictionary:
 			return picked
 		node_path = picked["path"]
 		found = picked["found"]
+		item = picked.get("item")
 	if node_path.is_empty():
 		return {"type": "error", "message": "click needs a path, or says to find the control by its words"}
 
@@ -541,6 +544,16 @@ func click(params: Dictionary) -> Dictionary:
 	# other words, a link among them. Said either way, so a press on the middle is never read as one
 	# on the words.
 	var aim: Vector2 = control.size * 0.5
+	var item_scrolled: bool = false
+	if item != null:
+		var found_by_words: Dictionary = found
+		var placed_item: Dictionary = await Items.in_view(
+			_host.get_tree(), control, node_path, item, wanted, found_by_words
+		)
+		if placed_item.has("message"):
+			return placed_item
+		aim = placed_item["point"]
+		item_scrolled = placed_item["scrolled"]
 	var rich: RichTextLabel = control as RichTextLabel
 	if found != null and rich != null:
 		var placed: Dictionary = Targets.point_on_words(rich, wanted)
@@ -568,9 +581,9 @@ func click(params: Dictionary) -> Dictionary:
 	# off the top of its container is inside the viewport, behind whatever is drawn up there, so
 	# the click went to that instead and said so. Measured on a hall whose staff panel had been
 	# scrolled past: the button was at y 69 and its container started at y 166.
-	var scrolled: bool = false
+	var scrolled: bool = item_scrolled
 	if not _in_sight(control, own, local):
-		scrolled = await _scroll_into_view(control)
+		scrolled = await _scroll_into_view(control) or item_scrolled
 		var left: String = Values.afterwards(control)
 		if left != "in_tree":
 			return {

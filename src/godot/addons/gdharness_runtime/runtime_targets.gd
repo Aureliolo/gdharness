@@ -2,6 +2,7 @@ extends RefCounted
 
 ## Which control a click means when it names the control by the words on it rather than by path.
 
+const Items = preload("runtime_items.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
 const Says = preload("runtime_says.gd")
@@ -24,7 +25,8 @@ const WHOLE: int = 1
 
 ## The control a click by [param wanted] words presses, found under [param root_path] in the tree
 ## [param root] heads, or the refusal saying why there is none or which of several:
-## {"path", "found"} or {"type", "message"}.
+## {"path", "found"} or {"type", "message"}, with `item` as well when the match is an item of a
+## control drawing a list, which [method Items.item_rect] places.
 ##
 ## Matched the way a find matches `says`, against a control's own words, and only among controls
 ## the player can see. A match inside a button presses the button, because the label is what says
@@ -57,6 +59,10 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	# that only says them as part of more stands in for.
 	var exact_out_of_reach: Array[Node] = []
 	var out_of_reach_as: Array[String] = []
+	# The item of a control drawing a list that matched, null for a control matched as a whole, and
+	# the point in the control a pointer would go to for it.
+	var items: Array = []
+	var aims: Array[Vector2] = []
 	var pending: Array[Node] = [reached["node"]]
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
@@ -66,6 +72,26 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 				if _says_exactly(Words.said_by(node), wanted):
 					exact_out_of_reach.append(node)
 					out_of_reach_as.append("hidden")
+			elif Words.draws_a_list(node):
+				# Each item a match of its own, so the words of one tab are matched as a whole and the
+				# index picks between two items saying them as it does between two buttons.
+				var drawing: Control = node
+				for entry: Dictionary in Words.items_of(drawing):
+					var words: String = entry["says"]
+					if not Says.matches(words, wanted):
+						continue
+					var whole: bool = _says_exactly(words, wanted)
+					var drawn_at_now: Rect2 = Items.item_rect(drawing, entry["item"], wanted)
+					matched.append(drawing)
+					said.append(words)
+					exact.append(whole)
+					inside.append(not whole and _inside_a_word(words, wanted))
+					items.append(entry["item"])
+					# An item drawn nowhere yet, scrolled out of its list, is judged at the list's middle,
+					# which is where the click scrolls it towards.
+					aims.append(
+						drawing.size * 0.5 if drawn_at_now.size == Vector2.ZERO else drawn_at_now.get_center()
+					)
 			else:
 				var control: Control = node
 				var target: Control = _pressed_through(control)
@@ -78,6 +104,8 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 					said.append(words)
 					exact.append(whole)
 					inside.append(buried)
+					items.append(null)
+					aims.append(target.size * 0.5)
 				elif (whole and not exact[at]) or (inside[at] and not buried):
 					said[at] = words
 					exact[at] = whole
@@ -93,13 +121,13 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	var outside: int = 0
 	var open: Array[int] = []
 	for index: int in matched.size():
-		if _off_screen(matched[index]):
+		if _off_screen(matched[index], aims[index]):
 			outside += 1
 			if exact[index]:
 				exact_out_of_reach.append(matched[index])
 				out_of_reach_as.append("outside what the screen shows")
 			continue
-		var over: Node = _cover_of(matched[index], drawn, areas)
+		var over: Node = _cover_of(matched[index], drawn, areas, aims[index])
 		if over == null:
 			open.append(index)
 		else:
@@ -125,12 +153,14 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	var lines: Array[String] = []
 	var wholes: Array[bool] = []
 	var insides: Array[bool] = []
+	var picked_items: Array = []
 	for index: int in open:
 		targets.append(matched[index])
 		ranks.append(_rank(matched[index], exact[index]))
 		lines.append(said[index])
 		wholes.append(exact[index])
 		insides.append(inside[index])
+		picked_items.append(items[index])
 
 	var under: String = "" if root_path == "/root" else " under %s" % root_path
 	if targets.is_empty():
@@ -257,7 +287,11 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 		found["picked"] = "%s; %s" % [_described(1, ranks[0], wanted, under), others]
 	if covered > 0:
 		found["covered"] = covered
-	return {"path": str(targets[index].get_path()), "found": found}
+	var answer: Dictionary = {"path": str(targets[index].get_path()), "found": found}
+	if picked_items[index] != null:
+		answer["item"] = picked_items[index]
+		found["item"] = Items.item_named(targets[index], picked_items[index], lines[index])
+	return answer
 
 
 ## How good a match [param target] is for a click: a control the pointer can reach over one it
@@ -451,7 +485,7 @@ static func _pressed_through(control: Control) -> Control:
 ## What a pointer at [param target]'s centre would reach instead of it, drawn over it, or null.
 static func drawn_over(target: Control) -> Node:
 	var drawn: Array[Node] = _pointer_takers(target.get_tree().root)
-	return _cover_of(target, drawn, _areas_of(drawn))
+	return _cover_of(target, drawn, _areas_of(drawn), target.size * 0.5)
 
 
 ## Why [param node], which is not visible in the tree, is not, as a parenthesis to follow its path:
@@ -631,7 +665,8 @@ static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
 	return areas
 
 
-## What a pointer at [param target]'s centre reaches instead of it, or null when nothing does.
+## What a pointer at [param aim] in [param target], its centre or the middle of the item a click is
+## for, reaches instead of it, or null when nothing does.
 ##
 ## The engine's own order for which control takes the pointer: an embedded window over everything
 ## in the viewport that holds it, then the higher canvas layer, then the later in the tree. A
@@ -650,10 +685,10 @@ static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
 ## point is passed over before anything costlier is asked of it. A window's box is in the space of
 ## the viewport it is embedded in, which is not the target's when the target is in another window,
 ## so a window is judged by [method _window_over] instead.
-static func _cover_of(target: Control, drawn: Array[Node], areas: Array[Rect2]) -> Node:
+static func _cover_of(target: Control, drawn: Array[Node], areas: Array[Rect2], aim: Vector2) -> Node:
 	var viewport: Viewport = target.get_viewport()
 	var moves: Dictionary[ScrollContainer, Vector2] = _scrolls_for(target)
-	var point: Vector2 = _centre_of(target) + _moved_by(target, moves)
+	var point: Vector2 = target.get_global_transform_with_canvas() * aim + _moved_by(target, moves)
 	var layer: int = _layer_of(target)
 	for at: int in drawn.size():
 		var other: Node = drawn[at]
@@ -770,13 +805,14 @@ static func _where_it_lands(target: Control, point: Vector2) -> Dictionary[Scrol
 	return moves
 
 
-## Whether a click could not reach [param target] however it scrolled: its centre, where the click
-## would bring it, outside its viewport or the one showing that on the screen, or clipped away by a
-## container the click does not scroll. A drawer parked off the side of the screen, or anything
-## outside the viewport of a game with no window, was listed among the controls on screen.
-static func _off_screen(target: Control) -> bool:
+## Whether a click could not reach [param aim] in [param target] however it scrolled: the point,
+## where the click would bring it, outside its viewport or the one showing that on the screen, or
+## clipped away by a container the click does not scroll. A drawer parked off the side of the
+## screen, or anything outside the viewport of a game with no window, was listed among the controls
+## on screen.
+static func _off_screen(target: Control, aim: Vector2) -> bool:
 	var moves: Dictionary[ScrollContainer, Vector2] = _scrolls_for(target)
-	var point: Vector2 = _centre_of(target) + _moved_by(target, moves)
+	var point: Vector2 = target.get_global_transform_with_canvas() * aim + _moved_by(target, moves)
 	if _clipped_away(target, point, moves) or not target.get_viewport().get_visible_rect().has_point(point):
 		return true
 	var reached: Dictionary = Screen.reach(target.get_viewport(), point)
