@@ -230,7 +230,9 @@ control outside a headless viewport. Read the refusal instead of retrying the ca
 Every answer is read back from the engine after the change rather than echoed from the request, and
 whatever the engine said on stderr comes back under \`engine_messages\`. A headless engine runs the
 project's autoloads after the operation has answered, and what it reports from then until it exits
-comes back separately, under \`engine_messages_after_answer\`: none of it changes the answer.
+comes back separately, under \`engine_messages_after_answer\`: none of it changes the answer. A
+check or write of a script waits for the autoloads to start, so the scripts naming them compile, and
+what they report while starting comes back under \`engine_messages_before_operation\`.
 
 ## More
 

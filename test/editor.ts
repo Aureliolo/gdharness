@@ -1244,6 +1244,16 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
   assert.deepEqual(nodePaths(get(await call('scene_tree', scene), 'tree')), ['.', 'Panel', 'Press']);
   assert.doesNotMatch(fileText(project, 'fixture.tscn'), /name="Copy"/, 'and be gone from the file');
 
+  // The description says a set of name renames, as there is no rename op to find instead.
+  await call('scene_node', { ...scene, op: 'set', nodePath: 'Panel', properties: { name: 'Shelf' } });
+  assert.deepEqual(
+    nodePaths(get(await call('scene_tree', scene), 'tree')),
+    ['.', 'Press', 'Shelf'],
+    'a set of name should rename the node',
+  );
+  assert.match(fileText(project, 'fixture.tscn'), /\[node name="Shelf" type="Node2D" parent="\."[ \]]/);
+  await call('scene_node', { ...scene, op: 'set', nodePath: 'Shelf', properties: { name: 'Panel' } });
+
   // Saving it again, and saving it somewhere else. The copy is read back through the tool that
   // reads scenes rather than as text, so it is a scene rather than a file of the right size.
   const saved = await call('scene_create', { ...scene, op: 'save' });

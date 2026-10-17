@@ -33,6 +33,9 @@ interface Reported {
   /** What was reported once the answer was written, which is not the operation's. */
   readonly afterAnswerMessages?: readonly LogEntry[];
   readonly afterAnswerOmitted?: number;
+  /** What the autoloads reported while an operation waited for them, which is not its own either. */
+  readonly beforeOperationMessages?: readonly LogEntry[];
+  readonly beforeOperationOmitted?: number;
 }
 
 export type HeadlessOutcome =
@@ -66,8 +69,18 @@ export function engineExtras(
   outcome: Reported & { readonly afterAnswer?: string | undefined },
 ): Record<string, unknown> {
   const after = outcome.afterAnswerMessages ?? [];
+  const before = outcome.beforeOperationMessages ?? [];
   return {
     ...(outcome.messages.length > 0 ? { engine_messages: outcome.messages } : {}),
+    ...(before.length > 0
+      ? {
+          engine_messages_before_operation: before,
+          engine_messages_before_operation_note: BEFORE_OPERATION_NOTE,
+        }
+      : {}),
+    ...(outcome.beforeOperationOmitted === undefined
+      ? {}
+      : { engine_messages_before_operation_omitted: outcome.beforeOperationOmitted }),
     ...(outcome.messagesOmitted === undefined ? {} : { engine_messages_omitted: outcome.messagesOmitted }),
     ...(after.length > 0
       ? { engine_messages_after_answer: after, engine_messages_after_answer_note: AFTER_ANSWER_NOTE }
@@ -91,6 +104,9 @@ export function engineExtras(
 const AFTER_ANSWER_NOTE =
   "Printed after this operation had written its answer, while the engine ran the project's autoloads and shut down: Godot starts a project's autoloads in every script run and cannot be told not to. An error raised in a project script here is that autoload's own, and none of these changes the answer.";
 
+const BEFORE_OPERATION_NOTE =
+  "Printed while the engine started the project's autoloads, before this operation ran: an operation that compiles the project's scripts waits for them, because the engine knows an autoload's name only once it is in the tree. An error raised in a project script here is that autoload's own.";
+
 /** How the operations script marks its own errors, which are otherwise ordinary lines to the engine. */
 const OWN_ERROR = '[ERROR] ';
 
@@ -99,6 +115,13 @@ const OWN_ERROR = '[ERROR] ';
  * godot_operations.gd.
  */
 export const ANSWERED = '[gdharness] answered';
+
+/**
+ * What the operations script prints in `_init` for an operation that waits for the project's
+ * autoloads, and when that operation begins. Kept in step with godot_operations.gd.
+ */
+export const WAITING = '[gdharness] waiting for the autoloads';
+export const BEGUN = '[gdharness] begun';
 
 /** At most this many of the newest problems ride on an answer; the rest are counted. */
 const MESSAGES_KEPT = 200;
@@ -361,12 +384,29 @@ export async function runOperation(
     discard(paramsDir);
   }
   const everything = ran.log.everything();
-  const answered = everything.findIndex((entry) => entry.source === 'stderr' && entry.text === ANSWERED);
-  const problems = problemsAmong(answered === -1 ? everything : everything.slice(0, answered));
+  const marked = (text: string): number =>
+    everything.findIndex((entry) => entry.source === 'stderr' && entry.text === text);
+  const answered = marked(ANSWERED);
+  const waiting = marked(WAITING);
+  const begun = marked(BEGUN);
+  const ended = answered === -1 ? everything.length : answered;
+  // An operation that waited for the autoloads ran between the two marks; what came before the
+  // first is its own start, and what came between them is the autoloads'.
+  const problems =
+    waiting === -1
+      ? problemsAmong(everything.slice(0, ended))
+      : problemsAmong([
+          ...everything.slice(0, waiting),
+          ...(begun === -1 ? [] : everything.slice(begun + 1, ended)),
+        ]);
+  const startup =
+    waiting === -1 ? [] : problemsAmong(everything.slice(waiting + 1, begun === -1 ? ended : begun));
   const after = answered === -1 ? [] : problemsAmong(everything.slice(answered + 1));
   const afterAnswered = {
     ...(after.length === 0 ? {} : { afterAnswerMessages: after.slice(-MESSAGES_KEPT) }),
     ...(after.length > MESSAGES_KEPT ? { afterAnswerOmitted: after.length - MESSAGES_KEPT } : {}),
+    ...(startup.length === 0 ? {} : { beforeOperationMessages: startup.slice(-MESSAGES_KEPT) }),
+    ...(startup.length > MESSAGES_KEPT ? { beforeOperationOmitted: startup.length - MESSAGES_KEPT } : {}),
   };
 
   if (answer.kind === 'unreadable') {
@@ -380,6 +420,16 @@ export async function runOperation(
   // No answer is an operation that refused or an engine that never reached the script, whatever
   // the exit status says.
   if (answer.kind === 'none') {
+    if (waiting !== -1 && begun === -1) {
+      return {
+        ok: false,
+        message:
+          `${operation} never ran: the engine ended (${howItEnded(ran)}) while it started the project's ` +
+          `autoloads, which this operation waits for. The last it reported: ${reason(ran.log, startup)}`,
+        ...reported(problems),
+        ...afterAnswered,
+      };
+    }
     // A refusal the script made is the whole message. Prefixed with the script's own name for the
     // operation and its exit status, it read as a crash in something the caller never called, and
     // it came back a second time under engine_messages.

@@ -574,26 +574,34 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'The import pipeline: what needs importing, how a resource is imported, reimports, UIDs, and the global class list the editor and the engine read.',
     parameters: {
       projectPath: PROJECT_PATH,
-      resourcePath: RESOURCE_PATH,
+      resourcePath: { ...RESOURCE_PATH, ops: ['status', 'options', 'set_options', 'uid', 'reimport'] },
       includeUpToDate: {
         type: 'boolean',
+        ops: ['status'],
         description: 'status: list resources that are current as well. Default false.',
       },
       options: {
         type: 'object',
+        ops: ['set_options'],
         description:
           'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}. A dictionary option whose keys are numbers, a font\'s opentype_features or any option already holding number keys, takes them written as strings of digits, and opentype_features also takes an OpenType tag by its four-letter name: {"opentype_features": {"liga": 0}} turns ligatures off. Both are written as the numbers the engine reads.',
         additionalProperties: true,
       },
       reimport: {
         type: 'boolean',
+        ops: ['set_options'],
         description:
           'set_options: reimport afterwards, answered under reimport as project_import reimport answers. Default true.',
       },
-      force: { type: 'boolean', description: 'reimport: reimport even what is current. Default false.' },
+      force: {
+        type: 'boolean',
+        ops: ['reimport'],
+        description: 'reimport: reimport even what is current. Default false.',
+      },
       timeoutMs: {
         type: 'integer',
         minimum: 1,
+        ops: ['reimport', 'set_options'],
         description:
           'reimport, set_options: how long to wait for the editor to finish reimporting. Default 300000.',
       },
@@ -775,17 +783,19 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_node',
     title: 'Scene nodes',
     description:
-      'One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties, and another scene is instanced by an add with instancePath. set with name renames a node. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene, and for a node that belongs to a scene this one instances or inherits. Needs the editor connected.',
+      'One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties, and another scene is instanced by an add with instancePath. A set with properties {"name": "Boss"} renames a node. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene, and for a node that belongs to a scene this one instances or inherits. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
-      nodePath: NODE_PATH,
+      nodePath: { ...NODE_PATH, ops: ['get', 'set', 'duplicate', 'reparent', 'delete', 'set_tilemap_cells'] },
       parentNodePath: {
         type: 'string',
+        ops: ['add', 'duplicate'],
         description: 'add: where the node goes. Default the root. duplicate: where the copy goes.',
       },
       nodeType: {
         type: 'string',
+        ops: ['add'],
         description: 'add: the node class, such as "CharacterBody2D". Give this or instancePath.',
       },
       instancePath: {
@@ -794,11 +804,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'add: a scene to instance as the new node instead of a class, such as "ui/panel.tscn". It is saved as an instance of that file, the way the editor\'s Instantiate Child Scene saves one, so changes to that scene reach it; properties set its root. A scene that is the target or instances it is refused.',
       },
-      nodeName: { type: 'string', description: "add: the new node's name." },
-      properties: PROPERTIES,
-      newName: { type: 'string', description: "duplicate: the copy's name." },
+      nodeName: { type: 'string', ops: ['add'], description: "add: the new node's name." },
+      properties: { ...PROPERTIES, ops: ['add', 'set'] },
+      newName: { type: 'string', ops: ['duplicate'], description: "duplicate: the copy's name." },
       newParentPath: {
         type: 'string',
+        ops: ['reparent'],
         description: 'reparent: the new parent, which may be the one it has, to move it among its siblings.',
       },
       index: {
@@ -810,13 +821,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       includeDefaults: {
         type: 'boolean',
+        ops: ['get'],
         description: 'get: include properties still at their default. Default false.',
       },
       layer: {
         type: 'number',
+        ops: ['set_tilemap_cells'],
         description: 'set_tilemap_cells: the layer of a TileMap. Default 0. A TileMapLayer is one layer.',
       },
-      cells: TILEMAP_CELLS,
+      cells: { ...TILEMAP_CELLS, ops: ['set_tilemap_cells'] },
     },
     requires: ['projectPath', 'scenePath'],
     operations: {
@@ -862,12 +875,28 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
-      sourceNodePath: { type: 'string', description: 'The node that emits.' },
-      signalName: { type: 'string', description: 'The signal it emits, such as "pressed".' },
-      targetNodePath: { type: 'string', description: 'The node whose method is called.' },
-      methodName: { type: 'string', description: 'The method on that node, called when it emits.' },
-      flags: { type: 'number', description: 'connect: Object.ConnectFlags, such as 1 for deferred.' },
-      nodePath: { type: 'string', description: 'list: only connections involving this node.' },
+      sourceNodePath: { type: 'string', ops: ['connect', 'disconnect'], description: 'The node that emits.' },
+      signalName: {
+        type: 'string',
+        ops: ['connect', 'disconnect'],
+        description: 'The signal it emits, such as "pressed".',
+      },
+      targetNodePath: {
+        type: 'string',
+        ops: ['connect', 'disconnect'],
+        description: 'The node whose method is called.',
+      },
+      methodName: {
+        type: 'string',
+        ops: ['connect', 'disconnect'],
+        description: 'The method on that node, called when it emits.',
+      },
+      flags: {
+        type: 'number',
+        ops: ['connect'],
+        description: 'connect: Object.ConnectFlags, such as 1 for deferred.',
+      },
+      nodePath: { type: 'string', ops: ['list'], description: 'list: only connections involving this node.' },
     },
     requires: ['projectPath', 'scenePath'],
     operations: {
@@ -1000,19 +1029,29 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
-      className: { type: 'string', description: 'create: a class_name for the script. Not with content.' },
-      extends: { type: 'string', description: 'create: the base class. Default Node. Not with content.' },
+      className: {
+        type: 'string',
+        ops: ['create'],
+        description: 'create: a class_name for the script. Not with content.',
+      },
+      extends: {
+        type: 'string',
+        ops: ['create'],
+        description: 'create: the base class. Default Node. Not with content.',
+      },
       content: {
         type: 'string',
+        ops: ['create'],
         description:
           'create: the whole file, written as given, instead of a template, className and extends.',
       },
       template: {
         type: 'string',
         enum: ['singleton', 'state_machine', 'component', 'resource'],
+        ops: ['create'],
         description: 'create: a starting shape.',
       },
-      modifications: SCRIPT_MODIFICATIONS,
+      modifications: { ...SCRIPT_MODIFICATIONS, ops: ['modify'] },
       symbol: {
         type: 'string',
         ops: ['rename'],
@@ -1054,17 +1093,20 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       scriptPath: SCRIPT_PATH,
       includeInherited: {
         type: 'boolean',
+        ops: ['structure'],
         description:
           "structure: also list what the script inherits, walking extends through the project's other scripts. Each such member carries inherited_from, the file declaring it, and the answer gains inherits_from, the chain that was walked. A name the script overrides is listed at both its lines rather than once. A native base is not walked, since it declares nothing in a file: editor_classes info answers for those. Default false.",
       },
       line: {
         type: 'integer',
         minimum: 1,
+        ops: ['completion', 'hover'],
         description: 'completion, hover: the line, counted from 1 as the editor shows it.',
       },
       character: {
         type: 'integer',
         minimum: 1,
+        ops: ['completion', 'hover'],
         description:
           'completion, hover: the column, counted from 1 as the editor shows it, with a tab counted as one. symbols gives each name at the line and column hover is asked at.',
       },
@@ -1518,9 +1560,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description: "The engine's ClassDB: find classes, read one in full, or walk an inheritance tree.",
     parameters: {
       projectPath: PROJECT_PATH,
-      filter: { type: 'string', description: 'query: a substring of the class name.' },
+      filter: { type: 'string', ops: ['query'], description: 'query: a substring of the class name.' },
       category: {
         type: 'string',
+        ops: ['query'],
         enum: [
           'node',
           'node2d',
@@ -1537,9 +1580,21 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ],
         description: 'query: limit to one family.',
       },
-      instantiableOnly: { type: 'boolean', description: 'query: leave out abstract classes. Default false.' },
-      className: { type: 'string', description: 'info, inheritance: the class.' },
-      includeInherited: { type: 'boolean', description: 'info: include inherited members. Default false.' },
+      instantiableOnly: {
+        type: 'boolean',
+        ops: ['query'],
+        description: 'query: leave out abstract classes. Default false.',
+      },
+      className: {
+        type: 'string',
+        ops: ['info', 'inheritance'],
+        description: 'info, inheritance: the class.',
+      },
+      includeInherited: {
+        type: 'boolean',
+        ops: ['info'],
+        description: 'info: include inherited members. Default false.',
+      },
       member: {
         type: 'string',
         ops: ['info'],

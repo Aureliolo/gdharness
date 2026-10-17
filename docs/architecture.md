@@ -770,6 +770,15 @@ when the answer is written, and what the engine reports after that line comes ba
 `engine_messages_after_answer`, with a note saying whose it is. Mixed into `engine_messages`, a
 failing autoload's errors rode on every settings read and read as the read failing.
 
+The operations that compile the project's scripts (`check_scripts`, `create_script` and
+`modify_script`) run on the first frame instead of in `_init`, after the autoloads have entered the
+tree. Before then the engine does not know an autoload's name, so every script naming one failed to
+compile with "Identifier not found", although the game and the editor ran it. Such an operation
+prints `[gdharness] waiting for the autoloads` in `_init` and `[gdharness] begun` when it starts,
+and what the engine reports between those two lines comes back under
+`engine_messages_before_operation`. An engine that ends before the second line never ran the
+operation, and the answer says so.
+
 An error raised inside the operations script itself refuses the answer: the engine hands the
 faulting function's caller a default value and exits 0, so the answer is missing whatever that
 function would have given.
