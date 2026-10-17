@@ -352,11 +352,14 @@ func _process(_delta: float) -> void:
 	_queries.note_frame(Time.get_ticks_usec())
 	_calibrate_the_profiler()
 
-	if _server.is_connection_available():
+	# Every connection waiting rather than one a frame: the engine queues eight a game has not
+	# taken and refuses the rest, so calls sent together would be refused as if the game were not up.
+	while _server.is_connection_available():
 		var client: StreamPeerTCP = _server.take_connection()
-		if client:
-			_clients.append(client)
-			_send_welcome(client)
+		if client == null:
+			break
+		_clients.append(client)
+		_send_welcome(client)
 
 	var gone: Array[StreamPeerTCP] = []
 	for client: StreamPeerTCP in _clients:
