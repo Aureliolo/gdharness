@@ -168,6 +168,12 @@ func _argument_for(
 				% [called, named, type_string(wants), index + 1, JSON.stringify(sent)]
 			)
 		}
+	var rounded: String = Values.inexact(sent, wants)
+	if not rounded.is_empty():
+		return {
+			"type": "error",
+			"message": "%s.%s takes int as argument %d: %s." % [called, named, index + 1, rounded]
+		}
 	var given: Variant = _values.fitted(sent, wants)
 	if not Values.acceptable(given, wants):
 		return {
@@ -242,6 +248,9 @@ func _value_for(
 				"message": "%s.%s holds an object: %s" % [called, named, named_object["message"]]
 			}
 		return {"value": named_object["object"]}
+	var rounded: String = Values.inexact(value, wanted)
+	if not rounded.is_empty():
+		return {"type": "error", "message": "%s.%s holds int: %s." % [called, named, rounded]}
 	var as_sent: Variant = _values.fitted(value, TYPE_NIL)
 	var cut: bool = Values.cuts(value, wanted)
 	var given: Variant = as_sent
