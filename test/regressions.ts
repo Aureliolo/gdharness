@@ -69,6 +69,7 @@ import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from 
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import { ensureHelperCompiled, HIDDEN_DESKTOP, helperAssembly, windowsCommandLine } from '../src/desktop.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
+import { docCacheCrash, editorCacheDirectory } from '../src/doc-cache.js';
 import {
   bursts,
   clearEditorLog,
@@ -12252,7 +12253,13 @@ function testARuntimeCallAfterOurRunEndedSaysSo(): void {
   const quit = ourRunEnded({ ...base, exitCode: 3, endedAt: 10_000 }, 15_000);
   assert.equal(
     quit,
-    'No game with the runtime addon is running: the game this server started (pid 41) ended 5s ago, and it exited by itself with code 3. editor_output has what it printed, and editor_run start runs it again.',
+    'No game with the runtime addon is running: the game this server started (pid 41) ended 5s ago, and it exited by itself with exit code 3. editor_output has what it printed, and editor_run start runs it again.',
+  );
+  const crashed = ourRunEnded({ ...base, exitCode: 0xc0000005, endedAt: 10_000 }, 15_000);
+  assert.match(
+    crashed,
+    /, and it exited by itself with exit code 0xC0000005, an access violation, so it crashed\. editor_output/,
+    crashed,
   );
   const signalled = ourRunEnded({ ...base, exitSignal: 'SIGKILL', endedAt: 10_000 }, 10_000);
   assert.match(signalled, /ended 0s ago, and it was ended by SIGKILL\./, signalled);
@@ -18283,6 +18290,273 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
 }
 
 /**
+ * An import or an export that crashed on its way out over a stale class reference cache runs again,
+ * and says so.
+ *
+ * Godot keys `editor_doc_cache-<major>.<minor>.res` on the exact build, so a 4.7.1 and a 4.7.2 on one
+ * machine each leave the other a stale cache, and an import or an export that meets one does its
+ * work, writes a fresh cache and crashes as it exits. The headless write fixture's first import
+ * failed that way three times in ten minutes while another session ran 4.7.1, reported under Bun as
+ * exit code 5, the low byte of an access violation; and project_export answered that it had not
+ * produced a pack it had written in full. The stale cache is made here by rewriting a real one's
+ * key, in a cache directory the fixture owns.
+ */
+async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> {
+  const ran = (exitCode: number | null, exitSignal: string | null = null, failure: string | null = null) => ({
+    exitCode,
+    exitSignal,
+    failure,
+  });
+  const cache = join('cache', 'editor_doc_cache-4.7.res');
+  const before = new Map([[cache, 1]]);
+  const rewritten = new Map([[cache, 2]]);
+  assert.deepEqual(
+    [
+      docCacheCrash(ran(0), before, rewritten, 'import'),
+      docCacheCrash(ran(0xc0000005), before, before, 'import'),
+      docCacheCrash(ran(null, 'SIGTERM', 'it ran past its minute'), before, rewritten, 'import'),
+    ],
+    [null, null, null],
+    'a clean run that rebuilt the cache, a crash that left it alone and a run this server ended are not this',
+  );
+  const crashed = docCacheCrash(ran(0xc0000005), before, rewritten, 'export') ?? '';
+  assert.ok(
+    crashed.startsWith(
+      `The first export ended badly (exit code 0xC0000005, an access violation, so it crashed) after rebuilding the editor's class reference cache, ${cache}. `,
+    ) && crashed.endsWith('So the export was run again, and this answer is from that second run.'),
+    crashed || 'a crash that rewrote the cache gave no note',
+  );
+  const fromNone = docCacheCrash(ran(null, 'SIGSEGV'), new Map(), rewritten, 'import') ?? '';
+  assert.ok(
+    fromNone.startsWith(
+      `The first import ended badly (ended by SIGSEGV) after rebuilding the editor's class reference cache, ${cache}. `,
+    ),
+    `a cache written where there was none counts, and a signal is named: ${fromNone}`,
+  );
+
+  const home = join('home', 'someone');
+  const sc = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sc-'));
+  try {
+    writeFileSync(join(sc, '._sc_'), '');
+    mkdirSync(join(sc, 'mac', 'Godot.app', 'Contents', 'MacOS'), { recursive: true });
+    writeFileSync(join(sc, 'mac', '_sc_'), '');
+    assert.deepEqual(
+      [
+        editorCacheDirectory(join('opt', 'godot'), 'linux', {}, home),
+        editorCacheDirectory(join('opt', 'godot'), 'linux', { XDG_CACHE_HOME: join(sc, 'xdg') }, home),
+        editorCacheDirectory(join('opt', 'godot'), 'linux', { XDG_CACHE_HOME: 'relative' }, home),
+        editorCacheDirectory(join('opt', 'godot.exe'), 'win32', { LOCALAPPDATA: join(sc, 'local') }, home),
+        editorCacheDirectory(
+          join('opt', 'godot.exe'),
+          'win32',
+          { LOCALAPPDATA: '', TEMP: join(sc, 'temp') },
+          home,
+        ),
+        editorCacheDirectory(join('Godot.app', 'Contents', 'MacOS', 'Godot'), 'darwin', {}, home),
+        editorCacheDirectory(join(sc, 'godot.exe'), 'win32', { LOCALAPPDATA: join(sc, 'local') }, home),
+        editorCacheDirectory(join(sc, 'mac', 'Godot.app', 'Contents', 'MacOS', 'Godot'), 'darwin', {}, home),
+        editorCacheDirectory(join(sc, 'mac', 'Godot.app', 'Contents', 'MacOS', 'Godot'), 'linux', {}, home),
+      ],
+      [
+        join(home, '.cache', 'godot'),
+        join(sc, 'xdg', 'godot'),
+        join(home, '.cache', 'godot'),
+        join(sc, 'local', 'Godot'),
+        join(sc, 'temp', 'Godot'),
+        join(home, 'Library', 'Caches', 'Godot'),
+        join(sc, 'editor_data', 'cache'),
+        join(sc, 'mac', 'editor_data', 'cache'),
+        join(home, '.cache', 'godot'),
+      ],
+      'the cache directory is found where the engine looks: the platform folder, or beside a self-contained engine or its app bundle',
+    );
+  } finally {
+    sweep(sc);
+  }
+
+  const outcomes: ImportOutcome[] = [];
+  const stand = (): Promise<ImportOutcome> => {
+    const next = outcomes.shift();
+    assert.ok(next !== undefined, 'no more passes were expected');
+    return Promise.resolve(next);
+  };
+  const failedFirst: ImportOutcome = {
+    ok: false,
+    message: 'the import pass failed (exit code 5): [ DONE ] loading_editor_layout',
+    messages: [],
+    docCacheNote: 'The first import ended badly.',
+  };
+  outcomes.push(failedFirst, { ok: true, messages: [], docCacheNote: 'not the first' });
+  assert.deepEqual(
+    await runImport('godot', 'project', { once: stand }),
+    { ok: true, messages: [], docCacheNote: 'The first import ended badly.' },
+    'the second pass answers, with the first pass’s note',
+  );
+  outcomes.push(failedFirst, {
+    ok: false,
+    message: 'the import pass failed (exit code 1): it broke.',
+    messages: [],
+  });
+  const twice = await runImport('godot', 'project', { once: stand });
+  assert.equal(
+    twice.ok ? '' : twice.message,
+    'the import pass failed (exit code 1): it broke. The first import ended badly.',
+    'and a second pass that fails carries the note in the message it is answered with',
+  );
+  assert.equal(outcomes.length, 0, 'each was run twice');
+
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('stale doc cache regression skipped (Godot not found)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-doc-cache-'));
+  const project = join(root, 'project');
+  const owned = join(root, 'cache-home');
+  // Each platform's engine finds its cache folder through one variable, so the fixture's own
+  // folder takes the place of the user's.
+  const cacheEnv: Record<string, string> =
+    process.platform === 'win32'
+      ? { LOCALAPPDATA: owned }
+      : process.platform === 'darwin'
+        ? { HOME: owned }
+        : { XDG_CACHE_HOME: owned };
+  const cacheDir = editorCacheDirectory(godotPath, process.platform, { ...process.env, ...cacheEnv }, owned);
+  if (!cacheDir.startsWith(owned)) {
+    sweep(root);
+    const why = `GODOT_PATH is a self-contained engine, whose cache at ${cacheDir} this fixture would make stale`;
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error(`GDHARNESS_REQUIRE_GODOT is set and ${why}.`);
+    }
+    console.log(`stale doc cache regression skipped (${why})`);
+    return;
+  }
+  mkdirSync(project, { recursive: true });
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Stale"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  writeFileSync(join(project, 'first.gd'), 'extends Node\n');
+  const staler = join(root, 'staler');
+  mkdirSync(staler);
+  writeFileSync(join(staler, 'project.godot'), 'config_version=5\n');
+  writeFileSync(
+    join(staler, 'stale.gd'),
+    'extends SceneTree\n\n\nfunc _init() -> void:\n' +
+      '\tvar path: String = OS.get_cmdline_user_args()[0]\n' +
+      '\tvar cache: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)\n' +
+      '\tcache.set_meta("version_hash", "stale")\n' +
+      '\tprint("saved ", ResourceSaver.save(cache, path, ResourceSaver.FLAG_COMPRESS))\n' +
+      '\tquit()\n',
+  );
+  const cacheFile = (): string => {
+    const found = existsSync(cacheDir)
+      ? readdirSync(cacheDir).find((name) => /^editor_doc_cache-\d+\.\d+\.res$/.test(name))
+      : undefined;
+    assert.ok(found !== undefined, `the editor wrote its class reference cache in ${cacheDir}`);
+    return join(cacheDir, found);
+  };
+  const makeStale = async (): Promise<number> => {
+    const file = cacheFile();
+    const made = await runEngine(godotPath, [
+      '--headless',
+      '--path',
+      staler,
+      '-s',
+      'res://stale.gd',
+      '--',
+      file,
+    ]);
+    assert.ok(
+      made.log.all.some((entry) => entry.text === 'saved 0'),
+      `the cache's key was rewritten: ${made.log.all.map((entry) => entry.text).join(' | ')}`,
+    );
+    return statSync(file).mtimeMs;
+  };
+
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: join(root, 'runtime'),
+      ...cacheEnv,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 300_000);
+  try {
+    await server.initialize('stale-doc-cache');
+    const fresh = parseTextContent(await call('project_import', { op: 'refresh_uids' }));
+    assert.deepEqual(
+      [get(fresh, 'uidsCreated'), get(fresh, 'docCacheNote')],
+      [['first.gd'], undefined],
+      `an import that made the cache where there was none ran once and cleanly: ${JSON.stringify(fresh)}`,
+    );
+
+    const staleAt = await makeStale();
+    writeFileSync(join(project, 'second.gd'), 'extends Node\n');
+    const importedRaw = await call('project_import', { op: 'refresh_uids' });
+    const imported = parseTextContent(importedRaw);
+    const importNote = text(get(imported, 'docCacheNote'));
+    const shownImport = JSON.stringify(importedRaw);
+    assert.deepEqual(get(imported, 'uidsCreated'), ['second.gd'], shownImport);
+    assert.ok(
+      importNote.startsWith('The first import ended badly (') &&
+        importNote.includes(`after rebuilding the editor's class reference cache, ${cacheFile()}.`),
+      `the import over a stale cache crashed, was run again, and says so: ${shownImport}`,
+    );
+    assert.ok(statSync(cacheFile()).mtimeMs > staleAt, 'and the crashing run left a fresh cache');
+
+    const added = parseTextContent(
+      await call('project_export', {
+        op: 'add_preset',
+        preset: 'Penguin',
+        platform: 'Linux',
+        outputPath: 'res://build/game.x86_64',
+      }),
+    );
+    await makeStale();
+    const exported = await call('project_export', {
+      op: 'run',
+      preset: 'Penguin',
+      outputPath: 'build/game.x86_64',
+    });
+    const shownExport = JSON.stringify(exported);
+    const verdict = ((get(exported, 'result', 'content') as { text?: string }[] | undefined) ?? [])
+      .map((block) => {
+        try {
+          return JSON.parse(block.text ?? '') as unknown;
+        } catch {
+          return undefined;
+        }
+      })
+      .find((parsed) => get(parsed, 'exported') !== undefined);
+    assert.ok(
+      text(get(verdict, 'docCacheNote')).startsWith('The first export ended badly ('),
+      `the export over a stale cache crashed, was run again, and says so: ${shownExport}`,
+    );
+    // Exported with templates and refused without them, the second run ends in 0 or 1, where the
+    // first ended in a crash.
+    assert.ok(
+      [0, 1].includes(Number(get(verdict, 'exitCode'))),
+      `the answer is the second run's: ${shownExport}`,
+    );
+    if (get(added, 'templates_installed') === true) {
+      assert.equal(get(verdict, 'exported'), true, `and its export is made: ${shownExport}`);
+    }
+  } finally {
+    await server.stop();
+    sweep(root);
+  }
+}
+
+/**
  * A process listing that failed says which way it failed.
  *
  * The record kept only the error's message, "Command failed:" and the command, which a listing
@@ -22559,6 +22833,29 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
     [three.exitCode, three.exitSignal, three.failure, howItEnded(three)],
     [3, null, null, 'exit code 3'],
     'a code the process exited with is its own',
+  );
+
+  // Rendered rather than raised: a crashing child under Bun, which runs the suites, reports only
+  // the low byte of the status, and the server reads the whole of it under Node.
+  const ended = (exitCode: number | null) => howItEnded({ exitCode, exitSignal: null, failure: null });
+  assert.deepEqual(
+    [
+      ended(0xc0000005),
+      ended(0xc00000fd),
+      ended(0xc0000135),
+      ended(0xc0000001),
+      ended(0xbfffffff),
+      ended(null),
+    ],
+    [
+      'exit code 0xC0000005, an access violation, so it crashed',
+      'exit code 0xC00000FD, a stack overflow, so it crashed',
+      'exit code 0xC0000135, a library it needs was not found, so it never started',
+      'exit code 0xC0000001, a Windows error status',
+      'exit code 3221225471',
+      'exit code unknown',
+    ],
+    'a Windows exception status is named in hex with what it means, and an ordinary code is left as it is',
   );
 
   // Raced against a deadline, because Node emits no `exit` for a start that failed, and a run
@@ -42293,6 +42590,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,
+  testAnImportOrExportOverAStaleDocCacheRunsAgain,
   testAStaleEnumMemberIsNamed,
   testAStaleStaticFunctionIsNamed,
   testAFailedReloadSaysWhatItKept,

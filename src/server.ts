@@ -77,6 +77,7 @@ import {
 } from './dap_client.js';
 import { ensureHelperCompiled, HIDDEN_DESKTOP } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
+import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import {
   bursts,
   clearEditorLog,
@@ -85,7 +86,7 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from './editor-log.js';
-import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
+import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
@@ -667,7 +668,7 @@ function exited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): boolean {
 /** How a process that has exited ended, for a sentence. */
 function howItExited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): string {
   return run.exitSignal === null
-    ? `exit code ${run.exitCode ?? 'unknown'}`
+    ? exitCodeText(run.exitCode)
     : `ended by ${run.exitSignal}, with no exit code`;
 }
 
@@ -1003,7 +1004,7 @@ export function ourRunEnded(
           : run.endedThrough === 'editor'
             ? 'this server asked the editor to stop it'
             : run.exitCode !== null
-              ? `it exited by itself with code ${run.exitCode}`
+              ? `it exited by itself with ${exitCodeText(run.exitCode)}`
               : run.exitSignal === null
                 ? 'it is no longer running'
                 : `it was ended by ${run.exitSignal}`;
@@ -1864,6 +1865,7 @@ export function exportAnswer(
   before: number | null,
   after: number | null,
   beside: readonly string[] = [],
+  docCacheNote: string | null = null,
 ): ToolResponse {
   const { log } = ending;
   const written = after !== null && after !== before;
@@ -1883,6 +1885,7 @@ export function exportAnswer(
           librariesNotLoaded: notCopied,
           extensionNote: `The export could not load ${notCopied.join(' and ')}: on Windows an engine running as the editor, which an export is, loads a GDExtension from a ~ copy beside the library, and another engine on this project held that copy: it could not be moved aside before the export, or another engine made a new one in between. Export again once that engine has loaded or exited.`,
         }),
+    ...(docCacheNote === null ? {} : { docCacheNote }),
     ...foldedEntriesAnswer(log),
   };
   if (verdict.exported) {
@@ -5320,6 +5323,7 @@ class GodotServer {
             // caller who knows it by its diff needs telling that the diff is the bug and is gone.
             note: uidsLeftNote(after.length),
             ...(imported.extensionNote === undefined ? {} : { extensionNote: imported.extensionNote }),
+            ...(imported.docCacheNote === undefined ? {} : { docCacheNote: imported.docCacheNote }),
           },
         },
         scanned,
@@ -5681,6 +5685,9 @@ class GodotServer {
       if (imported.extensionNote !== undefined) {
         extra['extensionNote'] = imported.extensionNote;
       }
+      if (imported.docCacheNote !== undefined) {
+        extra['docCacheNote'] = imported.docCacheNote;
+      }
     }
 
     const after = await this.operation('get_import_status', statusAsk, projectPath);
@@ -6000,21 +6007,34 @@ class GodotServer {
     // cleanly and wrote nothing read as exported from the last one's file.
     const writtenAt = (): number | null =>
       existsSync(output.absolutePath) ? statSync(output.absolutePath).mtimeMs : null;
-    const before = writtenAt();
-    const listedBefore = filesIn(folder);
-    const freed = freeLibraryCopies(project.value.path);
-    if (freed.setAside.length > 0 || freed.swept.length > 0) {
-      this.logDebug(
-        `Before the export: set aside ${freed.setAside.join(', ')}; swept ${freed.swept.join(', ')}`,
-      );
-    }
-    let ending: EngineRun;
-    try {
+    const caches = editorCacheDirectory(engine.value);
+    const exportOnce = async () => {
+      const before = writtenAt();
+      const listedBefore = filesIn(folder);
+      const cachesBefore = docCachesWritten(caches);
+      const freed = freeLibraryCopies(project.value.path);
+      if (freed.setAside.length > 0 || freed.swept.length > 0) {
+        this.logDebug(
+          `Before the export: set aside ${freed.setAside.join(', ')}; swept ${freed.swept.join(', ')}`,
+        );
+      }
       // An export of a real project is slow, so it gets five minutes rather than no limit.
-      ending = await runEngine(engine.value, exportArgs, { timeout: { ms: 300000, said: 'five minutes' } });
+      const ending = await runEngine(engine.value, exportArgs, {
+        timeout: { ms: 300000, said: 'five minutes' },
+      });
+      const crash = docCacheCrash(ending, cachesBefore, docCachesWritten(caches), 'export');
+      return { ending, before, listedBefore, crash };
+    };
+    let run: Awaited<ReturnType<typeof exportOnce>>;
+    let docCacheNote: string | null;
+    try {
+      const first = await exportOnce();
+      docCacheNote = first.crash;
+      run = first.crash === null ? first : await exportOnce();
     } finally {
       discard(exportLogs);
     }
+    const { ending, before, listedBefore } = run;
     if (ending.exitSignal === null && ending.exitCode === null) {
       return this.createErrorResponse(
         `Export could not be run: ${ending.failure ?? 'the engine gave no exit status'}`,
@@ -6032,6 +6052,7 @@ class GodotServer {
       before,
       writtenAt(),
       beside,
+      docCacheNote,
     );
   }
 
@@ -6327,7 +6348,7 @@ class GodotServer {
             ? `${uncaught.length === 1 ? 'one script error' : `${uncaught.length} script errors`} that failed no case`
             : undefined) ??
           (exitCode === null ? undefined : verdicts[exitCode]) ??
-          (run.exitSignal === null ? `exit ${exitCode ?? 'unknown'}` : howItExited(run)));
+          howItExited(run));
     const nothingAt = missing.join(' and ');
     const verdict = missing.length === 0 ? ranAs : `${ranAs}; nothing at ${nothingAt}`;
     const missingNote =
