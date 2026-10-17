@@ -739,27 +739,38 @@ export function failedCases(report: TestReport, printed: string): FailedCase[] {
 
 /**
  * [param failed] held to about [param budget] characters of JSON: every case still named, with its
- * first message, and the detail and reports of the cases past the budget left out and counted. A
- * run whose every case fails on one broken class is the run whose answer matters most, and it is
- * the one that outgrew the client.
+ * first message, and the detail and reports of the largest cases left out and counted. A run whose
+ * every case fails on one broken class is the run whose answer matters most, and it is the one that
+ * outgrew the client.
+ *
+ * The smallest cases are kept whole first, so one case printing thousands of different lines costs
+ * its own detail rather than everyone's, and which cases keep theirs does not depend on the order
+ * gdUnit4 ran the suites in, which differs between platforms.
  */
 export function failedWithin(
   failed: readonly FailedCase[],
   budget: number,
 ): { readonly failed: readonly FailedCase[]; readonly briefed: number } {
+  const sizes = failed.map((entry) => JSON.stringify(entry).length);
+  const smallestFirst = sizes.map((_, index) => index).sort((a, b) => (sizes[a] ?? 0) - (sizes[b] ?? 0));
+  const whole = new Set<number>();
   let spent = 0;
-  let briefed = 0;
-  const kept = failed.map((entry) => {
-    const size = JSON.stringify(entry).length;
-    if (briefed === 0 && spent + size <= budget) {
-      spent += size;
+  for (const index of smallestFirst) {
+    const size = sizes[index] ?? 0;
+    if (spent + size > budget) {
+      break;
+    }
+    spent += size;
+    whole.add(index);
+  }
+  const kept = failed.map((entry, index) => {
+    if (whole.has(index)) {
       return entry;
     }
-    briefed += 1;
     const { detail: _detail, reports: _reports, reportsLeftOut: _left, ...named } = entry;
     return { ...named, message: entry.message?.slice(0, 500) ?? null, detail: null };
   });
-  return { failed: kept, briefed };
+  return { failed: kept, briefed: failed.length - whole.size };
 }
 
 const MASKED_BRACKET = '[lb]';

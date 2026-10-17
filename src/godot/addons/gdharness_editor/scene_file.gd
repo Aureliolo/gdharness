@@ -211,16 +211,25 @@ static func make_folder_for(file_path: String) -> String:
 ## Why [param script], loaded from [param script_path], cannot be attached because the editor could not
 ## compile it, or "". A script that did not compile has no base type, and the refusal built from that
 ## said "start.gd extends , so it cannot be on a Control root" about a script that was fine, whose
-## failure was a class it called being behind in the editor.
+## failure was a class it called being behind in the editor. A headless engine compiles every
+## script from its file, so only an editor can hold a copy that is behind.
 static func uncompiled(script: Script, script_path: String) -> String:
 	if not str(script.get_instance_base_type()).is_empty():
 		return ""
+	if not Engine.is_editor_hint():
+		return (
+			(
+				"%s does not compile, so it cannot be attached. script_diagnostics on it gives the "
+				+ "parser's errors."
+			)
+			% script_path
+		)
 	return (
 		(
-			"%s does not compile here, so it cannot be attached. script_diagnostics on it gives "
-			+ "the parser's errors. If they deny a member that another class's file declares, the "
-			+ "editor's copy of that class is behind: editor_rescan with reloadScript on that class, then "
-			+ "ask again."
+			"%s does not compile in the editor, so it cannot be attached. script_diagnostics on it "
+			+ "gives the parser's errors. If they deny a member that another class's file declares, "
+			+ "the editor's copy of that class is behind: editor_rescan with reloadScript on that "
+			+ "class, then ask again."
 		)
 		% script_path
 	)

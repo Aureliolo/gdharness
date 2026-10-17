@@ -32866,7 +32866,7 @@ async function testARunawayTestRunAnswersASizeTheClientTakes(): Promise<void> {
       assert.equal(withoutDetail.length, briefed, `the cases past the budget are named alone: ${said}`);
       assert.match(
         text(get(answer, 'note')),
-        new RegExp(`The last ${briefed} of the 121 failing cases`),
+        new RegExp(`${briefed} of the 121 failing cases, those with the largest reports, are named`),
         said,
       );
       assert.ok(sent < 2_000_000, `the answer is well inside what the client takes: ${sent} characters`);
@@ -41615,6 +41615,24 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     );
     assert.match(broken, /editor_launch with hidden: true/, broken);
     assert.equal(fileOf('broken.tscn'), before, 'and the file is as it was');
+    // A headless engine compiles the script from its file, so no copy of a class can be behind and
+    // the editor's remedy for one is not offered.
+    const attached =
+      textOf(
+        await call('scene_create', {
+          op: 'create',
+          scenePath: 'attached.tscn',
+          rootNodeType: 'Node',
+          script: 'res://broken.gd',
+        }),
+      ) ?? '';
+    assert.match(
+      attached,
+      /res:\/\/broken\.gd does not compile, so it cannot be attached\. script_diagnostics on it gives the parser's errors\./,
+      attached,
+    );
+    assert.doesNotMatch(attached, /editor_rescan/, attached);
+    assert.ok(!existsSync(join(project, 'attached.tscn')), 'and a refused create leaves no file');
 
     // An editor of the project that has not reached this server holds its own copy of what it has
     // open, so a write waits for it; once it has gone, the same write goes through.

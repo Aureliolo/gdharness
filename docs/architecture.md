@@ -898,7 +898,8 @@ past 16 MB, losing the call and every later tool until the server is reconnected
 escaped again inside the JSON-RPC message. An answer past 4 MB is written to files in a scratch
 directory and answered with where, beside the short fields of its top level. `project_test` bounds
 its own answer first: identical reports in a case are folded, at most twenty different ones are
-kept, and past about a megabyte the failing cases are named with their first message only. A run of
+kept, and past about a megabyte the failing cases with the largest reports are named with their
+first message only. A run of
 125 cases failing on one broken class answered 18 MB before that.
 
 JSON keys are text, so a dictionary keyed by anything else is answered as its entries,

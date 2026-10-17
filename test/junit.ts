@@ -415,6 +415,21 @@ function testARunawayCaseIsFoldedAndBounded(): void {
     JSON.stringify(held.failed).length < size * 3 + 125 * 400,
     `the whole list stays near its budget: ${JSON.stringify(held.failed).length}`,
   );
+
+  // The largest case gives up its detail first, wherever it ran, and the order is kept.
+  const small = JSON.stringify(loop).length;
+  assert.ok(JSON.stringify(longest).length > small * 2, 'the long case is the largest');
+  const mixed = failedWithin([longest, loop, loop], small * 2);
+  assert.deepEqual(
+    mixed.failed.map((entry) => [entry.name, entry.detail === null, entry.reports?.length]),
+    [
+      ['test_long', true, undefined],
+      ['test_loop', false, 4],
+      ['test_loop', false, 4],
+    ],
+    'the long case is named alone and the two loops keep their reports',
+  );
+  assert.equal(mixed.briefed, 1);
 }
 
 function testASuiteWithASpaceInItsPathKeepsItsOrphans(): void {

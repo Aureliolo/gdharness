@@ -6519,7 +6519,7 @@ class GodotServer {
         [
           missingNote,
           briefed > 0
-            ? `The last ${briefed} of the ${failed.length} failing cases are named with their first message only, since their reports would have made the answer too large to deliver; pass one case's suite path to see its reports.`
+            ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver; pass one case's suite path to see its reports.`
             : undefined,
           notApplied.length > 0
             ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
