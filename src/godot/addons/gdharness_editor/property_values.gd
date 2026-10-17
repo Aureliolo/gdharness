@@ -272,6 +272,9 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 		var elements: Array = elements_of(declared)
 		if _fraction(raw, expected_type, elements):
 			return [false, _fraction_refusal(target, property, raw)]
+		var rounded: String = Serialisation.inexact(raw, expected_type)
+		if not rounded.is_empty():
+			return [false, "%s.%s holds int: %s." % [target.get_class(), property, rounded]]
 		_refused = ""
 		value = parse(raw, expected_type, elements)
 		if not _refused.is_empty():

@@ -151,9 +151,13 @@ so take it off when the question it was for is answered.
 
 \`scene_tree\` for what a scene holds, rather than what the \`.tscn\` text implies, and
 \`resource_edit read\` for a resource: both read the file through the editor when one serves the
-project and through a headless engine when none does, with the same answer. \`scene_node\`,
-\`scene_signal\` and the other \`resource_edit\` ops but \`move\` change it through the editor, so the
-files keep their formatting. \`script_info\` comes from the editor's own language server, and so does
+project and through a headless engine when none does, with the same answer. \`scene_create\`,
+\`scene_node\`, \`scene_signal\` and the other \`resource_edit\` ops but \`move\` change it through the
+editor when one serves the project, so the files keep their formatting, and through a headless
+engine running the editor's own tool when none does. That engine runs the scene's scripts, which an
+editor runs only as tools, so the answer puts back what they changed as the file loaded, and refuses a
+file where it cannot, such as a scene whose script does not compile; open the editor
+(\`editor_launch\` with \`hidden: true\`) and ask again for those. \`script_info\` comes from the editor's own language server, and so does
 \`script_diagnostics\` when this project's editor is open; without it a headless engine compiles the
 scripts and reports their errors, with lines but no columns and no warnings.
 

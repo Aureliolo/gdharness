@@ -156,6 +156,11 @@ static func cuts(given: Variant, type: int) -> bool:
 	return not (whole and (value == 0.0 or value == 1.0))
 
 
+## Why [param given] may not be the whole number sent, or "": see [method Serialisation.inexact].
+static func inexact(given: Variant, type: int) -> String:
+	return Serialisation.inexact(given, type)
+
+
 ## How a value of [param type] is written to be read as one, or empty when it is not built from fields.
 static func written_as(type: int) -> String:
 	return Serialisation.written_as(type)

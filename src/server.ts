@@ -23,6 +23,7 @@ import {
   readSync,
   rmdirSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, normalize, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -117,6 +118,7 @@ import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-ope
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
   failedCases,
+  failedWithin,
   finishesASuite,
   hookFailuresPrinted,
   ignoredYetRan,
@@ -325,6 +327,22 @@ const UPDATE_NOTICE_EVERY = 500;
  * once, rare enough that it is never the reason an answer got longer.
  */
 const FEEDBACK_NOTICE_EVERY = 250;
+
+/**
+ * About how many characters of JSON `project_test` gives the failing cases before it names the
+ * rest without their detail. Every case is still named; past this, nobody reads the reports in an
+ * answer anyway, and the run that grows one this large is a single broken class failing everything.
+ */
+const FAILED_BUDGET = 1_000_000;
+
+/**
+ * The most bytes one answer is sent with; a larger one is written to a file and answered with where.
+ *
+ * Claude Code closes the connection on a message past 16 MB, and the call and every later tool go
+ * with it until the server is reconnected by hand. The answer's text is escaped again inside the
+ * JSON-RPC message, which can come near to doubling it, so this sits well inside.
+ */
+const ANSWER_BUDGET = 4_000_000;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -3261,6 +3279,8 @@ class GodotServer {
   /** The runtime calls being answered, each with the game it went to. */
   private readonly callsOnGames = new Set<CallOnAGame>();
   private callsTaken = 0;
+  /** Where answers too large to send are written, made the first time one is. */
+  private answersDirectory: string | undefined;
   /** The client the lifecycle log last named, so a line is written only when it changes. */
   private clientNoted: string | null = null;
   /** The command line of the process that started this one, once asked, for the ended line. */
@@ -3865,11 +3885,83 @@ class GodotServer {
           () => this.answered(spec.name, checked.op ?? '', args),
           progress,
         );
-        return this.withFeedbackNotice(this.withUpdateNotice(answer));
+        return this.withinTheClientsLimit(spec.name, this.withFeedbackNotice(this.withUpdateNotice(answer)));
       } finally {
         this.inFlight.delete(call);
       }
     });
+  }
+
+  /**
+   * [param answer] as it is when it fits in {@link ANSWER_BUDGET}, and otherwise written whole to
+   * files and answered with where they are, beside whatever of its top level is small enough to
+   * read. A tool bounds its own answer where it knows how; this is for the shape nobody bounded,
+   * which otherwise loses the call and the connection together.
+   */
+  private withinTheClientsLimit(tool: string, answer: ToolResponse): ToolResponse {
+    const sizeOf = (item: ToolResponse['content'][number]): number =>
+      item.type === 'text' ? Buffer.byteLength(item.text) : item.data.length;
+    const bytes = answer.content.reduce((sum, item) => sum + sizeOf(item), 0);
+    if (bytes <= ANSWER_BUDGET) {
+      return answer;
+    }
+    this.answersDirectory ??= scratchDirectory('answers');
+    const directory = this.answersDirectory;
+    const stem = `${tool}-${Date.now()}`;
+    let savedAt: string[] | undefined;
+    let notSaved: string | undefined;
+    try {
+      savedAt = answer.content.map((item, index) => {
+        const file = join(
+          directory,
+          item.type === 'text'
+            ? `${stem}-${index}.txt`
+            : `${stem}-${index}.${item.mimeType.split('/')[1] ?? 'bin'}`,
+        );
+        writeFileSync(file, item.type === 'text' ? item.text : Buffer.from(item.data, 'base64'));
+        return file;
+      });
+    } catch (error) {
+      notSaved = errorMessage(error);
+    }
+    const first = answer.content[0];
+    let parsed: unknown = null;
+    try {
+      parsed = first?.type === 'text' ? JSON.parse(first.text) : null;
+    } catch {
+      // Prose rather than JSON: nothing of it is kept but where it was written.
+    }
+    const small: Record<string, unknown> = {};
+    const leftOut: string[] = [];
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      for (const [key, value] of Object.entries(parsed)) {
+        if (JSON.stringify(value).length <= 2_000) {
+          small[key] = value;
+        } else {
+          leftOut.push(key);
+        }
+      }
+    }
+    return {
+      ...answer,
+      content: [
+        {
+          type: 'text',
+          text: answerJson({
+            ...small,
+            answerTooLarge: {
+              bytes,
+              savedAt,
+              leftOut: leftOut.length > 0 ? leftOut : undefined,
+              note:
+                savedAt === undefined
+                  ? `The answer was ${bytes} bytes, past the ${ANSWER_BUDGET} this server sends in one message (Claude Code closes the connection past 16 MB), and writing it to a file failed: ${notSaved ?? 'no reason given'}. The fields of its top level that are short are kept here.`
+                  : `The answer was ${bytes} bytes, past the ${ANSWER_BUDGET} this server sends in one message (Claude Code closes the connection past 16 MB), so it was written whole to savedAt; read it from there. The fields of its top level that are short are kept here. The files are removed once this server has stopped.`,
+            },
+          }),
+        },
+      ],
+    };
   }
 
   /**
@@ -4278,6 +4370,12 @@ class GodotServer {
         ? await this.handleViaBridge(command, contained.value, op === '' ? tool : `${tool} ${op}`)
         : contained.response;
     };
+    const editorOrEngine = async (
+      command: string,
+      effect: 'reads' | 'writes',
+      extra: OperationParams = {},
+    ): Promise<ToolResponse> =>
+      await this.editorOrEngine(command, { ...arguments_, ...extra }, `${tool} ${op}`, effect);
 
     switch (tool) {
       case 'project_info':
@@ -4295,7 +4393,9 @@ class GodotServer {
         return await this.handleRunTests(args);
 
       case 'scene_create':
-        return op === 'create' ? await bridge('create_scene') : await bridge('save_scene');
+        return op === 'create'
+          ? await editorOrEngine('create_scene', 'writes')
+          : await editorOrEngine('save_scene', 'writes');
       case 'scene_tree':
         return await this.readFromFile(
           args,
@@ -4311,28 +4411,28 @@ class GodotServer {
       case 'scene_node':
         switch (op) {
           case 'add':
-            return await bridge('add_node');
+            return await editorOrEngine('add_node', 'writes');
           case 'get':
-            return await bridge('get_node_properties');
+            return await editorOrEngine('get_node_properties', 'reads');
           case 'set':
-            return await bridge('set_node_properties');
+            return await editorOrEngine('set_node_properties', 'writes');
           case 'duplicate':
-            return await bridge('duplicate_node', { parentPath: args['parentNodePath'] });
+            return await editorOrEngine('duplicate_node', 'writes', { parentPath: args['parentNodePath'] });
           case 'reparent':
-            return await bridge('reparent_node');
+            return await editorOrEngine('reparent_node', 'writes');
           case 'delete':
-            return await bridge('delete_node');
+            return await editorOrEngine('delete_node', 'writes');
           default:
-            return await bridge('set_tilemap_cells', { tilemapNodePath: args['nodePath'] });
+            return await editorOrEngine('set_tilemap_cells', 'writes', { tilemapNodePath: args['nodePath'] });
         }
       case 'scene_signal':
         switch (op) {
           case 'connect':
-            return await bridge('connect_signal');
+            return await editorOrEngine('connect_signal', 'writes');
           case 'disconnect':
-            return await bridge('disconnect_signal');
+            return await editorOrEngine('disconnect_signal', 'writes');
           default:
-            return await bridge('list_connections');
+            return await editorOrEngine('list_connections', 'reads');
         }
       case 'scene_animation':
         switch (op) {
@@ -4404,17 +4504,17 @@ class GodotServer {
             );
           }
           case 'create':
-            return await bridge('create_resource');
+            return await editorOrEngine('create_resource', 'writes');
           case 'modify':
-            return await bridge('modify_resource');
+            return await editorOrEngine('modify_resource', 'writes');
           case 'create_shader':
-            return await bridge('create_shader', { shaderPath: args['resourcePath'] });
+            return await editorOrEngine('create_shader', 'writes', { shaderPath: args['resourcePath'] });
           case 'create_tileset':
-            return await bridge('create_tileset', { tilesetPath: args['resourcePath'] });
+            return await editorOrEngine('create_tileset', 'writes', { tilesetPath: args['resourcePath'] });
           case 'set_theme_color':
-            return await bridge('set_theme_color', { themePath: args['resourcePath'] });
+            return await editorOrEngine('set_theme_color', 'writes', { themePath: args['resourcePath'] });
           default:
-            return await bridge('set_theme_font_size', { themePath: args['resourcePath'] });
+            return await editorOrEngine('set_theme_font_size', 'writes', { themePath: args['resourcePath'] });
         }
 
       case 'editor_launch':
@@ -6318,7 +6418,10 @@ class GodotServer {
       };
     }
 
-    const failed = failedCases(report, Buffer.concat(console).toString('utf8'));
+    const { failed, briefed } = failedWithin(
+      failedCases(report, Buffer.concat(console).toString('utf8')),
+      FAILED_BUDGET,
+    );
     // What the report cannot say. gdUnit4 decides the run's state on orphan nodes and writes none
     // of that into its XML, so a tier that passed every case and left nodes behind arrived as the
     // word "warnings" and nothing else: no failure, no entry, nothing naming a suite. Read off
@@ -6399,6 +6502,7 @@ class GodotServer {
       skipped: report.skipped,
       time: report.time,
       failed,
+      failedWithoutDetail: briefed > 0 ? briefed : undefined,
       hookFailures: hookFailures.length > 0 ? hookFailures : undefined,
       uncaughtScriptErrors: uncaughtFolded.length > 0 ? uncaughtFolded : undefined,
       // Alongside `failed` rather than folded into it: a suite that left nodes behind failed
@@ -6414,6 +6518,9 @@ class GodotServer {
       note:
         [
           missingNote,
+          briefed > 0
+            ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver; pass one case's suite path to see its reports.`
+            : undefined,
           notApplied.length > 0
             ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
             : undefined,
@@ -8270,7 +8377,10 @@ class GodotServer {
       return undefined;
     }
     const connected = this.godotBridge.isConnected() ? this.godotBridge.getStatus().editorPid : undefined;
-    const pids = editorsOfProjectIn(tree, projectPath).filter((pid) => pid !== connected);
+    // A process ended a moment ago can still be listed: on Windows it stays in the process table
+    // until its termination finishes, after its exit code is set, and an editor killed just before
+    // the listing was reported as one on its way.
+    const pids = editorsOfProjectIn(tree, projectPath).filter((pid) => pid !== connected && alive(pid));
     const started = await startTimesOf(pids);
     return pids.map((pid) => {
       const at = started.get(pid) ?? tree.get(pid)?.startedAt;
@@ -12367,6 +12477,71 @@ class GodotServer {
       ...outcome.payload,
       readBy:
         'a headless engine, since no editor serves this project; unsaved changes in an editor are not seen',
+      ...engineExtras(outcome),
+    });
+  }
+
+  /**
+   * A scene or resource tool: through the editor when one serves the project, and otherwise the
+   * editor addon's own tool run by a headless engine, which answers in the same shape. The engine
+   * runs every script, as the editor does not, so the tools put back what scripts change there
+   * (see headless_check.gd) and refuse what they cannot put back.
+   *
+   * An editor of the project that is running and has not reached this server holds its own copy of
+   * any scene it has open, and a save there would put back what the engine wrote, so a write is
+   * refused until that editor connects.
+   */
+  private async editorOrEngine(
+    command: string,
+    args: OperationParams,
+    askedAs: string,
+    effect: 'reads' | 'writes',
+  ): Promise<ToolResponse> {
+    const contained = this.containProjectFiles(args);
+    if (!contained.ok) {
+      return contained.response;
+    }
+    const project = this.project(contained.value);
+    if (!project.ok) {
+      return project.response;
+    }
+    const projectPath = project.value.path;
+    const waited = await this.waitForTheEditorOpenedHere(contained.value, []);
+    if (this.editorHasOpen(projectPath)) {
+      return await this.handleViaBridge(command, contained.value, askedAs);
+    }
+    if (effect === 'writes') {
+      if (waited !== null) {
+        return waited;
+      }
+      const arriving = await this.editorsNotYetConnected(projectPath);
+      if (arriving !== undefined && arriving.length > 0) {
+        const named = arriving.map((one) => `pid ${one.pid}`).join(', ');
+        return this.createErrorResponse(
+          `${askedAs} was not run: an editor of this project is running (${named}) and has not reached this server, and saving a scene or resource it holds would put back what a write made around it.`,
+          [
+            'editor_status names it under editorsNotYetConnected and says when it has connected; the write then goes through it',
+            `If it never connects it is not reaching this server: end ${arriving.length === 1 ? 'that pid' : 'those pids'} and ask again`,
+          ],
+        );
+      }
+    }
+    const outcome = await this.operation(
+      'run_editor_tool',
+      { command, arguments: contained.value },
+      projectPath,
+    );
+    if (!outcome.ok) {
+      return this.answer(outcome);
+    }
+    return this.jsonTextResponse({
+      ...outcome.payload,
+      ...(effect === 'reads'
+        ? {
+            readBy:
+              'a headless engine, since no editor serves this project; unsaved changes in an editor are not seen',
+          }
+        : { writtenBy: 'a headless engine, since no editor serves this project' }),
       ...engineExtras(outcome),
     });
   }
