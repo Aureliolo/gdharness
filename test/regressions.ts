@@ -31,6 +31,7 @@ import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { alive } from '../src/alive.js';
 import { answerJson } from '../src/answer-json.js';
+import { scriptsAutoloaded } from '../src/autoload-failure.js';
 import {
   bootNotePath,
   halfAsLongAgain,
@@ -232,6 +233,7 @@ import {
 } from '../src/script-profile.js';
 import {
   aboveTheRunner,
+  autoloadNotCompiledNote,
   captureDestinationRefusal,
   captureDetail,
   editorsOfProjectIn,
@@ -256,6 +258,7 @@ import {
   profileAnswer,
   profileOnStart,
   projectSourceOf,
+  repeatingScriptError,
   runIsUp,
   runtimeVerdict,
   scanWaitAnswer,
@@ -32272,8 +32275,9 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
  * Hung sends a reader looking for a deadlock in the last suite named, and a run printing a passing
  * case every few milliseconds up to the kill came back as hung: sixty cases reported PASSED in the
  * entries of an answer that said it had stopped. The rule is rendered at both sides of its line
- * first, then held against real runs: a suite that prints steadily past the limit, and one that
- * goes quiet in its first case.
+ * first, then held against real runs: a suite that prints steadily past the limit, one that goes
+ * quiet in its first case, and one repeating a script error in a loop, which had printed up to the
+ * kill and was told to wait longer.
  */
 async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
   const running = timedOutVerdict(25_000, 40);
@@ -32296,6 +32300,36 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
     'a long timeout waits thirty seconds of silence',
   );
   assert.equal(timedOutVerdict(600_000, 30_000).hung, true);
+
+  // A run repeating one script error to the kill is named for it, whatever else it printed before.
+  const log = new GameLog();
+  log.append('stdout', 'Run Test Suite: res://looping/looping_test.gd\n');
+  const failing = (times: number, at: string): string =>
+    Array.from(
+      { length: times },
+      () => `SCRIPT ERROR: Cannot call method 'get_class' on a null value.\n   at: ${at}\n`,
+    ).join('');
+  log.append('stderr', failing(99, '_fails (res://looping/looping_test.gd:6)'));
+  const repeatedAt = (): ReturnType<typeof repeatingScriptError> =>
+    repeatingScriptError(log.all, (entry) => log.raisedByScript(entry));
+  assert.equal(repeatedAt(), null, 'ninety-nine repeats are not yet a loop');
+  log.append('stderr', failing(1, '_fails (res://looping/looping_test.gd:6)'));
+  assert.deepEqual(repeatedAt(), {
+    text: "Cannot call method 'get_class' on a null value.",
+    where: '_fails (res://looping/looping_test.gd:6)',
+    times: 100,
+  });
+  const looping = timedOutVerdict(25_000, 3, repeatedAt());
+  assert.equal(looping.hung, false, JSON.stringify(looping));
+  assert.equal(
+    looping.verdict,
+    "timed out after 25000 ms repeating one script error, printed 100 times: Cannot call method 'get_class' on a null value. (_fails (res://looping/looping_test.gd:6)). A line that fails on every pass of a loop does this, and a longer timeoutMs would not end it",
+  );
+  log.append('stderr', failing(1, '_fails (res://looping/looping_test.gd:9)'));
+  assert.equal(repeatedAt(), null, 'the same error raised somewhere else is not the loop repeating');
+  log.append('stderr', failing(1, '_fails (res://looping/looping_test.gd:6)'));
+  log.append('stdout', '  test_next PASSED 4ms\n');
+  assert.equal(repeatedAt(), null, 'a run that printed something else after its errors had moved on');
 
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
@@ -32345,6 +32379,29 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
         '',
       ].join('\n'),
     );
+    // A case waiting in a loop for a call that fails on every pass, which is what ostinato's stepped
+    // suite did against a class that had not compiled.
+    mkdirSync(join(projectDir, 'looping'));
+    writeFileSync(
+      join(projectDir, 'looping', 'looping_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func _fails() -> bool:',
+        '\tvar nothing: Object = null',
+        '\treturn nothing.get_class() == ""',
+        '',
+        '',
+        'func test_waits_for_a_call_that_fails() -> void:',
+        '\tvar done: bool = false',
+        '\twhile not done:',
+        '\t\tOS.delay_msec(5)',
+        '\t\tdone = _fails()',
+        '\tassert_bool(done).is_true()',
+        '',
+      ].join('\n'),
+    );
     await withStdioServer(async (_call, request) => {
       const run = async (path: string): Promise<unknown> => {
         const response = await request(
@@ -32387,11 +32444,172 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
         /^hung: killed after 12000 ms, having printed nothing/,
         JSON.stringify(stuck),
       );
-      // Both runs were killed, which is when an engine still holds its log as the removal comes.
+      const loop = await run('res://looping');
+      assert.equal(get(loop, 'hung'), false, JSON.stringify(loop));
+      assert.equal(get(loop, 'timedOut'), true, JSON.stringify(loop));
+      assert.match(
+        String(get(loop, 'verdict')),
+        /^timed out after 12000 ms repeating one script error, printed \d+ times: .*'get_class'.* \(_fails \(res:\/\/looping\/looping_test\.gd:6\)\)\. A line that fails on every pass of a loop does this, and a longer timeoutMs would not end it$/,
+        JSON.stringify(loop),
+      );
+      // All the runs were killed, which is when an engine still holds its log as the removal comes.
       assert.deepEqual(
         await userDataLeftBy('CutShort', began),
         [],
         'a run cut short leaves no user data directory behind',
+      );
+    });
+  } finally {
+    sweep(projectDir);
+  }
+}
+
+/**
+ * A test run whose autoload did not compile is stopped and named for the script that did not.
+ *
+ * Reported from ostinato as #1153: a parse error in a class an autoload depends on left every
+ * suite running without it, a case looping on a call into it printed the same script error for
+ * the whole timeout, and the answer said the run was still running and wanted a longer timeoutMs.
+ * The suite here passes steadily for twenty seconds, longer than the limit, so an answer without
+ * timedOut is one the stop gave. The autoload is a scene, whose script is read off it, and the
+ * notes no run reaches are rendered first.
+ */
+async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
+  const errors = foldedScriptErrors([
+    {
+      path: 'res://boot/guard.gd',
+      line: null,
+      message: 'Compile Error: Failed to compile depended scripts.',
+    },
+  ]);
+  const unread = autoloadNotCompiledNote({ name: 'Guard', path: 'res://boot/guard.gd' }, errors, false);
+  assert.match(
+    unread,
+    /^No result counts: the autoload Guard \(res:\/\/boot\/guard\.gd\) did not compile\. One script failed only through it, listed under failedThroughDependency\. Every suite runs with the autoloads/,
+    unread,
+  );
+  assert.match(unread, /The run ended before that was read, and what its suites said is set aside\./, unread);
+  const two = autoloadNotCompiledNote(
+    { name: 'Guard', path: 'res://boot/guard.gd' },
+    foldedScriptErrors([
+      {
+        path: 'res://core/broken.gd',
+        line: 5,
+        message: 'Parse Error: Identifier "nowhere" not declared in the current scope',
+      },
+      { path: 'res://core/other.gd', line: 2, message: 'Parse Error: Unexpected "Indent" in class body.' },
+    ]),
+    true,
+  );
+  assert.match(
+    two,
+    /did not compile, and the first error the engine raised compiling was at res:\/\/core\/broken\.gd:5: Parse Error: Identifier "nowhere" not declared in the current scope\. One more error is under scriptErrors\. Every suite/,
+    two,
+  );
+
+  // A script autoload by its own path and a scene by the scripts it names, with or without the star
+  // that makes it a global, since the engine loads both; a scene that is not there names nothing.
+  const named = mkdtempSync(join(tmpdir(), 'gdharness-autoloads-named-'));
+  try {
+    writeFileSync(
+      join(named, 'project.godot'),
+      'config_version=5\n\n[autoload]\n\nGuard="*res://boot/guard.gd"\nHud="res://ui/hud.tscn"\nGone="*res://ui/gone.tscn"\n',
+    );
+    mkdirSync(join(named, 'ui'));
+    writeFileSync(
+      join(named, 'ui', 'hud.tscn'),
+      '[gd_scene load_steps=3 format=3]\n\n[ext_resource type="Script" uid="uid://b1" path="res://ui/hud.gd" id="1"]\n' +
+        '[ext_resource type="Texture2D" path="res://ui/hud.png" id="2"]\n',
+    );
+    assert.deepEqual(
+      [...scriptsAutoloaded(named)],
+      [
+        ['res://boot/guard.gd', 'Guard'],
+        ['res://ui/hud.gd', 'Hud'],
+      ],
+    );
+  } finally {
+    sweep(named);
+  }
+
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('autoload compile regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-autoload-broken-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="AutoloadBroken"\n\n' +
+        '[autoload]\n\nGuard="*res://boot/guard.tscn"\n',
+    );
+    cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(projectDir, 'core'));
+    writeFileSync(
+      join(projectDir, 'core', 'broken.gd'),
+      'class_name Broken\nextends RefCounted\n\n\nfunc step() -> bool:\n\treturn nowhere\n',
+    );
+    mkdirSync(join(projectDir, 'boot'));
+    writeFileSync(
+      join(projectDir, 'boot', 'guard.gd'),
+      'extends Node\n\nvar broken: Broken = Broken.new()\n',
+    );
+    writeFileSync(
+      join(projectDir, 'boot', 'guard.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://boot/guard.gd" id="1"]\n\n' +
+        '[node name="Guard" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    mkdirSync(join(projectDir, 'steady'));
+    writeFileSync(
+      join(projectDir, 'steady', 'steady_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        ...Array.from({ length: 400 }, (_, index) =>
+          [
+            '',
+            '',
+            `func test_case_${index}() -> void:`,
+            '\tawait get_tree().create_timer(0.05).timeout',
+            '\tassert_bool(true).is_true()',
+          ].join('\n'),
+        ),
+        '',
+      ].join('\n'),
+    );
+    await withStdioServer(async (_call, request) => {
+      const response = await request(
+        'tools/call',
+        {
+          name: 'project_test',
+          arguments: { projectPath: projectDir, path: 'res://steady', timeoutMs: 12_000 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+      const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+      const shown = blocks.join('\n');
+      assert.equal(get(answer, 'timedOut'), undefined, `stopped before its timeout: ${shown}`);
+      assert.equal(get(answer, 'passed'), false, shown);
+      assert.equal(
+        get(answer, 'verdict'),
+        'the autoload Guard (res://boot/guard.gd) did not compile, so no result counts',
+        shown,
+      );
+      assert.deepEqual(
+        asArray(get(answer, 'scriptErrors')).map((one) => [get(one, 'path'), get(one, 'line')]),
+        [['res://core/broken.gd', 6]],
+        shown,
+      );
+      assert.deepEqual(get(answer, 'failedThroughDependency'), ['res://boot/guard.gd'], shown);
+      assert.match(
+        blocks[0] ?? '',
+        /^No result counts: the autoload Guard \(res:\/\/boot\/guard\.gd\) did not compile, and the first error the engine raised compiling was at res:\/\/core\/broken\.gd:6: .*nowhere.* The run was stopped as soon as the engine said so rather than left to its timeout\./,
+        shown,
       );
     });
   } finally {
@@ -43419,6 +43637,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGdUnitRunner,
   testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,
+  testATestRunWhoseAutoloadDidNotCompileStops,
   testAStackOverflowIsNotAPass,
   testARunawayTestRunAnswersASizeTheClientTakes,
   testATestRunNamesItsLeaksAndItsUnusedIgnores,
