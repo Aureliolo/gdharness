@@ -563,6 +563,10 @@ static func _walk_from(object: Object, path: String) -> Dictionary:
 ## null, and the method list says how many a method takes: its parameters less those with defaults,
 ## up to all of them, or any number past that for one taking varargs.
 static func _argument_count_refused(holder: Object, method: String, given: int) -> String:
+	# A node's method list runs to hundreds of entries, and walking it costs a couple of milliseconds
+	# of the game's frame; a call giving exactly the arguments the method declares needs no walk.
+	if given == holder.get_method_argument_count(method):
+		return ""
 	for entry: Dictionary in holder.get_method_list():
 		if str(entry.get("name", "")) != method:
 			continue

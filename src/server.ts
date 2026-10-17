@@ -1641,9 +1641,14 @@ function unlistedValues(schema: unknown, value: unknown, path: string): string[]
   const fields = schema as Readonly<Record<string, unknown>>;
   const listed = fields['enum'];
   if (Array.isArray(listed) && typeof value === 'string') {
-    return listed.includes(value)
-      ? []
-      : [`${path} as one of ${listed.join(', ')}, not ${JSON.stringify(value)}`];
+    if (listed.includes(value)) {
+      return [];
+    }
+    return [
+      listed.length === 1
+        ? `${path} only as ${String(listed[0])}, not ${JSON.stringify(value)}`
+        : `${path} as one of ${listed.join(', ')}, not ${JSON.stringify(value)}`,
+    ];
   }
   if (Array.isArray(value)) {
     return value.flatMap((element, index) => unlistedValues(fields['items'], element, `${path}[${index}]`));
@@ -2739,6 +2744,11 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       `scriptMs, ${table.scriptMs}ms, is more than the ${reading.coveredMs}ms the profile covers.${table.superCallers > 0 ? ' The super calls above, counted twice, can account for some or all of that; whatever they do not is' : ' One thread cannot spend more time than passes, so that is'} functions running on several threads at once, through WorkerThreadPool or Thread. The engine adds every thread's time to the same function and does not say which thread a call ran on, so a function's selfMs is summed over every thread it ran on rather than taken out of frames, and a function that waits for the others, through wait_for_group_task_completion or wait_to_finish, has the wait in its own selfMs as well.`,
     );
   }
+  if (table.addonFunctions > 0) {
+    notes.push(
+      `The gdharness runtime addon's own functions took ${table.addonMs}ms of self time over ${table.addonFunctions === 1 ? 'one function' : `${table.addonFunctions} functions`}, answering tools such as runtime_invoke and sending the profile. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs, since they are not the game's work, though that time was spent in the game's frames.`,
+    );
+  }
   notes.push(...cappedNotes(totals));
   if (totals.unreadable > 0) {
     notes.push(
@@ -2755,6 +2765,8 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     scriptMs: table.scriptMs,
     perCallOverheadUs: table.perCallUs ?? undefined,
     functionsCounted: table.counted,
+    runtimeAddonMs: table.addonFunctions > 0 ? table.addonMs : undefined,
+    runtimeAddonFunctions: table.addonFunctions > 0 ? table.addonFunctions : undefined,
     omitted: table.omitted > 0 ? table.omitted : undefined,
     functions: table.functions,
     callers: reading.callersOf === undefined ? undefined : callersAnswer(totals, reading.callersOf),

@@ -1904,6 +1904,45 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     undefined,
     'and without the runtime addon there is no measurement to report',
   );
+  // The runtime addon answering runtime_invoke inside the game: probe 60 found its argument check,
+  // named _argument_count_refused, above the press it made, so a limit of one returned gdharness and
+  // not the game. Summed apart, the rows, the count and scriptMs are the game's alone.
+  const served = totals({
+    'res://addons/gdharness_runtime/runtime_changes.gd::565::_argument_count_refused': {
+      calls: 3,
+      selfSeconds: 0.006,
+      totalSeconds: 0.006,
+    },
+    'res://addons/gdharness_runtime/runtime_autoload.gd::120::_send_response': {
+      calls: 3,
+      selfSeconds: 0.001,
+      totalSeconds: 0.001,
+    },
+    'res://main.gd::15::press': { calls: 3, selfSeconds: 0.003, totalSeconds: 0.0035 },
+    'res://main.gd::11::step': { calls: 3, selfSeconds: 0.0005, totalSeconds: 0.0005 },
+  });
+  const servedTable = profiledFunctions(served, 1);
+  assert.deepEqual(
+    [servedTable.functions.map((one) => one.function), servedTable.counted, servedTable.scriptMs],
+    [['press'], 2, 3.5],
+    "a limit of one returns the game's costliest function, and the addon's rows count nowhere in the game's",
+  );
+  const servedAnswer = answer({ totals: served });
+  assert.deepEqual(
+    [get(servedAnswer, 'runtimeAddonMs'), get(servedAnswer, 'runtimeAddonFunctions')],
+    [7, 2],
+    'the addon is summed apart rather than dropped',
+  );
+  assert.match(
+    String(servedAnswer['note']),
+    /The gdharness runtime addon's own functions took 7ms of self time over 2 functions, answering tools such as runtime_invoke and sending the profile\. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs/,
+    `the note says where the addon's time went: ${String(servedAnswer['note'])}`,
+  );
+  assert.equal(
+    get(answer({ totals: calibrated }), 'runtimeAddonMs'),
+    undefined,
+    'the calibration rows are the profiler measuring itself, not the addon serving a tool',
+  );
   // Named in the note, since a limit can return none of them: two by name, and seven as the five with
   // the most self time and how many more. Reported from ostinato: nine counted, none in the rows.
   const hot = (count: number): ProfileTotals =>
@@ -33160,7 +33199,7 @@ async function testAProfileSinceAMarkAnswersForOneAction(): Promise<void> {
       unmarked.said,
     );
     const later = await call('editor_run', { op: 'profile', since: 'later' });
-    assert.match(later.said, /^editor_run takes since as one of mark, not "later"\./, later.said);
+    assert.match(later.said, /^editor_run takes since only as mark, not "later"\./, later.said);
 
     const marked = await call('editor_run', { op: 'profile', mark: true });
     assert.equal(get(marked.parsed, 'marked'), true, marked.said);
@@ -33197,6 +33236,17 @@ async function testAProfileSinceAMarkAnswersForOneAction(): Promise<void> {
       `callersOf reads the same difference: ${shown}`,
     );
     assert.match(String(get(sinceMark, 'note')), /^Counted from the mark set \d+ms ago: /, shown);
+    // The presses went through runtime_invoke, so the runtime addon served them inside the game.
+    assert.deepEqual(
+      [
+        asArray(get(sinceMark, 'functions')).filter((row) =>
+          String(get(row, 'script')).startsWith('res://addons/gdharness_runtime/'),
+        ).length,
+        typeof get(sinceMark, 'runtimeAddonMs'),
+      ],
+      [0, 'number'],
+      `the addon serving the presses is summed apart from the game's rows: ${shown}`,
+    );
 
     const whole = await call('editor_run', { op: 'profile' });
     assert.deepEqual(
@@ -37911,6 +37961,18 @@ async function testAnUnlistedValueIsRefusedRatherThanDefaulted(): Promise<void> 
     const named = textOf(sections) ?? JSON.stringify(sections);
     assert.match(named, /include\[1\] as one of/, `the stray element is named by position: ${named}`);
     assert.doesNotMatch(named, /include\[0\]/, `and the good one is not: ${named}`);
+
+    // A set of one is a single value, and "one of mark" read as a list cut short.
+    const single = await server.request('tools/call', {
+      name: 'editor_run',
+      arguments: { op: 'profile', since: 'later' },
+    });
+    const only = textOf(single) ?? JSON.stringify(single);
+    assert.match(
+      only,
+      /^editor_run takes since only as mark, not "later"\./,
+      `a set of one is named as such: ${only}`,
+    );
   } finally {
     await server.stop();
   }
