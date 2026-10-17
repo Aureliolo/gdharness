@@ -254,12 +254,17 @@ static func can_read(holder: Variant, named: String) -> bool:
 ## reports an engine error for one of another type, so a step into a map typed by an enum read the
 ## right entry and left four errors in the game's log for each of the two walks, and the run was
 ## counted as unclean for a read.
+##
+## A step written in double quotes is the key inside them, so a key holding a colon is one step:
+## Alchemill keys its stock by namespaced ids, "stock:\"base:dew\"", and split at that colon the
+## step named a key "base" the map had never had.
 static func _key_in(map: Dictionary, named: String) -> Array:
-	var spellings: Array = [named, StringName(named)]
-	if named.is_valid_int():
-		spellings.append(int(named))
-	if named.is_valid_float():
-		spellings.append(float(named))
+	var word: String = key_written(named)
+	var spellings: Array = [word, StringName(word)]
+	if word.is_valid_int():
+		spellings.append(int(word))
+	if word.is_valid_float():
+		spellings.append(float(word))
 	var typed: int = map.get_typed_key_builtin() if map.is_typed_key() else TYPE_NIL
 	for key: Variant in spellings:
 		if typed != TYPE_NIL and typeof(key) != typed:
@@ -269,9 +274,35 @@ static func _key_in(map: Dictionary, named: String) -> Array:
 	return []
 
 
+## The key a step names: the words inside the quotes of one written in double quotes, read as JSON
+## reads a string so a quote inside is written \", and the step itself otherwise.
+static func key_written(named: String) -> String:
+	if named.length() < 2 or not named.begins_with('"') or not named.ends_with('"'):
+		return named
+	var reader: JSON = JSON.new()
+	if reader.parse(named) != OK or not reader.data is String:
+		return named
+	return reader.data
+
+
+## [param key] written as a step that names it: in double quotes when it holds what a bare step
+## cannot, a colon a path splits at, a bracket that reads as a call, a quote, or nothing at all.
+static func step_naming(key: Variant) -> String:
+	var text: String = str(key)
+	if not (key is String or key is StringName):
+		return text
+	if text.is_empty():
+		return JSON.stringify(text)
+	for character: String in [":", "(", ")", '"']:
+		if text.contains(character):
+			return JSON.stringify(text)
+	return text
+
+
 ## [param reaching] split into its steps at each colon, except one inside a call's brackets or a
-## quoted argument: `get_node("/root/Main"):name` is two steps, and split at every colon a quoted
-## argument holding one became a step that names nothing.
+## quoted argument or key: `get_node("/root/Main"):name` is two steps, and so is
+## `stock:"base:dew"`; split at every colon a quoted argument holding one became a step that names
+## nothing.
 static func steps_of(reaching: String) -> PackedStringArray:
 	var steps: PackedStringArray = []
 	var step: String = ""
@@ -569,17 +600,19 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 		var keys: Array = map.keys()
 		# A key reading as the step and still not reached is one of a type a step cannot spell, and
 		# saying the map has no key 3 while listing 3 among its keys contradicts itself.
+		var word: String = key_written(named)
 		for key: Variant in keys:
-			if str(key) == named:
+			if str(key) == word:
 				return (
 					"%s has a key that reads %s, but it is %s, which a path step cannot name"
 					% [called_as, named, type_string(typeof(key))]
 				)
 		# Eight of them, because a map keyed by something unexpected is told by the first few and a
-		# map of two hundred would bury the sentence saying which key was missing.
+		# map of two hundred would bury the sentence saying which key was missing. Each written as a
+		# step reaching it, so the list says how to name a key holding a colon.
 		var some: Array[String] = []
 		for key: Variant in keys.slice(0, 8):
-			some.append(str(key))
+			some.append(step_naming(key))
 		var rest: String = ""
 		if keys.size() > 8:
 			rest = " and %d more" % [keys.size() - 8]
