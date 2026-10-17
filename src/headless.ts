@@ -16,6 +16,7 @@ import type { GameLog, LogEntry } from './game-log.js';
 import { freeLibraryCopies } from './library-copies.js';
 import { forceNextImport } from './reimport.js';
 import { discard, scratchDirectory } from './scratch.js';
+import { notCompiledIn } from './script-origins.js';
 import type { OperationParams } from './server-types.js';
 
 export interface HeadlessEngine {
@@ -76,7 +77,7 @@ export function engineExtras(
     ...(before.length > 0
       ? {
           engine_messages_before_operation: before,
-          engine_messages_before_operation_note: BEFORE_OPERATION_NOTE,
+          engine_messages_before_operation_note: withNotCompiled(BEFORE_OPERATION_NOTE, before),
         }
       : {}),
     ...(outcome.beforeOperationOmitted === undefined
@@ -84,7 +85,10 @@ export function engineExtras(
       : { engine_messages_before_operation_omitted: outcome.beforeOperationOmitted }),
     ...(outcome.messagesOmitted === undefined ? {} : { engine_messages_omitted: outcome.messagesOmitted }),
     ...(after.length > 0
-      ? { engine_messages_after_answer: after, engine_messages_after_answer_note: AFTER_ANSWER_NOTE }
+      ? {
+          engine_messages_after_answer: after,
+          engine_messages_after_answer_note: withNotCompiled(AFTER_ANSWER_NOTE, after),
+        }
       : {}),
     ...(outcome.afterAnswerOmitted === undefined
       ? {}
@@ -104,6 +108,19 @@ export function engineExtras(
  */
 const AFTER_ANSWER_NOTE =
   "Printed after this operation had written its answer, while the engine ran the project's autoloads and shut down: Godot starts a project's autoloads in every script run and cannot be told not to. An error raised in a project script here is that autoload's own, and none of these changes the answer.";
+
+/**
+ * [param note] with what a script the autoloads could not compile means for the project, when
+ * [param entries] hold one. The note says none of the messages changes the answer, which is true of
+ * the operation and left a caller who had just registered a broken autoload with `saved: true` to
+ * guess that every run of the project now starts without it.
+ */
+function withNotCompiled(note: string, entries: readonly LogEntry[]): string {
+  const path = entries.map(notCompiledIn).find((found) => found !== undefined);
+  return path === undefined
+    ? note
+    : `${note} ${path} did not compile, so every run of this project starts its autoloads without it until it is fixed; its errors are among these.`;
+}
 
 const BEFORE_OPERATION_NOTE =
   "Printed while the engine started the project's autoloads, before this operation ran: an operation that compiles the project's scripts waits for them, because the engine knows an autoload's name only once it is in the tree. An error raised in a project script here is that autoload's own.";

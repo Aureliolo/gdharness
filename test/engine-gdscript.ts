@@ -3121,6 +3121,38 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
       /^get_project_setting hit an error in the operations script, so its answer is left out: .*Out of bounds get index '1'.* \(_faulty \(.*project_config\.gd:\d+\)\)$/,
       partial.message,
     );
+
+    // An autoload whose script does not compile: the note still says the answer stands, and says
+    // what it means for the project, which a raised error does not.
+    assert.doesNotMatch(
+      String(get(extras, 'engine_messages_after_answer_note')),
+      /did not compile/,
+      'an autoload that only raised an error is not called one that did not compile',
+    );
+    writeFileSync(
+      join(dir, 'broken.gd'),
+      'extends Node\n\n\nfunc greet() -> String:\n\treturn missing_name\n',
+    );
+    writeFileSync(
+      join(dir, 'project.godot'),
+      readFileSync(join(dir, 'project.godot'), 'utf8').replace(
+        'Loud="*res://loud.gd"',
+        'Loud="*res://loud.gd"\nBroken="*res://broken.gd"',
+      ),
+    );
+    const beside = await runThroughTheServersOwnPath(
+      engine,
+      'get_project_setting',
+      { setting: 'application/config/name' },
+      dir,
+    );
+    assert.ok(beside.ok, `a read beside a broken autoload still answers: ${beside.ok ? '' : beside.message}`);
+    assert.equal(get(beside.payload, 'value'), 'Answered', JSON.stringify(beside.payload));
+    assert.match(
+      String(get(engineExtras(beside), 'engine_messages_after_answer_note')),
+      /none of these changes the answer\. res:\/\/broken\.gd did not compile, so every run of this project starts its autoloads without it until it is fixed; its errors are among these\.$/,
+      JSON.stringify(engineExtras(beside)),
+    );
   } finally {
     sweep(dir);
     sweep(operations);
