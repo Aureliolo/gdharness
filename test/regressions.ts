@@ -11595,6 +11595,11 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
       true,
       `the game should have announced its runtime: ${textOf(started)}`,
     );
+    assert.equal(
+      get(startedAnswer, 'scene'),
+      'res://main.tscn',
+      `a start that names no scene says which the project started in: ${textOf(started)}`,
+    );
     // The number the game announced, which is the engine. The run's own number is the process the
     // server launched, and under the Windows console build that is a wrapper whose child is the
     // engine: taken from the run, this case expected a number the next server has no way to know.
@@ -22859,8 +22864,9 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
         get(started, 'through'),
         get(started, 'executable'),
         get(started, 'arguments'),
+        get(started, 'scene'),
       ],
-      [true, 'gdharness', build, ['--', script, saves, said]],
+      [true, 'gdharness', build, ['--', script, saves, said], undefined],
       `the build is started with no --path and its own arguments: ${shown}`,
     );
     assert.match(text(get(started, 'message')), /started without a debugger/, shown);
@@ -32381,6 +32387,11 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
     );
     // A case waiting in a loop for a call that fails on every pass, which is what ostinato's stepped
     // suite did against a class that had not compiled.
+    mkdirSync(join(projectDir, 'quick'));
+    writeFileSync(
+      join(projectDir, 'quick', 'quick_test.gd'),
+      'extends GdUnitTestSuite\n\n\nfunc test_passes() -> void:\n\tassert_bool(true).is_true()\n',
+    );
     mkdirSync(join(projectDir, 'looping'));
     writeFileSync(
       join(projectDir, 'looping', 'looping_test.gd'),
@@ -32417,6 +32428,14 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
         const json = blocks.find((text) => text.trimStart().startsWith('{')) ?? '{}';
         return JSON.parse(json) as unknown;
       };
+      // A run that wrote its report says how long the whole call took beside gdUnit4's own seconds.
+      const quick = await run('res://quick');
+      assert.equal(get(quick, 'passed'), true, JSON.stringify(quick));
+      const quickTook = Number(get(quick, 'tookMs'));
+      assert.ok(
+        quickTook > 0 && quickTook < 12_000 && quickTook > Number(get(quick, 'time')) * 1000,
+        `tookMs covers the whole call and so more than the cases' own time: ${JSON.stringify(quick)}`,
+      );
       const steady = await run('res://steady');
       assert.equal(
         get(steady, 'hung'),
@@ -32424,6 +32443,10 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
         `a run printing up to the kill is not hung: ${JSON.stringify(steady)}`,
       );
       assert.equal(get(steady, 'timedOut'), true, JSON.stringify(steady));
+      assert.ok(
+        Number(get(steady, 'tookMs')) >= 12_000,
+        `a run killed at its limit took at least the limit: ${JSON.stringify(steady)}`,
+      );
       assert.match(
         String(get(steady, 'verdict')),
         /^timed out after 12000 ms while still running/,
@@ -32582,18 +32605,29 @@ async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
       ].join('\n'),
     );
     await withStdioServer(async (_call, request) => {
-      const response = await request(
-        'tools/call',
-        {
-          name: 'project_test',
-          arguments: { projectPath: projectDir, path: 'res://steady', timeoutMs: 12_000 },
-        },
-        ENGINE_CALL_TIMEOUT_MS,
-      );
-      const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
-      const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
-      const shown = blocks.join('\n');
+      const ran = async (): Promise<{ answer: unknown; blocks: string[]; shown: string }> => {
+        const response = await request(
+          'tools/call',
+          {
+            name: 'project_test',
+            arguments: { projectPath: projectDir, path: 'res://steady', timeoutMs: 12_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const said = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        return {
+          answer: JSON.parse(said.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown,
+          blocks: said,
+          shown: said.join('\n'),
+        };
+      };
+      const { answer, blocks, shown } = await ran();
       assert.equal(get(answer, 'timedOut'), undefined, `stopped before its timeout: ${shown}`);
+      const took = Number(get(answer, 'tookMs'));
+      assert.ok(
+        took > 0 && took < 12_000,
+        `tookMs is the whole call, under the limit it stopped short of: ${shown}`,
+      );
       assert.equal(get(answer, 'passed'), false, shown);
       assert.equal(
         get(answer, 'verdict'),
@@ -32610,6 +32644,25 @@ async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
         blocks[0] ?? '',
         /^No result counts: the autoload Guard \(res:\/\/boot\/guard\.gd\) did not compile, and the first error the engine raised compiling was at res:\/\/core\/broken\.gd:6: .*nowhere.* The run was stopped as soon as the engine said so rather than left to its timeout\./,
         shown,
+      );
+
+      // The autoload's own script with the error, which the engine reports as a parse error rather
+      // than as a compilation that failed through a dependency.
+      writeFileSync(
+        join(projectDir, 'boot', 'guard.gd'),
+        'extends Node\n\n\nfunc greet() -> String:\n\treturn elsewhere\n',
+      );
+      const own = await ran();
+      assert.equal(get(own.answer, 'timedOut'), undefined, `stopped before its timeout: ${own.shown}`);
+      assert.equal(
+        get(own.answer, 'verdict'),
+        'the autoload Guard (res://boot/guard.gd) did not compile, so no result counts',
+        own.shown,
+      );
+      assert.deepEqual(
+        asArray(get(own.answer, 'scriptErrors')).map((one) => [get(one, 'path'), get(one, 'line')]),
+        [['res://boot/guard.gd', 5]],
+        own.shown,
       );
     });
   } finally {

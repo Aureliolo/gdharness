@@ -3238,10 +3238,10 @@ function scriptsUnder(directory: string, prefix: string): string[] {
   return found;
 }
 
-/** Whether project.godot names a scene for the game to start in. */
-function hasMainScene(projectFile: string): boolean {
+/** The scene project.godot names for the game to start in, or null when it names none. */
+function mainSceneOf(projectFile: string): string | null {
   const scene = parseProjectGodot(readFileSync(projectFile, 'utf8'))['application']?.['run/main_scene'];
-  return typeof scene === 'string' && scene !== '';
+  return typeof scene === 'string' && scene !== '' ? scene : null;
 }
 
 /**
@@ -6283,6 +6283,7 @@ class GodotServer {
 
     // The rebuild waits out the editor's scan before it runs, so what it waited is what this run
     // waited, and the engine below starts on the cache the rebuild left.
+    const began = Date.now();
     const classes = await this.rebuildClassCache(project.value.path);
     if (!classes.ok) {
       return this.answer(classes);
@@ -6369,6 +6370,7 @@ class GodotServer {
       await untilGone([run.process.pid]);
     }
     await run.settled;
+    const tookMs = Date.now() - began;
     // Read again once the run is over, so a run that ended between two looks answers as one that
     // was stopped: whether it got through its suites first is a race, and what they said about
     // code that did not compile is not an answer either way.
@@ -6557,6 +6559,7 @@ class GodotServer {
                 passed: false,
                 verdict,
                 tests: 0,
+                tookMs,
                 exitCode,
                 exitSignal: run.exitSignal ?? undefined,
                 hung,
@@ -6662,6 +6665,7 @@ class GodotServer {
       errors: report.errors,
       skipped: report.skipped,
       time: report.time,
+      tookMs,
       failed,
       failedWithoutDetail: briefed > 0 ? briefed : undefined,
       hookFailures: hookFailures.length > 0 ? hookFailures : undefined,
@@ -8743,7 +8747,7 @@ class GodotServer {
     }
     // Asked to run a project with no main scene, the engine puts up a modal box and waits for
     // a click, even headless on Windows: a process on a pipe that never exits.
-    if (exported === null && !sceneToRun && !hasMainScene(project.value.file)) {
+    if (exported === null && !sceneToRun && mainSceneOf(project.value.file) === null) {
       return this.createErrorResponse('The project sets no main scene, so there is nothing to run.', [
         'Pass scene to run one scene',
         'Choose the main scene with project_settings set_main_scene',
@@ -8949,6 +8953,13 @@ class GodotServer {
       alsoRunning: stranded.length === 0 ? undefined : stranded.map((one) => one.pid),
       pid: started.pid,
       executable: exported?.ok === true ? exported.relativePath : undefined,
+      // Named for a start that left it to the project, whose command line names no scene.
+      scene:
+        exported !== null
+          ? undefined
+          : sceneArgument === null
+            ? mainSceneOf(project.value.file)
+            : `res://${sceneArgument}`,
       arguments: cmdArgs,
       argsNote: engineFlagsNote(given.value),
       // Named here rather than only by editor_output, because a caller who wants to watch the
