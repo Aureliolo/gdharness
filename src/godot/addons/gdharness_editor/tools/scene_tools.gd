@@ -111,7 +111,7 @@ func _kept(scene: SceneFile, saved: Node, node: Node, names: Array) -> String:
 					"%s.%s would load from the file as %s: the scene does not keep it, because the property "
 					+ "is not one a scene stores or the node belongs to another scene."
 				)
-				% [at, property, JSON.stringify(_values.serialize_value(loaded))]
+				% [at, property, JSON.stringify(_values.serialize_value(loaded), "", false)]
 			)
 	return ""
 
