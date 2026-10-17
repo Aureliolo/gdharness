@@ -5731,6 +5731,14 @@ class GodotServer {
         `project_info cannot include ${unknown.join(', ')}. Sections: ${Object.keys(PROJECT_INFO_SECTIONS).join(', ')}.`,
       );
     }
+    // Read by the validation section alone, so without it they would change nothing and the answer
+    // would not say so.
+    const forValidation = ['preset', 'detail'].filter((name) => args[name] !== undefined);
+    if (forValidation.length > 0 && !include.includes('validation')) {
+      return this.createErrorResponse(
+        `${forValidation.join(' and ')} ${forValidation.length === 1 ? 'is' : 'are'} read only by the validation section, which this call does not include: add "validation" to include, or leave ${forValidation.length === 1 ? 'it' : 'them'} out.`,
+      );
+    }
     const project = this.project(args);
     if (!project.ok) {
       return project.response;
@@ -6675,11 +6683,18 @@ class GodotServer {
    * suspicion is not a fault, and refusing would take a working tool away on one.
    */
   private markedIfStale(answer: OperationParams): unknown {
+    const status = this.godotBridge.getStatus();
+    // The language server can answer for an editor this server has no bridge to, and an editor that
+    // has not greeted has not said what it runs: neither is known to be behind, and calling one
+    // stale sends the caller to restart an editor that may not exist.
+    if (!hasSaidWhoItIs(status)) {
+      return answer;
+    }
     return markIfStale(
       answer,
-      this.godotBridge.getStatus().addonVersion,
+      status.addonVersion,
       SERVER_VERSION,
-      this.godotBridge.getStatus().addonDigest,
+      status.addonDigest,
       shippedEditorDigest(),
       this.editorCodeOnDisk(),
     );
