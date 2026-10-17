@@ -99,6 +99,16 @@ export async function originsOf(
 
 const RELOADED_AT = /GDScript::reload \((res:\/\/.+):(\d+)\)$/;
 
+// "Parse error" for a script with an error of its own, "Compilation failed" for one that failed
+// because a script it depends on did.
+const NOT_COMPILED =
+  /^Failed to load script "(res:\/\/[^"]+)" with error "(?:Parse error|Compilation failed)"/;
+
+/** The script [param entry] says the engine could not load because it did not compile, or undefined. */
+export function notCompiledIn(entry: LogEntry): string | undefined {
+  return NOT_COMPILED.exec(entry.text)?.[1];
+}
+
 /** Every error in [param entries] the engine raised compiling a script, with where it was. */
 export function compileErrorsIn(entries: readonly LogEntry[]): ScriptError[] {
   return entries.flatMap((entry) => {

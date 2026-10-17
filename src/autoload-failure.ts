@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { LogEntry } from './game-log.js';
 import { parseProjectGodot } from './resources.js';
+import { notCompiledIn } from './script-origins.js';
 import { autoloadPaths } from './setup.js';
 
 /**
@@ -50,14 +51,12 @@ export function scriptsAutoloaded(projectPath: string): Map<string, string> {
   return scripts;
 }
 
-const NOT_COMPILED = /^Failed to load script "(res:\/\/[^"]+)" with error "Compilation failed"/;
-
 /** The autoload [param entry] says did not compile, by name and script, or null. */
 export function autoloadNotCompiled(
   entry: LogEntry,
   autoloaded: ReadonlyMap<string, string>,
 ): { name: string; path: string } | null {
-  const path = NOT_COMPILED.exec(entry.text)?.[1];
+  const path = notCompiledIn(entry);
   const name = path === undefined ? undefined : autoloaded.get(path);
   return path === undefined || name === undefined ? null : { name, path };
 }
