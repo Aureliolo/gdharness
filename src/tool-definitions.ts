@@ -749,7 +749,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       rootNodeType: {
         type: 'string',
         ops: ['create'],
-        description: 'create: the root node class. Default Node.',
+        description:
+          'create: the root node class, an engine class or a class_name a project script declares, which the root is made as with that script attached. Default Node.',
       },
       rootNodeName: {
         type: 'string',
@@ -789,7 +790,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_node',
     title: 'Scene nodes',
-    description: `One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties, and another scene is instanced by an add with instancePath. A set with properties {"name": "Boss"} renames a node. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene, and for a node that belongs to a scene this one instances or inherits. ${WITHOUT_AN_EDITOR}`,
+    description: `One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type or script class can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties, and another scene is instanced by an add with instancePath. A set with properties {"name": "Boss"} renames a node. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene, and for a node that belongs to a scene this one instances or inherits. ${WITHOUT_AN_EDITOR}`,
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -802,7 +803,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       nodeType: {
         type: 'string',
         ops: ['add'],
-        description: 'add: the node class, such as "CharacterBody2D". Give this or instancePath.',
+        description:
+          'add: the node class, such as "CharacterBody2D", or a class_name a project script declares, which the node is made as with that script attached. Give this or instancePath.',
       },
       instancePath: {
         type: 'string',
@@ -1174,7 +1176,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       resourceType: {
         type: 'string',
         ops: ['create'],
-        description: 'create: the resource class, such as "PhysicsMaterial" or "StandardMaterial3D".',
+        description:
+          'create: the resource class, such as "PhysicsMaterial" or "StandardMaterial3D", or a class_name a project script declares, which the resource is made as with that script attached.',
       },
       properties: { ...PROPERTIES, ops: ['create', 'modify'] },
       script: {

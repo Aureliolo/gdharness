@@ -186,6 +186,17 @@ func create_scene(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Missing scenePath"}
 	if not scene_path.ends_with(".tscn"):
 		scene_path += ".tscn"
+	var asked_type: String = root_node_type
+	var made: Dictionary = SceneFile.made_as(
+		root_node_type,
+		"" if script_path.is_empty() else _to_scene_res_path(project_path, script_path),
+		"Node",
+		"rootNodeType"
+	)
+	if made.has("error"):
+		return {"ok": false, "error": made["error"]}
+	root_node_type = str(made["type"])
+	script_path = str(made["script"])
 	# A class that is not a node went into a Node variable, which is a runtime error the caller
 	# heard about only as "Invalid tool result".
 	if not ClassDB.class_exists(root_node_type) or not ClassDB.is_parent_class(root_node_type, "Node"):
@@ -237,6 +248,9 @@ func create_scene(args: Dictionary) -> Dictionary:
 				"%s extends %s, so it cannot be on a %s root." % [full_script_path, base, root_node_type]
 			}
 		root.set_script(script)
+		# Named again, since a headless engine runs the script's _init as it is attached, and a node's
+		# name is no property the write compares.
+		root.name = root_node_name
 
 	var folder: String = SceneFile.make_folder_for(scene_path)
 	if not folder.is_empty():
@@ -246,9 +260,7 @@ func create_scene(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {
-		"ok": true, "scenePath": scene_path, "rootNodeType": root_node_type, "rootNodeName": root_node_name
-	}
+	return {"ok": true, "scenePath": scene_path, "rootNodeType": asked_type, "rootNodeName": root_node_name}
 
 
 func list_scene_nodes(args: Dictionary) -> Dictionary:
@@ -276,6 +288,16 @@ func add_node(args: Dictionary) -> Dictionary:
 
 	if node_name.is_empty():
 		return {"ok": false, "error": "Missing nodeName"}
+	var asked_type: String = node_type
+	var class_script: Script = null
+	if not node_type.is_empty() and not ClassDB.class_exists(node_type):
+		var declared: Dictionary = SceneFile.script_class(node_type, "Node")
+		if declared.has("error"):
+			return {"ok": false, "error": declared["error"]}
+		var held: Variant = declared.get("script")
+		if held is Script:
+			class_script = held
+			node_type = str(declared["base"])
 	var making: Array = Placing.what_to_add(node_type, instance_path, scene_path)
 	var packed: PackedScene = making[0]
 	if not str(making[1]).is_empty():
@@ -304,6 +326,9 @@ func add_node(args: Dictionary) -> Dictionary:
 
 	# In the tree before its properties, so a property holding a node can find it by path.
 	var new_node: Node = Placing.made(packed, node_type)
+	if class_script != null:
+		scene.asked(new_node, ["script"])
+		new_node.set_script(class_script)
 	new_node.name = node_name
 	parent.add_child(new_node)
 	Placing.place(new_node, place)
@@ -321,12 +346,15 @@ func add_node(args: Dictionary) -> Dictionary:
 	var answer: Dictionary = {
 		"ok": true,
 		"nodeName": node_name,
-		"nodeType": new_node.get_class(),
+		"nodeType": asked_type if class_script != null else new_node.get_class(),
 		"nodePath": new_path,
 		"index": new_node.get_index(),
 	}
 	var written: Dictionary = scene.write(
-		func(saved: Node) -> String: return _kept(scene, saved, new_node, properties.keys())
+		func(saved: Node) -> String:
+			return _kept(
+				scene, saved, new_node, properties.keys() + (["script"] if class_script != null else [])
+			)
 	)
 	if not written.is_empty():
 		return written
@@ -342,7 +370,14 @@ func delete_node(args: Dictionary) -> Dictionary:
 	var node_path: String = str(args.get("nodePath", ""))
 
 	if node_path.is_empty() or node_path == ".":
-		return {"ok": false, "error": "Cannot delete root node"}
+		return {
+			"ok": false,
+			"error":
+			(
+				"The root cannot be deleted, since a scene has exactly one. Delete the nodes under it, or "
+				+ "make a scene with another root with scene_create."
+			)
+		}
 
 	var opened: Array = _open(scene_path, true)
 	var scene: SceneFile = opened[0]
@@ -480,6 +515,9 @@ func reparent_node(args: Dictionary) -> Dictionary:
 		return scene.refuse(unplaceable)
 
 	var old_path: String = scene.path_of(node)
+	# Unowned while it moves: a node taken out of the tree keeps its owner, and adding it under the new
+	# parent warned that the owner was not above it. Node.reparent warns the same way.
+	node.owner = null
 	node.get_parent().remove_child(node)
 	new_parent.add_child(node)
 	Placing.place(node, place)
