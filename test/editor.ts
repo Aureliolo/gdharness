@@ -2970,6 +2970,36 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     /script = ExtResource/,
     'the root is saved under its name, carrying the script',
   );
+  // A class a script declares, by its name, as the editor's create dialog offers it.
+  const clapped = (await call('scene_create', {
+    projectPath: project,
+    scenePath: 'res://clapped.tscn',
+    rootNodeType: 'Clapper',
+  })) as { rootNodeType?: unknown; rootNodeName?: unknown };
+  assert.deepEqual(
+    [clapped.rootNodeType, clapped.rootNodeName],
+    ['Clapper', 'Clapper'],
+    JSON.stringify(clapped),
+  );
+  assert.match(
+    fileText(project, 'clapped.tscn'),
+    /\[node name="Clapper" type="Node"/,
+    fileText(project, 'clapped.tscn'),
+  );
+  assert.match(
+    fileText(project, 'clapped.tscn'),
+    /path="res:\/\/clapper\.gd"/,
+    fileText(project, 'clapped.tscn'),
+  );
+  const added = (await call('scene_node', {
+    projectPath: project,
+    scenePath: 'res://clapped.tscn',
+    op: 'add',
+    nodeName: 'Second',
+    nodeType: 'Clapper',
+  })) as { nodeType?: unknown };
+  assert.equal(added.nodeType, 'Clapper', JSON.stringify(added));
+  assert.match(nodeBody(fileText(project, 'clapped.tscn'), 'Second'), /script = ExtResource/);
   assert.match(
     await refusal('scene_create', {
       projectPath: project,
