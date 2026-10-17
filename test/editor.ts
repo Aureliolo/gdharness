@@ -1461,6 +1461,11 @@ async function testAPathWritesOneComponent({ call, refusal, project }: Editor): 
     "an integer vector's axis refuses a fraction",
   );
   assert.match(
+    await refusal('scene_node', set({ hframes: 9007199254740994 })),
+    /Sprite2D\.hframes holds int: 9007199254740994 is 2\^53 or more, .*\{"_type": "int", "value": "\.\.\."\}/,
+    'a whole number a JSON number may not have carried exactly is refused, naming the form that does',
+  );
+  assert.match(
     await refusal('scene_node', set({ 'hframes:x': 1 })),
     /Sprite2D\.hframes is an int, which a path does not step into/,
     'and a number has no components to step into',

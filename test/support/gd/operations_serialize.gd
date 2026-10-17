@@ -7,7 +7,9 @@ extends SceneTree
 const Serialisation = preload("res://operations/serialisation.gd")
 
 ## The types that are described rather than rebuilt, because nothing can send one back.
-const DESCRIBED: Array[int] = [TYPE_OBJECT, TYPE_RID, TYPE_CALLABLE, TYPE_SIGNAL]
+const DESCRIBED: Array[int] = [TYPE_OBJECT, TYPE_CALLABLE, TYPE_SIGNAL]
+## 2^53, from which on whole numbers share doubles.
+const EXACT: int = 9007199254740992
 
 var failures: Array[String] = []
 var values: Serialisation = Serialisation.new()
@@ -20,6 +22,7 @@ func _init() -> void:
 	_check_deserialize()
 	_check_every_type()
 	_check_non_finite()
+	_check_exact_ints()
 	_check_keys()
 
 	if failures.is_empty():
@@ -262,8 +265,79 @@ func _check_non_finite() -> void:
 		_fail("a float tag naming no number was built into %s" % var_to_str(unnamed))
 
 
-## The types that describe rather than rebuild: an object, a bound method, a signal and a resource
-## id are all things a caller can be told about and none of them can be sent back. What is asked of
+## Whole numbers from 2^53 on, bare, in a packed list, as an RID's id and as an object's, carried
+## through the engine's JSON, which reads every number as a double and so gives a neighbour back for
+## one that large. Each side of the bound too, since the bound itself is the first number two others
+## share a double with.
+func _check_exact_ints() -> void:
+	var cases: Array = [
+		EXACT,
+		-EXACT,
+		EXACT + 1,
+		EXACT - 1,
+		(1 << 62) + 1,
+		-(1 << 62) - 3,
+		PackedInt64Array([(1 << 62) + 1, 5]),
+		[(1 << 62) + 1],
+		{"seed": EXACT + 1},
+		rid_from_int64((1 << 62) + 9),
+		rid_from_int64(81604378624),
+	]
+	for original: Variant in cases:
+		var wire: String = JSON.stringify(values.serialize_value(original))
+		var rebuilt: Variant = type_convert(
+			values.deserialize_value(JSON.parse_string(wire)), typeof(original)
+		)
+		if not _same(rebuilt, original):
+			_fail("%s crossed as %s and came back %s" % [var_to_str(original), wire, var_to_str(rebuilt)])
+	# Below the bound a number is still the number it was, not a tag.
+	if values.serialize_value(EXACT - 1) != EXACT - 1:
+		_fail("2^53 - 1 was tagged: %s" % JSON.stringify(values.serialize_value(EXACT - 1)))
+
+	var counted: RefCounted = RefCounted.new()
+	var described: Dictionary = JSON.parse_string(JSON.stringify(values.serialize_value(counted)))
+	var id: Variant = values.deserialize_value(described["id"])
+	if not id is int or id != counted.get_instance_id():
+		_fail("a RefCounted's id %d came back %s" % [counted.get_instance_id(), JSON.stringify(described)])
+
+	# An RID's id written by hand as a number below the bound builds it too.
+	var by_hand: Variant = values.deserialize_value({"_type": "RID", "id": 81604378624.0})
+	if not _same(by_hand, rid_from_int64(81604378624)):
+		_fail("an RID tag with a number for its id was built into %s" % var_to_str(by_hand))
+	# A tag that cannot be the number it names is left as it arrived rather than read as another.
+	var refused: Array = [
+		{"_type": "int", "value": "lots"},
+		{"_type": "int", "value": "007"},
+		{"_type": "int", "value": 5},
+		{"_type": "RID", "id": 1.5},
+		{"_type": "RID", "id": float(EXACT) * 4},
+	]
+	for tag: Variant in refused:
+		var built: Variant = values.deserialize_value(tag)
+		if not built is Dictionary:
+			_fail("%s was built into %s" % [JSON.stringify(tag), var_to_str(built)])
+
+	# Digits handed to an int are read as digits, and a number that large is refused by name.
+	var digits: Variant = values.fitted(str((1 << 62) + 1), TYPE_INT)
+	if not digits is int or digits != (1 << 62) + 1:
+		_fail("digits fitted to an int came back %s" % var_to_str(digits))
+	if Serialisation.inexact(float(EXACT) + 2, TYPE_INT).is_empty():
+		_fail("a number past 2^53 for an int was not refused")
+	if not Serialisation.inexact(float(EXACT) - 1, TYPE_INT).is_empty():
+		_fail("2^53 - 1 for an int was refused")
+
+
+## Whether [param a] and [param b] are the same value, an RID by its id, since two RIDs print alike.
+func _same(a: Variant, b: Variant) -> bool:
+	if a is RID and b is RID:
+		var first: RID = a
+		var second: RID = b
+		return first.get_id() == second.get_id()
+	return typeof(a) == typeof(b) and var_to_str(a) == var_to_str(b)
+
+
+## The types that describe rather than rebuild: an object, a bound method and a signal are all
+## things a caller can be told about and none of them can be sent back. What is asked of
 ## these is that the answer is a tagged description rather than the engine's own text for them.
 func _check_described(kind: int) -> void:
 	if not samples.has(kind):

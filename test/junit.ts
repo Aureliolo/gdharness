@@ -8,9 +8,12 @@ import assert from 'node:assert/strict';
 import {
   BOTH_SIDES_ALIKE_NOTE,
   failedCases,
+  failedWithin,
   hookFailuresPrinted,
   ignoredYetRan,
+  LONGEST_DETAIL,
   MalformedReportError,
+  MOST_REPORTS_SHOWN,
   orphansPrinted,
   parseJUnit,
   RENDERED_AWAY_NOTE,
@@ -345,6 +348,88 @@ ${error('test_errors_then_fails', 'late_test', 6)}
     ['', 'a'],
     `both values read back, the second into the second report: ${JSON.stringify(each)}`,
   );
+}
+
+/**
+ * A case raising the same errors on every pass of a loop answers each once, with how many times,
+ * and a case whose reports all differ, or whose detail runs on, is bounded all the same. A run of
+ * 125 cases calling into a class that had stopped compiling answered 18 MB on one line, one case
+ * carrying 2,062 reports, and Claude Code closed the connection on it.
+ */
+function testARunawayCaseIsFoldedAndBounded(): void {
+  const error = (line: number, detail: string): string =>
+    `<error message="ERROR: res://tests/loop_test.gd:${line}" type="ABORT"><![CDATA[${detail}]]></error>`;
+  const runtime = (line: number): string =>
+    `Godot Runtime Error !\n  'Cannot call method 'tick' on a null value.'\n\tat 'test_loop' in res://tests/loop_test.gd:${line}\n${'\tat Clock.advance (res://core/clock.gd:40)\n'.repeat(8)}`;
+  const looped = Array.from({ length: 2_000 }, (_, pass) =>
+    error(10 + (pass % 4), runtime(10 + (pass % 4))),
+  ).join('');
+  const distinct = Array.from({ length: MOST_REPORTS_SHOWN + 10 }, (_, line) =>
+    error(line + 1, runtime(line + 1)),
+  ).join('');
+  const long = error(3, `Expecting:\n '${'x'.repeat(LONGEST_DETAIL + 30_000)}'\n but was\n 'y'`);
+  const suite = (name: string, cases: string): string =>
+    `<testsuite name="${name}" package="tests" tests="1" failures="0" errors="1">${cases}</testsuite>`;
+  const report = parseJUnit(
+    `<testsuites>${suite('loop_test', `<testcase name="test_loop">${looped}</testcase>`)}${suite(
+      'many_test',
+      `<testcase name="test_many">${distinct}</testcase>`,
+    )}${suite('long_test', `<testcase name="test_long">${long}</testcase>`)}</testsuites>`,
+  );
+  const [loop, many, longest] = failedCases(report, '');
+
+  assert.deepEqual(
+    loop?.reports?.map((one) => [one.message, one.times]),
+    [10, 11, 12, 13].map((line) => [`ERROR: res://tests/loop_test.gd:${line}`, 500]),
+    `the same four errors are answered once each, with how many times: ${JSON.stringify(loop?.reports?.length)}`,
+  );
+  assert.equal(loop.reportCount, 2_000, 'and the case says how many reports it made');
+  assert.equal(loop.reportsLeftOut, undefined, 'and none of the four is left out');
+  assert.match(loop.detail ?? '', /Cannot call method 'tick' on a null value/, 'the first report leads');
+
+  assert.equal(many?.reports?.length, MOST_REPORTS_SHOWN, 'different reports are kept up to the limit');
+  assert.equal(many.reportsLeftOut, 10, 'and the rest are counted');
+  assert.equal(many.reports[0]?.times, undefined, 'a report made once carries no count');
+
+  const whole = report.suites[2]?.cases[0]?.detail?.length ?? 0;
+  const marker = `\n[${whole - LONGEST_DETAIL} more characters left out]`;
+  assert.ok(whole > LONGEST_DETAIL, `the long detail reached the reader whole: ${whole}`);
+  assert.ok(
+    longest?.detail?.length === LONGEST_DETAIL + marker.length && longest.detail.endsWith(marker),
+    `a detail past the limit is cut and says by how much: ${longest?.detail?.length} ending ${JSON.stringify(longest?.detail?.slice(-60))}`,
+  );
+
+  // Held to a budget: every case still named with its first message, the ones past it without
+  // their reports.
+  const run = Array.from({ length: 125 }, () => many);
+  const size = JSON.stringify(many).length;
+  const held = failedWithin(run, size * 3);
+  assert.equal(held.failed.length, 125, 'every failing case is still named');
+  assert.equal(held.briefed, 122, 'and those past the budget are counted');
+  assert.deepEqual(
+    [held.failed[2]?.reports?.length, held.failed[3]?.reports, held.failed[3]?.detail, held.failed[3]?.name],
+    [MOST_REPORTS_SHOWN, undefined, null, 'test_many'],
+    'the cases inside the budget keep their reports and the rest keep their names',
+  );
+  assert.ok(
+    JSON.stringify(held.failed).length < size * 3 + 125 * 400,
+    `the whole list stays near its budget: ${JSON.stringify(held.failed).length}`,
+  );
+
+  // The largest case gives up its detail first, wherever it ran, and the order is kept.
+  const small = JSON.stringify(loop).length;
+  assert.ok(JSON.stringify(longest).length > small * 2, 'the long case is the largest');
+  const mixed = failedWithin([longest, loop, loop], small * 2);
+  assert.deepEqual(
+    mixed.failed.map((entry) => [entry.name, entry.detail === null, entry.reports?.length]),
+    [
+      ['test_long', true, undefined],
+      ['test_loop', false, 4],
+      ['test_loop', false, 4],
+    ],
+    'the long case is named alone and the two loops keep their reports',
+  );
+  assert.equal(mixed.briefed, 1);
 }
 
 function testASuiteWithASpaceInItsPathKeepsItsOrphans(): void {
@@ -931,6 +1016,7 @@ function testAnIgnoreThatLeftOutNothingIsNamed(): void {
 
 testASecondFailedAssertionIsNotAHook();
 testEveryReportOfACaseIsKept();
+testARunawayCaseIsFoldedAndBounded();
 testAStringAfterAnArrayReadsItsOwnValue();
 testEveryShapeOfAStringEqualityReadsItsValue();
 testEntitiesAndShapes();

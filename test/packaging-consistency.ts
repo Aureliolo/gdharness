@@ -76,6 +76,7 @@ const operationsModules = [
   'class_cache.gd',
   'classdb_queries.gd',
   'dependencies.gd',
+  'editor_tools.gd',
   'export_presets.gd',
   'file_reads.gd',
   'file_walk.gd',

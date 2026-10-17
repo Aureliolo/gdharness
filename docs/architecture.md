@@ -401,18 +401,19 @@ once the server is there, rather than waiting for somebody to restart it.
 
 ## Which tools use which
 
-| Tools                                                                                                           | Route                                                                                                                                  | Needs running                                    |
-| --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `scene_*` and `resource_edit` but the reads below and `move`, `editor_rescan`, `editor_launch restart`, `close` | Editor bridge                                                                                                                          | The editor, addon enabled                        |
-| `scene_tree`, `scene_animation read` and `read_states`, `resource_edit read`                                    | Editor bridge when an editor serves the project, otherwise headless operations                                                         | Nothing                                          |
-| `script_diagnostics`                                                                                            | Language server when this project's editor is open, otherwise headless operations, which report errors without columns and no warnings | Nothing, though only the editor reports warnings |
-| `script_info` except `structure`, `script_edit rename` of a member                                              | Language server                                                                                                                        | The editor                                       |
-| `debug_*`, and the console `editor_output` returns                                                              | Debug adapter                                                                                                                          | A game the editor is playing                     |
-| `runtime_*`                                                                                                     | Runtime                                                                                                                                | A game with the runtime autoload                 |
-| `project_*`, `editor_classes`, `script_info structure`, `script_edit` otherwise, and                            | Headless operations                                                                                                                    | Nothing                                          |
-| `resource_edit move`                                                                                            |                                                                                                                                        |                                                  |
-| `editor_run`                                                                                                    | Editor bridge when an editor is connected, otherwise a spawned game                                                                    | Nothing, though the editor changes what it does  |
-| `editor_status`                                                                                                 | All of them, reporting what answers                                                                                                    | Nothing                                          |
+| Tools                                                                                | Route                                                                                                                                  | Needs running                                    |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `scene_animation` but its reads, `editor_rescan`, `editor_launch restart`, `close`   | Editor bridge                                                                                                                          | The editor, addon enabled                        |
+| `scene_tree`, `scene_animation read` and `read_states`, `resource_edit read`         | Editor bridge when an editor serves the project, otherwise headless operations                                                         | Nothing                                          |
+| `scene_create`, `scene_node`, `scene_signal`, `resource_edit` but `read` and `move`  | Editor bridge when an editor serves the project, otherwise the editor addon's own tool in headless operations                          | Nothing                                          |
+| `script_diagnostics`                                                                 | Language server when this project's editor is open, otherwise headless operations, which report errors without columns and no warnings | Nothing, though only the editor reports warnings |
+| `script_info` except `structure`, `script_edit rename` of a member                   | Language server                                                                                                                        | The editor                                       |
+| `debug_*`, and the console `editor_output` returns                                   | Debug adapter                                                                                                                          | A game the editor is playing                     |
+| `runtime_*`                                                                          | Runtime                                                                                                                                | A game with the runtime autoload                 |
+| `project_*`, `editor_classes`, `script_info structure`, `script_edit` otherwise, and | Headless operations                                                                                                                    | Nothing                                          |
+| `resource_edit move`                                                                 |                                                                                                                                        |                                                  |
+| `editor_run`                                                                         | Editor bridge when an editor is connected, otherwise a spawned game                                                                    | Nothing, though the editor changes what it does  |
+| `editor_status`                                                                      | All of them, reporting what answers                                                                                                    | Nothing                                          |
 
 `script_edit rename` reads the project's files itself, through a GDScript tokenizer of its own in
 `src/gdscript-source.ts`, because the question it answers for every occurrence of a name is what
@@ -831,6 +832,27 @@ hands it the node from the scene it opens; with no editor, the operation builds 
 script left off, and asks that, so the libraries and the tree root are the ones the file stores
 and no script of the scene runs.
 
+The scene and resource writes take the other way round. With no editor, `editor_tools.gd` runs the
+editor addon's own `scene_tools.gd` or `resource_tools.gd` in a headless engine, preloaded from
+beside the operations in the package, so a write passes the checks the editor's does and answers in
+its shape, with `writtenBy` (or `readBy`) added. A write cannot avoid instancing the scene the way a
+read does, and outside the editor instancing runs every script, where the editor gives a script that
+is not a tool a placeholder. So `scene_file.gd` and `headless_check.gd` put back what scripts did:
+on opening, each node with such a script is compared with what the file stores for it, and a
+difference goes back to the file's value, or to what the node would load with if the file did not set
+it, read from the files of the scenes it is instanced from rather than by instancing them; on writing,
+a node the tool changed through such a script has every other property put back to what it held
+before. A node with no such script is left alone, because a script runs on its own node as the scene
+loads, and anything else a pack changes, such as a Control gaining its grow directions from the
+setter of `anchors_preset`, the editor's pack changes too. After the save, the embedded resources
+that carry a script, and the main resource of a resource file, are compared with the file's text
+before the write the same way and put back. What still differs after one round is refused, with the
+file restored, and so is a scene whose script did not compile, which the engine instances without
+it. A headless save also writes back the uid the file had, which an engine with no editor's uid
+cache otherwise drops. An editor of the project that is running and has not reached this server
+holds its own copy of anything it has open, and saving that would put back what the engine wrote,
+so a write waits for it to connect instead.
+
 `project_export add_preset` writes `export_presets.cfg` from an operation in `export_presets.gd`,
 with the keys the editor's Export dialog writes for a new preset; the exporter fills every platform
 option the file leaves out with its default. An open editor is the one reader this misses. Godot
@@ -862,6 +884,23 @@ property holding `INF` was answered as holding nothing. Each is tagged as
 colour or rectangle, and a write accepts the same tag. The fixture holds the wire text itself to
 having neither spelling, because a round trip through the engine's own JSON reads `1e99999` back as
 infinity and passes on the wire that loses it.
+
+Whole numbers of 2^53 or more are the other numbers JSON cannot carry: the server and the engine
+both read a JSON number as a double, and from 2^53 on neighbouring whole numbers share one. A
+RefCounted's instance id has its top bit set and a resource uid is 63 bits, so both came back as a
+neighbouring id. Such a number is answered as its digits, `{"_type": "int", "value": "..."}`, and
+built back from them; one arriving as a bare number for an int is refused, since it may already be
+a neighbour of the one sent. An RID is answered as its id and built back from it, so a viewport's
+RID read off one call is an argument to the next.
+
+An answer too large for the client never goes out. Claude Code closes the connection on a message
+past 16 MB, losing the call and every later tool until the server is reconnected, and the text is
+escaped again inside the JSON-RPC message. An answer past 4 MB is written to files in a scratch
+directory and answered with where, beside the short fields of its top level. `project_test` bounds
+its own answer first: identical reports in a case are folded, at most twenty different ones are
+kept, and past about a megabyte the failing cases with the largest reports are named with their
+first message only. A run of
+125 cases failing on one broken class answered 18 MB before that.
 
 JSON keys are text, so a dictionary keyed by anything else is answered as its entries,
 `{"_type": "Dictionary", "entries": [[1, "a"]]}`, and a write accepts the same. Answered as text, an

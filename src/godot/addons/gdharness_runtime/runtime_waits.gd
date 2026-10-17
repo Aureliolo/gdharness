@@ -255,6 +255,9 @@ func wait_until(params: Dictionary) -> Dictionary:
 	var refused: String = _not_comparable(current, wanted, node_path, property)
 	if refused.is_empty():
 		refused = _cut_to_fit(params["value"], typeof(current), node_path, property)
+	var rounded: String = Values.inexact(params["value"], typeof(current))
+	if refused.is_empty() and not rounded.is_empty():
+		refused = "%s.%s holds int: %s." % [node_path, property, rounded]
 	var never_held: bool = typeof(wanted) != TYPE_NIL and typeof(wanted) != TYPE_OBJECT
 	if refused.is_empty() and declared == TYPE_OBJECT and never_held:
 		refused = (

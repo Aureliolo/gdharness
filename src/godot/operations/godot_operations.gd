@@ -46,8 +46,11 @@ const BEGUN: String = "[gdharness] begun"
 
 ## The operations that compile the project's scripts. The engine knows an autoload's name only once
 ## the autoload is in the tree, which is after `_init`, so a script naming one compiled here failed
-## with "Identifier not found" while the game and the editor ran it.
-const AFTER_THE_AUTOLOADS: Array[String] = ["check_scripts", "create_script", "modify_script"]
+## with "Identifier not found" while the game and the editor ran it. A scene tool loads the scripts
+## of the scene it opens.
+const AFTER_THE_AUTOLOADS: Array[String] = [
+	"check_scripts", "create_script", "modify_script", "run_editor_tool"
+]
 
 var _log: Log
 
@@ -203,6 +206,9 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 				)
 			)
 
+		"run_editor_tool":
+			payload = _read(_editor_tool(params))
+
 		# Import and export pipeline
 		"get_import_status":
 			payload = ImportPipeline.new(_log).get_import_status(params)
@@ -287,6 +293,20 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			_log.error("Unknown operation: " + operation)
 
 	return payload
+
+
+## A scene or resource tool of the editor addon, run as editor_tools.gd runs it. Loaded for this op
+## alone, because the tools bring the editor addon's scene and resource scripts with them: preloaded
+## here, every op compiled them, and an operations directory without the addons beside it lost every
+## op rather than this one.
+func _editor_tool(params: Dictionary) -> Dictionary:
+	var own: Script = get_script()
+	var path: String = own.resource_path.get_base_dir().path_join("editor_tools.gd")
+	var tools: Script = ResourceLoader.load(path, "Script")
+	if tools == null or not tools.can_instantiate():
+		return {"ok": false, "error": "The editor tools did not load from %s." % path}
+	var answer: Dictionary = tools.call("run", params)
+	return answer
 
 
 ## A read the editor answers too, in the shape an operation answers: its refusal as the run's error.

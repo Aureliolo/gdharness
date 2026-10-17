@@ -43,9 +43,17 @@ export interface Surviving {
 }
 
 /** What a scratch directory is for, which is the first part of its name. */
-export type ScratchKind = 'desktop' | 'export' | 'import' | 'params' | 'runtime-screenshot' | 'tests';
+export type ScratchKind =
+  | 'answers'
+  | 'desktop'
+  | 'export'
+  | 'import'
+  | 'params'
+  | 'runtime-screenshot'
+  | 'tests';
 
 const KINDS: readonly ScratchKind[] = [
+  'answers',
   'desktop',
   'export',
   'import',

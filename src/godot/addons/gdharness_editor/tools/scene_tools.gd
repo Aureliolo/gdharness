@@ -90,7 +90,7 @@ func _missing_on(node: Node, missing: String) -> String:
 	if probe.reload() == OK:
 		return missing
 	return (
-		"%s. Its script, %s, does not compile, so the editor knows none of what it declares."
+		"%s. Its script, %s, does not compile, so none of what it declares is known here."
 		% [missing, script.resource_path]
 	)
 
@@ -213,6 +213,10 @@ func create_scene(args: Dictionary) -> Dictionary:
 
 	var root: Node = ClassDB.instantiate(root_node_type)
 	root.name = root_node_name
+	var scene: SceneFile = SceneFile.new()
+	scene.root = root
+	scene.path = scene_path
+	scene.asked(root, ["script"])
 
 	if not script_path.is_empty():
 		var full_script_path: String = _to_scene_res_path(project_path, script_path)
@@ -238,9 +242,6 @@ func create_scene(args: Dictionary) -> Dictionary:
 	if not folder.is_empty():
 		root.free()
 		return {"ok": false, "error": folder}
-	var scene: SceneFile = SceneFile.new()
-	scene.root = root
-	scene.path = scene_path
 	var written: Dictionary = scene.write()
 	if not written.is_empty():
 		return written
@@ -307,6 +308,10 @@ func add_node(args: Dictionary) -> Dictionary:
 	parent.add_child(new_node)
 	Placing.place(new_node, place)
 	Placing.own(new_node, root)
+	var unsettled: String = scene.settle()
+	if not unsettled.is_empty():
+		return scene.refuse("Nothing was written: " + unsettled)
+	scene.asked(new_node, properties.keys())
 	var refused_property: String = _properties.write_all(new_node, properties)
 	if not refused_property.is_empty():
 		return scene.refuse(refused_property)
@@ -415,6 +420,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	target_parent.add_child(duplicated_node)
 	Placing.own(duplicated_node, root)
 	Placing.reconnect(copies, source)
+	scene.copied(copies)
 
 	var new_path: String = scene.path_of(duplicated_node)
 	var written: Dictionary = scene.write(
@@ -530,6 +536,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		if not unusable.is_empty():
 			return scene.refuse(unusable)
 
+	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
 	if not refused_property.is_empty():
 		return scene.refuse(_missing_on(node, refused_property))
@@ -570,12 +577,10 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	var props: Dictionary = _properties_of(node, include_defaults, scene.set_here(node))
 	var cells: Dictionary = ResourceTools.cells_of(node)
 	scene.close()
-	var answer: Dictionary = {
-		"ok": true,
-		"nodePath": node_path,
-		"properties": props,
-		"unsavedInEditor": SceneFile.unsaved(scene_path)
-	}
+	var answer: Dictionary = {"ok": true, "nodePath": node_path, "properties": props}
+	# Only an editor holds anything unsaved; a headless engine answering false would say it looked.
+	if Engine.is_editor_hint():
+		answer["unsavedInEditor"] = SceneFile.unsaved(scene_path)
 	answer.merge(cells)
 	# An empty answer read as a node with nothing on it, rather than one with nothing changed.
 	if props.is_empty() and not include_defaults:
@@ -600,7 +605,10 @@ func save_scene(args: Dictionary) -> Dictionary:
 			return {"ok": false, "error": unsaved}
 
 	var open_root: Node = null
-	for open: Node in EditorInterface.get_open_scene_roots():
+	var open_roots: Array[Node] = []
+	if Engine.is_editor_hint():
+		open_roots = EditorInterface.get_open_scene_roots()
+	for open: Node in open_roots:
 		if open.scene_file_path == scene_path:
 			open_root = open
 	if open_root != null and target_path == scene_path:
@@ -618,7 +626,7 @@ func save_scene(args: Dictionary) -> Dictionary:
 		written = SceneFile.save_packed(packed, target_path)
 	else:
 		var scene: SceneFile = SceneFile.new()
-		var refused: Dictionary = scene.open(scene_path, false)
+		var refused: Dictionary = scene.open(scene_path, true)
 		if not refused.is_empty():
 			return refused
 		scene.path = target_path
@@ -897,4 +905,7 @@ func list_connections(args: Dictionary) -> Dictionary:
 				)
 
 	scene.close()
-	return {"ok": true, "connections": connections, "unsavedInEditor": SceneFile.unsaved(scene_path)}
+	var listed: Dictionary = {"ok": true, "connections": connections}
+	if Engine.is_editor_hint():
+		listed["unsavedInEditor"] = SceneFile.unsaved(scene_path)
+	return listed

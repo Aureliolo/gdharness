@@ -16,6 +16,10 @@ const Read = preload("reading.gd")
 const NUMBERS: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT]
 const TEXTS: Array[int] = [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH]
 
+# 2^53. A JSON number is a double, and every whole number below this one in size has a double of
+# its own; from here on two or more share each double, so one arriving tells nobody which was sent.
+const EXACT: int = 9007199254740992
+
 # The types that cross as a plain JSON list and have to be built back into themselves. A list is
 # what a caller can write by hand and what the serialiser answers with, and the parameter or
 # property being written is the only thing that knows which of these it wanted.
@@ -53,6 +57,8 @@ const LIST_TYPES: Array[int] = [
 # type it wanted.
 const SERIALISERS: Dictionary = {
 	TYPE_NIL: "_serialize_nil",
+	TYPE_INT: "_serialize_int",
+	TYPE_PACKED_INT64_ARRAY: "_serialize_ints",
 	TYPE_FLOAT: "_serialize_float",
 	TYPE_PACKED_FLOAT32_ARRAY: "_serialize_floats",
 	TYPE_PACKED_FLOAT64_ARRAY: "_serialize_floats",
@@ -109,6 +115,8 @@ const BUILDERS: Dictionary = {
 	"NodePath": "_build_node_path",
 	"PackedByteArray": "_build_bytes",
 	"float": "_build_float",
+	"int": "_build_int",
+	"RID": "_build_rid",
 	"Dictionary": "_build_dictionary",
 }
 
@@ -136,6 +144,8 @@ const REQUIRED: Dictionary = {
 	"NodePath": [["path"]],
 	"PackedByteArray": [["base64"]],
 	"float": [["value"]],
+	"int": [["value"]],
+	"RID": [["id"]],
 	"Dictionary": [["entries"]],
 }
 
@@ -243,7 +253,38 @@ func deserialize_value(value: Variant) -> Variant:
 		return fields
 	if tag == "Dictionary" and not pairs(fields["entries"]):
 		return fields
+	# Digits only: the tag is there to carry what a number cannot, and {"value": 5} meant for some
+	# other shape is not to be read as 5.
+	if tag == "int" and not (fields["value"] is String and _exact_int(fields["value"]) != null):
+		return fields
+	if tag == "RID" and _exact_int(fields["id"]) == null:
+		return fields
 	return call(builder, fields)
+
+
+## [param held] as the whole number it spells exactly, or null: an int, a JSON number that is whole
+## and no larger than a double holds exactly, the digits of one, or the int tag carrying them. A
+## fraction, or a number past 2^53 that arrived as a number and so may already be a neighbour of the
+## one meant, is no id.
+func _exact_int(held: Variant) -> Variant:
+	if held is int:
+		return held
+	if held is float:
+		var number: float = held
+		if is_finite(number) and number == floorf(number) and absf(number) < EXACT:
+			return int(number)
+		return null
+	if held is String:
+		var digits: String = held
+		var parsed: int = digits.to_int()
+		if digits.is_valid_int() and str(parsed) == digits:
+			return parsed
+		return null
+	if held is Dictionary:
+		var tagged: Dictionary = held
+		if str(tagged.get("_type", "")) == "int" and tagged.has("value"):
+			return _exact_int(tagged["value"])
+	return null
 
 
 ## The components a path reads off [param value], by the names GDScript gives them, or none for a
@@ -393,6 +434,11 @@ func fitted(value: Variant, type: int) -> Variant:
 	if not simple.has(type) or not simple.has(typeof(rebuilt)):
 		return rebuilt
 
+	# Digits are read as digits, since read as JSON they become a double and one past 2^53 a
+	# neighbour of the number written.
+	if rebuilt is String and type == TYPE_INT and _exact_int(rebuilt) != null:
+		return _exact_int(rebuilt)
+
 	if rebuilt is String and type != TYPE_STRING:
 		var text: String = rebuilt
 		var parsed: Variant = Read.json_or_null(text)
@@ -408,13 +454,33 @@ func fitted(value: Variant, type: int) -> Variant:
 	return type_convert(rebuilt, type)
 
 
+## Why [param given], meant for an int, may not be the number that was sent, or "" when it is. A
+## JSON number is a double wherever it is read, so a whole number from 2^53 on arrives as the nearest
+## double to the one written: 9007199254740993 sent as a number arrives as 9007199254740992, and a
+## seed written that way would be stored as its neighbour with the answer saying it was written.
+static func inexact(given: Variant, type: int) -> String:
+	if type != TYPE_INT or (typeof(given) != TYPE_FLOAT and typeof(given) != TYPE_INT):
+		return ""
+	var number: float = Read.as_float(given)
+	if not is_finite(number) or absf(number) < EXACT:
+		return ""
+	return (
+		(
+			"%s is 2^53 or more, where a JSON number holds a whole number only to the nearest double,"
+			+ ' so it may not be the number sent: send the digits as {"_type": "int", "value": "..."}'
+			+ ", the form a read answers with"
+		)
+		% String.num(number, 0)
+	)
+
+
 ## How a value of [param type] is written to be read as one, for a refusal to name, or empty for a
 ## type that is not built from fields. A refusal naming only the two types left a caller to find
 ## the shape in the description of another op.
 static func written_as(type: int) -> String:
 	var tag: String = type_string(type)
 	var alternatives: Array = REQUIRED.get(tag, [])
-	if alternatives.is_empty() or tag == "float" or tag == "Dictionary":
+	if alternatives.is_empty() or tag in ["float", "int", "Dictionary"]:
 		return ""
 	var keys: Array = alternatives[0]
 	var parts: Array[String] = []
@@ -530,10 +596,32 @@ func _serialize_node_path(value: NodePath) -> Dictionary:
 	return {"path": str(value), "_type": "NodePath"}
 
 
-# An id rather than nothing, because two properties holding the same RID are worth telling apart
-# even though neither can be handed back to the engine.
+# By its id, which is all an RID is from outside the server holding it, and which builds it back:
+# a viewport's RID read off one call is what RenderingServer's render timing takes in the next.
 func _serialize_rid(value: RID) -> Dictionary:
-	return {"id": value.get_id(), "_type": "RID"}
+	return {"id": _serialize_int(value.get_id()), "_type": "RID"}
+
+
+# A whole number from 2^53 on as its digits, because JSON numbers are doubles on the server's side
+# and on the engine's, and from there on neighbouring whole numbers share a double. A RefCounted's
+# instance id is one, with its top bit set, and a resource uid another; read as numbers they came
+# back as a neighbouring id, which named nothing or something else.
+func _serialize_int(value: int) -> Variant:
+	if value > -EXACT and value < EXACT:
+		return value
+	return {"_type": "int", "value": str(value)}
+
+
+# A packed list of 64-bit numbers stays the JSON list it is unless something in it is too large for
+# a double to hold.
+func _serialize_ints(value: PackedInt64Array) -> Variant:
+	for number: int in value:
+		if number <= -EXACT or number >= EXACT:
+			var items: Array = []
+			for each: int in value:
+				items.append(_serialize_int(each))
+			return items
+	return value
 
 
 # A bound method, said in the terms a caller could act on: what it is on, and what it is called.
@@ -672,7 +760,7 @@ func _describe_object(value: Object) -> Dictionary:
 	# in a costume and reads as if the object had been asked and had nothing to say.
 	if value.has_method("_to_string"):
 		described["says"] = value.to_string()
-	described["id"] = value.get_instance_id()
+	described["id"] = _serialize_int(value.get_instance_id())
 	return described
 
 
@@ -806,6 +894,16 @@ func _build_bytes(fields: Dictionary) -> PackedByteArray:
 
 func _build_float(fields: Dictionary) -> float:
 	return Read.as_float(fields)
+
+
+func _build_int(fields: Dictionary) -> int:
+	var exact: int = _exact_int(fields["value"])
+	return exact
+
+
+func _build_rid(fields: Dictionary) -> RID:
+	var id: int = _exact_int(fields["id"])
+	return rid_from_int64(id)
 
 
 ## The entries of a dictionary whose keys are not all text. JSON carries every number as a float,
