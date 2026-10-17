@@ -36935,7 +36935,8 @@ function testEveryToolNamedInProseIsATool(): void {
   // bridge sends the addon, the autoload the runtime installs, a section of project.godot, the
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
-  // export_presets.cfg and the directory a self-contained editor keeps its data in. Named one
+  // export_presets.cfg, the directory a self-contained editor keeps its data in and the file the
+  // editor caches its class reference in. Named one
   // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
   // and called a tool or called vocabulary.
   const notTools = new Set([
@@ -36961,6 +36962,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'debug_exit',
     'script_export_mode',
     'editor_data',
+    'editor_doc_cache',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
