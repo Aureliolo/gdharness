@@ -392,7 +392,7 @@ function loaderAmong(
 }
 
 /** Every autoload in project.godot, as the project-relative path each one names. */
-function autoloadPaths(settings: Record<string, Record<string, unknown>>): Map<string, string> {
+export function autoloadPaths(settings: Record<string, Record<string, unknown>>): Map<string, string> {
   const named = new Map<string, string>();
   for (const [name, value] of Object.entries(settings['autoload'] ?? {})) {
     // A leading star is the enabled marker the editor writes, not part of the path.

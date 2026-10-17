@@ -725,7 +725,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'integer',
         minimum: 1,
         description:
-          'How long the run may take before it is killed. Default 600000. A run killed at the limit answers timedOut and silentForMs, how long it had printed nothing; it is called hung only when that was half the limit, or thirty seconds of a longer one, and otherwise it was still running and wants a longer timeoutMs or a narrower path.',
+          'How long the run may take before it is killed. Default 600000. A run killed at the limit answers timedOut and silentForMs, how long it had printed nothing; it is called hung only when that was half the limit, or thirty seconds of a longer one, and otherwise it was still running and wants a longer timeoutMs or a narrower path, unless it ended repeating one script error, which the verdict names instead. A run whose autoload did not compile is stopped as soon as the engine says so, and names the script that did not under scriptErrors.',
       },
       printed: {
         type: 'string',

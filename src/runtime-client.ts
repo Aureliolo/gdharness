@@ -13,7 +13,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
-import { createConnection } from 'node:net';
+import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -943,6 +943,60 @@ export function lateAnswer(id: number): LateAnswer | undefined {
 }
 
 /**
+ * How many connections from this server may wait for one game to take them.
+ *
+ * The engine queues eight connections a game has not taken and refuses the rest, and a game takes
+ * them between frames, so fourteen calls sent together lost four to a refusal that read as a game
+ * starting or stopping. Under eight, to leave the rest of the queue to other servers.
+ */
+const UNTAKEN_PER_GAME = 4;
+
+/**
+ * How long after a refusal a connection is dialled again. Windows refuses at once while a game's
+ * queue is full, where Linux and macOS leave the connection to be retried, and a game empties the
+ * queue every frame.
+ */
+const REDIAL_MS = 50;
+
+/** Per game, by where it is dialled: the places held, and the requests waiting for one. */
+const untaken = new Map<string, { held: number; readonly waiting: (() => void)[] }>();
+
+function placeOf(endpoint: RuntimeEndpoint): string {
+  return `${dialAddress(endpoint.address)}:${endpoint.port}`;
+}
+
+/**
+ * Calls [param granted] once a connection to [param game] may be opened, with what gives the place
+ * back. A request that has given up by then gives it straight back.
+ */
+function waitForAPlace(game: string, granted: (giveBack: () => void) => void): void {
+  const line = untaken.get(game) ?? { held: 0, waiting: [] };
+  untaken.set(game, line);
+  const grant = (): void => {
+    line.held += 1;
+    let given = false;
+    granted(() => {
+      if (given) {
+        return;
+      }
+      given = true;
+      line.held -= 1;
+      const next = line.waiting.shift();
+      if (next !== undefined) {
+        next();
+      } else if (line.held === 0 && untaken.get(game) === line) {
+        untaken.delete(game);
+      }
+    });
+  };
+  if (line.held < UNTAKEN_PER_GAME) {
+    grant();
+  } else {
+    line.waiting.push(grant);
+  }
+}
+
+/**
  * One request to one game, answered by the reply that carries its id.
  *
  * The first line a game sends is its welcome, which names the protocol it speaks; a game built
@@ -970,14 +1024,27 @@ export function runtimeRequest(
     let buffered = '';
     let welcomed = false;
 
-    const socket = createConnection({ port: endpoint.port, host: dialAddress(endpoint.address) });
+    let socket: Socket | null = null;
+    let refusals = 0;
+    let redial: NodeJS.Timeout | null = null;
+    // Held from the dial until the game takes the connection, which its welcome says.
+    let giveBackThePlace: (() => void) | null = null;
+    const taken = (): void => {
+      giveBackThePlace?.();
+      giveBackThePlace = null;
+    };
     let lateTimer: NodeJS.Timeout | null = null;
     const finish = (reply: RuntimeReply): void => {
+      taken();
+      if (redial !== null) {
+        clearTimeout(redial);
+        redial = null;
+      }
       if (late) {
         if (lateTimer !== null) {
           clearTimeout(lateTimer);
         }
-        socket.destroy();
+        socket?.destroy();
         late = false;
         if (typeof afterTheWait === 'function') {
           afterTheWait(reply);
@@ -996,10 +1063,27 @@ export function runtimeRequest(
       }
       done = true;
       clearTimeout(timer);
-      socket.destroy();
+      socket?.destroy();
       settle(reply);
     };
     const timer = setTimeout(() => {
+      if (socket === null) {
+        // Nothing listening and a full queue are refused alike, so the answer names both.
+        finish(
+          refusals > 0
+            ? {
+                ok: false,
+                reason: 'refused',
+                message: `The game (${describe(endpoint)}) is running but nothing answered on its port: it refused ${refusals === 1 ? 'the connection' : `all ${refusals} connections tried`} within ${timeoutMs}ms. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do. Nothing was sent, so nothing ran.`,
+              }
+            : {
+                ok: false,
+                reason: 'busy',
+                message: `'${command}' was not sent to the game (${describe(endpoint)}) within ${timeoutMs}ms: ${UNTAKEN_PER_GAME} connections from this server were already waiting for the game to take them, which it does between frames, so a long frame or a breakpoint holds them. Nothing was sent, so nothing ran.`,
+              },
+        );
+        return;
+      }
       const still = welcomed
         ? `The game (${describe(endpoint)}) has the request and did not answer '${command}' within ${timeoutMs}ms.`
         : `The game (${describe(endpoint)}) did not answer '${command}' within ${timeoutMs}ms and had not taken the request: its frame has not ended since it was sent, which a long frame or a breakpoint does, and the request runs when it does.`;
@@ -1043,64 +1127,106 @@ export function runtimeRequest(
       });
     }, timeoutMs);
 
-    socket.setEncoding('utf8');
-    socket.on('connect', () => {
-      socket.write(`${JSON.stringify({ id, command, params })}\n`);
-    });
-    socket.on('data', (chunk: string) => {
-      buffered += chunk;
-      let newline = buffered.indexOf('\n');
-      while (newline !== -1 && (!done || late)) {
-        const line = buffered.slice(0, newline).trim();
-        buffered = buffered.slice(newline + 1);
-        newline = buffered.indexOf('\n');
-        if (line === '') {
-          continue;
-        }
-        let message: Record<string, unknown>;
-        try {
-          message = asParams(JSON.parse(line));
-        } catch {
-          continue;
-        }
-        if (!welcomed) {
-          welcomed = true;
-          if (readString(message, 'type') === 'welcome') {
-            const spoken = readNumber(message, 'protocol');
-            if (spoken !== RUNTIME_PROTOCOL) {
-              finish({
-                ok: false,
-                reason: 'protocol',
-                message: `The game (${describe(endpoint)}) speaks runtime protocol ${spoken ?? 'unknown'} and this server speaks ${RUNTIME_PROTOCOL}. Reinstall the runtime addon into the project.`,
-              });
-              return;
-            }
+    const open = (): void => {
+      const opened = createConnection({ port: endpoint.port, host: dialAddress(endpoint.address) });
+      socket = opened;
+      opened.setEncoding('utf8');
+      opened.on('connect', () => {
+        opened.write(`${JSON.stringify({ id, command, params })}\n`);
+      });
+      opened.on('data', (chunk: string) => {
+        buffered += chunk;
+        let newline = buffered.indexOf('\n');
+        while (newline !== -1 && (!done || late)) {
+          const line = buffered.slice(0, newline).trim();
+          buffered = buffered.slice(newline + 1);
+          newline = buffered.indexOf('\n');
+          if (line === '') {
             continue;
           }
+          let message: Record<string, unknown>;
+          try {
+            message = asParams(JSON.parse(line));
+          } catch {
+            continue;
+          }
+          if (!welcomed) {
+            welcomed = true;
+            taken();
+            if (readString(message, 'type') === 'welcome') {
+              const spoken = readNumber(message, 'protocol');
+              if (spoken !== RUNTIME_PROTOCOL) {
+                finish({
+                  ok: false,
+                  reason: 'protocol',
+                  message: `The game (${describe(endpoint)}) speaks runtime protocol ${spoken ?? 'unknown'} and this server speaks ${RUNTIME_PROTOCOL}. Reinstall the runtime addon into the project.`,
+                });
+                return;
+              }
+              continue;
+            }
+          }
+          if (message['id'] !== id) {
+            continue;
+          }
+          if (readString(message, 'type') === 'error') {
+            finish({
+              ok: false,
+              reason: 'error',
+              message: readString(message, 'message') ?? 'unknown error',
+            });
+            return;
+          }
+          finish({ ok: true, payload: message, endpoint });
         }
-        if (message['id'] !== id) {
-          continue;
-        }
-        if (readString(message, 'type') === 'error') {
-          finish({ ok: false, reason: 'error', message: readString(message, 'message') ?? 'unknown error' });
+      });
+      opened.on('error', (error: NodeJS.ErrnoException) => {
+        if (socket !== opened) {
           return;
         }
-        finish({ ok: true, payload: message, endpoint });
+        if (error.code === 'ECONNREFUSED' && !done) {
+          if (alive(endpoint.pid)) {
+            // A refused connection carried nothing, so dialling again cannot run anything twice.
+            refusals += 1;
+            socket = null;
+            opened.destroy();
+            redial = setTimeout(() => {
+              redial = null;
+              open();
+            }, REDIAL_MS);
+            return;
+          }
+          finish({
+            ok: false,
+            reason: 'refused',
+            message: `The game (${describe(endpoint)}) has ended: its port refused the connection and its process is gone.`,
+          });
+          return;
+        }
+        finish({
+          ok: false,
+          reason: 'refused',
+          message: `The game (${describe(endpoint)}) is running but nothing answered on its port: ${error.code ?? error.message}. It may still be starting or be shutting down.`,
+        });
+      });
+      opened.on('close', () => {
+        if (socket !== opened) {
+          return;
+        }
+        finish({
+          ok: false,
+          reason: 'refused',
+          message: `The game (${describe(endpoint)}) closed the connection before answering '${command}'.`,
+        });
+      });
+    };
+    waitForAPlace(placeOf(endpoint), (giveBack) => {
+      if (done) {
+        giveBack();
+        return;
       }
-    });
-    socket.on('error', (error: NodeJS.ErrnoException) => {
-      finish({
-        ok: false,
-        reason: 'refused',
-        message: `The game (${describe(endpoint)}) is running but nothing answered on its port: ${error.code ?? error.message}. It may still be starting, or be shutting down.`,
-      });
-    });
-    socket.on('close', () => {
-      finish({
-        ok: false,
-        reason: 'refused',
-        message: `The game (${describe(endpoint)}) closed the connection before answering '${command}'.`,
-      });
+      giveBackThePlace = giveBack;
+      open();
     });
   });
 }
