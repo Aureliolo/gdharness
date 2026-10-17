@@ -13577,14 +13577,18 @@ class GodotServer {
       onGame.alongside.size === 0
         ? {}
         : { ranAlongside: [...onGame.alongside], alongsideNote: ALONGSIDE_NOTE };
+    // A capture the wait ran out on still saves into its folder when the game gets to it, so the
+    // folder goes once the game has answered rather than when the wait ends.
+    let savedLater = false;
     try {
       const reply = await runtimeRequest(
         choice.endpoint,
         command,
         screenshotPath ? { ...params, output_path: screenshotPath } : params,
         timeoutMs,
-        !expectsScreenshot,
+        expectsScreenshot ? () => discard(screenshotDir) : 'keep',
       );
+      savedLater = !reply.ok && reply.stillWithTheGame === true;
       // A request the wait ran out on is still going in the game, so it is answered as pending
       // rather than as a failure: the call has not failed, and a caller told it had repeated calls
       // that had already run.
@@ -13641,7 +13645,9 @@ class GodotServer {
       };
     } finally {
       this.callsOnGames.delete(onGame);
-      discard(screenshotDir);
+      if (!savedLater) {
+        discard(screenshotDir);
+      }
     }
   }
 

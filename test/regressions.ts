@@ -14502,6 +14502,114 @@ async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
 }
 
 /**
+ * A capture the wait ran out on keeps its folder until the game has answered.
+ *
+ * Reported from fantasy-guild-manager as #1150: a capture sent while the game played 45 days in one
+ * frame answered the timeout, and the server took the capture's folder away while the request sat in
+ * the game. When the frame ended the game saved into a folder that was gone, the engine printed an
+ * error, and the run read clean: false for a game that had raised nothing. The fake game holds the
+ * capture past the wait, then says whether the folder was there to save into.
+ */
+async function testACaptureTheWaitRanOutOnKeepsItsFolder(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-late-capture-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-late-capture-rt-'));
+  const saved: { into: string; folderWasThere: boolean | null } = { into: '', folderWasThere: null };
+  let answered: () => void = () => {};
+  const lateAnswer = new Promise<void>((settle) => {
+    answered = settle;
+  });
+  const game = createServer((socket) => {
+    socket.setEncoding('utf8');
+    socket.write(`${JSON.stringify({ type: 'welcome', protocol: RUNTIME_PROTOCOL })}\n`);
+    let buffered = '';
+    socket.on('data', (chunk: string) => {
+      buffered += chunk;
+      for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+        const asked = JSON.parse(buffered.slice(0, at)) as {
+          id: number;
+          command: string;
+          params: { output_path?: string };
+        };
+        buffered = buffered.slice(at + 1);
+        if (asked.command !== 'capture_screenshot') {
+          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong' })}\n`);
+          continue;
+        }
+        const path = asked.params.output_path ?? '';
+        setTimeout(() => {
+          saved.into = path;
+          saved.folderWasThere = existsSync(dirname(path));
+          if (saved.folderWasThere) {
+            writeFileSync(path, 'png');
+          }
+          socket.write(
+            `${JSON.stringify({ id: asked.id, type: 'screenshot_file', path, width: 1, height: 1, format: 'png' })}\n`,
+          );
+          answered();
+        }, 1_500);
+      }
+    });
+    socket.on('error', () => {});
+  });
+  const holder = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_RUNTIME_TIMEOUT_MS: '500',
+    },
+  });
+  try {
+    await listenOnAReservedPort(game, '127.0.0.1');
+    const pid = holder.pid ?? 0;
+    writeFileSync(
+      join(runtimeDir, `runtime-${pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid,
+        port: portOf(game),
+        address: '127.0.0.1',
+        project: { name: basename(project), path: project },
+      }),
+      'utf8',
+    );
+    await server.initialize('regression-test');
+    const timedOut =
+      textOf(
+        await server.request('tools/call', { name: 'runtime_capture', arguments: { op: 'screenshot' } }),
+      ) ?? '';
+    assert.match(
+      timedOut,
+      /Nothing was cancelled: the game runs it when it gets to it, and what it answers then is not kept, so ask again once the game answers\./,
+      timedOut,
+    );
+    await lateAnswer;
+    assert.equal(
+      saved.folderWasThere,
+      true,
+      `the folder outlived the wait, for the game to save into: ${saved.into}`,
+    );
+    let gone = false;
+    for (let waited = 0; !gone && waited < 5_000; waited += 100) {
+      await delay(100);
+      gone = saved.into !== '' && !existsSync(dirname(saved.into));
+    }
+    assert.ok(gone, `and went once the game had answered: ${saved.into}`);
+  } finally {
+    await server.stop();
+    holder.kill();
+    await new Promise<void>((closed) => {
+      game.close(() => {
+        closed();
+      });
+    });
+    sweep(runtimeDir);
+    sweep(project);
+  }
+}
+
+/**
  * runtimeConnected is about this server's project, and another project's game is listed as such.
  *
  * Reported from ostinato, whose server's editor_status said runtimeConnected true while the only
@@ -43043,6 +43151,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRuntimeConnectedIsAboutThisProjectsGames,
   testACallBesideAnotherOnTheGameSaysSo,
   testAGameOnEveryInterfaceIsReached,
+  testACaptureTheWaitRanOutOnKeepsItsFolder,
   testAGameOnAnotherRuntimeAddonSaysSo,
   testAGameSaysWhichRuntimeAddonItLoaded,
   testAWorktreeFindsItsMainCheckoutsEngine,
