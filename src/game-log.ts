@@ -402,6 +402,15 @@ export class GameLog {
   }
 
   /**
+   * The engine crash handler's report, if the engine printed one. An engine can exit 0 after
+   * crashing, as 4.7.2 on macOS does when an import crashes on its way out, so the exit code alone
+   * does not say a run crashed.
+   */
+  crashReport(): LogEntry | undefined {
+    return this.entries.find((entry) => CRASH.test(entry.text));
+  }
+
+  /**
    * Every entry, for a reader that groups rather than filters.
    *
    * Apart from `select` because it marks nothing seen and admits everything: a burst is found by

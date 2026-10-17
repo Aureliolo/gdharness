@@ -701,7 +701,10 @@ handed to the game as it starts, and one set while it runs reaches it at once. T
 pauses a running game, which the editor's adapter cannot, and the engine takes the pause between
 lines of script as well as between frames, so a game spinning in a script loop on its first frame
 can be broken into and asked where it is. Errors do not stop such a game (`--ignore-error-breaks`),
-as they did not when it had no debugger. A profiled run's profiler reads the same connection.
+as they did not when it had no debugger. A profiled run's profiler reads the same connection. A
+mark (`editor_run profile` with `mark`) is the profile's totals at that moment, written beside the
+run's note rather than held in the server, so a server that replaces this one counts
+`since: "mark"` from the same place.
 
 `editor_output` answers with entries rather than lines: each `ERROR:`, `SCRIPT ERROR:` and
 `WARNING:` headline with its `at:` line and backtrace, the counts, and a `clean` verdict. It
@@ -808,7 +811,9 @@ as it is torn down, and the deferred call runs after that. The run has done its 
 fresh cache by then, so the next run is clean. When an import or an export ends badly and a cache in
 that folder was written while it ran, gdharness runs it once more and says why under
 `docCacheNote`. Windows reports the crash as an access violation, 0xC0000005, and a runtime that
-keeps only the low byte of an exit code, as Bun does, reports it as 5.
+keeps only the low byte of an exit code, as Bun does, reports it as 5. On macOS the engine's crash
+handler prints the signal and the process then exits 0, so a run whose output holds that report
+counts as ending badly too.
 
 Which tools this covers is worth knowing, because `project_settings get` reads like a look at a
 config file and is not: it starts an engine so that a setting nobody wrote into `project.godot`

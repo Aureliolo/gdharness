@@ -203,6 +203,7 @@ import {
   listeningPid,
   noteIsAbout,
   openTranscript,
+  profileMarkPath,
   profilePath,
   type RunRecord,
   readEditorRunNote,
@@ -247,12 +248,16 @@ import {
   callersOf,
   frameFunctionsFor,
   PROFILE_FROM_START,
+  type ProfileMark,
   type ProfileTotals,
   profiledFunctions,
   queuedMessagesOf,
   readProfileFile,
+  readProfileMark,
   type SourceOf,
+  totalsSince,
   UNNAMED_PREFIX,
+  writeProfileMark,
 } from './script-profile.js';
 import { serverInstructions } from './server-instructions.js';
 import type {
@@ -2614,6 +2619,12 @@ function playedCap(
 
 /** What a profile answer reads from the run's project rather than from the profile. */
 type ProjectForProfile = Pick<ProfileReading, 'runtimeAddon' | 'sourceOf' | 'callersOf'>;
+
+/** Whether an editor_run profile asked to set the run's mark, and to count from it. */
+interface MarkAsk {
+  readonly mark: boolean;
+  readonly since: boolean;
+}
 
 /** What a callers answer for a property says its places are, which are not calls. */
 const PROPERTY_PLACES =
@@ -10680,6 +10691,10 @@ class GodotServer {
         ['editor_run profile names each function as it answers; pass one of those'],
       );
     }
+    const asked: MarkAsk = {
+      mark: readBoolean(args, 'mark') === true,
+      since: readString(args, 'since') === 'mark',
+    };
     const going = await this.runStillGoing(run);
     const projectPath = run.projectPath;
     // The profile outlives the project it was taken in: a git worktree removed after its run leaves
@@ -10704,7 +10719,7 @@ class GodotServer {
                 : { callersOf: { name: callersName, scripts: () => projectScripts(projectPath) } }),
             };
     if (run.throughEditor) {
-      return await this.profileOfThePlayedGame(going, projectPath, fromProject, limit);
+      return await this.profileOfThePlayedGame(run, going, fromProject, limit, asked);
     }
     const path = run.profile;
     if (path === undefined) {
@@ -10720,26 +10735,28 @@ class GodotServer {
       ]);
     }
     const totals = file.connected ? file : null;
-    return this.jsonTextResponse(
-      profileAnswer(
-        {
-          through: 'gdharness',
-          running: going,
-          totals,
-          coveredMs: totals?.lastFrameAt == null ? 0 : totals.lastFrameAt - totals.startedAt,
-          ...fromProject,
-        },
-        limit,
-      ),
+    return this.profileReply(
+      run,
+      {
+        through: 'gdharness',
+        running: going,
+        totals,
+        coveredMs: totals?.lastFrameAt == null ? 0 : totals.lastFrameAt - totals.startedAt,
+        ...fromProject,
+      },
+      limit,
+      asked,
     );
   }
 
   private async profileOfThePlayedGame(
+    run: GodotProcess,
     going: boolean,
-    projectPath: string | null,
     fromProject: ProjectForProfile,
     limit: number,
+    asked: MarkAsk,
   ): Promise<ToolResponse> {
+    const { projectPath } = run;
     const read = await this.handleViaBridge('profile_read', {});
     if (read.isError === true) {
       return read;
@@ -10767,14 +10784,19 @@ class GodotServer {
       // was sent: the editor sends it at its own frame rate and the game applies it at its next
       // poll, so "from here on" said at once let the first calls after it go uncounted.
       const on = await this.firstProfiledFrame();
+      // A mark here would be the profile's own start, which an answer without since already counts from.
+      const unmarked =
+        asked.mark || asked.since
+          ? ' Nothing was marked, and nothing is counted from a mark: the profile begins now, so an answer without since covers the same span.'
+          : '';
       return this.jsonTextResponse({
         through: 'editor',
         running: true,
         started: true,
         functions: [],
         note: on
-          ? 'The profiler was switched on now, for the game the editor is playing, and its first frame has arrived, so it covers what the game does from here on. Ask again for the functions; editor_run start with profile: true covers a game from its start.'
-          : `The profiler was switched on for the game the editor is playing, and no frame of it had arrived ${PROFILER_ON_MS}ms later: what the game does before the first one is not counted. Ask again for the functions; editor_run start with profile: true covers a game from its start.`,
+          ? `The profiler was switched on now, for the game the editor is playing, and its first frame has arrived, so it covers what the game does from here on. Ask again for the functions; editor_run start with profile: true covers a game from its start.${unmarked}`
+          : `The profiler was switched on for the game the editor is playing, and no frame of it had arrived ${PROFILER_ON_MS}ms later: what the game does before the first one is not counted. Ask again for the functions; editor_run start with profile: true covers a game from its start.${unmarked}`,
       });
     }
     const functions = asParams(held['functions']);
@@ -10802,18 +10824,103 @@ class GodotServer {
             ),
           }
         : null;
-    return this.jsonTextResponse(
-      profileAnswer(
-        {
-          through: 'editor',
-          running: going,
-          totals,
-          coveredMs: readNonNegativeNumber(held, 'coveredMs') ?? 0,
-          ...fromProject,
-        },
-        limit,
-      ),
+    return this.profileReply(
+      run,
+      {
+        through: 'editor',
+        running: going,
+        totals,
+        coveredMs: readNonNegativeNumber(held, 'coveredMs') ?? 0,
+        ...fromProject,
+      },
+      limit,
+      asked,
     );
+  }
+
+  /**
+   * The profile answer for [param reading], counted from the run's mark when [param asked] says
+   * since, and with the mark set at these totals when it says mark. Since is read first, so one call
+   * with both answers for the span just ended and starts the next.
+   */
+  private profileReply(
+    run: GodotProcess,
+    reading: ProfileReading,
+    limit: number,
+    asked: MarkAsk,
+  ): ToolResponse {
+    const markPath = profileMarkPath(run.startedAt);
+    const now = Date.now();
+    let shown = reading;
+    const lead: string[] = [];
+    let sinceFields: Record<string, unknown> = {};
+    if (asked.since) {
+      const mark = readProfileMark(markPath);
+      if (mark === null || mark.runStartedAt !== run.startedAt || mark.projectPath !== run.projectPath) {
+        return this.createErrorResponse(
+          'No mark has been set in this run, so there is nothing to count from.',
+          ['editor_run profile with mark: true sets one at the totals it answers with'],
+        );
+      }
+      const added = reading.totals === null ? null : totalsSince(reading.totals, mark.totals);
+      if (added === null) {
+        return this.createErrorResponse(
+          'The profile holds less than it did at the mark, so the profiler was started again since, and what it holds now cannot be counted from the mark.',
+          ['editor_run profile with mark: true sets a mark in the profile as it is now'],
+        );
+      }
+      shown = {
+        ...reading,
+        totals: added.totals,
+        coveredMs: Math.max(0, reading.coveredMs - mark.coveredMs),
+      };
+      const ago = now - mark.takenAt;
+      sinceFields = {
+        since: 'mark',
+        markSetMsAgo: ago,
+        ...(added.shrunk > 0 ? { lessThanAtMark: added.shrunk } : {}),
+      };
+      lead.push(
+        `Counted from the mark set ${ago}ms ago: each function's calls and milliseconds are what it added after the mark, frames and coveredMs are those since it, and a function that added no call is left out.`,
+      );
+      if (added.shrunk > 0) {
+        const one = added.shrunk === 1;
+        lead.push(
+          `${one ? 'One function reads' : `${added.shrunk} functions read`} less than at the mark and ${one ? 'is' : 'are'} left out, counted under lessThanAtMark: the engine's own totals arrived after the mark and replaced the frames' sum, and capped totals leave out the functions with the least time.`,
+        );
+      }
+    }
+    if (asked.mark) {
+      if (reading.totals === null) {
+        return this.createErrorResponse(
+          'There is nothing to mark yet: the game has not connected to the profiler.',
+          ['Ask again in a moment, once the game is up'],
+        );
+      }
+      const mark: ProfileMark = {
+        takenAt: now,
+        projectPath: run.projectPath,
+        runStartedAt: run.startedAt,
+        coveredMs: reading.coveredMs,
+        totals: reading.totals,
+      };
+      if (!writeProfileMark(markPath, mark)) {
+        return this.createErrorResponse(`The mark could not be written to ${markPath}, so none is set.`);
+      }
+      lead.push(
+        asked.since
+          ? 'The mark is moved to the totals as they are now, so the next since: "mark" counts from here.'
+          : 'The mark is set at these totals: editor_run profile with since: "mark" answers only what is added after it.',
+      );
+    }
+    const answer = profileAnswer(shown, limit);
+    const note = [...lead, ...(typeof answer['note'] === 'string' ? [answer['note']] : [])].join(' ');
+    return this.jsonTextResponse({
+      ...answer,
+      ...sinceFields,
+      ...(asked.mark ? { marked: true } : {}),
+      note: note === '' ? undefined : note,
+    });
   }
 
   /** Whether a frame of the profile reached the editor within `PROFILER_ON_MS` of being asked. */

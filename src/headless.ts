@@ -350,10 +350,10 @@ async function importOnce(godotPath: string, projectPath: string): Promise<Impor
     discard(logDir);
   }
   const problems = problemsIn(ran.log);
-  if (ran.exitCode === 0 && ran.failure === null) {
-    return { ok: true, ...reported(problems) };
-  }
   const crash = docCacheCrash(ran, cachesBefore, docCachesWritten(caches), 'import');
+  if (ran.exitCode === 0 && ran.failure === null) {
+    return { ok: true, ...reported(problems), ...(crash === null ? {} : { docCacheNote: crash }) };
+  }
   return {
     ok: false,
     message: `the import pass failed (${howItEnded(ran)}): ${reason(ran.log, problems)}`,

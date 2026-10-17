@@ -170,6 +170,7 @@ import {
   judgeRun,
   listeningPid,
   listeningPidInNetstat,
+  profileMarkPath,
   readLatestRun,
   readRunRecord,
   readWindowsCommandLine,
@@ -224,6 +225,7 @@ import {
   readProfileFile,
   type SourceOf,
   signatureParts,
+  totalsSince,
   UNNAMED_PREFIX,
   withEngineArguments,
   writeProfileFile,
@@ -7275,7 +7277,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 130;
+const READ_IN_WORDS = 132;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -18302,11 +18304,17 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
  * key, in a cache directory the fixture owns.
  */
 async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> {
-  const ran = (exitCode: number | null, exitSignal: string | null = null, failure: string | null = null) => ({
-    exitCode,
-    exitSignal,
-    failure,
-  });
+  const ran = (
+    exitCode: number | null,
+    exitSignal: string | null = null,
+    failure: string | null = null,
+    printed = '',
+  ) => {
+    const log = new GameLog();
+    log.append('stdout', printed);
+    log.finish();
+    return { exitCode, exitSignal, failure, log };
+  };
   const cache = join('cache', 'editor_doc_cache-4.7.res');
   const before = new Map([[cache, 1]]);
   const rewritten = new Map([[cache, 2]]);
@@ -18332,6 +18340,17 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
       `The first import ended badly (ended by SIGSEGV) after rebuilding the editor's class reference cache, ${cache}. `,
     ),
     `a cache written where there was none counts, and a signal is named: ${fromNone}`,
+  );
+  // As an import crashes on macOS: the crash handler reports it and the engine exits 0.
+  const handled = 'handle_crash: Program crashed with signal 11';
+  const exitedZero =
+    docCacheCrash(ran(0, null, null, `${handled}\nEngine version: Godot\n`), before, rewritten, 'import') ??
+    '';
+  assert.ok(
+    exitedZero.startsWith(
+      `The first import ended badly (exit code 0, and its crash handler printed "${handled}") after rebuilding the editor's class reference cache, ${cache}. `,
+    ),
+    exitedZero || 'a crash the handler reported, followed by exit code 0, gave no note',
   );
 
   const home = join('home', 'someone');
@@ -30538,9 +30557,21 @@ function testRunNotesAreKeptPerProject(): void {
     const aDayAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
     utimesSync(guildLog, aDayAgo, aDayAgo);
     utimesSync(benchLog, aDayAgo, aDayAgo);
+    // A run's profile mark goes with the run: kept while a note names it, swept once old otherwise.
+    const guildMark = profileMarkPath(readRunRecord(guild)?.startedAt ?? 0);
+    const strayMark = join(runs, 'run-3.profile-mark.json');
+    for (const mark of [guildMark, strayMark]) {
+      writeFileSync(mark, '{}');
+      utimesSync(mark, aDayAgo, aDayAgo);
+    }
     sweepTranscripts();
     assert.ok(existsSync(guildLog), "the guild run's transcript is kept while its note names it");
     assert.ok(existsSync(benchLog), "and so is the bench's");
+    assert.deepEqual(
+      [existsSync(guildMark), existsSync(strayMark)],
+      [true, false],
+      "the guild run's mark is kept, and a day-old mark of no run is swept",
+    );
 
     clearRunRecord(bench);
     assert.equal(readRunRecord(bench), null, 'clearing the bench takes its note away');
@@ -32935,6 +32966,272 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       await server.stop();
     }
   } finally {
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A profile since a mark answers for one action apart from the boot.
+ *
+ * #1147: profiling a press in a running game summed everything from the game's start, so the
+ * boot's hundreds of milliseconds sat in the same rows as a press's few, and ostinato read callersOf
+ * before and after each action and subtracted by hand, one function per call. This is the check the
+ * issue gives: a scene that runs boot() once in _ready and press() when invoked, marked after the
+ * boot, then pressed three times. The mark is read again by a second server, since the harness can
+ * replace a server between the mark and the read.
+ */
+async function testAProfileSinceAMarkAnswersForOneAction(): Promise<void> {
+  const now: ProfileTotals = {
+    startedAt: 7,
+    lastFrameAt: 900,
+    frames: 30,
+    complete: false,
+    unreadable: 1,
+    cappedFrames: 2,
+    functions: {
+      'res://main.gd::4::boot': { calls: 1, selfSeconds: 0.1, totalSeconds: 0.1 },
+      'res://main.gd::9::press': { calls: 5, selfSeconds: 0.05, totalSeconds: 0.06 },
+      'res://main.gd::14::fresh': { calls: 2, selfSeconds: 0.002, totalSeconds: 0.002 },
+      'res://main.gd::18::shrinking': { calls: 1, selfSeconds: 0.001, totalSeconds: 0.001 },
+      'res://addons/gdharness_runtime/runtime_autoload.gd::40::_profiler_probe': {
+        calls: 100,
+        selfSeconds: 0.0002,
+        totalSeconds: 0.0002,
+      },
+    },
+  };
+  const mark: ProfileTotals = {
+    ...now,
+    frames: 10,
+    unreadable: 0,
+    cappedFrames: 1,
+    functions: {
+      'res://main.gd::4::boot': { calls: 1, selfSeconds: 0.1, totalSeconds: 0.1 },
+      'res://main.gd::9::press': { calls: 2, selfSeconds: 0.02, totalSeconds: 0.025 },
+      'res://main.gd::18::shrinking': { calls: 3, selfSeconds: 0.003, totalSeconds: 0.003 },
+      'res://main.gd::22::gone': { calls: 1, selfSeconds: 0.001, totalSeconds: 0.001 },
+      'res://addons/gdharness_runtime/runtime_autoload.gd::40::_profiler_probe': {
+        calls: 100,
+        selfSeconds: 0.0002,
+        totalSeconds: 0.0002,
+      },
+    },
+  };
+  const since = totalsSince(now, mark);
+  assert.ok(since !== null, 'a profile that went on from the mark counts from it');
+  const press = since.totals.functions['res://main.gd::9::press'];
+  assert.deepEqual(
+    [
+      Object.keys(since.totals.functions).sort(),
+      press?.calls,
+      Math.round((press?.selfSeconds ?? 0) * 1e6),
+      Math.round((press?.totalSeconds ?? 0) * 1e6),
+      since.totals.frames,
+      since.totals.unreadable,
+      since.totals.cappedFrames,
+      since.shrunk,
+    ],
+    [
+      [
+        'res://addons/gdharness_runtime/runtime_autoload.gd::40::_profiler_probe',
+        'res://main.gd::14::fresh',
+        'res://main.gd::9::press',
+      ],
+      3,
+      30000,
+      35000,
+      20,
+      1,
+      1,
+      2,
+    ],
+    'what each function added, a new one whole, the calibration kept whole for the per-call cost, and the two that read less than at the mark left out and counted',
+  );
+  assert.deepEqual(
+    [totalsSince({ ...now, frames: 9 }, mark), totalsSince({ ...now, startedAt: 8 }, mark)],
+    [null, null],
+    'a profile with fewer frames than the mark, or switched on at another time, was started again since',
+  );
+
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('profile mark regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-profile-mark-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-profile-mark-rt-'));
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Marked"\nrun/main_scene="res://main.tscn"\n\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    [
+      'extends Node',
+      '',
+      'var sum := 0',
+      '',
+      '',
+      'func boot() -> void:',
+      '\tfor i in 300000:',
+      '\t\tsum += i % 7',
+      '',
+      '',
+      'func step(n: int) -> int:',
+      '\treturn n % 11',
+      '',
+      '',
+      'func press() -> int:',
+      '\tfor i in 20000:',
+      '\t\tsum += i % 3',
+      '\treturn step(sum)',
+      '',
+      '',
+      'func _ready() -> void:',
+      '\tboot()',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  const env = { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project };
+  const caller = (server: ServerProcess) => async (name: string, args: Record<string, unknown>) => {
+    const said =
+      textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+    return { said, parsed: said.trimStart().startsWith('{') ? (JSON.parse(said) as unknown) : null };
+  };
+  // Undefined for a refusal too, so the assertion reading it prints what was said instead.
+  const callsOf = (answer: unknown, fn: string): number | undefined => {
+    const rows = get(answer, 'functions');
+    return Array.isArray(rows)
+      ? rows.filter((row) => get(row, 'function') === fn).map((row) => Number(get(row, 'calls')))[0]
+      : undefined;
+  };
+  const until = async (
+    ask: () => Promise<{ said: string; parsed: unknown }>,
+    done: (parsed: unknown) => boolean,
+    what: string,
+  ): Promise<unknown> => {
+    const deadline = Date.now() + 30_000;
+    let last = '';
+    while (Date.now() < deadline) {
+      const { said, parsed } = await ask();
+      last = said;
+      if (parsed !== null && done(parsed)) {
+        return parsed;
+      }
+      await delay(250);
+    }
+    throw new assert.AssertionError({ message: `${what}; the last answer was ${last}` });
+  };
+
+  const first = new ServerProcess({ env });
+  let second: ServerProcess | null = null;
+  try {
+    await first.initialize('profile-mark');
+    const call = caller(first);
+    const started = await call('editor_run', {
+      op: 'start',
+      projectPath: project,
+      headless: true,
+      profile: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.match(started.said, /"started": true/, started.said);
+    await until(
+      () => call('editor_run', { op: 'profile' }),
+      (parsed) => callsOf(parsed, 'boot') === 1,
+      'the boot reached the profile',
+    );
+
+    const unmarked = await call('editor_run', { op: 'profile', since: 'mark' });
+    assert.match(
+      unmarked.said,
+      /^No mark has been set in this run, so there is nothing to count from\./,
+      unmarked.said,
+    );
+    const later = await call('editor_run', { op: 'profile', since: 'later' });
+    assert.match(later.said, /^editor_run takes since as one of mark, not "later"\./, later.said);
+
+    const marked = await call('editor_run', { op: 'profile', mark: true });
+    assert.equal(get(marked.parsed, 'marked'), true, marked.said);
+    assert.equal(callsOf(marked.parsed, 'boot'), 1, `the mark answers as usual: ${marked.said}`);
+
+    for (let i = 0; i < 3; i++) {
+      const pressed = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'press',
+        args: [],
+      });
+      assert.ok(pressed.parsed !== null, pressed.said);
+    }
+    const sinceMark = await until(
+      () => call('editor_run', { op: 'profile', since: 'mark', callersOf: 'step' }),
+      (parsed) => callsOf(parsed, 'press') === 3,
+      'three presses since the mark',
+    );
+    const shown = JSON.stringify(sinceMark);
+    assert.equal(
+      callsOf(sinceMark, 'boot'),
+      undefined,
+      `the boot is not in what was added since the mark: ${shown}`,
+    );
+    assert.deepEqual(
+      [get(sinceMark, 'since'), typeof get(sinceMark, 'markSetMsAgo'), callsOf(sinceMark, 'step')],
+      ['mark', 'number', 3],
+      shown,
+    );
+    assert.deepEqual(
+      asArray(get(sinceMark, 'callers', 'sites')).map((one) => [get(one, 'within'), get(one, 'withinCalls')]),
+      [['press', 3]],
+      `callersOf reads the same difference: ${shown}`,
+    );
+    assert.match(String(get(sinceMark, 'note')), /^Counted from the mark set \d+ms ago: /, shown);
+
+    const whole = await call('editor_run', { op: 'profile' });
+    assert.deepEqual(
+      [callsOf(whole.parsed, 'boot'), callsOf(whole.parsed, 'press')],
+      [1, 3],
+      `without since, the whole run as before: ${whole.said}`,
+    );
+
+    // A second server for the project, after the mark, reads the mark the first one set.
+    second = new ServerProcess({ env });
+    await second.initialize('profile-mark-again');
+    const again = caller(second);
+    const read = await again('editor_run', { op: 'profile', since: 'mark' });
+    assert.equal(
+      callsOf(read.parsed, 'press'),
+      3,
+      `a server that replaced the one that set the mark reads it: ${read.said}`,
+    );
+
+    const lap = await again('editor_run', { op: 'profile', since: 'mark', mark: true });
+    assert.deepEqual(
+      [callsOf(lap.parsed, 'press'), get(lap.parsed, 'marked')],
+      [3, true],
+      `since and mark together answer from the old mark and then move it: ${lap.said}`,
+    );
+    await again('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'press', args: [] });
+    await until(
+      () => again('editor_run', { op: 'profile', since: 'mark' }),
+      (parsed) => callsOf(parsed, 'press') === 1,
+      'one press since the moved mark',
+    );
+    await again('editor_run', { op: 'stop' });
+  } finally {
+    await second?.stop();
+    await first.stop();
     sweep(project);
     sweep(runtimeDir);
   }
@@ -42719,6 +43016,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,
+  testAProfileSinceAMarkAnswersForOneAction,
   testAProfileFromTheStartWaitsForTheProfiler,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
   testCommandLineSetup,

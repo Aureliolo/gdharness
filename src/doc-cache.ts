@@ -73,26 +73,29 @@ export function docCachesWritten(directory: string): ReadonlyMap<string, number>
 }
 
 /**
- * What a caller is told when [param ran], an import or an export, did not exit cleanly and a class
- * reference cache was written while it ran, going by [param before] and [param after] from
+ * What a caller is told when [param ran], an import or an export, did not exit cleanly, or exited 0
+ * after its crash handler reported a crash, as one on macOS does, and a class reference cache was
+ * written while it ran, going by [param before] and [param after] from
  * {@link docCachesWritten}; null for any other run. [param what] names the run, `import` or
  * `export`, and the caller runs it again when this is not null.
  */
 export function docCacheCrash(
-  ran: Pick<EngineRun, 'exitCode' | 'exitSignal' | 'failure'>,
+  ran: Pick<EngineRun, 'exitCode' | 'exitSignal' | 'failure' | 'log'>,
   before: ReadonlyMap<string, number>,
   after: ReadonlyMap<string, number>,
   what: 'import' | 'export',
 ): string | null {
-  if ((ran.exitCode === 0 && ran.exitSignal === null) || ran.failure !== null) {
+  const report = ran.log.crashReport();
+  if ((ran.exitCode === 0 && ran.exitSignal === null && report === undefined) || ran.failure !== null) {
     return null;
   }
   const rewritten = [...after].find(([path, at]) => before.get(path) !== at)?.[0];
   if (rewritten === undefined) {
     return null;
   }
+  const said = report === undefined ? '' : `, and its crash handler printed "${report.text}"`;
   return (
-    `The first ${what} ended badly (${howItEnded(ran)}) after rebuilding the editor's class reference ` +
+    `The first ${what} ended badly (${howItEnded(ran)}${said}) after rebuilding the editor's class reference ` +
     `cache, ${rewritten}. Godot crashes as an import or an export exits when it finds that cache ` +
     'stale, which it is whenever another build of the same minor version wrote it last, such as 4.7.1 ' +
     `beside 4.7.2, and the crashing run writes a fresh one. So the ${what} was run again, and this answer ` +
