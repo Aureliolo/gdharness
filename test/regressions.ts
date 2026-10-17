@@ -14628,7 +14628,7 @@ async function testCallsSentTogetherWaitTheirTurnAtTheGame(): Promise<void> {
     const refusedThroughout = await read();
     assert.match(
       refusedThroughout,
-      /'get_property' was not sent to the game \(.*\) within 2000ms: its port refused all \d+ connections tried, which the engine does while more are waiting for the game than the eight it queues: several servers calling the game at once can fill the queue, and a long frame or a breakpoint stops the game taking them\. Nothing was sent, so nothing ran\./,
+      /The game \(.*\) is running but nothing answered on its port: it refused all \d+ connections tried within 2000ms\. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do\. Nothing was sent, so nothing ran\./,
       refusedThroughout,
     );
     game.listen(port, '127.0.0.1');

@@ -1068,15 +1068,20 @@ export function runtimeRequest(
     };
     const timer = setTimeout(() => {
       if (socket === null) {
-        const why =
+        // Nothing listening and a full queue are refused alike, so the answer names both.
+        finish(
           refusals > 0
-            ? `its port refused ${refusals === 1 ? 'the connection' : `all ${refusals} connections tried`}, which the engine does while more are waiting for the game than the eight it queues: several servers calling the game at once can fill the queue, and a long frame or a breakpoint stops the game taking them`
-            : `${UNTAKEN_PER_GAME} connections from this server were already waiting for the game to take them, which it does between frames, so a long frame or a breakpoint holds them`;
-        finish({
-          ok: false,
-          reason: 'busy',
-          message: `'${command}' was not sent to the game (${describe(endpoint)}) within ${timeoutMs}ms: ${why}. Nothing was sent, so nothing ran.`,
-        });
+            ? {
+                ok: false,
+                reason: 'refused',
+                message: `The game (${describe(endpoint)}) is running but nothing answered on its port: it refused ${refusals === 1 ? 'the connection' : `all ${refusals} connections tried`} within ${timeoutMs}ms. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do. Nothing was sent, so nothing ran.`,
+              }
+            : {
+                ok: false,
+                reason: 'busy',
+                message: `'${command}' was not sent to the game (${describe(endpoint)}) within ${timeoutMs}ms: ${UNTAKEN_PER_GAME} connections from this server were already waiting for the game to take them, which it does between frames, so a long frame or a breakpoint holds them. Nothing was sent, so nothing ran.`,
+              },
+        );
         return;
       }
       const still = welcomed
