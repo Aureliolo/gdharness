@@ -28620,6 +28620,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'var by_name: Dictionary[String, Gear] = {"head": null}\n' +
           'var spare: RefCounted = RefCounted.new()\nvar count: int = 3\n' +
           'var done_at: Array[int] = []\nvar tally: Dictionary[String, int] = {}\nvar board: Array[int] = []\n' +
+          'var ledger: Dictionary = {"zeta": 1, "alpha": 2, "mid": 3}\n' +
           'var names: PackedStringArray = PackedStringArray(["Ada", "Bram"])\n' +
           'var locked: int = 5:\n\tset(value):\n\t\tpass\n\n\n' +
           'func _ready() -> void:\n' +
@@ -28938,6 +28939,12 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         ['head'],
         'a map answers its keys',
       );
+      // A map comes back in the order the game keeps it, which is the order its keys() and a loop
+      // over it give. Sorted on the way out of the game, a stock keyed base:dew, base:salt and
+      // base:moon_sand was read with moon_sand second while its keys() put it third.
+      const ledgerOrder = ['zeta', 'alpha', 'mid'];
+      assert.deepEqual(Object.keys(asObject(get((await read('ledger')).parsed, 'value'))), ledgerOrder);
+      assert.deepEqual(get((await read('ledger:keys()')).parsed, 'value'), ledgerOrder, 'as keys() lists it');
       assert.match((await read('board:back()')).said, /is an empty list, so it has no back\(\)/);
       assert.match((await read('wares:clear()')).said, /not one of the calls a path makes on one/);
       assert.equal(
@@ -42360,6 +42367,11 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       '[node name="Added" type="Node2D" parent="Pet/Body" index="0"]\n\n[editable path="Pet"]\n',
     'panel.tres':
       '[gd_resource type="StyleBoxFlat" format=3]\n\n[resource]\nbg_color = Color(1, 0, 0, 1)\ncorner_radius_top_left = 4\n',
+    'ledger.gd': 'extends Resource\n\n@export var entries: Dictionary = {}\n',
+    'ledger.tres':
+      '[gd_resource type="Resource" script_class="" load_steps=2 format=3]\n\n' +
+      '[ext_resource type="Script" path="res://ledger.gd" id="1_ledger"]\n\n' +
+      '[resource]\nscript = ExtResource("1_ledger")\nentries = {\n"zeta": 1,\n"alpha": 2,\n"mid": 3\n}\n',
     'loud_player.gd':
       'extends AnimationPlayer\n\n\nfunc _init() -> void:\n' +
       '\tFileAccess.open("res://init_ran.txt", FileAccess.WRITE).store_string("ran")\n',
@@ -42489,6 +42501,14 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       ['properties', 'readBy', 'resourcePath', 'resourceType'],
       JSON.stringify(panel),
     );
+
+    // The engine's JSON writer sorts keys unless told not to, so a map came back in another order
+    // than the file and the game keep it in.
+    const ledger = parseTextContent(
+      await call('resource_edit', { op: 'read', resourcePath: 'res://ledger.tres' }),
+    );
+    const entries = get(asObject(get(ledger, 'properties')), 'entries');
+    assert.deepEqual(Object.keys(asObject(entries)), ['zeta', 'alpha', 'mid'], JSON.stringify(ledger));
 
     // Each read handed the other's file says which one reads it, where the scene read printed the
     // loader's error and the resource read answered a scene's packed bundle as its properties.
