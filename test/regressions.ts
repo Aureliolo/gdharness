@@ -6982,21 +6982,17 @@ async function testANoEditorRefusalSaysWhetherOneCanConnect(): Promise<void> {
     writeFileSync(join(projectPath, 'project.godot'), 'config_version=5\n');
     await withStdioServer(
       async (call) => {
-        const animation = {
-          op: 'create',
-          projectPath,
-          scenePath: 'res://made.tscn',
-          playerNodePath: 'Anim',
-          animationName: 'idle',
-        };
-        const create = await call('scene_animation', animation);
+        // A read asked of the editor, since every scene and resource write goes through a headless
+        // engine when no editor serves the project.
+        const fromTheEditor = { op: 'get', projectPath, setting: 'application/config/name', from: 'editor' };
+        const create = await call('project_settings', fromTheEditor);
         assert.match(create, /^Editor not connected/, create);
 
         // A project never set up has no addon to enable and no editor that could dial in, so the
         // refusal says that and how to install it. Each half of the addon check gets the shape only it
         // refuses, as editor_launch's does, and then the project that has both, which an editor could
         // still connect from.
-        const ask = async (): Promise<string> => await call('scene_animation', animation);
+        const ask = async (): Promise<string> => await call('project_settings', fromTheEditor);
         assert.ok(
           create.startsWith(
             `Editor not connected, and no editor of this project can connect: the gdharness editor addon is not installed in ${projectPath}.`,
@@ -38412,14 +38408,8 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
     // A call only an editor answers: scene_tree and scene_node read the other project's file without
     // one, and a scene write goes through a headless engine there.
     const other = await server.request('tools/call', {
-      name: 'scene_animation',
-      arguments: {
-        op: 'create',
-        projectPath: elsewhere,
-        scenePath: 'res://main.tscn',
-        playerNodePath: 'Anim',
-        animationName: 'idle',
-      },
+      name: 'project_settings',
+      arguments: { op: 'get', projectPath: elsewhere, setting: 'application/config/name', from: 'editor' },
     });
     const refused = textOf(other) ?? JSON.stringify(other);
     // By its process id too: a headless engine run that holds the bridge has no window to look for.
@@ -38429,7 +38419,7 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
     );
     assert.match(refused, /gdharness-editor-has-not/, `and the one that was asked for: ${refused}`);
     assert.equal(
-      asked.includes('create_animation'),
+      asked.includes('get_project_setting'),
       false,
       'and the editor was never asked about a project it cannot see',
     );
@@ -42725,6 +42715,23 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       '[sub_resource type="Resource" id="Resource_stats"]\nscript = ExtResource("1_stats")\nmax_hp = 20\n\n' +
       '[node name="Holder" type="Node"]\nscript = ExtResource("2_keeps")\nstats = SubResource("Resource_stats")\n\n' +
       '[node name="Other" type="Node2D" parent="."]\n',
+    // The same scripted resource kept as a map's value and inside a nested array, which a binary
+    // save has to see as plainly as one held directly.
+    'keeps_many.gd': 'extends Node\n\n@export var held: Dictionary = {}\n@export var listed: Array = []\n',
+    ...Object.fromEntries(
+      (
+        [
+          ['mapped.tscn', 'held = {\n"a": SubResource("Resource_stats")\n}'],
+          ['nested.tscn', 'listed = [[SubResource("Resource_stats")]]'],
+        ] as const
+      ).map(([file, kept]) => [
+        file,
+        `[gd_scene format=3]\n\n${stats}[ext_resource type="Script" path="res://keeps_many.gd" id="2_many"]\n\n` +
+          '[sub_resource type="Resource" id="Resource_stats"]\nscript = ExtResource("1_stats")\nmax_hp = 20\n\n' +
+          `[node name="Many" type="Node"]\nscript = ExtResource("2_many")\n${kept}\n`,
+      ]),
+    ),
+    'calm.tscn': '[gd_scene format=3]\n\n[node name="Calm" type="Node2D"]\nposition = Vector2(3, 4)\n',
     // Does not compile, so the engine instances the scene without it, where the editor keeps it.
     'broken.gd': 'extends Node\n\n\nfunc _init() -> void:\n\tnot_declared_anywhere()\n',
     'broken.tscn':
@@ -43079,6 +43086,30 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     assert.doesNotMatch(attached, /editor_rescan/, attached);
     assert.ok(!existsSync(join(project, 'attached.tscn')), 'and a refused create leaves no file');
 
+    // A binary scene has no text to compare after the save, so one embedding a resource whose
+    // script ran is refused, wherever in its values that resource is kept.
+    const calm = await written('scene_create', {
+      op: 'save_as',
+      scenePath: 'calm.tscn',
+      newPath: 'calm.scn',
+    });
+    assert.equal(get(calm, 'savedPath'), 'res://calm.scn', JSON.stringify(calm));
+    assert.ok(existsSync(join(project, 'calm.scn')), 'a binary scene with no such resource is written');
+    for (const name of ['holder', 'mapped', 'nested']) {
+      const binary =
+        textOf(
+          await call('scene_create', { op: 'save_as', scenePath: `${name}.tscn`, newPath: `${name}.scn` }),
+        ) ?? '';
+      assert.match(
+        binary,
+        new RegExp(
+          `^Nothing was written: res://${name}\\.scn is a binary scene holding an embedded resource with a script that is not a tool`,
+        ),
+        `${name}: ${binary}`,
+      );
+      assert.ok(!existsSync(join(project, `${name}.scn`)), `and ${name}.scn is not written`);
+    }
+
     // An editor of the project that has not reached this server holds its own copy of what it has
     // open, so a write waits for it; once it has gone, the same write goes through.
     const runtime = join(project, `godot-standin${process.platform === 'win32' ? '.exe' : ''}`);
@@ -43112,6 +43143,148 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     assert.deepEqual(sets('main.tscn', '[node name="Plain"'), ['position = Vector2(9, 9)']);
   } finally {
     standIn?.kill();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * scene_animation's writes with no editor, through the server and a real engine, as the other scene
+ * tools write: each op lands in the file that keeps it, root.gd's _init (position) is not saved by
+ * a write that never asked for it, and a library in its own file whose animation carries a script
+ * that is not a tool is refused, since that file is saved without being compared with its text.
+ */
+async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('animation without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-animation-engine-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-animation-engine-rt-'));
+  const player = (library: string) =>
+    `[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="res://${library}" id="1_library"]\n` +
+    '[ext_resource type="Script" path="res://root.gd" id="2_root"]\n\n' +
+    '[sub_resource type="AnimationNodeStateMachine" id="StateMachine_1"]\n\n' +
+    '[node name="Root" type="Node2D"]\nscript = ExtResource("2_root")\n\n' +
+    '[node name="Body" type="Sprite2D" parent="."]\n\n' +
+    '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {\n&"moves": ExtResource("1_library")\n}\n\n' +
+    '[node name="Tree" type="AnimationTree" parent="."]\ntree_root = SubResource("StateMachine_1")\n' +
+    'anim_player = NodePath("../Player")\n';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Animation"\n',
+    'root.gd': 'extends Node2D\n\n\nfunc _init() -> void:\n\tposition = Vector2(9, 9)\n',
+    'library.tres':
+      '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_idle"]\n' +
+      'resource_name = "idle"\n\n[resource]\n_data = {\n&"idle": SubResource("Animation_idle")\n}\n',
+    'moves.tscn': player('library.tres'),
+    'stretched.gd': 'extends Animation\n\n\nfunc _init() -> void:\n\tlength = 3.0\n',
+    'stretched.tres':
+      '[gd_resource type="AnimationLibrary" format=3]\n\n[ext_resource type="Script" path="res://stretched.gd" id="1_stretched"]\n\n' +
+      '[sub_resource type="Animation" id="Animation_long"]\nscript = ExtResource("1_stretched")\nresource_name = "long"\n\n' +
+      '[resource]\n_data = {\n&"long": SubResource("Animation_long")\n}\n',
+    'stretched.tscn': player('stretched.tres'),
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: 'scene_animation', arguments: { projectPath: project, scenePath: 'moves.tscn', ...args } },
+      240_000,
+    );
+  const written = async (args: Record<string, unknown>): Promise<unknown> => {
+    const answer = await call(args);
+    const payload = parseTextContent(answer);
+    assert.match(
+      text(get(payload, 'writtenBy')),
+      /^a headless engine, since no editor serves this project$/,
+      `${String(args['op'])}: ${textOf(answer) ?? JSON.stringify(answer)}`,
+    );
+    return payload;
+  };
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('animation-engine');
+
+    await written({ op: 'create', playerNodePath: 'Player', animationName: 'spin', length: 0.5 });
+    const track = await written({
+      op: 'add_track',
+      playerNodePath: 'Player',
+      animationName: 'spin',
+      track: {
+        type: 'property',
+        nodePath: 'Body',
+        property: 'rotation',
+        keyframes: [
+          { time: 0, value: 0 },
+          { time: 0.5, value: 3.14 },
+        ],
+      },
+    });
+    assert.equal(get(track, 'trackIndex'), 0, JSON.stringify(track));
+    const scene = fileOf('moves.tscn');
+    assert.match(scene, /\[sub_resource type="Animation" id="[^"]+"\]\nlength = 0\.5\n/, scene);
+    assert.match(scene, /&"spin": SubResource/, scene);
+    assert.match(scene, /tracks\/0\/path = NodePath\("Body:rotation"\)/, scene);
+    const spin = parseTextContent(
+      await call({ op: 'read', playerNodePath: 'Player', animationName: 'spin' }),
+    );
+    assert.equal(asArray(get(spin, 'tracks')).length, 1, JSON.stringify(spin));
+
+    await written({ op: 'create', playerNodePath: 'Player', animationName: 'moves/hop' });
+    assert.match(fileOf('library.tres'), /&"hop": SubResource/, fileOf('library.tres'));
+    assert.doesNotMatch(
+      fileOf('moves.tscn'),
+      /"hop"/,
+      'an animation of a library kept apart goes in its file',
+    );
+
+    await written({ op: 'add_state', animTreePath: 'Tree', stateName: 'Spin', animationName: 'spin' });
+    await written({ op: 'add_state', animTreePath: 'Tree', stateName: 'Idle', animationName: 'moves/idle' });
+    await written({ op: 'connect_states', animTreePath: 'Tree', fromState: 'Spin', toState: 'Idle' });
+    const states = parseTextContent(await call({ op: 'read_states', animTreePath: 'Tree' }));
+    const named = asArray(get(states, 'states')).map((state) => get(state, 'stateName'));
+    for (const name of ['Spin', 'Idle']) {
+      assert.ok(named.includes(name), JSON.stringify(states));
+      assert.match(fileOf('moves.tscn'), new RegExp(`states/${name}/node = SubResource`));
+    }
+    assert.equal(asArray(get(states, 'transitions')).length, 1, JSON.stringify(states));
+    assert.doesNotMatch(fileOf('moves.tscn'), /position = Vector2\(9, 9\)/, 'what _init set is not saved');
+
+    const before = fileOf('stretched.tres');
+    const scripted =
+      textOf(
+        await call({
+          op: 'create',
+          scenePath: 'stretched.tscn',
+          playerNodePath: 'Player',
+          animationName: 'moves/new',
+        }),
+      ) ?? '';
+    assert.match(
+      scripted,
+      /^Nothing was written: res:\/\/stretched\.tres holds a resource with a script that is not a tool/,
+      scripted,
+    );
+    assert.equal(fileOf('stretched.tres'), before, 'and the library file is as it was');
+  } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
     rmSync(runtimeDir, { recursive: true, force: true });
@@ -43448,6 +43621,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveWithNoEditorLeavesTheProjectLoading,
   testAReadWithNoEditorAnswersFromTheFile,
   testAWriteWithNoEditorGoesThroughAHeadlessEngine,
+  testAnAnimationIsWrittenWithNoEditor,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
   testEveryFileArgumentIsContained,
