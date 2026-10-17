@@ -411,10 +411,10 @@ static func _cut_to_fit(given: Variant, type: int, node_path: String, property: 
 		return ""
 	return (
 		(
-			"%s.%s holds %s and the value to wait for is %s, which it would have to be cut to fit:"
+			"%s.%s holds %s and the value to wait for is %s, which %s cannot hold without changing it:"
 			+ " waiting on it would answer about a state nobody asked for."
 		)
-		% [node_path, property, type_string(type), str(given)]
+		% [node_path, property, type_string(type), str(given), Values.cut_by(type)]
 	)
 
 

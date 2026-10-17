@@ -343,6 +343,16 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 	var screenshot_path: String = requested_path
 	if screenshot_path.begins_with("user://") or screenshot_path.begins_with("res://"):
 		screenshot_path = ProjectSettings.globalize_path(screenshot_path)
+	# The server makes the folder for each capture and takes it away when it stops waiting for one,
+	# and a server replaced since the capture was asked for took it with it. Saving into a folder that
+	# is gone raises an engine error, which counts against a game that did nothing wrong.
+	if not DirAccess.dir_exists_absolute(screenshot_path.get_base_dir()):
+		return _refused(
+			(
+				"The folder to save the capture in, %s, is gone: the server that asked for it stopped waiting"
+				% screenshot_path.get_base_dir()
+			)
+		)
 	var save_error: Error = image.save_png(screenshot_path)
 	if save_error != OK:
 		return {"type": "error", "message": "Failed to save screenshot as PNG: " + str(save_error)}

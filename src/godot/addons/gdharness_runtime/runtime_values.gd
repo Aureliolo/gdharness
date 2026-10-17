@@ -156,6 +156,11 @@ static func cuts(given: Variant, type: int) -> bool:
 	return not (whole and (value == 0.0 or value == 1.0))
 
 
+## The slot [method cuts] speaks of, with its article, for a refusal to name: "an int" or "a bool".
+static func cut_by(type: int) -> String:
+	return "an int" if type == TYPE_INT else "a bool"
+
+
 ## Why [param given] may not be the whole number sent, or "": see [method Serialisation.inexact].
 static func inexact(given: Variant, type: int) -> String:
 	return Serialisation.inexact(given, type)

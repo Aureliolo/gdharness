@@ -322,6 +322,11 @@ const ms = (seconds: number): number => Math.round(seconds * 1_000_000) / 1000;
  * A function with no calls is left out. One the profiler started inside is never counted as called,
  * and its time is measured from the engine's start rather than from its own, which would put it at
  * the top of every table with a time longer than the run.
+ *
+ * The runtime addon's functions are summed apart, as `addonMs` over `addonFunctions`: they are
+ * gdharness answering its tools inside the game, a `runtime_invoke` costing more than many a press it
+ * makes, and among the game's rows they would read as the game's cost and take its places under the
+ * limit.
  */
 export function profiledFunctions(
   totals: ProfileTotals,
@@ -332,6 +337,8 @@ export function profiledFunctions(
   omitted: number;
   scriptMs: number;
   counted: number;
+  addonMs: number;
+  addonFunctions: number;
   superCallers: number;
   perCallUs: number | null;
   overheadDominated: number;
@@ -342,17 +349,19 @@ export function profiledFunctions(
 } {
   const perCallUs = perCallCostOf(totals);
   const rows = rowsOf(totals, sourceOf).map((row) => withOverhead(row, perCallUs));
-  const scriptMs = ms(
-    Object.entries(totals.functions).reduce(
-      (sum, [signature, one]) => sum + (one.calls > 0 && !isCalibration(signature) ? one.selfSeconds : 0),
-      0,
-    ),
+  const called = Object.entries(totals.functions).filter(
+    ([signature, one]) => one.calls > 0 && !isCalibration(signature),
   );
+  const addon = called.filter(([signature]) => isRuntimeAddon(signature));
+  const selfOf = (entries: typeof called): number =>
+    ms(entries.reduce((sum, [, one]) => sum + one.selfSeconds, 0));
   return {
     functions: rows.slice(0, limit).map((row) => placedLambda(row, sourceOf)),
     omitted: Math.max(0, rows.length - limit),
-    scriptMs,
+    scriptMs: selfOf(called.filter(([signature]) => !isRuntimeAddon(signature))),
     counted: rows.length,
+    addonMs: selfOf(addon),
+    addonFunctions: addon.length,
     superCallers: rows.filter((row) => row.selfIncludesSuper === true).length,
     perCallUs,
     overheadDominated: rows.filter((row) => row.overheadMs !== undefined).length,
@@ -365,6 +374,13 @@ export function profiledFunctions(
 const RUNTIME_SCRIPT = 'gdharness_runtime/runtime_autoload.gd';
 const PROFILER_PROBE = '_profiler_probe';
 const PROFILER_CALIBRATOR = '_calibrate_the_profiler';
+
+/** Where setup installs the runtime addon, whose scripts run in the game on gdharness's behalf. */
+const RUNTIME_ADDON = 'res://addons/gdharness_runtime/';
+
+function isRuntimeAddon(signature: string): boolean {
+  return signatureParts(signature).script.startsWith(RUNTIME_ADDON);
+}
 
 /** Whether [param signature] is the runtime addon measuring the profiler, which is not the game's. */
 function isCalibration(signature: string): boolean {
@@ -493,7 +509,7 @@ function rowsOf(totals: ProfileTotals, sourceOf: SourceOf): ProfiledFunction[] {
     return codes.get(script) ?? null;
   };
   return Object.entries(totals.functions)
-    .filter(([signature, sum]) => sum.calls > 0 && !isCalibration(signature))
+    .filter(([signature, sum]) => sum.calls > 0 && !isRuntimeAddon(signature) && !isCalibration(signature))
     .map(([signature, sum]): ProfiledFunction => {
       const parts = signatureParts(signature);
       const code = codeOfScript(parts.script);

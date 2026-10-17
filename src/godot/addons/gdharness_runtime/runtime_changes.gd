@@ -164,8 +164,8 @@ func _argument_for(
 			"type": "error",
 			"message":
 			(
-				"%s.%s takes %s as argument %d and was given %s, which it would have to be cut to fit"
-				% [called, named, type_string(wants), index + 1, JSON.stringify(sent)]
+				"%s.%s takes %s as argument %d and was given %s, which %s cannot hold without changing it"
+				% [called, named, type_string(wants), index + 1, JSON.stringify(sent), Values.cut_by(wants)]
 			)
 		}
 	var rounded: String = Values.inexact(sent, wants)
@@ -259,8 +259,8 @@ func _value_for(
 			"type": "error",
 			"message":
 			(
-				"%s.%s holds %s and the value given is %s, which it would have to be cut to fit"
-				% [called, named, type_string(wanted), JSON.stringify(value)]
+				"%s.%s holds %s and the value given is %s, which %s cannot hold without changing it"
+				% [called, named, type_string(wanted), JSON.stringify(value), Values.cut_by(wanted)]
 			)
 		}
 	if declared != TYPE_NIL or (not cut and Values.acceptable(as_sent, wanted)):
@@ -563,6 +563,10 @@ static func _walk_from(object: Object, path: String) -> Dictionary:
 ## null, and the method list says how many a method takes: its parameters less those with defaults,
 ## up to all of them, or any number past that for one taking varargs.
 static func _argument_count_refused(holder: Object, method: String, given: int) -> String:
+	# A node's method list runs to hundreds of entries, and walking it costs a couple of milliseconds
+	# of the game's frame; a call giving exactly the arguments the method declares needs no walk.
+	if given == holder.get_method_argument_count(method):
+		return ""
 	for entry: Dictionary in holder.get_method_list():
 		if str(entry.get("name", "")) != method:
 			continue
