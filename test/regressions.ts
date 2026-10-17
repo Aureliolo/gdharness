@@ -23471,7 +23471,7 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
         await call('runtime_invoke', { op: 'set', nodePath, property, value: given });
       const cutFor = (slot: string, type: string, given: string): RegExp =>
         new RegExp(
-          `${slot} holds ${type} and the value given is ${given}, which it would have to be cut to fit`,
+          `${slot} holds ${type} and the value given is ${given}, which ${type === 'int' ? 'an int' : 'a bool'} cannot hold without changing it`,
         );
       const cutInt = await set('/root/Main', 'count', 2.5);
       assert.match(cutInt, cutFor('count', 'int', '2\\.5'), cutInt);
@@ -23480,6 +23480,18 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
       assert.match(cutAxis, cutFor('cell\\.y', 'int', '2\\.5'), cutAxis);
       const cutFlag = await set('/root/Main', 'flag', 0.2);
       assert.match(cutFlag, cutFor('flag', 'bool', '0\\.2'), cutFlag);
+      const cutWait = await call('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'count',
+        value: 2.5,
+        timeoutMs: 500,
+      });
+      assert.match(
+        cutWait,
+        /\/root\/Main\.count holds int and the value to wait for is 2\.5, which an int cannot hold without changing it: waiting on it would answer about a state nobody asked for\./,
+        cutWait,
+      );
       await set('/root/Main', 'count', 7);
       assert.equal(await value('/root/Main', 'count'), 7, 'a whole number is written');
       await set('/root/Main', 'flag', 1);
@@ -23494,7 +23506,7 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
       });
       assert.match(
         cutArgument,
-        /step takes int as argument 1 and was given 2\.5, which it would have to be cut to fit/,
+        /step takes int as argument 1 and was given 2\.5, which an int cannot hold without changing it/,
         cutArgument,
       );
       const stepped = await call('runtime_invoke', {

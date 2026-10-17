@@ -164,8 +164,8 @@ func _argument_for(
 			"type": "error",
 			"message":
 			(
-				"%s.%s takes %s as argument %d and was given %s, which it would have to be cut to fit"
-				% [called, named, type_string(wants), index + 1, JSON.stringify(sent)]
+				"%s.%s takes %s as argument %d and was given %s, which %s cannot hold without changing it"
+				% [called, named, type_string(wants), index + 1, JSON.stringify(sent), Values.cut_by(wants)]
 			)
 		}
 	var rounded: String = Values.inexact(sent, wants)
@@ -259,8 +259,8 @@ func _value_for(
 			"type": "error",
 			"message":
 			(
-				"%s.%s holds %s and the value given is %s, which it would have to be cut to fit"
-				% [called, named, type_string(wanted), JSON.stringify(value)]
+				"%s.%s holds %s and the value given is %s, which %s cannot hold without changing it"
+				% [called, named, type_string(wanted), JSON.stringify(value), Values.cut_by(wanted)]
 			)
 		}
 	if declared != TYPE_NIL or (not cut and Values.acceptable(as_sent, wanted)):
