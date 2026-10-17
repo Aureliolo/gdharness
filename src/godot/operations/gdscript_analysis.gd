@@ -154,6 +154,21 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		if not declaring in dependencies:
 			dependencies.append(declaring)
 
+	# An autoload is named the way a class is, and its script is one this one needs to compile, but
+	# the project loads it rather than this script, so it is answered apart from dependencies.
+	var global_autoloads: Dictionary = {}
+	for property: Dictionary in ProjectSettings.get_property_list():
+		var setting: String = str(property.get("name", ""))
+		var value: String = (
+			str(ProjectSettings.get_setting(setting)) if setting.begins_with("autoload/") else ""
+		)
+		if value.begins_with("*"):
+			global_autoloads[setting.trim_prefix("autoload/")] = value.trim_prefix("*")
+	var autoloads_used: Array[Dictionary] = []
+	for used: String in Dependencies.classes_used_in(content, global_autoloads):
+		if str(global_autoloads[used]) != full_script_path:
+			autoloads_used.append({"name": used, "path": str(global_autoloads[used])})
+
 	var answer: Dictionary = {
 		"path": script_path,
 		"full_path": full_script_path,
@@ -167,6 +182,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		"inner_classes": inner_classes,
 		"dependencies": dependencies,
 		"classes_used": classes_used,
+		"autoloads_used": autoloads_used,
 		"line_count": lines.size()
 	}
 	if Read.as_bool(params.get("include_inherited", false)):
@@ -386,10 +402,15 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 	else:
 		name = var_text.split(" ")[0].strip_edges()
 
+	# Null for a declaration with no value, which as an empty string read as `= ""`.
+	var stated_default: Variant = null
+	if "=" in var_text:
+		stated_default = default_value
+
 	return {
 		"name": name,
 		"type": type_hint,
-		"default_value": default_value,
+		"default_value": stated_default,
 		"is_export": is_export,
 		"export_hint": export_hint,
 		"is_onready": is_onready,
@@ -582,7 +603,10 @@ func _parse_param(param_text: String) -> Dictionary:
 	if is_rest:
 		name = name.substr(3).strip_edges()
 
-	return {"name": name, "type": type_hint, "default": default_value, "is_rest": is_rest}
+	var stated_default: Variant = null
+	if "=" in param_text:
+		stated_default = default_value
+	return {"name": name, "type": type_hint, "default": stated_default, "is_rest": is_rest}
 
 
 func _collect_dependencies(line: String, into: Array[String]) -> void:

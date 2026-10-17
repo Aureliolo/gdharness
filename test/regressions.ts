@@ -7127,6 +7127,34 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       'while modify with its additions reaches the project check',
     );
 
+    // project_info has no ops, and its preset and detail are read by one section of include. Sent
+    // without it they were dropped and the answer had no validation in it to say so.
+    assert.match(
+      await call('project_info', { projectPath: '/p', preset: 'Windows' }),
+      /^preset is read only by the validation section, which this call does not include: add "validation" to include, or leave it out\./,
+      'a preset is refused without the section that reads it',
+    );
+    assert.match(
+      await call('project_info', {
+        projectPath: '/p',
+        include: ['health'],
+        preset: 'Windows',
+        detail: 'full',
+      }),
+      /^preset and detail are read only by the validation section, .* or leave them out\./,
+      'and so are both, beside another section',
+    );
+    assert.match(
+      await call('project_info', {
+        projectPath: '/p',
+        include: ['validation'],
+        preset: 'Windows',
+        detail: 'full',
+      }),
+      /Not a Godot project/,
+      'while with validation included they reach the project check',
+    );
+
     // The editor's console is read off disk on every call, so there is no mark to be since and no
     // process to ask for processor time. Both would have been accepted and ignored.
     assert.match(
@@ -17505,6 +17533,43 @@ function testAFailedReloadSaysWhatItKept(): void {
  * caller reads rather than the functions that build it.
  */
 /**
+ * A stand-in editor of [param project] on [param bridgePort] that greets with the 0.0.1 addon and
+ * refuses whatever it is asked, once [param server] reports it as the editor on its bridge.
+ */
+async function greetAsAnOldEditor(
+  server: ServerProcess,
+  bridgePort: number,
+  project: string,
+): Promise<WebSocket> {
+  const editor = new WebSocket(`ws://127.0.0.1:${bridgePort}/godot`);
+  await new Promise<void>((resolve, reject) => {
+    editor.once('open', () => {
+      resolve();
+    });
+    editor.once('error', reject);
+  });
+  editor.on('message', (raw: Buffer) => {
+    const message: unknown = JSON.parse(String(raw));
+    if (isRecord(message) && message['type'] === 'tool_invoke') {
+      editor.send(
+        JSON.stringify({ type: 'tool_result', id: message['id'], success: false, error: 'a stand-in' }),
+      );
+    }
+  });
+  editor.send(JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: '0.0.1' }));
+  let status: unknown = null;
+  for (let waited = 0; waited < 10_000; waited += 100) {
+    status = parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }));
+    if (get(status, 'editor', 'addonVersion') === '0.0.1') {
+      return editor;
+    }
+    await delay(100);
+  }
+  editor.close();
+  throw new Error(`the stand-in editor never showed as greeted: ${JSON.stringify(status)}`);
+}
+
+/**
  * #926: script_diagnostics answers several scripts in one call. A change across seventeen scripts
  * was one call each, so four were asked about and thirteen waited for the unit tier.
  *
@@ -17616,6 +17681,7 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               nothingReported: nothing.length,
               first: nothing[0],
               last: nothing.at(-1),
+              addonIsStale: get(folder, 'addonIsStale'),
             },
             {
               clean: true,
@@ -17625,6 +17691,8 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               nothingReported: 302,
               first: 'many/s000.gd',
               last: 'ui/shop.gd',
+              // No editor is on the bridge to have said what it runs, so nothing says it is behind.
+              addonIsStale: undefined,
             },
             JSON.stringify(folder).slice(0, 600),
           );
@@ -17640,15 +17708,20 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     await withFakeLanguageServer(
       (uri) => (uri.includes('quiet') ? null : uri),
       async (lspPort) => {
+        const bridgePort = await reservePort();
         const server = new ServerProcess({
           env: {
-            GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+            GDHARNESS_BRIDGE_PORT: String(bridgePort),
             GDHARNESS_LSP_PORT: String(lspPort),
             GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
           },
         });
+        let editor: WebSocket | null = null;
         try {
           await server.initialize('regression-test');
+          // An editor of the project on the bridge that loaded an older addon, so there is a mark to
+          // place.
+          editor = await greetAsAnOldEditor(server, bridgePort, project);
           const several = parseTextContent(
             await server.request(
               'tools/call',
@@ -17726,6 +17799,7 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
             JSON.stringify(one),
           );
         } finally {
+          editor?.close();
           await server.stop();
         }
       },
@@ -17822,8 +17896,9 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(answered, 'clean'),
         get(answered, 'errors'),
         get(answered, 'warnings'),
+        get(answered, 'addonIsStale'),
       ],
-      ['checked/broken.gd', false, 2, null],
+      ['checked/broken.gd', false, 2, null, undefined],
       `one script compiled by the engine, its warnings unread rather than none: ${shown}`,
     );
     assert.deepEqual(
@@ -17857,8 +17932,9 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(all, 'warnings'),
         get(all, 'nothingReported'),
         get(all, 'checkedBy'),
+        get(all, 'addonIsStale'),
       ],
-      [false, 3, 3, null, ['checked/fine.gd'], 'engine'],
+      [false, 3, 3, null, ['checked/fine.gd'], 'engine', undefined],
       `a folder compiled whole, an engine past each failure, the clean script named apart: ${said}`,
     );
     const dependent = asArray(get(all, 'scripts')).find(
@@ -19399,6 +19475,13 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         '\t"a": 1,',
         '\t"b": 2,',
         '}',
+        // No value and an empty string, which a default read as text told apart only by its quotes.
+        '@export var tint: Color',
+        'var label: String = ""',
+        '',
+        '',
+        'func greet(who: String, times: int = 1) -> void:',
+        '\tprint(who, times)',
         '',
       ].join('\n'),
     );
@@ -19569,9 +19652,9 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
       assert.deepEqual(
         get(asArray(get(engineCalls, 'functions'))[4], 'params'),
         [
-          { name: 'first', type: 'int', default: '', is_rest: false },
+          { name: 'first', type: 'int', default: null, is_rest: false },
           // The dots are the syntax, so a caller building a call site gets a name it can use.
-          { name: 'rest', type: 'Array', default: '', is_rest: true },
+          { name: 'rest', type: 'Array', default: null, is_rest: true },
         ],
         `a rest parameter is named without its dots and says it is one: ${JSON.stringify(engineCalls)}`,
       );
@@ -19605,15 +19688,15 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
           // The last bracket on this line belongs to the body, not to the signature, and the last
           // colon does too: read to the end of the line this answered with a parameter typed
           // `int) -> void`, a second one named `")"`, and no return type at all.
-          ['noted', 'void', [['a', 'int', '']]],
+          ['noted', 'void', [['a', 'int', null]]],
           [
             'from_dict',
             'bool',
             [
-              ['saved', 'Dictionary', ''],
+              ['saved', 'Dictionary', null],
               // The comma is inside the type's own brackets, so it separates nothing. Split on it,
               // this answered with a third parameter named `int]` and a truncated second type.
-              ['roster', 'Dictionary[String, int]', ''],
+              ['roster', 'Dictionary[String, int]', null],
             ],
           ],
           [
@@ -19621,7 +19704,7 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
             'spread',
             'bool',
             [
-              ['first', 'int', ''],
+              ['first', 'int', null],
               ['second', 'String', '"x"'],
             ],
           ],
@@ -19629,8 +19712,8 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
             'later',
             'void',
             [
-              ['only', 'Dictionary[String, int]', ''],
-              ['rest', 'Array', ''],
+              ['only', 'Dictionary[String, int]', null],
+              ['rest', 'Array', null],
             ],
           ],
         ],
@@ -19672,8 +19755,23 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
       );
       assert.deepEqual(
         asArray(get(wrapped, 'variables')).map((each) => [get(each, 'name'), get(each, 'default_value')]),
-        [['table', '{ "a": 1, "b": 2, }']],
-        `and a comment beside an opening brace is not part of the value: ${JSON.stringify(wrapped)}`,
+        [
+          ['table', '{ "a": 1, "b": 2, }'],
+          ['tint', null],
+          ['label', '""'],
+        ],
+        `a comment beside an opening brace is not part of the value, and no value is null: ${JSON.stringify(wrapped)}`,
+      );
+      assert.deepEqual(
+        asArray(get(asArray(get(wrapped, 'functions'))[0], 'params')).map((each) => [
+          get(each, 'name'),
+          get(each, 'default'),
+        ]),
+        [
+          ['who', null],
+          ['times', '1'],
+        ],
+        `and so is a parameter's: ${JSON.stringify(wrapped)}`,
       );
 
       const halfWritten = await call('script_info', {

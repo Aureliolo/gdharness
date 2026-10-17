@@ -266,7 +266,11 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
       name: { type: 'string' },
       params: { type: 'string', description: 'Functions and signals: the parameter list, "delta: float".' },
       returnType: { type: 'string', description: 'Functions: the return type.' },
-      body: { type: 'string', description: 'Functions: the body.' },
+      body: {
+        type: 'string',
+        description:
+          'Functions: the body, its lines separated by \\n. Indent shared by every line is taken off and one tab put on, so it can be written indented or not.',
+      },
       varType: {
         type: 'string',
         description:
@@ -383,7 +387,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_settings',
     title: 'Project settings',
     description:
-      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events and deadzone, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. Every write keeps the sections and keys of project.godot in the order the file had them, so a change touches only its own lines. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
+      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events and deadzone, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. Every write keeps the sections and keys of project.godot in the order the file had them, so a change moves no other line; the save is the engine's, and like the editor's it writes Godot's header and config/features into a file that lacks them. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
     parameters: {
       projectPath: PROJECT_PATH,
       setting: {
@@ -1116,7 +1120,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       structure: {
         effect: 'read',
         summary:
-          'functions, variables, signals, class_name and extends, read from the file, and dependencies: the paths it loads or preloads as written, then the scripts declaring each project class_name its code uses, which classes_used names with the class',
+          "functions, variables, signals, class_name and extends, read from the file, and dependencies: the paths it loads or preloads as written, then the scripts declaring each project class_name its code uses, which classes_used names with the class; autoloads_used names each autoload the code uses by its global name, with the autoload's script, which the project loads rather than this script, so it is not under dependencies",
         requires: [],
       },
       symbols: {

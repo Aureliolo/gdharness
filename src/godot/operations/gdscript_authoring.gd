@@ -396,8 +396,11 @@ func _add_function(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	var declared_at: int = insert_line + func_lines.size()
 	func_lines.append("func " + func_name + "(" + func_params + ") -> " + return_type + ":")
 
-	for bl: String in body.split("\n"):
-		func_lines.append("\t" + bl)
+	# The body's statements relative to the function, whether or not the caller indented them for
+	# it: a body written with its tab already on came out two levels in. A blank line stays empty,
+	# since an indent alone on it is trailing whitespace to every formatter.
+	for bl: String in body.dedent().split("\n"):
+		func_lines.append("" if bl.strip_edges().is_empty() else "\t" + bl)
 
 	var below: int = _blank_run(lines, insert_line, 1)
 	if insert_line + below < lines.size():
