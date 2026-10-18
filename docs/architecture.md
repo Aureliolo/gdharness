@@ -995,7 +995,9 @@ The scene tools never touch the editor's open scene. Each one works on a copy of
   the instances of the scene are from its read tree, then rewrites the editable paths, the entries'
   names and parents, and the connections it names below them. Godot finds an entry whose node moved
   by `unique_id`, and its parent by `parent_id_path`, but an editable path only by the path, so that
-  scene's next save dropped what it kept below the instance. A scene that does not load, or that the
+  scene's next save dropped what it kept below the instance. A reparent also drops the ids saved
+  beside each rewritten path, since they run through the old parent, which still exists for a
+  recovery to find; a rename keeps every id. A scene that does not load, or that the
   editor holds unsaved changes to, is left as it was and named under `notFollowed`.
 - It packs the copy and instantiates the pack before writing anything, and each tool checks its change
   in that result, which is what loading the file will give. A property the node took but the file does

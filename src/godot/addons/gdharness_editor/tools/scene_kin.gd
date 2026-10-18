@@ -143,7 +143,8 @@ static func set_editable(scene: SceneFile, node: Node, editable: bool) -> String
 ## Carries the move of a node of [param changed] from [param old_path] to [param new_path], both
 ## from its root, into each other text scene of the project that names the node by path: one that
 ## instances or inherits [param changed], at any depth. Its editable instances, its entries for the
-## node and for what is below it, and its connections are rewritten to the new path. The engine finds
+## node and for what is below it (their names and parents), and its connections are rewritten to
+## the new path. The engine finds
 ## a moved node's entries by its unique_id, but an editable instance only by its path, so a scene
 ## saved after the move lost the values it kept below one. Answers followed, the scenes rewritten,
 ## and notFollowed, each one left as it was with why, each only when it names any.
@@ -178,7 +179,7 @@ static func follow(changed: String, old_path: String, new_path: String) -> Dicti
 		var tree: Dictionary = read["tree"]
 		_instances_of(tree, changed, old_path, new_path, moves)
 		var text: String = texts[scene_path]
-		var rewritten: String = _rewritten(text, moves)
+		var rewritten: String = _rewritten(text, moves, old_path.get_base_dir() != new_path.get_base_dir())
 		if rewritten == text:
 			continue
 		var unsaved: String = SceneFile.unsaved_in_editor(scene_path)
@@ -260,16 +261,22 @@ static func _instances_of(
 
 
 ## [param text] with every path [param moves] names, and every path below one, moved.
-static func _rewritten(text: String, moves: Dictionary) -> String:
+##
+## Beside a path the saver writes the unique_ids of the nodes along it, which the loader follows when
+## the path has vanished. A rename leaves those ids as they were; with [param reparented] they run
+## through the old parent, which still exists, so a recovery would find the wrong node. They are left
+## out of each path moved, as a hand-written scene leaves them, and the next save writes them anew.
+static func _rewritten(text: String, moves: Dictionary, reparented: bool) -> String:
 	if moves.is_empty():
 		return text
 	var lines: PackedStringArray = text.split("\n")
 	for at: int in lines.size():
 		var line: String = lines[at]
 		if line.begins_with("[editable "):
-			line = _attribute_moved(line, "path", moves)
+			line = _attribute_moved(line, "path", "", moves, reparented)
 		elif line.begins_with("[connection "):
-			line = _attribute_moved(_attribute_moved(line, "from", moves), "to", moves)
+			line = _attribute_moved(line, "from", "from_uid_path", moves, reparented)
+			line = _attribute_moved(line, "to", "to_uid_path", moves, reparented)
 		elif line.begins_with("[node ") and line.contains(' parent="'):
 			var parent: String = _attribute(line, "parent")
 			var whole: String = _under(parent, _attribute(line, "name"))
@@ -277,9 +284,12 @@ static func _rewritten(text: String, moves: Dictionary) -> String:
 				var moved: String = moves[whole]
 				var moved_parent: String = moved.get_base_dir()
 				line = _attribute_set(line, "name", moved.get_file())
-				line = _attribute_set(line, "parent", "." if moved_parent.is_empty() else moved_parent)
+				var placed: String = _attribute_set(
+					line, "parent", "." if moved_parent.is_empty() else moved_parent
+				)
+				line = _without_ids(placed, "parent_id_path") if placed != line and reparented else placed
 			else:
-				line = _attribute_moved(line, "parent", moves)
+				line = _attribute_moved(line, "parent", "parent_id_path", moves, reparented)
 		lines[at] = line
 	return "\n".join(lines)
 
@@ -311,8 +321,20 @@ static func _attribute_set(line: String, attribute: String, value: String) -> St
 	return line.substr(0, found.get_start(1)) + value + line.substr(found.get_end(1))
 
 
-static func _attribute_moved(line: String, attribute: String, moves: Dictionary) -> String:
+## [param line] with the path under [param attribute] moved by [param moves], and, when that moved it
+## and the move was a reparent, without the ids under [param ids] that went along the old path.
+static func _attribute_moved(
+	line: String, attribute: String, ids: String, moves: Dictionary, reparented: bool
+) -> String:
 	var found: RegExMatch = RegEx.create_from_string(' %s="([^"]*)"' % attribute).search(line)
 	if found == null:
 		return line
-	return _attribute_set(line, attribute, _moved(found.get_string(1), moves))
+	var moved: String = _moved(found.get_string(1), moves)
+	if moved == found.get_string(1):
+		return line
+	var placed: String = _attribute_set(line, attribute, moved)
+	return _without_ids(placed, ids) if reparented and not ids.is_empty() else placed
+
+
+static func _without_ids(line: String, ids: String) -> String:
+	return RegEx.create_from_string(" %s=PackedInt32Array\\([^)]*\\)" % ids).sub(line, "")

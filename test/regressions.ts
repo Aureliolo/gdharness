@@ -43822,12 +43822,13 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
       '[node name="Top" parent="DeskB"]\nvisible = false\n\n' +
       '[node name="Tag" type="Node3D" parent="DeskB/Top"]\n\n' +
       '[node name="Bulb" parent="DeskB/Top/DeskLamp"]\nlight_energy = 4.0\n\n' +
-      '[connection signal="visibility_changed" from="DeskB/Top" to="." method="notify_property_list_changed"]\n\n' +
+      '[connection signal="visibility_changed" from="DeskB/Top/DeskLamp" to="." method="notify_property_list_changed"]\n\n' +
       '[editable path="DeskB"]\n[editable path="DeskB/Top/DeskLamp"]\n',
     'study.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://room.tscn" id="1_room"]\n\n' +
       '[node name="Room" instance=ExtResource("1_room")]\n\n' +
       '[node name="Top" parent="."]\nvisible = false\n\n' +
+      '[node name="DeskLamp" parent="DeskA/Top"]\nvisible = false\n\n' +
       '[node name="Bulb" parent="DeskA/Top/DeskLamp"]\nlight_energy = 2.0\n\n' +
       '[editable path="DeskA"]\n[editable path="DeskA/Top/DeskLamp"]\n',
     'long_desk.tscn':
@@ -43888,7 +43889,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
       '[node name="Surface" parent="DeskB"]',
       '[node name="Tag" type="Node3D" parent="DeskB/Surface"]',
       '[node name="Bulb" parent="DeskB/Surface/DeskLamp"]',
-      '[connection signal="visibility_changed" from="DeskB/Surface" to="."',
+      '[connection signal="visibility_changed" from="DeskB/Surface/DeskLamp" to="."',
       '[editable path="DeskB"]',
       '[editable path="DeskB/Surface/DeskLamp"]',
     ]) {
@@ -43902,6 +43903,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     const study = fileOf('study.tscn');
     assert.ok(study.includes('[node name="Bulb" parent="DeskA/Surface/DeskLamp"]'), study);
     assert.ok(study.includes('[editable path="DeskA/Surface/DeskLamp"]'), study);
+    assert.ok(study.includes('[node name="DeskLamp" parent="DeskA/Surface"]'), study);
     assert.ok(
       study.includes('[node name="Top" parent="."]'),
       `study.tscn inherits room.tscn, not desk.tscn, so its value for room.tscn's own Top stays: ${study}`,
@@ -43935,6 +43937,30 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
       `after saving again: ${fileOf('room.tscn')}\n${fileOf('study.tscn')}`,
     );
 
+    // The save wrote the unique_ids along each path, which a reparent leaves running through the old
+    // parent: the loader follows them when a path has vanished, and Surface is still there to find.
+    const lineOf = (scene: string, start: string): string =>
+      fileOf(scene)
+        .split('\n')
+        .find((line) => line.startsWith(start)) ?? `no line starting ${start}`;
+    const bulb = '[node name="Bulb" parent="DeskB/';
+    const signal = '[connection signal="visibility_changed"';
+    const chain = / parent_id_path=(PackedInt32Array\([^)]*\))/.exec(lineOf('room.tscn', bulb))?.[1];
+    assert.ok(chain !== undefined, `the save wrote the ids along Bulb's parent: ${fileOf('room.tscn')}`);
+    assert.match(
+      lineOf('study.tscn', '[node name="DeskLamp" parent="DeskA/'),
+      / parent_id_path=PackedInt32Array\(/,
+      fileOf('study.tscn'),
+    );
+    // The saver writes them on a connection only for some sources, so the lamp's own chain, the same
+    // path's, is put on this one's.
+    writeFileSync(
+      join(project, 'room.tscn'),
+      fileOf('room.tscn').replace(
+        lineOf('room.tscn', signal),
+        `${lineOf('room.tscn', signal).slice(0, -1)} from_uid_path=${chain}]`,
+      ),
+    );
     const moved = await call('scene_node', {
       op: 'reparent',
       scenePath: 'desk.tscn',
@@ -43948,7 +43974,17 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     );
     const again = fileOf('room.tscn');
     assert.ok(again.includes('[editable path="DeskB/Leg/DeskLamp"]'), again);
-    assert.match(again, /\[node name="Bulb" parent="DeskB\/Leg\/DeskLamp"/, again);
+    assert.match(lineOf('room.tscn', bulb), /^\[node name="Bulb" parent="DeskB\/Leg\/DeskLamp"/, again);
+    assert.doesNotMatch(lineOf('room.tscn', bulb), /_id_path/, `the ids through Surface went: ${again}`);
+    const lamp = '[node name="DeskLamp" parent="DeskA/';
+    assert.match(
+      lineOf('study.tscn', lamp),
+      /^\[node name="DeskLamp" parent="DeskA\/Leg"/,
+      fileOf('study.tscn'),
+    );
+    assert.doesNotMatch(lineOf('study.tscn', lamp), /_id_path/, fileOf('study.tscn'));
+    assert.match(lineOf('room.tscn', signal), / from="DeskB\/Leg\/DeskLamp" /, again);
+    assert.doesNotMatch(lineOf('room.tscn', signal), /_uid_path/, again);
     await call('scene_node', {
       op: 'set',
       scenePath: 'room.tscn',
@@ -43956,6 +43992,24 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
       properties: { visible: true },
     });
     assert.equal(await energy('room.tscn', 'DeskB/Leg/DeskLamp/Bulb'), 4, fileOf('room.tscn'));
+
+    // A rename keeps every node's id, so the ids along a renamed path stay as they were.
+    const ids = / parent_id_path=PackedInt32Array\([^)]*\)/.exec(lineOf('room.tscn', bulb))?.[0];
+    assert.ok(ids !== undefined, `the save wrote ids again: ${fileOf('room.tscn')}`);
+    const stood = await call('scene_node', {
+      op: 'set',
+      scenePath: 'desk.tscn',
+      nodePath: 'Leg',
+      properties: { name: 'Stand' },
+    });
+    assert.ok(asArray(get(stood, 'followed')).includes('res://room.tscn'), JSON.stringify(stood));
+    assert.match(
+      lineOf('room.tscn', bulb),
+      /^\[node name="Bulb" parent="DeskB\/Stand\/DeskLamp"/,
+      fileOf('room.tscn'),
+    );
+    assert.ok(lineOf('room.tscn', bulb).includes(ids), `the ids are kept: ${fileOf('room.tscn')}`);
+    assert.equal(await energy('room.tscn', 'DeskB/Stand/DeskLamp/Bulb'), 4, fileOf('room.tscn'));
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
   } finally {
     await server.stop();
