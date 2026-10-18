@@ -1222,7 +1222,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       controlType: {
         type: 'string',
         ops: ['set_theme_color', 'set_theme_font_size'],
-        description: 'Theme ops: the Control class, such as "Button".',
+        description:
+          'Theme ops: the theme type, a Control or Window class such as "Button", or the name of a type variation, which can be any name. A name that is no such class is set as a variation and answered with a note saying so.',
       },
       colorName: {
         type: 'string',
@@ -1235,7 +1236,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['set_theme_font_size'],
         description: 'set_theme_font_size: such as "font_size".',
       },
-      size: { type: 'number', ops: ['set_theme_font_size'], description: 'set_theme_font_size: pixels.' },
+      size: {
+        type: 'number',
+        ops: ['set_theme_font_size'],
+        description: 'set_theme_font_size: pixels, a whole number of 1 or more.',
+      },
     },
     requires: ['projectPath', 'resourcePath'],
     operations: {

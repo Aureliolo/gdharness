@@ -43350,6 +43350,111 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
 }
 
 /**
+ * A theme and a tile set with no editor, through the server and a real engine. A font size Godot
+ * would read back as the theme's default is refused; a theme type that is no class is set as the
+ * variation it is and said to be one; and an image written since the import is named as not yet
+ * imported, with the call that imports it, which this then makes and follows.
+ */
+async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('theme and tile set without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-theme-engine-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-theme-engine-rt-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Theme"\n');
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  const theme = { resourcePath: 'res://theme.tres' };
+  const fontSize = async (size: unknown): Promise<JsonRpcMessage> =>
+    await call('resource_edit', {
+      ...theme,
+      op: 'set_theme_font_size',
+      controlType: 'Label',
+      fontSizeName: 'font_size',
+      size,
+    });
+  const colour = async (controlType: string): Promise<unknown> =>
+    parseTextContent(
+      await call('resource_edit', {
+        ...theme,
+        op: 'set_theme_color',
+        controlType,
+        colorName: 'font_color',
+        color: { r: 1, g: 0, b: 0, a: 1 },
+      }),
+    );
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('theme-engine');
+
+    await call('resource_edit', { ...theme, op: 'create', resourceType: 'Theme' });
+    assert.equal(get(parseTextContent(await fontSize(12)), 'size'), 12);
+    for (const [size, shown] of [
+      [-3, '-3'],
+      [0, '0'],
+      [12.5, '12.5'],
+    ] as const) {
+      assert.equal(
+        textOf(await fontSize(size)),
+        `size must be a whole number of pixels, 1 or more, not ${shown}: Godot reads 0 or less as no size and uses the theme's default instead.`,
+        `size ${JSON.stringify(size)}`,
+      );
+    }
+    assert.match(fileOf('theme.tres'), /\nLabel\/font_sizes\/font_size = 12\n/, 'and the size set is kept');
+
+    for (const kind of ['Button', 'PopupMenu']) {
+      const set = await colour(kind);
+      assert.equal(get(set, 'controlType'), kind, JSON.stringify(set));
+      assert.equal(get(set, 'note'), undefined, `${kind} is a class a theme styles: ${JSON.stringify(set)}`);
+    }
+    const variation = await colour('Buton');
+    assert.equal(
+      get(variation, 'note'),
+      'Buton is not a Control or Window class, so this is a type variation: it styles only a control whose theme_type_variation is Buton.',
+      JSON.stringify(variation),
+    );
+    assert.match(fileOf('theme.tres'), /\nButon\/colors\/font_color = Color\(1, 0, 0, 1\)\n/);
+
+    writeFileSync(join(project, 'late.png'), solidPng(200, 60, 60));
+    const tileset = {
+      op: 'create_tileset',
+      resourcePath: 'res://set.tres',
+      sources: [{ texture: 'res://late.png', tileSize: { x: 2, y: 2 } }],
+    };
+    assert.equal(
+      textOf(await call('resource_edit', tileset)),
+      'sources[0].texture: res://late.png has not been imported, so the engine has no texture for it yet. project_import reimport with resourcePath res://late.png imports it.',
+    );
+    assert.ok(!existsSync(join(project, 'set.tres')), 'and no tile set is written');
+    const reimported = await call('project_import', { op: 'reimport', resourcePath: 'res://late.png' });
+    assert.ok(existsSync(join(project, 'late.png.import')), textOf(reimported) ?? JSON.stringify(reimported));
+    const made = parseTextContent(await call('resource_edit', tileset));
+    assert.equal(asArray(get(made, 'sources')).length, 1, JSON.stringify(made));
+    assert.match(fileOf('set.tres'), /\[gd_resource type="TileSet"/);
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * resource_edit move with no editor, through the server and a real engine: a preview writes
  * nothing, and the move of a directory holding a global class leaves the class cache naming it at
  * its new path and every changed script compiling in a fresh engine. Needs no editor, which the
@@ -43680,6 +43785,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAReadWithNoEditorAnswersFromTheFile,
   testAWriteWithNoEditorGoesThroughAHeadlessEngine,
   testAnAnimationIsWrittenWithNoEditor,
+  testAThemeAndATilesetWithNoEditor,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
   testEveryFileArgumentIsContained,
