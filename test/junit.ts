@@ -456,19 +456,6 @@ function testARunThatSaidNothingOfTheSortIsLeftAlone(): void {
 }
 
 /**
- * The orphan counts, which are in the console and nowhere else.
- *
- * gdUnit4 decides a run's state on orphan nodes and writes none of it into its JUnit report: an
- * ORPHAN report produces no element, and no suite attribute carries the count. A tier that passed
- * every case and left nodes behind came back as `warnings`, exit 101, with `failures` 0, `failed`
- * empty and `engineEntries` empty, so the word in the verdict was the entire answer and finding
- * out what it meant cost a guess and another run of a tier that takes minutes.
- *
- * The lines below are the shapes the runner prints: the suite is announced on its own line, its
- * statistics end its block on one line with the state written after them, and the run's totals
- * come back under `Overall Summary`.
- */
-/**
  * The scripts gdUnit4 could not load, read off the lines it printed on 4.7.2 with v6.2.1 for a
  * directory holding a suite with an undeclared identifier, one extending a class that does not
  * exist, one with two faults and a suite that loads.
@@ -549,6 +536,19 @@ function testScriptErrorsAreReadOffTheConsole(): void {
   );
 }
 
+/**
+ * The orphan counts, which are in the console and nowhere else.
+ *
+ * gdUnit4 decides a run's state on orphan nodes and writes none of it into its JUnit report: an
+ * ORPHAN report produces no element, and no suite attribute carries the count. A tier that passed
+ * every case and left nodes behind came back as `warnings`, exit 101, with `failures` 0, `failed`
+ * empty and `engineEntries` empty, so the word in the verdict was the entire answer and finding
+ * out what it meant cost a guess and another run of a tier that takes minutes.
+ *
+ * The lines below are the shapes the runner prints: the suite is announced on its own line, its
+ * statistics end its block on one line with the state written after them, and the run's totals
+ * come back under `Overall Summary`.
+ */
 function testOrphansAreReadOffTheConsole(): void {
   const printed = [
     'Run Test Suite: res://test/guild_test.gd',

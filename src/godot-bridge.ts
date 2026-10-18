@@ -371,7 +371,6 @@ export class BridgeTimeout extends Error {
   }
 }
 
-/** The editor turned a tool away unrun because it was scanning or importing its files. */
 /**
  * A tool not sent to an editor running another release's addon, whose answer would be that
  * release's. The message is the remedy.
@@ -385,6 +384,7 @@ export class AddonOfAnotherRelease extends Error {}
  */
 const ASKED_OF_ANY_RELEASE: ReadonlySet<string> = new Set(['quit_editor', 'restart_editor']);
 
+/** The editor turned a tool away unrun because it was scanning or importing its files. */
 class EditorBusy extends Error {
   constructor(toolName: string) {
     super(`The editor was scanning or importing its files, so ${toolName} was not run.`);

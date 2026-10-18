@@ -172,11 +172,12 @@ autoload rather than an editor plugin, so an export instantiates it. See
 
 `gdharness doctor` exits 1 on any problem and names it.
 
-A windowed game this server starts goes on a desktop of its own on Windows, out of sight, but its
-sound still comes out of the machine. `silent: true` on `editor_run` start runs it with no sound,
-and `GDHARNESS_SILENT=1` in the server's environment makes that the default. The editor takes no
-engine flags for a game it plays, so a silent run is started by the server and the `debug_*` tools
-do not reach it; `silent: false` plays through the editor as before.
+A windowed game this server starts goes on a desktop of its own on Windows, out of sight, and makes
+no sound: it is started with `--audio-driver Dummy`, and so is an editor `editor_launch` opens.
+Headless runs and test runs are silent already. `silent: false` on `editor_run` start or on
+`editor_launch` asks for sound. The editor takes no engine flags for a game it plays, so a silent
+windowed run is started by the server, whose own debugger holds it, and the `debug_*` tools answer
+for it as for one the editor plays; `silent: false` plays it through the editor, with sound.
 
 On that desktop Windows refuses to say where the pointer is, since it answers only for the desktop
 in use. Injected pointer input reaches the controls under it, their hover and tooltips, and the

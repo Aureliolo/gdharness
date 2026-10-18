@@ -442,12 +442,6 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
 }
 
 /**
- * Runs one operation the way the server runs it, and returns the JSON object it printed.
- *
- * `scriptPath` defaults to the copy inside the project. The server runs the one in its own
- * package instead, from outside the project entirely, which is what testInstalledLayout passes.
- */
-/**
  * Whether add_export_preset finds the templates of the preset's own platform, read from a copy of
  * the engine marked self-contained, so the templates directory is one this fixture fills.
  *
@@ -506,6 +500,12 @@ function checkTemplatesArePerPlatform(godotPath: string, projectDir: string): vo
   }
 }
 
+/**
+ * Runs one operation the way the server runs it, and returns the JSON object it printed.
+ *
+ * `scriptPath` defaults to the copy inside the project. The server runs the one in its own
+ * package instead, from outside the project entirely, which is what testInstalledLayout passes.
+ */
 function runOperation(
   godotPath: string,
   projectDir: string,
@@ -1918,15 +1918,6 @@ function testOperations(godotPath: string, projectDir: string): void {
 }
 
 /**
- * A `.gdignore` is how a project tells the engine a directory is not part of it: nothing under
- * one is imported, so nothing in there is a resource, a dependency or a global class. Both
- * walks have to stop at it, or every answer built on them names files the engine will never
- * load, and a class list holding one sends a game looking for a script it cannot resolve.
- *
- * Each half adds a visible file beside an ignored one and counts, because a walk that had
- * stopped finding anything at all satisfies the absence just as well.
- */
-/**
  * An import is judged by content: what it built is there, its source is the one it recorded, and a
  * scene depends on every image it names.
  *
@@ -2256,6 +2247,15 @@ function triangleUsing(uri: string, meshName?: string): Record<string, unknown> 
   };
 }
 
+/**
+ * A `.gdignore` is how a project tells the engine a directory is not part of it: nothing under
+ * one is imported, so nothing in there is a resource, a dependency or a global class. Both
+ * walks have to stop at it, or every answer built on them names files the engine will never
+ * load, and a class list holding one sends a game looking for a script it cannot resolve.
+ *
+ * Each half adds a visible file beside an ignored one and counts, because a walk that had
+ * stopped finding anything at all satisfies the absence just as well.
+ */
 function testAGdignoreStopsTheWalk(godotPath: string, projectDir: string): void {
   const operation = (name: string, params: unknown): unknown =>
     runOperation(godotPath, projectDir, name, params);
@@ -2540,17 +2540,6 @@ function testInstalledLayout(godotPath: string, projectDir: string): void {
   );
 }
 
-/**
- * The operations run under the target project's warning levels, all of them, with nothing to hide
- * behind.
- *
- * `--path` puts the operations script under the project's settings even though the file lives in
- * the server's package, and `exclude_addons` cannot cover it: that only reaches `res://addons/`,
- * and this script is not in the project at all. So one project setting `unsafe_call_argument` or
- * `return_value_discarded` to error takes every headless operation with it, which is what happened.
- * The project here holds every warning this engine has at error level and contains nothing else, so
- * what compiles is the shipped operations directory and only that.
- */
 /**
  * A whole family of settings is answerable in one call, with the type the engine registers for each.
  *
@@ -3326,6 +3315,17 @@ async function testAScriptNamingAnAutoloadCompiles(godotPath: string): Promise<v
   }
 }
 
+/**
+ * The operations run under the target project's warning levels, all of them, with nothing to hide
+ * behind.
+ *
+ * `--path` puts the operations script under the project's settings even though the file lives in
+ * the server's package, and `exclude_addons` cannot cover it: that only reaches `res://addons/`,
+ * and this script is not in the project at all. So one project setting `unsafe_call_argument` or
+ * `return_value_discarded` to error takes every headless operation with it, which is what happened.
+ * The project here holds every warning this engine has at error level and contains nothing else, so
+ * what compiles is the shipped operations directory and only that.
+ */
 function testTheOperationsSurviveEveryWarning(godotPath: string): void {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-strict-'));
   try {
@@ -3356,7 +3356,6 @@ function testTheOperationsSurviveEveryWarning(godotPath: string): void {
   }
 }
 
-/** The cases after the fixtures, in the order the leg runs them, by the name `case` takes. */
 /**
  * A scene saved binary counts as a scene in the health check.
  *
@@ -3580,6 +3579,7 @@ function testAFontsFeaturesAreWrittenAsTheEngineReadsThem(godotPath: string, _pr
   }
 }
 
+/** The cases after the fixtures, in the order the leg runs them, by the name `case` takes. */
 const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => void | Promise<void>>> = {
   dependencyWalk: testDependencyWalk,
   operations: testOperations,

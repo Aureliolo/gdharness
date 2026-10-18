@@ -42,8 +42,10 @@ function read(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
 }
 
-/** Every harness whose config this writes, rather than handing the reader a command or a block. */
-/** The harnesses whose config is JSON, which is the shape this file reads back. */
+/**
+ * The harnesses whose config this writes as JSON, rather than handing the reader a command or a
+ * block. JSON is the shape this file reads back.
+ */
 const JSON_WRITERS = HARNESSES.filter(
   (harness) => harness.snippet === undefined && harness.toml === undefined && harness.yaml === undefined,
 );

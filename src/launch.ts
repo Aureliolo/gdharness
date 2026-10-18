@@ -64,18 +64,15 @@ export interface RunOptions {
 }
 
 /**
- * Whether a run is to make no sound: as [param requested] says, or else as `GDHARNESS_SILENT` in
- * the server's environment says, where anything but empty, `0` or `false` means yes.
+ * Whether what this server starts is to make no sound: yes unless [param requested] is `false`.
  *
  * A windowed run is kept off the desktop somebody is using, and its sound was not: it came out of
- * the machine's speakers at whatever hour a session ran it, the same intrusion by the other sense.
+ * the machine's speakers at whatever hour a session ran it, the same intrusion by the other sense,
+ * and a session that ran a game's tests played its music on the owner's machine. Sound is for the
+ * call that asks for it.
  */
-export function resolveSilent(requested: unknown, variables: NodeJS.ProcessEnv): boolean {
-  if (typeof requested === 'boolean') {
-    return requested;
-  }
-  const said = envValue('GDHARNESS_SILENT', variables)?.toLowerCase();
-  return said !== undefined && said !== '0' && said !== 'false';
+export function resolveSilent(requested: unknown): boolean {
+  return requested !== false;
 }
 
 /**
@@ -259,10 +256,15 @@ export function editorArguments(
   ports: EditorPorts,
   logFile: string,
   hidden: boolean,
+  silent: boolean,
 ): string[] {
   return [
     '-e',
     ...(hidden ? ['--headless'] : []),
+    // The editor's own sound: a tool script, a preview, a scene playing in the viewport. A
+    // headless editor has none already. The games it plays are not given it, since the editor
+    // hands them no audio driver of its own.
+    ...(silent && !hidden ? ['--audio-driver', 'Dummy'] : []),
     '--path',
     projectPath,
     '--lsp-port',

@@ -106,6 +106,7 @@ import { DebuggerStream, decodeVariant, framedCommand } from '../src/godot-varia
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
 import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
+import { IMPORTABLE_EXTENSIONS, staleImports } from '../src/import-freshness.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
 import {
@@ -2178,12 +2179,6 @@ function testSceneToolsVectorRegression(): void {
   }
 }
 
-/**
- * A stand-in for Godot's language server.
- *
- * `reply` decides what URI it publishes diagnostics under, which is the whole point: Godot
- * does not echo back the URI the client sent, it builds its own.
- */
 /** The port a listening server landed on, which `address()` only answers once it is up. */
 function portOf(server: Server): number {
   const address = server.address();
@@ -2264,6 +2259,12 @@ interface FakeDiagnostic {
   readonly severity?: number;
 }
 
+/**
+ * A stand-in for Godot's language server.
+ *
+ * `publishUri` decides what URI it publishes diagnostics under, which is the whole point: Godot
+ * does not echo back the URI the client sent, it builds its own.
+ */
 async function withFakeLanguageServer<T>(
   publishUri: (uri: string) => string | null,
   handler: (port: number) => Promise<T>,
@@ -5006,6 +5007,156 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
     await server.stop();
     sweep(project);
   }
+}
+
+/**
+ * An editor this server opens or starts again makes no sound unless the call asks for it.
+ *
+ * A session's run once played a game's music on the owner's machine, and an editor plays sound of
+ * its own: a tool script, a preview, a scene running in the viewport. The engine is a stand-in that
+ * exits at once, since what is checked is what the editor was started with, which the answer
+ * carries. A visible stand-in on Windows starts through the helper on the desktop in use, so those
+ * cases run on Windows only where windows may open.
+ */
+async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> {
+  const visibleHere =
+    process.platform !== 'win32' ||
+    process.env['CI'] !== undefined ||
+    process.env['GDHARNESS_ALLOW_WINDOWS'] !== undefined;
+  if (!visibleHere) {
+    console.log(
+      'visible editor silence cases skipped: on Windows the stand-in would open on the desktop in use; GDHARNESS_ALLOW_WINDOWS runs them here',
+    );
+  }
+  const silence = (argv: readonly string[]): boolean => {
+    const at = argv.indexOf('--audio-driver');
+    return at >= 0 && argv[at + 1] === 'Dummy';
+  };
+  const cases = [
+    { how: 'opened visible', act: 'open', args: {}, silent: true, visible: true },
+    { how: 'opened visible with sound', act: 'open', args: { silent: false }, silent: false, visible: true },
+    { how: 'opened hidden', act: 'open', args: { hidden: true }, silent: false, visible: false },
+    { how: 'started again hidden', act: 'restart', args: { hidden: true }, silent: false, visible: false },
+    { how: 'started again', act: 'restart', args: {}, silent: true, visible: true },
+    {
+      how: 'started again with sound',
+      act: 'restart',
+      args: { silent: false },
+      silent: false,
+      visible: true,
+    },
+  ] as const;
+  let ran = 0;
+  for (const one of cases) {
+    if (one.visible && !visibleHere) {
+      continue;
+    }
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-silent-editor-'));
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Silent"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    const port = await reservePort();
+    const server = new ServerProcess({
+      env: {
+        GDHARNESS_PROJECT: project,
+        GDHARNESS_BRIDGE_PORT: String(port),
+        GODOT_PATH: process.execPath,
+        GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '20000',
+      },
+    });
+    // The editor being restarted: a process that holds its pid until it is asked to go.
+    const holder =
+      one.act === 'restart'
+        ? spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+            detached: true,
+            stdio: 'ignore',
+          })
+        : null;
+    const sockets: WebSocket[] = [];
+    const connect = async (): Promise<WebSocket> => {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      sockets.push(socket);
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      return socket;
+    };
+    try {
+      await server.initialize('regression-test');
+      let answer: unknown;
+      if (one.act === 'open') {
+        answer = parseTextContent(
+          await server.request('tools/call', {
+            name: 'editor_launch',
+            arguments: { op: 'open', projectPath: project, ...one.args },
+          }),
+        );
+        assert.equal(get(answer, 'launched'), true, `${one.how}: ${JSON.stringify(answer)}`);
+      } else {
+        const first = await connect();
+        first.on('message', (data: Buffer) => {
+          const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string; id?: string };
+          if (message.type === 'tool_invoke' && message.tool === 'quit_editor') {
+            first.send(
+              JSON.stringify({ type: 'tool_result', id: message.id, success: true, result: { ok: true } }),
+            );
+            holder?.kill();
+            first.close();
+            // The editor the server starts is a stand-in that never dials in, so this one does, as
+            // the restarted editor would.
+            void delay(1000).then(async () => {
+              const again = await connect();
+              again.send(
+                JSON.stringify(greeting(project, { editor_pid: process.pid, opened_by_a_server: true })),
+              );
+            });
+          }
+        });
+        first.send(JSON.stringify(greeting(project, { editor_pid: holder?.pid, opened_by_a_server: true })));
+        let greeted = false;
+        for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+          const status = parseTextContent(
+            await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+          );
+          greeted = get(status, 'editor', 'openedByAServer') === true;
+          if (!greeted) {
+            await delay(100);
+          }
+        }
+        assert.ok(greeted, `${one.how}: the editor being restarted greets as one a server opened`);
+        answer = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_launch', arguments: { op: 'restart', ...one.args } },
+            60_000,
+          ),
+        );
+        assert.equal(get(answer, 'restarted'), true, `${one.how}: ${JSON.stringify(answer)}`);
+      }
+      const argv = asArray(get(answer, 'arguments'), `${one.how}: the answer's arguments`).map(text);
+      assert.ok(
+        argv.includes('--path'),
+        `${one.how}: the answer carries what it was started with: ${JSON.stringify(answer)}`,
+      );
+      assert.equal(silence(argv), one.silent, `${one.how}: silent ${String(one.silent)}: ${argv.join(' ')}`);
+      ran += 1;
+    } finally {
+      for (const socket of sockets) {
+        socket.terminate();
+      }
+      if (holder?.pid !== undefined && alive(holder.pid)) {
+        holder.kill();
+      }
+      await server.stop();
+      sweep(project);
+    }
+  }
+  assert.ok(ran > 0, 'at least the hidden open ran');
 }
 
 /**
@@ -11946,7 +12097,11 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
     clearEditorLog(project);
     const editor = spawnHidden(
       godotPath,
-      [...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project), true), '--quit-after', '2000'],
+      [
+        ...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project), true, true),
+        '--quit-after',
+        '2000',
+      ],
       { stdio: 'ignore' },
     );
     const pid = editor.pid ?? 0;
@@ -16560,7 +16715,8 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
   // per machine rather than per editor, and the second editor open otherwise binds neither. The
   // log file is the only way anything reads what an editor prints, since its console reaches no
   // plugin: an editor spawned without it is one whose startup nobody can see.
-  // A visible editor by default, which is the user's; headless only when asked to be hidden.
+  // A visible editor by default, which is the user's; headless only when asked to be hidden. Silent
+  // by default, which a headless one is already.
   const opened = [
     '--path',
     '/p',
@@ -16571,15 +16727,18 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
     '--log-file',
     '/p/.godot/gdharness-editor.log',
   ];
-  assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', false), [
-    '-e',
-    ...opened,
-  ]);
-  assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true), [
-    '-e',
-    '--headless',
-    ...opened,
-  ]);
+  assert.deepEqual(
+    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', false, true),
+    ['-e', '--audio-driver', 'Dummy', ...opened],
+  );
+  assert.deepEqual(
+    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', false, false),
+    ['-e', ...opened],
+  );
+  assert.deepEqual(
+    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true, true),
+    ['-e', '--headless', ...opened],
+  );
   // The scene as a res:// path and last: the engine reads it positionally, so text beginning
   // with a dash would otherwise be another option to it.
   assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: 'scenes/-odd.tscn' }), [
@@ -16753,19 +16912,29 @@ function testEngineFlagsAreAListNotAPassage(): void {
 }
 
 /**
- * Whether a run is silent: as asked, or as the server's environment says when it was not asked,
- * where `0` and `false` say no as an empty value does.
+ * What this server starts is silent unless the call asks for sound.
+ *
+ * A session's test run played a game's music on the owner's machine. Sound is for the call that
+ * asks for it with `silent: false`, and nothing else turns it on.
  */
-function testSilenceFollowsTheAskThenTheEnvironment(): void {
-  assert.equal(resolveSilent(true, {}), true, 'asked for');
-  assert.equal(resolveSilent(false, { GDHARNESS_SILENT: '1' }), false, 'asked against the default');
-  assert.equal(resolveSilent(undefined, {}), false, 'neither');
-  for (const yes of ['1', 'true', 'yes', 'TRUE']) {
-    assert.equal(resolveSilent(undefined, { GDHARNESS_SILENT: yes }), true, `GDHARNESS_SILENT=${yes}`);
-  }
-  for (const no of ['', '0', 'false', 'False']) {
-    assert.equal(resolveSilent(undefined, { GDHARNESS_SILENT: no }), false, `GDHARNESS_SILENT=${no}`);
-  }
+function testWhatThisServerStartsIsSilentUnlessAsked(): void {
+  assert.equal(resolveSilent(undefined), true, 'not asked');
+  assert.equal(resolveSilent(true), true, 'asked for silence');
+  assert.equal(resolveSilent(false), false, 'asked for sound');
+  const silentEditor = editorArguments('/p', { lsp: 1, dap: 2 }, '/log', false, true);
+  assert.deepEqual(
+    silentEditor.slice(silentEditor.indexOf('--audio-driver'), silentEditor.indexOf('--audio-driver') + 2),
+    ['--audio-driver', 'Dummy'],
+    `an editor this server opens is silent: ${silentEditor.join(' ')}`,
+  );
+  assert.ok(
+    !editorArguments('/p', { lsp: 1, dap: 2 }, '/log', false, false).includes('--audio-driver'),
+    'and one asked for sound is not',
+  );
+  assert.ok(
+    !editorArguments('/p', { lsp: 1, dap: 2 }, '/log', true, true).includes('--audio-driver'),
+    'a hidden editor is headless, which is silent already',
+  );
 }
 
 /**
@@ -20959,6 +21128,170 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
 }
 
 /**
+ * A run imports what changed on disk since its last import before it starts, and names it.
+ *
+ * Issue #1166, from game-b: a picture redrawn by a script, then `project_test` and `editor_run
+ * start`, and both ran on the old import while project_import status called it needs_reimport.
+ * The check that decides whether to import reads files, so it is held to agree with status both
+ * ways: nothing on a project just imported, which would otherwise cost every run an import pass,
+ * and the same files and reasons once a picture is overwritten and another added. A rewrite byte
+ * for byte is current, as the editor judges it. Then a boot check and a test run each import first,
+ * and status reads every file current after.
+ */
+async function testARunImportsWhatChangedFirst(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('import-first regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-import-first-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ImportFirst"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    writeFileSync(join(project, 'picture.png'), solidPng(40, 160, 40));
+    // Walked past by both: never imported, and never counted as behind.
+    mkdirSync(join(project, 'ignored'));
+    writeFileSync(join(project, 'ignored', '.gdignore'), '');
+    writeFileSync(join(project, 'ignored', 'raw.png'), solidPng(1, 2, 3));
+    mkdirSync(join(project, '.hidden'));
+    writeFileSync(join(project, '.hidden', 'raw.png'), solidPng(1, 2, 3));
+    // An import that fails: behind only once its source changes, since importing the same bytes
+    // again fails again.
+    writeFileSync(join(project, 'broken.png'), 'not an image');
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(project, 'test'));
+    writeFileSync(
+      join(project, 'test', 'picture_test.gd'),
+      'extends GdUnitTestSuite\n\n\nfunc test_the_picture_loads() -> void:\n\tassert_object(load("res://picture.png")).is_not_null()\n',
+    );
+    await withStdioServer(async (_call, request) => {
+      const answer = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+        const response = await request(
+          'tools/call',
+          { name, arguments: { projectPath: project, ...args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+      };
+      const behindByStatus = async (): Promise<{ path: string; reason: string }[]> =>
+        asArray(get(await answer('project_import', { op: 'status' }), 'resources'))
+          .filter((one) => get(one, 'status') === 'needs_reimport')
+          .map((one) => ({ path: text(get(one, 'path')), reason: text(get(one, 'reason')) }))
+          .sort((one, other) => one.path.localeCompare(other.path));
+
+      const imported = await answer('project_import', { op: 'reimport' });
+      assert.ok(asArray(get(imported, 'reimported')).includes('res://picture.png'), JSON.stringify(imported));
+      assert.deepEqual(await behindByStatus(), [], 'status reads the imported project current');
+      assert.deepEqual(staleImports(project), [], 'and so does the check, or every run would import');
+      const current = await answer('editor_run', { op: 'check' });
+      assert.equal(get(current, 'booted'), true, JSON.stringify(current));
+      assert.deepEqual(
+        [get(current, 'importedFirst'), get(current, 'importTookMs')],
+        [undefined, undefined],
+        `nothing was behind, and so nothing was timed: ${JSON.stringify(current)}`,
+      );
+
+      writeFileSync(join(project, 'picture.png'), solidPng(160, 40, 40));
+      writeFileSync(join(project, 'added.png'), solidPng(40, 40, 160));
+      const flagged = staleImports(project);
+      assert.deepEqual(
+        flagged,
+        [
+          { path: 'res://added.png', reason: 'it has not been imported' },
+          { path: 'res://picture.png', reason: 'the source changed after it was imported' },
+        ],
+        JSON.stringify(flagged),
+      );
+      assert.deepEqual(
+        await behindByStatus(),
+        flagged,
+        'the check and status name the same files, for the same reasons',
+      );
+
+      const checked = await answer('editor_run', { op: 'check' });
+      assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
+      assert.deepEqual(
+        asArray(get(checked, 'importedFirst')).map(String).sort(),
+        ['res://added.png', 'res://picture.png'],
+        `the boot check imported both first: ${JSON.stringify(checked)}`,
+      );
+      // An engine's import pass takes seconds, and a reading of none would say the time was not taken.
+      assert.ok(
+        Number(get(checked, 'importTookMs')) > 0,
+        `and says how long the import took: ${JSON.stringify(checked)}`,
+      );
+      // The import retries the failed one too, as project_import reimport does, and says it stayed.
+      assert.deepEqual(
+        asArray(get(checked, 'notImportedFirst', 0, 'paths')),
+        ['res://broken.png'],
+        JSON.stringify(checked),
+      );
+      assert.match(
+        text(get(checked, 'importNote')),
+        /^The files under notImportedFirst are still on their previous import, so this run shows what they held before\./,
+        JSON.stringify(checked),
+      );
+      assert.deepEqual(await behindByStatus(), [], 'and status reads them current after it');
+
+      const same = readFileSync(join(project, 'picture.png'));
+      writeFileSync(join(project, 'picture.png'), same);
+      assert.deepEqual(staleImports(project), [], 'a rewrite byte for byte is current');
+
+      // The failed one mended, alone, which is the change that lets its import succeed.
+      writeFileSync(join(project, 'broken.png'), solidPng(160, 40, 160));
+      const mended = await answer('editor_run', { op: 'check' });
+      assert.deepEqual(
+        asArray(get(mended, 'importedFirst')).map(String),
+        ['res://broken.png'],
+        `a failed import whose source was mended is imported first: ${JSON.stringify(mended)}`,
+      );
+      assert.equal(get(mended, 'notImportedFirst'), undefined, JSON.stringify(mended));
+
+      writeFileSync(join(project, 'picture.png'), solidPng(160, 160, 40));
+      // A suite with no .uid yet, which the import gives it, as the editor's scan would.
+      writeFileSync(
+        join(project, 'test', 'second_test.gd'),
+        'extends GdUnitTestSuite\n\n\nfunc test_true() -> void:\n\tassert_bool(true).is_true()\n',
+      );
+      const tested = await answer('project_test', { path: 'res://test' });
+      assert.equal(get(tested, 'passed'), true, JSON.stringify(tested));
+      assert.deepEqual(
+        asArray(get(tested, 'importedFirst')).map(String),
+        ['res://picture.png'],
+        `the test run imported the picture first: ${JSON.stringify(tested)}`,
+      );
+      assert.deepEqual(
+        asArray(get(tested, 'uidsWrittenFirst')).map(String),
+        ['res://test/second_test.gd'],
+        `and named the sidecar the import wrote: ${JSON.stringify(tested)}`,
+      );
+      assert.equal(get(tested, 'uidsMissing'), undefined, JSON.stringify(tested));
+      assert.deepEqual(await behindByStatus(), [], 'and status reads it current after the test run');
+    });
+  } finally {
+    sweep(project);
+  }
+}
+
+/** The extensions the check counts as imported are the ones `project_import status` counts. */
+function testTheImportCheckKnowsWhatStatusImports(): void {
+  const source = readFileSync(join('src', 'godot', 'operations', 'import_pipeline.gd'), 'utf8');
+  const listed = /const IMPORTABLE_EXTENSIONS: Array\[String\] = \[([^\]]*)\]/.exec(source)?.[1];
+  assert.ok(listed !== undefined, 'import_pipeline.gd should hold IMPORTABLE_EXTENSIONS');
+  const extensions = [...listed.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(extensions.length, 29, `the list as it stands: ${extensions.join(', ')}`);
+  assert.deepEqual([...IMPORTABLE_EXTENSIONS], extensions);
+}
+
+/**
  * project_import reimport reimports, without an editor, through the engine's own import pass.
  *
  * It answered "requested" and did nothing, and set_options said reimport_triggered over a sidecar
@@ -21841,23 +22174,6 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
   }
 }
 
-/**
- * A start through the editor does not sit out its announce budget on a game that died on boot.
- *
- * `testAStartStopsWaitingForAGameThatIsOver` holds this for a run this server spawned, which has
- * a process to ask. A run the editor plays has none, and the wait for its announcement read the
- * record, which says a played run is going for as long as it lasts. So a scene that died on a
- * parse error was waited for the whole budget and then reported, correctly, as no longer
- * running: the right answer, five seconds late by default and as late as `runtimeWaitMs` asks.
- * The editor is what knows, and the wait asks it the way `editor_run wait` does.
- *
- * The first start is the positive: while the editor says it is playing, the wait runs its
- * budget out and says the game may yet announce. Without it the second half is satisfied by a
- * wait that gives up on every played run at once.
- *
- * A socket for the editor and a scripted adapter, because what is under test is which source the
- * wait reads, and a real editor can only be made to play a game that dies by being given one.
- */
 /** What a fixture is handed by `withAPlayingEditor`. */
 interface PlayingEditorStage {
   readonly server: ServerProcess;
@@ -21901,7 +22217,9 @@ const FAKE_EDITOR_PID = process.pid;
  * [param options.onAdapter] is handed each connection the server makes to the scripted adapter,
  * for a fixture that sends events down it. [param options.editorPid] is the process the editor
  * says it is, this one unless a fixture wants the adapter to be somebody else's. [param options.env]
- * is added to the server's environment, for a fixture about a default the environment sets.
+ * is added to the server's environment, for a fixture about a default the environment sets. The
+ * editor plays headless unless [param options.playsWindowed] says it plays a window, which is what
+ * sends a silent windowed start, and a headless one, to be started by the server instead.
  */
 async function withAPlayingEditor(
   answer: (where: Pick<PlayingEditorStage, 'adapter' | 'project' | 'runtimeDir'>) => EditorToolAnswer,
@@ -21913,6 +22231,7 @@ async function withAPlayingEditor(
     onAdapter?: (socket: Socket) => void;
     editorPid?: number;
     env?: Readonly<Record<string, string>>;
+    playsWindowed?: boolean;
   } = {},
 ): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
@@ -21952,10 +22271,14 @@ async function withAPlayingEditor(
           options.realAddon === true
             ? '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n'
             : '';
+        // The games here run headless, as the editor's would with these arguments, which is also
+        // what lets a silent start be played through the editor.
+        const playsHeadless =
+          options.playsWindowed === true ? '' : '\n[editor]\n\nrun/main_run_args="--headless"\n';
         writeFileSync(
           join(project, 'project.godot'),
           '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Played"\n' +
-            `run/main_scene="res://main.tscn"\n${registered}`,
+            `run/main_scene="res://main.tscn"\n${registered}${playsHeadless}`,
         );
         writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
         // The wait only happens for a project that could announce, which is one with the addon on
@@ -22898,10 +23221,29 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
       /^A profile is read through the debugger, and an exported build is started without one/,
     );
 
+    // Silent unless asked otherwise, as every run is: the engine flag goes before the build's own
+    // arguments. The stand-in is Node, which refuses the flag, so the build that has to run below is
+    // given sound instead.
+    const silentStart = parseTextContent(
+      await call({
+        op: 'start',
+        executable: build,
+        headless: false,
+        args: [script, saves, `${said}.silent`],
+      }),
+    );
+    assert.deepEqual(
+      get(silentStart, 'arguments'),
+      ['--audio-driver', 'Dummy', '--', script, saves, `${said}.silent`],
+      `an exported build is silent by default: ${JSON.stringify(silentStart)}`,
+    );
+    await call({ op: 'stop' });
+
     const answered = await call({
       op: 'start',
       executable: build,
       headless: false,
+      silent: false,
       savesIn: saves,
       args: [script, saves, said],
     });
@@ -24305,16 +24647,19 @@ async function testAPlayThroughAnotherProcesssAdapterIsRefusedEachTime(): Promis
  * why it did not go through the editor.
  *
  * A windowed run is kept off the desktop somebody is using, and its sound came out of the machine's
- * speakers all the same. Silence is an engine flag, and the editor takes none for a game it plays,
- * so a silent run is spawned the way a run with arguments is, losing the debugger, which the answer
- * has to say rather than leave to be found. Asked for, set as the server's default, and the default
- * turned down for one start, each against a connected editor that would otherwise play it.
+ * speakers all the same, and a session's test run once played a game's music on the owner's machine.
+ * Silence is an engine flag, and the editor takes none for a game it plays, so a silent run is
+ * spawned the way a run with arguments is, which the answer says rather than leave to be found. By
+ * default, asked for, and sound asked for with silent: false, each against a connected editor that
+ * would otherwise play it in a window; and an editor whose project plays its games headless, which
+ * are silent already and so are played through it.
  */
 async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
   const cases = [
-    { how: 'asked for', env: {}, silent: true as boolean | undefined, spawned: true, byDefault: false },
-    { how: 'by default', env: { GDHARNESS_SILENT: '1' }, silent: undefined, spawned: true, byDefault: true },
-    { how: 'turned down', env: { GDHARNESS_SILENT: '1' }, silent: false, spawned: false, byDefault: false },
+    { how: 'by default', silent: undefined as boolean | undefined, spawned: true, playsWindowed: true },
+    { how: 'asked for', silent: true, spawned: true, playsWindowed: true },
+    { how: 'sound asked for', silent: false, spawned: false, playsWindowed: true },
+    { how: 'played headless', silent: undefined, spawned: false, playsWindowed: false },
   ];
   for (const one of cases) {
     let plays = 0;
@@ -24366,13 +24711,8 @@ async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
           );
           assert.match(
             text(get(answer, 'message')),
-            /The editor cannot play a game silent, which takes an engine flag, so this one was started here/,
+            /The editor cannot play a game silent, which takes an engine flag, so this one was started here, silent as every run is unless asked otherwise, and silent: false plays it through the editor, with sound\./,
             `${one.how}: and says why: ${said}`,
-          );
-          assert.equal(
-            text(get(answer, 'message')).includes('silent because GDHARNESS_SILENT says so'),
-            one.byDefault,
-            `${one.how}: naming the default only when it was the default: ${said}`,
           );
           assert.equal(plays, 0, `${one.how}: and the editor is not asked to play`);
         } else {
@@ -24381,7 +24721,7 @@ async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
         }
         await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
       },
-      { env: one.env },
+      { playsWindowed: one.playsWindowed },
     );
   }
 }
@@ -24948,6 +25288,23 @@ async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
   }
 }
 
+/**
+ * A start through the editor does not sit out its announce budget on a game that died on boot.
+ *
+ * `testAStartStopsWaitingForAGameThatIsOver` holds this for a run this server spawned, which has
+ * a process to ask. A run the editor plays has none, and the wait for its announcement read the
+ * record, which says a played run is going for as long as it lasts. So a scene that died on a
+ * parse error was waited for the whole budget and then reported, correctly, as no longer
+ * running: the right answer, five seconds late by default and as late as `runtimeWaitMs` asks.
+ * The editor is what knows, and the wait asks it the way `editor_run wait` does.
+ *
+ * The first start is the positive: while the editor says it is playing, the wait runs its
+ * budget out and says the game may yet announce. Without it the second half is satisfied by a
+ * wait that gives up on every played run at once.
+ *
+ * A socket for the editor and a scripted adapter, because what is under test is which source the
+ * wait reads, and a real editor can only be made to play a game that dies by being given one.
+ */
 async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
   let playing = false;
   let diesOnBoot = false;
@@ -25863,7 +26220,7 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
         );
       }
     },
-    { realAddon: true, engine },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
@@ -26048,7 +26405,7 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         );
       }
     },
-    { realAddon: true, engine },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
@@ -26763,8 +27120,81 @@ async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
       even(pixel[0]) && even(pixel[2]),
       `the screen with the game's red window over its right half: ${pixel.join(',')}`,
     );
-    await stopItsRun(server);
-    stopped = true;
+
+    // The window on its own, shown and then hidden. Hidden it holds no frame, and asking it for its
+    // image made the engine log an error into the game's output, so the run stopped unclean for the
+    // capture's doing rather than the game's.
+    const ofTheWindow = async (): Promise<JsonRpcMessage> =>
+      await server.request(
+        'tools/call',
+        {
+          name: 'runtime_capture',
+          arguments: { op: 'viewport', viewportPath: '/root/Main/Over', width: 1, height: 1 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    const shown = await ofTheWindow();
+    const shownImage = asArray(get(shown, 'result', 'content')).find(
+      (chunk) => get(chunk, 'type') === 'image',
+    );
+    assert.ok(shownImage !== undefined, `a shown window is captured: ${JSON.stringify(shown)}`);
+    const red = [...onePixelOf(Buffer.from(String(get(shownImage, 'data')), 'base64'))];
+    assert.ok((red[0] ?? 0) > 200 && (red[2] ?? 255) < 60, `as the red it draws: ${red.join(',')}`);
+    await server.request('tools/call', {
+      name: 'runtime_invoke',
+      arguments: { op: 'set', nodePath: '/root/Main/Over', property: 'visible', value: false },
+    });
+    const hidden = textOf(await ofTheWindow()) ?? '';
+    assert.match(
+      hidden,
+      /The Window at \/root\/Main\/Over is hidden, so nothing is drawn to it\. Show it \(its visible property\) and ask again\./,
+      hidden,
+    );
+    for (const [property, value] of [
+      ['visible', true],
+      ['mode', 1],
+    ] as const) {
+      await server.request('tools/call', {
+        name: 'runtime_invoke',
+        arguments: { op: 'set', nodePath: '/root/Main/Over', property, value },
+      });
+    }
+    // Windows minimises the window on its desktop by itself. An X server with no window manager
+    // has nobody to take the request, so there the window says whether it went.
+    const mode = get(
+      parseTextContent(
+        await server.request('tools/call', {
+          name: 'runtime_inspect',
+          arguments: { op: 'property', nodePath: '/root/Main/Over', property: 'mode' },
+        }),
+      ),
+      'value',
+    );
+    if (process.platform === 'win32' || mode === 1) {
+      const minimised = textOf(await ofTheWindow()) ?? '';
+      assert.match(
+        minimised,
+        /Nothing is being drawn to the Window at \/root\/Main\/Over, which is minimised\. Restore it and ask again\./,
+        `${minimised} (mode ${String(mode)})`,
+      );
+    } else {
+      console.log(
+        `minimised window capture step skipped: the window manager left it in mode ${String(mode)}`,
+      );
+    }
+    const ended = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    stopped = get(ended, 'stopped') === true;
+    assert.deepEqual(
+      [get(ended, 'stopped'), get(ended, 'errors'), get(ended, 'clean')],
+      [true, 0, true],
+      `and the run stops clean, the refusal having asked the engine nothing: ${JSON.stringify(ended)}`,
+    );
   } finally {
     if (!stopped) {
       await server.request(
@@ -28138,7 +28568,7 @@ async function testAFindByClassReachesWhatExtendsIt(): Promise<void> {
         );
       }
     },
-    { realAddon: true, engine },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
@@ -28245,7 +28675,7 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
         );
       }
     },
-    { realAddon: true, engine },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
@@ -29470,7 +29900,7 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
         }
       }
     },
-    { realAddon: true, engine },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
@@ -29677,7 +30107,7 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
         );
       }
     },
-    { engine },
+    { engine, playsWindowed: true },
   );
 }
 
@@ -32541,9 +32971,16 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       const quick = await run('res://quick');
       assert.equal(get(quick, 'passed'), true, JSON.stringify(quick));
       const quickTook = Number(get(quick, 'tookMs'));
+      // gdUnit4 is copied in unimported, so the first run imports its pictures, which the limit
+      // does not cover and importTookMs counts.
+      const quickImport = get(quick, 'importedFirst') === undefined ? 0 : Number(get(quick, 'importTookMs'));
       assert.ok(
-        quickTook > 0 && quickTook < 12_000 && quickTook > Number(get(quick, 'time')) * 1000,
-        `tookMs covers the whole call and so more than the cases' own time: ${JSON.stringify(quick)}`,
+        quickTook > 0 &&
+          quickImport >= 0 &&
+          quickImport < quickTook &&
+          quickTook - quickImport < 12_000 &&
+          quickTook > Number(get(quick, 'time')) * 1000,
+        `tookMs covers the whole call and so more than the cases' own time, and the run without its import stays under its limit: ${JSON.stringify(quick)}`,
       );
       const steady = await run('res://steady');
       assert.equal(
@@ -32733,9 +33170,12 @@ async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
       const { answer, blocks, shown } = await ran();
       assert.equal(get(answer, 'timedOut'), undefined, `stopped before its timeout: ${shown}`);
       const took = Number(get(answer, 'tookMs'));
+      // The import that comes first is outside the limit, and importTookMs says how much of the
+      // call it was.
+      const imported = get(answer, 'importedFirst') === undefined ? 0 : Number(get(answer, 'importTookMs'));
       assert.ok(
-        took > 0 && took < 12_000,
-        `tookMs is the whole call, under the limit it stopped short of: ${shown}`,
+        took > 0 && imported >= 0 && imported < took && took - imported < 12_000,
+        `tookMs is the whole call, and without its import under the limit it stopped short of: ${shown}`,
       );
       assert.equal(get(answer, 'passed'), false, shown);
       assert.equal(
@@ -35923,7 +36363,7 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
     passed: true,
     uidsMissing: ['res://test/a_test.gd'],
     uidsNote:
-      'This script has no .uid sidecar yet: the engine writes one when it imports the project, which a test run does not, so a check that tracks the sidecars fails on it. project_import refresh_uids writes them.',
+      'This script has no .uid sidecar yet: the engine writes one when it imports the project, and this run had nothing to import, so a check that tracks the sidecars fails on it. project_import refresh_uids writes them.',
   });
   assert.match(
     String(
@@ -36124,6 +36564,9 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
       next.note,
       /The test run before this one in this project, of res:\/\/test\/a_test\.gd, res:\/\/test\/b_test\.gd, res:\/\/test\/c_test\.gd, was cut off by its client at \S+ after 2 suites had finished, 1 of them with failures, while res:\/\/test\/c_test\.gd was running; what it finished is under previousRunCut\.$/,
     );
+    // A suite written since the last import, so it has no .uid sidecar, which a gate that tracks them
+    // fails on later. The runs above imported gdUnit4's icons first and gave every suite one then.
+    rmSync(join(projectDir, 'test', 'a_test.gd.uid'), { force: true });
     const after = answerOf(
       await server.request(
         'tools/call',
@@ -36133,8 +36576,9 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
     );
     assert.equal(get(after.json, 'verdict'), 'passed', after.note);
     assert.equal(get(after.json, 'previousRunCut'), undefined, 'handed back once');
-    // The suite was written here and never imported, so it has no .uid sidecar, which a gate that
-    // tracks them fails on later: the run names it, and stops once the sidecar is there.
+    // Nothing was behind, so nothing was imported: the run names it, and stops once the sidecar is
+    // there.
+    assert.equal(get(after.json, 'importedFirst'), undefined, after.note);
     assert.deepEqual(get(after.json, 'uidsMissing'), [a], after.note);
     writeFileSync(join(projectDir, 'test', 'a_test.gd.uid'), 'uid://b1gdharnesstest\n');
     const minted = answerOf(
@@ -45041,6 +45485,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testBothEndsAgreeAboutTheAnnouncement,
   testARestartLeftHalfDoneIsSaid,
   testAnEditorStillArrivingIsNotOpenedBeside,
+  testAnEditorThisServerStartsIsSilentUnlessAsked,
   testABridgeThatMovedSaysFromWhere,
   testASupersededServerStandsDown,
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
@@ -45061,7 +45506,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSceneToolsVectorRegression,
   testRunArgumentsLeaveTheLocalDebuggerOff,
   testEngineFlagsAreAListNotAPassage,
-  testSilenceFollowsTheAskThenTheEnvironment,
+  testWhatThisServerStartsIsSilentUnlessAsked,
   testASilentRunIsStartedHereAndSaysWhy,
   testARunGivenEngineFlagsIsStartedHere,
   testEngineFlagsReachTheEngine,
@@ -45189,6 +45634,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStructureReadDescribesTheScriptItRead,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testAReimportReimportsThroughTheEngine,
+  testARunImportsWhatChangedFirst,
+  testTheImportCheckKnowsWhatStatusImports,
   testEachSettingsWriteNamesItsSetting,
   testASettingsWriteIsTakenUpByTheEditor,
   testOptionsWrittenAreSaidWhenTheirReimportFails,

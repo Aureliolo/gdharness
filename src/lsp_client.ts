@@ -1079,7 +1079,6 @@ function shownSymbol(entry: unknown, lastOfDocument: number): JsonRecord {
   };
 }
 
-/** A completion without the copy of the request Godot hands back with every item. */
 /** The most completions one answer carries; the rest are counted. */
 const MOST_COMPLETIONS = 100;
 
@@ -1121,6 +1120,7 @@ export function narrowedCompletions(completions: readonly unknown[], typed: stri
   };
 }
 
+/** A completion without the copy of the request Godot hands back with every item. */
 function shownCompletion(entry: unknown): JsonRecord {
   const { data: _request, kind, ...rest } = asRecord(entry);
   return { ...rest, kind: named(kind, COMPLETION_KINDS) };
