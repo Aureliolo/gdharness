@@ -13703,9 +13703,7 @@ class GodotServer {
     // The game is not asked: an answer from another release's runtime is that release's answer.
     const staleNote = this.runtimeStaleNote(choice.endpoint);
     if (staleNote !== undefined) {
-      return this.createErrorResponse(staleNote, [
-        'editor_status lists the game and the runtime addon it loaded',
-      ]);
+      return this.createErrorResponse(staleNote);
     }
     const screenshotDir = expectsScreenshot ? scratchDirectory('runtime-screenshot') : null;
     const screenshotPath = screenshotDir ? join(screenshotDir, 'capture.png') : null;
