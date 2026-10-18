@@ -445,7 +445,7 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 				)
 				% types
 			)
-			+ Values.unread_note(wanted, typeof(current))
+			+ Values.remedy(wanted, typeof(current))
 		)
 	if not Values.comparable(current, wanted):
 		return (
@@ -464,7 +464,7 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 				)
 				% types
 			)
-			+ Values.unread_note(wanted, typeof(current))
+			+ Values.remedy(wanted, typeof(current))
 		)
 	return ""
 

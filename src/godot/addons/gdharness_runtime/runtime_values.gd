@@ -10,6 +10,7 @@ extends RefCounted
 
 const Read = preload("reading.gd")
 const Serialisation = preload("serialisation.gd")
+const Shapes = preload("value_shapes.gd")
 
 ## The engine singletons a call, a write or a read may name instead of a node: what the engine
 ## measures, and the engine settings that are the game's own. Not every singleton: OS runs programs
@@ -166,13 +167,9 @@ static func inexact(given: Variant, type: int) -> String:
 	return Serialisation.inexact(given, type)
 
 
-## How a value of [param type] is written to be read as one, or empty when it is not built from fields.
-static func written_as(type: int) -> String:
-	return Serialisation.written_as(type)
-
-
-static func unread_note(value: Variant, type: int) -> String:
-	return Serialisation.unread_note(value, type)
+## What a refusal of [param value] where a [param type] goes ends with: see [method Shapes.remedy].
+static func remedy(value: Variant, type: int) -> String:
+	return Shapes.remedy(value, type)
 
 
 ## The declared type of one parameter of a method, or TYPE_NIL when the method or the parameter

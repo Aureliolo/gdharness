@@ -16,6 +16,7 @@ extends RefCounted
 
 const Read = preload("reading.gd")
 const Serialisation = preload("serialisation.gd")
+const Shapes = preload("value_shapes.gd")
 
 # The data types a Theme names its items by, as in "Button/colors/font_color", and what each holds.
 const THEME_ITEMS: Dictionary[String, Array] = {
@@ -115,8 +116,8 @@ func cannot_hold(
 	var cost: String = " Setting it would save a different value than the one asked for."
 	if not Serialisation.acceptable(value, expected_type):
 		var shape: String = "%s.%s is %s and the value given is %s, which cannot become one."
-		var unread: String = Serialisation.unread_note(value, expected_type)
-		return shape % [holder, property, held, type_string(typeof(value))] + unread + cost
+		var remedy: String = Shapes.remedy(value, expected_type)
+		return shape % [holder, property, held, type_string(typeof(value))] + remedy + cost
 
 	# And the same question of each element, because a list is accepted for a packed or typed array
 	# whatever is in it: a polygon written as [{"x": 1}] passes the check above and lands as one zero
@@ -676,7 +677,7 @@ func _parse_shaped_dictionary(value: Dictionary, expected_type: int, elements: A
 	if expected_type == TYPE_NIL or expected_type == TYPE_DICTIONARY:
 		return _parse_entries(value, elements)
 	var tag: String = type_string(expected_type)
-	if Serialisation.REQUIRED.has(tag):
+	if Shapes.REQUIRED.has(tag):
 		var tagged: Dictionary = value.duplicate()
 		tagged["_type"] = tag
 		var built: Variant = _values.deserialize_value(tagged)

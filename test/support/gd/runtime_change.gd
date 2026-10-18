@@ -30,6 +30,7 @@ var named_stock: Dictionary = {&"base:dew": 5}
 var spare: RefCounted = RefCounted.new()
 var spot: Vector2 = Vector2.ZERO
 var area: Rect2 = Rect2()
+var tint: Color = Color.WHITE
 
 
 func press(point: Vector2, forward: bool) -> bool:
@@ -313,6 +314,20 @@ func _check_a_value_given_by_its_fields() -> void:
 	var counted: Dictionary = await _write("counted", "many")
 	if str(counted.get("message", "")).contains("is sent as"):
 		_fail("a number names no shape: %s" % JSON.stringify(counted))
+	var coded: Dictionary = await _write("tint", "#00ff0080")
+	if coded.get("type") != "property_set" or holder.get("tint") != Color.html("#00ff0080"):
+		_fail("a colour takes its html code: %s, holding %s" % [JSON.stringify(coded), holder.get("tint")])
+	var alpha: Dictionary = await _write("tint", {"r": 1, "g": 0, "b": 0, "alpha": 0.5})
+	var colour_shape: String = 'A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code'
+	if not str(alpha.get("message", "")).contains(
+		"A Color has no alpha, so the value is not read as one. " + colour_shape
+	):
+		_fail(
+			"one naming its alpha otherwise is refused with the key it goes under: %s" % JSON.stringify(alpha)
+		)
+	var uncoded: Dictionary = await _write("tint", "#00ff0")
+	if uncoded.get("type") != "error" or holder.get("tint") != Color.html("#00ff0080"):
+		_fail("and a word that is no html code is refused: %s" % JSON.stringify(uncoded))
 
 
 ## A slot declared as Variant takes what it is given, as the engine does; one declared as a number

@@ -187,7 +187,7 @@ func _argument_for(
 					type_string(wants),
 					index + 1,
 					type_string(typeof(given)),
-					_written_as(wants, sent)
+					Values.remedy(sent, wants)
 				]
 			)
 		}
@@ -276,7 +276,7 @@ func _value_for(
 						named,
 						type_string(wanted),
 						type_string(typeof(given)),
-						_written_as(wanted, value)
+						Values.remedy(value, wanted)
 					]
 				)
 			}
@@ -602,15 +602,6 @@ func _element_object(
 
 
 ## "list" or "map", for a refusal about a typed container.
-## The sentences a refusal ends with for a type built from fields: which keys of [param sent] kept it
-## from being read as one, and the shape that is. Nothing for a type that is not built from fields.
-static func _written_as(type: int, sent: Variant) -> String:
-	var shape: String = Values.written_as(type)
-	if shape.is_empty():
-		return ""
-	return Values.unread_note(sent, type) + " A %s is sent as %s." % [type_string(type), shape]
-
-
 static func _sort_of(container: Variant) -> String:
 	return "list" if container is Array else "map"
 

@@ -4,6 +4,7 @@ const Read = preload("reading.gd")
 const Log = preload("logger.gd")
 const ProjectFile = preload("project_file.gd")
 const Serialisation = preload("serialisation.gd")
+const Shapes = preload("value_shapes.gd")
 
 var _log: Log
 var _values: Serialisation = Serialisation.new()
@@ -113,8 +114,9 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	var default_value: Variant = ProjectSettings.property_get_revert(setting_path)
 	var was_default: bool = had_value and default_value != null and old_value == default_value
 
-	var final_value: Variant = _values.deserialize_value(value)
 	var wanted: int = _wanted_type(setting_path, old_value if had_value else null)
+	# Fitted as a property write fits it, so a value one of them takes the other takes too.
+	var final_value: Variant = _values.fitted(value, wanted)
 	if wanted > TYPE_NIL and final_value != null and typeof(final_value) != wanted:
 		if not _converts_faithfully(final_value, wanted):
 			return _log.failure(_cannot_hold(setting_path, wanted, final_value))
@@ -181,8 +183,8 @@ static func _cannot_hold(setting_path: String, wanted: int, value: Variant) -> S
 	if wanted in numbers and typeof(value) in numbers:
 		return "%s, and %s is not the same number as one.%s" % [declared, str(value), cost]
 	var given: String = type_string(typeof(value))
-	var unread: String = Serialisation.unread_note(value, wanted)
-	return "%s, and %s (%s) cannot become one.%s" % [declared, JSON.stringify(value), given, unread]
+	var remedy: String = Shapes.remedy(value, wanted)
+	return "%s, and %s (%s) cannot become one.%s" % [declared, JSON.stringify(value), given, remedy]
 
 
 # Add an autoload singleton

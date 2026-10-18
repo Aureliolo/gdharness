@@ -38726,6 +38726,81 @@ function testTheEditorIsOfferedWhereItCanAnswer(): void {
 }
 
 /**
+ * A project setting takes a value the way a property write does.
+ *
+ * Settings were built from the value alone, so a vector written as its fields without a tag was a
+ * dictionary to them and refused, while scene_node set took it, and a colour given as its html code
+ * was refused by both. A value carrying a field its type has not is refused here too, naming it.
+ */
+async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('setting values regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-setting-values-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-setting-values-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Values"\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const set = async (setting: string, value: unknown): Promise<{ answer: unknown; said: string }> => {
+    const response = await server.request(
+      'tools/call',
+      { name: 'project_settings', arguments: { projectPath: project, op: 'set', setting, value } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    return { answer: parseTextContent(response), said: textOf(response) ?? JSON.stringify(response) };
+  };
+  const file = (): string => readFileSync(join(project, 'project.godot'), 'utf8');
+  try {
+    await server.initialize('regression-test');
+    const gravity = 'physics/2d/default_gravity_vector';
+    const fields = await set(gravity, { x: 0, y: 2 });
+    assert.equal(get(fields.answer, 'saved'), true, `a vector written as its fields: ${fields.said}`);
+    assert.match(file(), /default_gravity_vector=Vector2\(0, 2\)/, `is saved as one: ${file()}`);
+    const deep = await set(gravity, { x: 0, y: 3, z: 1 });
+    assert.match(
+      deep.said,
+      /declared as Vector2, .* cannot become one\. A Vector2 has no z, so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\./,
+      'one carrying a field it has not is refused naming it',
+    );
+    assert.match(
+      file(),
+      /default_gravity_vector=Vector2\(0, 2\)/,
+      `and the file keeps what it held: ${file()}`,
+    );
+
+    const clear = 'rendering/environment/defaults/default_clear_color';
+    const coded = await set(clear, '#336699');
+    assert.equal(get(coded.answer, 'saved'), true, `a colour given as its html code: ${coded.said}`);
+    assert.deepEqual(
+      ['r', 'g', 'b', 'a'].map((channel) =>
+        Math.round(asNumber(get(coded.answer, 'new_value', channel)) * 255),
+      ),
+      [0x33, 0x66, 0x99, 255],
+      `is that colour: ${coded.said}`,
+    );
+    const alpha = await set(clear, { r: 1, g: 0, b: 0, alpha: 0.5 });
+    assert.ok(
+      alpha.said.includes(
+        'A Color has no alpha, so the value is not read as one. A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code, "#ff8000".',
+      ),
+      `a colour naming its alpha otherwise is told the key it goes under: ${alpha.said}`,
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * A read asked of the editor is refused rather than answered from disk.
  *
  * The two are not the same reading, which is the whole reason for saying which one you want: disk
@@ -45597,6 +45672,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovieIsWrittenOnlyWhereACaptureCouldBe,
   testAWindowedRunWritesItsMovie,
   testTheEditorIsOfferedWhereItCanAnswer,
+  testASettingTakesWhatAPropertyTakes,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,

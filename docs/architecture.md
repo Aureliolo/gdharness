@@ -965,6 +965,13 @@ object does not declare is refused rather than ignored. The running game asks th
 argument before `callv` and of a value before a wait compares it, through `acceptable` beside the
 serialiser, so the two sides cannot answer it differently.
 
+What each tag has to carry, the fields it reads when they are there, and how a refusal says a type is
+written are `value_shapes.gd`, shared the same way. A value carrying a field its type does not have
+is not built, because a builder takes the fields it knows and drops the rest: `{"x": 1, "y": 2,
+"z": 3}` for a `Vector2` would be written as `(1, 2)` and answered as written. Every refusal of a
+value where such a type goes ends with the key that stopped it and the shape that is read, from the
+same function on every side.
+
 A value that passes is still read back once set, because a setter can refuse or change it and say so
 only in the editor's log: a `Timer` given a `wait_time` of 0 holds 1, a `Sprite2D` given a material
 for its texture holds nothing. Each property set in a call is set once more after the rest, so a
