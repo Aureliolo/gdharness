@@ -1731,6 +1731,15 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
     const kept = fileText(project, 'kin/host.tscn');
     assert.match(kept, /\n\[editable path="Crate1"\]\n/, kept);
     assert.match(kept, /\[node name="Look" parent="Crate1"[^\]]*\]\nscale = Vector2\(3, 3\)\n/, kept);
+    const read = await call('scene_tree', { ...host, depth: 1 });
+    const children: unknown = get(read, 'tree', 'children');
+    assert.ok(Array.isArray(children), text(read));
+    assert.ok(
+      children.some((child) => get(child, 'name') === 'Crate1' && get(child, 'editableChildren') === true),
+      `the editor's scene_tree says Crate1 is editable: ${text(read)}`,
+    );
+    const asked = await call('scene_node', { ...host, op: 'get', nodePath: 'Crate1' });
+    assert.equal(get(asked, 'editableChildren'), true, text(asked));
     await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1', editableChildren: false });
     const closed = fileText(project, 'kin/host.tscn');
     assert.doesNotMatch(closed, /\[editable|parent="Crate1"/, `closing them drops what was kept: ${closed}`);

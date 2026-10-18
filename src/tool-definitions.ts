@@ -647,7 +647,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       refresh_uids: {
         effect: 'additive',
         summary:
-          'import the project so every script and shader has its .uid sidecar, and name under uidsCreated the ones this made and under stillWithoutUid the ones the engine would not import: it writes no scene and no script, so a project whose sidecars are all present is left untouched',
+          'import the project so every script and shader has its .uid sidecar and the uid cache holds the uid of every file, scenes made with no editor among them, which a headless write names a reference by (see namedByPath), and name under uidsCreated the ones this made and under stillWithoutUid the ones the engine would not import: it writes no scene and no script, so a project whose sidecars are all present is left untouched',
         requires: [],
       },
       refresh_classes: {
@@ -791,7 +791,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Scene tree',
     effect: 'read',
     description:
-      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. A node that instances another scene names that file under instanceOf, and the nodes listed under it come from that file rather than this one. Needs no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without making its nodes, so no script of theirs runs (autoloads still start once it has answered, as in every headless call). For the nodes of a game that is running, runtime_inspect tree.',
+      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. A node that instances another scene names that file under instanceOf, and the nodes listed under it come from that file rather than this one; its editableChildren says whether this scene, or a scene it inherits, keeps values of its own for them (scene_node set editableChildren). Needs no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without making its nodes, so no script of theirs runs (autoloads still start once it has answered, as in every headless call). For the nodes of a game that is running, runtime_inspect tree.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -872,7 +872,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       get: {
         effect: 'read',
         summary:
-          "read a node's properties, and a TileMapLayer's or TileMap's cells as set_tilemap_cells takes them, the first 1000 with cellCount for all",
+          "read a node's properties, and a TileMapLayer's or TileMap's cells as set_tilemap_cells takes them, the first 1000 with cellCount for all. An instance of another scene also answers instanceOf and editableChildren, as scene_tree does",
         requires: ['nodePath'],
       },
       set: {

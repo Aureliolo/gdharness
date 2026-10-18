@@ -651,8 +651,11 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	# names this scene's file sets are always answered.
 	var props: Dictionary = _properties_of(node, include_defaults, scene.set_here(node))
 	var cells: Dictionary = ResourceTools.cells_of(node)
-	scene.close()
 	var answer: Dictionary = {"ok": true, "nodePath": node_path, "properties": props}
+	if node != scene.root and node.owner != null and not node.scene_file_path.is_empty():
+		answer["instanceOf"] = node.scene_file_path
+		answer["editableChildren"] = scene.root.is_editable_instance(node)
+	scene.close()
 	# Only an editor holds anything unsaved; a headless engine answering false would say it looked.
 	if Engine.is_editor_hint():
 		answer["unsavedInEditor"] = SceneFile.unsaved(scene_path)

@@ -15,9 +15,10 @@ const Read = preload("reading.gd")
 const Serialisation = preload("serialisation.gd")
 
 
-## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf on a node that
-## instances another scene and every stored property when [param include_properties] is set, the
-## file's value or the default where it sets none. [param depth] -1 reads every level.
+## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
+## editableChildren on a node that instances another scene and every stored property when
+## [param include_properties] is set, the file's value or the default where it sets none.
+## [param depth] -1 reads every level.
 static func scene_tree(scene_path: String, depth: int, include_properties: bool) -> Dictionary:
 	var laid: Dictionary = _laid(scene_path)
 	if not laid.get("ok", false):
@@ -106,6 +107,7 @@ static func _lay(state: SceneState, prefix: String, nodes: Dictionary, within: A
 				if not nodes.has(path):
 					return "%s holds no nodes" % instance.resource_path
 				nodes[path]["instanceOf"] = instance.resource_path
+				nodes[path]["editableChildren"] = false
 			elif state.is_node_instance_placeholder(index):
 				nodes[path] = _made("InstancePlaceholder")
 				nodes[path]["instanceOf"] = state.get_node_instance_placeholder(index)
@@ -134,7 +136,33 @@ static func _lay(state: SceneState, prefix: String, nodes: Dictionary, within: A
 			held[str(state.get_node_property_name(index, property))] = state.get_node_property_value(
 				index, property
 			)
+	# Only the scene being read and the scenes it inherits share its root, the owner whose editable
+	# instances a write here sets; a file instanced below makes its own owner's editable.
+	if prefix == ".":
+		for editable: String in _editable_in(state.get_path()):
+			var at: String = _joined(prefix, editable)
+			var marked: Dictionary = nodes.get(at, {})
+			if marked.has("editableChildren"):
+				marked["editableChildren"] = true
 	return ""
+
+
+## The paths of the instances [param scene_path] gives editable children, from its root. SceneState
+## does not give them to a script, so they are read off the scene's bundle.
+static func _editable_in(scene_path: String) -> PackedStringArray:
+	var found: PackedStringArray = []
+	var loaded: Resource = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	if not loaded is PackedScene:
+		return found
+	var given: Variant = loaded.get("_bundled")
+	if not given is Dictionary:
+		return found
+	var bundled: Dictionary = given
+	var listed: Variant = bundled.get("editable_instances", [])
+	if listed is Array:
+		for one: Variant in listed:
+			var _kept: bool = found.append(str(one))
+	return found
 
 
 ## The unique_id of each node entry in the text scene at [param scene_path], in the order its state
@@ -227,6 +255,8 @@ static func _entry(
 	# The root's file is the scene being read, so only another node's names a second scene.
 	if path != "." and node.has("instanceOf"):
 		data["instanceOf"] = node["instanceOf"]
+		if node.has("editableChildren"):
+			data["editableChildren"] = node["editableChildren"]
 	if include_properties:
 		var given: Dictionary = node["properties"]
 		data["properties"] = _stored(str(node["type"]), given)

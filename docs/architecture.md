@@ -840,7 +840,10 @@ The read matches entries to nodes as instantiating does. An entry that sets valu
 scene it comes from has since renamed or moved is found by the node's `unique_id`, searched among
 the nodes owned by the nearest instance above it, and the node keeps its new name. `SceneState`
 does not give scripts the ids, so they are read from the text of a `.tscn`; a binary scene's entries
-are matched by path alone. The stored properties come from a bare node of each engine class with
+are matched by path alone. Nor does it give them its list of editable instances, which is read off
+the scene's `_bundled` dictionary, from the scene being read and the scenes it inherits only: those
+share its root, and a scene instanced below lists the instances its own root keeps values for. The
+stored properties come from a bare node of each engine class with
 the file's values set on it, since what a node lists depends on its values and some setters set
 others. A resource kept inside a file (`res://hero.tscn::Animation_jump`, the path a property
 holding one is answered with) is found among what the file holds, because the engine loads such a

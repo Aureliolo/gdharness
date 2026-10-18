@@ -23506,10 +23506,13 @@ async function testTheFrameTimeIsTheFrame(): Promise<void> {
           ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
           : { ok: true },
     async ({ server, project }) => {
+      // The held step has to stand clear of an ordinary frame, which is about 7 ms headless but took
+      // 24 ms on a loaded macOS runner, where a 30 ms hold left the mean within half of the slowest
+      // step. Held 120 ms, the slowest step is twice the mean while ordinary frames stay under 50 ms.
       writeFileSync(
         join(project, 'main.gd'),
         'extends Node\n\nvar frames: int = 0\n\n\nfunc _process(_delta: float) -> void:\n' +
-          '\tframes += 1\n\tif frames % 20 == 0:\n\t\tOS.delay_msec(30)\n',
+          '\tframes += 1\n\tif frames % 20 == 0:\n\t\tOS.delay_msec(120)\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -23542,9 +23545,9 @@ async function testTheFrameTimeIsTheFrame(): Promise<void> {
         read('frame_time') > measured / 2 && read('frame_time') < measured * 2,
         `frame_time is the frame the wait measured: ${shown}`,
       );
-      assert.ok(read('frame_time_max') >= 0.025, `frame_time_max is the held frame: ${shown}`);
+      assert.ok(read('frame_time_max') >= 0.115, `frame_time_max is the held frame: ${shown}`);
       assert.ok(
-        read('process_time_max') >= 0.025 && read('frame_time') < read('process_time_max') / 2,
+        read('process_time_max') >= 0.115 && read('frame_time') < read('process_time_max') / 2,
         `process_time_max is the engine's slowest step, which the mean frame is well under: ${shown}`,
       );
       assert.equal(get(metrics, 'data', 'vsync'), 'none, headless', shown);
@@ -43601,6 +43604,55 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       /\[node name="Head" parent="Crate2\/Bolt"[^\]]*\]\nscale = Vector2\(4, 4\)\n/,
       nested,
     );
+    const editableIn = async (scenePath: string): Promise<Record<string, unknown>> => {
+      const found: Record<string, unknown> = {};
+      const walk = (entry: unknown): void => {
+        if (get(entry, 'instanceOf') !== undefined) {
+          found[String(get(entry, 'path'))] = get(entry, 'editableChildren');
+        }
+        asArray(get(entry, 'children')).forEach(walk);
+      };
+      walk(get(parseTextContent(await call('scene_tree', { scenePath })), 'tree'));
+      return found;
+    };
+    const opening = { Crate1: false, 'Crate1/Bolt': false, Crate2: true, 'Crate2/Bolt': true };
+    assert.deepEqual(await editableIn('main.tscn'), opening, 'scene_tree says which instances are editable');
+    const asked = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'main.tscn', nodePath: 'Crate2/Bolt' }),
+    );
+    assert.deepEqual(
+      [get(asked, 'instanceOf'), get(asked, 'editableChildren')],
+      ['res://parts/bolt.tscn', true],
+      JSON.stringify(asked),
+    );
+    await written('scene_create', { op: 'create', inherits: 'main.tscn', scenePath: 'main_kin.tscn' });
+    assert.deepEqual(
+      await editableIn('main_kin.tscn'),
+      opening,
+      'a scene inheriting main.tscn shares its root',
+    );
+    const kinAsked = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'main_kin.tscn', nodePath: 'Crate2' }),
+    );
+    assert.equal(get(kinAsked, 'editableChildren'), true, JSON.stringify(kinAsked));
+    await written('scene_create', { op: 'create', scenePath: 'hall.tscn', rootNodeType: 'Node2D' });
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'hall.tscn',
+      instancePath: 'main.tscn',
+      nodeName: 'Main',
+    });
+    assert.deepEqual(
+      await editableIn('hall.tscn'),
+      {
+        Main: false,
+        'Main/Crate1': false,
+        'Main/Crate1/Bolt': false,
+        'Main/Crate2': false,
+        'Main/Crate2/Bolt': false,
+      },
+      "main.tscn's editable instances are its own root's: a scene instancing it keeps nothing for them",
+    );
     assert.equal(
       textOf(await call('scene_node', { ...head, nodePath: 'Crate1/Bolt/Head' })),
       'Crate1/Bolt/Head belongs to the scene instanced at Crate1/Bolt (res://parts/bolt.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it, or have this scene keep its own values for this instance with scene_node set nodePath Crate1 editableChildren true, then nodePath Crate1/Bolt editableChildren true.',
@@ -43650,6 +43702,11 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       `and keeps the node added straight under the instance: ${closed}`,
     );
     assert.match(closed, /\[node name="Crate2" parent="\." [^\]]*\]\nposition = Vector2\(30, 0\)\n/, closed);
+    assert.deepEqual(
+      await editableIn('main.tscn'),
+      { Crate1: false, 'Crate1/Bolt': false, Crate2: false, 'Crate2/Bolt': false },
+      'and the read says so',
+    );
 
     for (const nodePath of ['.', 'Floor']) {
       assert.equal(
