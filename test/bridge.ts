@@ -891,14 +891,13 @@ async function main(): Promise<void> {
       // this is how a server learns where it went. Zero is an addon that could not find out,
       // which is not a port and is not reported as one.
       godot.send(JSON.stringify(greeting(projectPath, { lsp_port: lspPort, dap_port: 6106, debug_port: 0 })));
-      // A greeting without a server's mark has its process's command line read first, to tell an
-      // editor from a one-shot engine run, and that read can take seconds on Windows.
+      // Until the greeting lands the socket is connected and the editor has said nothing, and a
+      // greeting without a server's mark then has its process's command line read, to tell an
+      // editor from a one-shot engine run, which can take seconds on Windows.
+      const settled = (status: unknown): boolean =>
+        get(status, 'editor', 'connected') === true && get(status, 'editor', 'greeting') === undefined;
       let afterReady = await payload('editor_status', {});
-      for (
-        let waited = 0;
-        waited < 15_000 && get(afterReady, 'editor', 'connected') !== true;
-        waited += 200
-      ) {
+      for (let waited = 0; waited < 15_000 && !settled(afterReady); waited += 200) {
         await delay(200);
         afterReady = await payload('editor_status', {});
       }
