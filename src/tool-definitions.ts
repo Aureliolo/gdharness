@@ -795,7 +795,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
-      depth: { type: 'number', description: 'How many levels to descend. Default: all.' },
+      depth: {
+        type: 'number',
+        description:
+          'How many levels to descend. Default: all. A node at the last level that has children of its own lists none and says how many under childrenNotListed.',
+      },
       includeProperties: { type: 'boolean', description: "Include each node's properties. Default false." },
     },
     requires: ['projectPath', 'scenePath'],
@@ -831,7 +835,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['set'],
         description:
-          "set: on an instance of another scene, whether its children are editable here, as the editor's Editable Children makes them. True lets scene_node set give the nodes inside that instance values of this scene's own, which no other instance shares. An instance nested inside another takes it once the one around it has editable children. False drops every value this scene keeps for them. The answer says editableChildren as the file now holds it.",
+          "set: on an instance of another scene, whether its children are editable here, as the editor's Editable Children makes them. True lets scene_node set give the nodes inside that instance values of this scene's own, which no other instance shares. An instance nested inside another takes it once the one around it has editable children. False drops every value this scene keeps for them and every node it added below them, and the answer lists those nodes under dropped; a node added straight under the instance stays. The answer says editableChildren as the file now holds it.",
       },
       newName: { type: 'string', ops: ['duplicate'], description: "duplicate: the copy's name." },
       newParentPath: {

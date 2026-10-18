@@ -592,10 +592,13 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		if not unusable.is_empty():
 			return scene.refuse(unusable)
 
+	var dropped: Array[String] = []
 	if editable != null:
 		var not_an_instance: String = Kin.set_editable(scene, node, Read.as_bool(editable))
 		if not not_an_instance.is_empty():
 			return scene.refuse(not_an_instance)
+		if not Read.as_bool(editable):
+			dropped = scene.held_under(scene.path_of(node))
 
 	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
@@ -620,6 +623,8 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var answer: Dictionary = {"ok": true, "nodePath": new_path, "properties": held}
 	if editable != null:
 		answer["editableChildren"] = Read.as_bool(editable)
+	if not dropped.is_empty():
+		answer["dropped"] = dropped
 	return answer
 
 

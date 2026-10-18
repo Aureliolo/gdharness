@@ -84,13 +84,16 @@ static func inherit(scene_path: String, base_path: String, root_name: String, sc
 	var lines: PackedStringArray = [
 		'[gd_scene format=3 uid="%s"]' % ResourceUID.id_to_text(ResourceUID.create_id()),
 		"",
-		'[ext_resource type="PackedScene"%s path="%s" id="1_base"]' % [_uid_of(base_path), base_path],
+		(
+			'[ext_resource type="PackedScene"%s path="%s" id="1_base"]'
+			% [SceneFile.uid_attribute(base_path), base_path]
+		),
 	]
 	if script != null:
 		var _resourced: bool = lines.append(
 			(
 				'[ext_resource type="Script"%s path="%s" id="2_script"]'
-				% [_uid_of(script.resource_path), script.resource_path]
+				% [SceneFile.uid_attribute(script.resource_path), script.resource_path]
 			)
 		)
 	lines.append_array(["", '[node name="%s" instance=ExtResource("1_base")]' % name])
@@ -121,18 +124,6 @@ static func inherit(scene_path: String, base_path: String, root_name: String, sc
 		"rootNodeType": root_type,
 		"rootNodeName": name
 	}
-
-
-## The uid attribute an ext_resource line gives [param path], or "" when the file has none to read
-## or its uid leads to another file.
-static func _uid_of(path: String) -> String:
-	var id: int = SceneFile.uid_in(path)
-	if id == ResourceUID.INVALID_ID:
-		id = ResourceLoader.get_resource_uid(path)
-	# A file copied whole keeps the uid in its header, which the loader follows to the original.
-	if id == ResourceUID.INVALID_ID or (ResourceUID.has_id(id) and ResourceUID.get_id_path(id) != path):
-		return ""
-	return ' uid="%s"' % ResourceUID.id_to_text(id)
 
 
 ## Makes the children of [param node], an instance in [param scene], editable or not, answering why

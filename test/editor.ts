@@ -1734,6 +1734,31 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
     await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1', editableChildren: false });
     const closed = fileText(project, 'kin/host.tscn');
     assert.doesNotMatch(closed, /\[editable|parent="Crate1"/, `closing them drops what was kept: ${closed}`);
+
+    // A scene copied whole carries the uid in its header, and the editor reads a reference's uid from
+    // the file it names, so each base is named by a uid only where the editor's cache gives it that one.
+    writeFileSync(
+      join(project, 'kin', 'crate.tscn'),
+      '[gd_scene format=3 uid="uid://bkincrate1"]\n\n[node name="Crate" type="Node2D"]\n\n[node name="Look" type="Sprite2D" parent="."]\n',
+    );
+    writeFileSync(
+      join(project, 'kin', 'crate_copy.tscn'),
+      `${fileText(project, 'kin/crate.tscn')}\n[node name="Lid" type="Sprite2D" parent="."]\n`,
+    );
+    await call('editor_rescan', { projectPath: project });
+    for (const [base, children] of [
+      ['kin/crate.tscn', ['Look']],
+      ['kin/crate_copy.tscn', ['Look', 'Lid']],
+    ] as const) {
+      const scenePath = `kin/from_${base.slice(4)}`;
+      await call('scene_create', { projectPath: project, op: 'create', inherits: base, scenePath });
+      const tree = get(await call('scene_tree', { projectPath: project, scenePath }), 'tree');
+      assert.deepEqual(
+        asArray(get(tree, 'children')).map((child) => get(child, 'name')),
+        children,
+        `${scenePath} inherits ${base}: ${fileText(project, scenePath)}`,
+      );
+    }
   } finally {
     await hook(project, { op: 'open', path: 'res://main.tscn' });
     rmSync(join(project, 'kin'), { recursive: true, force: true });
@@ -2204,7 +2229,7 @@ async function testAWriteKeepsWhatTheSceneComesFrom({ call, refusal, project }: 
   );
   assert.match(
     await refusal('scene_node', { ...inherited, op: 'delete', nodePath: 'Given' }),
-    /Given comes from the scene res:\/\/layers\/inherited\.tscn inherits from/,
+    /Given is made by res:\/\/layers\/base\.tscn, a scene res:\/\/layers\/inherited\.tscn inherits/,
   );
   assert.match(
     await refusal('scene_node', { ...host, op: 'reparent', nodePath: 'Panel', newParentPath: 'Panel/Leaf' }),

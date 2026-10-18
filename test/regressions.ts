@@ -42899,7 +42899,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       JSON.stringify(hero),
     );
     assert.deepEqual(sets('hero.tscn', '[node name="Hero" type="Node2D"'), ['script = ExtResource']);
-    assert.match(fileOf('hero.tscn'), /\[ext_resource type="Script" path="res:\/\/hero\.gd"/);
+    assert.match(
+      fileOf('hero.tscn'),
+      /\[ext_resource type="Script" uid="uid:\/\/[a-y0-8]+" path="res:\/\/hero\.gd"/,
+      'and names the script by the uid the import gave it',
+    );
     const boss = await written('scene_node', {
       op: 'add',
       scenePath: 'made.tscn',
@@ -42981,7 +42985,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     });
     assert.equal(get(made, 'resourceType'), 'Stats', JSON.stringify(made));
     assert.deepEqual(sets('named.tres', '[resource]'), ['script = ExtResource', 'max_hp = 50', tags]);
-    assert.match(fileOf('named.tres'), /\[ext_resource type="Script" path="res:\/\/stats\.gd"/);
+    assert.match(
+      fileOf('named.tres'),
+      /\[ext_resource type="Script" uid="uid:\/\/[a-y0-8]+" path="res:\/\/stats\.gd"/,
+      fileOf('named.tres'),
+    );
     const notAClass =
       textOf(
         await call('resource_edit', { op: 'create', resourcePath: 'none.tres', resourceType: 'Statz' }),
@@ -43382,6 +43390,20 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       '[node name="Bolt" parent="." instance=ExtResource("2_bolt")]\n',
     'parts/bolt.tscn':
       '[gd_scene format=3]\n\n[node name="Bolt" type="Node2D"]\n\n[node name="Head" type="Sprite2D" parent="."]\n',
+    'gloss.tres': '[gd_resource type="AnimationNodeStateMachine" format=3]\n\n[resource]\n',
+    // Peg's Tip has the id Grain has: ids are numbered within a file, so a search by id stops at an
+    // instance, whose nodes are numbered in its own file.
+    'parts/peg.tscn':
+      '[gd_scene format=3]\n\n[node name="Peg" type="Node2D" unique_id=20]\n\n' +
+      '[node name="Tip" type="Sprite2D" parent="." unique_id=12]\n',
+    'parts/plank.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/peg.tscn" id="1_peg"]\n\n' +
+      '[node name="Plank" type="Node2D" unique_id=11]\n\n' +
+      '[node name="Peg" parent="." unique_id=13 instance=ExtResource("1_peg")]\n\n' +
+      '[node name="Grain" type="Sprite2D" parent="." unique_id=12]\n',
+    'wide_plank.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/plank.tscn" id="1_plank"]\n\n' +
+      '[node name="Plank" instance=ExtResource("1_plank")]\n\n[node name="Grain" parent="." unique_id=12]\nscale = Vector2(2, 2)\n',
     'main.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/crate.tscn" id="1_crate"]\n\n' +
       '[node name="Main" type="Node2D"]\n\n[node name="Floor" type="Node2D" parent="."]\n\n' +
@@ -43410,10 +43432,14 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       /^a headless engine, since no editor serves this project$/,
       `${name} ${String(args['op'])}: ${textOf(answer) ?? JSON.stringify(answer)}`,
     );
+    // A reference written with a uid the uid cache does not hold warns on every later load.
+    assert.doesNotMatch(JSON.stringify(payload), /invalid UID/, JSON.stringify(payload));
     return payload;
   };
   const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
   const inheriting = { op: 'create', inherits: 'parts/crate.tscn' };
+  const crateByUid =
+    /\[ext_resource type="PackedScene" uid="uid:\/\/dcratehw2x" path="res:\/\/parts\/crate\.tscn" id="[^"]+"\]/;
   try {
     const imported = await runImport(godotPath, project);
     assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
@@ -43426,11 +43452,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       JSON.stringify(made),
     );
     const big = fileOf('parts/big_crate.tscn');
-    assert.match(
-      big,
-      /\[ext_resource type="PackedScene" uid="uid:\/\/dcratehw2x" path="res:\/\/parts\/crate\.tscn" id="1_base"\]/,
-      big,
-    );
+    assert.match(big, crateByUid, big);
     assert.match(big, /\[node name="Crate" instance=ExtResource\("1_base"\)\]/, big);
     const tree = get(
       parseTextContent(await call('scene_tree', { scenePath: 'parts/big_crate.tscn' })),
@@ -43451,6 +43473,12 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       ['res://parts/big_crate.tscn', 'StaticBody2D', 'Crate'],
       `a scene inheriting an inherited one: ${JSON.stringify(further)}`,
     );
+    const bigger = fileOf('parts/bigger_crate.tscn');
+    assert.match(
+      bigger,
+      /\[ext_resource type="PackedScene" path="res:\/\/parts\/big_crate\.tscn" id="1_base"\]/,
+      `big_crate.tscn was made since the import, so the uid cache has no uid for it to be named by: ${bigger}`,
+    );
     await written('scene_node', {
       op: 'set',
       scenePath: 'parts/big_crate.tscn',
@@ -43460,6 +43488,14 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     const overridden = fileOf('parts/big_crate.tscn');
     assert.match(overridden, /\[node name="Look" parent="\."[^\]]*\]\nscale = Vector2\(2, 2\)\n/, overridden);
     assert.doesNotMatch(overridden, /modulate/, 'what the base root script set in _init is not saved');
+    assert.match(overridden, crateByUid, `a headless save keeps the uid of what it names: ${overridden}`);
+    assert.equal(
+      textOf(
+        await call('scene_node', { op: 'delete', scenePath: 'parts/bigger_crate.tscn', nodePath: 'Look' }),
+      ),
+      'Look is made by res://parts/crate.tscn, a scene res://parts/bigger_crate.tscn inherits, which creates it again on load. Edit that scene instead.',
+      'the refusal names the scene that makes the node, past the base that only sets values on it',
+    );
 
     const scripted = await written('scene_create', {
       ...inheriting,
@@ -43478,6 +43514,10 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
         "inherits takes the root's class from res://parts/crate.tscn, so rootNodeType is not given with it.",
       ],
       [{ inherits: 'parts/none.tscn' }, 'inherits: Scene not found: res://parts/none.tscn'],
+      [
+        { inherits: 'gloss.tres' },
+        'inherits: res://gloss.tres is an AnimationNodeStateMachine, not a scene: resource_edit read reads its properties.',
+      ],
       [
         { script: 'panel.gd' },
         'res://panel.gd extends Control, so it cannot be on the StaticBody2D root res://parts/crate.tscn inherits.',
@@ -43508,6 +43548,11 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     });
     assert.equal(get(opened, 'editableChildren'), true, JSON.stringify(opened));
     assert.match(fileOf('main.tscn'), /\n\[editable path="Crate2"\]\n/, fileOf('main.tscn'));
+    assert.match(
+      fileOf('main.tscn'),
+      crateByUid,
+      'a reference the file made by path gains the uid the cache holds',
+    );
     await written('scene_node', inside);
     const kept = fileOf('main.tscn');
     assert.match(kept, /\[node name="Look" parent="Crate2"[^\]]*\]\nscale = Vector2\(3, 3\)\n/, kept);
@@ -43548,17 +43593,39 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       'Crate2/Spare/Head belongs to the scene instanced at Crate2/Spare (res://parts/bolt.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it.',
       'no editable children reach an instance a script makes',
     );
-    await written('scene_node', {
+    for (const [parentNodePath, nodeName] of [
+      ['Crate2/Look', 'Tag'],
+      ['Crate2', 'Badge'],
+    ]) {
+      await written('scene_node', {
+        op: 'add',
+        scenePath: 'main.tscn',
+        parentNodePath,
+        nodeType: 'Node2D',
+        nodeName,
+      });
+    }
+    const shut = await written('scene_node', {
       op: 'set',
       scenePath: 'main.tscn',
       nodePath: 'Crate2',
       editableChildren: false,
     });
+    assert.deepEqual(
+      get(shut, 'dropped'),
+      ['Crate2/Look', 'Crate2/Look/Tag', 'Crate2/Bolt/Head'],
+      JSON.stringify(shut),
+    );
     const closed = fileOf('main.tscn');
     assert.doesNotMatch(
       closed,
-      /\[editable|parent="Crate2[/"]/,
-      `closing them drops what was kept: ${closed}`,
+      /\[editable|name="(Look|Head|Tag)" /,
+      `closing them drops what was kept, and what was added below a node of the instance: ${closed}`,
+    );
+    assert.match(
+      closed,
+      /\[node name="Badge" type="Node2D" parent="Crate2"/,
+      `and keeps the node added straight under the instance: ${closed}`,
     );
     assert.match(closed, /\[node name="Crate2" parent="\." [^\]]*\]\nposition = Vector2\(30, 0\)\n/, closed);
 
@@ -43573,6 +43640,20 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     assert.equal(
       textOf(await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath: 'Crate1' })),
       'set takes properties, editableChildren, or both.',
+    );
+
+    const shallow = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'main.tscn', depth: 1 })),
+      'tree',
+    );
+    assert.deepEqual(
+      asArray(get(shallow, 'children')).map((child) => [get(child, 'name'), get(child, 'childrenNotListed')]),
+      [
+        ['Floor', undefined],
+        ['Crate1', 3],
+        ['Crate2', 4],
+      ],
+      `a node cut off by depth says how many children it has: ${JSON.stringify(shallow)}`,
     );
 
     // A scene copied whole carries the uid of the one it was copied from, so one of the two names a
@@ -43597,6 +43678,29 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
         `${scenePath} inherits ${base}: ${fileOf(scenePath)}`,
       );
     }
+
+    // The engine finds a value entry whose node was renamed in the scene it comes from by its
+    // unique_id, and so must a read of the file.
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'parts/plank.tscn',
+      nodePath: 'Grain',
+      properties: { name: 'Knot' },
+    });
+    assert.match(fileOf('parts/plank.tscn'), /\[node name="Knot" type="Sprite2D" parent="\." unique_id=12\]/);
+    const wide = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'wide_plank.tscn', includeProperties: true })),
+      'tree',
+    );
+    const knot = asArray(get(wide, 'children'));
+    assert.deepEqual(
+      knot.map((child) => [get(child, 'name'), get(get(get(child, 'properties'), 'scale'), 'x')]),
+      [
+        ['Peg', 1],
+        ['Knot', 2],
+      ],
+      `the renamed node keeps the scale wide_plank.tscn gives it: ${JSON.stringify(wide)}`,
+    );
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });

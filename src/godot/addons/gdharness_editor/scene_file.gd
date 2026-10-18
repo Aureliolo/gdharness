@@ -38,6 +38,7 @@ static var scan_due: bool = false
 
 var root: Node = null
 var path: String = ""
+## The path of each node a scene this one inherits gives, with the file that makes it.
 var _base_paths: Dictionary = {}
 var _state: SceneState = null
 ## What the file stores on each node it was opened with, by the node's instance id, so a node keeps
@@ -78,9 +79,16 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		return {"ok": false, "error": "Failed to instantiate " + path}
 	_state = packed.get_state()
 	var base: SceneState = _state.get_base_scene_state()
+	# Each node a base gives, with the file that makes it: the deepest base listing it as more than
+	# values set on a node from further down.
 	while base != null:
 		for index: int in base.get_node_count():
-			_base_paths[_relative(str(base.get_node_path(index)))] = true
+			var given: String = _relative(str(base.get_node_path(index)))
+			var made: bool = (
+				base.get_node_instance(index) != null or not str(base.get_node_type(index)).is_empty()
+			)
+			if made or not _base_paths.has(given):
+				_base_paths[given] = base.get_path()
 		base = base.get_base_scene_state()
 	# On a read as well, which would otherwise answer what the scripts set as what the file holds.
 	if not Engine.is_editor_hint():
@@ -165,6 +173,23 @@ func close() -> void:
 		root = null
 
 
+## The path of every entry the file holds under the instance at [param at] that goes once its
+## children are not editable: values for a node of the instance, and a node the scene added under
+## one, since the packer skips everything below a node of an instance that is not editable. A node
+## added straight under [param at] is the scene's own and stays.
+func held_under(at: String) -> Array[String]:
+	var held: Array[String] = []
+	for index: int in _state.get_node_count():
+		var entry: String = _relative(str(_state.get_node_path(index)))
+		var parent: String = _relative(str(_state.get_node_path(index, true)))
+		var values_only: bool = (
+			_state.get_node_instance(index) == null and str(_state.get_node_type(index)).is_empty()
+		)
+		if (values_only and entry.begins_with(at + "/")) or parent.begins_with(at + "/"):
+			held.append(entry)
+	return held
+
+
 ## The path of [param node] as a tool names it: "." for the root.
 func path_of(node: Node) -> String:
 	return str(root.get_path_to(node))
@@ -231,10 +256,10 @@ func fixed(node: Node) -> String:
 	if _base_paths.has(at):
 		return (
 			(
-				"%s comes from the scene %s inherits from, which creates it again on load. Edit that "
+				"%s is made by %s, a scene %s inherits, which creates it again on load. Edit that "
 				+ "scene instead."
 			)
-			% [at, path]
+			% [at, _base_paths[at], path]
 		)
 	return ""
 
@@ -483,7 +508,51 @@ static func save_keeping_uid(resource: Resource, file_path: String) -> Error:
 		return saving
 	if uid == ResourceUID.INVALID_ID:
 		uid = ResourceUID.create_id()
-	return ResourceSaver.set_uid(file_path, uid)
+	var marked: Error = ResourceSaver.set_uid(file_path, uid)
+	if marked != OK:
+		return marked
+	return _with_external_uids(file_path)
+
+
+## Puts back the uid on each external resource the text file at [param file_path] names. Only the
+## editor's file system tells the saver a path's uid, so a headless save writes every reference by
+## path alone, and each breaks when the file it names is moved.
+static func _with_external_uids(file_path: String) -> Error:
+	if not (file_path.ends_with(".tscn") or file_path.ends_with(".tres")):
+		return OK
+	var lines: PackedStringArray = FileAccess.get_file_as_string(file_path).split("\n")
+	var pattern: RegEx = RegEx.create_from_string(' path="([^"]+)"')
+	var changed: bool = false
+	for at: int in lines.size():
+		var line: String = lines[at]
+		if not line.begins_with("[ext_resource ") or line.contains(' uid="'):
+			continue
+		var named: RegExMatch = pattern.search(line)
+		var uid: String = uid_attribute(named.get_string(1)) if named != null else ""
+		if not uid.is_empty():
+			lines[at] = line.replace(' path="', uid + ' path="')
+			changed = true
+	if not changed:
+		return OK
+	var file: FileAccess = FileAccess.open(file_path, FileAccess.WRITE)
+	if file == null:
+		return FileAccess.get_open_error()
+	if not file.store_string("\n".join(lines)):
+		return ERR_FILE_CANT_WRITE
+	file.close()
+	return OK
+
+
+## The uid attribute a reference to [param named] is written with, as ' uid="uid://..."', or "".
+##
+## Only a uid the uid cache gives that path, which is what the loader resolves it by. A uid the cache
+## does not know (a file made with no editor since the last scan) is answered with a warning on every
+## load, and one it gives another file (a scene copied whole keeps its original's) loads that file.
+static func uid_attribute(named: String) -> String:
+	var id: int = ResourceLoader.get_resource_uid(named)
+	if id == ResourceUID.INVALID_ID or not ResourceUID.has_id(id) or ResourceUID.get_id_path(id) != named:
+		return ""
+	return ' uid="%s"' % ResourceUID.id_to_text(id)
 
 
 ## The uid the file at [param file_path] declares, or [constant ResourceUID.INVALID_ID].

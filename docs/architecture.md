@@ -836,12 +836,16 @@ alone can say, whether it holds unsaved changes to the scene, and the headless a
 `readBy` instead. A scene is read off its `SceneState`, with each instanced scene laid where it
 is instanced, rather than instantiated: outside the editor, instantiating runs every node
 script's member initialisers and `_init`, so a read would have run the game's code on every node.
-The stored properties come from a bare node of each engine class with the file's values set on
-it, since what a node lists depends on its values and some setters set others. A resource kept
-inside a file (`res://hero.tscn::Animation_jump`, the path a property holding one is answered
-with) is found among what the file holds, because the engine loads such a path only while the
-file is cached and a read loads it uncached; the server takes the id off before the project
-boundary judges the path, which is a file's.
+The read matches entries to nodes as instantiating does. An entry that sets values on a node the
+scene it comes from has since renamed or moved is found by the node's `unique_id`, searched among
+the nodes owned by the nearest instance above it, and the node keeps its new name. `SceneState`
+does not give scripts the ids, so they are read from the text of a `.tscn`; a binary scene's entries
+are matched by path alone. The stored properties come from a bare node of each engine class with
+the file's values set on it, since what a node lists depends on its values and some setters set
+others. A resource kept inside a file (`res://hero.tscn::Animation_jump`, the path a property
+holding one is answered with) is found among what the file holds, because the engine loads such a
+path only while the file is cached and a read loads it uncached; the server takes the id off before
+the project boundary judges the path, which is a file's.
 
 `scene_animation read` and `read_states` share `animation_reads.gd` the same way. The editor
 hands it the node from the scene it opens; with no editor, the operation builds a bare
@@ -871,12 +875,15 @@ and so is a scene whose script did not compile, which the engine instances witho
 only restates a property's default does not count against a write: the engine reports no default for
 an export initialised by a constructor call, such as `PackedStringArray()`, so every save writes one,
 the editor's too, and that default is read from the declaration in the script instead. A headless
-save also writes back the uid the file had, which an engine with no editor's uid cache otherwise
-drops. An animation library kept in a file of its own is saved beside the scene, and refused when
-it, or a resource it embeds, carries a script that is not a tool, since nothing compares that file
-with its text. An editor of the project that is running and has not reached this server
-holds its own copy of anything it has open, and saving that would put back what the engine wrote,
-so a write waits for it to connect instead.
+save also writes back the uid the file had, and the uid on each external resource it names, which an
+engine with no editor's file system drops, since only that tells the saver a path's uid. A reference
+is given the uid the uid cache holds for its path and no other: one the cache does not know (a file
+made with no editor since the last scan) warns on every load, and one the cache gives another file
+(the original of a scene copied whole) loads that file. An animation library kept in a file of its
+own is saved beside the scene, and refused when it, or a resource it embeds, carries a script that
+is not a tool, since nothing compares that file with its text. An editor of the project that is
+running and has not reached this server holds its own copy of anything it has open, and saving that
+would put back what the engine wrote, so a write waits for it to connect instead.
 
 `project_export add_preset` writes `export_presets.cfg` from an operation in `export_presets.gd`,
 with the keys the editor's Export dialog writes for a new preset; the exporter fills every platform
@@ -988,9 +995,9 @@ The scene tools never touch the editor's open scene. Each one works on a copy of
 save, bringing its tab to the front for the save and putting back the tab that was there.
 `scene_create` with `inherits` writes the new scene's text itself, as the editor's New Inherited
 Scene saves it, rather than packing an instance of the base: a headless engine instancing the base
-runs its scripts, and the pack would keep what they set as the new scene's own values. It leaves out
-the base's uid when that uid leads to another file, as it does for a scene copied whole, and loads
-the result back to check that it inherits the base.
+runs its scripts, and the pack would keep what they set as the new scene's own values. It names the
+base by uid on the same rule as a headless save, and loads the result back to check that it inherits
+the base.
 `resource_edit` reads the file back after saving a resource, and puts the old file back when a
 property set did not survive the save.
 
