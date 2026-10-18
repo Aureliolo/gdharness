@@ -36,6 +36,7 @@ import { pathToFileURL } from 'node:url';
 import { alive } from '../src/alive.js';
 import { readBreakpointNote } from '../src/breakpoint-note.js';
 import { GodotDAPClient } from '../src/dap_client.js';
+import { staleImports } from '../src/import-freshness.js';
 import { NOT_INHERITED, RESOLVED_ELSEWHERE } from '../src/rename.js';
 import { readLatestRun } from '../src/run-record.js';
 import { frameFunctionsFor, queuedMessagesOf } from '../src/script-profile.js';
@@ -854,6 +855,9 @@ function createProject(): string {
     join(dir, 'tiles', 'atlas.png'),
     pixelPng(8, 4, (x) => (x < 4 ? [200, 60, 60, 255] : [0, 0, 0, 0])),
   );
+  // A layer a script redraws behind the editor's back, which a run has to import first.
+  mkdirSync(join(dir, 'pictures'), { recursive: true });
+  writeFileSync(join(dir, 'pictures', 'stave.png'), solidPng(40, 160, 40));
 
   // An AnimationTree whose root is a state machine. The state ops need one and nothing makes
   // one: a tool that writes a node cannot build the resource that goes inside it.
@@ -3440,6 +3444,38 @@ async function testAReimportTakesInFilesTheEditorHasNotSeen({ call, project }: E
 
   rmSync(dir, { recursive: true, force: true });
   await call('editor_rescan', { projectPath: project });
+}
+
+/**
+ * A run with the editor open imports first what changed on disk behind it, through the editor.
+ *
+ * Issue #1166, from ostinato: a layer redrawn by a script, and the game and the test run both read
+ * the old import while project_import status called it needs_reimport. The editor was connected
+ * the whole time and never took the change in, since it scans only when its window regains focus,
+ * which an editor an agent drives never does. Overwritten here as the script overwrote it.
+ */
+async function testARunImportsThroughTheEditorFirst({ call, project }: Editor): Promise<void> {
+  const status = async (): Promise<unknown> =>
+    get(
+      await call('project_import', {
+        projectPath: project,
+        op: 'status',
+        resourcePath: 'pictures/stave.png',
+      }),
+      'resources',
+      0,
+    );
+  assert.equal(get(await status(), 'status'), 'up_to_date', 'the editor imported it when it opened');
+
+  writeFileSync(join(project, 'pictures', 'stave.png'), solidPng(160, 40, 40));
+  assert.equal(get(await status(), 'reason'), 'the source changed after it was imported');
+  const checked = await call('editor_run', { projectPath: project, op: 'check' });
+  assert.ok(
+    asArray(get(checked, 'importedFirst')).includes('res://pictures/stave.png'),
+    `the boot check imported it first: ${text(checked)}`,
+  );
+  assert.equal(get(await status(), 'status'), 'up_to_date', 'and status reads it current after');
+  assert.deepEqual(staleImports(project), [], 'nothing is left behind for the next run to import');
 }
 
 /**
@@ -6714,6 +6750,7 @@ async function main(): Promise<void> {
     ['testEditorRescan', testEditorRescan],
     ['testAReimportGoesThroughTheEditor', testAReimportGoesThroughTheEditor],
     ['testAReimportTakesInFilesTheEditorHasNotSeen', testAReimportTakesInFilesTheEditorHasNotSeen],
+    ['testARunImportsThroughTheEditorFirst', testARunImportsThroughTheEditorFirst],
     ['testAClassTheEditorCannotSee', testAClassTheEditorCannotSee],
     ['testAScanWritesTheCacheFromTheEditor', testAScanWritesTheCacheFromTheEditor],
     ['testARescanKeepsWhatTheRebuildWrote', testARescanKeepsWhatTheRebuildWrote],

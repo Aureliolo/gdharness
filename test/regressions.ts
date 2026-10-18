@@ -106,6 +106,7 @@ import { DebuggerStream, decodeVariant, framedCommand } from '../src/godot-varia
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
 import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
+import { IMPORTABLE_EXTENSIONS, staleImports } from '../src/import-freshness.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
 import {
@@ -2178,12 +2179,6 @@ function testSceneToolsVectorRegression(): void {
   }
 }
 
-/**
- * A stand-in for Godot's language server.
- *
- * `reply` decides what URI it publishes diagnostics under, which is the whole point: Godot
- * does not echo back the URI the client sent, it builds its own.
- */
 /** The port a listening server landed on, which `address()` only answers once it is up. */
 function portOf(server: Server): number {
   const address = server.address();
@@ -2264,6 +2259,12 @@ interface FakeDiagnostic {
   readonly severity?: number;
 }
 
+/**
+ * A stand-in for Godot's language server.
+ *
+ * `publishUri` decides what URI it publishes diagnostics under, which is the whole point: Godot
+ * does not echo back the URI the client sent, it builds its own.
+ */
 async function withFakeLanguageServer<T>(
   publishUri: (uri: string) => string | null,
   handler: (port: number) => Promise<T>,
@@ -20959,6 +20960,165 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
 }
 
 /**
+ * A run imports what changed on disk since its last import before it starts, and names it.
+ *
+ * Issue #1166, from ostinato: a picture redrawn by a script, then `project_test` and `editor_run
+ * start`, and both ran on the old import while project_import status called it needs_reimport.
+ * The check that decides whether to import reads files, so it is held to agree with status both
+ * ways: nothing on a project just imported, which would otherwise cost every run an import pass,
+ * and the same files and reasons once a picture is overwritten and another added. A rewrite byte
+ * for byte is current, as the editor judges it. Then a boot check and a test run each import first,
+ * and status reads every file current after.
+ */
+async function testARunImportsWhatChangedFirst(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('import-first regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-import-first-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ImportFirst"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    writeFileSync(join(project, 'picture.png'), solidPng(40, 160, 40));
+    // Walked past by both: never imported, and never counted as behind.
+    mkdirSync(join(project, 'ignored'));
+    writeFileSync(join(project, 'ignored', '.gdignore'), '');
+    writeFileSync(join(project, 'ignored', 'raw.png'), solidPng(1, 2, 3));
+    mkdirSync(join(project, '.hidden'));
+    writeFileSync(join(project, '.hidden', 'raw.png'), solidPng(1, 2, 3));
+    // An import that fails: behind only once its source changes, since importing the same bytes
+    // again fails again.
+    writeFileSync(join(project, 'broken.png'), 'not an image');
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(project, 'test'));
+    writeFileSync(
+      join(project, 'test', 'picture_test.gd'),
+      'extends GdUnitTestSuite\n\n\nfunc test_the_picture_loads() -> void:\n\tassert_object(load("res://picture.png")).is_not_null()\n',
+    );
+    await withStdioServer(async (_call, request) => {
+      const answer = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+        const response = await request(
+          'tools/call',
+          { name, arguments: { projectPath: project, ...args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+      };
+      const behindByStatus = async (): Promise<{ path: string; reason: string }[]> =>
+        asArray(get(await answer('project_import', { op: 'status' }), 'resources'))
+          .filter((one) => get(one, 'status') === 'needs_reimport')
+          .map((one) => ({ path: text(get(one, 'path')), reason: text(get(one, 'reason')) }))
+          .sort((one, other) => one.path.localeCompare(other.path));
+
+      const imported = await answer('project_import', { op: 'reimport' });
+      assert.ok(asArray(get(imported, 'reimported')).includes('res://picture.png'), JSON.stringify(imported));
+      assert.deepEqual(await behindByStatus(), [], 'status reads the imported project current');
+      assert.deepEqual(staleImports(project), [], 'and so does the check, or every run would import');
+      const current = await answer('editor_run', { op: 'check' });
+      assert.equal(get(current, 'booted'), true, JSON.stringify(current));
+      assert.equal(
+        get(current, 'importedFirst'),
+        undefined,
+        `nothing was behind: ${JSON.stringify(current)}`,
+      );
+
+      writeFileSync(join(project, 'picture.png'), solidPng(160, 40, 40));
+      writeFileSync(join(project, 'added.png'), solidPng(40, 40, 160));
+      const flagged = staleImports(project);
+      assert.deepEqual(
+        flagged,
+        [
+          { path: 'res://added.png', reason: 'it has not been imported' },
+          { path: 'res://picture.png', reason: 'the source changed after it was imported' },
+        ],
+        JSON.stringify(flagged),
+      );
+      assert.deepEqual(
+        await behindByStatus(),
+        flagged,
+        'the check and status name the same files, for the same reasons',
+      );
+
+      const checked = await answer('editor_run', { op: 'check' });
+      assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
+      assert.deepEqual(
+        asArray(get(checked, 'importedFirst')).map(String).sort(),
+        ['res://added.png', 'res://picture.png'],
+        `the boot check imported both first: ${JSON.stringify(checked)}`,
+      );
+      // The import retries the failed one too, as project_import reimport does, and says it stayed.
+      assert.deepEqual(
+        asArray(get(checked, 'notImportedFirst', 0, 'paths')),
+        ['res://broken.png'],
+        JSON.stringify(checked),
+      );
+      assert.match(
+        text(get(checked, 'importNote')),
+        /^The files under notImportedFirst are still on their previous import, so this run shows what they held before\./,
+        JSON.stringify(checked),
+      );
+      assert.deepEqual(await behindByStatus(), [], 'and status reads them current after it');
+
+      const same = readFileSync(join(project, 'picture.png'));
+      writeFileSync(join(project, 'picture.png'), same);
+      assert.deepEqual(staleImports(project), [], 'a rewrite byte for byte is current');
+
+      // The failed one mended, alone, which is the change that lets its import succeed.
+      writeFileSync(join(project, 'broken.png'), solidPng(160, 40, 160));
+      const mended = await answer('editor_run', { op: 'check' });
+      assert.deepEqual(
+        asArray(get(mended, 'importedFirst')).map(String),
+        ['res://broken.png'],
+        `a failed import whose source was mended is imported first: ${JSON.stringify(mended)}`,
+      );
+      assert.equal(get(mended, 'notImportedFirst'), undefined, JSON.stringify(mended));
+
+      writeFileSync(join(project, 'picture.png'), solidPng(160, 160, 40));
+      // A suite with no .uid yet, which the import gives it, as the editor's scan would.
+      writeFileSync(
+        join(project, 'test', 'second_test.gd'),
+        'extends GdUnitTestSuite\n\n\nfunc test_true() -> void:\n\tassert_bool(true).is_true()\n',
+      );
+      const tested = await answer('project_test', { path: 'res://test' });
+      assert.equal(get(tested, 'passed'), true, JSON.stringify(tested));
+      assert.deepEqual(
+        asArray(get(tested, 'importedFirst')).map(String),
+        ['res://picture.png'],
+        `the test run imported the picture first: ${JSON.stringify(tested)}`,
+      );
+      assert.deepEqual(
+        asArray(get(tested, 'uidsWrittenFirst')).map(String),
+        ['res://test/second_test.gd'],
+        `and named the sidecar the import wrote: ${JSON.stringify(tested)}`,
+      );
+      assert.equal(get(tested, 'uidsMissing'), undefined, JSON.stringify(tested));
+      assert.deepEqual(await behindByStatus(), [], 'and status reads it current after the test run');
+    });
+  } finally {
+    sweep(project);
+  }
+}
+
+/** The extensions the check counts as imported are the ones `project_import status` counts. */
+function testTheImportCheckKnowsWhatStatusImports(): void {
+  const source = readFileSync(join('src', 'godot', 'operations', 'import_pipeline.gd'), 'utf8');
+  const listed = /const IMPORTABLE_EXTENSIONS: Array\[String\] = \[([^\]]*)\]/.exec(source)?.[1];
+  assert.ok(listed !== undefined, 'import_pipeline.gd should hold IMPORTABLE_EXTENSIONS');
+  const extensions = [...listed.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(extensions.length, 29, `the list as it stands: ${extensions.join(', ')}`);
+  assert.deepEqual([...IMPORTABLE_EXTENSIONS], extensions);
+}
+
+/**
  * project_import reimport reimports, without an editor, through the engine's own import pass.
  *
  * It answered "requested" and did nothing, and set_options said reimport_triggered over a sidecar
@@ -21841,23 +22001,6 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
   }
 }
 
-/**
- * A start through the editor does not sit out its announce budget on a game that died on boot.
- *
- * `testAStartStopsWaitingForAGameThatIsOver` holds this for a run this server spawned, which has
- * a process to ask. A run the editor plays has none, and the wait for its announcement read the
- * record, which says a played run is going for as long as it lasts. So a scene that died on a
- * parse error was waited for the whole budget and then reported, correctly, as no longer
- * running: the right answer, five seconds late by default and as late as `runtimeWaitMs` asks.
- * The editor is what knows, and the wait asks it the way `editor_run wait` does.
- *
- * The first start is the positive: while the editor says it is playing, the wait runs its
- * budget out and says the game may yet announce. Without it the second half is satisfied by a
- * wait that gives up on every played run at once.
- *
- * A socket for the editor and a scripted adapter, because what is under test is which source the
- * wait reads, and a real editor can only be made to play a game that dies by being given one.
- */
 /** What a fixture is handed by `withAPlayingEditor`. */
 interface PlayingEditorStage {
   readonly server: ServerProcess;
@@ -24948,6 +25091,23 @@ async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
   }
 }
 
+/**
+ * A start through the editor does not sit out its announce budget on a game that died on boot.
+ *
+ * `testAStartStopsWaitingForAGameThatIsOver` holds this for a run this server spawned, which has
+ * a process to ask. A run the editor plays has none, and the wait for its announcement read the
+ * record, which says a played run is going for as long as it lasts. So a scene that died on a
+ * parse error was waited for the whole budget and then reported, correctly, as no longer
+ * running: the right answer, five seconds late by default and as late as `runtimeWaitMs` asks.
+ * The editor is what knows, and the wait asks it the way `editor_run wait` does.
+ *
+ * The first start is the positive: while the editor says it is playing, the wait runs its
+ * budget out and says the game may yet announce. Without it the second half is satisfied by a
+ * wait that gives up on every played run at once.
+ *
+ * A socket for the editor and a scripted adapter, because what is under test is which source the
+ * wait reads, and a real editor can only be made to play a game that dies by being given one.
+ */
 async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
   let playing = false;
   let diesOnBoot = false;
@@ -35923,7 +36083,7 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
     passed: true,
     uidsMissing: ['res://test/a_test.gd'],
     uidsNote:
-      'This script has no .uid sidecar yet: the engine writes one when it imports the project, which a test run does not, so a check that tracks the sidecars fails on it. project_import refresh_uids writes them.',
+      'This script has no .uid sidecar yet: the engine writes one when it imports the project, and this run had nothing to import, so a check that tracks the sidecars fails on it. project_import refresh_uids writes them.',
   });
   assert.match(
     String(
@@ -36124,6 +36284,9 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
       next.note,
       /The test run before this one in this project, of res:\/\/test\/a_test\.gd, res:\/\/test\/b_test\.gd, res:\/\/test\/c_test\.gd, was cut off by its client at \S+ after 2 suites had finished, 1 of them with failures, while res:\/\/test\/c_test\.gd was running; what it finished is under previousRunCut\.$/,
     );
+    // A suite written since the last import, so it has no .uid sidecar, which a gate that tracks them
+    // fails on later. The runs above imported gdUnit4's icons first and gave every suite one then.
+    rmSync(join(projectDir, 'test', 'a_test.gd.uid'), { force: true });
     const after = answerOf(
       await server.request(
         'tools/call',
@@ -36133,8 +36296,9 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
     );
     assert.equal(get(after.json, 'verdict'), 'passed', after.note);
     assert.equal(get(after.json, 'previousRunCut'), undefined, 'handed back once');
-    // The suite was written here and never imported, so it has no .uid sidecar, which a gate that
-    // tracks them fails on later: the run names it, and stops once the sidecar is there.
+    // Nothing was behind, so nothing was imported: the run names it, and stops once the sidecar is
+    // there.
+    assert.equal(get(after.json, 'importedFirst'), undefined, after.note);
     assert.deepEqual(get(after.json, 'uidsMissing'), [a], after.note);
     writeFileSync(join(projectDir, 'test', 'a_test.gd.uid'), 'uid://b1gdharnesstest\n');
     const minted = answerOf(
@@ -45189,6 +45353,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStructureReadDescribesTheScriptItRead,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testAReimportReimportsThroughTheEngine,
+  testARunImportsWhatChangedFirst,
+  testTheImportCheckKnowsWhatStatusImports,
   testEachSettingsWriteNamesItsSetting,
   testASettingsWriteIsTakenUpByTheEditor,
   testOptionsWrittenAreSaidWhenTheirReimportFails,

@@ -68,15 +68,6 @@ function announced(line: string): { severity: Severity; text: string; byScript: 
   };
 }
 
-/**
- * Collects the lines a game prints, one stream at a time, into entries.
- *
- * Bytes arrive in the chunks the pipe makes of them, which can cut a character as easily as a
- * line, so each stream is decoded here and its last piece held back until the newline that
- * ends it turns up. An indented line after a headline is the headline's detail, and so are the
- * lines of a stderr error message that ends in a colon, up to its first indented line; anything
- * else starts an entry of its own.
- */
 /** The sources a log is written into as bytes arrive, as against the debugger's own entries. */
 type Stream = 'stdout' | 'stderr' | 'transcript';
 
@@ -246,6 +237,15 @@ export function foldedRepeats(entries: readonly LogEntry[]): readonly FoldedEntr
   );
 }
 
+/**
+ * Collects the lines a game prints, one stream at a time, into entries.
+ *
+ * Bytes arrive in the chunks the pipe makes of them, which can cut a character as easily as a
+ * line, so each stream is decoded here and its last piece held back until the newline that
+ * ends it turns up. An indented line after a headline is the headline's detail, and so are the
+ * lines of a stderr error message that ends in a colon, up to its first indented line; anything
+ * else starts an entry of its own.
+ */
 export class GameLog {
   private readonly entries: LogEntry[] = [];
   private readonly decoders: Record<Stream, StringDecoder> = {
