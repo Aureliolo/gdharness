@@ -168,9 +168,21 @@ func _check_deserialize() -> void:
 		_fail("Vector2i round trip")
 	if values.deserialize_value(values.serialize_value(Vector3i(6, 7, 8))) != Vector3i(6, 7, 8):
 		_fail("Vector3i round trip")
+	var deep: Dictionary = {"_type": "Vector2", "x": 1, "y": 2, "z": 3}
+	var deep_back: Variant = values.deserialize_value(deep)
+	if typeof(deep_back) != TYPE_DICTIONARY or deep_back != deep:
+		_fail("a Vector2 carrying a z should come back as it arrived, not as %s" % str(deep_back))
+	var framed: Dictionary = {"_type": "Rect2", "position": {"x": 1, "y": 2}, "size": {"x": 3, "y": 4}}
+	if values.deserialize_value(framed) != Rect2(1, 2, 3, 4):
+		_fail("a Rect2 by its corners: %s" % str(values.deserialize_value(framed)))
+	var counted: Dictionary = {"_type": "Rect2", "x": 1, "y": 2, "width": 3, "height": 4}
+	if values.deserialize_value(counted) != Rect2(1, 2, 3, 4):
+		_fail("and by its four numbers: %s" % str(values.deserialize_value(counted)))
 	var colour: Color = Color(0.25, 0.5, 0.75, 1)
 	if values.deserialize_value(values.serialize_value(colour)) != colour:
 		_fail("Color round trip")
+	if values.deserialize_value({"_type": "Color", "r": 1, "g": 0, "b": 0}) != Color(1, 0, 0, 1):
+		_fail("a Color without its alpha is opaque")
 	if values.deserialize_value(values.serialize_value(NodePath("Root/Child"))) != NodePath("Root/Child"):
 		_fail("NodePath round trip")
 

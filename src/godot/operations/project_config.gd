@@ -181,7 +181,8 @@ static func _cannot_hold(setting_path: String, wanted: int, value: Variant) -> S
 	if wanted in numbers and typeof(value) in numbers:
 		return "%s, and %s is not the same number as one.%s" % [declared, str(value), cost]
 	var given: String = type_string(typeof(value))
-	return "%s, and %s (%s) cannot become one." % [declared, JSON.stringify(value), given]
+	var unread: String = Serialisation.unread_note(value, wanted)
+	return "%s, and %s (%s) cannot become one.%s" % [declared, JSON.stringify(value), given, unread]
 
 
 # Add an autoload singleton

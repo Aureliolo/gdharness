@@ -439,10 +439,13 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 	if not objects and not Values.acceptable(wanted, typeof(current)):
 		return (
 			(
-				"%s.%s holds %s and the value to wait for is %s, which cannot become one:"
-				+ " waiting on it would answer about a state nobody asked for."
+				(
+					"%s.%s holds %s and the value to wait for is %s, which cannot become one:"
+					+ " waiting on it would answer about a state nobody asked for."
+				)
+				% types
 			)
-			% types
+			+ Values.unread_note(wanted, typeof(current))
 		)
 	if not Values.comparable(current, wanted):
 		return (
@@ -455,10 +458,13 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 	if not Values.acceptable(wanted, typeof(current)):
 		return (
 			(
-				"%s.%s holds %s and the value to wait for is %s, which cannot become one:"
-				+ " waiting on it would answer about a state nobody asked for."
+				(
+					"%s.%s holds %s and the value to wait for is %s, which cannot become one:"
+					+ " waiting on it would answer about a state nobody asked for."
+				)
+				% types
 			)
-			% types
+			+ Values.unread_note(wanted, typeof(current))
 		)
 	return ""
 

@@ -291,6 +291,22 @@ func _check_a_value_given_by_its_fields() -> void:
 	var said: String = str(short.get("message", ""))
 	if short.get("type") != "error" or not said.ends_with('A Vector2 is sent as {"x": ..., "y": ...}.'):
 		_fail("one missing a field is refused naming the shape: %s" % JSON.stringify(short))
+	var shape: String = 'A Vector2 is sent as {"x": ..., "y": ...}.'
+	var deep: Dictionary = await _write("spot", {"x": 7, "y": 8, "z": 9})
+	var deep_said: String = str(deep.get("message", ""))
+	if not deep_said.ends_with("A Vector2 has no z, so the value is not read as one. " + shape):
+		_fail("one carrying a field a Vector2 has not is refused naming it: %s" % JSON.stringify(deep))
+	if holder.get("spot") != Vector2(1.5, -2):
+		_fail("and the slot keeps what it held: %s" % holder.get("spot"))
+	var named: Dictionary = await _write("spot", {"type": "Vector2", "x": 7, "y": 8})
+	var named_said: String = str(named.get("message", ""))
+	if not named_said.contains(
+		'A Vector2 has no type, so the value is not read as one: a value names its type under "_type". '
+	):
+		_fail("a type named under type is refused saying where it goes: %s" % JSON.stringify(named))
+	var tagged: Dictionary = await _invoke("press", [{"_type": "Vector2", "x": 1, "y": 2, "w": 3}, true])
+	if not str(tagged.get("message", "")).contains("A Vector2 has no w, so the value is not read as one."):
+		_fail("and an argument tagged as one: %s" % JSON.stringify(tagged))
 	var unshaped: Dictionary = await _write("spot", "east")
 	if not str(unshaped.get("message", "")).ends_with('A Vector2 is sent as {"x": ..., "y": ...}.'):
 		_fail("and so is a write of a word: %s" % JSON.stringify(unshaped))

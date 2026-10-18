@@ -27102,12 +27102,13 @@ async function testAStartSaysItsGameIsOnAnotherBuild(): Promise<void> {
         ),
         said,
       );
-      assert.ok(
-        text(get(behind, 'runtime', 'staleNote')).includes(
-          `run  npx -y gdharness@${SERVER_VERSION} upgrade "${project.replaceAll('\\', '/')}"  in a shell`,
-        ),
-        `and names the upgrade, since the project's own addon is the other build: ${said}`,
-      );
+      // The project as the game announced it, which Godot spells with forward slashes and macOS
+      // with the /private its temporary directory links to.
+      const upgraded = new RegExp(
+        `run {2}npx -y gdharness@${SERVER_VERSION.replaceAll('.', '\\.')} upgrade "([^"]+)" {2}in a shell`,
+      ).exec(text(get(behind, 'runtime', 'staleNote')));
+      assert.ok(upgraded, `and names the upgrade, since the project's own addon is the other build: ${said}`);
+      assert.equal(realpathSync(upgraded[1] ?? ''), realpathSync(project), `of this project: ${said}`);
     } finally {
       await stop();
     }

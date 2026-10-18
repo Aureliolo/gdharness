@@ -148,6 +148,11 @@ const REQUIRED: Dictionary = {
 	"RID": [["id"]],
 	"Dictionary": [["entries"]],
 }
+## The fields a builder reads when they are there and does without when not.
+const OPTIONAL: Dictionary = {
+	"Color": ["a"],
+	"PackedByteArray": ["size"],
+}
 
 
 # Converts a Godot value into something JSON can carry. A type with no entry in the table
@@ -246,8 +251,7 @@ func deserialize_value(value: Variant) -> Variant:
 	# under the target project's warning levels, so one such project lost every headless call.
 	var tag: String = str(fields["_type"])
 	var builder: String = BUILDERS.get(tag, "")
-	var needed: Array = REQUIRED.get(tag, [])
-	if builder.is_empty() or not _carries(fields, needed):
+	if builder.is_empty() or not spare(fields, tag).any(func(left: Array) -> bool: return left.is_empty()):
 		return fields
 	if tag == "float" and str(fields["value"]) not in ["inf", "-inf", "nan"]:
 		return fields
@@ -489,17 +493,41 @@ static func written_as(type: int) -> String:
 	return "{%s}" % ", ".join(parts)
 
 
-## Whether [param fields] carries every key of any one of [param alternatives].
+## The keys of [param fields] that a [param tag] built from them would not read, one list for each
+## spelling of its fields carried whole. A rectangle has two: its corners, and four numbers.
 ##
-## More than one spelling because a rectangle has two: the two corners it is answered with, and the
-## four numbers the editor's own tools answered with before the serialisers were made one, which a
-## caller may have kept.
-func _carries(fields: Dictionary, alternatives: Array) -> bool:
+## A builder drops a key it does not know without a word, so {"x": 1, "y": 2, "z": 3} for a Vector2
+## would be written as (1, 2) and answered as written: a value is built only when a list is empty.
+static func spare(fields: Dictionary, tag: String) -> Array:
+	var optional: Array = OPTIONAL.get(tag, [])
+	var lists: Array = []
+	var alternatives: Array = REQUIRED.get(tag, [])
 	for alternative: Variant in alternatives:
 		var keys: Array = alternative
 		if keys.all(func(key: Variant) -> bool: return fields.has(key)):
-			return true
-	return false
+			var over: Callable = func(key: Variant) -> bool:
+				return str(key) != "_type" and not keys.has(key) and not optional.has(key)
+			lists.append(fields.keys().filter(over))
+	return lists
+
+
+## A sentence naming the keys of [param value] that stop it being read as a [param type], or "".
+## The refusal it goes into names only the two types, and the key is what the caller takes out.
+static func unread_note(value: Variant, type: int) -> String:
+	if not value is Dictionary:
+		return ""
+	var fields: Dictionary = value
+	var tag: String = type_string(type)
+	var lists: Array = spare(fields, tag)
+	var built: bool = lists.any(func(over: Array) -> bool: return over.is_empty())
+	if lists.is_empty() or built or str(fields.get("_type", tag)) != tag:
+		return ""
+	lists.sort_custom(func(a: Array, b: Array) -> bool: return a.size() < b.size())
+	var left: Array = lists[0]
+	var note: String = " A %s has no %s, so the value is not read as one" % [tag, " or ".join(left)]
+	if left.has("type") and not fields.has("_type"):
+		return note + ': a value names its type under "_type".'
+	return note + "."
 
 
 func _serialize_nil(_value: Variant) -> Variant:

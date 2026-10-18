@@ -1358,6 +1358,12 @@ async function testAValueTheSceneCannotHoldIsRefused({ call, refusal, project }:
     /position is Vector2 and the value given is String, which cannot become one/,
     'and where a vector goes, rather than stored as the origin',
   );
+  await call('scene_node', set({ position: { x: 4, y: 5 } }));
+  assert.match(
+    await refusal('scene_node', set({ position: { x: 1, y: 2, z: 3 } })),
+    /position is Vector2 and the value given is Dictionary, which cannot become one\. A Vector2 has no z, so the value is not read as one\. Setting it/,
+    'and a vector carrying a field it has not, rather than stored without it',
+  );
 
   // A list is a list whatever is in it, so the packed array is asked about its elements too.
   assert.match(

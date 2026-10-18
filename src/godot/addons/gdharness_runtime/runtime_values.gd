@@ -171,6 +171,10 @@ static func written_as(type: int) -> String:
 	return Serialisation.written_as(type)
 
 
+static func unread_note(value: Variant, type: int) -> String:
+	return Serialisation.unread_note(value, type)
+
+
 ## The declared type of one parameter of a method, or TYPE_NIL when the method or the parameter
 ## is not there, which reads as "no opinion".
 func parameter_type(object: Object, method: String, index: int) -> int:

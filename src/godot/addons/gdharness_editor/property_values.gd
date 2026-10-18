@@ -115,7 +115,8 @@ func cannot_hold(
 	var cost: String = " Setting it would save a different value than the one asked for."
 	if not Serialisation.acceptable(value, expected_type):
 		var shape: String = "%s.%s is %s and the value given is %s, which cannot become one."
-		return shape % [holder, property, held, type_string(typeof(value))] + cost
+		var unread: String = Serialisation.unread_note(value, expected_type)
+		return shape % [holder, property, held, type_string(typeof(value))] + unread + cost
 
 	# And the same question of each element, because a list is accepted for a packed or typed array
 	# whatever is in it: a polygon written as [{"x": 1}] passes the check above and lands as one zero

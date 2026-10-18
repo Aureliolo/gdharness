@@ -187,7 +187,7 @@ func _argument_for(
 					type_string(wants),
 					index + 1,
 					type_string(typeof(given)),
-					_written_as(wants)
+					_written_as(wants, sent)
 				]
 			)
 		}
@@ -271,7 +271,13 @@ func _value_for(
 				"message":
 				(
 					"%s.%s holds %s and the value given is %s, which cannot become one.%s"
-					% [called, named, type_string(wanted), type_string(typeof(given)), _written_as(wanted)]
+					% [
+						called,
+						named,
+						type_string(wanted),
+						type_string(typeof(given)),
+						_written_as(wanted, value)
+					]
 				)
 			}
 	var typed: Dictionary = _values.typed_like(given, old_value, _element_object.bind(node, node_path))
@@ -596,11 +602,13 @@ func _element_object(
 
 
 ## "list" or "map", for a refusal about a typed container.
-## The sentence a refusal ends with for a type built from fields, naming the shape that is read as
-## one, or nothing for a type that is not.
-static func _written_as(type: int) -> String:
+## The sentences a refusal ends with for a type built from fields: which keys of [param sent] kept it
+## from being read as one, and the shape that is. Nothing for a type that is not built from fields.
+static func _written_as(type: int, sent: Variant) -> String:
 	var shape: String = Values.written_as(type)
-	return "" if shape.is_empty() else " A %s is sent as %s." % [type_string(type), shape]
+	if shape.is_empty():
+		return ""
+	return Values.unread_note(sent, type) + " A %s is sent as %s." % [type_string(type), shape]
 
 
 static func _sort_of(container: Variant) -> String:
