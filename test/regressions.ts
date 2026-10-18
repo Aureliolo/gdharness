@@ -26405,7 +26405,7 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         );
       }
     },
-    { realAddon: true, engine },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
