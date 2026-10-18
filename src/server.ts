@@ -8553,7 +8553,7 @@ class GodotServer {
       project.value.path,
       ports,
       args['hidden'] === true,
-      resolveSilent(false),
+      resolveSilent(args['silent']),
     );
     if (opened.error !== null) {
       return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
