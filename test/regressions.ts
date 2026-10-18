@@ -43309,8 +43309,8 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     }
     assert.equal(
       textOf(await call({ op: 'read', playerNodePath: 'Nowhere/Player' })),
-      'AnimationPlayer not found at: Nowhere/Player',
-      'and a path that is simply wrong is told only that',
+      'AnimationPlayer not found at: Nowhere/Player. The root, Root, has no Nowhere; its children are Body, Player, Tree, Bare.',
+      'and a path that is simply wrong is told where it leaves the scene, with no word of the root',
     );
     // A root with a child of its own name: there the path names that child, which has no player.
     for (const op of ['create', 'read']) {
@@ -43323,7 +43323,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
             animationName: 'more',
           }),
         ),
-        'AnimationPlayer not found at: Root/Player',
+        'AnimationPlayer not found at: Root/Player. Root has no Player; it has no children.',
         `${op} under a child named like the root`,
       );
     }
@@ -43484,7 +43484,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     );
     assert.equal(
       get(further, 'namedByPath'),
-      'res://parts/big_crate.tscn is named by path rather than by uid: the uid cache has no uid for it yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.',
+      "res://parts/big_crate.tscn is named by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -43834,6 +43834,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     'long_desk.tscn':
       `[gd_scene format=3]\n\n${desk}\n\n[node name="Desk" instance=ExtResource("1_desk")]\n\n` +
       '[node name="Top" parent="."]\nvisible = false\n',
+    'crowd.tscn': `[gd_scene format=3]\n\n[node name="Crowd" type="Node"]\n${Array.from({ length: 14 }, (_, at) => `\n[node name="N${at + 1}" type="Node" parent="."]\n`).join('')}`,
     // Names desk.tscn but does not load, so where its instances are cannot be read.
     'broken.tscn':
       `[gd_scene format=3]\n\n${desk}\n\n[node name="Broken" type="Node3D"]\n\n` +
@@ -44010,6 +44011,60 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     );
     assert.ok(lineOf('room.tscn', bulb).includes(ids), `the ids are kept: ${fileOf('room.tscn')}`);
     assert.equal(await energy('room.tscn', 'DeskB/Stand/DeskLamp/Bulb'), 4, fileOf('room.tscn'));
+
+    // A path from before the moves is told what is there instead.
+    const refusal = async (args: Record<string, unknown>): Promise<string | null> =>
+      textOf(
+        await server.request(
+          'tools/call',
+          {
+            name: 'scene_node',
+            arguments: { projectPath: project, scenePath: 'desk.tscn', op: 'get', ...args },
+          },
+          240_000,
+        ),
+      );
+    assert.deepEqual(
+      [
+        await refusal({ nodePath: 'Leg/DeskLamp' }),
+        await refusal({ nodePath: 'Stand/Lamp' }),
+        await refusal({ nodePath: 'Surface/DeskLamp/Bulb' }),
+      ],
+      [
+        'Node not found: Leg/DeskLamp. The root, Desk, has no Leg; its children are Surface, Stand.',
+        'Node not found: Stand/Lamp. Stand has no Lamp; its children are DeskLamp.',
+        'Node not found: Surface/DeskLamp/Bulb. Surface has no DeskLamp; it has no children.',
+      ],
+    );
+    assert.equal(
+      await refusal({ scenePath: 'crowd.tscn', nodePath: 'N15' }),
+      'Node not found: N15. The root, Crowd, has no N15; its children are N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12 and 2 more.',
+    );
+    const copy = await call('scene_node', {
+      op: 'duplicate',
+      scenePath: 'desk.tscn',
+      nodePath: 'Stand',
+      newName: 'Spare',
+      parentNodePath: 'Surface',
+    });
+    assert.deepEqual(
+      [get(copy, 'newNodePath'), get(copy, 'parentNodePath'), get(copy, 'index')],
+      ['Surface/Spare', 'Surface', 0],
+      JSON.stringify(copy),
+    );
+
+    // Neither lamp.tscn nor desk.tscn has a uid the cache holds, as hand-written scenes with none.
+    const both = await call('scene_node', {
+      op: 'add',
+      scenePath: 'unrelated.tscn',
+      instancePath: 'desk.tscn',
+      nodeName: 'Spare',
+    });
+    assert.equal(
+      get(both, 'namedByPath'),
+      "res://lamp.tscn, res://desk.tscn are named by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
+      JSON.stringify(both),
+    );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
   } finally {
     await server.stop();

@@ -42,6 +42,31 @@ static func scene_node(scene_path: String, node_path: String) -> Dictionary:
 	return {"ok": true, "name": found["name"], "type": found["type"], "properties": found["properties"]}
 
 
+## [param said], the refusal for [param node_path], which [param scene_path] does not have, with
+## where the path leaves the scene as [method Read.missing_below] says it.
+static func missing_from(said: String, scene_path: String, node_path: String) -> String:
+	var laid: Dictionary = _laid(scene_path)
+	if not laid.get("ok", false):
+		return said
+	var nodes: Dictionary = laid["nodes"]
+	var parts: PackedStringArray = node_path.trim_prefix("./").split("/", false)
+	var at: String = "."
+	var reached: PackedStringArray = []
+	for part: String in parts:
+		var below: String = _joined(at, part)
+		if not nodes.has(below):
+			break
+		at = below
+		var _walked: bool = reached.append(part)
+	if reached.size() >= parts.size():
+		return said
+	var names: PackedStringArray = []
+	var children: Array[String] = nodes[at]["children"]
+	for child: String in children:
+		var _named: bool = names.append(str(nodes[child]["name"]))
+	return Read.missing_below(said, str(nodes["."]["name"]), reached, parts[reached.size()], names)
+
+
 ## Every node of [param scene_path] as {ok, nodes}, keyed by path, or a refusal.
 static func _laid(scene_path: String) -> Dictionary:
 	if not FileAccess.file_exists(scene_path):

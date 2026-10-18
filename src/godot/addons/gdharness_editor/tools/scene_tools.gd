@@ -12,16 +12,6 @@ const ResourceTools = preload("resource_tools.gd")
 const SceneFile = preload("../scene_file.gd")
 const Serialisation = preload("../serialisation.gd")
 
-## The names Object.ConnectFlags gives each bit. The number alone left a reader guessing that 2 is
-## the persistence every connection in a saved scene carries.
-const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
-	Object.CONNECT_DEFERRED: "deferred",
-	Object.CONNECT_PERSIST: "persist",
-	Object.CONNECT_ONE_SHOT: "one_shot",
-	Object.CONNECT_REFERENCE_COUNTED: "reference_counted",
-	Object.CONNECT_APPEND_SOURCE_OBJECT: "append_source_object",
-}
-
 var _editor_plugin: EditorPlugin = null
 var _values: Serialisation = Serialisation.new()
 var _properties: PropertyValues = PropertyValues.new()
@@ -29,19 +19,6 @@ var _properties: PropertyValues = PropertyValues.new()
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
-
-
-## Each bit set in [param flags] by name, and whatever bits are left unnamed as one number.
-static func _flag_names(flags: int) -> Array[String]:
-	var names: Array[String] = []
-	var rest: int = flags
-	for bit: int in CONNECT_FLAG_NAMES:
-		if flags & bit:
-			names.append(CONNECT_FLAG_NAMES[bit])
-			rest &= ~bit
-	if rest != 0:
-		names.append(str(rest))
-	return names
 
 
 func _ensure_res_path(path: String) -> String:
@@ -473,6 +450,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	scene.copied(copies)
 
 	var new_path: String = scene.path_of(duplicated_node)
+	var placed: Array = [scene.path_of(target_parent), duplicated_node.get_index()]
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			if saved.get_node_or_null(new_path) == null:
@@ -482,7 +460,14 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {"ok": true, "nodePath": node_path, "newName": new_name, "newNodePath": new_path}
+	return {
+		"ok": true,
+		"nodePath": node_path,
+		"newName": new_name,
+		"newNodePath": new_path,
+		"parentNodePath": placed[0],
+		"index": placed[1],
+	}
 
 
 func reparent_node(args: Dictionary) -> Dictionary:
@@ -816,7 +801,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 		"targetNodePath": to,
 		"methodName": method_name,
 		"flags": saved_flags[0],
-		"flagNames": _flag_names(Read.as_int(saved_flags[0])),
+		"flagNames": SceneFile.flag_names(Read.as_int(saved_flags[0])),
 		# Connected either way, as the editor's own dialog allows, since the method may be written
 		# next; a caller told nothing learnt of a misspelt one only when the signal fired.
 		"methodFound": method_found
@@ -827,7 +812,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	if flags_before >= 0:
 		answer["alreadyConnected"] = true
 		if flags_before != Read.as_int(saved_flags[0]):
-			answer["flagsBefore"] = _flag_names(flags_before)
+			answer["flagsBefore"] = SceneFile.flag_names(flags_before)
 	return answer
 
 
@@ -980,7 +965,7 @@ func list_connections(args: Dictionary) -> Dictionary:
 							"targetNodePath": target_path,
 							"methodName": str(callable.get_method()),
 							"flags": flags,
-							"flagNames": _flag_names(flags),
+							"flagNames": SceneFile.flag_names(flags),
 							# False for a connection an instanced scene makes inside itself, which only that
 							# scene can change.
 							"editable": editable

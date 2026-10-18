@@ -31,6 +31,15 @@ const HeadlessCheck = preload("headless_check.gd")
 const PUTTING_BACK_PASSES: int = 4
 const PropertyValues = preload("property_values.gd")
 const Read = preload("reading.gd")
+## The names Object.ConnectFlags gives each bit. The number alone left a reader guessing that 2 is
+## the persistence every connection in a saved scene carries.
+const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
+	Object.CONNECT_DEFERRED: "deferred",
+	Object.CONNECT_PERSIST: "persist",
+	Object.CONNECT_ONE_SHOT: "one_shot",
+	Object.CONNECT_REFERENCE_COUNTED: "reference_counted",
+	Object.CONNECT_APPEND_SOURCE_OBJECT: "append_source_object",
+}
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
 ## for the editor's files to settle has to wait through as well.
@@ -162,12 +171,45 @@ func refuse(error: String) -> Dictionary:
 	return {"ok": false, "error": error}
 
 
+## Each bit set in [param flags], a connection's, by name, and whatever bits are left unnamed as one
+## number.
+static func flag_names(flags: int) -> Array[String]:
+	var names: Array[String] = []
+	var rest: int = flags
+	for bit: int in CONNECT_FLAG_NAMES:
+		if flags & bit:
+			names.append(CONNECT_FLAG_NAMES[bit])
+			rest &= ~bit
+	if rest != 0:
+		names.append(str(rest))
+	return names
+
+
 ## [param said], the refusal for [param node_path] found nowhere in this scene, with how a path is
-## read when it starts with the root's own name.
+## read when it starts with the root's own name, and otherwise with the last node of the path the
+## scene has and what is under it, as after a node was moved or renamed.
 func not_found(said: String, node_path: String) -> String:
-	if root == null or root.has_node(NodePath(node_path.get_slice("/", 0))):
+	if root == null:
 		return said
-	return Read.from_the_root(said, node_path, str(root.name))
+	if not root.has_node(NodePath(node_path.get_slice("/", 0))):
+		var hinted: String = Read.from_the_root(said, node_path, str(root.name))
+		if hinted != said:
+			return hinted
+	var parts: PackedStringArray = node_path.trim_prefix("./").split("/", false)
+	var at: Node = root
+	var reached: PackedStringArray = []
+	for part: String in parts:
+		var below: Node = at.get_node_or_null(NodePath(part))
+		if below == null:
+			break
+		at = below
+		var _walked: bool = reached.append(part)
+	if reached.size() >= parts.size():
+		return said
+	var names: PackedStringArray = []
+	for child: Node in at.get_children():
+		var _named: bool = names.append(str(child.name))
+	return Read.missing_below(said, str(root.name), reached, parts[reached.size()], names)
 
 
 func close() -> void:

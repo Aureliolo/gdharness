@@ -4148,8 +4148,9 @@ class GodotServer {
           server_is: SERVER_VERSION,
           project_is: moved,
           what_to_do:
-            `The project's gdharness addons are ${moved}, older than this ${SERVER_VERSION} server, so an ` +
-            'editor restart loads the old code and reconnecting spawns this same server again. Tell the ' +
+            `The project's gdharness addons are ${moved}, older than this ${SERVER_VERSION} server. ` +
+            'Restarting the editor would load that older addon code again, and reconnecting would start ' +
+            'this same server version again, so neither brings the two into step. Tell the ' +
             `user, and offer to run  ${gdharnessCommand(SERVER_VERSION, this.ownProject === null ? 'upgrade' : `upgrade "${this.ownProject}"`)}  ` +
             "in a shell, which replaces the addons with this server's; ask first, since it changes " +
             'files in their project. editor_launch restart then loads them.',
