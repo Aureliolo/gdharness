@@ -5,6 +5,7 @@ extends RefCounted
 ## stores, which runs no script of the scene's, so a read answers the same either way.
 
 const FileReads = preload("file_reads.gd")
+const Read = preload("reading.gd")
 const Serialisation = preload("serialisation.gd")
 
 const LOOP_MODE_NAMES: Dictionary[int, String] = {
@@ -60,7 +61,12 @@ static func _bare(scene_path: String, node_path: String, kind: String) -> Array:
 		return [null, read]
 	var type: String = str(read.get("type", ""))
 	if not ClassDB.class_exists(type) or not ClassDB.is_parent_class(type, kind):
-		return [null, {"ok": false, "error": "%s not found at: %s" % [kind, node_path]}]
+		var said: String = "%s not found at: %s" % [kind, node_path]
+		if read.is_empty() and FileReads.scene_node(scene_path, node_path.get_slice("/", 0)).is_empty():
+			said = Read.from_the_root(
+				said, node_path, str(FileReads.scene_node(scene_path, ".").get("name", ""))
+			)
+		return [null, {"ok": false, "error": said}]
 	var bare: Node = ClassDB.instantiate(type)
 	bare.name = str(read["name"])
 	var given: Dictionary = read["properties"]
@@ -164,7 +170,10 @@ static func state_machine(tree: AnimationTree, state_machine_path: String) -> An
 ## the path that failed, and what is there instead.
 static func no_machine(tree: AnimationTree, state_machine_path: String) -> String:
 	if tree == null or tree.tree_root == null:
-		return "The AnimationTree has no tree_root."
+		return (
+			"The AnimationTree has no tree_root. Make one with resource_edit create of an "
+			+ "AnimationNodeStateMachine, then give its res:// path to tree_root with scene_node set."
+		)
 	var current: AnimationNodeStateMachine = tree.tree_root as AnimationNodeStateMachine
 	if current == null:
 		return (

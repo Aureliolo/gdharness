@@ -240,7 +240,11 @@ const ANIMATION_TRACK: JsonSchema = {
     type: { type: 'string', enum: ['property', 'method'] },
     nodePath: { type: 'string', description: 'Target node, relative to the AnimationPlayer root.' },
     property: { type: 'string', description: 'For property tracks: the property to animate.' },
-    method: { type: 'string', description: 'For method tracks: the method to call.' },
+    method: {
+      type: 'string',
+      description:
+        "For method tracks: the method to call. The answer's methodFound says whether the target node has it; a method it lacks is still added, since it may be written next, and until it exists each call the track makes fails.",
+    },
     keyframes: {
       type: 'array',
       items: {

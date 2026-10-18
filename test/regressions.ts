@@ -43174,7 +43174,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     '[node name="Body" type="Sprite2D" parent="."]\n\n' +
     '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {\n&"moves": ExtResource("1_library")\n}\n\n' +
     '[node name="Tree" type="AnimationTree" parent="."]\ntree_root = SubResource("StateMachine_1")\n' +
-    'anim_player = NodePath("../Player")\n';
+    'anim_player = NodePath("../Player")\n\n[node name="Bare" type="AnimationTree" parent="."]\n';
   const files: Record<string, string> = {
     'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Animation"\n',
     'root.gd': 'extends Node2D\n\n\nfunc _init() -> void:\n\tposition = Vector2(9, 9)\n',
@@ -43187,7 +43187,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       '[gd_resource type="AnimationLibrary" format=3]\n\n[ext_resource type="Script" path="res://stretched.gd" id="1_stretched"]\n\n' +
       '[sub_resource type="Animation" id="Animation_long"]\nscript = ExtResource("1_stretched")\nresource_name = "long"\n\n' +
       '[resource]\n_data = {\n&"long": SubResource("Animation_long")\n}\n',
-    'stretched.tscn': player('stretched.tres'),
+    'stretched.tscn': `${player('stretched.tres')}\n[node name="Root" type="Node" parent="."]\n`,
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -43284,6 +43284,64 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       scripted,
     );
     assert.equal(fileOf('stretched.tres'), before, 'and the library file is as it was');
+
+    // A path from the root's own name, as a tree lists the root, is answered with how paths are read:
+    // by a write, by a read with no editor, and by the scene tools, which share the sentence.
+    const fromRoot =
+      'AnimationPlayer not found at: Root/Player. Paths go from the root, Root, whose own path is ".", so this one is "Player".';
+    for (const op of ['create', 'read']) {
+      assert.equal(
+        textOf(await call({ op, playerNodePath: 'Root/Player', animationName: 'more' })),
+        fromRoot,
+        `${op} from the root's name`,
+      );
+    }
+    assert.equal(
+      textOf(await call({ op: 'read', playerNodePath: 'Nowhere/Player' })),
+      'AnimationPlayer not found at: Nowhere/Player',
+      'and a path that is simply wrong is told only that',
+    );
+    // A root with a child of its own name: there the path names that child, which has no player.
+    for (const op of ['create', 'read']) {
+      assert.equal(
+        textOf(
+          await call({
+            op,
+            scenePath: 'stretched.tscn',
+            playerNodePath: 'Root/Player',
+            animationName: 'more',
+          }),
+        ),
+        'AnimationPlayer not found at: Root/Player',
+        `${op} under a child named like the root`,
+      );
+    }
+    const asParent = await server.request(
+      'tools/call',
+      {
+        name: 'scene_node',
+        arguments: {
+          projectPath: project,
+          scenePath: 'moves.tscn',
+          op: 'add',
+          nodeType: 'Node',
+          nodeName: 'Late',
+          parentNodePath: 'Root',
+        },
+      },
+      240_000,
+    );
+    assert.equal(
+      textOf(asParent),
+      'Parent node not found: Root. Paths go from the root, Root, whose own path is ".".',
+      JSON.stringify(asParent),
+    );
+    const bare = textOf(await call({ op: 'read_states', animTreePath: 'Bare' })) ?? '';
+    assert.match(
+      bare,
+      /^The AnimationTree has no tree_root\. Make one with resource_edit create of an AnimationNodeStateMachine, then give its res:\/\/ path to tree_root with scene_node set\./,
+      bare,
+    );
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
