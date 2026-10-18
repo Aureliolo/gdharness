@@ -99,3 +99,18 @@ static func json_or_null(text: String) -> Variant:
 	if json.parse(text) != OK:
 		return null
 	return json.data
+
+
+## [param said], the refusal for [param node_path] found nowhere in a scene whose root is called
+## [param root_name], with how paths are read when the path starts with that name and the root has
+## no child called that. Paths go from the root, so its own name there names a child of it, and a
+## caller who read the root as Main in a tree wrote Main/Body and was told only that nothing is there.
+static func from_the_root(said: String, node_path: String, root_name: String) -> String:
+	var first: String = node_path.get_slice("/", 0)
+	if root_name.is_empty() or first != root_name:
+		return said
+	var rest: String = node_path.substr(first.length() + 1)
+	var how: String = 'Paths go from the root, %s, whose own path is "."' % root_name
+	if not rest.is_empty():
+		how += ', so this one is "%s"' % rest
+	return "%s%s %s." % [said, "" if said.ends_with(".") else ".", how]

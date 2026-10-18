@@ -111,7 +111,7 @@ func _kept(scene: SceneFile, saved: Node, node: Node, names: Array) -> String:
 					"%s.%s would load from the file as %s: the scene does not keep it, because the property "
 					+ "is not one a scene stores or the node belongs to another scene."
 				)
-				% [at, property, JSON.stringify(_values.serialize_value(loaded))]
+				% [at, property, JSON.stringify(_values.serialize_value(loaded), "", false)]
 			)
 	return ""
 
@@ -312,7 +312,7 @@ func add_node(args: Dictionary) -> Dictionary:
 	var root: Node = scene.root
 	var parent: Node = _find_node(root, parent_node_path)
 	if not parent:
-		return scene.refuse("Parent node not found: " + parent_node_path)
+		return scene.refuse(scene.not_found("Parent node not found: " + parent_node_path, parent_node_path))
 	var foreign: String = scene.foreign(parent)
 	if not foreign.is_empty():
 		return scene.refuse(foreign)
@@ -387,7 +387,7 @@ func delete_node(args: Dictionary) -> Dictionary:
 
 	var node: Node = _find_node(scene.root, node_path)
 	if not node:
-		return scene.refuse("Node not found: " + node_path)
+		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
 	var fixed: String = scene.fixed(node)
 	if not fixed.is_empty():
 		return scene.refuse(fixed)
@@ -427,7 +427,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	var root: Node = scene.root
 	var source: Node = _find_node(root, node_path)
 	if not source:
-		return scene.refuse("Node not found: " + node_path)
+		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
 	if source == root:
 		return scene.refuse("The root of %s cannot be copied into its own scene." % scene_path)
 	var foreign: String = scene.foreign(source)
@@ -438,7 +438,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	if not parent_path.is_empty():
 		target_parent = _find_node(root, parent_path)
 	if not target_parent:
-		return scene.refuse("Parent not found: " + parent_path)
+		return scene.refuse(scene.not_found("Parent not found: " + parent_path, parent_path))
 	foreign = scene.foreign(target_parent)
 	if not foreign.is_empty():
 		return scene.refuse(foreign)
@@ -491,9 +491,9 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	var node: Node = _find_node(root, node_path)
 	var new_parent: Node = _find_node(root, new_parent_path)
 	if not node:
-		return scene.refuse("Node not found: " + node_path)
+		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
 	if not new_parent:
-		return scene.refuse("New parent not found: " + new_parent_path)
+		return scene.refuse(scene.not_found("New parent not found: " + new_parent_path, new_parent_path))
 	var fixed: String = scene.fixed(node)
 	if not fixed.is_empty():
 		return scene.refuse(fixed)
@@ -562,7 +562,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 
 	var node: Node = _find_node(scene.root, node_path)
 	if not node:
-		return scene.refuse("Node not found: " + node_path)
+		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
 	var foreign: String = scene.foreign(node)
 	if not foreign.is_empty():
 		return scene.refuse(foreign)
@@ -606,7 +606,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 
 	var node: Node = _find_node(scene.root, node_path)
 	if not node:
-		return scene.refuse("Node not found: " + node_path)
+		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
 
 	# Against the default the node would have in no scene: its script's for what the script
 	# declares, the class's for the rest. Compared with a bare instance of the class, every exported
@@ -792,9 +792,9 @@ func _connection_ends(
 	var source: Node = _find_node(scene.root, source_node_path)
 	var target: Node = _find_node(scene.root, target_node_path)
 	if not source:
-		return [null, "Source node not found: " + source_node_path]
+		return [null, scene.not_found("Source node not found: " + source_node_path, source_node_path)]
 	if not target:
-		return [null, "Target node not found: " + target_node_path]
+		return [null, scene.not_found("Target node not found: " + target_node_path, target_node_path)]
 	# pack drops a connection with either end inside an instanced scene, and the answer said it was
 	# made or removed.
 	for end: Node in [source, target]:
@@ -897,7 +897,7 @@ func list_connections(args: Dictionary) -> Dictionary:
 	if not filter_path.is_empty():
 		filtered = _find_node(root, filter_path)
 		if filtered == null:
-			return scene.refuse("Node not found: " + filter_path)
+			return scene.refuse(scene.not_found("Node not found: " + filter_path, filter_path))
 	var nodes: Array = []
 	_collect_nodes_recursive(root, ".", nodes)
 

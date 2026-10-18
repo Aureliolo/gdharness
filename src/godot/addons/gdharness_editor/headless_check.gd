@@ -147,12 +147,8 @@ static func reached(object: Object, property: String) -> Dictionary:
 ## Whether [param object] holds, at any depth, an embedded resource with a script that is not a tool.
 static func holds_scripted_embedded(object: Object, seen: Dictionary) -> bool:
 	for value: Variant in stored(object).values():
-		var items: Array = value if value is Array else [value]
-		for item: Variant in items:
-			if not item is Resource or seen.has(item):
-				continue
-			var resource: Resource = item
-			if not resource.is_built_in():
+		for resource: Resource in resources_in(value):
+			if seen.has(resource) or not resource.is_built_in():
 				continue
 			seen[resource] = true
 			var script: Script = resource.get_script()
@@ -161,6 +157,25 @@ static func holds_scripted_embedded(object: Object, seen: Dictionary) -> bool:
 			if holds_scripted_embedded(resource, seen):
 				return true
 	return false
+
+
+## The resources [param value] is or holds through arrays and dictionaries at any depth, keys
+## included: a file embeds a resource kept as a map's value, the way an AnimationLibrary keeps its
+## animations, as it embeds one held directly.
+static func resources_in(value: Variant) -> Array[Resource]:
+	var found: Array[Resource] = []
+	if value is Resource:
+		found.append(value)
+	elif value is Array:
+		var items: Array = value
+		for item: Variant in items:
+			found.append_array(resources_in(item))
+	elif value is Dictionary:
+		var entries_held: Dictionary = value
+		for key: Variant in entries_held:
+			found.append_array(resources_in(key))
+			found.append_array(resources_in(entries_held[key]))
+	return found
 
 
 ## Puts the file at [param file_path] back as [param previous], or removes it when there was none,
@@ -370,11 +385,7 @@ static func settle_saved(
 ## Every embedded resource [param values] reach, at any depth, by its id in the file.
 static func embedded_in(values: Array, found: Dictionary) -> Dictionary:
 	for value: Variant in values:
-		var items: Array = value if value is Array else [value]
-		for item: Variant in items:
-			if not item is Resource:
-				continue
-			var resource: Resource = item
+		for resource: Resource in resources_in(value):
 			var id: String = resource.get_scene_unique_id()
 			if not resource.is_built_in() or id.is_empty() or found.has(id):
 				continue

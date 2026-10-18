@@ -129,8 +129,8 @@ func set_property(params: Dictionary) -> Dictionary:
 				% [
 					reached["called"],
 					named,
-					JSON.stringify(_values.serialize(given)),
-					JSON.stringify(_values.serialize(now)),
+					JSON.stringify(_values.serialize(given), "", false),
+					JSON.stringify(_values.serialize(now), "", false),
 					why,
 				]
 			)
