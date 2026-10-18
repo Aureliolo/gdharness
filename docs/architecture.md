@@ -265,9 +265,9 @@ being written.
                             `- spawn -->  godot --headless   one engine per call
 ```
 
-The agent's side is MCP over stdio, in either protocol era: the 2026-07-28 revision, which opens
-with `server/discover` and carries an envelope on every request, and the 2025 revisions, which open
-with `initialize`. The client's first message decides which, and the tools answer the same in both.
+The agent's side is MCP over stdio in the 2026-07-28 revision, which opens with `server/discover`
+and carries an envelope on every request. A client opening with the 2025 `initialize` is answered
+with the unsupported-protocol-version error naming 2026-07-28.
 
 Beside the tools it offers the `godot://` resources, with their paths completed from the project,
 three prompts written as the tool calls they make, and a few lines of instructions a client puts in

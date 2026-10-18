@@ -3466,9 +3466,10 @@ class GodotServer {
       console.error(`[SERVER] Using Godot at: ${located.path}`);
     }
 
-    // The entry decides from the client's opening message which protocol era the connection
-    // speaks, so a 2026-07-28 client and a 2025 one are both served.
+    // A 2025 initialize is answered with the unsupported-protocol-version error naming 2026-07-28,
+    // and the connection stays open for a modern opening.
     this.stdio = serveStdio(() => this.protocol(), {
+      legacy: 'reject',
       onerror: (error) => {
         console.error('[MCP Error]', error);
       },
@@ -3891,9 +3892,8 @@ class GodotServer {
   /**
    * A protocol object answering for this server, built afresh each time the stdio entry asks.
    *
-   * The entry can build one for a client that opens in the 2026 era and discard it when the client
-   * falls back to a 2025 handshake, so this holds no state of its own: everything a call reads or
-   * changes lives on this server, which outlives every protocol object made for it.
+   * It holds no state of its own: everything a call reads or changes lives on this server, which
+   * outlives every protocol object made for it.
    */
   private protocol(): McpServer {
     // Handlers go on the low-level server McpServer wraps rather than through registerTool: the
@@ -3932,8 +3932,7 @@ class GodotServer {
   }
 
   private setupToolHandlers(protocol: ProtocolServer): void {
-    // From the 2026 envelope every request carries, which the SDK lifts out of _meta under its own
-    // keys, and from initialize on a 2025 connection.
+    // From the envelope every request carries, which the SDK lifts out of _meta under its own keys.
     const clientOf = (envelope: object | undefined): { name: string; version: string } | undefined => {
       const named = (envelope as Record<string, unknown> | undefined)?.['io.modelcontextprotocol/clientInfo'];
       if (typeof named === 'object' && named !== null) {
@@ -3942,10 +3941,7 @@ class GodotServer {
           return { name, version };
         }
       }
-      // Deprecated for the 2026 era, where the envelope above answers; on a 2025 connection, which
-      // has no envelope, the SDK keeps this as the one place initialize's client is kept.
-      // oxlint-disable-next-line typescript/no-deprecated
-      return protocol.getClientVersion();
+      return undefined;
     };
     protocol.setRequestHandler('tools/list', (_request, ctx) => {
       this.noteTheClient(clientOf(ctx.mcpReq.envelope));

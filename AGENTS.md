@@ -28,10 +28,9 @@ Windowed regressions skip unless `GDHARNESS_ALLOW_WINDOWS` is set. `bun scripts/
 and `bun scripts/install-gdunit4.ts` fetch the pinned versions into the temp directory and print
 where they landed.
 
-The suites speak the 2026-07-28 protocol, as Claude Code does: `ServerProcess` opens with
-`server/discover` and puts the envelope on every request. Pass `era: 'legacy'` for the 2025
-`initialize` handshake. Smoke, `test/node-runtime.ts` and `metadata-consistency` keep checking that
-one, for the clients still sending it.
+The server speaks the 2026-07-28 protocol only, as Claude Code does: `ServerProcess` opens with
+`server/discover` and puts the envelope on every request. A 2025 `initialize` is answered with the
+unsupported-protocol-version error naming 2026-07-28, which smoke checks.
 
 Run `test:typed` after any GDScript change. gdlint and gdformat pass a script the engine refuses with
 warnings as errors, and the regressions load the addons under the default warnings, so a local run
@@ -47,7 +46,7 @@ addon script, and add a new operations module to the list in `test/packaging-con
 `test:packaging` checks both and runs only on Linux and macOS, so from Windows the push is the
 first run that sees them.
 
-`src/` is the TypeScript MCP server (entry points `server-entry.ts` and `cli.ts`). Every tool is
+`src/` is the TypeScript MCP server (entry point `cli.ts`, which serves stdio when given no command). Every tool is
 one entry in `src/tool-definitions.ts`: the server dispatches from it, and the site and the skill
 render their tool reference from it. `src/godot/addons/` holds the editor, runtime and auto-reload
 addons and `src/godot/operations/` the headless engine operations, both GDScript. `test/` holds the
