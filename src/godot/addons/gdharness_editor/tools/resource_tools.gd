@@ -399,6 +399,19 @@ func _atlas(entry: Variant, index: int) -> Array:
 	if texture_path.split("/").has(".."):
 		return [false, "sources[%d].texture leaves the project: %s" % [index, texture_path]]
 	if not ResourceLoader.exists(texture_path):
+		# An image the engine has not imported loads as nothing, where "no texture" would send a caller
+		# looking for a file that is there.
+		if FileAccess.file_exists(texture_path) and not FileAccess.file_exists(texture_path + ".import"):
+			return [
+				false,
+				(
+					(
+						"sources[%d].texture: %s has not been imported, so the engine has no texture for it "
+						+ "yet. project_import reimport with resourcePath %s imports it."
+					)
+					% [index, texture_path, texture_path]
+				)
+			]
 		return [false, "sources[%d].texture: no texture at %s" % [index, texture_path]]
 	var texture: Texture2D = load(texture_path) as Texture2D
 	if texture == null:
@@ -720,13 +733,15 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "The theme saved without %s/%s" % [control_type, color_name]}
 
 	var stored: Color = saved.get_color(color_name, control_type)
-	return {
-		"ok": true,
-		"themePath": theme_path,
-		"controlType": control_type,
-		"colorName": color_name,
-		"color": {"r": stored.r, "g": stored.g, "b": stored.b, "a": stored.a}
-	}
+	return _noting_variation(
+		{
+			"ok": true,
+			"themePath": theme_path,
+			"controlType": control_type,
+			"colorName": color_name,
+			"color": {"r": stored.r, "g": stored.g, "b": stored.b, "a": stored.a}
+		}
+	)
 
 
 func set_theme_font_size(args: Dictionary) -> Dictionary:
@@ -743,7 +758,23 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 	if theme == null:
 		return {"ok": false, "error": "No Theme at %s. Create one there first." % theme_path}
 
-	theme.set_font_size(font_size_name, control_type, Read.as_int(args.get("size", 0)))
+	# Godot reads a size of 0 or less as unset and answers the theme's default, so -3 would be read
+	# back as 16.
+	var pixels: float = Read.as_float(args.get("size"), 0.0)
+	if not is_finite(pixels) or pixels < 1 or pixels != floorf(pixels):
+		var shown: String = str(int(pixels)) if pixels == floorf(pixels) else str(pixels)
+		return {
+			"ok": false,
+			"error":
+			(
+				(
+					"size must be a whole number of pixels, 1 or more, not %s: Godot reads 0 or less as no size "
+					% shown
+				)
+				+ "and uses the theme's default instead."
+			)
+		}
+	theme.set_font_size(font_size_name, control_type, int(pixels))
 
 	var unsaved: String = _save_theme(theme, theme_path, "%s/font_sizes/%s" % [control_type, font_size_name])
 	if not unsaved.is_empty():
@@ -753,10 +784,32 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 	if saved == null or not saved.has_font_size(font_size_name, control_type):
 		return {"ok": false, "error": "The theme saved without %s/%s" % [control_type, font_size_name]}
 
-	return {
-		"ok": true,
-		"themePath": theme_path,
-		"controlType": control_type,
-		"fontSizeName": font_size_name,
-		"size": saved.get_font_size(font_size_name, control_type)
-	}
+	return _noting_variation(
+		{
+			"ok": true,
+			"themePath": theme_path,
+			"controlType": control_type,
+			"fontSizeName": font_size_name,
+			"size": saved.get_font_size(font_size_name, control_type)
+		}
+	)
+
+
+## [param answer] with a note when its controlType names no class a theme styles. Any name is a
+## theme type, so one that is no class is a type variation, which styles only a control whose
+## theme_type_variation names it, and a misspelt "Buton" would otherwise read as Button set.
+func _noting_variation(answer: Dictionary) -> Dictionary:
+	var type: String = str(answer.get("controlType", ""))
+	if (
+		ClassDB.class_exists(type)
+		and (ClassDB.is_parent_class(type, "Control") or ClassDB.is_parent_class(type, "Window"))
+	):
+		return answer
+	answer["note"] = (
+		(
+			"%s is not a Control or Window class, so this is a type variation: it styles only a control "
+			+ "whose theme_type_variation is %s."
+		)
+		% [type, type]
+	)
+	return answer

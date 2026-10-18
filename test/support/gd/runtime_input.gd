@@ -567,7 +567,9 @@ func _check_a_click_by_words(input: InputCommands) -> void:
 	var beyond: Dictionary = await input.click({"says": "Send back", "index": 2})
 	if (
 		beyond.get("type") != "error"
-		or not str(beyond.get("message", "")).contains("index 2 is not one of the 2")
+		or not str(beyond.get("message", "")).contains(
+			'index 2 picks nothing: the 2 matches on screen saying "Send back" are 0 to 1'
+		)
 	):
 		_fail("an index past the matches is refused: %s" % JSON.stringify(beyond))
 

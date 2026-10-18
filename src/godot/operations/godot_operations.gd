@@ -129,7 +129,8 @@ func _answer(operation: String, params: Dictionary, answer_path: String) -> void
 		)
 		quit(1)
 		return
-	var written: bool = answer.store_string(JSON.stringify(payload))
+	# Keys in the order they were put in, which for a map read is the order the resource keeps.
+	var written: bool = answer.store_string(JSON.stringify(payload, "", false))
 	answer.close()
 	if not written:
 		_log.error("Could not write the answer to " + answer_path)
