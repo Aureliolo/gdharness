@@ -554,13 +554,16 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {
+	var answer: Dictionary = {
 		"ok": true,
 		"nodePath": old_path,
 		"newParentPath": new_parent_path,
 		"newNodePath": new_path,
 		"index": index,
 	}
+	if new_path != old_path:
+		answer.merge(Kin.follow(scene_path, old_path, new_path))
+	return answer
 
 
 func set_node_properties(args: Dictionary) -> Dictionary:
@@ -600,6 +603,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		if not Read.as_bool(editable):
 			dropped = scene.held_under(scene.path_of(node))
 
+	var old_path: String = scene.path_of(node)
 	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
 	if not refused_property.is_empty():
@@ -626,6 +630,8 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	if not dropped.is_empty():
 		answer["droppedValues"] = dropped["values"]
 		answer["droppedNodes"] = dropped["nodes"]
+	if new_path != old_path:
+		answer.merge(Kin.follow(scene_path, old_path, new_path))
 	return answer
 
 

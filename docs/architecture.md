@@ -989,6 +989,14 @@ The scene tools never touch the editor's open scene. Each one works on a copy of
   `scene_node set editableChildren` calls that would let the scene keep its own values for it, one
   for each instance around it that is not editable, outermost first, because the pack skips
   everything under such an instance.
+- A node renamed or reparented is followed into the other `.tscn` files that name it by path:
+  those instancing or inheriting the scene, found from the `path=` of their external resources and
+  then from those of the scenes found, until no more are. In each one, `scene_kin.gd` takes where
+  the instances of the scene are from its read tree, then rewrites the editable paths, the entries'
+  names and parents, and the connections it names below them. Godot finds an entry whose node moved
+  by `unique_id`, and its parent by `parent_id_path`, but an editable path only by the path, so that
+  scene's next save dropped what it kept below the instance. A scene that does not load, or that the
+  editor holds unsaved changes to, is left as it was and named under `notFollowed`.
 - It packs the copy and instantiates the pack before writing anything, and each tool checks its change
   in that result, which is what loading the file will give. A property the node took but the file does
   not keep, such as a variable a `@tool` script does not export, is refused there.

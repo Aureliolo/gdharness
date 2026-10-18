@@ -1694,6 +1694,12 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
     '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://kin/crate.tscn" id="1_crate"]\n\n' +
       '[node name="Host" type="Node2D"]\n\n[node name="Crate1" parent="." instance=ExtResource("1_crate")]\n',
   );
+  writeFileSync(
+    join(project, 'kin', 'aside.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://kin/crate.tscn" id="1_crate"]\n\n' +
+      '[node name="Aside" type="Node2D"]\n\n[node name="Crate9" parent="." instance=ExtResource("1_crate")]\n\n' +
+      '[node name="Look" parent="Crate9"]\nscale = Vector2(5, 5)\n\n[editable path="Crate9"]\n',
+  );
   const host = { projectPath: project, scenePath: 'res://kin/host.tscn' };
   try {
     await call('editor_rescan', { projectPath: project });
@@ -1740,6 +1746,36 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
     );
     const asked = await call('scene_node', { ...host, op: 'get', nodePath: 'Crate1' });
     assert.equal(get(asked, 'editableChildren'), true, text(asked));
+
+    // A rename is followed into the scenes naming the node, host.tscn open in a tab among them, and
+    // not into one with unsaved changes in the editor, which writing its file would discard.
+    await hook(project, { op: 'edit', path: 'res://kin/aside.tscn', node: 'ByHand' });
+    const renamed = await call('scene_node', {
+      projectPath: project,
+      scenePath: 'res://kin/crate.tscn',
+      op: 'set',
+      nodePath: 'Look',
+      properties: { name: 'Face' },
+    });
+    const followed: unknown = get(renamed, 'followed');
+    assert.ok(Array.isArray(followed), text(renamed));
+    assert.deepEqual(
+      followed.map(String).sort(),
+      ['res://kin/big.tscn', 'res://kin/host.tscn'],
+      text(renamed),
+    );
+    const left: unknown = get(renamed, 'notFollowed');
+    assert.ok(Array.isArray(left) && left.length === 1, text(renamed));
+    assert.equal(get(left[0], 'scenePath'), 'res://kin/aside.tscn', text(renamed));
+    assert.match(text(get(left[0], 'reason')), /^res:\/\/kin\/aside\.tscn has unsaved changes in the editor/);
+    assert.match(fileText(project, 'kin/aside.tscn'), /\[node name="Look" parent="Crate9"\]/);
+    // The tab was reloaded with the followed file, so the editor's next save of it keeps the entry.
+    await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1', properties: { position: [1, 1] } });
+    const after = fileText(project, 'kin/host.tscn');
+    assert.match(after, /\[node name="Face" parent="Crate1"[^\]]*\]\nscale = Vector2\(3, 3\)\n/, after);
+    assert.match(after, /\n\[editable path="Crate1"\]\n/, after);
+    await call('scene_create', { projectPath: project, scenePath: 'res://kin/aside.tscn', op: 'save' });
+
     await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1', editableChildren: false });
     const closed = fileText(project, 'kin/host.tscn');
     assert.doesNotMatch(closed, /\[editable|parent="Crate1"/, `closing them drops what was kept: ${closed}`);

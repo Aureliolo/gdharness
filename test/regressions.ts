@@ -43788,6 +43788,183 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
 }
 
 /**
+ * A node renamed or moved in a scene, with no editor, is followed into the scenes that name it by
+ * path. Godot finds a moved node's values by its unique_id, but editable children only by path, so
+ * room.tscn saved after the rename would drop the light it keeps inside DeskB's lamp. unrelated.tscn
+ * has the same shape of paths through a Top of its own and instances nothing that moved.
+ */
+async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('followed move regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-rt-'));
+  const lamp = '[ext_resource type="PackedScene" path="res://lamp.tscn" id="1_lamp"]';
+  const desk = '[ext_resource type="PackedScene" path="res://desk.tscn" id="1_desk"]';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Follow"\n',
+    'lamp.tscn':
+      '[gd_scene format=3]\n\n[node name="Lamp" type="Node3D"]\n\n[node name="Bulb" type="OmniLight3D" parent="."]\n',
+    'desk.tscn':
+      `[gd_scene format=3]\n\n${lamp}\n\n[node name="Desk" type="Node3D"]\n\n` +
+      '[node name="Top" type="Node3D" parent="."]\n\n[node name="Leg" type="Node3D" parent="."]\n\n' +
+      '[node name="DeskLamp" parent="Top" instance=ExtResource("1_lamp")]\n',
+    'room.tscn':
+      `[gd_scene format=3]\n\n${desk}\n\n[node name="Room" type="Node3D"]\n\n` +
+      '[node name="Top" type="Node3D" parent="."]\n\n' +
+      '[node name="DeskA" parent="." instance=ExtResource("1_desk")]\n\n' +
+      '[node name="DeskB" parent="." instance=ExtResource("1_desk")]\n\n' +
+      '[node name="Top" parent="DeskB"]\nvisible = false\n\n' +
+      '[node name="Tag" type="Node3D" parent="DeskB/Top"]\n\n' +
+      '[node name="Bulb" parent="DeskB/Top/DeskLamp"]\nlight_energy = 4.0\n\n' +
+      '[connection signal="visibility_changed" from="DeskB/Top" to="." method="notify_property_list_changed"]\n\n' +
+      '[editable path="DeskB"]\n[editable path="DeskB/Top/DeskLamp"]\n',
+    'study.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://room.tscn" id="1_room"]\n\n' +
+      '[node name="Room" instance=ExtResource("1_room")]\n\n' +
+      '[node name="Top" parent="."]\nvisible = false\n\n' +
+      '[node name="Bulb" parent="DeskA/Top/DeskLamp"]\nlight_energy = 2.0\n\n' +
+      '[editable path="DeskA"]\n[editable path="DeskA/Top/DeskLamp"]\n',
+    'long_desk.tscn':
+      `[gd_scene format=3]\n\n${desk}\n\n[node name="Desk" instance=ExtResource("1_desk")]\n\n` +
+      '[node name="Top" parent="."]\nvisible = false\n',
+    // Names desk.tscn but does not load, so where its instances are cannot be read.
+    'broken.tscn':
+      `[gd_scene format=3]\n\n${desk}\n\n[node name="Broken" type="Node3D"]\n\n` +
+      '[node name="D" parent="." instance=ExtResource("9_gone")]\n\n[editable path="D/Top/DeskLamp"]\n',
+    'unrelated.tscn':
+      `[gd_scene format=3]\n\n${lamp}\n\n[node name="Other" type="Node3D"]\n\n` +
+      '[node name="Top" type="Node3D" parent="."]\n\n[node name="DeskLamp" parent="Top" instance=ExtResource("1_lamp")]\n\n' +
+      '[node name="Bulb" parent="Top/DeskLamp"]\nlight_energy = 3.0\n\n[editable path="Top/DeskLamp"]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+    parseTextContent(
+      await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000),
+    );
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const energy = async (scenePath: string, nodePath: string): Promise<unknown> =>
+    get(await call('scene_node', { op: 'get', scenePath, nodePath }), 'properties', 'light_energy');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('follow-engine');
+
+    const renamed = await call('scene_node', {
+      op: 'set',
+      scenePath: 'desk.tscn',
+      nodePath: 'Top',
+      properties: { name: 'Surface' },
+    });
+    assert.deepEqual(
+      asArray(get(renamed, 'followed')).map(String).sort(),
+      ['res://long_desk.tscn', 'res://room.tscn', 'res://study.tscn'],
+      JSON.stringify(renamed),
+    );
+    assert.deepEqual(
+      get(renamed, 'notFollowed'),
+      [{ scenePath: 'res://broken.tscn', reason: 'Failed to load res://broken.tscn as a scene' }],
+      JSON.stringify(renamed),
+    );
+    assert.equal(fileOf('broken.tscn'), files['broken.tscn'], 'and it is left as it was');
+    const room = fileOf('room.tscn');
+    for (const line of [
+      '[node name="Surface" parent="DeskB"]',
+      '[node name="Tag" type="Node3D" parent="DeskB/Surface"]',
+      '[node name="Bulb" parent="DeskB/Surface/DeskLamp"]',
+      '[connection signal="visibility_changed" from="DeskB/Surface" to="."',
+      '[editable path="DeskB"]',
+      '[editable path="DeskB/Surface/DeskLamp"]',
+    ]) {
+      assert.ok(room.includes(line), `room.tscn names ${line}: ${room}`);
+    }
+    assert.deepEqual(
+      room.match(/[^\n]*Top[^\n]*/g),
+      ['[node name="Top" type="Node3D" parent="."]'],
+      `only room.tscn's own Top is left, since room.tscn does not inherit desk.tscn: ${room}`,
+    );
+    const study = fileOf('study.tscn');
+    assert.ok(study.includes('[node name="Bulb" parent="DeskA/Surface/DeskLamp"]'), study);
+    assert.ok(study.includes('[editable path="DeskA/Surface/DeskLamp"]'), study);
+    assert.ok(
+      study.includes('[node name="Top" parent="."]'),
+      `study.tscn inherits room.tscn, not desk.tscn, so its value for room.tscn's own Top stays: ${study}`,
+    );
+    assert.ok(
+      fileOf('long_desk.tscn').includes('[node name="Surface" parent="."]'),
+      fileOf('long_desk.tscn'),
+    );
+    assert.equal(fileOf('unrelated.tscn'), files['unrelated.tscn'], 'a scene instancing nothing that moved');
+
+    // The effect: the next save of each scene keeps the lights, which a lost editable path drops.
+    await call('scene_node', {
+      op: 'set',
+      scenePath: 'room.tscn',
+      nodePath: 'DeskA',
+      properties: { visible: false },
+    });
+    await call('scene_node', {
+      op: 'set',
+      scenePath: 'study.tscn',
+      nodePath: '.',
+      properties: { visible: false },
+    });
+    assert.deepEqual(
+      [
+        await energy('room.tscn', 'DeskB/Surface/DeskLamp/Bulb'),
+        await energy('study.tscn', 'DeskA/Surface/DeskLamp/Bulb'),
+        await energy('study.tscn', 'DeskB/Surface/DeskLamp/Bulb'),
+      ],
+      [4, 2, 4],
+      `after saving again: ${fileOf('room.tscn')}\n${fileOf('study.tscn')}`,
+    );
+
+    const moved = await call('scene_node', {
+      op: 'reparent',
+      scenePath: 'desk.tscn',
+      nodePath: 'Surface/DeskLamp',
+      newParentPath: 'Leg',
+    });
+    assert.deepEqual(
+      asArray(get(moved, 'followed')).map(String).sort(),
+      ['res://room.tscn', 'res://study.tscn'],
+      JSON.stringify(moved),
+    );
+    const again = fileOf('room.tscn');
+    assert.ok(again.includes('[editable path="DeskB/Leg/DeskLamp"]'), again);
+    assert.match(again, /\[node name="Bulb" parent="DeskB\/Leg\/DeskLamp"/, again);
+    await call('scene_node', {
+      op: 'set',
+      scenePath: 'room.tscn',
+      nodePath: 'DeskA',
+      properties: { visible: true },
+    });
+    assert.equal(await energy('room.tscn', 'DeskB/Leg/DeskLamp/Bulb'), 4, fileOf('room.tscn'));
+    assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * A theme and a tile set with no editor, through the server and a real engine. A font size Godot
  * would read back as the theme's default is refused; a theme type that is no class is set as the
  * variation it is and said to be one; and an image written since the import is named as not yet
@@ -44225,6 +44402,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAnimationIsWrittenWithNoEditor,
   testAThemeAndATilesetWithNoEditor,
   testASceneKeepsItsOwnValuesForAnotherScenesNodes,
+  testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
   testEveryFileArgumentIsContained,
