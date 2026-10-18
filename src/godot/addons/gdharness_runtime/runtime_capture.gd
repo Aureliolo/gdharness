@@ -103,7 +103,8 @@ func _lay_native_windows(image: Image) -> void:
 		if node == root or not node is Window:
 			continue
 		var window: Window = node
-		if not window.visible or window.is_embedded():
+		# A minimised window is not on the screen, and its texture holds the last frame it drew.
+		if not window.visible or window.is_embedded() or not window.can_draw():
 			continue
 		var drawn: Image = window.get_texture().get_image()
 		if drawn == null or drawn.is_empty():

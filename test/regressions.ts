@@ -27177,6 +27177,22 @@ async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
         /Nothing is being drawn to the Window at \/root\/Main\/Over, which is minimised\. Restore it and ask again\./,
         `${minimised} (mode ${String(mode)})`,
       );
+      // Nor is it laid over the screen: it is not on it, and its texture still holds the red it
+      // last drew over the right half.
+      const without = await server.request(
+        'tools/call',
+        { name: 'runtime_capture', arguments: { op: 'screenshot', width: 1, height: 1 } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const withoutImage = asArray(get(without, 'result', 'content')).find(
+        (chunk) => get(chunk, 'type') === 'image',
+      );
+      assert.ok(withoutImage !== undefined, `the screen is still captured: ${JSON.stringify(without)}`);
+      const blue = [...onePixelOf(Buffer.from(String(get(withoutImage, 'data')), 'base64'))];
+      assert.ok(
+        (blue[0] ?? 255) < 60 && (blue[2] ?? 0) > 200,
+        `the screen without the minimised window: ${blue.join(',')}`,
+      );
     } else {
       console.log(
         `minimised window capture step skipped: the window manager left it in mode ${String(mode)}`,
