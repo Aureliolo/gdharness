@@ -195,6 +195,7 @@ import {
   discoverRuntimes,
   errorReportOf,
   JUDGED_AFTER_MS,
+  notSent,
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   reportAlreadyInTranscript,
@@ -14625,11 +14626,13 @@ async function testCallsSentTogetherWaitTheirTurnAtTheGame(): Promise<void> {
       `a call refused at first was answered: ${throughTheRefusal}`,
     );
 
+    // macOS has held one dial to this closed port past the wait rather than refusing it, which is
+    // answered as the dial it is: nothing was sent either way.
     game.close();
     const refusedThroughout = await read();
     assert.match(
       refusedThroughout,
-      /The game \(.*\) is running but nothing answered on its port: it refused all \d+ connections tried within 2000ms\. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do\. Nothing was sent, so nothing ran\./,
+      /The game \(.*\) is running but nothing answered on its port: it refused (all \d+ connections tried within 2000ms|(one connection|\d+ connections) and had not accepted the next when the wait ended, after 2000ms)\. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do\. Nothing was sent, so nothing ran\./,
       refusedThroughout,
     );
     game.listen(port, '127.0.0.1');
@@ -14654,6 +14657,165 @@ async function testCallsSentTogetherWaitTheirTurnAtTheGame(): Promise<void> {
     sweep(runtimeDir);
     sweep(project);
   }
+}
+
+/**
+ * A call whose connection the system holds, neither accepted nor refused, is answered as not sent.
+ *
+ * Godot's TCPServer queues eight connections a game has not taken. Past those Windows refuses a dial
+ * at once, while Linux and macOS hold it unanswered, and a request is written only once its
+ * connection is accepted, so a wait ending on a held dial has sent nothing. It was answered as a
+ * request the game had and would run, with a requestId to read the reply by, and the dial was left
+ * open to send it whenever the game took it. The listener is an engine that never takes a
+ * connection, as a game in one long frame does, and its queue is filled before the call.
+ */
+async function testACallTheSystemHoldsIsNotSent(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('held dial regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-dial-'));
+  const home = join(project, '.home');
+  mkdirSync(home, { recursive: true });
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-dial-rt-'));
+  const port = await reservePort();
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  writeFileSync(
+    join(project, 'hold.gd'),
+    `extends SceneTree\n\nvar server := TCPServer.new()\n\n\nfunc _initialize() -> void:\n\tvar _listening: Error = server.listen(${port}, "127.0.0.1")\n`,
+  );
+  const engine = spawnHidden(godotPath, ['--headless', '--path', project, '-s', 'res://hold.gd'], {
+    env: {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: home,
+      LOCALAPPDATA: home,
+      XDG_CONFIG_HOME: home,
+      XDG_DATA_HOME: home,
+      XDG_CACHE_HOME: home,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const printed: string[] = [];
+  engine.stdout.on('data', (chunk: Buffer) => printed.push(String(chunk)));
+  engine.stderr.on('data', (chunk: Buffer) => printed.push(String(chunk)));
+  const queued: Socket[] = [];
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_RUNTIME_TIMEOUT_MS: '2000',
+    },
+  });
+  try {
+    const dial = async (): Promise<Socket | null> =>
+      await new Promise((settled) => {
+        const socket = createConnection({ port, host: '127.0.0.1' });
+        socket.once('connect', () => {
+          settled(socket);
+        });
+        socket.once('error', () => {
+          socket.destroy();
+          settled(null);
+        });
+      });
+    // The first connection accepted says the engine is listening, and stays as the first queued.
+    for (const deadline = Date.now() + 60_000; queued.length === 0; ) {
+      assert.ok(
+        Date.now() < deadline && engine.exitCode === null,
+        `the engine never listened on ${port}: ${printed.join('')}`,
+      );
+      const first = await dial();
+      if (first === null) {
+        await delay(100);
+      } else {
+        queued.push(first);
+      }
+    }
+    for (let more = 0; more < 24; more += 1) {
+      const socket = createConnection({ port, host: '127.0.0.1' });
+      socket.on('error', () => {});
+      queued.push(socket);
+    }
+    await delay(500);
+    const pid = engine.pid ?? 0;
+    writeFileSync(
+      join(runtimeDir, `runtime-${pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid,
+        port,
+        address: '127.0.0.1',
+        project: { name: basename(project), path: project },
+      }),
+      'utf8',
+    );
+    await server.initialize('regression-test');
+    const answer =
+      textOf(
+        await server.request(
+          'tools/call',
+          { name: 'runtime_inspect', arguments: { op: 'property', nodePath: '/root/Main', property: 'day' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      ) ?? '';
+    assert.match(
+      answer,
+      process.platform === 'win32'
+        ? /is running but nothing answered on its port: it refused all \d+ connections tried within 2000ms\. .*Nothing was sent, so nothing ran\./
+        : /'get_property' was not sent to the game \(.*\) within 2000ms: its port had not accepted the connection, which is how Linux and macOS hold one while the game's queue is full, .*Nothing was sent, so nothing ran\./,
+      answer,
+    );
+    assert.doesNotMatch(answer, /requestId/, `nothing was sent, so there is no reply to read: ${answer}`);
+  } finally {
+    await server.stop();
+    for (const socket of queued) {
+      socket.destroy();
+    }
+    if (engine.exitCode === null && engine.signalCode === null) {
+      const gone = new Promise<void>((done) => {
+        engine.once('exit', () => {
+          done();
+        });
+      });
+      engine.kill();
+      await gone;
+    }
+    sweep(runtimeDir);
+    sweep(project);
+  }
+}
+
+/**
+ * Every answer for a request the wait ended on before it reached the game. Only the engine legs
+ * reach the held dial, and only a closed port that a system holds a dial to past refusing others
+ * reaches both at once, which no fixture can arrange.
+ */
+function testANotSentAnswerSaysWhatHeldIt(): void {
+  const said = (refusals: number, dialling: boolean): string => {
+    const reply = notSent('pid 7 on 127.0.0.1:9', 'get_property', 2000, refusals, dialling);
+    return `${reply.reason}: ${reply.message}`;
+  };
+  const refusedTail =
+    '. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do. Nothing was sent, so nothing ran.';
+  const refused =
+    'refused: The game (pid 7 on 127.0.0.1:9) is running but nothing answered on its port: it refused';
+  assert.deepEqual(
+    [said(0, false), said(0, true), said(1, false), said(3, false), said(1, true), said(3, true)],
+    [
+      "busy: 'get_property' was not sent to the game (pid 7 on 127.0.0.1:9) within 2000ms: 4 connections from this server were already waiting for the game to take them, which it does between frames, so a long frame or a breakpoint holds them. Nothing was sent, so nothing ran.",
+      "busy: 'get_property' was not sent to the game (pid 7 on 127.0.0.1:9) within 2000ms: its port had not accepted the connection, which is how Linux and macOS hold one while the game's queue is full, as it is when the game has not taken the connections before it during a long frame or at a breakpoint. Nothing was sent, so nothing ran.",
+      `${refused} the connection within 2000ms${refusedTail}`,
+      `${refused} all 3 connections tried within 2000ms${refusedTail}`,
+      `${refused} one connection and had not accepted the next when the wait ended, after 2000ms${refusedTail}`,
+      `${refused} 3 connections and had not accepted the next when the wait ended, after 2000ms${refusedTail}`,
+    ],
+  );
 }
 
 /**
@@ -45220,6 +45382,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameOnEveryInterfaceIsReached,
   testACaptureTheWaitRanOutOnKeepsItsFolder,
   testCallsSentTogetherWaitTheirTurnAtTheGame,
+  testACallTheSystemHoldsIsNotSent,
+  testANotSentAnswerSaysWhatHeldIt,
   testAGameOnAnotherRuntimeAddonSaysSo,
   testAGameSaysWhichRuntimeAddonItLoaded,
   testAWorktreeFindsItsMainCheckoutsEngine,

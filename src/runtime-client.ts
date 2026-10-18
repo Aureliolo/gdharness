@@ -958,6 +958,41 @@ const UNTAKEN_PER_GAME = 4;
  */
 const REDIAL_MS = 50;
 
+/**
+ * The answer for a request whose wait ended before it reached [param game]: after [param refusals]
+ * refused dials, and with one still [param dialling], neither accepted nor refused, or with none
+ * open because no place came free.
+ *
+ * Nothing listening and a full queue are refused alike on Windows, so the refusal names both;
+ * Linux and macOS hold a dial to a full queue instead, which is the dial still open.
+ */
+export function notSent(
+  game: string,
+  command: string,
+  timeoutMs: number,
+  refusals: number,
+  dialling: boolean,
+): Extract<RuntimeReply, { ok: false }> {
+  if (refusals > 0) {
+    const refused = dialling
+      ? `it refused ${refusals === 1 ? 'one connection' : `${refusals} connections`} and had not accepted the next when the wait ended, after ${timeoutMs}ms`
+      : `it refused ${refusals === 1 ? 'the connection' : `all ${refusals} connections tried`} within ${timeoutMs}ms`;
+    return {
+      ok: false,
+      reason: 'refused',
+      message: `The game (${game}) is running but nothing answered on its port: ${refused}. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do. Nothing was sent, so nothing ran.`,
+    };
+  }
+  const why = dialling
+    ? "its port had not accepted the connection, which is how Linux and macOS hold one while the game's queue is full, as it is when the game has not taken the connections before it during a long frame or at a breakpoint"
+    : `${UNTAKEN_PER_GAME} connections from this server were already waiting for the game to take them, which it does between frames, so a long frame or a breakpoint holds them`;
+  return {
+    ok: false,
+    reason: 'busy',
+    message: `'${command}' was not sent to the game (${game}) within ${timeoutMs}ms: ${why}. Nothing was sent, so nothing ran.`,
+  };
+}
+
 /** Per game, by where it is dialled: the places held, and the requests waiting for one. */
 const untaken = new Map<string, { held: number; readonly waiting: (() => void)[] }>();
 
@@ -1025,6 +1060,8 @@ export function runtimeRequest(
     let welcomed = false;
 
     let socket: Socket | null = null;
+    // The request is written on connect, so a dial still open when the wait ends has sent nothing.
+    let connected = false;
     let refusals = 0;
     let redial: NodeJS.Timeout | null = null;
     // Held from the dial until the game takes the connection, which its welcome says.
@@ -1067,21 +1104,10 @@ export function runtimeRequest(
       settle(reply);
     };
     const timer = setTimeout(() => {
-      if (socket === null) {
-        // Nothing listening and a full queue are refused alike, so the answer names both.
-        finish(
-          refusals > 0
-            ? {
-                ok: false,
-                reason: 'refused',
-                message: `The game (${describe(endpoint)}) is running but nothing answered on its port: it refused ${refusals === 1 ? 'the connection' : `all ${refusals} connections tried`} within ${timeoutMs}ms. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do. Nothing was sent, so nothing ran.`,
-              }
-            : {
-                ok: false,
-                reason: 'busy',
-                message: `'${command}' was not sent to the game (${describe(endpoint)}) within ${timeoutMs}ms: ${UNTAKEN_PER_GAME} connections from this server were already waiting for the game to take them, which it does between frames, so a long frame or a breakpoint holds them. Nothing was sent, so nothing ran.`,
-              },
-        );
+      if (socket === null || !connected) {
+        // A dial the system has neither accepted nor refused is abandoned rather than left to send
+        // the request later, so that "nothing ran" stays true.
+        finish(notSent(describe(endpoint), command, timeoutMs, refusals, socket !== null));
         return;
       }
       const still = welcomed
@@ -1132,6 +1158,7 @@ export function runtimeRequest(
       socket = opened;
       opened.setEncoding('utf8');
       opened.on('connect', () => {
+        connected = true;
         opened.write(`${JSON.stringify({ id, command, params })}\n`);
       });
       opened.on('data', (chunk: string) => {
