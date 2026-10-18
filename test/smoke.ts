@@ -62,10 +62,7 @@ async function main(): Promise<void> {
   const configuredPort = Number.parseInt(process.env['GDHARNESS_BRIDGE_PORT'] ?? '', 10);
   const port = Number.isInteger(configuredPort) && configuredPort > 0 ? configuredPort : await reservePort();
 
-  // The 2025 handshake, which every other suite no longer sends: the 2026 opening is checked below
-  // through the SDK's own client.
   const server = new ServerProcess({
-    era: 'legacy',
     env: {
       GODOT_PATH: process.env['GODOT_PATH'] ?? process.execPath,
       GDHARNESS_BRIDGE_PORT: String(port),
@@ -122,8 +119,9 @@ async function main(): Promise<void> {
     }
 
     await server.stop();
-    await servesTheModernEra(tools.length);
-    console.log(`ci smoke passed with ${tools.length} tools on ${host}:${port}, in both protocol eras`);
+    await servesTheSdksClient(tools.length);
+    await refusesThe2025Opening();
+    console.log(`ci smoke passed with ${tools.length} tools on ${host}:${port}`);
   } catch (error) {
     await server.stop();
     console.error(error instanceof Error ? error.message : String(error));
@@ -131,23 +129,28 @@ async function main(): Promise<void> {
   }
 }
 
-/**
- * A client that opens in the 2026-07-28 revision, from the SDK rather than hand-written frames, so
- * the opening it sends is the one real clients send: no `initialize`, a `server/discover`, and an
- * envelope on every request. The handshake above is the 2025 one, and passing it says nothing about
- * this: a server wired straight to a stdio transport answers it and refuses every modern opening.
- */
-async function servesTheModernEra(legacyToolCount: number): Promise<void> {
-  const revision = badgedRevision();
+/** A transport starting the built server, with an environment of its own. */
+function serverTransport(): { transport: StdioClientTransport; runtimeDir: string | null } {
   const { env, runtimeDir } = testServerEnvironment({
     GODOT_PATH: process.env['GODOT_PATH'] ?? process.execPath,
   });
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ['build/index.js'],
+    args: ['build/cli.js'],
     env,
     stderr: 'pipe',
   });
+  return { transport, runtimeDir };
+}
+
+/**
+ * A client that opens in the 2026-07-28 revision, from the SDK rather than hand-written frames, so
+ * the opening it sends is the one real clients send: no `initialize`, a `server/discover`, and an
+ * envelope on every request.
+ */
+async function servesTheSdksClient(toolCount: number): Promise<void> {
+  const revision = badgedRevision();
+  const { transport, runtimeDir } = serverTransport();
   const client = new Client(
     { name: 'ci-smoke-modern', version: '1.0.0' },
     { versionNegotiation: { mode: { pin: revision } } },
@@ -158,23 +161,43 @@ async function servesTheModernEra(legacyToolCount: number): Promise<void> {
     assert.equal(client.getNegotiatedProtocolVersion(), revision, `at ${revision}`);
     // Stamped on every 2026 response by the SDK, from the name and version the server gives it.
     const identity = client.getServerVersion();
-    assert.equal(identity?.name, 'gdharness', 'the server names itself in the 2026 era');
+    assert.equal(identity?.name, 'gdharness', 'the server names itself');
     assert.equal(identity.version, packageVersion(), 'with the version it was built as');
 
     const { tools } = await client.listTools();
-    assert.equal(tools.length, legacyToolCount, 'the 2026 era lists the tools the 2025 era does');
+    assert.equal(tools.length, toolCount, "the SDK's client lists the tools the hand-written frames do");
 
     // A call that needs no editor and no engine, read for what it answers rather than for not
-    // failing: the dispatch, the argument check and the response all run in this era.
+    // failing: the dispatch, the argument check and the response all run.
     const status = await client.callTool({ name: 'editor_status', arguments: {} });
-    assert.notEqual(
-      status.isError,
-      true,
-      `editor_status answered in the 2026 era: ${JSON.stringify(status)}`,
-    );
+    assert.notEqual(status.isError, true, `editor_status answered: ${JSON.stringify(status)}`);
     const first = status.content[0];
     assert.ok(first?.type === 'text', 'with a text block');
     assert.ok(isRecord(JSON.parse(first.text)), 'carrying a JSON report');
+  } finally {
+    await client.close();
+    if (runtimeDir !== null) sweep(runtimeDir);
+  }
+}
+
+/**
+ * A client opening with the 2025 `initialize`, as the SDK's client does when pinned to a 2025
+ * revision, is told which revision the server speaks rather than served.
+ */
+async function refusesThe2025Opening(): Promise<void> {
+  const revision = badgedRevision();
+  const { transport, runtimeDir } = serverTransport();
+  const client = new Client(
+    { name: 'ci-smoke-2025', version: '1.0.0' },
+    { versionNegotiation: { mode: { pin: '2025-06-18' } } },
+  );
+  try {
+    const refused = await client.connect(transport).then(
+      () => null,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    assert.ok(refused !== null, `a 2025 opening was served, in the ${client.getProtocolEra()} era`);
+    assert.match(refused, new RegExp(revision), `the refusal names ${revision}: ${refused}`);
   } finally {
     await client.close();
     if (runtimeDir !== null) sweep(runtimeDir);

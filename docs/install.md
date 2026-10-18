@@ -106,8 +106,8 @@ and `latest` is how they drift apart: `editor_status` reports that as `addonIsSt
 
 `GDHARNESS_PROJECT` is which project this server was set up for. It writes the editor bridge's
 address into that project so the editor can find it wherever it landed, which is what lets two
-projects be open at once: see [how it works](architecture.html#connections). Leave it out and the
-bridge is the fixed port again, which is the behaviour every config written before this had.
+projects be open at once: see [how it works](architecture.html#connections). Leave it out, as a
+config written by hand does, and the bridge holds out for its fixed port.
 
 Every tool call still carries its own `projectPath`. Nothing else is read from the environment.
 
@@ -197,6 +197,9 @@ start waits for the editor to finish scanning before it starts anyway and says s
 `GDHARNESS_STOP_WAIT_MS`, how long a stop waits for what it ended to be gone before answering that it
 is still running (10 seconds); and `GDHARNESS_GREETING_WAIT_MS`, how long a restart waits for a newly
 connected editor to say who it is (10 seconds).
+
+`GDHARNESS_DEBUG=1` writes the server's debug lines to stderr, where your harness's MCP log keeps
+them, and runs headless engines with `--debug-godot`.
 
 ## Updating
 

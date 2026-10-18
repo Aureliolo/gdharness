@@ -6,20 +6,12 @@ extends RefCounted
 const Read = preload("reading.gd")
 
 
-## A point the tool schema sends as two flat numbers, or the older form of one [x, y] value.
-## Answers a Vector2, or the String that says what was wrong with it.
-static func read_point(params: Dictionary, x_key: String, y_key: String, pair_key: String) -> Variant:
-	if params.has(x_key) and params.has(y_key):
-		return Vector2(Read.as_float(params[x_key]), Read.as_float(params[y_key]))
-	var raw: Variant = params.get(pair_key, Vector2.ZERO)
-	if raw is Vector2:
-		return raw
-	if raw is Array:
-		var pair: Array = raw
-		if pair.size() < 2:
-			return "%s array must contain [x, y]" % pair_key
-		return Vector2(Read.as_float(pair[0]), Read.as_float(pair[1]))
-	return "%s must be Vector2 or [x, y]" % pair_key
+## A point the tool schema sends as two flat numbers. Answers a Vector2, or the String that says
+## which was missing.
+static func read_point(params: Dictionary, x_key: String, y_key: String) -> Variant:
+	if not params.has(x_key) or not params.has(y_key):
+		return "%s and %s are both needed." % [x_key, y_key]
+	return Vector2(Read.as_float(params[x_key]), Read.as_float(params[y_key]))
 
 
 ## The points of a drag: x, y, then each of via, then toX, toY. Answers the String saying what is

@@ -42,7 +42,7 @@ export interface GodotProcess {
    * What a process's own start is held against, since `startedAt` is when the start was asked for.
    * A windowed run on Windows goes through a helper compiled on first use, and on a loaded runner the
    * engine began more than the window after that: its own stop then refused it as a process started
-   * too late to be the run, and left it running. Absent from a note written before this was kept.
+   * too late to be the run, and left it running. Absent for a played run.
    */
   startedBy?: number;
   /** Where the keeper holding a spawned run listens for a stop, as its note says. */
@@ -69,8 +69,7 @@ export interface GodotProcess {
   notEndedBecause?: string;
   /**
    * The engine a spawned run was started with, which with its project and start is what says its
-   * pid still means it before anything is signalled: see `judgeRun`. Absent for a played run, and
-   * for one picked up from a note too old to name it, which is then judged on its project alone.
+   * pid still means it before anything is signalled: see `judgeRun`. Absent for a played run.
    */
   command?: string;
   /** Set once the process has exited with a code; null while it runs, and for a signalled end. */

@@ -5,7 +5,6 @@
   "mcpName": "io.github.Aureliolo/gdharness",
   "description": "A harness for driving a Godot 4 project from an agent: editor addons, a runtime bridge into the running game, an MCP server in front of them, and a CLI that installs and diagnoses the Godot side.",
   "type": "module",
-  "main": "./build/index.js",
   "bin": {
     "gdharness": "build/cli.js"
   },

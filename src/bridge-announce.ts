@@ -44,11 +44,25 @@ export function readAnnouncement(path: string): BridgeAnnouncement | null {
     if (typeof parsed !== 'object' || parsed === null) {
       return null;
     }
-    const said = parsed as Partial<BridgeAnnouncement>;
-    if (typeof said.port !== 'number' || typeof said.pid !== 'number') {
+    const said = parsed as Record<keyof BridgeAnnouncement, unknown>;
+    if (
+      said.protocol !== BRIDGE_ANNOUNCE_PROTOCOL ||
+      typeof said.host !== 'string' ||
+      typeof said.port !== 'number' ||
+      typeof said.pid !== 'number' ||
+      typeof said.version !== 'string' ||
+      typeof said.startedAt !== 'string'
+    ) {
       return null;
     }
-    return said as BridgeAnnouncement;
+    return {
+      protocol: said.protocol,
+      host: said.host,
+      port: said.port,
+      pid: said.pid,
+      version: said.version,
+      startedAt: said.startedAt,
+    };
   } catch {
     return null;
   }
@@ -73,7 +87,7 @@ export function serverBehind(
   announcement: BridgeAnnouncement | null,
   startedAt: number | undefined,
 ): AnnouncedServer | null {
-  if (announcement === null || typeof announcement.version !== 'string' || startedAt === undefined) {
+  if (announcement === null || startedAt === undefined) {
     return null;
   }
   const announcedAt = Date.parse(announcement.startedAt);
@@ -106,7 +120,7 @@ function announcementIsOurs(path: string): boolean {
  * Writes where this bridge is, and answers the path, or null with a reason on standard error.
  *
  * A failure here is not fatal: without an announcement the editor falls back to the port it was
- * configured with, which is where it looked before any of this existed.
+ * configured with.
  */
 export function announceBridge(
   projectPath: string,
