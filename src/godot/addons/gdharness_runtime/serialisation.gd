@@ -664,8 +664,12 @@ func _serialize_array(value: Array) -> Array:
 
 # Base64 rather than a list of numbers. A byte array is a texture, a sound or a save file often
 # enough that the list would be the whole answer, megabytes of it, and unreadable either way.
+#
+# The engine's encoder raises an error on an empty array, and an empty tile_map_data is every
+# TileMapLayer with nothing painted yet, so a read of one carried an engine error in its answer.
 func _serialize_bytes(value: PackedByteArray) -> Dictionary:
-	return {"base64": Marshalls.raw_to_base64(value), "size": value.size(), "_type": "PackedByteArray"}
+	var text: String = "" if value.is_empty() else Marshalls.raw_to_base64(value)
+	return {"base64": text, "size": value.size(), "_type": "PackedByteArray"}
 
 
 # The packed vector and colour arrays, each element serialised the way one of them on its own is.

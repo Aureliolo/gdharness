@@ -10,6 +10,7 @@ extends RefCounted
 const AnimationTools = preload("../addons/gdharness_editor/tools/animation_tools.gd")
 const ResourceTools = preload("../addons/gdharness_editor/tools/resource_tools.gd")
 const SceneTools = preload("../addons/gdharness_editor/tools/scene_tools.gd")
+const SceneFile = preload("../addons/gdharness_editor/scene_file.gd")
 
 const SCENE_COMMANDS: Array[String] = [
 	"create_scene",
@@ -60,7 +61,24 @@ static func run(params: Dictionary) -> Dictionary:
 	var answer: Variant = tools.call(command, arguments)
 	tools.free()
 	if answer is Dictionary:
-		return answer
+		var answered: Dictionary = answer
+		if not SceneFile.by_path.is_empty():
+			answered["namedByPath"] = (
+				(
+					"%s %s named by path rather than by uid. A uid in a file's own header is resolved "
+					+ "through the project's uid cache, which holds none for %s yet, as with a file "
+					+ "made since the project was last scanned, and a uid it does not hold would warn "
+					+ "on every load. project_import refresh_uids scans the project, and writes after "
+					+ "it name %s by uid."
+				)
+				% [
+					", ".join(SceneFile.by_path),
+					"is" if SceneFile.by_path.size() == 1 else "are",
+					"it" if SceneFile.by_path.size() == 1 else "them",
+					"it" if SceneFile.by_path.size() == 1 else "them",
+				]
+			)
+		return answered
 	return {
 		"ok": false, "error": "%s answered %s rather than an object." % [command, type_string(typeof(answer))]
 	}

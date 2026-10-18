@@ -181,6 +181,43 @@ export function scriptsWithoutUid(projectPath: string): string[] {
   return found.sort();
 }
 
+/**
+ * The res:// paths the project's uid cache holds a uid for, or null when it has no cache it can read.
+ *
+ * The engine writes `.godot/uid_cache.bin` as a count and then, for each entry, the id, the length
+ * of the path and the path, little-endian; files gaining a uid later are appended and the count
+ * rewritten, so a later entry for an id replaces an earlier one, as the engine's own load takes it.
+ * A headless write looks a path's uid up here, which nothing in the project's own files shows.
+ */
+export function pathsInUidCache(projectPath: string): Set<string> | null {
+  let data: Buffer;
+  try {
+    data = readFileSync(join(projectPath, '.godot', 'uid_cache.bin'));
+  } catch {
+    return null;
+  }
+  if (data.length < 4) {
+    return null;
+  }
+  const count = data.readUInt32LE(0);
+  const paths = new Map<bigint, string>();
+  let at = 4;
+  for (let entry = 0; entry < count; entry++) {
+    if (at + 12 > data.length) {
+      return null;
+    }
+    const id = data.readBigUInt64LE(at);
+    const length = data.readUInt32LE(at + 8);
+    at += 12;
+    if (at + length > data.length) {
+      return null;
+    }
+    paths.set(id, data.toString('utf8', at, at + length));
+    at += length;
+  }
+  return new Set(paths.values());
+}
+
 export interface SearchOptions {
   readonly query: string;
   /** Extensions to search, or undefined for every text file. */

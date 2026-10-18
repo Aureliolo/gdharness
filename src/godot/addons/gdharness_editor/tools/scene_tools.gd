@@ -5,21 +5,13 @@ extends Node
 
 const FileReads = preload("../file_reads.gd")
 const Read = preload("../reading.gd")
+const Kin = preload("scene_kin.gd")
+const Paths = preload("scene_paths.gd")
 const Placing = preload("scene_placing.gd")
 const PropertyValues = preload("../property_values.gd")
 const ResourceTools = preload("resource_tools.gd")
 const SceneFile = preload("../scene_file.gd")
 const Serialisation = preload("../serialisation.gd")
-
-## The names Object.ConnectFlags gives each bit. The number alone left a reader guessing that 2 is
-## the persistence every connection in a saved scene carries.
-const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
-	Object.CONNECT_DEFERRED: "deferred",
-	Object.CONNECT_PERSIST: "persist",
-	Object.CONNECT_ONE_SHOT: "one_shot",
-	Object.CONNECT_REFERENCE_COUNTED: "reference_counted",
-	Object.CONNECT_APPEND_SOURCE_OBJECT: "append_source_object",
-}
 
 var _editor_plugin: EditorPlugin = null
 var _values: Serialisation = Serialisation.new()
@@ -28,19 +20,6 @@ var _properties: PropertyValues = PropertyValues.new()
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
-
-
-## Each bit set in [param flags] by name, and whatever bits are left unnamed as one number.
-static func _flag_names(flags: int) -> Array[String]:
-	var names: Array[String] = []
-	var rest: int = flags
-	for bit: int in CONNECT_FLAG_NAMES:
-		if flags & bit:
-			names.append(CONNECT_FLAG_NAMES[bit])
-			rest &= ~bit
-	if rest != 0:
-		names.append(str(rest))
-	return names
 
 
 func _ensure_res_path(path: String) -> String:
@@ -175,17 +154,42 @@ func _collect_nodes_recursive(node: Node, path: String, out_nodes: Array) -> voi
 		_collect_nodes_recursive(child, child_path, out_nodes)
 
 
-func create_scene(args: Dictionary) -> Dictionary:
+func _inherited(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
+	var script_path: String = str(args.get("script", ""))
+	return Kin.inherited(
+		args,
+		_new_scene_path(args),
+		_to_scene_res_path(project_path, str(args.get("inherits", ""))),
+		"" if script_path.is_empty() else _to_scene_res_path(project_path, script_path)
+	)
+
+
+## The res:// path a create in [param args] writes, given .tscn when it has no extension, or "".
+func _new_scene_path(args: Dictionary) -> String:
+	var scene_path: String = _to_scene_res_path(
+		str(args.get("projectPath", "")), str(args.get("scenePath", ""))
+	)
+	if scene_path == "res://":
+		return ""
+	return scene_path if scene_path.ends_with(".tscn") else scene_path + ".tscn"
+
+
+func create_scene(args: Dictionary) -> Dictionary:
+	if str(args.get("inherits", "")).is_empty():
+		return _create_of_a_class(args)
+	return _inherited(args)
+
+
+func _create_of_a_class(args: Dictionary) -> Dictionary:
+	var project_path: String = str(args.get("projectPath", ""))
+	var scene_path: String = _new_scene_path(args)
 	var root_node_type: String = str(args.get("rootNodeType", "Node"))
 	var root_node_name: String = str(args.get("rootNodeName", root_node_type))
 	var script_path: String = str(args.get("script", ""))
 
-	if scene_path == "res://":
+	if scene_path.is_empty():
 		return {"ok": false, "error": "Missing scenePath"}
-	if not scene_path.ends_with(".tscn"):
-		scene_path += ".tscn"
 	var asked_type: String = root_node_type
 	var made: Dictionary = SceneFile.made_as(
 		root_node_type,
@@ -208,19 +212,8 @@ func create_scene(args: Dictionary) -> Dictionary:
 	var unfit: String = SceneFile.unfit_name(root_node_name)
 	if not unfit.is_empty():
 		return {"ok": false, "error": unfit}
-	# Saving over a scene that is there replaced it, nodes and all, and answered as a new scene.
 	if FileAccess.file_exists(scene_path):
-		return {
-			"ok": false,
-			"error":
-			(
-				(
-					"%s already exists, and scene_create op=create would replace everything in it. Edit it "
-					+ "with scene_node, or create the scene under another path."
-				)
-				% scene_path
-			)
-		}
+		return Kin.taken(scene_path)
 
 	var root: Node = ClassDB.instantiate(root_node_type)
 	root.name = root_node_name
@@ -395,6 +388,8 @@ func delete_node(args: Dictionary) -> Dictionary:
 	var at: String = scene.path_of(node)
 	node.get_parent().remove_child(node)
 	node.free()
+	var carried: Paths = Paths.new()
+	var _rewritten: int = carried.carry(scene, {at: ""})
 
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
@@ -405,7 +400,9 @@ func delete_node(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {"ok": true, "deletedNodePath": at}
+	var answer: Dictionary = {"ok": true, "deletedNodePath": at}
+	answer.merge(Kin.follow(scene_path, at, "", carried))
+	return answer
 
 
 func duplicate_node(args: Dictionary) -> Dictionary:
@@ -458,6 +455,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	scene.copied(copies)
 
 	var new_path: String = scene.path_of(duplicated_node)
+	var placed: Array = [scene.path_of(target_parent), duplicated_node.get_index()]
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			if saved.get_node_or_null(new_path) == null:
@@ -467,7 +465,14 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {"ok": true, "nodePath": node_path, "newName": new_name, "newNodePath": new_path}
+	return {
+		"ok": true,
+		"nodePath": node_path,
+		"newName": new_name,
+		"newNodePath": new_path,
+		"parentNodePath": placed[0],
+		"index": placed[1],
+	}
 
 
 func reparent_node(args: Dictionary) -> Dictionary:
@@ -525,6 +530,8 @@ func reparent_node(args: Dictionary) -> Dictionary:
 
 	var new_path: String = scene.path_of(node)
 	var index: int = node.get_index()
+	var carried: Paths = Paths.new()
+	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var copy: Node = saved.get_node_or_null(new_path)
@@ -537,15 +544,19 @@ func reparent_node(args: Dictionary) -> Dictionary:
 			return ""
 	)
 	if not written.is_empty():
+		carried.put_back(scene_path)
 		return written
 
-	return {
+	var answer: Dictionary = {
 		"ok": true,
 		"nodePath": old_path,
 		"newParentPath": new_parent_path,
 		"newNodePath": new_path,
 		"index": index,
 	}
+	if new_path != old_path:
+		answer.merge(Kin.follow(scene_path, old_path, new_path, carried))
+	return answer
 
 
 func set_node_properties(args: Dictionary) -> Dictionary:
@@ -553,6 +564,9 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", "."))
 	var properties: Dictionary = _parse_properties_arg(args.get("properties", {}))
+	var editable: Variant = args.get("editableChildren")
+	if properties.is_empty() and editable == null:
+		return {"ok": false, "error": "set takes properties, editableChildren, or both."}
 
 	var opened: Array = _open(scene_path, true)
 	var scene: SceneFile = opened[0]
@@ -574,6 +588,15 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		if not unusable.is_empty():
 			return scene.refuse(unusable)
 
+	var dropped: Dictionary = {}
+	if editable != null:
+		var not_an_instance: String = Kin.set_editable(scene, node, Read.as_bool(editable))
+		if not not_an_instance.is_empty():
+			return scene.refuse(not_an_instance)
+		if not Read.as_bool(editable):
+			dropped = scene.held_under(scene.path_of(node))
+
+	var old_path: String = scene.path_of(node)
 	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
 	if not refused_property.is_empty():
@@ -583,13 +606,29 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	for key: Variant in properties:
 		held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
 	var new_path: String = scene.path_of(node)
+	var carried: Paths = Paths.new()
+	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
 	var written: Dictionary = scene.write(
-		func(saved: Node) -> String: return _kept(scene, saved, node, properties.keys())
+		func(saved: Node) -> String:
+			var unkept: String = _kept(scene, saved, node, properties.keys())
+			if unkept.is_empty() and editable != null:
+				if saved.is_editable_instance(saved.get_node(new_path)) != Read.as_bool(editable):
+					return "%s would load with editableChildren %s." % [new_path, not Read.as_bool(editable)]
+			return unkept
 	)
 	if not written.is_empty():
+		carried.put_back(scene_path)
 		return written
 
-	return {"ok": true, "nodePath": new_path, "properties": held}
+	var answer: Dictionary = {"ok": true, "nodePath": new_path, "properties": held}
+	if editable != null:
+		answer["editableChildren"] = Read.as_bool(editable)
+	if not dropped.is_empty():
+		answer["droppedValues"] = dropped["values"]
+		answer["droppedNodes"] = dropped["nodes"]
+	if new_path != old_path:
+		answer.merge(Kin.follow(scene_path, old_path, new_path, carried))
+	return answer
 
 
 func get_node_properties(args: Dictionary) -> Dictionary:
@@ -614,8 +653,11 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	# names this scene's file sets are always answered.
 	var props: Dictionary = _properties_of(node, include_defaults, scene.set_here(node))
 	var cells: Dictionary = ResourceTools.cells_of(node)
-	scene.close()
 	var answer: Dictionary = {"ok": true, "nodePath": node_path, "properties": props}
+	if node != scene.root and node.owner != null and not node.scene_file_path.is_empty():
+		answer["instanceOf"] = node.scene_file_path
+		answer["editableChildren"] = scene.root.is_editable_instance(node)
+	scene.close()
 	# Only an editor holds anything unsaved; a headless engine answering false would say it looked.
 	if Engine.is_editor_hint():
 		answer["unsavedInEditor"] = SceneFile.unsaved(scene_path)
@@ -770,7 +812,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 		"targetNodePath": to,
 		"methodName": method_name,
 		"flags": saved_flags[0],
-		"flagNames": _flag_names(Read.as_int(saved_flags[0])),
+		"flagNames": SceneFile.flag_names(Read.as_int(saved_flags[0])),
 		# Connected either way, as the editor's own dialog allows, since the method may be written
 		# next; a caller told nothing learnt of a misspelt one only when the signal fired.
 		"methodFound": method_found
@@ -781,7 +823,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	if flags_before >= 0:
 		answer["alreadyConnected"] = true
 		if flags_before != Read.as_int(saved_flags[0]):
-			answer["flagsBefore"] = _flag_names(flags_before)
+			answer["flagsBefore"] = SceneFile.flag_names(flags_before)
 	return answer
 
 
@@ -934,7 +976,7 @@ func list_connections(args: Dictionary) -> Dictionary:
 							"targetNodePath": target_path,
 							"methodName": str(callable.get_method()),
 							"flags": flags,
-							"flagNames": _flag_names(flags),
+							"flagNames": SceneFile.flag_names(flags),
 							# False for a connection an instanced scene makes inside itself, which only that
 							# scene can change.
 							"editable": editable
