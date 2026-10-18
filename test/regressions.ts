@@ -5010,6 +5010,156 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
 }
 
 /**
+ * An editor this server opens or starts again makes no sound unless the call asks for it.
+ *
+ * A session's run once played a game's music on the owner's machine, and an editor plays sound of
+ * its own: a tool script, a preview, a scene running in the viewport. The engine is a stand-in that
+ * exits at once, since what is checked is what the editor was started with, which the answer
+ * carries. A visible stand-in on Windows starts through the helper on the desktop in use, so those
+ * cases run on Windows only where windows may open.
+ */
+async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> {
+  const visibleHere =
+    process.platform !== 'win32' ||
+    process.env['CI'] !== undefined ||
+    process.env['GDHARNESS_ALLOW_WINDOWS'] !== undefined;
+  if (!visibleHere) {
+    console.log(
+      'visible editor silence cases skipped: on Windows the stand-in would open on the desktop in use; GDHARNESS_ALLOW_WINDOWS runs them here',
+    );
+  }
+  const silence = (argv: readonly string[]): boolean => {
+    const at = argv.indexOf('--audio-driver');
+    return at >= 0 && argv[at + 1] === 'Dummy';
+  };
+  const cases = [
+    { how: 'opened visible', act: 'open', args: {}, silent: true, visible: true },
+    { how: 'opened visible with sound', act: 'open', args: { silent: false }, silent: false, visible: true },
+    { how: 'opened hidden', act: 'open', args: { hidden: true }, silent: false, visible: false },
+    { how: 'started again hidden', act: 'restart', args: { hidden: true }, silent: false, visible: false },
+    { how: 'started again', act: 'restart', args: {}, silent: true, visible: true },
+    {
+      how: 'started again with sound',
+      act: 'restart',
+      args: { silent: false },
+      silent: false,
+      visible: true,
+    },
+  ] as const;
+  let ran = 0;
+  for (const one of cases) {
+    if (one.visible && !visibleHere) {
+      continue;
+    }
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-silent-editor-'));
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Silent"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    const port = await reservePort();
+    const server = new ServerProcess({
+      env: {
+        GDHARNESS_PROJECT: project,
+        GDHARNESS_BRIDGE_PORT: String(port),
+        GODOT_PATH: process.execPath,
+        GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '20000',
+      },
+    });
+    // The editor being restarted: a process that holds its pid until it is asked to go.
+    const holder =
+      one.act === 'restart'
+        ? spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+            detached: true,
+            stdio: 'ignore',
+          })
+        : null;
+    const sockets: WebSocket[] = [];
+    const connect = async (): Promise<WebSocket> => {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      sockets.push(socket);
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      return socket;
+    };
+    try {
+      await server.initialize('regression-test');
+      let answer: unknown;
+      if (one.act === 'open') {
+        answer = parseTextContent(
+          await server.request('tools/call', {
+            name: 'editor_launch',
+            arguments: { op: 'open', projectPath: project, ...one.args },
+          }),
+        );
+        assert.equal(get(answer, 'launched'), true, `${one.how}: ${JSON.stringify(answer)}`);
+      } else {
+        const first = await connect();
+        first.on('message', (data: Buffer) => {
+          const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string; id?: string };
+          if (message.type === 'tool_invoke' && message.tool === 'quit_editor') {
+            first.send(
+              JSON.stringify({ type: 'tool_result', id: message.id, success: true, result: { ok: true } }),
+            );
+            holder?.kill();
+            first.close();
+            // The editor the server starts is a stand-in that never dials in, so this one does, as
+            // the restarted editor would.
+            void delay(1000).then(async () => {
+              const again = await connect();
+              again.send(
+                JSON.stringify(greeting(project, { editor_pid: process.pid, opened_by_a_server: true })),
+              );
+            });
+          }
+        });
+        first.send(JSON.stringify(greeting(project, { editor_pid: holder?.pid, opened_by_a_server: true })));
+        let greeted = false;
+        for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+          const status = parseTextContent(
+            await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+          );
+          greeted = get(status, 'editor', 'openedByAServer') === true;
+          if (!greeted) {
+            await delay(100);
+          }
+        }
+        assert.ok(greeted, `${one.how}: the editor being restarted greets as one a server opened`);
+        answer = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_launch', arguments: { op: 'restart', ...one.args } },
+            60_000,
+          ),
+        );
+        assert.equal(get(answer, 'restarted'), true, `${one.how}: ${JSON.stringify(answer)}`);
+      }
+      const argv = asArray(get(answer, 'arguments'), `${one.how}: the answer's arguments`).map(text);
+      assert.ok(
+        argv.includes('--path'),
+        `${one.how}: the answer carries what it was started with: ${JSON.stringify(answer)}`,
+      );
+      assert.equal(silence(argv), one.silent, `${one.how}: silent ${String(one.silent)}: ${argv.join(' ')}`);
+      ran += 1;
+    } finally {
+      for (const socket of sockets) {
+        socket.terminate();
+      }
+      if (holder?.pid !== undefined && alive(holder.pid)) {
+        holder.kill();
+      }
+      await server.stop();
+      sweep(project);
+    }
+  }
+  assert.ok(ran > 0, 'at least the hidden open ran');
+}
+
+/**
  * A restart another server began and could not finish is said, and settled by an editor arriving.
  *
  * A restart of an editor this server opened is a quit, a wait and a launch, and the server can be
@@ -11947,7 +12097,11 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
     clearEditorLog(project);
     const editor = spawnHidden(
       godotPath,
-      [...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project), true), '--quit-after', '2000'],
+      [
+        ...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project), true, true),
+        '--quit-after',
+        '2000',
+      ],
       { stdio: 'ignore' },
     );
     const pid = editor.pid ?? 0;
@@ -16561,7 +16715,8 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
   // per machine rather than per editor, and the second editor open otherwise binds neither. The
   // log file is the only way anything reads what an editor prints, since its console reaches no
   // plugin: an editor spawned without it is one whose startup nobody can see.
-  // A visible editor by default, which is the user's; headless only when asked to be hidden.
+  // A visible editor by default, which is the user's; headless only when asked to be hidden. Silent
+  // by default, which a headless one is already.
   const opened = [
     '--path',
     '/p',
@@ -16572,15 +16727,18 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
     '--log-file',
     '/p/.godot/gdharness-editor.log',
   ];
-  assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', false), [
-    '-e',
-    ...opened,
-  ]);
-  assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true), [
-    '-e',
-    '--headless',
-    ...opened,
-  ]);
+  assert.deepEqual(
+    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', false, true),
+    ['-e', '--audio-driver', 'Dummy', ...opened],
+  );
+  assert.deepEqual(
+    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', false, false),
+    ['-e', ...opened],
+  );
+  assert.deepEqual(
+    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true, true),
+    ['-e', '--headless', ...opened],
+  );
   // The scene as a res:// path and last: the engine reads it positionally, so text beginning
   // with a dash would otherwise be another option to it.
   assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: 'scenes/-odd.tscn' }), [
@@ -16754,19 +16912,29 @@ function testEngineFlagsAreAListNotAPassage(): void {
 }
 
 /**
- * Whether a run is silent: as asked, or as the server's environment says when it was not asked,
- * where `0` and `false` say no as an empty value does.
+ * What this server starts is silent unless the call asks for sound.
+ *
+ * A session's test run played a game's music on the owner's machine. Sound is for the call that
+ * asks for it with `silent: false`, and nothing else turns it on.
  */
-function testSilenceFollowsTheAskThenTheEnvironment(): void {
-  assert.equal(resolveSilent(true, {}), true, 'asked for');
-  assert.equal(resolveSilent(false, { GDHARNESS_SILENT: '1' }), false, 'asked against the default');
-  assert.equal(resolveSilent(undefined, {}), false, 'neither');
-  for (const yes of ['1', 'true', 'yes', 'TRUE']) {
-    assert.equal(resolveSilent(undefined, { GDHARNESS_SILENT: yes }), true, `GDHARNESS_SILENT=${yes}`);
-  }
-  for (const no of ['', '0', 'false', 'False']) {
-    assert.equal(resolveSilent(undefined, { GDHARNESS_SILENT: no }), false, `GDHARNESS_SILENT=${no}`);
-  }
+function testWhatThisServerStartsIsSilentUnlessAsked(): void {
+  assert.equal(resolveSilent(undefined), true, 'not asked');
+  assert.equal(resolveSilent(true), true, 'asked for silence');
+  assert.equal(resolveSilent(false), false, 'asked for sound');
+  const silentEditor = editorArguments('/p', { lsp: 1, dap: 2 }, '/log', false, true);
+  assert.deepEqual(
+    silentEditor.slice(silentEditor.indexOf('--audio-driver'), silentEditor.indexOf('--audio-driver') + 2),
+    ['--audio-driver', 'Dummy'],
+    `an editor this server opens is silent: ${silentEditor.join(' ')}`,
+  );
+  assert.ok(
+    !editorArguments('/p', { lsp: 1, dap: 2 }, '/log', false, false).includes('--audio-driver'),
+    'and one asked for sound is not',
+  );
+  assert.ok(
+    !editorArguments('/p', { lsp: 1, dap: 2 }, '/log', true, true).includes('--audio-driver'),
+    'a hidden editor is headless, which is silent already',
+  );
 }
 
 /**
@@ -21025,10 +21193,10 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
       assert.deepEqual(staleImports(project), [], 'and so does the check, or every run would import');
       const current = await answer('editor_run', { op: 'check' });
       assert.equal(get(current, 'booted'), true, JSON.stringify(current));
-      assert.equal(
-        get(current, 'importedFirst'),
-        undefined,
-        `nothing was behind: ${JSON.stringify(current)}`,
+      assert.deepEqual(
+        [get(current, 'importedFirst'), get(current, 'importTookMs')],
+        [undefined, undefined],
+        `nothing was behind, and so nothing was timed: ${JSON.stringify(current)}`,
       );
 
       writeFileSync(join(project, 'picture.png'), solidPng(160, 40, 40));
@@ -21054,6 +21222,11 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
         asArray(get(checked, 'importedFirst')).map(String).sort(),
         ['res://added.png', 'res://picture.png'],
         `the boot check imported both first: ${JSON.stringify(checked)}`,
+      );
+      // An engine's import pass takes seconds, and a reading of none would say the time was not taken.
+      assert.ok(
+        Number(get(checked, 'importTookMs')) > 0,
+        `and says how long the import took: ${JSON.stringify(checked)}`,
       );
       // The import retries the failed one too, as project_import reimport does, and says it stayed.
       assert.deepEqual(
@@ -22044,7 +22217,9 @@ const FAKE_EDITOR_PID = process.pid;
  * [param options.onAdapter] is handed each connection the server makes to the scripted adapter,
  * for a fixture that sends events down it. [param options.editorPid] is the process the editor
  * says it is, this one unless a fixture wants the adapter to be somebody else's. [param options.env]
- * is added to the server's environment, for a fixture about a default the environment sets.
+ * is added to the server's environment, for a fixture about a default the environment sets. The
+ * editor plays headless unless [param options.playsWindowed] says it plays a window, which is what
+ * sends a silent windowed start, and a headless one, to be started by the server instead.
  */
 async function withAPlayingEditor(
   answer: (where: Pick<PlayingEditorStage, 'adapter' | 'project' | 'runtimeDir'>) => EditorToolAnswer,
@@ -22056,6 +22231,7 @@ async function withAPlayingEditor(
     onAdapter?: (socket: Socket) => void;
     editorPid?: number;
     env?: Readonly<Record<string, string>>;
+    playsWindowed?: boolean;
   } = {},
 ): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
@@ -22095,10 +22271,14 @@ async function withAPlayingEditor(
           options.realAddon === true
             ? '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n'
             : '';
+        // The games here run headless, as the editor's would with these arguments, which is also
+        // what lets a silent start be played through the editor.
+        const playsHeadless =
+          options.playsWindowed === true ? '' : '\n[editor]\n\nrun/main_run_args="--headless"\n';
         writeFileSync(
           join(project, 'project.godot'),
           '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Played"\n' +
-            `run/main_scene="res://main.tscn"\n${registered}`,
+            `run/main_scene="res://main.tscn"\n${registered}${playsHeadless}`,
         );
         writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
         // The wait only happens for a project that could announce, which is one with the addon on
@@ -23041,10 +23221,29 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
       /^A profile is read through the debugger, and an exported build is started without one/,
     );
 
+    // Silent unless asked otherwise, as every run is: the engine flag goes before the build's own
+    // arguments. The stand-in is Node, which refuses the flag, so the build that has to run below is
+    // given sound instead.
+    const silentStart = parseTextContent(
+      await call({
+        op: 'start',
+        executable: build,
+        headless: false,
+        args: [script, saves, `${said}.silent`],
+      }),
+    );
+    assert.deepEqual(
+      get(silentStart, 'arguments'),
+      ['--audio-driver', 'Dummy', '--', script, saves, `${said}.silent`],
+      `an exported build is silent by default: ${JSON.stringify(silentStart)}`,
+    );
+    await call({ op: 'stop' });
+
     const answered = await call({
       op: 'start',
       executable: build,
       headless: false,
+      silent: false,
       savesIn: saves,
       args: [script, saves, said],
     });
@@ -24448,16 +24647,19 @@ async function testAPlayThroughAnotherProcesssAdapterIsRefusedEachTime(): Promis
  * why it did not go through the editor.
  *
  * A windowed run is kept off the desktop somebody is using, and its sound came out of the machine's
- * speakers all the same. Silence is an engine flag, and the editor takes none for a game it plays,
- * so a silent run is spawned the way a run with arguments is, losing the debugger, which the answer
- * has to say rather than leave to be found. Asked for, set as the server's default, and the default
- * turned down for one start, each against a connected editor that would otherwise play it.
+ * speakers all the same, and a session's test run once played a game's music on the owner's machine.
+ * Silence is an engine flag, and the editor takes none for a game it plays, so a silent run is
+ * spawned the way a run with arguments is, which the answer says rather than leave to be found. By
+ * default, asked for, and sound asked for with silent: false, each against a connected editor that
+ * would otherwise play it in a window; and an editor whose project plays its games headless, which
+ * are silent already and so are played through it.
  */
 async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
   const cases = [
-    { how: 'asked for', env: {}, silent: true as boolean | undefined, spawned: true, byDefault: false },
-    { how: 'by default', env: { GDHARNESS_SILENT: '1' }, silent: undefined, spawned: true, byDefault: true },
-    { how: 'turned down', env: { GDHARNESS_SILENT: '1' }, silent: false, spawned: false, byDefault: false },
+    { how: 'by default', silent: undefined as boolean | undefined, spawned: true, playsWindowed: true },
+    { how: 'asked for', silent: true, spawned: true, playsWindowed: true },
+    { how: 'sound asked for', silent: false, spawned: false, playsWindowed: true },
+    { how: 'played headless', silent: undefined, spawned: false, playsWindowed: false },
   ];
   for (const one of cases) {
     let plays = 0;
@@ -24509,13 +24711,8 @@ async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
           );
           assert.match(
             text(get(answer, 'message')),
-            /The editor cannot play a game silent, which takes an engine flag, so this one was started here/,
+            /The editor cannot play a game silent, which takes an engine flag, so this one was started here, silent as every run is unless asked otherwise, and silent: false plays it through the editor, with sound\./,
             `${one.how}: and says why: ${said}`,
-          );
-          assert.equal(
-            text(get(answer, 'message')).includes('silent because GDHARNESS_SILENT says so'),
-            one.byDefault,
-            `${one.how}: naming the default only when it was the default: ${said}`,
           );
           assert.equal(plays, 0, `${one.how}: and the editor is not asked to play`);
         } else {
@@ -24524,7 +24721,7 @@ async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
         }
         await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
       },
-      { env: one.env },
+      { playsWindowed: one.playsWindowed },
     );
   }
 }
@@ -26023,7 +26220,7 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
         );
       }
     },
-    { realAddon: true, engine },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
@@ -28298,7 +28495,7 @@ async function testAFindByClassReachesWhatExtendsIt(): Promise<void> {
         );
       }
     },
-    { realAddon: true, engine },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
@@ -28405,7 +28602,7 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
         );
       }
     },
-    { realAddon: true, engine },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
@@ -29630,7 +29827,7 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
         }
       }
     },
-    { realAddon: true, engine },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
@@ -29837,7 +30034,7 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
         );
       }
     },
-    { engine },
+    { engine, playsWindowed: true },
   );
 }
 
@@ -32701,9 +32898,16 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       const quick = await run('res://quick');
       assert.equal(get(quick, 'passed'), true, JSON.stringify(quick));
       const quickTook = Number(get(quick, 'tookMs'));
+      // gdUnit4 is copied in unimported, so the first run imports its pictures, which the limit
+      // does not cover and importTookMs counts.
+      const quickImport = get(quick, 'importedFirst') === undefined ? 0 : Number(get(quick, 'importTookMs'));
       assert.ok(
-        quickTook > 0 && quickTook < 12_000 && quickTook > Number(get(quick, 'time')) * 1000,
-        `tookMs covers the whole call and so more than the cases' own time: ${JSON.stringify(quick)}`,
+        quickTook > 0 &&
+          quickImport >= 0 &&
+          quickImport < quickTook &&
+          quickTook - quickImport < 12_000 &&
+          quickTook > Number(get(quick, 'time')) * 1000,
+        `tookMs covers the whole call and so more than the cases' own time, and the run without its import stays under its limit: ${JSON.stringify(quick)}`,
       );
       const steady = await run('res://steady');
       assert.equal(
@@ -32893,9 +33097,12 @@ async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
       const { answer, blocks, shown } = await ran();
       assert.equal(get(answer, 'timedOut'), undefined, `stopped before its timeout: ${shown}`);
       const took = Number(get(answer, 'tookMs'));
+      // The import that comes first is outside the limit, and importTookMs says how much of the
+      // call it was.
+      const imported = get(answer, 'importedFirst') === undefined ? 0 : Number(get(answer, 'importTookMs'));
       assert.ok(
-        took > 0 && took < 12_000,
-        `tookMs is the whole call, under the limit it stopped short of: ${shown}`,
+        took > 0 && imported >= 0 && imported < took && took - imported < 12_000,
+        `tookMs is the whole call, and without its import under the limit it stopped short of: ${shown}`,
       );
       assert.equal(get(answer, 'passed'), false, shown);
       assert.equal(
@@ -45205,6 +45412,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testBothEndsAgreeAboutTheAnnouncement,
   testARestartLeftHalfDoneIsSaid,
   testAnEditorStillArrivingIsNotOpenedBeside,
+  testAnEditorThisServerStartsIsSilentUnlessAsked,
   testABridgeThatMovedSaysFromWhere,
   testASupersededServerStandsDown,
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
@@ -45225,7 +45433,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSceneToolsVectorRegression,
   testRunArgumentsLeaveTheLocalDebuggerOff,
   testEngineFlagsAreAListNotAPassage,
-  testSilenceFollowsTheAskThenTheEnvironment,
+  testWhatThisServerStartsIsSilentUnlessAsked,
   testASilentRunIsStartedHereAndSaysWhy,
   testARunGivenEngineFlagsIsStartedHere,
   testEngineFlagsReachTheEngine,

@@ -1786,6 +1786,11 @@ interface ImportedFirst {
   readonly notImported: readonly unknown[];
   /** The scripts the import gave a `.uid` sidecar, which it writes for every script without one. */
   readonly uidsWritten: readonly string[];
+  /**
+   * How long the import took. It is outside a run's own limit, so a call that imported can take
+   * longer than the limit it was given, and this is what says where the rest went.
+   */
+  readonly tookMs: number;
   readonly note?: string;
 }
 
@@ -1798,6 +1803,7 @@ function importedFirstAnswer(importedFirst: ImportedFirst | undefined): {
   importedFirst?: readonly string[];
   notImportedFirst?: readonly unknown[];
   uidsWrittenFirst?: readonly string[];
+  importTookMs?: number;
   importNote?: string;
 } {
   if (importedFirst === undefined) {
@@ -1807,6 +1813,7 @@ function importedFirstAnswer(importedFirst: ImportedFirst | undefined): {
     ...(importedFirst.imported.length === 0 ? {} : { importedFirst: importedFirst.imported }),
     ...(importedFirst.notImported.length === 0 ? {} : { notImportedFirst: importedFirst.notImported }),
     ...(importedFirst.uidsWritten.length === 0 ? {} : { uidsWrittenFirst: importedFirst.uidsWritten }),
+    importTookMs: importedFirst.tookMs,
     ...(importedFirst.note === undefined ? {} : { importNote: importedFirst.note }),
   };
 }
@@ -3366,6 +3373,8 @@ class GodotServer {
     readonly pid: number;
     readonly startedAt: number | null;
     readonly projectPath: string;
+    /** What it was started with, which a restart answers with as an open does. */
+    readonly arguments: readonly string[];
   } | null = null;
 
   /**
@@ -5231,7 +5240,9 @@ class GodotServer {
     // The import gives a uid to every script without one, as the editor's scan does, so the files
     // it writes beside them are named as well as the ones it imported.
     const unminted = scriptsWithoutUid(projectPath);
+    const began = Date.now();
     const done = await this.reimport(projectPath, undefined, false, scanWaitMs());
+    const tookMs = Date.now() - began;
     const stillUnminted = scriptsWithoutUid(projectPath);
     const uidsWritten = unminted
       .filter((script) => !stillUnminted.includes(script))
@@ -5242,6 +5253,7 @@ class GodotServer {
         imported: [],
         notImported: [],
         uidsWritten,
+        tookMs,
         note: `Files changed since they were imported could not be imported before this run, so it reads their previous import: ${why}`,
       };
     }
@@ -5253,7 +5265,7 @@ class GodotServer {
         : notImported.length > 0
           ? 'The files under notImportedFirst are still on their previous import, so this run shows what they held before. project_import status says why.'
           : undefined;
-    return { imported, notImported, uidsWritten, ...(note === undefined ? {} : { note }) };
+    return { imported, notImported, uidsWritten, tookMs, ...(note === undefined ? {} : { note }) };
   }
 
   /**
@@ -8183,7 +8195,12 @@ class GodotServer {
     // `gdscript/warnings/return_value_discarded=0` out and changed nothing else.
     const settingsBefore = this.settingKeysOf(before.projectPath);
     const asked = mine
-      ? await this.startItAgain(before.projectPath ?? '', before.editorPid, args['hidden'] === true)
+      ? await this.startItAgain(
+          before.projectPath ?? '',
+          before.editorPid,
+          args['hidden'] === true,
+          resolveSilent(args['silent']),
+        )
       : await this.handleViaBridge('restart_editor', {});
     if (asked.isError === true) {
       return asked;
@@ -8227,6 +8244,8 @@ class GodotServer {
       staleNote: this.godotBridge.anotherRelease(),
       ...this.whatTheEditorDropped(settingsBefore, after),
       ...servers,
+      // One opened by hand restarts itself, with arguments the engine keeps to itself.
+      ...(mine && this.launchedEditor !== null ? { arguments: this.launchedEditor.arguments } : {}),
       tookMs: Date.now() - began,
     });
   }
@@ -8398,6 +8417,7 @@ class GodotServer {
     projectPath: string,
     editorPid: number | undefined,
     hidden: boolean,
+    silent: boolean,
   ): Promise<ToolResponse> {
     const engine = await this.engine();
     if (!engine.ok) {
@@ -8449,7 +8469,7 @@ class GodotServer {
       );
     }
 
-    const opened = await this.openAnEditor(engine.value, projectPath, ports, hidden);
+    const opened = await this.openAnEditor(engine.value, projectPath, ports, hidden, silent);
     // Settled either way: a launch that failed is answered to the caller who asked, which is not
     // an interruption, and leaving the note would have the next server explain a failure this one
     // already explained.
@@ -8528,7 +8548,13 @@ class GodotServer {
     // Read before the launch settles it, so the answer can say this open finished something
     // rather than started something.
     const unfinished = restartOwed(project.value.path);
-    const opened = await this.openAnEditor(engine.value, project.value.path, ports, args['hidden'] === true);
+    const opened = await this.openAnEditor(
+      engine.value,
+      project.value.path,
+      ports,
+      args['hidden'] === true,
+      resolveSilent(args['silent']),
+    );
     if (opened.error !== null) {
       return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
     }
@@ -8540,6 +8566,7 @@ class GodotServer {
       projectPath: project.value.path,
       lspPort: ports.lsp,
       dapPort: ports.dap,
+      arguments: opened.arguments,
       finishesRestart:
         unfinished === null
           ? undefined
@@ -8624,7 +8651,8 @@ class GodotServer {
     projectPath: string,
     ports: EditorPorts,
     hidden: boolean,
-  ): Promise<{ pid: number | null; error: string | null }> {
+    silent: boolean,
+  ): Promise<{ pid: number | null; error: string | null; arguments: readonly string[] }> {
     // Told rather than left to derive. A game is started by the editor and inherits its
     // environment, not this server's, so an editor opened without TMP or TEMP set announces its
     // games somewhere this server never looks first. Passing the directory down makes the two
@@ -8638,9 +8666,10 @@ class GodotServer {
     // Through a launcher that exits once the editor is up, so the editor is nobody's child here: the
     // harness ends a server by killing its process tree, at every reconnect, and an editor spawned
     // as this server's child went with it however detached it was.
+    const args = editorArguments(projectPath, ports, editorLogPath(projectPath), hidden, silent);
     const launched = await launchOutsideTheTree({
       command: engine,
-      args: editorArguments(projectPath, ports, editorLogPath(projectPath), hidden),
+      args,
       env: {
         ...process.env,
         GDHARNESS_RUNTIME_DIR: runtimeDirectory(),
@@ -8654,7 +8683,7 @@ class GodotServer {
       ...(hidden ? { desktop: HIDDEN_DESKTOP } : { noActivate: true }),
     });
     if ('error' in launched) {
-      return { pid: null, error: launched.error };
+      return { pid: null, error: launched.error, arguments: args };
     }
     // Which editor the log beside it belongs to, so a server that did not open this editor can
     // still tell its console from the one a previous editor left on disk. As soon as the pid is
@@ -8675,9 +8704,10 @@ class GodotServer {
       pid: launched.pid,
       startedAt: (await startTimesOf([launched.pid])).get(launched.pid) ?? null,
       projectPath,
+      arguments: args,
     };
     this.closedHere = null;
-    return { pid: launched.pid, error: null };
+    return { pid: launched.pid, error: null, arguments: args };
   }
 
   /**
@@ -8885,8 +8915,9 @@ class GodotServer {
     const editorWouldPlay = !headless || editorPlaysHeadless(project.value.file);
     // A silent run is spawned for the reason a run with arguments is: silence is an engine flag,
     // `--audio-driver Dummy`, and the editor takes none for a game it plays. Only a windowed one:
-    // a headless run is silent already, the editor's included.
-    const silent = resolveSilent(args['silent'], process.env) && !headless;
+    // a headless run is silent already, and so is one the editor plays headless.
+    const silent = resolveSilent(args['silent']) && !headless;
+    const silentOnlyHere = silent && !editorPlaysHeadless(project.value.file);
     const profiled = readBoolean(args, 'profile') === true;
     if (
       exported === null &&
@@ -8895,7 +8926,7 @@ class GodotServer {
       given.value.length === 0 &&
       flags.value.length === 0 &&
       !needsItsOwnProcess(asked.value) &&
-      !silent
+      !silentOnlyHere
     ) {
       return await this.playThroughEditor(
         sceneArgument,
@@ -8958,9 +8989,9 @@ class GodotServer {
           ? ` The editor cannot be handed arguments for a game it plays, so this one was started here.${OWN_DEBUGGER}`
           : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
             ? ` The editor plays a game with its own environment, so a run given one was started here.${OWN_DEBUGGER}`
-            : this.godotBridge.isConnected() && editorWouldPlay && silent
+            : this.godotBridge.isConnected() && editorWouldPlay && silentOnlyHere
               ? ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
-                `started here${args['silent'] === true ? '' : ', silent because GDHARNESS_SILENT says so'}, and silent: false plays it through the editor.${OWN_DEBUGGER}`
+                `started here, silent as every run is unless asked otherwise, and silent: false plays it through the editor, with sound.${OWN_DEBUGGER}`
               : '';
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not

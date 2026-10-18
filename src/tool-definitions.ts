@@ -211,7 +211,7 @@ const WITHOUT_AN_EDITOR =
   "Through the editor when one serves the project; with none, a headless engine runs the editor's own tool and the answer says so under writtenBy, or readBy for a read. That engine runs every script of the file, where the editor runs only tool scripts, so what a script changes as the file loads or as a property is set is put back before anything is saved, and a file where that cannot be done, such as a scene whose script does not compile, is refused and nothing is written. Each file the written one refers to is named by its uid, as the editor names it, except a file the project's uid cache has no uid for yet (one made since the project was last scanned), which is named by path and listed under namedByPath with the call that scans it. An editor of the project that is running and has not reached this server is waited for rather than written around.";
 /** What a run says about the imports it brought up to date before it started. */
 const IMPORTED_FIRST =
-  "importedFirst names the files whose import was behind them on disk, such as a picture changed since it was imported or one never imported, which were imported before the run through project_import reimport, so the run reads them as they are now; it is left out when every import was current. notImportedFirst lists, as project_import reimport does, any it could not import, and importNote says that the run reads those as they were. The import gives every script without a .uid sidecar one, as the editor's scan does, and uidsWrittenFirst names those scripts.";
+  "importedFirst names the files whose import was behind them on disk, such as a picture changed since it was imported or one never imported, which were imported before the run through project_import reimport, so the run reads them as they are now; it is left out when every import was current. notImportedFirst lists, as project_import reimport does, any it could not import, and importNote says that the run reads those as they were. The import gives every script without a .uid sidecar one, as the editor's scan does, and uidsWrittenFirst names those scripts. importTookMs is how long the import took; it is outside the run's own time limit, so a call that imported can take that much longer than the limit it was given.";
 const WHOLE_NUMBERS =
   'A whole number of 2^53 or more, such as a 64-bit seed or a resource uid, is written as its digits, {"_type": "int", "value": "9007199254740993"}, the form a read answers with: a JSON number that large can arrive as a neighbour of the one sent, so sent as a number it is refused.';
 const SCRIPT_PATH: JsonSchema = {
@@ -1317,6 +1317,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'Open the editor headless and, on Windows, on a desktop of its own, so no window of it or of the games it plays appears. Default false: one visible editor, shown without taking the focus. On restart only for an editor a server opened; one opened by hand comes back as it was, so hidden is refused there.',
       },
+      silent: {
+        type: 'boolean',
+        ops: ['open', 'restart'],
+        description:
+          "Open the editor with no sound out of the machine, started with --audio-driver Dummy, so a tool script, a preview or a scene playing in its viewport is heard by nobody. Default true: pass false to hear it. The answer's arguments are what the editor was started with. The editor hands no audio driver to a game it plays, so editor_run's own silent decides that game's sound. A hidden editor is headless and silent either way. On restart only for an editor a server opened; one opened by hand comes back as it was.",
+      },
     },
     requires: [],
     operations: {
@@ -1378,7 +1384,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['start'],
         description:
-          "start: run the game with no sound out of the machine, by starting the engine with --audio-driver Dummy: every stream still plays and every playback position still advances, so what is playing can still be asked. The editor takes no engine flags for a game it plays, so a silent windowed run is started by this server, whose keeper is its debugger rather than the editor. A headless run, check's included, is silent already. Default false, or true when GDHARNESS_SILENT is set in the server's environment to anything but 0 or false; silent: false then plays through the editor as before.",
+          "start: run the game with no sound out of the machine, by starting the engine with --audio-driver Dummy: every stream still plays and every playback position still advances, so what is playing can still be asked. The editor takes no engine flags for a game it plays, so a silent windowed run is started by this server, whose keeper is its debugger rather than the editor. A headless run, check's included, is silent already, and so is a test run. Default true, for an exported build too: pass false to hear the game, which a windowed run with the editor connected then plays through the editor.",
       },
       executable: {
         type: 'string',
