@@ -35,6 +35,9 @@ const Read = preload("reading.gd")
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
 ## for the editor's files to settle has to wait through as well.
 static var scan_due: bool = false
+## The files a headless save named by path alone because the uid cache holds no uid for them,
+## gathered for the answer to the call that saved, the one call its engine runs.
+static var by_path: PackedStringArray = []
 
 var root: Node = null
 var path: String = ""
@@ -173,21 +176,25 @@ func close() -> void:
 		root = null
 
 
-## The path of every entry the file holds under the instance at [param at] that goes once its
-## children are not editable: values for a node of the instance, and a node the scene added under
-## one, since the packer skips everything below a node of an instance that is not editable. A node
-## added straight under [param at] is the scene's own and stays.
-func held_under(at: String) -> Array[String]:
-	var held: Array[String] = []
+## What the file holds under the instance at [param at] that goes once its children are not
+## editable, as {values, nodes}: the paths of the instance's nodes it sets values on, which stay with
+## the instance's own values, and of the nodes the scene added below one of them, which are gone,
+## since the packer skips everything below a node of an instance that is not editable. A node added
+## straight under [param at] is the scene's own and stays.
+func held_under(at: String) -> Dictionary:
+	var values: Array[String] = []
+	var nodes: Array[String] = []
 	for index: int in _state.get_node_count():
 		var entry: String = _relative(str(_state.get_node_path(index)))
 		var parent: String = _relative(str(_state.get_node_path(index, true)))
 		var values_only: bool = (
 			_state.get_node_instance(index) == null and str(_state.get_node_type(index)).is_empty()
 		)
-		if (values_only and entry.begins_with(at + "/")) or parent.begins_with(at + "/"):
-			held.append(entry)
-	return held
+		if values_only and entry.begins_with(at + "/"):
+			values.append(entry)
+		elif not values_only and parent.begins_with(at + "/"):
+			nodes.append(entry)
+	return {"values": values, "nodes": nodes}
 
 
 ## The path of [param node] as a tool names it: "." for the root.
@@ -528,7 +535,9 @@ static func _with_external_uids(file_path: String) -> Error:
 		if not line.begins_with("[ext_resource ") or line.contains(' uid="'):
 			continue
 		var named: RegExMatch = pattern.search(line)
-		var uid: String = uid_attribute(named.get_string(1)) if named != null else ""
+		if named == null:
+			continue
+		var uid: String = reference_uid(named.get_string(1))
 		if not uid.is_empty():
 			lines[at] = line.replace(' path="', uid + ' path="')
 			changed = true
@@ -541,6 +550,28 @@ static func _with_external_uids(file_path: String) -> Error:
 		return ERR_FILE_CANT_WRITE
 	file.close()
 	return OK
+
+
+## [method uid_attribute] for a reference about to be written, noting [param named] under
+## [member by_path] when it is left to be named by path.
+static func reference_uid(named: String) -> String:
+	var uid: String = uid_attribute(named)
+	if uid.is_empty():
+		note_by_path(named)
+	return uid
+
+
+## Notes [param named], a reference just written by path alone, under [member by_path] when the uid
+## cache holds nothing for it: a file made since the project was last scanned, whose uid the cache
+## learns from the next scan. Not a file whose uid the cache gives to another, which a scan leaves.
+static func note_by_path(named: String) -> void:
+	if Engine.is_editor_hint() or not FileAccess.file_exists(named) or by_path.has(named):
+		return
+	var own: int = uid_in(named)
+	if own == ResourceUID.INVALID_ID and FileAccess.file_exists(named + ".uid"):
+		own = ResourceUID.text_to_id(FileAccess.get_file_as_string(named + ".uid").strip_edges())
+	if own == ResourceUID.INVALID_ID or not ResourceUID.has_id(own):
+		var _noted: bool = by_path.append(named)
 
 
 ## The uid attribute a reference to [param named] is written with, as ' uid="uid://..."', or "".

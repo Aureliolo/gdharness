@@ -43479,6 +43479,28 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       /\[ext_resource type="PackedScene" path="res:\/\/parts\/big_crate\.tscn" id="1_base"\]/,
       `big_crate.tscn was made since the import, so the uid cache has no uid for it to be named by: ${bigger}`,
     );
+    assert.equal(
+      get(further, 'namedByPath'),
+      'res://parts/big_crate.tscn is named by path rather than by uid: the uid cache has no uid for it yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.',
+      'and the answer says why, with the call that changes it',
+    );
+    assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
+    const refreshed = parseTextContent(await call('project_import', { op: 'refresh_uids' }));
+    assert.ok(Array.isArray(get(refreshed, 'uidsCreated')), JSON.stringify(refreshed));
+    const after = await written('scene_node', {
+      op: 'set',
+      scenePath: 'parts/bigger_crate.tscn',
+      nodePath: '.',
+      properties: { position: [1, 1] },
+    });
+    assert.equal(get(after, 'namedByPath'), undefined, JSON.stringify(after));
+    const bigUid = /uid="(uid:\/\/[a-y0-8]+)"/.exec(fileOf('parts/big_crate.tscn'))?.[1] ?? 'no header uid';
+    assert.ok(
+      fileOf('parts/bigger_crate.tscn').includes(
+        `[ext_resource type="PackedScene" uid="${bigUid}" path="res://parts/big_crate.tscn"`,
+      ),
+      `after the scan the reference names big_crate.tscn by its uid: ${fileOf('parts/bigger_crate.tscn')}`,
+    );
     await written('scene_node', {
       op: 'set',
       scenePath: 'parts/big_crate.tscn',
@@ -43612,8 +43634,8 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       editableChildren: false,
     });
     assert.deepEqual(
-      get(shut, 'dropped'),
-      ['Crate2/Look', 'Crate2/Look/Tag', 'Crate2/Bolt/Head'],
+      [get(shut, 'droppedValues'), get(shut, 'droppedNodes')],
+      [['Crate2/Look', 'Crate2/Bolt/Head'], ['Crate2/Look/Tag']],
       JSON.stringify(shut),
     );
     const closed = fileOf('main.tscn');

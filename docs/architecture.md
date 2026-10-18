@@ -879,7 +879,10 @@ save also writes back the uid the file had, and the uid on each external resourc
 engine with no editor's file system drops, since only that tells the saver a path's uid. A reference
 is given the uid the uid cache holds for its path and no other: one the cache does not know (a file
 made with no editor since the last scan) warns on every load, and one the cache gives another file
-(the original of a scene copied whole) loads that file. An animation library kept in a file of its
+(the original of a scene copied whole) loads that file. A file left to be named by path for the
+first reason is listed under `namedByPath` with `project_import refresh_uids`, whose import pass
+gives the cache its uid. Each headless call is an engine of its own, so the list gathered in a
+static on `scene_file.gd` holds that call's saves alone. An animation library kept in a file of its
 own is saved beside the scene, and refused when it, or a resource it embeds, carries a script that
 is not a tool, since nothing compares that file with its text. An editor of the project that is
 running and has not reached this server holds its own copy of anything it has open, and saving that

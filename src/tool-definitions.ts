@@ -208,7 +208,7 @@ const SCENE_PATH: JsonSchema = {
 };
 /** How the scene and resource tools answer when no editor serves the project. */
 const WITHOUT_AN_EDITOR =
-  "Through the editor when one serves the project; with none, a headless engine runs the editor's own tool and the answer says so under writtenBy, or readBy for a read. That engine runs every script of the file, where the editor runs only tool scripts, so what a script changes as the file loads or as a property is set is put back before anything is saved, and a file where that cannot be done, such as a scene whose script does not compile, is refused and nothing is written. An editor of the project that is running and has not reached this server is waited for rather than written around.";
+  "Through the editor when one serves the project; with none, a headless engine runs the editor's own tool and the answer says so under writtenBy, or readBy for a read. That engine runs every script of the file, where the editor runs only tool scripts, so what a script changes as the file loads or as a property is set is put back before anything is saved, and a file where that cannot be done, such as a scene whose script does not compile, is refused and nothing is written. Each file the written one refers to is named by its uid, as the editor names it, except a file the project's uid cache has no uid for yet (one made since the project was last scanned), which is named by path and listed under namedByPath with the call that scans it. An editor of the project that is running and has not reached this server is waited for rather than written around.";
 const WHOLE_NUMBERS =
   'A whole number of 2^53 or more, such as a 64-bit seed or a resource uid, is written as its digits, {"_type": "int", "value": "9007199254740993"}, the form a read answers with: a JSON number that large can arrive as a neighbour of the one sent, so sent as a number it is refused.';
 const SCRIPT_PATH: JsonSchema = {
@@ -623,7 +623,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       status: {
         effect: 'read',
         summary:
-          'which resources are outdated or failed, or one resource with resourcePath, each with its reason. Judged by content with the checks the editor makes before it reimports: a sidecar changed since its import, as setting an option without a reimport leaves it; a sidecar with no uid or written for another file; an output under .godot/imported that is gone (missing_outputs) or changed; a source whose hash differs from the one its import recorded, or with no record. Beyond the editor, a glTF scene whose import does not depend on an image it names, because it was built before that image was imported (imported_without; a scene whose import runs an import script is not judged on images). failed is an import that failed, which the editor never tries again on its own. Without resourcePath, a sidecar whose source is gone is listed as missing_source',
+          'which resources are outdated or failed, or one resource with resourcePath, each with its reason and a status the summary counts: needs_reimport (out of date, or a file the engine imports that has never been imported), failed, up_to_date, missing_source, or not_imported (a file the engine does not import at all, with why). Judged by content with the checks the editor makes before it reimports: a sidecar changed since its import, as setting an option without a reimport leaves it; a sidecar with no uid or written for another file; an output under .godot/imported that is gone (missing_outputs) or changed; a source whose hash differs from the one its import recorded, or with no record. Beyond the editor, a glTF scene whose import does not depend on an image it names, because it was built before that image was imported (imported_without; a scene whose import runs an import script is not judged on images). failed is an import that failed, which the editor never tries again on its own. Without resourcePath, a sidecar whose source is gone is listed as missing_source',
         requires: [],
       },
       options: { effect: 'read', summary: 'the import options of one resource', requires: ['resourcePath'] },
@@ -821,7 +821,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['add'],
         description:
-          'add: the node class, such as "CharacterBody2D", or a class_name a project script declares, which the node is made as with that script attached. Give this or instancePath.',
+          'add: the node class, such as "CharacterBody2D", or a class_name a project script declares, which the node is made as with that script attached. Give this or instancePath. The answer\'s nodeType is the class of the node made, for an instance the class of its scene\'s root.',
       },
       instancePath: {
         type: 'string',
@@ -835,7 +835,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['set'],
         description:
-          "set: on an instance of another scene, whether its children are editable here, as the editor's Editable Children makes them. True lets scene_node set give the nodes inside that instance values of this scene's own, which no other instance shares. An instance nested inside another takes it once the one around it has editable children. False drops every value this scene keeps for them and every node it added below them, and the answer lists those nodes under dropped; a node added straight under the instance stays. The answer says editableChildren as the file now holds it.",
+          "set: on an instance of another scene, whether its children are editable here, as the editor's Editable Children makes them. True lets scene_node set give the nodes inside that instance values of this scene's own, which no other instance shares. An instance nested inside another takes it once the one around it has editable children. False drops every value this scene keeps for them, and every node it added below one of them. The answer names the nodes whose values went under droppedValues (they stay, with the instance's own values) and the added nodes that went under droppedNodes; a node added straight under the instance stays. The answer says editableChildren as the file now holds it.",
       },
       newName: { type: 'string', ops: ['duplicate'], description: "duplicate: the copy's name." },
       newParentPath: {
@@ -1287,7 +1287,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       move: {
         effect: 'destructive',
-        summary: 'move or rename a file or a directory, and every path in the project naming it',
+        summary:
+          "move or rename a file or a directory, and every path in the project naming it. With no editor an import pass then rebuilds the project's uid cache, so a reference by uid leads to the new path, and uidTable says whether it ran",
         requires: ['newPath'],
       },
     },
