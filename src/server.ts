@@ -118,6 +118,7 @@ import {
   runOperation,
 } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
+import { staleImports } from './import-freshness.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
   failedCases,
@@ -349,6 +350,9 @@ const ANSWER_BUDGET = 4_000_000;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/** How long a server runs before the lifecycle log asks which process started it. */
+const PARENT_ASKED_AFTER_MS = 5_000;
+
 /**
  * How long a restart waits for the old editor to go, and then for the new one to come back.
  *
@@ -357,9 +361,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * has to look at, usually a dialog, and saying so beats holding the caller's call open in silence.
  * A project whose import runs past it sets GDHARNESS_EDITOR_RESTART_TIMEOUT_MS.
  */
-/** How long a server runs before the lifecycle log asks which process started it. */
-const PARENT_ASKED_AFTER_MS = 5_000;
-
 function editorRestartTimeoutMs(): number {
   return waitFromEnv('GDHARNESS_EDITOR_RESTART_TIMEOUT_MS', 90_000);
 }
@@ -589,13 +590,6 @@ export function longerWaitNote(tool: string, op: string, waitedMs: number): stri
   return `${tool} ${op} takes no timeoutMs: it was given ${waitedMs}ms, and ${how}.`;
 }
 
-/**
- * A file under the project as the project spells it, which is how a caller names it.
- *
- * Both sides resolved, since the adapter's spelling has every symlink followed and the project's
- * as the bridge reports it may not: on macOS every /var/folders project is really under
- * /private/var/folders, and the unresolved root would put its own files outside it.
- */
 /** A debug_control or debug_state call as the question it puts to a kept game's debugger. */
 function keptGameRequest(tool: string, op: string, args: OperationParams): DebugRequest {
   if (tool === 'debug_state') {
@@ -626,6 +620,13 @@ function keptGameRequest(tool: string, op: string, args: OperationParams): Debug
 const OWN_DEBUGGER =
   ' Its debugger is the keeper holding it rather than the editor, so the debug_* tools answer for it all the same: breakpoints stop it, and debug_control pause breaks into it wherever it is, which the editor offers no way to do.';
 
+/**
+ * A file under the project as the project spells it, which is how a caller names it.
+ *
+ * Both sides resolved, since the adapter's spelling has every symlink followed and the project's
+ * as the bridge reports it may not: on macOS every /var/folders project is really under
+ * /private/var/folders, and the unresolved root would put its own files outside it.
+ */
 function projectSpelling(projectPath: string, absolutePath: string): string {
   return `res://${relative(realPathOr(projectPath), realPathOr(absolutePath)).replaceAll('\\', '/')}`;
 }
@@ -1016,8 +1017,8 @@ export function ourRunEnded(
 /**
  * How a stop went: the run is gone; it was signalled and was still there when the wait ran out; or
  * nothing was signalled, because its pid no longer answers as the process the run was started as.
+ * `unreached` is a played run whose editor could not be asked to stop it.
  */
-/** `unreached` is a played run whose editor could not be asked to stop it. */
 type Ending = 'gone' | 'lingering' | 'refused' | 'unreached';
 
 /** What a stop answers about the run it was asked to end, apart from what that run had started. */
@@ -1767,18 +1768,56 @@ function scanWaitMs(): number {
 /** How long past its exit a run's output is waited for when something else still holds its pipes. */
 const STREAMS_GRACE_MS = 2_000;
 
-/** What a start waited for before the game was launched: an editor scan and its cache write. */
+/**
+ * What a start waited for before the game was launched: an editor scan and its cache write, and
+ * the imports of files changed on disk, which it brought up to date first.
+ */
 interface ScanWait {
   readonly waitedMs: number;
   /** The wait ran out with the editor still scanning, so the game started during the scan. */
   readonly stillScanning: boolean;
+  readonly importedFirst?: ImportedFirst;
+}
+
+/** The imports a run brought up to date before it started, when any were behind their files. */
+interface ImportedFirst {
+  readonly imported: readonly string[];
+  /** What project_import reimport could not bring up to date, grouped by its status and reason. */
+  readonly notImported: readonly unknown[];
+  /** The scripts the import gave a `.uid` sidecar, which it writes for every script without one. */
+  readonly uidsWritten: readonly string[];
+  /**
+   * How long the import took. It is outside a run's own limit, so a call that imported can take
+   * longer than the limit it was given, and this is what says where the rest went.
+   */
+  readonly tookMs: number;
+  readonly note?: string;
 }
 
 /**
- * What a start or a boot check says about the editor scan it waited for: nothing when there was
- * none, how long when there was, and a note when it gave up waiting, since a game started during a
- * scan can fail on a correct script and the caller would otherwise go looking in the script.
+ * What a run says about the imports it brought up to date: nothing when none was behind, and
+ * otherwise each one, since a caller who changed a picture learns here that the run shows the
+ * new one, and a note for any still on its previous import, which the run shows as it was.
  */
+function importedFirstAnswer(importedFirst: ImportedFirst | undefined): {
+  importedFirst?: readonly string[];
+  notImportedFirst?: readonly unknown[];
+  uidsWrittenFirst?: readonly string[];
+  importTookMs?: number;
+  importNote?: string;
+} {
+  if (importedFirst === undefined) {
+    return {};
+  }
+  return {
+    ...(importedFirst.imported.length === 0 ? {} : { importedFirst: importedFirst.imported }),
+    ...(importedFirst.notImported.length === 0 ? {} : { notImportedFirst: importedFirst.notImported }),
+    ...(importedFirst.uidsWritten.length === 0 ? {} : { uidsWrittenFirst: importedFirst.uidsWritten }),
+    importTookMs: importedFirst.tookMs,
+    ...(importedFirst.note === undefined ? {} : { importNote: importedFirst.note }),
+  };
+}
+
 /** The scan-wait fields an answer already carries, to be passed on by an answer built from it. */
 function scanWaitIn(payload: OperationParams): { waitedForEditorScanMs?: number; scanNote?: string } {
   const waited = readNumber(payload, 'waitedForEditorScanMs');
@@ -1964,12 +2003,18 @@ export function scanWaitAnswer(
 ): {
   waitedForEditorScanMs?: number;
   scanNote?: string | undefined;
+  importedFirst?: readonly string[];
+  notImportedFirst?: readonly unknown[];
+  uidsWrittenFirst?: readonly string[];
+  importNote?: string;
 } {
+  const imports = importedFirstAnswer(scanned.importedFirst);
   if (scanned.waitedMs === 0) {
-    return {};
+    return imports;
   }
   const still = `The editor was still scanning the project after ${scanWaitMs() / 1000} seconds, so`;
   return {
+    ...imports,
     waitedForEditorScanMs: scanned.waitedMs,
     scanNote: !scanned.stillScanning
       ? undefined
@@ -1994,15 +2039,6 @@ export function scanWaitAnswer(
  * would wait to be told nothing.
  */
 const PLAYING_STATUS_MS = 1_000;
-
-/**
- * How long an addon before 1.1.3 is believed when it says a scan it was asked for has not started.
- *
- * Those addons took `EditorFileSystem.scan()` as queued and reported `pending` until the editor
- * next said its filesystem changed. The call runs a scan or does nothing, so the flag is only a
- * guess, and this is the horizon on it rather than on the scan.
- */
-const SCAN_START_MS = 2_000;
 
 /**
  * How long the editor has to stay idle after a rescan before the rescan answers.
@@ -2218,9 +2254,9 @@ export function withoutUidUnder(unminted: readonly string[], paths: readonly str
 
 /**
  * [param answer] with [param missing], the scripts it ran that have no `.uid` sidecar yet, under
- * uidsMissing. The engine writes one when it imports the project and a test run does not, so a suite
- * written since the last import runs and passes here and then fails a gate that tracks the sidecars,
- * which is where it was found downstream.
+ * uidsMissing. The engine writes one when it imports the project, which a test run does only when an
+ * import is behind its file, so a suite written since the last import runs and passes here and then
+ * fails a gate that tracks the sidecars, which is where it was found downstream.
  */
 export function withUidsMissing(answer: ToolResponse, missing: readonly string[]): ToolResponse {
   const content = answer.content.map((part) => ({ ...part }));
@@ -2231,7 +2267,7 @@ export function withUidsMissing(answer: ToolResponse, missing: readonly string[]
       last.text = answerJson({
         ...parsed,
         uidsMissing: missing,
-        uidsNote: `${missing.length === 1 ? 'This script has' : 'These scripts have'} no .uid sidecar yet: the engine writes one when it imports the project, which a test run does not, so a check that tracks the sidecars fails on ${missing.length === 1 ? 'it' : 'them'}. project_import refresh_uids writes them.`,
+        uidsNote: `${missing.length === 1 ? 'This script has' : 'These scripts have'} no .uid sidecar yet: the engine writes one when it imports the project, and this run had nothing to import, so a check that tracks the sidecars fails on ${missing.length === 1 ? 'it' : 'them'}. project_import refresh_uids writes them.`,
       });
     }
   } catch {
@@ -3337,6 +3373,8 @@ class GodotServer {
     readonly pid: number;
     readonly startedAt: number | null;
     readonly projectPath: string;
+    /** What it was started with, which a restart answers with as an open does. */
+    readonly arguments: readonly string[];
   } | null = null;
 
   /**
@@ -5185,6 +5223,73 @@ class GodotServer {
   }
 
   /**
+   * Imports what changed on disk since it was imported, before a run reads the imports.
+   *
+   * An editor takes in a changed file only when its window regains focus, which an editor an
+   * agent drives never does, and an engine started without one never imports at all, so a game
+   * or a test run read the old import and drew a picture the project no longer held. The check
+   * reads the files and starts no engine; only when it finds something behind does the run pay
+   * for project_import reimport, which judges the project with project_import status and imports
+   * through the editor when one has the project open. A run is not refused for an import that
+   * failed: it is what the caller asked for, and the answer says which files it shows as before.
+   */
+  private async importWhatChanged(projectPath: string): Promise<ImportedFirst | undefined> {
+    if (staleImports(projectPath).length === 0) {
+      return undefined;
+    }
+    // The import gives a uid to every script without one, as the editor's scan does, so the files
+    // it writes beside them are named as well as the ones it imported.
+    const unminted = scriptsWithoutUid(projectPath);
+    const began = Date.now();
+    const done = await this.reimport(projectPath, undefined, false, scanWaitMs());
+    const tookMs = Date.now() - began;
+    const stillUnminted = scriptsWithoutUid(projectPath);
+    const uidsWritten = unminted
+      .filter((script) => !stillUnminted.includes(script))
+      .map((script) => `res://${script}`);
+    if (!done.ok) {
+      const why = done.response.content.map((block) => block.text).join(' ');
+      return {
+        imported: [],
+        notImported: [],
+        uidsWritten,
+        tookMs,
+        note: `Files changed since they were imported could not be imported before this run, so it reads their previous import: ${why}`,
+      };
+    }
+    const imported = (readArray(done.payload, 'reimported') ?? []).map(String);
+    const notImported = readArray(done.payload, 'notReimported') ?? [];
+    const note =
+      done.payload['stillImporting'] === true
+        ? `The editor was still importing files changed since they were imported when the wait ran out after ${scanWaitMs() / 1000} seconds, so this run may read their previous import. project_import status says where each stands.`
+        : notImported.length > 0
+          ? 'The files under notImportedFirst are still on their previous import, so this run shows what they held before. project_import status says why.'
+          : undefined;
+    return { imported, notImported, uidsWritten, tookMs, ...(note === undefined ? {} : { note }) };
+  }
+
+  /**
+   * [param waited] with the import that followed it, and with the wait for the cache the editor
+   * writes after importing, which it does by scanning: a game booted in that frame reads a cache
+   * being rewritten, as after any other scan.
+   */
+  private async afterTheImport(
+    projectPath: string,
+    waited: ScanWait,
+    importedFirst: ImportedFirst | undefined,
+  ): Promise<ScanWait> {
+    if (importedFirst === undefined) {
+      return waited;
+    }
+    const settled = await this.untilTheEditorsScanIsWritten(projectPath);
+    return {
+      waitedMs: waited.waitedMs + settled.waitedMs,
+      stillScanning: settled.stillScanning,
+      importedFirst,
+    };
+  }
+
+  /**
    * Waits out a scan the editor open on this project is running, and the class cache write that
    * follows it, so a game is not started against a cache being rewritten.
    *
@@ -6265,7 +6370,23 @@ class GodotServer {
     if (!classes.ok) {
       return this.answer(classes);
     }
-    const scanned = scanWaitIn(classes.payload);
+    // After the rebuild, so classes still says what the files declared that the cache lacked,
+    // whatever the import writes into the cache after it.
+    const rebuildWaited = scanWaitIn(classes.payload);
+    const importWaited = scanWaitAnswer(
+      await this.afterTheImport(
+        project.value.path,
+        { waitedMs: 0, stillScanning: false },
+        await this.importWhatChanged(project.value.path),
+      ),
+    );
+    const waitedMs = (rebuildWaited.waitedForEditorScanMs ?? 0) + (importWaited.waitedForEditorScanMs ?? 0);
+    const scanNote = importWaited.scanNote ?? rebuildWaited.scanNote;
+    const scanned = {
+      ...importWaited,
+      ...(waitedMs > 0 ? { waitedForEditorScanMs: waitedMs } : {}),
+      ...(scanNote === undefined ? {} : { scanNote }),
+    };
 
     // Under a name of this run's own. The directory is a path in the project rather than in this
     // process, so a second run against the same project wrote its report_1 beside the first's,
@@ -8074,7 +8195,12 @@ class GodotServer {
     // `gdscript/warnings/return_value_discarded=0` out and changed nothing else.
     const settingsBefore = this.settingKeysOf(before.projectPath);
     const asked = mine
-      ? await this.startItAgain(before.projectPath ?? '', before.editorPid, args['hidden'] === true)
+      ? await this.startItAgain(
+          before.projectPath ?? '',
+          before.editorPid,
+          args['hidden'] === true,
+          resolveSilent(args['silent']),
+        )
       : await this.handleViaBridge('restart_editor', {});
     if (asked.isError === true) {
       return asked;
@@ -8118,6 +8244,8 @@ class GodotServer {
       staleNote: this.godotBridge.anotherRelease(),
       ...this.whatTheEditorDropped(settingsBefore, after),
       ...servers,
+      // One opened by hand restarts itself, with arguments the engine keeps to itself.
+      ...(mine && this.launchedEditor !== null ? { arguments: this.launchedEditor.arguments } : {}),
       tookMs: Date.now() - began,
     });
   }
@@ -8289,6 +8417,7 @@ class GodotServer {
     projectPath: string,
     editorPid: number | undefined,
     hidden: boolean,
+    silent: boolean,
   ): Promise<ToolResponse> {
     const engine = await this.engine();
     if (!engine.ok) {
@@ -8340,7 +8469,7 @@ class GodotServer {
       );
     }
 
-    const opened = await this.openAnEditor(engine.value, projectPath, ports, hidden);
+    const opened = await this.openAnEditor(engine.value, projectPath, ports, hidden, silent);
     // Settled either way: a launch that failed is answered to the caller who asked, which is not
     // an interruption, and leaving the note would have the next server explain a failure this one
     // already explained.
@@ -8419,7 +8548,13 @@ class GodotServer {
     // Read before the launch settles it, so the answer can say this open finished something
     // rather than started something.
     const unfinished = restartOwed(project.value.path);
-    const opened = await this.openAnEditor(engine.value, project.value.path, ports, args['hidden'] === true);
+    const opened = await this.openAnEditor(
+      engine.value,
+      project.value.path,
+      ports,
+      args['hidden'] === true,
+      resolveSilent(args['silent']),
+    );
     if (opened.error !== null) {
       return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
     }
@@ -8431,6 +8566,7 @@ class GodotServer {
       projectPath: project.value.path,
       lspPort: ports.lsp,
       dapPort: ports.dap,
+      arguments: opened.arguments,
       finishesRestart:
         unfinished === null
           ? undefined
@@ -8515,7 +8651,8 @@ class GodotServer {
     projectPath: string,
     ports: EditorPorts,
     hidden: boolean,
-  ): Promise<{ pid: number | null; error: string | null }> {
+    silent: boolean,
+  ): Promise<{ pid: number | null; error: string | null; arguments: readonly string[] }> {
     // Told rather than left to derive. A game is started by the editor and inherits its
     // environment, not this server's, so an editor opened without TMP or TEMP set announces its
     // games somewhere this server never looks first. Passing the directory down makes the two
@@ -8529,9 +8666,10 @@ class GodotServer {
     // Through a launcher that exits once the editor is up, so the editor is nobody's child here: the
     // harness ends a server by killing its process tree, at every reconnect, and an editor spawned
     // as this server's child went with it however detached it was.
+    const args = editorArguments(projectPath, ports, editorLogPath(projectPath), hidden, silent);
     const launched = await launchOutsideTheTree({
       command: engine,
-      args: editorArguments(projectPath, ports, editorLogPath(projectPath), hidden),
+      args,
       env: {
         ...process.env,
         GDHARNESS_RUNTIME_DIR: runtimeDirectory(),
@@ -8545,7 +8683,7 @@ class GodotServer {
       ...(hidden ? { desktop: HIDDEN_DESKTOP } : { noActivate: true }),
     });
     if ('error' in launched) {
-      return { pid: null, error: launched.error };
+      return { pid: null, error: launched.error, arguments: args };
     }
     // Which editor the log beside it belongs to, so a server that did not open this editor can
     // still tell its console from the one a previous editor left on disk. As soon as the pid is
@@ -8566,9 +8704,10 @@ class GodotServer {
       pid: launched.pid,
       startedAt: (await startTimesOf([launched.pid])).get(launched.pid) ?? null,
       projectPath,
+      arguments: args,
     };
     this.closedHere = null;
-    return { pid: launched.pid, error: null };
+    return { pid: launched.pid, error: null, arguments: args };
   }
 
   /**
@@ -8680,11 +8819,16 @@ class GodotServer {
     // than reported: the caller asked for a game, and this is what it takes to have one. After any
     // scan the editor is running has written its own list, which would otherwise land over the
     // rebuild, and which a game booted in the middle of reads half-written.
-    const scanned = await this.untilTheEditorsScanIsWritten(project.value.path);
+    const waited = await this.untilTheEditorsScanIsWritten(project.value.path);
     const refreshed = await this.refreshStaleClasses(project.value.path);
     if (!refreshed.ok) {
       return refreshed.response;
     }
+    // After the classes, so refreshedClasses still names what the files declared that the cache
+    // lacked, whatever the import writes into the cache after it. An exported build carries its
+    // own imports.
+    const imported = exported === null ? await this.importWhatChanged(project.value.path) : undefined;
+    const scanned = await this.afterTheImport(project.value.path, waited, imported);
 
     const sceneArgument = sceneToRun?.ok ? sceneToRun.relativePath : null;
     if (op === 'check') {
@@ -8771,8 +8915,9 @@ class GodotServer {
     const editorWouldPlay = !headless || editorPlaysHeadless(project.value.file);
     // A silent run is spawned for the reason a run with arguments is: silence is an engine flag,
     // `--audio-driver Dummy`, and the editor takes none for a game it plays. Only a windowed one:
-    // a headless run is silent already, the editor's included.
-    const silent = resolveSilent(args['silent'], process.env) && !headless;
+    // a headless run is silent already, and so is one the editor plays headless.
+    const silent = resolveSilent(args['silent']) && !headless;
+    const silentOnlyHere = silent && !editorPlaysHeadless(project.value.file);
     const profiled = readBoolean(args, 'profile') === true;
     if (
       exported === null &&
@@ -8781,7 +8926,7 @@ class GodotServer {
       given.value.length === 0 &&
       flags.value.length === 0 &&
       !needsItsOwnProcess(asked.value) &&
-      !silent
+      !silentOnlyHere
     ) {
       return await this.playThroughEditor(
         sceneArgument,
@@ -8844,9 +8989,9 @@ class GodotServer {
           ? ` The editor cannot be handed arguments for a game it plays, so this one was started here.${OWN_DEBUGGER}`
           : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
             ? ` The editor plays a game with its own environment, so a run given one was started here.${OWN_DEBUGGER}`
-            : this.godotBridge.isConnected() && editorWouldPlay && silent
+            : this.godotBridge.isConnected() && editorWouldPlay && silentOnlyHere
               ? ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
-                `started here${args['silent'] === true ? '' : ', silent because GDHARNESS_SILENT says so'}, and silent: false plays it through the editor.${OWN_DEBUGGER}`
+                `started here, silent as every run is unless asked otherwise, and silent: false plays it through the editor, with sound.${OWN_DEBUGGER}`
               : '';
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
@@ -11851,8 +11996,8 @@ class GodotServer {
     // hidden editor imports what a scan finds on the thread that answers requests, so a large import
     // holds the answer until it is over; the editor is at work rather than gone, and is waited for.
     let startUnanswered = false;
-    // How many scans the editor had completed before the one asked for, from an addon that counts
-    // them: the scan asked for is over once the count has moved past it.
+    // How many scans the editor had completed before the one asked for: the scan asked for is over
+    // once the count has moved past it.
     let completedBefore: number | undefined;
     // Files whose `.uid` the editor had not taken in and was told to read again, and files on disk
     // naming one UID between them, from the call that started the scan.
@@ -11920,10 +12065,6 @@ class GodotServer {
         idleSince = null;
         continue;
       }
-      // `pending` is from an addon before 1.1.3, which took a scan asked for as queued. It is
-      // believed only for as long as a scan takes to start, since an addon that never cleared it
-      // would otherwise hold every rescan for the whole budget.
-      const pending = Boolean(status['pending']) && Date.now() - started < SCAN_START_MS;
       // The scan's own end, which neither flag gives: a threaded scan stops reporting itself when its
       // thread finishes, and what it found is imported when the thread is joined, a frame or more
       // later and longer in an editor left in the background. Idle flags in between read as done,
@@ -11931,7 +12072,7 @@ class GodotServer {
       const completed = readNumber(status, 'scansCompleted');
       const notYetOver =
         completedBefore !== undefined && completed !== undefined && completed <= completedBefore;
-      busy = Boolean(status['scanning']) || Boolean(status['importing']) || pending || notYetOver;
+      busy = Boolean(status['scanning']) || Boolean(status['importing']) || notYetOver;
       if (busy) {
         idleSince = null;
       } else {
