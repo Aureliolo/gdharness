@@ -38,37 +38,34 @@ three parts answer it differently:
 | `addons/gdharness_editor`  | by the editor, at startup      | after `editor_launch restart`    |
 | the MCP server             | by the harness, when it spawns | only when the harness reconnects |
 
-So a fix in the runtime addon is live immediately, even to a server several versions old: a
-project upgraded mid-session had `runtime_inspect` walking a path its own server predated, because
-the walk happens in the game. A fix in how an argument is parsed does not, because that happens in
-the server, and a server cannot replace itself: nothing inside it can ask the harness for a
-restart.
+So the halves of one project can be on different releases: an upgrade writes the addons under a
+running editor and game, and a server cannot replace itself, since nothing inside it can ask the
+harness for a restart. The server and the addons of one release ship together and are not kept
+working with any other release's, so a half running other code is refused rather than asked.
 
-That matters when a fix is being verified. "Upgraded and the tier is green" says the files are
-right, not that the thing answering is. `editor_status` is what settles it: `addonIsStale`
-compares the editor addon code the editor loaded against the code this server ships (by a digest
+The editor addon is judged by the code it loaded against the code this server ships, by a digest
 the install writes as `.gdharness-digest`, so an upgrade that leaves that code alone does not call
-the editor stale; an addon from before digests is compared by version), and `projectIs` catches
-the other direction, a project upgraded while the server kept running, which nothing else reports
-at all.
-
-Every answer that came out of the editor carries `addonIsStale` and `staleNote` too, when the two
-halves differ. Only `editor_status` used to, so an editor several releases behind went on
-answering scene and resource questions out of the code it loaded at startup, confidently, and a
-caller who never asked about versions had nothing to go on. Measured in the field: four errors
-from a stale addon that were not errors and vanished on restart. Read the version from
-`serverVersion` rather than from the pin when it matters, because the pin describes the next
-server and the process answering is whatever the harness spawned at the last reconnect.
+the editor stale. An editor whose greeting lacks a field this release sends is another release's
+too. The bridge sends such an editor nothing but the quit that `editor_launch close` and
+`editor_launch restart` need, and every other editor-routed call is refused with the remedy:
+`editor_launch restart` when the project holds this server's addons, `gdharness upgrade` first when
+it does not, and a reconnect when the editor is the newer half. `editor_status` answers throughout,
+with `addonIsStale` and `staleNote`, and `projectIs` catches the other direction, a project upgraded
+while the server kept running. Read the version from `serverVersion` rather than from the pin when
+it matters, because the pin describes the next server and the process answering is whatever the
+harness spawned at the last reconnect.
 
 A game says which runtime addon it loaded, read from the same two markers in
 `addons/gdharness_runtime` when it starts, and `editor_status` judges each entry under `runtimes`
-the same way, with `addonVersion`, `addonIsStale` and `staleNote`. Every `runtime_*` answer from a
-stale game carries the last two. "Live on the next `editor_run`" holds for the project that was
-upgraded: a second checkout of it, such as a git worktree, has its own `addons/`, and one was found
-running a runtime three releases behind its server with nothing saying so, because the protocol
-number, which was all that was compared, had not moved. `staleNote` names the fix by what the game's
-own project holds: `gdharness upgrade` there when its addon is not this server's either, a restart of
-the game when it is, and a reconnect when the game is the newer half.
+the same way, with `addonVersion`, `addonIsStale` and `staleNote`. A `runtime_*` call to a stale
+game is refused with the note and not sent. The check is by digest rather than by the protocol
+number because a second checkout of a project, such as a git worktree, has its own `addons/`, and
+one was found running a runtime three releases behind its server with the protocol number
+unchanged. The note names the fix by what the game's own project holds: `gdharness upgrade` there
+when its addon is not this server's either, a restart of the game when it is, and a reconnect when
+the game is the newer half. A runtime of another protocol is not listed as reachable at all: the
+protocol moves whenever the wire changes, and such a game is named as unreadable with the half that
+is behind.
 
 The runner is named by its path rather than as `npx` or `bunx`. A harness spawns what the config
 names, through PATH, and a runner's name is not always on it: a Bun installed under a project
@@ -465,8 +462,8 @@ headless operation, the import pass) first asks an editor open on that project w
 scan's end or for two seconds past it, and says how long under `waitedForEditorScanMs`. A class
 cache rebuild waits before it reads the cache it compares against, so the list the editor writes is
 the one compared. A scan still going after thirty seconds is an import of large assets rather than
-a script scan, and the engine starts anyway with a `scanNote`. An editor that does not answer, or
-whose addon predates `scan_status`, is not waited for.
+a script scan, and the engine starts anyway with a `scanNote`. An editor that does not answer is
+not waited for.
 
 Nothing the addon does saves a file while the editor scans or imports. A scan's thread ends by
 writing the editor's file list out to `.godot`, walking the list as it goes, and every save in the
@@ -745,8 +742,8 @@ confirmation. `editor_run stop` takes the file of the game it ended down itself,
 has gone, so the common case never reaches that judgement. A file that will not parse under a
 number a live process holds is left for the next look, not swept, and the addon writes the file
 whole under a `.tmp` name and moves it into place: the directory is shared by every server on the
-machine, and one still running an older sweep would otherwise take a file it met between the
-game's open and its write.
+machine, and one sweeping it would otherwise take a file it met between the game's open and its
+write.
 
 A script run is not one of them. Autoloads come up for `godot -s` as well, so a test tier or a
 batch tool would bind a port and announce itself under the project's own path, and a client asking

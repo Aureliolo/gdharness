@@ -34,7 +34,7 @@ import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headl
 import { defectReport } from './issues.js';
 import { isSameDirectory } from './paths.js';
 import { Ask, interactive } from './prompt.js';
-import { GODOT_DEBUG_MODE_DEFAULT } from './server-version.js';
+import { DEBUG_MODE } from './server-version.js';
 import {
   autoloadIsOurs,
   disablePlugins,
@@ -87,7 +87,7 @@ function projectArgument(at: number): string {
 async function engine(projectPath?: string): Promise<HeadlessEngine> {
   const located = await new GodotLocator().find();
   if (located.ok) {
-    return { godotPath: located.path, script: shippedOperationsScript(), debug: GODOT_DEBUG_MODE_DEFAULT };
+    return { godotPath: located.path, script: shippedOperationsScript(), debug: DEBUG_MODE };
   }
   // The recorded engine is for a machine where nothing is set and nothing is where it usually is.
   // A GODOT_PATH that names something broken is not that: falling back past it would run some
@@ -95,7 +95,7 @@ async function engine(projectPath?: string): Promise<HeadlessEngine> {
   const recorded =
     located.named === null && projectPath !== undefined ? recordedEnginePath(projectPath) : null;
   if (recorded !== null) {
-    return { godotPath: recorded, script: shippedOperationsScript(), debug: GODOT_DEBUG_MODE_DEFAULT };
+    return { godotPath: recorded, script: shippedOperationsScript(), debug: DEBUG_MODE };
   }
   const main = located.named === null && projectPath !== undefined ? mainCheckoutOf(projectPath) : null;
   const theirs = main === null ? null : recordedEnginePath(main);
@@ -107,7 +107,7 @@ async function engine(projectPath?: string): Promise<HeadlessEngine> {
   console.error(
     `engine: ${theirs}, which the harness config of ${main} names; this project is a git worktree of it`,
   );
-  return { godotPath: theirs, script: shippedOperationsScript(), debug: GODOT_DEBUG_MODE_DEFAULT };
+  return { godotPath: theirs, script: shippedOperationsScript(), debug: DEBUG_MODE };
 }
 
 /** The outcome as a line for a person, and a throw when the engine refused. */
@@ -485,8 +485,8 @@ async function upgrade(): Promise<void> {
       : `${present.version ?? 'an unmarked copy'} -> ${version}`,
   );
 
-  // Read before the copy replaces it. A copy from before digests has none, and then nothing says
-  // the code is the same, so the restart is asked for as it always was.
+  // Read before the copy replaces it. A copy gdharness did not install has none, and then nothing
+  // says the code is the same, so the restart is asked for.
   const digestBefore = installedEditorDigest(projectPath);
   for (const addon of installAddons(projectPath)) {
     console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
@@ -552,7 +552,7 @@ async function upgrade(): Promise<void> {
     digestBefore !== null && digestBefore === installedEditorDigest(projectPath)
       ? '  1. Nothing for the editor: this upgrade left the editor addons the same code as before,\n' +
           '     so it gives an open editor nothing to restart for. editor_status says addonIsStale\n' +
-          '     if the editor is older than that.'
+          '     if the editor is running other code.'
       : '  1. The open editor is still running the addons it loaded at startup. Restart it with the\n' +
           '     editor_launch restart tool, which closes and reopens the window.',
   );

@@ -7,6 +7,8 @@ import { errorMessage, Refusal, toError } from './errors.js';
 import { envValue } from './launch.js';
 import { isSameDirectory } from './paths.js';
 import { portFromEnv } from './ports.js';
+import { addonMismatch, SERVER_VERSION } from './server-version.js';
+import { installedEditorDigest, shippedEditorDigest } from './setup.js';
 
 const DEFAULT_PORT = 6505;
 const DEFAULT_HOST = '127.0.0.1';
@@ -109,32 +111,49 @@ interface PongMessage {
 interface GodotReadyMessage {
   type: 'godot_ready';
   project_path: string;
-  addon_version?: string;
-  addon_digest?: string;
-  editor_pid?: number;
-  /** The three ports this editor serves, so a server talks to this one and not another. */
-  lsp_port?: number;
-  dap_port?: number;
-  debug_port?: number;
+  /** Empty for a copy of the addon gdharness did not install, which carries no markers. */
+  addon_version: string;
+  addon_digest: string;
+  editor_pid: number;
+  /** The three ports this editor serves, so a server talks to this one and not another; 0 when it could not find out. */
+  lsp_port: number;
+  dap_port: number;
+  debug_port: number;
   /** Whether a debug session opening is told the editor's breakpoints, or takes them away. */
-  syncs_breakpoints?: boolean;
+  syncs_breakpoints: boolean;
   /** Whether a gdharness server started this editor, which decides who may start it again. */
-  opened_by_a_server?: boolean;
+  opened_by_a_server: boolean;
   /** Whether another editor started this one, and so none of the arguments it was given reached it. */
-  started_by_an_editor?: boolean;
+  started_by_an_editor: boolean;
+}
+
+/** Every field of the greeting with its type, which is what an editor of this release sends. */
+const GREETING_FIELDS: Readonly<Record<string, 'string' | 'number' | 'boolean'>> = {
+  project_path: 'string',
+  addon_version: 'string',
+  addon_digest: 'string',
+  editor_pid: 'number',
+  lsp_port: 'number',
+  dap_port: 'number',
+  debug_port: 'number',
+  syncs_breakpoints: 'boolean',
+  opened_by_a_server: 'boolean',
+  started_by_an_editor: 'boolean',
+};
+
+/** The greeting fields [param message] lacks or holds as the wrong type, in the order above. */
+export function greetingFaults(message: Record<string, unknown>): string[] {
+  return Object.entries(GREETING_FIELDS)
+    .filter(([field, type]) => typeof message[field] !== type)
+    .map(([field]) => field);
 }
 
 type IncomingMessage = ToolResultMessage | PongMessage | GodotReadyMessage;
 type OutgoingMessage = ToolInvokeMessage | PingMessage;
 
-/**
- * A port an editor says it serves on, or undefined for anything that is not one.
- *
- * Typed loosely on purpose: what arrives is whatever an addon sent, and an addon older than this
- * field sends nothing at all.
- */
-function servedPort(said: unknown): number | undefined {
-  return typeof said === 'number' && Number.isInteger(said) && said > 0 && said <= 65535 ? said : undefined;
+/** A port an editor says it serves on, or undefined for 0, its word for not knowing, or anything else not a port. */
+function servedPort(said: number): number | undefined {
+  return Number.isInteger(said) && said > 0 && said <= 65535 ? said : undefined;
 }
 
 interface BridgeEventMap {
@@ -170,34 +189,30 @@ interface GodotConnectionInfo {
   projectPath?: string;
   connectedAt: Date;
   lastPongAt?: Date;
+  // The fields below are set from the greeting, and absent until it arrives.
   /** The addon version this editor loaded, which an install under it does not change. */
   addonVersion?: string;
-  /** The digest of the editor addon code it loaded, absent from an addon older than digests. */
+  /** The digest of the editor addon code it loaded. */
   addonDigest?: string | undefined;
   /** Which process is on the other end, since a restarted editor is a new one. */
   editorPid?: number | undefined;
   /**
-   * Where this editor serves its language server, its debug adapter and its own debugger.
+   * Where this editor serves its language server, its debug adapter and its own debugger, each
+   * undefined when the editor could not find out.
    *
    * Godot keeps one of each per machine rather than per editor, so the numbers are only worth
-   * reporting because a second editor has to be moved off them. Undefined for an addon too old
-   * to say, which is answered by falling back to the defaults it would have been on anyway.
+   * reporting because a second editor has to be moved off them.
    */
   lspPort?: number | undefined;
   dapPort?: number | undefined;
   debugPort?: number | undefined;
-  /**
-   * Whether a gdharness server started this editor.
-   *
-   * Undefined for an addon too old to say, which reads as no: an editor nothing claims is one this
-   * server leaves to restart itself, which is what every editor did before this was asked.
-   */
+  /** Whether a gdharness server started this editor; one nothing claims restarts itself. */
   openedByAServer?: boolean | undefined;
   /**
    * Whether another editor started this one: Godot's own restart, or the project manager opening a
    * project. Such an editor has the environment and none of the arguments of the one before it, so
    * it serves the ports its editor settings name, writes no console a server asked for, and is not
-   * the editor any server opened. Undefined for an addon too old to say.
+   * the editor any server opened.
    */
   startedByAnEditor?: boolean | undefined;
   /**
@@ -205,7 +220,7 @@ interface GodotConnectionInfo {
    *
    * Godot clears every breakpoint in the script editor on a session's `initialize` unless
    * `network/debug_adapter/sync_breakpoints` is on; the addon turns it on as it loads and reports
-   * it here. Undefined for an addon too old to say, which is one that never turned it on.
+   * it here, so false is the setting turned off again by hand.
    */
   syncsBreakpoints?: boolean | undefined;
   /**
@@ -285,9 +300,8 @@ export function mayYetConnect(listeningSince: Date | undefined, now: number = Da
  * note then told the caller to restart a healthy editor, which costs them the language server and
  * the bridge for nothing. Reported downstream on a restart onto the current addon.
  *
- * An addon too old to report a version is recorded as the empty string when `godot_ready` lands, so
- * waiting for the version to be *known* rather than non-empty terminates for those too. Waiting for
- * a non-empty one would hang exactly on the editors the staleness note exists for.
+ * An addon with no version marker is recorded as the empty string when `godot_ready` lands, so
+ * waiting for the version to be *known* rather than non-empty terminates for those too.
  */
 export function theEditorHasComeBack(
   status: { connected: boolean; connectedAt?: Date | undefined; addonVersion?: string | undefined },
@@ -358,6 +372,19 @@ export class BridgeTimeout extends Error {
 }
 
 /** The editor turned a tool away unrun because it was scanning or importing its files. */
+/**
+ * A tool not sent to an editor running another release's addon, whose answer would be that
+ * release's. The message is the remedy.
+ */
+export class AddonOfAnotherRelease extends Error {}
+
+/**
+ * The commands an editor of another release is still sent, since only its addon can end it: the
+ * quit editor_launch close and a server's own restart send, and the restart an editor opened by
+ * hand does itself.
+ */
+const ASKED_OF_ANY_RELEASE: ReadonlySet<string> = new Set(['quit_editor', 'restart_editor']);
+
 class EditorBusy extends Error {
   constructor(toolName: string) {
     super(`The editor was scanning or importing its files, so ${toolName} was not run.`);
@@ -405,9 +432,8 @@ export class GodotBridge extends EventEmitter {
   /**
    * The project this bridge serves, or null when nothing said which.
    *
-   * Null is every config written by hand and every one written before a server knew its project,
-   * and it is what keeps those working exactly as they did: an editor is taken on the port alone,
-   * because the port is the whole contract when there is nowhere to announce.
+   * Null for a config written by hand: an editor is taken on the port alone, because the port is
+   * the whole contract when there is nowhere to announce.
    */
   private readonly ownProject: string | null;
 
@@ -651,6 +677,25 @@ export class GodotBridge extends EventEmitter {
     };
   }
 
+  /**
+   * Why the connected editor is asked nothing but to quit, with what to do about it, or undefined
+   * when it runs this server's addon or has not greeted yet.
+   */
+  public anotherRelease(): string | undefined {
+    const info = this.connectionInfo;
+    if (info?.greeted !== true || info.addonVersion === undefined || info.addonDigest === undefined) {
+      return undefined;
+    }
+    const project = info.projectPath;
+    return addonMismatch(
+      info.addonVersion,
+      SERVER_VERSION,
+      info.addonDigest,
+      shippedEditorDigest(),
+      project === undefined || project === '' ? undefined : installedEditorDigest(project),
+    );
+  }
+
   public invokeTool(
     toolName: string,
     args: Record<string, unknown>,
@@ -843,36 +888,38 @@ export class GodotBridge extends EventEmitter {
       case 'godot_ready':
         if (this.connectionInfo) {
           if (this.belongsElsewhere(message.project_path)) {
-            this.elsewhereUnlessOneShot(
-              message.project_path,
-              message.editor_pid,
-              message.opened_by_a_server === true,
-            );
+            this.elsewhereUnlessOneShot(message.project_path, message.editor_pid, message.opened_by_a_server);
             return;
           }
           this.connectionInfo.projectPath = withoutTrailingSeparator(message.project_path);
-          // An older addon sends no version at all, which is itself worth reporting: it is one
-          // installed before this was written, so it is certainly not the shipped one.
-          this.connectionInfo.addonVersion = message.addon_version ?? '';
+          const faults = greetingFaults(message as unknown as Record<string, unknown>);
+          if (faults.length > 0) {
+            // Another release's addon, which this server asks nothing but to quit. The connection is
+            // kept for that: closed, the addon dials straight back, and only it can quit its editor.
+            this.log('info', `Godot ready from another release's addon, which sent no ${faults.join(', ')}`);
+            this.connectionInfo.addonVersion =
+              typeof message.addon_version === 'string' ? message.addon_version : '';
+            this.connectionInfo.addonDigest = '';
+            // Read when it is one, so editor_launch close and restart can wait on its process.
+            this.connectionInfo.editorPid =
+              typeof message.editor_pid === 'number' ? message.editor_pid : undefined;
+            this.connectionInfo.greeted = true;
+            this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
+            return;
+          }
+          this.connectionInfo.addonVersion = message.addon_version;
           this.connectionInfo.addonDigest = message.addon_digest;
           this.connectionInfo.editorPid = message.editor_pid;
-          // Zero is the addon saying it could not find out, which is the same answer as an addon
-          // too old to be asked, and both are the defaults.
           this.connectionInfo.lspPort = servedPort(message.lsp_port);
           this.connectionInfo.dapPort = servedPort(message.dap_port);
           this.connectionInfo.debugPort = servedPort(message.debug_port);
-          this.connectionInfo.openedByAServer = message.opened_by_a_server === true;
-          this.connectionInfo.startedByAnEditor =
-            typeof message.started_by_an_editor === 'boolean' ? message.started_by_an_editor : undefined;
-          // Left undefined rather than read as false for an addon that does not say, since the
-          // two call for different advice: one is an editor to restart, the other a setting.
-          this.connectionInfo.syncsBreakpoints =
-            typeof message.syncs_breakpoints === 'boolean' ? message.syncs_breakpoints : undefined;
+          this.connectionInfo.openedByAServer = message.opened_by_a_server;
+          this.connectionInfo.startedByAnEditor = message.started_by_an_editor;
+          this.connectionInfo.syncsBreakpoints = message.syncs_breakpoints;
           this.log('info', `Godot ready: ${message.project_path}`);
           this.connectionInfo.greeted = true;
-          const pid = this.connectionInfo.editorPid;
-          if (!this.connectionInfo.openedByAServer && pid !== undefined && this.oneShotReader !== null) {
-            this.identify(pid);
+          if (!message.opened_by_a_server && this.oneShotReader !== null) {
+            this.identify(message.editor_pid);
             return;
           }
           this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
@@ -895,6 +942,10 @@ export class GodotBridge extends EventEmitter {
   ): Promise<unknown> {
     if (!this.isConnected()) {
       return Promise.reject(new Error('Godot is not connected'));
+    }
+    const otherRelease = ASKED_OF_ANY_RELEASE.has(toolName) ? undefined : this.anotherRelease();
+    if (otherRelease !== undefined) {
+      return Promise.reject(new AddonOfAnotherRelease(otherRelease));
     }
 
     const requestId = randomUUID();

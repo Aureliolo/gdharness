@@ -47,9 +47,9 @@ export interface RunRecord {
    * What a process's own start is held against, since `startedAt` is when the start was asked for.
    * A windowed run on Windows goes through a helper compiled on first use, and on a loaded runner the
    * engine began more than the window after that: its own stop then refused it as a process started
-   * too late to be the run, and left it running. Absent from a note written before this was kept.
+   * too late to be the run, and left it running.
    */
-  readonly startedBy?: number;
+  readonly startedBy: number;
   readonly projectPath: string;
   /**
    * The project the server that started the run serves, which can be another than the run's.
@@ -57,13 +57,12 @@ export interface RunRecord {
    * A server serving one project can start a run of another by naming its projectPath. Its
    * successor after a reconnect serves the same project, and found the note under the run's
    * project, not its own, so it refused the run as another server's while the runtime tools still
-   * reached the game. Absent from a note written before this was kept, and for a server that names
-   * no project.
+   * reached the game. Absent for a server that names no project.
    */
   readonly servedBy?: string;
   /**
-   * Where the keeper holding the game listens for a stop: see `keeper-channel.ts`. Absent from a note
-   * written before keepers listened, and for a keeper that could not.
+   * Where the keeper holding the game listens for a stop: see `keeper-channel.ts`. Absent for a
+   * keeper that could not listen.
    */
   readonly keeper?: string;
   /**
@@ -75,10 +74,10 @@ export interface RunRecord {
   /**
    * The engine this run was started with, so the pid can be shown to still mean this run.
    *
-   * Absent from a record written before this was kept, and a pid on its own is not an identity:
-   * see `stillTheRecordedRun`, which is what decides whether anything may be signalled.
+   * A pid on its own is not an identity: see `stillTheRecordedRun`, which is what decides whether
+   * anything may be signalled.
    */
-  readonly command?: string;
+  readonly command: string;
   /**
    * What it exited with, written by the keeper that holds the game the moment it ends.
    *
@@ -96,15 +95,6 @@ function runsDirectory(): string {
   return join(runtimeDirectory(), 'runs');
 }
 
-/**
- * The part of a note's name that says whose project it is.
- *
- * One note per project, because the runs directory is every project's on the machine: with one
- * note for all of them, a bench one project started overwrote the note of a run another project's
- * server had started, and that server's successor after a reconnect found no run of its own and
- * refused to end the game as somebody else's. Normalised the way `isSameDirectory` compares, so
- * the spelling a server was given and the one its editor reports name the same note.
- */
 /**
  * [param path] with the links in whatever part of it exists resolved, and the rest as written.
  *
@@ -130,6 +120,15 @@ function realAsFarAsItExists(path: string): string {
   }
 }
 
+/**
+ * The part of a note's name that says whose project it is.
+ *
+ * One note per project, because the runs directory is every project's on the machine: with one
+ * note for all of them, a bench one project started overwrote the note of a run another project's
+ * server had started, and that server's successor after a reconnect found no run of its own and
+ * refused to end the game as somebody else's. Normalised the way `isSameDirectory` compares, so
+ * the spelling a server was given and the one its editor reports name the same note.
+ */
 function projectKey(projectPath: string): string {
   const real = realAsFarAsItExists(resolve(projectPath)).replace(/[\\/]+$/, '');
   const folded = process.platform === 'win32' || process.platform === 'darwin' ? real.toLowerCase() : real;
@@ -165,7 +164,7 @@ export function writeLatestRun(servedBy: string, latest: LatestRun): void {
     mkdirSync(runsDirectory(), { recursive: true });
     writeWhole(latestRunPath(servedBy), JSON.stringify(latest, null, 2));
   } catch {
-    // Unwritable leaves the successor choosing by age, which is what it did before this was kept.
+    // Unwritable leaves the successor choosing by age.
   }
 }
 
@@ -185,12 +184,6 @@ export function readLatestRun(servedBy: string, directory = runtimeDirectory()):
     return null;
   }
 }
-
-/**
- * The one note every project shared before notes were per project, read so a run a server of that
- * version started is still picked up and ended after the upgrade.
- */
-const SHARED_NOTE = 'run.json';
 
 /**
  * A transcript nothing else is writing to, opened for appending.
@@ -280,9 +273,7 @@ export function writeEditorRunNote(note: EditorRunNote): void {
 /** The editor-played run of [param projectPath] another server left a file for, or null. */
 export function readEditorRunNote(projectPath: string): EditorRunNote | null {
   for (const directory of runtimeDirectories()) {
-    const note =
-      editorNoteAt(editorNotePath(projectPath, directory)) ??
-      editorNoteAt(join(directory, 'runs', 'editor-run.json'));
+    const note = editorNoteAt(editorNotePath(projectPath, directory));
     if (note !== null && isSameDirectory(note.projectPath, projectPath)) {
       return note;
     }
@@ -363,10 +354,6 @@ export function readRunRecord(projectPath: string): RunRecord | null {
     if (own !== null) {
       return own;
     }
-    const shared = recordAt(join(directory, 'runs', SHARED_NOTE));
-    if (shared !== null && shared.projectPath !== '' && isSameDirectory(shared.projectPath, projectPath)) {
-      return shared;
-    }
   }
   return null;
 }
@@ -382,7 +369,7 @@ export function everyRunRecord(): RunRecord[] {
       continue;
     }
     for (const entry of entries) {
-      if (entry === SHARED_NOTE || (entry.startsWith('note-') && entry.endsWith('.json'))) {
+      if (entry.startsWith('note-') && entry.endsWith('.json')) {
         const record = recordAt(join(directory, 'runs', entry));
         if (record !== null) {
           found.push(record);
@@ -411,12 +398,24 @@ function recordAt(path: string): RunRecord | null {
     return null;
   }
   const args = fields['arguments'];
+  const startedBy = fields['startedBy'];
+  const projectPath = fields['projectPath'];
+  const command = fields['command'];
+  if (
+    typeof startedBy !== 'number' ||
+    typeof projectPath !== 'string' ||
+    projectPath === '' ||
+    typeof command !== 'string' ||
+    !Array.isArray(args)
+  ) {
+    return null;
+  }
   return {
     pid,
     transcript,
     startedAt,
-    ...(typeof fields['startedBy'] === 'number' ? { startedBy: fields['startedBy'] } : {}),
-    projectPath: typeof fields['projectPath'] === 'string' ? fields['projectPath'] : '',
+    startedBy,
+    projectPath,
     ...(typeof fields['servedBy'] === 'string' && fields['servedBy'] !== ''
       ? { servedBy: fields['servedBy'] }
       : {}),
@@ -424,8 +423,8 @@ function recordAt(path: string): RunRecord | null {
     ...(typeof fields['profile'] === 'string' && fields['profile'] !== ''
       ? { profile: fields['profile'] }
       : {}),
-    arguments: Array.isArray(args) ? args.filter((value): value is string => typeof value === 'string') : [],
-    ...(typeof fields['command'] === 'string' ? { command: fields['command'] } : {}),
+    arguments: args.filter((value): value is string => typeof value === 'string'),
+    command,
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
     ...(typeof fields['exitSignal'] === 'string' ? { exitSignal: fields['exitSignal'] } : {}),
     ...(typeof fields['endedAt'] === 'number' ? { endedAt: fields['endedAt'] } : {}),
@@ -736,16 +735,15 @@ export function whyNotTheRun(
   // The cost is a clock stepped backwards by more than the window between the note being written
   // and the process being asked about, which would read a live run as finished. Remote against an
   // adjustment of that size, and the alternative is a stale yes on every fan-out.
-  const after =
-    running.startedAt === undefined ? 0 : running.startedAt - (record.startedBy ?? record.startedAt);
+  const after = running.startedAt === undefined ? 0 : running.startedAt - record.startedBy;
   if (after > SAME_RUN_WINDOW_MS) {
     return `that process started ${Math.round(after / 1000)} seconds after the run had`;
   }
-  const engine = record.command === undefined ? null : basename(record.command);
+  const engine = basename(record.command);
   const said = process.platform === 'win32' ? running.text.toLowerCase() : running.text;
-  const wanted = engine === null || process.platform !== 'win32' ? engine : engine.toLowerCase();
-  if (wanted !== null && !said.includes(wanted)) {
-    return `that process is not ${engine ?? 'the engine'}, which the run was started with`;
+  const wanted = process.platform === 'win32' ? engine.toLowerCase() : engine;
+  if (!said.includes(wanted)) {
+    return `that process is not ${engine}, which the run was started with`;
   }
   // An editor is not a run, and nothing else here separates the two: the editor holding a project
   // and a game of that project are the same binary pointed at the same directory, which is all
@@ -759,15 +757,7 @@ export function whyNotTheRun(
   if (running.kind === 'commandLine' && readCommandLine(running.text).editor) {
     return 'that process is an editor';
   }
-  if (record.projectPath === '') {
-    // An older record names no project to compare, so the executable is the whole of what there
-    // is to go on either way. A record written by this version answers both.
-    return wanted !== null ? null : 'the record names neither the project nor the engine';
-  }
   if (running.kind === 'image') {
-    if (wanted === null) {
-      return 'the operating system named only its executable, and the record names no engine';
-    }
     return needed === 'possible'
       ? null
       : `the operating system named only its executable and not its command line (${running.unread ?? 'no reason given'}), which is not enough to signal it on`;
@@ -818,24 +808,14 @@ export function judgeAnnouncedGame(
 /**
  * Take [param projectPath]'s note away for a run that has ended, wherever it was left.
  *
- * Every candidate directory is looked in, for the same reason they are read. The note every project
- * shared before notes were per project is taken away only when it names this project, since another
- * project's run may be the one it describes.
+ * Every candidate directory is looked in, for the same reason they are read.
  */
 export function clearRunRecord(projectPath: string): void {
   for (const directory of runtimeDirectories()) {
-    const shared = join(directory, 'runs', SHARED_NOTE);
-    const sharedRecord = recordAt(shared);
-    const ours =
-      sharedRecord !== null &&
-      sharedRecord.projectPath !== '' &&
-      isSameDirectory(sharedRecord.projectPath, projectPath);
-    for (const path of [runRecordPath(projectPath, directory), ...(ours ? [shared] : [])]) {
-      try {
-        rmSync(path, { force: true });
-      } catch {
-        // Held open for a moment, which leaves it for the next clear.
-      }
+    try {
+      rmSync(runRecordPath(projectPath, directory), { force: true });
+    } catch {
+      // Held open for a moment, which leaves it for the next clear.
     }
   }
 }

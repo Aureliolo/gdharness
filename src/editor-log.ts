@@ -50,9 +50,8 @@ function editorLogNotePath(projectPath: string): string {
  * Which editor the log beside this note was written by.
  *
  * The pid is the whole point of the note. A log left by yesterday's editor is still on disk today,
- * and `opened_by_a_server` is true of an editor opened by any gdharness, including one from before
- * this was captured at all. Both of those would otherwise be read as the connected editor's
- * console, which is the one way this can answer with somebody else's output.
+ * and would otherwise be read as the connected editor's console, which is the one way this can
+ * answer with somebody else's output.
  */
 interface EditorLogNote {
   readonly pid: number;
@@ -106,7 +105,7 @@ export function writeEditorLogNote(projectPath: string, pid: number): void {
 /** Why there is no console to read, or null when there is one. */
 export type NoConsole =
   | { readonly kind: 'not ours' }
-  | { readonly kind: 'older server'; readonly notedPid: number | null }
+  | { readonly kind: 'another editor'; readonly notedPid: number | null }
   | { readonly kind: 'not written' };
 
 /**
@@ -124,12 +123,11 @@ export function theConsoleWasNotCaptured(why: NoConsole, projectPath: string): s
       'at it from inside. This is not an editor that printed nothing.'
     );
   }
-  if (why.kind === 'older server') {
+  if (why.kind === 'another editor') {
     return (
       `This editor was opened by a gdharness server, but the console beside ${projectPath} belongs ` +
       `to editor ${why.notedPid ?? 'none recorded'} rather than to this one, so it holds an ` +
-      'earlier session and is not offered as this one. A server from before consoles were ' +
-      'captured leaves exactly this.'
+      'earlier session and is not offered as this one.'
     );
   }
   return (
@@ -158,7 +156,7 @@ export function editorConsole(
   }
   const noted = readEditorLogNote(projectPath);
   if (noted === null || editorPid === null || noted.pid !== editorPid) {
-    return { kind: 'older server', notedPid: noted?.pid ?? null };
+    return { kind: 'another editor', notedPid: noted?.pid ?? null };
   }
   const path = editorLogPath(projectPath);
   if (!existsSync(path)) {

@@ -1047,7 +1047,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     // The server's own account, kept in its stderr for the case that fails: a start that waited
     // thirty seconds on a game whose console said it had announced left nothing behind saying
     // what the wait looked at, and the editor's output is the other half of that evidence.
-    DEBUG: 'true',
+    GDHARNESS_DEBUG: '1',
   };
   const server = new ServerProcess({ env: serverEnv });
 
@@ -2137,7 +2137,7 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
     resourcePath: 'res://dot.tres',
     op: 'create',
     resourceType: 'PlaceholderTexture2D',
-    properties: { size: { type: 'Vector2', x: 8, y: 8 } },
+    properties: { size: { _type: 'Vector2', x: 8, y: 8 } },
   });
 
   // A texture is a resource-valued property like any other, so set is what assigns one: there is
@@ -3696,21 +3696,6 @@ async function testTheClassCheckKnowsWhichProjectItIsAbout({ call, project }: Ed
 }
 
 /**
- * A setting read from the editor rather than from the file, and the two disagreeing on purpose.
- *
- * `from: "editor"` exists because the two readings are not the same: the file is what a check with
- * nobody's window open can reproduce, and the editor is what it has been told. Asserting only that
- * the editor answers would be satisfied by a server that quietly read the file and called it the
- * editor's, which is exactly the ambiguity the argument was added to remove, so the file is changed
- * underneath the editor first, by hand rather than through a tool, and then both are asked. Whether
- * an editor ever picks a change up on its own is the engine's business; what is asserted is that
- * the two answers come from two places, and the editor's is the one it was holding.
- *
- * Then the other half: a write through project_settings is taken up by the editor. Written to the
- * file alone, the editor went on answering the old value and would have saved it back over the new
- * one, and the answer said nothing.
- */
-/**
  * A preset added beside an open editor is written, and the caller is told the editor does not see
  * it: Godot reads export_presets.cfg when the editor starts and again only when an export platform
  * comes or goes, and the next save of its Export dialog writes its own list over the file.
@@ -3742,6 +3727,21 @@ async function testAPresetAddedBesideTheEditorIsNoted({ call, project }: Editor)
   }
 }
 
+/**
+ * A setting read from the editor rather than from the file, and the two disagreeing on purpose.
+ *
+ * `from: "editor"` exists because the two readings are not the same: the file is what a check with
+ * nobody's window open can reproduce, and the editor is what it has been told. Asserting only that
+ * the editor answers would be satisfied by a server that quietly read the file and called it the
+ * editor's, which is exactly the ambiguity the argument was added to remove, so the file is changed
+ * underneath the editor first, by hand rather than through a tool, and then both are asked. Whether
+ * an editor ever picks a change up on its own is the engine's business; what is asserted is that
+ * the two answers come from two places, and the editor's is the one it was holding.
+ *
+ * Then the other half: a write through project_settings is taken up by the editor. Written to the
+ * file alone, the editor went on answering the old value and would have saved it back over the new
+ * one, and the answer said nothing.
+ */
 async function testASettingReadFromTheEditor({ call, refusal, project }: Editor): Promise<void> {
   const named = 'application/config/description';
   const written = 'what only the file says';
@@ -3886,13 +3886,6 @@ async function testASettingReadFromTheEditor({ call, refusal, project }: Editor)
   assert.match(refused, /does not take from/, `a write has no editor reading to choose: ${refused}`);
 }
 
-/**
- * The language server tools, which answer from the editor's own server rather than from the addon.
- *
- * Both scripts are driven, the one that parses and the one that does not. A diagnostics tool
- * that has quietly stopped answering returns nothing for every file, which reads exactly like a
- * clean project, so the case that matters is the one where something is wrong.
- */
 /**
  * A class written under a running editor is unresolved until something tells the editor, and
  * `editor_rescan` is what tells it.
@@ -5117,6 +5110,13 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
   });
 }
 
+/**
+ * The language server tools, which answer from the editor's own server rather than from the addon.
+ *
+ * Both scripts are driven, the one that parses and the one that does not. A diagnostics tool
+ * that has quietly stopped answering returns nothing for every file, which reads exactly like a
+ * clean project, so the case that matters is the one where something is wrong.
+ */
 async function testLanguageServer({ call, attempt, project }: Editor): Promise<void> {
   const sound = { projectPath: project, scriptPath: 'res://sound.gd' };
 
@@ -5821,21 +5821,6 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
 }
 
 /**
- * A file edited while a game is running does not change the game.
- *
- * The `auto_reload` addon is an EditorPlugin: it polls the open scene and the scripts on that
- * scene's node tree, and reloads them with `CACHE_MODE_REPLACE` in the editor's own process. A
- * game the editor is playing is a separate process holding its own copy, so nothing here crosses
- * over. That reading of the source is easy to reach and easy to doubt, and a session that doubts
- * it stops editing anything for the length of a run: one downstream project came within a
- * decision of parking a two-hour bench over it.
- *
- * So it is measured on the strongest form, which is also the one that is worth relying on:
- * whatever the editor does with the changed file, the running game answers from the code it
- * started with. The edit is proved to have landed where the tools look before the game is asked
- * again, because a write that never reached disk would leave the game unchanged too.
- */
-/**
  * A play is its own, and one that cannot start is not answered as started.
  *
  * The note naming a played run's transcript stays after the play, and a server picking up a later
@@ -6040,6 +6025,21 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
   }
 }
 
+/**
+ * A file edited while a game is running does not change the game.
+ *
+ * The `auto_reload` addon is an EditorPlugin: it polls the open scene and the scripts on that
+ * scene's node tree, and reloads them with `CACHE_MODE_REPLACE` in the editor's own process. A
+ * game the editor is playing is a separate process holding its own copy, so nothing here crosses
+ * over. That reading of the source is easy to reach and easy to doubt, and a session that doubts
+ * it stops editing anything for the length of a run: one downstream project came within a
+ * decision of parking a two-hour bench over it.
+ *
+ * So it is measured on the strongest form, which is also the one that is worth relying on:
+ * whatever the editor does with the changed file, the running game answers from the code it
+ * started with. The edit is proved to have landed where the tools look before the game is asked
+ * again, because a write that never reached disk would leave the game unchanged too.
+ */
 async function testAnEditDoesNotReachTheRunningGame({ call, attempt, play, project }: Editor): Promise<void> {
   await attempt('editor_run', { op: 'stop' });
   const game = { projectPath: project };
@@ -6198,17 +6198,6 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, play, project
 }
 
 /**
- * An error the editor breaks the game on, and the console that said nothing about it.
- *
- * Godot prints no script error over the debug adapter. It halts the game and names the error in
- * the `stopped` event, so a console built from what the adapter printed held no trace of one:
- * `editor_output` answered `clean` with zero errors about a game sitting dead at a null call,
- * while every runtime tool timed out and said only that it might be at a breakpoint. Found the
- * slow way, on a real project whose save carried one bad field.
- *
- * Its own game, because it ends with one that cannot run.
- */
-/**
  * How long an editor-played run takes to reach `editor_output` when nothing else asks for it.
  *
  * The other cases here read the console after something has spoken to the debug adapter: a stack,
@@ -6361,6 +6350,17 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, play, project }: Ed
   );
 }
 
+/**
+ * An error the editor breaks the game on, and the console that said nothing about it.
+ *
+ * Godot prints no script error over the debug adapter. It halts the game and names the error in
+ * the `stopped` event, so a console built from what the adapter printed held no trace of one:
+ * `editor_output` answered `clean` with zero errors about a game sitting dead at a null call,
+ * while every runtime tool timed out and said only that it might be at a breakpoint. Found the
+ * slow way, on a real project whose save carried one bad field.
+ *
+ * Its own game, because it ends with one that cannot run.
+ */
 async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, play, project }: Editor): Promise<void> {
   const game = { projectPath: project };
   await play();
