@@ -19,7 +19,7 @@ import { WebSocket } from 'ws';
 import { spawnHidden } from '../src/spawn.js';
 
 const HOST = '127.0.0.1';
-const ENTRY = 'build/index.js';
+const ENTRY = 'build/cli.js';
 
 async function freePort(): Promise<number> {
   return await new Promise((resolve, reject) => {
@@ -73,11 +73,13 @@ try {
     `${JSON.stringify({
       jsonrpc: '2.0',
       id: 1,
-      method: 'initialize',
+      method: 'server/discover',
       params: {
-        protocolVersion: '2024-11-05',
-        capabilities: {},
-        clientInfo: { name: 'node-runtime-test', version: '1' },
+        _meta: {
+          'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+          'io.modelcontextprotocol/clientInfo': { name: 'node-runtime-test', version: '1' },
+          'io.modelcontextprotocol/clientCapabilities': {},
+        },
       },
     })}\n`,
   );
@@ -94,8 +96,11 @@ try {
   assert.ok(opened, 'Node serves the editor socket at /godot');
   assert.equal(await upgrades(port, '/visualizer', 1500), false, 'and refuses a socket to any other path');
 
-  assert.match(answered, /"serverInfo"/, 'Node answers the MCP handshake over stdio');
-  assert.match(answered, /"protocolVersion"/, 'with a protocol version');
+  assert.match(
+    answered,
+    /"io\.modelcontextprotocol\/serverInfo":\{"name":"gdharness"/,
+    `Node answers server/discover over stdio, naming gdharness: ${answered}`,
+  );
 } finally {
   child.kill();
 }

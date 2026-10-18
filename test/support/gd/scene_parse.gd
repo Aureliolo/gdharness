@@ -35,8 +35,6 @@ func _fail(message: String) -> void:
 func _check_tagged(tools: PropertyValues) -> void:
 	if tools.parse({"_type": "Vector2", "x": 1, "y": 2}) != Vector2(1, 2):
 		_fail("tagged Vector2")
-	if tools.parse({"type": "Vector2", "x": 1, "y": 2}) != Vector2(1, 2):
-		_fail("tagged Vector2 under the older 'type' key")
 	if tools.parse({"_type": "Vector3", "x": 1, "y": 2, "z": 3}) != Vector3(1, 2, 3):
 		_fail("tagged Vector3")
 	if tools.parse({"_type": "Vector2i", "x": 4, "y": 5}) != Vector2i(4, 5):

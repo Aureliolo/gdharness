@@ -304,10 +304,10 @@ func read_resource(args: Dictionary) -> Dictionary:
 
 
 func create_shader(args: Dictionary) -> Dictionary:
-	var shader_path: String = _ensure_res_path(str(args.get("shaderPath", "")))
+	var shader_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	var shader_type: String = str(args.get("shaderType", "canvas_item"))
 	if shader_path == "res://":
-		return {"ok": false, "error": "shaderPath is required"}
+		return {"ok": false, "error": "resourcePath is required"}
 	var taken: String = _taken(shader_path, "resource_edit op=create_shader", "Edit its text")
 	if not taken.is_empty():
 		return {"ok": false, "error": taken}
@@ -336,9 +336,9 @@ func create_shader(args: Dictionary) -> Dictionary:
 
 
 func create_tileset(args: Dictionary) -> Dictionary:
-	var tileset_path: String = _ensure_res_path(str(args.get("tilesetPath", "")))
+	var tileset_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	if tileset_path == "res://":
-		return {"ok": false, "error": "tilesetPath is required"}
+		return {"ok": false, "error": "resourcePath is required"}
 	var taken: String = _taken(tileset_path, "resource_edit op=create_tileset")
 	if not taken.is_empty():
 		return {"ok": false, "error": taken}
@@ -478,7 +478,7 @@ func _source_ids(tile_set: TileSet) -> Array[int]:
 
 func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	var scene_path: String = _ensure_res_path(str(args.get("scenePath", "")))
-	var node_path: String = str(args.get("tilemapNodePath", ""))
+	var node_path: String = str(args.get("nodePath", ""))
 	if scene_path == "res://":
 		return {"ok": false, "error": "scenePath is required"}
 
@@ -702,9 +702,9 @@ func _save_theme(theme: Theme, theme_path: String, item: String) -> String:
 
 
 func set_theme_color(args: Dictionary) -> Dictionary:
-	var theme_path: String = _ensure_res_path(str(args.get("themePath", "")))
+	var theme_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	if theme_path == "res://":
-		return {"ok": false, "error": "themePath is required"}
+		return {"ok": false, "error": "resourcePath is required"}
 
 	var color_name: String = str(args.get("colorName", ""))
 	var control_type: String = str(args.get("controlType", ""))
@@ -745,9 +745,9 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 
 
 func set_theme_font_size(args: Dictionary) -> Dictionary:
-	var theme_path: String = _ensure_res_path(str(args.get("themePath", "")))
+	var theme_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	if theme_path == "res://":
-		return {"ok": false, "error": "themePath is required"}
+		return {"ok": false, "error": "resourcePath is required"}
 
 	var font_size_name: String = str(args.get("fontSizeName", ""))
 	var control_type: String = str(args.get("controlType", ""))

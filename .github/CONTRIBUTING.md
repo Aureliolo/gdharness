@@ -32,7 +32,12 @@
   did, and so are a new tool and a new op. Ignore all of it and your calls still work.
 - **Minor**: only when the owner marks a release as one, which is announced ahead. Nothing earns
   one on its own.
-- **Major**: none is planned. A tool, an op, an argument or a field is not renamed or taken away.
+- **Major**: none is planned.
+
+Until gdharness has users outside its own projects, nothing is kept working for an older release.
+The server and the addons of one release work with each other only, and an editor or a game on
+another release's addon is refused with the command that brings it into step. A rename or a
+removal ships in a minor.
 
 ## What every language in here is held to
 
@@ -125,7 +130,6 @@ whose executables are world-writable. Releases are cut by CI.
 .
 ├── src/
 │   ├── server.ts          # The MCP server: validation and dispatch of every tool
-│   ├── server-entry.ts    # Its entry point, bundled as build/index.js
 │   ├── cli.ts             # CLI entry point: the server by default, setup, doctor, runtime, classes
 │   ├── setup.ts           # What the CLI does to a project
 │   ├── tool-definitions.ts# Tool schemas

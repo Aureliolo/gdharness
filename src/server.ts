@@ -101,6 +101,7 @@ import {
 } from './game-log.js';
 import { isIdentifier } from './gdscript-source.js';
 import {
+  AddonOfAnotherRelease,
   anEditorIsStillComing,
   BridgeTimeout,
   type GodotBridge,
@@ -272,12 +273,8 @@ import type {
   ToolResponse,
 } from './server-types.js';
 import {
-  addonMismatch,
   DEBUG_MODE,
-  editorIsStale,
-  GODOT_DEBUG_MODE_DEFAULT,
   gdharnessCommand,
-  markIfStale,
   runtimeAddonUnknown,
   runtimeMismatch,
   SERVER_VERSION,
@@ -286,10 +283,8 @@ import {
 import {
   inspectProject,
   installedAddonVersion,
-  installedEditorDigest,
   installedRuntimeDigest,
   RUNTIME_AUTOLOAD,
-  shippedEditorDigest,
   shippedRuntimeDigest,
 } from './setup.js';
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
@@ -748,7 +743,7 @@ function stillRunning(run: GodotProcess | null): boolean {
  */
 export const PLAY_STARTS_WITHIN_MS = 30_000;
 
-/** Which play an editor's answer is about, or null from an addon that does not number them. */
+/** Which play an editor's answer is about, or null for an answer that does not say, which is malformed. */
 function playOf(answer: OperationParams): EditorPlay | null {
   const play = readNumber(answer, 'play');
   const editorPid = readNumber(answer, 'editorPid');
@@ -779,7 +774,7 @@ function playedSince(run: GodotProcess, playing: EditorPlay | null): boolean {
  * announce, which is the answer this was written to stop giving. The editor knows, and is already
  * asked this by `editor_status`. [param editorSays] is null when it will not say, and then the
  * record is what is left. [param editorPlay] is which play the editor says it is in, null when it
- * does not number them. [param now] is when the question is asked, for the play that has not
+ * will not say. [param now] is when the question is asked, for the play that has not
  * started yet.
  */
 export function runIsUp(
@@ -926,7 +921,7 @@ async function closeLikeAPlayer(
   const asked = await runtimeRequest(endpoint, 'close_game', {}, CLOSE_ASK_MS);
   if (!asked.ok) {
     return asked.reason === 'error'
-      ? `its runtime did not take the close (${asked.message}), as an addon older than this server's does not`
+      ? `its runtime refused the close (${asked.message})`
       : `its runtime did not answer the close within ${CLOSE_ASK_MS / 1000} seconds, as a game held at a breakpoint or stuck in a frame does not`;
   }
   if (await untilGone([announced, ...alsoGoing], closeWaitMs())) {
@@ -2210,10 +2205,6 @@ function nonEmpty<T extends Record<string, readonly unknown[]>>(lists: T): Parti
 }
 
 /**
- * [param answer] carrying [param previous]: its sentence after the answer's own, and the record
- * under `previousRunCut` in the JSON the answer ends with.
- */
-/**
  * The scripts of [param unminted], spelled from the project root, that are among [param paths]: a
  * suite file named there, or anything inside a directory named there.
  */
@@ -2249,6 +2240,10 @@ export function withUidsMissing(answer: ToolResponse, missing: readonly string[]
   return { ...answer, content };
 }
 
+/**
+ * [param answer] carrying [param previous]: its sentence after the answer's own, and the record
+ * under `previousRunCut` in the JSON the answer ends with.
+ */
 export function withPreviousCut(answer: ToolResponse, previous: CutTestRun): ToolResponse {
   const content = answer.content.map((part) => ({ ...part }));
   const last = content.at(-1);
@@ -2511,7 +2506,6 @@ function importStatuses(payload: OperationParams): { path: string; status: strin
   });
 }
 
-/** What to tell a caller whose file, scene, script or resource path landed outside the project. */
 /**
  * How long `editor_run wait` waits by default, and how often it looks.
  *
@@ -2522,6 +2516,7 @@ function importStatuses(payload: OperationParams): { path: string; status: strin
 const WAIT_FOR_RUN_MS = 600_000;
 const RUN_POLL_MS = 250;
 
+/** What to tell a caller whose file, scene, script or resource path landed outside the project. */
 const PATH_SOLUTIONS = [
   'Give the path relative to the project, such as "scenes/main.tscn" or "res://scenes/main.tscn"',
   'Point projectPath at the project the file belongs to',
@@ -2697,7 +2692,7 @@ function profileFrameFunctions(projectPath: string | null): number {
   return frameFunctionsFor(queuedMessagesOf(projectGodot));
 }
 
-/** The cap an editor addon's profile reports, absent from an addon older than it. */
+/** The cap an editor addon's profile reports, none before a session has set one. */
 function playedCap(
   held: OperationParams,
 ): Pick<ProfileTotals, 'frameFunctions' | 'cappedFrames' | 'totalCapped'> {
@@ -3263,44 +3258,20 @@ function mainSceneOf(projectFile: string): string | null {
  * can be known to open no window, and it is what lets a headless request still go through the
  * editor, which is the only route with a debugger attached.
  */
-/**
- * Whether the runtime addon in the project announces which editor played a game, which the
- * addon does from the version that reads `GDHARNESS_EDITOR_PID` out of the game's environment.
- * Read from the file rather than remembered, since an upgrade rewrites it under a running server;
- * a project with no addon, or one this server cannot read, announces nothing of the kind.
- */
-function runtimeAddonAnnouncesEditors(projectPath: string | null): boolean {
-  if (projectPath === null) {
-    return false;
-  }
-  try {
-    return readFileSync(join(projectPath, RUNTIME_AUTOLOAD.path), 'utf8').includes('"editor_pid"');
-  } catch {
-    return false;
-  }
-}
-
 function editorPlaysHeadless(projectFile: string): boolean {
   const runArgs = parseProjectGodot(readFileSync(projectFile, 'utf8'))['editor']?.['run/main_run_args'];
   return typeof runArgs === 'string' && /(?:^|\s)--headless(?:\s|$)/.test(runArgs);
 }
 
-/**
- * Tool arguments with their keys in camelCase, whichever spelling the client used. Only the
- * arguments themselves: what they hold (node properties, import options, a setting value) is
- * the engine's own vocabulary, where `custom_minimum_size` has to stay as it is.
- */
-function camelCased(params: unknown): OperationParams {
+/** Tool arguments as the client sent them, copied onto an object with no prototype. */
+function ownArguments(params: unknown): OperationParams {
   // The keys are the `arguments` member of a tools/call, straight off the wire. JSON.parse
-  // makes `__proto__` an own enumerable property, so it survives the hasOwn guard below and
-  // a write to it would re-parent this object onto caller-supplied data rather than store a key.
+  // makes `__proto__` an own enumerable property, and a write of it to an ordinary object would
+  // re-parent that object onto caller-supplied data rather than store a key.
   const result: OperationParams = emptyRecord();
   const source = asParams(params);
   for (const key of Object.keys(source)) {
-    const name = key.startsWith('_')
-      ? key
-      : key.replace(/_([a-zA-Z0-9])/g, (_, letter: string) => letter.toUpperCase());
-    result[name] = source[key];
+    result[key] = source[key];
   }
   return result;
 }
@@ -3406,9 +3377,8 @@ class GodotServer {
   /**
    * The project this server was set up for, from the config `setup` wrote, or null.
    *
-   * Null is every config written before this existed and every one written by hand, and it is
-   * what keeps those working exactly as they did: without it there is nowhere to announce a
-   * bridge, so the port stays the whole contract and the server holds out for it.
+   * Null for a config written by hand or a bare `npx gdharness`: without it there is nowhere to
+   * announce a bridge, so the port stays the whole contract and the server holds out for it.
    */
   private readonly ownProject: string | null;
   private announcedAt: string | null = null;
@@ -3466,9 +3436,10 @@ class GodotServer {
       console.error(`[SERVER] Using Godot at: ${located.path}`);
     }
 
-    // The entry decides from the client's opening message which protocol era the connection
-    // speaks, so a 2026-07-28 client and a 2025 one are both served.
+    // A 2025 initialize is answered with the unsupported-protocol-version error naming 2026-07-28,
+    // and the connection stays open for a modern opening.
     this.stdio = serveStdio(() => this.protocol(), {
+      legacy: 'reject',
       onerror: (error) => {
         console.error('[MCP Error]', error);
       },
@@ -3527,8 +3498,8 @@ class GodotServer {
    *
    * Only for this project's own predecessor on the configured port. Anything else holding it is not
    * going to let go on being told, and the bridge moves as before. Neither is a predecessor that
-   * does not stand down in time: a version from before servers watched for a successor never does,
-   * and the bridge then moves and announces where it went.
+   * does not stand down in time, as a hung one never does, and the bridge then moves and announces
+   * where it went.
    */
   private async takeOverFromAPredecessor(): Promise<void> {
     if (this.ownProject === null) {
@@ -3891,9 +3862,8 @@ class GodotServer {
   /**
    * A protocol object answering for this server, built afresh each time the stdio entry asks.
    *
-   * The entry can build one for a client that opens in the 2026 era and discard it when the client
-   * falls back to a 2025 handshake, so this holds no state of its own: everything a call reads or
-   * changes lives on this server, which outlives every protocol object made for it.
+   * It holds no state of its own: everything a call reads or changes lives on this server, which
+   * outlives every protocol object made for it.
    */
   private protocol(): McpServer {
     // Handlers go on the low-level server McpServer wraps rather than through registerTool: the
@@ -3932,8 +3902,7 @@ class GodotServer {
   }
 
   private setupToolHandlers(protocol: ProtocolServer): void {
-    // From the 2026 envelope every request carries, which the SDK lifts out of _meta under its own
-    // keys, and from initialize on a 2025 connection.
+    // From the envelope every request carries, which the SDK lifts out of _meta under its own keys.
     const clientOf = (envelope: object | undefined): { name: string; version: string } | undefined => {
       const named = (envelope as Record<string, unknown> | undefined)?.['io.modelcontextprotocol/clientInfo'];
       if (typeof named === 'object' && named !== null) {
@@ -3942,10 +3911,7 @@ class GodotServer {
           return { name, version };
         }
       }
-      // Deprecated for the 2026 era, where the envelope above answers; on a 2025 connection, which
-      // has no envelope, the SDK keeps this as the one place initialize's client is kept.
-      // oxlint-disable-next-line typescript/no-deprecated
-      return protocol.getClientVersion();
+      return undefined;
     };
     protocol.setRequestHandler('tools/list', (_request, ctx) => {
       this.noteTheClient(clientOf(ctx.mcpReq.envelope));
@@ -3962,7 +3928,7 @@ class GodotServer {
         );
       }
 
-      const args = camelCased(request.params.arguments);
+      const args = ownArguments(request.params.arguments);
       const checked = this.validateArguments(spec, args);
       if (!checked.ok) {
         return checked.response;
@@ -4233,16 +4199,6 @@ class GodotServer {
     return installed === null || installed === SERVER_VERSION ? null : installed;
   }
 
-  /**
-   * The code of the editor addon installed in the project the editor has open, which is what a
-   * restart of it loads, or undefined when no project is known.
-   */
-  private editorCodeOnDisk(): string | null | undefined {
-    const status = this.godotBridge.getStatus();
-    const project = (status.connected ? status.projectPath : undefined) ?? this.ownProject;
-    return project === null || project === '' ? undefined : installedEditorDigest(project);
-  }
-
   /** What to do about the runtime addon [param endpoint] loaded, or undefined when it is this server's. */
   private runtimeStaleNote(endpoint: RuntimeEndpoint): string | undefined {
     const project = endpoint.project.path;
@@ -4324,10 +4280,14 @@ class GodotServer {
       // more calls working out which, and the answer only arrives when something else mentions the
       // version in passing.
       const where = named === null ? spec.name : `${spec.name} ${named}`;
+      const spelled = unknown.flatMap((key) => {
+        const camel = key.replace(/_([a-zA-Z0-9])/g, (_, letter: string) => letter.toUpperCase());
+        return camel !== key && known.has(camel) ? [`${key} is spelled ${camel}`] : [];
+      });
       return {
         ok: false,
         response: this.createErrorResponse(
-          `${where} does not take ${unknown.join(', ')}. ${takes} This is gdharness ${SERVER_VERSION}, which is what decides whether an argument exists.`,
+          `${where} does not take ${unknown.join(', ')}.${spelled.length === 0 ? '' : ` ${spelled.join(', ')}.`} ${takes} This is gdharness ${SERVER_VERSION}, which is what decides whether an argument exists.`,
         ),
       };
     }
@@ -4406,9 +4366,7 @@ class GodotServer {
   }
 
   /**
-   * One tool call to the code that does it. The editor addon and the runtime addon keep their
-   * command names, so an op that renamed an argument hands it over under the old name here.
-   * `op` is empty for a tool that has none.
+   * One tool call to the code that does it. `op` is empty for a tool that has none.
    */
   private async dispatch(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     // Every call but the one that reports the state as it is waits out an editor still arriving,
@@ -4487,12 +4445,8 @@ class GodotServer {
         ? await this.handleViaBridge(command, contained.value, op === '' ? tool : `${tool} ${op}`)
         : contained.response;
     };
-    const editorOrEngine = async (
-      command: string,
-      effect: 'reads' | 'writes',
-      extra: OperationParams = {},
-    ): Promise<ToolResponse> =>
-      await this.editorOrEngine(command, { ...arguments_, ...extra }, `${tool} ${op}`, effect);
+    const editorOrEngine = async (command: string, effect: 'reads' | 'writes'): Promise<ToolResponse> =>
+      await this.editorOrEngine(command, arguments_, `${tool} ${op}`, effect);
 
     switch (tool) {
       case 'project_info':
@@ -4534,13 +4488,13 @@ class GodotServer {
           case 'set':
             return await editorOrEngine('set_node_properties', 'writes');
           case 'duplicate':
-            return await editorOrEngine('duplicate_node', 'writes', { parentPath: args['parentNodePath'] });
+            return await editorOrEngine('duplicate_node', 'writes');
           case 'reparent':
             return await editorOrEngine('reparent_node', 'writes');
           case 'delete':
             return await editorOrEngine('delete_node', 'writes');
           default:
-            return await editorOrEngine('set_tilemap_cells', 'writes', { tilemapNodePath: args['nodePath'] });
+            return await editorOrEngine('set_tilemap_cells', 'writes');
         }
       case 'scene_signal':
         switch (op) {
@@ -4625,13 +4579,13 @@ class GodotServer {
           case 'modify':
             return await editorOrEngine('modify_resource', 'writes');
           case 'create_shader':
-            return await editorOrEngine('create_shader', 'writes', { shaderPath: args['resourcePath'] });
+            return await editorOrEngine('create_shader', 'writes');
           case 'create_tileset':
-            return await editorOrEngine('create_tileset', 'writes', { tilesetPath: args['resourcePath'] });
+            return await editorOrEngine('create_tileset', 'writes');
           case 'set_theme_color':
-            return await editorOrEngine('set_theme_color', 'writes', { themePath: args['resourcePath'] });
+            return await editorOrEngine('set_theme_color', 'writes');
           default:
-            return await editorOrEngine('set_theme_font_size', 'writes', { themePath: args['resourcePath'] });
+            return await editorOrEngine('set_theme_font_size', 'writes');
         }
 
       case 'editor_launch':
@@ -5571,11 +5525,11 @@ class GodotServer {
       return {};
     } catch (error) {
       const message = errorMessage(error);
-      const why = message.includes('Unknown tool')
-        ? 'runs an addon from before writes were handed to it'
-        : `could not take the change (${message})`;
       return {
-        editorNote: `The open editor ${why}, so it still holds the old values, answers them when asked, and writes them back over the file the next time it saves. editor_launch restart loads the file and the addon this server ships.`,
+        editorNote:
+          error instanceof AddonOfAnotherRelease
+            ? `The open editor was not asked to take the change, so it still holds the old values, answers them when asked, and writes them back over the file the next time it saves. ${message}`
+            : `The open editor could not take the change (${message}), so it still holds the old values, answers them when asked, and writes them back over the file the next time it saves. editor_launch restart loads the file again.`,
       };
     }
   }
@@ -5872,15 +5826,12 @@ class GodotServer {
         const message = errorMessage(error);
         return {
           ok: false,
-          response: message.includes('Unknown tool')
-            ? this.createErrorResponse(
-                'The editor is running an addon from before reimport_files, so it cannot be asked to reimport.',
-                [
-                  'editor_launch restart loads the addon this server ships',
+          response:
+            error instanceof AddonOfAnotherRelease
+              ? this.createErrorResponse(message, [
                   'Or close the editor, and project_import reimport runs the engine import instead',
-                ],
-              )
-            : this.createErrorResponse(`The editor answered reimport_files with an error: ${message}`),
+                ])
+              : this.createErrorResponse(`The editor answered reimport_files with an error: ${message}`),
         };
       }
       if (answer['started'] !== false) {
@@ -5929,7 +5880,7 @@ class GodotServer {
     const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
     this.logDebug(`Running ${operation} in ${projectPath}: ${JSON.stringify(params)}`);
     const outcome = await runOperation(
-      { godotPath: engine.value, script: this.operationsScript, debug: GODOT_DEBUG_MODE_DEFAULT },
+      { godotPath: engine.value, script: this.operationsScript, debug: DEBUG_MODE },
       operation,
       params,
       projectPath,
@@ -6801,7 +6752,7 @@ class GodotServer {
           ? checked.refusal
           : this.jsonTextResponse({ ...checked.answers[0], ...engineChecked(one.noLanguageServer.reason) });
       }
-      return 'refusal' in one ? one.refusal : this.jsonTextResponse(this.markedIfStale(one.answer));
+      return 'refusal' in one ? one.refusal : this.jsonTextResponse(one.answer);
     }
     const progress = callProgress();
     const cancelled = callSignal();
@@ -6859,19 +6810,17 @@ class GodotServer {
         reported.push(one.answer);
       }
     }
-    return this.jsonTextResponse(
-      this.markedIfStale({
-        clean: errors === 0 && unread === 0,
-        scriptsChecked: scripts.value.length,
-        errors,
-        // Unknown once any script was compiled by the engine, which reports no warnings.
-        warnings: byEngine === null ? warnings : null,
-        ...(unread > 0 ? { scriptsNotRead: unread } : {}),
-        scripts: reported,
-        nothingReported,
-        ...(byEngine === null ? {} : engineChecked(byEngine)),
-      }),
-    );
+    return this.jsonTextResponse({
+      clean: errors === 0 && unread === 0,
+      scriptsChecked: scripts.value.length,
+      errors,
+      // Unknown once any script was compiled by the engine, which reports no warnings.
+      warnings: byEngine === null ? warnings : null,
+      ...(unread > 0 ? { scriptsNotRead: unread } : {}),
+      scripts: reported,
+      nothingReported,
+      ...(byEngine === null ? {} : engineChecked(byEngine)),
+    });
   }
 
   /**
@@ -6968,38 +6917,7 @@ class GodotServer {
   }
 
   /**
-   * [param answer] marked stale the way a bridge answer is, because this one is worth marking
-   * most. Diagnostics come from the language server of an editor that may have been running since
-   * before the addon it holds was replaced, and nothing in the answer said so: a caller had to
-   * make a status call first to know whether to believe it, which nobody does before an answer
-   * looks wrong.
-   *
-   * That is the fault, rather than any claim that a behind editor answers wrongly. A project
-   * recorded diagnostics naming lines that were not in the file, gone after a restart, and on
-   * their own re-reading a class_name the editor's database had not caught up with explains it
-   * without staleness being involved at all. Marked rather than refused for the same reason: a
-   * suspicion is not a fault, and refusing would take a working tool away on one.
-   */
-  private markedIfStale(answer: OperationParams): unknown {
-    const status = this.godotBridge.getStatus();
-    // The language server can answer for an editor this server has no bridge to, and an editor that
-    // has not greeted has not said what it runs: neither is known to be behind, and calling one
-    // stale sends the caller to restart an editor that may not exist.
-    if (!hasSaidWhoItIs(status)) {
-      return answer;
-    }
-    return markIfStale(
-      answer,
-      status.addonVersion,
-      SERVER_VERSION,
-      status.addonDigest,
-      shippedEditorDigest(),
-      this.editorCodeOnDisk(),
-    );
-  }
-
-  /**
-   * One script's diagnostics and verdict, unmarked, or the refusal. `perScript` says whether the
+   * One script's diagnostics and verdict, or the refusal. `perScript` says whether the
    * refusal is about this script, such as a path that is not there, rather than about the
    * language server, which would refuse every script the same way.
    */
@@ -7488,23 +7406,19 @@ class GodotServer {
 
   /**
    * What a caller should know when the editor is one that clears its breakpoints as a session
-   * opens, or when the addon is too old to say. Empty when the editor keeps them.
+   * opens. Empty when the editor keeps them.
    *
    * Godot's adapter answers `initialize` by clearing every breakpoint in the script editor unless
    * `network/debug_adapter/sync_breakpoints` is on. The addon turns it on as it loads, so an editor
-   * reporting it off is holding an older addon than the one on disk, and the remedy is a restart
-   * rather than a setting; an addon that reports nothing is older still.
+   * reporting it off had it turned off again since.
    */
   private breakpointsAtRisk(): { breakpointsAtRisk?: string } {
-    const status = this.godotBridge.getStatus();
-    if (!hasSaidWhoItIs(status) || status.syncsBreakpoints === true) {
+    if (this.godotBridge.getStatus().syncsBreakpoints !== false) {
       return {};
     }
     return {
       breakpointsAtRisk:
-        status.syncsBreakpoints === false
-          ? 'This editor clears every breakpoint in its script editor whenever a debug session opens on its adapter, which this server does for its first breakpoint or stack read: network/debug_adapter/sync_breakpoints is off. The installed addon turns it on as it loads, so the editor is running an older one; editor_launch restart puts the installed addon in, or turn the setting on in Editor Settings > Network > Debug Adapter.'
-          : 'Whether this editor keeps its breakpoints when a debug session opens cannot be told: the addon it is running predates the report. Godot clears them unless network/debug_adapter/sync_breakpoints is on, which the installed addon turns on as it loads; editor_launch restart puts the installed addon in.',
+        'This editor clears every breakpoint in its script editor whenever a debug session opens on its adapter, which this server does for its first breakpoint or stack read: network/debug_adapter/sync_breakpoints is off. The addon turns it on as it loads, so it was turned off since; turn it on in Editor Settings > Network > Debug Adapter, or editor_launch restart turns it on again.',
     };
   }
 
@@ -7671,11 +7585,9 @@ class GodotServer {
     const isPortConflict = this.bridgeStartupError?.includes('EADDRINUSE') ?? false;
     // The addon an editor loaded at startup, against the one this server ships. An install
     // replaces the files under a running editor without changing what it is serving, and the
-    // only other sign of that is a tool answering as the old version did.
+    // bridge asks such an editor nothing but to quit.
     const greeted = hasSaidWhoItIs(status);
-    const stale =
-      greeted &&
-      editorIsStale(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest());
+    const staleNote = this.godotBridge.anotherRelease();
     const unfinished = this.restartLeftUnfinished(status.connected);
     // A project without the editor addon has no editor that can dial in, whatever the bridge's age
     // or an editor already running: one opened on it loads no plugin. A young server said
@@ -7685,7 +7597,7 @@ class GodotServer {
     return {
       ...status,
       serverVersion: SERVER_VERSION,
-      addonIsStale: greeted ? stale : undefined,
+      addonIsStale: greeted ? staleNote !== undefined : undefined,
       greeting:
         status.connected && !greeted
           ? 'The editor has connected and has not yet said who it is: its project, pid, addon version and ports arrive with its greeting a moment after the socket opens, later while it imports. Ask again for them.'
@@ -7776,18 +7688,11 @@ class GodotServer {
               port: this.godotBridge.configuredPort,
               note: `The gdharness server this one replaced, pid ${this.handingOverFrom}, still holds port ${this.godotBridge.configuredPort} and is standing down; this server takes the port when it lets go, and takes another after ${HANDOVER_MS / 1000} seconds if it does not.`,
             },
-      staleNote: stale
-        ? addonMismatch(
-            status.addonVersion,
-            SERVER_VERSION,
-            status.addonDigest,
-            shippedEditorDigest(),
-            this.editorCodeOnDisk(),
-          )
-        : undefined,
-      addonNote: greeted
-        ? sameCodeNote(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest())
-        : undefined,
+      staleNote,
+      addonNote:
+        greeted && staleNote === undefined
+          ? sameCodeNote(status.addonVersion ?? '', SERVER_VERSION)
+          : undefined,
       startedByAnEditorNote:
         status.startedByAnEditor === true
           ? "Another editor started this one: Godot's own restart, or the project manager opening a project. None of the arguments a server gave the editor before it reached this one, so it serves the ports its editor settings name (and none at all while another editor holds those, when the script and debug tools reach that editor instead), its console is not captured, and it restarts itself. Close it and use editor_launch open to have an editor this server started."
@@ -7819,8 +7724,8 @@ class GodotServer {
    *
    * A game started from the editor's own play button belongs to no process here, so without
    * asking, editor_status reports nothing running while a game is on screen. Answered only by
-   * an editor holding this version's addon: an older one has no such command, and the staleness
-   * in the same payload is what says why the answer is missing.
+   * an editor holding this version's addon: the bridge asks another release's nothing, and the
+   * staleNote in the same payload is what says why the answer is missing.
    */
   private async editorPlayingState(): Promise<{
     playing: boolean;
@@ -7829,19 +7734,10 @@ class GodotServer {
     play: EditorPlay | null;
   } | null> {
     const status = this.godotBridge.getStatus();
-    // Asked of any connected editor, including one running an addon from another version. It used
-    // to require the versions to match, and what that cost was that `playingInEditor` was null for
-    // the whole time an addon was behind, so a game the editor was playing could not be picked up
-    // and a server that had not started that game itself said "No game is running" about one on
-    // screen. Measured: one editor, one server, the same engine, the 0.13.30 addon answering null
-    // and the current one answering the scene it is playing.
-    //
-    // What the version check was buying, which was not nothing and is why the wait below exists: an
-    // editor that does not answer this call at all leaves the request outstanding for the whole
-    // tool timeout, and `editor_status` waits on it. Two fixtures with a greeting editor that
-    // serves no tools went from answering at once to timing out at twenty seconds. So the question
-    // is asked of everybody and the answer is waited for briefly: this is a status call on a local
-    // socket, and an editor that has not replied in a moment is one with nothing to say here.
+    // Waited for briefly, because an editor that does not answer this call at all leaves the request
+    // outstanding for the whole tool timeout, and `editor_status` waits on it: two fixtures with a
+    // greeting editor that serves no tools timed out at twenty seconds. This is a status call on a
+    // local socket, and an editor that has not replied in a moment is one with nothing to say here.
     if (!status.connected) {
       return null;
     }
@@ -7879,7 +7775,7 @@ class GodotServer {
    * Whether the editor is scanning, and how long ago it last finished one, asked with the same short
    * wait as what it is playing. A start waits out a scan and the class cache write after it, and
    * this is where a caller can see that state for itself. Null from an editor that did not answer,
-   * which includes one whose addon predates the question.
+   * or that runs another release's addon.
    */
   private async editorScanState(): Promise<{
     scanning: boolean;
@@ -7968,10 +7864,8 @@ class GodotServer {
           // whatever that game started for itself, carries the editor's process id; a game
           // another server started carries none. Absent when the game announced none.
           editorPid: endpoint.editorPid,
-          // The runtime addon the game loaded, null when the game could not say, which a runtime
-          // from before games reported it cannot and a copy with no markers cannot either.
-          addonVersion:
-            endpoint.addon === undefined || endpoint.addon.version === '' ? null : endpoint.addon.version,
+          // The runtime addon the game loaded, null for a copy with no markers, which cannot say.
+          addonVersion: endpoint.addon.version === '' ? null : endpoint.addon.version,
           ...(unknown ? {} : { addonIsStale: staleNote !== undefined }),
           ...(staleNote === undefined ? {} : { staleNote }),
           reachable: reply.ok,
@@ -8220,14 +8114,8 @@ class GodotServer {
       editorPid: now.editorPid,
       addonVersion: now.addonVersion,
       serverVersion: SERVER_VERSION,
-      addonIsStale: editorIsStale(now.addonVersion, SERVER_VERSION, now.addonDigest, shippedEditorDigest()),
-      staleNote: addonMismatch(
-        now.addonVersion,
-        SERVER_VERSION,
-        now.addonDigest,
-        shippedEditorDigest(),
-        this.editorCodeOnDisk(),
-      ),
+      addonIsStale: this.godotBridge.anotherRelease() !== undefined,
+      staleNote: this.godotBridge.anotherRelease(),
       ...this.whatTheEditorDropped(settingsBefore, after),
       ...servers,
       tookMs: Date.now() - began,
@@ -9081,7 +8969,7 @@ class GodotServer {
       // answered listening about a process it did not start while its own was still booting,
       // and a spawned start judged by the played rule waited its whole budget on its own game.
       // The run held rather than one picked up from disk: the start that waits here has just taken it.
-      accept: (one) => this.isTheGameOf(this.activeProcess, one, projectPath),
+      accept: (one) => this.isTheGameOf(this.activeProcess, one),
       // A game held at a breakpoint set before the run is not booting any more, and waiting out
       // the budget on one says nothing. It cannot announce until it is let go. Nor is there
       // anything to wait for once the process is over: a boot that fails on a parse error is
@@ -9502,8 +9390,7 @@ class GodotServer {
     }
     const before = run.announcedBefore ?? new Set<number>();
     const theOne = this.announcedOfTheRunsProject(run, runtimesAnnounced().running).find(
-      (one) =>
-        one.pid === Number(named) && !before.has(one.pid) && this.isTheGameOf(run, one, run.projectPath),
+      (one) => one.pid === Number(named) && !before.has(one.pid) && this.isTheGameOf(run, one),
     );
     if (theOne !== undefined) {
       this.tie(run, theOne);
@@ -9674,16 +9561,19 @@ class GodotServer {
     // Checked against what this server holds of the run rather than against the note on disk: the
     // run was started here or picked up from that note, so it holds the same engine, project and
     // start, and the note can be gone or name a later run while this one is still going.
-    const startedAs: RunRecord = {
-      pid: running.pid,
-      transcript: running.transcript ?? '',
-      startedAt: running.startedAt,
-      ...(running.startedBy === undefined ? {} : { startedBy: running.startedBy }),
-      projectPath: running.projectPath ?? '',
-      arguments: [],
-      ...(running.command === undefined ? {} : { command: running.command }),
-    };
-    const why = await whyNotStillTheRecordedRun(startedAs);
+    const { startedBy, command, projectPath } = running;
+    const why =
+      startedBy === undefined || command === undefined || projectPath === null
+        ? 'this server holds no engine, project and start of it to check the process against'
+        : await whyNotStillTheRecordedRun({
+            pid: running.pid,
+            transcript: running.transcript ?? '',
+            startedAt: running.startedAt,
+            startedBy,
+            projectPath,
+            arguments: [],
+            command,
+          });
     if (why !== null) {
       clearTheRecord();
       running.endedHere = null;
@@ -10173,9 +10063,7 @@ class GodotServer {
       return run.announcedPid;
     }
     const before = run.announcedBefore ?? new Set<number>();
-    const candidates = ours.filter(
-      (one) => !before.has(one.pid) && this.isTheGameOf(run, one, run.projectPath),
-    );
+    const candidates = ours.filter((one) => !before.has(one.pid) && this.isTheGameOf(run, one));
     const theOne = candidates.length === 1 ? candidates[0] : undefined;
     if (theOne !== undefined) {
       this.tie(run, theOne);
@@ -10385,21 +10273,13 @@ class GodotServer {
   /**
    * Whether an announced game could be one the connected editor played.
    *
-   * A game that names an editor is the editor's when it names this one. A game that names none
-   * is the editor's only when the project's runtime addon does not announce editors at all, in
-   * which case no game of the project does: with an addon that does, a game announcing no editor
-   * was started by something other than the editor, whatever project it is from. Everything
-   * passes when this server does not know which editor it has.
+   * A game is the editor's when it names this one: every runtime of this protocol announces the
+   * editor that played it, so a game announcing none was started by something other than the
+   * editor. Everything passes when this server does not know which editor it has.
    */
-  private playedByOurEditor(endpoint: RuntimeEndpoint, projectPath: string | null): boolean {
+  private playedByOurEditor(endpoint: RuntimeEndpoint): boolean {
     const editor = this.godotBridge.getStatus().editorPid;
-    if (editor === undefined) {
-      return true;
-    }
-    if (endpoint.editorPid !== undefined) {
-      return endpoint.editorPid === editor;
-    }
-    return !runtimeAddonAnnouncesEditors(projectPath ?? this.ownProject);
+    return editor === undefined || endpoint.editorPid === editor;
   }
 
   /**
@@ -10408,16 +10288,12 @@ class GodotServer {
    * inherited no editor to name and one that names the connected editor is that editor's game.
    * No run at all is nothing's game.
    */
-  private isTheGameOf(
-    run: GodotProcess | null,
-    endpoint: RuntimeEndpoint,
-    projectPath: string | null,
-  ): boolean {
+  private isTheGameOf(run: GodotProcess | null, endpoint: RuntimeEndpoint): boolean {
     if (run === null) {
       return false;
     }
     if (run.throughEditor) {
-      return this.playedByOurEditor(endpoint, projectPath);
+      return this.playedByOurEditor(endpoint);
     }
     const editor = this.godotBridge.getStatus().editorPid;
     return endpoint.editorPid === undefined || endpoint.editorPid !== editor;
@@ -10458,12 +10334,12 @@ class GodotServer {
       log: new GameLog(),
       transcript: record.transcript,
       readOffset: 0,
-      projectPath: record.projectPath === '' ? null : record.projectPath,
+      projectPath: record.projectPath,
       startedAt: record.startedAt,
-      ...(record.startedBy === undefined ? {} : { startedBy: record.startedBy }),
+      startedBy: record.startedBy,
       ...(record.keeper === undefined ? {} : { keeper: record.keeper }),
       ...(record.profile === undefined ? {} : { profile: record.profile }),
-      ...(record.command === undefined ? {} : { command: record.command }),
+      command: record.command,
       exitCode: null,
       exitSignal: null,
       throughEditor: false,
@@ -10528,26 +10404,6 @@ class GodotServer {
     );
   }
 
-  /**
-   * Whether a run left on disk belongs to the project this server serves.
-   *
-   * The note lives in the runtime directory, which is per machine rather than per project, so two
-   * servers running beside each other share it. Answering about the other one's run would be the
-   * worst kind of wrong answer: the right shape, about the wrong game, and nothing in it saying
-   * so. Compared against the project this server was told to serve, then against the one the
-   * editor on the bridge has open.
-   *
-   * With neither, the answer is no. It used to be yes, on the reasoning that a server which
-   * cannot name a project has nothing to compare against and the run was probably its own. That
-   * reads "I do not know whose this is" as "it is mine", about a note whose whole purpose is to
-   * let a server pick a run back up and end it. A regression suite, whose servers are started
-   * with no project and no editor, adopted a bench belonging to another project on the same
-   * machine and killed it before starting its own run: six times in fifty minutes, silently,
-   * while its owner bisected their own code looking for the cause.
-   *
-   * A server that cannot say whose a run is answers "No game is running" about it, which is the
-   * true answer to the question it can actually ask.
-   */
   /**
    * What to say when this server has no run to answer about.
    *
@@ -10624,12 +10480,11 @@ class GodotServer {
     if (record === null) {
       return `No game is running.${noEditor} Start one with editor_run.`;
     }
-    const whose = record.projectPath === '' ? 'a project it does not name' : record.projectPath;
     const ours =
       mine === null
         ? 'this server was started without GDHARNESS_PROJECT and has no editor connected, so it cannot say whose that run is'
         : `this server serves ${mine}`;
-    return `No game of this server's is running.${noEditor} A run started from ${whose} is recorded on this machine, and ${ours}, so it is not this server's to answer for or to end. Start one with editor_run.`;
+    return `No game of this server's is running.${noEditor} A run started from ${record.projectPath} is recorded on this machine, and ${ours}, so it is not this server's to answer for or to end. Start one with editor_run.`;
   }
 
   /**
@@ -10706,6 +10561,26 @@ class GodotServer {
     ];
   }
 
+  /**
+   * Whether a run left on disk belongs to the project this server serves.
+   *
+   * The note lives in the runtime directory, which is per machine rather than per project, so two
+   * servers running beside each other share it. Answering about the other one's run would be the
+   * worst kind of wrong answer: the right shape, about the wrong game, and nothing in it saying
+   * so. Compared against the project this server was told to serve, then against the one the
+   * editor on the bridge has open.
+   *
+   * With neither, the answer is no. It used to be yes, on the reasoning that a server which
+   * cannot name a project has nothing to compare against and the run was probably its own. That
+   * reads "I do not know whose this is" as "it is mine", about a note whose whole purpose is to
+   * let a server pick a run back up and end it. A regression suite, whose servers are started
+   * with no project and no editor, adopted a bench belonging to another project on the same
+   * machine and killed it before starting its own run: six times in fifty minutes, silently,
+   * while its owner bisected their own code looking for the cause.
+   *
+   * A server that cannot say whose a run is answers "No game is running" about it, which is the
+   * true answer to the question it can actually ask.
+   */
   private couldBeOurs(project: string): boolean {
     const mine = this.ourProject();
     if (mine === null) {
@@ -10813,18 +10688,6 @@ class GodotServer {
     });
   }
 
-  /** editor_output: the log as entries, filtered the way the caller asked. */
-  /**
-   * Waits for the run to end, then answers exactly as editor_output does.
-   *
-   * Without this a caller watching a headless run had to poll the process from a shell, once per
-   * session, and that loop is easy to write inside out: a test with its polarity reversed returns
-   * at once on a live run and reads as a run that finished. The pid and the liveness check are
-   * both already here, so the waiting belongs here too.
-   *
-   * A wait that runs out is not a failure. The answer says `running` either way, and the note says
-   * which of the two happened so that "still going" is never read as "ended and printed nothing".
-   */
   /**
    * editor_run profile: where the run spends its time by GDScript function.
    *
@@ -11105,6 +10968,17 @@ class GodotServer {
     return false;
   }
 
+  /**
+   * Waits for the run to end, then answers exactly as editor_output does.
+   *
+   * Without this a caller watching a headless run had to poll the process from a shell, once per
+   * session, and that loop is easy to write inside out: a test with its polarity reversed returns
+   * at once on a live run and reads as a run that finished. The pid and the liveness check are
+   * both already here, so the waiting belongs here too.
+   *
+   * A wait that runs out is not a failure. The answer says `running` either way, and the note says
+   * which of the two happened so that "still going" is never read as "ended and printed nothing".
+   */
   private async handleWaitForRun(args: OperationParams): Promise<ToolResponse> {
     await this.pickUpWhatTheEditorIsPlaying();
     const run = await this.currentRun();
@@ -11339,6 +11213,7 @@ class GodotServer {
     );
   }
 
+  /** editor_output: the log as entries, filtered the way the caller asked. */
   private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
     if (readString(args, 'op') === 'editor') {
       return this.handleEditorConsole(args);
@@ -11548,7 +11423,6 @@ class GodotServer {
     });
   }
 
-  /** editor_run stop: the game is ended and its verdict answered, errors and warnings kept. */
   /**
    * The refusal for a stop or a wait whose `projectPath` names a project other than the run's, or
    * null when it names none or the same one.
@@ -11572,6 +11446,7 @@ class GodotServer {
     );
   }
 
+  /** editor_run stop: the game is ended and its verdict answered, errors and warnings kept. */
   private async handleStopProject(args: OperationParams): Promise<ToolResponse> {
     // Before anything is picked to end. A reconnect leaves the editor-played run unrecorded, and
     // what would otherwise be adopted here is the last run this project spawned: a pid belonging
@@ -12167,7 +12042,7 @@ class GodotServer {
               constantsBefore: listed('heldConstantsBefore')['heldConstantsBefore'] ?? [],
               constantsAfter: listed('constants')['constants'] ?? [],
               names: projectPath === '' ? [] : this.classesAScriptNames(projectPath, script),
-              restored: typeof answer['restored'] === 'boolean' ? answer['restored'] : null,
+              restored: answer['restored'] === true,
               restoredAs: readString(answer, 'restoredAs') ?? '',
             }),
           };
@@ -12347,9 +12222,7 @@ class GodotServer {
           const left =
             answer['restored'] === true
               ? ''
-              : answer['restored'] === false
-                ? '; compiling it again from the text it was built from failed too, so the editor holds it unusable until it compiles'
-                : '; a failed compile leaves the copy the editor holds unusable until it compiles, and this editor does not put it back';
+              : '; compiling it again from the text it was built from failed too, so the editor holds it unusable until it compiles';
           notReloaded.push({
             scriptPath,
             problem: `it did not compile: Godot answered error ${failed}${readString(answer, 'failedAs') ? `, ${readString(answer, 'failedAs')}` : ''}${left}`,
@@ -12724,13 +12597,6 @@ class GodotServer {
   }
 
   /**
-   * resource_edit move: a file with its .import and .uid, or a directory with everything in it, and
-   * every path in the project naming one of them rewritten to name where it went. Made from the
-   * files, so it needs no editor. An editor serving the project is then brought up to it the way its
-   * own FileSystem dock brings itself up after a move, since it holds the old paths in its open
-   * scenes, its cached resources and the project settings it would save back over the file.
-   */
-  /**
    * scene_tree and resource_edit read, which only read a file: through the editor serving the
    * project when there is one, so the answer says whether it holds unsaved changes, and otherwise by
    * a headless engine running the editor's own read on the file.
@@ -12840,6 +12706,13 @@ class GodotServer {
     });
   }
 
+  /**
+   * resource_edit move: a file with its .import and .uid, or a directory with everything in it, and
+   * every path in the project naming one of them rewritten to name where it went. Made from the
+   * files, so it needs no editor. An editor serving the project is then brought up to it the way its
+   * own FileSystem dock brings itself up after a move, since it holds the old paths in its open
+   * scenes, its cached resources and the project settings it would save back over the file.
+   */
   private async handleMoveFile(given: OperationParams): Promise<ToolResponse> {
     const project = this.project(given);
     if (!project.ok) {
@@ -13368,49 +13241,25 @@ class GodotServer {
       );
     }
     try {
-      return this.jsonTextResponse(
-        markIfStale(
-          await this.godotBridge.invokeTool(toolName, args),
-          this.godotBridge.getStatus().addonVersion,
-          SERVER_VERSION,
-          this.godotBridge.getStatus().addonDigest,
-          shippedEditorDigest(),
-          this.editorCodeOnDisk(),
-        ),
-      );
+      return this.jsonTextResponse(await this.godotBridge.invokeTool(toolName, args));
     } catch (error) {
       if (error instanceof BridgeTimeout) {
         return error;
       }
+      if (error instanceof AddonOfAnotherRelease) {
+        return this.createErrorResponse(error.message, ['editor_status says which addon the editor holds']);
+      }
       const message = errorMessage(error);
-      // An addon older than this server has no command for an op added since, and its own words for
-      // that named the command and nothing else: a probe calling resource_edit read on an editor a
-      // release behind was told "Unknown tool: read_resource", which reads as a fault in the tool.
+      // The bridge sends nothing to another release's addon, and this server's has every command, so
+      // one lacking a command did not load all of itself: a script of it that fails to compile in this
+      // engine leaves the commands it holds unregistered.
       if (message.includes(`Unknown tool: ${toolName}`)) {
-        const status = this.godotBridge.getStatus();
-        const remedy = addonMismatch(
-          status.addonVersion,
-          SERVER_VERSION,
-          status.addonDigest,
-          shippedEditorDigest(),
-          this.editorCodeOnDisk(),
-        );
-        // The addon this server ships has every command, so one of the same build lacking one did not
-        // load all of itself: a script of it that fails to compile in this engine leaves the commands
-        // it holds unregistered, and telling the caller to update an addon that is current sent them
-        // to restart into the same failure.
-        if (remedy === undefined) {
-          const log =
-            open === undefined || open === ''
-              ? "the editor's Output panel"
-              : `${editorLogPath(open)} for an editor editor_launch opened, or the Output panel of one opened by hand`;
-          return this.createErrorResponse(
-            `The editor's gdharness addon is this ${SERVER_VERSION} server's own and still has no ${named}, so a script of the addon failed to load in this editor and the commands it holds were never registered. The script and the error are in ${log}.`,
-            ['editor_status says which addon the editor holds'],
-          );
-        }
+        const log =
+          open === undefined || open === ''
+            ? "the editor's Output panel"
+            : `${editorLogPath(open)} for an editor editor_launch opened, or the Output panel of one opened by hand`;
         return this.createErrorResponse(
-          `The editor's gdharness addon is older than this ${SERVER_VERSION} server and has no ${named}, so it cannot answer this call. ${remedy}`,
+          `The editor's gdharness addon is this ${SERVER_VERSION} server's own and still has no ${named}, so a script of the addon failed to load in this editor and the commands it holds were never registered. The script and the error are in ${log}.`,
           ['editor_status says which addon the editor holds'],
         );
       }
@@ -13428,24 +13277,6 @@ class GodotServer {
     return Number.isInteger(override) && override > 0 ? override : 10000;
   }
 
-  /**
-   * Whether an editor-played run is held at a breakpoint, from the session when it knows and from
-   * the runtime when it does not.
-   *
-   * The debug session knows once it has been told by a `stopped` event, let the game go itself, or
-   * found frames on attach. A session that connected after the stop is none of those: measured on a
-   * real editor, the adapter answers such a session a thread and no frames while the game sits at
-   * its breakpoint, and that is the session every replacement server has after a reconnect. Reading
-   * its null as "running" is how a game that draws nothing and answers nothing was reported running,
-   * and how `debug_state stack` refused with "running, not stopped" about a game that was stopped.
-   *
-   * The runtime can still tell. A game with the addon accepts a connection and answers a ping in
-   * milliseconds while it runs, and accepts the connection and never answers while it is held,
-   * which `editor_status` already reports per game. So when the session cannot say, the runtime is
-   * asked once with a short wait, and its answer is recorded on the session so the next read does
-   * not ask again. A game without the addon leaves the question open, and the answer says so
-   * rather than guessing.
-   */
   /**
    * Where the game at [endpoint] is held, when it is the run this server reports on and the
    * session has been told, else null.
@@ -13467,6 +13298,24 @@ class GodotServer {
     return session.whereItStopped();
   }
 
+  /**
+   * Whether an editor-played run is held at a breakpoint, from the session when it knows and from
+   * the runtime when it does not.
+   *
+   * The debug session knows once it has been told by a `stopped` event, let the game go itself, or
+   * found frames on attach. A session that connected after the stop is none of those: measured on a
+   * real editor, the adapter answers such a session a thread and no frames while the game sits at
+   * its breakpoint, and that is the session every replacement server has after a reconnect. Reading
+   * its null as "running" is how a game that draws nothing and answers nothing was reported running,
+   * and how `debug_state stack` refused with "running, not stopped" about a game that was stopped.
+   *
+   * The runtime can still tell. A game with the addon accepts a connection and answers a ping in
+   * milliseconds while it runs, and accepts the connection and never answers while it is held,
+   * which `editor_status` already reports per game. So when the session cannot say, the runtime is
+   * asked once with a short wait, and its answer is recorded on the session so the next read does
+   * not ask again. A game without the addon leaves the question open, and the answer says so
+   * rather than guessing.
+   */
   private async holdOf(
     run: GodotProcess,
     going?: boolean,
@@ -13561,7 +13410,7 @@ class GodotServer {
         return false;
       }
     };
-    if (already.some((one) => announcedSinceTheStart(one) && this.isTheGameOf(run, one, project))) {
+    if (already.some((one) => announcedSinceTheStart(one) && this.isTheGameOf(run, one))) {
       return null;
     }
     const which = run.throughEditor ? 'the game the editor is playing for it' : `pid ${run.pid ?? 'unknown'}`;
@@ -13579,7 +13428,7 @@ class GodotServer {
     const fresh = await announcedSince(project, new Set(already.map((one) => one.pid)), {
       budgetMs: Math.min(budgetMs, remaining),
       // The run held, which this call took above: another call replacing it mid-wait replaces this.
-      accept: (one) => this.isTheGameOf(this.activeProcess, one, project),
+      accept: (one) => this.isTheGameOf(this.activeProcess, one),
       giveUp: () => this.activeProcess !== run || this.dapClient?.isStopped() === true || !stillRunning(run),
     });
     const endpoint = await this.theRunsAmong(run, fresh);
@@ -13706,14 +13555,16 @@ class GodotServer {
         return this.createErrorResponse(refusal);
       }
     }
+    // The game is not asked: an answer from another release's runtime is that release's answer.
+    const staleNote = this.runtimeStaleNote(choice.endpoint);
+    if (staleNote !== undefined) {
+      return this.createErrorResponse(staleNote, [
+        'editor_status lists the game and the runtime addon it loaded',
+      ]);
+    }
     const screenshotDir = expectsScreenshot ? scratchDirectory('runtime-screenshot') : null;
     const screenshotPath = screenshotDir ? join(screenshotDir, 'capture.png') : null;
-    // On every answer, the refusals most of all: a command an older runtime does not know, or
-    // answers the old way, is where a stale addon shows, and nothing else in the answer says so.
-    const staleNote = this.runtimeStaleNote(choice.endpoint);
-    const stale = staleNote === undefined ? {} : { addonIsStale: true, staleNote };
-    const refused = (message: string): ToolResponse =>
-      this.createErrorResponse(staleNote === undefined ? message : `${message}\n\n${staleNote}`);
+    const refused = (message: string): ToolResponse => this.createErrorResponse(message);
     const onGame: CallOnAGame = {
       pid: choice.endpoint.pid,
       what: `${asked.tool} ${asked.op}`,
@@ -13754,7 +13605,6 @@ class GodotServer {
           waitedMs: timeoutMs,
           note: `${reply.message} ${longerWaitNote(asked.tool, asked.op, timeoutMs)}`,
           ...answeredBy,
-          ...stale,
           ...alongside(),
         });
       }
@@ -13764,7 +13614,7 @@ class GodotServer {
 
       const { id: _id, ...payload } = reply.payload;
       if (!expectsScreenshot) {
-        return this.jsonTextResponse({ ...payload, ...answeredBy, ...stale, ...alongside() });
+        return this.jsonTextResponse({ ...payload, ...answeredBy, ...alongside() });
       }
 
       const returnedPath = readString(payload, 'path');
@@ -13792,7 +13642,7 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${saveTo === null ? '' : `. Saved to ${saveTo}`}${ranWith.length === 0 ? '' : `\n\nRan alongside ${ranWith.join(', ')}. ${ALONGSIDE_NOTE}`}${staleNote === undefined ? '' : `\n\n${staleNote}`}`,
+            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${saveTo === null ? '' : `. Saved to ${saveTo}`}${ranWith.length === 0 ? '' : `\n\nRan alongside ${ranWith.join(', ')}. ${ALONGSIDE_NOTE}`}`,
           },
           { type: 'image', data: readFileSync(screenshotPath).toString('base64'), mimeType: 'image/png' },
         ],

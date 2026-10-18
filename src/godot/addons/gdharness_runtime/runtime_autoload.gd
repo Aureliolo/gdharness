@@ -23,7 +23,7 @@ const Typing = preload("runtime_typing.gd")
 const Values = preload("runtime_values.gd")
 const Waits = preload("runtime_waits.gd")
 
-const PROTOCOL: int = 2
+const PROTOCOL: int = 3
 const DEFAULT_BIND_ADDRESS: String = "127.0.0.1"
 const BIND_ADDRESS_SETTING: String = "gdharness/runtime/bind_address"
 ## 0 asks the operating system for a free port, which is the default and what the server
@@ -502,7 +502,7 @@ func _announce(bind_address: String) -> void:
 	# Written whole under a name no server reads and moved into place, so no look ever meets
 	# the file empty: a server sweeping the directory between an open and a write took the
 	# announcement for a dead game's leftover, and the directory is shared by every server on
-	# the machine, older ones included.
+	# the machine.
 	var staged: String = path + ".tmp"
 	var file: FileAccess = FileAccess.open(staged, FileAccess.WRITE)
 	if file == null:

@@ -28,10 +28,9 @@ Windowed regressions skip unless `GDHARNESS_ALLOW_WINDOWS` is set. `bun scripts/
 and `bun scripts/install-gdunit4.ts` fetch the pinned versions into the temp directory and print
 where they landed.
 
-The suites speak the 2026-07-28 protocol, as Claude Code does: `ServerProcess` opens with
-`server/discover` and puts the envelope on every request. Pass `era: 'legacy'` for the 2025
-`initialize` handshake. Smoke, `test/node-runtime.ts` and `metadata-consistency` keep checking that
-one, for the clients still sending it.
+The server speaks the 2026-07-28 protocol only, as Claude Code does: `ServerProcess` opens with
+`server/discover` and puts the envelope on every request. A 2025 `initialize` is answered with the
+unsupported-protocol-version error naming 2026-07-28, which smoke checks.
 
 Run `test:typed` after any GDScript change. gdlint and gdformat pass a script the engine refuses with
 warnings as errors, and the regressions load the addons under the default warnings, so a local run
@@ -47,13 +46,13 @@ addon script, and add a new operations module to the list in `test/packaging-con
 `test:packaging` checks both and runs only on Linux and macOS, so from Windows the push is the
 first run that sees them.
 
-`src/` is the TypeScript MCP server (entry points `server-entry.ts` and `cli.ts`). Every tool is
-one entry in `src/tool-definitions.ts`: the server dispatches from it, and the site and the skill
-render their tool reference from it. `src/godot/addons/` holds the editor, runtime and auto-reload
-addons and `src/godot/operations/` the headless engine operations, both GDScript. `test/` holds the
-suites, with shared helpers in `test/support/`, and `scripts/` the build, release and installer
-scripts. `docs/architecture.md` describes how the parts fit together, and the repository map in
-`.github/CONTRIBUTING.md` names the main modules.
+`src/` is the TypeScript MCP server (entry point `cli.ts`, which serves stdio when given no
+command). Every tool is one entry in `src/tool-definitions.ts`: the server dispatches from it, and
+the site and the skill render their tool reference from it. `src/godot/addons/` holds the editor,
+runtime and auto-reload addons and `src/godot/operations/` the headless engine operations, both
+GDScript. `test/` holds the suites, with shared helpers in `test/support/`, and `scripts/` the
+build, release and installer scripts. `docs/architecture.md` describes how the parts fit together,
+and the repository map in `.github/CONTRIBUTING.md` names the main modules.
 
 ## Tests
 
@@ -309,7 +308,13 @@ this project does not make. `.github/CONTRIBUTING.md` states this publicly, so k
 "Prepare release" workflow is run only when the owner has said so for the release in hand, in their
 own words, after being asked directly; a change that looks like it deserves one is still a patch
 until then. **Never cut a major, and never ask for one.** `major` and an exact `2.0.0` are not
-options here, however ready anything looks; a rename or a removal is not made.
+options here, however ready anything looks.
+
+Nothing is kept working for an older release while gdharness has no users outside the owner's own
+projects. The server and the addons of one release work with each other only: an editor or a game
+on another release's addon is refused with the command that brings it into step, and no fallback,
+alias or old reading is kept for it. A rename or a removal goes out in a minor the owner approved.
+`.github/CONTRIBUTING.md` says the same under Versions.
 
 Cut releases through the button rather than by hand: run the "Prepare release" workflow with the
 bump, merge the pull request it opens, and `release-tag.yml` tags whatever version lands on

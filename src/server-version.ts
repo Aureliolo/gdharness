@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { isNewer } from './update-check.js';
 
-export const DEBUG_MODE: boolean = process.env['DEBUG'] === 'true';
-export const GODOT_DEBUG_MODE_DEFAULT: boolean = process.env['GODOT_DEBUG'] === 'true' || DEBUG_MODE;
+/** Debug lines on stderr, and headless engines run with `--debug-godot`. */
+export const DEBUG_MODE: boolean = process.env['GDHARNESS_DEBUG'] === '1';
 
 export const SERVER_VERSION = (() => {
   try {
@@ -16,56 +16,27 @@ export const SERVER_VERSION = (() => {
 })();
 
 /**
- * What an editor serving no version at all is called, since every addon before 0.4.0 is one.
+ * Whether an addon is running code other than what this server ships.
  *
- * A whole noun phrase rather than a version-shaped fragment, because the sentence it goes into
- * supplied the noun itself and the two met as "the addon from before versions were reported addon".
- * The versioned case now brings its own noun for the same reason.
+ * By digest, because the version moves on every release and the addons' code mostly does not:
+ * compared by version, an upgrade that left the addon alone called every editor stale and sent it
+ * to a restart that loaded the same code.
  */
-const UNVERSIONED = 'an addon from before versions were reported';
-
-/**
- * Whether the editor is running addon code other than what this server ships.
- *
- * By digest when both sides have one, because the version moves on every release and the editor
- * addon mostly does not: compared by version, an upgrade that left the addon alone called every
- * editor stale and sent it to a restart that loaded the same code. An addon from before digests
- * reports none, and the version is all there is to go on.
- */
-export function editorIsStale(
-  addonVersion: string | undefined,
-  serverVersion: string,
-  addonDigest?: string,
-  shippedDigest?: string,
-): boolean {
-  if (addonDigest !== undefined && addonDigest !== '' && shippedDigest !== undefined) {
-    return addonDigest !== shippedDigest;
-  }
-  return addonVersion !== serverVersion;
+export function staleAddon(addonDigest: string, shippedDigest: string): boolean {
+  return addonDigest !== shippedDigest;
 }
 
 /**
- * Why an editor reporting another version than this server's is not stale, or undefined when there
- * is nothing to explain: the versions match, or the code is not known to be the same.
+ * Why an editor running this server's addon code reports another version, or undefined when the
+ * versions match or the editor reports none. Asked only of an editor that is not stale.
  *
  * An upgrade that leaves the editor addons alone leaves an open editor reporting the version it
  * loaded at startup, which is right: it is running that code, and that code is this version's. The
  * answer then showed an older addonVersion beside addonIsStale false, and a session read the gap as
  * something to fix and restarted its editor for nothing.
  */
-export function sameCodeNote(
-  addonVersion: string | undefined,
-  serverVersion: string,
-  addonDigest?: string,
-  shippedDigest?: string,
-): string | undefined {
-  if (
-    addonVersion === undefined ||
-    addonVersion === serverVersion ||
-    addonDigest === undefined ||
-    addonDigest === '' ||
-    addonDigest !== shippedDigest
-  ) {
+export function sameCodeNote(addonVersion: string, serverVersion: string): string | undefined {
+  if (addonVersion === '' || addonVersion === serverVersion) {
     return undefined;
   }
   const same = `The editor loaded the ${addonVersion} addons, which are the same code this ${serverVersion} server ships, so nothing needs restarting`;
@@ -78,7 +49,8 @@ export function sameCodeNote(
 }
 
 /**
- * What to do about an editor and a server shipping different addons, or undefined when they agree.
+ * Why the editor is not asked anything, and what to do about it, when it and this server run
+ * different addon code; undefined when they agree.
  *
  * Which half is behind decides the answer, and getting it wrong sends the reader the wrong way.
  * An upgrade writes the new addon under a running editor, so the editor is the old half and a
@@ -87,16 +59,16 @@ export function sameCodeNote(
  * the editor widens the gap: what that one wants is the MCP server reconnected.
  */
 export function addonMismatch(
-  addonVersion: string | undefined,
+  addonVersion: string,
   serverVersion: string,
-  addonDigest?: string,
-  shippedDigest?: string,
+  addonDigest: string,
+  shippedDigest: string,
   onDisk?: string | null,
 ): string | undefined {
-  if (!editorIsStale(addonVersion, serverVersion, addonDigest, shippedDigest)) {
+  if (!staleAddon(addonDigest, shippedDigest)) {
     return undefined;
   }
-  const reported = addonVersion ?? '';
+  const reported = addonVersion;
   // What a restart would load, which is the project's addons on disk, not this server's. A server
   // newer than the addons it finds, as a checkout gets when a teammate moves the pin in a committed
   // config and not the addons, was told to restart the editor, which loaded the same old code, and
@@ -105,13 +77,14 @@ export function addonMismatch(
     onDisk !== undefined && onDisk !== shippedDigest
       ? `The project's own addons are not this server's either, so a restart would load the same code again: run  ${gdharnessCommand(serverVersion, 'upgrade')}  in a shell in the project directory, which installs the ${serverVersion} addons, and editor_launch restart then picks them up.`
       : 'Restart it with editor_launch restart to pick this one up.';
+  const asked = 'so this server asks it nothing but to quit:';
   if (reported === serverVersion) {
-    return `The editor is running a different build of the ${reported} addon from the one this server ships. ${restart}`;
+    return `The editor is running a different build of the ${reported} addon from the one this server ships, ${asked} ${restart}`;
   }
-  const editor = reported === '' ? UNVERSIONED : `the ${reported} addon`;
-  const both = `The editor is running ${editor} while this server ships ${serverVersion}.`;
+  const editor = reported === '' ? 'an addon with no version marker' : `the ${reported} addon`;
+  const both = `The editor is running ${editor} while this server ships ${serverVersion}, ${asked}`;
   if (reported !== '' && isNewer(reported, serverVersion)) {
-    return `${both} This server is the older half: reconnect it in your harness so it spawns ${reported}.`;
+    return `${both} this server is the older half; reconnect it in your harness so it spawns ${reported}.`;
   }
   return `${both} ${restart}`;
 }
@@ -127,45 +100,37 @@ export function gdharnessCommand(version: string, args: string): string {
 }
 
 /** A game that reports its runtime addon and could not read the markers that say what it is. */
-export function runtimeAddonUnknown(
-  addon: { readonly version: string; readonly digest: string } | undefined,
-): boolean {
-  return addon?.version === '' && addon.digest === '';
+export function runtimeAddonUnknown(addon: { readonly version: string; readonly digest: string }): boolean {
+  return addon.version === '' && addon.digest === '';
 }
 
 /**
- * What to do about a game running a runtime addon other than this server's, or undefined when it
- * runs this server's or cannot say what it runs.
+ * Why a game is not asked anything, and what to do about it, when it runs a runtime addon other
+ * than this server's; undefined when it runs this server's or cannot say what it runs.
  *
  * The same question as `addonMismatch` asks of the editor, for the addon inside a game. A second
  * checkout of a project, a git worktree, carried a runtime addon three releases behind its server
  * and nothing said so: every runtime answer came from the old code, and the protocol, which is
- * all that was compared, had not moved. [param addon] is absent for a runtime from before games
- * said what they loaded, and every one of those is behind. [param onDisk] is the digest the game's
- * own project holds, which is what the game loads the next time it starts.
+ * all that was compared, had not moved. [param onDisk] is the digest the game's own project holds,
+ * which is what the game loads the next time it starts.
  */
 export function runtimeMismatch(
   pid: number,
-  addon: { readonly version: string; readonly digest: string } | undefined,
+  addon: { readonly version: string; readonly digest: string },
   serverVersion: string,
-  shippedDigest: string | undefined,
+  shippedDigest: string,
   onDisk: string | null | undefined,
   projectPath: string,
 ): string | undefined {
-  if (runtimeAddonUnknown(addon)) {
-    return undefined;
-  }
-  if (addon !== undefined && !editorIsStale(addon.version, serverVersion, addon.digest, shippedDigest)) {
+  if (runtimeAddonUnknown(addon) || !staleAddon(addon.digest, shippedDigest)) {
     return undefined;
   }
   const game = `The game (pid ${pid})`;
-  if (addon !== undefined && addon.version !== '' && isNewer(addon.version, serverVersion)) {
-    return `${game} is running the ${addon.version} runtime addon while this server ships ${serverVersion}. This server is the older half: reconnect it in your harness so it spawns ${addon.version}.`;
+  if (addon.version !== '' && isNewer(addon.version, serverVersion)) {
+    return `${game} is running the ${addon.version} runtime addon while this server ships ${serverVersion}, so this server asks it nothing. This server is the older half: reconnect it in your harness so it spawns ${addon.version}.`;
   }
   let loaded: string;
-  if (addon === undefined) {
-    loaded = `a runtime addon from before games reported theirs, while this server ships ${serverVersion}`;
-  } else if (addon.version === serverVersion) {
+  if (addon.version === serverVersion) {
     loaded = `a different build of the ${serverVersion} runtime addon from the one this server ships`;
   } else if (addon.version === '') {
     loaded = `a runtime addon with no version marker, while this server ships ${serverVersion}`;
@@ -176,32 +141,5 @@ export function runtimeMismatch(
     onDisk !== undefined && onDisk !== shippedDigest
       ? `The project's own runtime addon is not this server's either, so starting the game again loads the same code: run  ${gdharnessCommand(serverVersion, `upgrade "${projectPath}"`)}  in a shell, which installs the ${serverVersion} addons, and the game picks them up when it next starts.`
       : `The project holds this server's runtime addon, so the game picks it up when it next starts.`;
-  return `${game} is running ${loaded}, and its answers come from that code. ${remedy}`;
-}
-
-/**
- * An answer from the editor, marked when the addon that produced it is not this server's.
- *
- * `editor_status` has reported `addonIsStale` all along and every other answer out of the editor
- * said nothing, so a caller who never asks about versions is served by whatever code the editor
- * loaded at startup, confidently and with no sign of it. A downstream project has a recorded
- * incident of exactly that: four errors from a stale addon that were not errors, and vanished on
- * restart. The same project reported an editor three releases behind its server today.
- *
- * Only when the two differ, so a project whose halves agree sees nothing added, and only onto an
- * object, because an answer that is a list or a number is not one to grow a key on.
- */
-export function markIfStale(
-  answer: unknown,
-  addonVersion: string | undefined,
-  serverVersion: string,
-  addonDigest?: string,
-  shippedDigest?: string,
-  onDisk?: string | null,
-): unknown {
-  const staleNote = addonMismatch(addonVersion, serverVersion, addonDigest, shippedDigest, onDisk);
-  if (staleNote === undefined || typeof answer !== 'object' || answer === null || Array.isArray(answer)) {
-    return answer;
-  }
-  return { ...(answer as Record<string, unknown>), addonIsStale: true, staleNote };
+  return `${game} is running ${loaded}, so this server asks it nothing: its answers would come from that code. ${remedy}`;
 }

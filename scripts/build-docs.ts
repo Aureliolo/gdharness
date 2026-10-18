@@ -597,13 +597,6 @@ function renderTools(): string {
 }
 
 /**
- * The same reference as markdown, which is what an agent gets pointed at.
- *
- * An agent handed an HTML page pays for the chrome, the navigation and the stylesheet link before
- * it reaches a sentence, so every page here has a plain twin and the links written for agents go
- * to those.
- */
-/**
  * The one navigation, on every page and listing every page including the front one.
  *
  * It is the page list, so a page outside it is one nothing links to, and there is nowhere for a
@@ -777,13 +770,6 @@ function linksIn(text: string): string[] {
 }
 
 /**
- * Text that is not tab, newline or carriage return but is still below a space.
- *
- * Compared by code point rather than matched by a character class: writing that class means
- * putting escapes in a regular expression, and an escape in this file is exactly what got
- * mangled into a raw control byte last time.
- */
-/**
  * Box drawing and block elements, which look like the obvious way to draw a diagram and are not.
  *
  * IBM Plex Mono has no glyphs in these blocks, so the browser draws them from whatever other font
@@ -803,6 +789,13 @@ function drawingCharactersIn(text: string): string[] {
   return [...found];
 }
 
+/**
+ * Text that is not tab, newline or carriage return but is still below a space.
+ *
+ * Compared by code point rather than matched by a character class: writing that class means
+ * putting escapes in a regular expression, and an escape in this file is exactly what got
+ * mangled into a raw control byte last time.
+ */
 function controlCharactersIn(text: string): number[] {
   const found: number[] = [];
   for (let index = 0; index < text.length; index += 1) {

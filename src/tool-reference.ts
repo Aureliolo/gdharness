@@ -116,6 +116,13 @@ function listed(items: readonly string[]): string {
   return items.length === 1 ? last : `${items.slice(0, -1).join(', ')} and ${last}`;
 }
 
+/**
+ * The tool reference as markdown, which is what an agent gets pointed at.
+ *
+ * An agent handed an HTML page pays for the chrome, the navigation and the stylesheet link before
+ * it reaches a sentence, so every page of the site has a plain twin and the links written for
+ * agents go to those.
+ */
 export function renderToolsMarkdown(): string {
   const lines: string[] = [
     '# Tools',
