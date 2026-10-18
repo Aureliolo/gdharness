@@ -703,9 +703,9 @@ export interface FailedReload {
   readonly names: readonly string[];
   /**
    * Whether the editor compiled the copy again from the text it held before, which is what makes it
-   * usable again, or null from an addon that does not say.
+   * usable again.
    */
-  readonly restored: boolean | null;
+  readonly restored: boolean;
   /** Godot's own name for why that compile failed too, when it did. */
   readonly restoredAs: string;
 }
@@ -776,9 +776,7 @@ export function failedReloadNote(failed: FailedReload): string {
   const unusable =
     'A failed compile leaves the copy the editor holds unusable, measured on 4.7.2: the editor can make no instance of it, and one it already made has lost its methods, while its member lists read as before.';
   let copy: string;
-  if (failed.restored === null) {
-    copy = `${unusable} This editor's addon does not put it back, so it stays that way until the script compiles: reload it then, or restart the editor with editor_launch restart.`;
-  } else if (!failed.restored) {
+  if (!failed.restored) {
     copy = `${unusable} The editor compiled it again from the text it was built from, and that failed too${failed.restoredAs === '' ? '' : ` (${failed.restoredAs})`}, so it stays that way until the script compiles: reload it then, or restart the editor with editor_launch restart.`;
   } else if (unchanged) {
     copy =

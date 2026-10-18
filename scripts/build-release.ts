@@ -49,15 +49,13 @@ await rm(buildRoot, { recursive: true, force: true });
 await mkdir(buildRoot, { recursive: true });
 
 await buildBundledEntrypoint('cli.ts', 'cli.js');
-await buildBundledEntrypoint('server-entry.ts', 'index.js');
-// Its own bundle beside index.js, which starts it with Node: the launcher and keeper that leave
+// Its own bundle beside cli.js, which starts it with Node: the launcher and keeper that leave
 // what the server starts outside the server's process tree.
 await buildBundledEntrypoint('keeper.ts', 'keeper.js');
 
 for (const sourcePath of await collectTypeScriptEntries(sourceRoot)) {
   const relativePath = path.relative(sourceRoot, sourcePath);
-  if (relativePath === 'cli.ts' || relativePath === 'server-entry.ts' || relativePath === 'keeper.ts')
-    continue;
+  if (relativePath === 'cli.ts' || relativePath === 'keeper.ts') continue;
 
   const outputPath = path.join(buildRoot, relativePath.replace(/\.ts$/, '.js'));
   await mkdir(path.dirname(outputPath), { recursive: true });
@@ -94,7 +92,7 @@ const SHEBANG = '#!/usr/bin/env node\n';
 // Replaced rather than prepended. The bundler carries the entry file's own shebang into the
 // bundle, so a prepend leaves two, and the second one wins nothing and reads as a mistake. What
 // the published file starts with is a packaging decision either way, not the source's.
-for (const executable of ['cli.js', 'index.js']) {
+for (const executable of ['cli.js']) {
   const executablePath = path.join(buildRoot, executable);
   const contents = await readFile(executablePath, 'utf8');
   const body = contents.startsWith('#!') ? contents.slice(contents.indexOf('\n') + 1) : contents;

@@ -315,13 +315,13 @@ function testAnInstallSaysWhatItLaunchedInsteadOf(): void {
     const entry = (before['mcpServers'] as Record<string, Record<string, unknown>>)[SERVER_KEY];
     assert.ok(entry, 'the install wrote an entry to point somewhere else');
     entry['command'] = 'node';
-    entry['args'] = ['../gdharness/build/index.js'];
+    entry['args'] = ['../gdharness/build/cli.js'];
     writeFileSync(path, `${JSON.stringify(before, null, 2)}\n`, 'utf8');
 
     const moved = connect(harness, root, LAUNCH);
     assert.equal(
       moved.wasLaunchedBy,
-      'node ../gdharness/build/index.js',
+      'node ../gdharness/build/cli.js',
       'the line it replaced is named rather than dropped in silence',
     );
 
@@ -343,10 +343,10 @@ function testAnInstallSaysWhatItLaunchedInsteadOf(): void {
  */
 function testTheUpgradeNoteNamesTheConfigRatherThanTheAddons(): void {
   const moved = harnessNote(
-    { moved: ['node ../gdharness/build/index.js'], written: 1, byHand: 0 },
+    { moved: ['node ../gdharness/build/cli.js'], written: 1, byHand: 0 },
     'npx -y gdharness@9.9.10',
   );
-  assert.match(moved, /node \.\.\/gdharness\/build\/index\.js/, 'it names what the config held');
+  assert.match(moved, /node \.\.\/gdharness\/build\/cli\.js/, 'it names what the config held');
   assert.match(moved, /npx -y gdharness@9\.9\.10/, 'and what it holds now');
 
   // Nothing moved, so there is nothing it can honestly name: the server the harness is running is
@@ -470,8 +470,8 @@ function testTheUpgradeNoteSeparatesTheThreeWaysNothingMoved(): void {
 
   // A project can hold a config this writes and a harness it cannot, and the config's answer is the
   // true one for the reconnect while the command above still has to be run.
-  const both = harnessNote({ moved: ['node build/index.js'], written: 1, byHand: 2 }, now);
-  assert.match(both, /node build\/index\.js/, 'the config that moved is still named');
+  const both = harnessNote({ moved: ['node build/cli.js'], written: 1, byHand: 2 }, now);
+  assert.match(both, /node build\/cli\.js/, 'the config that moved is still named');
   assert.match(
     both,
     /2 harnesses above were handed a command/,

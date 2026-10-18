@@ -112,37 +112,28 @@ function addonsDigest(names: readonly string[], from: string): string {
   return hash.digest('hex');
 }
 
-let shippedDigest: string | null | undefined;
-let shippedRuntime: string | null | undefined;
+let shippedDigest: string | undefined;
+let shippedRuntime: string | undefined;
 
 /**
- * The digest of the editor plugins this package ships, taken once, or undefined when they cannot
- * be read, which leaves staleness to the version as it was before digests.
+ * The digest of the editor plugins this package ships, taken once. A package whose addons cannot
+ * be read is a broken install, and the error says so where it is met.
  */
-export function shippedEditorDigest(): string | undefined {
-  if (shippedDigest === undefined) {
-    try {
-      shippedDigest = editorAddonDigest();
-    } catch {
-      shippedDigest = null;
-    }
-  }
-  return shippedDigest ?? undefined;
+export function shippedEditorDigest(): string {
+  shippedDigest ??= editorAddonDigest();
+  return shippedDigest;
 }
 
 /** The same for the runtime addon. */
-export function shippedRuntimeDigest(): string | undefined {
-  if (shippedRuntime === undefined) {
-    try {
-      shippedRuntime = runtimeAddonDigest();
-    } catch {
-      shippedRuntime = null;
-    }
-  }
-  return shippedRuntime ?? undefined;
+export function shippedRuntimeDigest(): string {
+  shippedRuntime ??= runtimeAddonDigest();
+  return shippedRuntime;
 }
 
-/** The digest the installed editor addon was written with, or null for a copy from before digests. */
+/**
+ * The digest the installed editor addon was written with, or null for a copy gdharness did not
+ * install, which carries no marker.
+ */
 export function installedEditorDigest(projectPath: string): string | null {
   return digestMarker(projectPath, ADDONS[0]);
 }

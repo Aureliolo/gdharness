@@ -284,7 +284,7 @@ func _glyph_of(keycode: Key, shifted: bool) -> int:
 ## `pressed` is how a caller asks for one half, the way a drag is made: true holds the button down,
 ## false lets go of one being held.
 func inject_mouse_click(params: Dictionary) -> Dictionary:
-	var point: Variant = Mouse.read_point(params, "x", "y", "position")
+	var point: Variant = Mouse.read_point(params, "x", "y")
 	if point is String:
 		return {"type": "error", "message": point}
 	var position: Vector2 = point
@@ -349,7 +349,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 ## would have carried. A relative the caller gives is kept, since a game may want to read a motion
 ## the position does not show.
 func inject_mouse_motion(params: Dictionary) -> Dictionary:
-	var point: Variant = Mouse.read_point(params, "x", "y", "position")
+	var point: Variant = Mouse.read_point(params, "x", "y")
 	if point is String:
 		return {"type": "error", "message": point}
 	var position: Vector2 = point
@@ -358,11 +358,6 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 		relative = Vector2(
 			Read.as_float(params.get("relativeX", 0.0)), Read.as_float(params.get("relativeY", 0.0))
 		)
-	elif params.has("relative"):
-		var movement: Variant = Mouse.read_point(params, "relativeX", "relativeY", "relative")
-		if movement is String:
-			return {"type": "error", "message": movement}
-		relative = movement
 
 	var supplied: bool = _follow_in_the_window(position)
 	Input.parse_input_event(_motion(position, relative))

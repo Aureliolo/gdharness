@@ -600,18 +600,13 @@ func shown(value: Variant) -> String:
 ## not mine". A tag that names a type but lacks the keys to build it is left unhandled on purpose,
 ## so the caller can still read it against the type the property declares.
 func _parse_tagged_dictionary(value: Dictionary) -> Array:
-	var type_tag: String = str(value.get("_type", value.get("type", "")))
+	var type_tag: String = str(value.get("_type", ""))
 	if type_tag == "Resource":
 		return _parse_resource_tag(value)
 
 	# The shared builder is the same one the answer was written by, so every shape it writes comes
-	# back as itself. `type` as the tag is read as `_type`: it is what these tools answered with
-	# before the serialisers were made one, and a caller who kept an answer can still send it.
-	var tagged: Dictionary = value
-	if not value.has("_type") and not type_tag.is_empty():
-		tagged = value.duplicate()
-		tagged["_type"] = type_tag
-	var rebuilt: Variant = _values.deserialize_value(tagged)
+	# back as itself.
+	var rebuilt: Variant = _values.deserialize_value(value)
 	if not rebuilt is Dictionary:
 		return [true, rebuilt]
 
@@ -660,7 +655,7 @@ func _parse_new_resource(type_tag: String, value: Dictionary) -> Array:
 	var wanted: Dictionary = {}
 	for key: Variant in value:
 		var property: String = str(key)
-		if property != "_type" and property != "type":
+		if property != "_type":
 			wanted[property] = value[key]
 	var refused: String = write_all(built, wanted)
 	if not refused.is_empty():

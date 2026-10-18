@@ -250,8 +250,8 @@ func _check(node: Runtime, directory: String) -> void:
 		_fail("the announcement is not an object")
 		return
 	var fields: Dictionary = announced
-	if fields.get("protocol") != 2:
-		_fail("the announcement should name protocol 2: %s" % str(fields))
+	if fields.get("protocol") != Runtime.PROTOCOL:
+		_fail("the announcement should name protocol %d: %s" % [Runtime.PROTOCOL, str(fields)])
 	if fields.get("pid") != OS.get_process_id():
 		_fail("the announcement should carry this process id: %s" % str(fields))
 	if fields.get("port") != node._port:
@@ -276,8 +276,8 @@ func _check(node: Runtime, directory: String) -> void:
 		_fail("no welcome arrived")
 		return
 	var welcome: Dictionary = _reply(0)
-	if welcome.get("type") != "welcome" or welcome.get("protocol") != 2:
-		_fail("the first line should be a protocol 2 welcome: %s" % lines[0])
+	if welcome.get("type") != "welcome" or welcome.get("protocol") != Runtime.PROTOCOL:
+		_fail("the first line should be a protocol %d welcome: %s" % [Runtime.PROTOCOL, lines[0]])
 	var commands: Array = welcome.get("commands", [])
 	if not commands.has("ping") or not commands.has("get_tree"):
 		_fail("the welcome should list the commands: %s" % lines[0])

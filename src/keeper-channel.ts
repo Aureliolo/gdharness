@@ -153,10 +153,7 @@ export async function askTheKeeperToStop(
     : { unreached: `it answered ${JSON.stringify(answered)}` };
 }
 
-/**
- * Asks the debugger of the game the keeper at [param address] holds. An answer that is not JSON is a
- * keeper from before the debugger, which answers every question but a stop with `unknown`.
- */
+/** Asks the debugger of the game the keeper at [param address] holds. */
 export async function askTheKeepersDebugger(
   address: string,
   request: DebugRequest,
@@ -165,9 +162,6 @@ export async function askTheKeepersDebugger(
   const answered = await askTheKeeper(address, `${DEBUG_PREFIX}${JSON.stringify(request)}`, withinMs);
   if (typeof answered !== 'string') {
     return answered;
-  }
-  if (answered === 'unknown') {
-    return { unreached: 'its keeper was started by a gdharness from before game debuggers, and has none' };
   }
   try {
     const parsed: unknown = JSON.parse(answered);

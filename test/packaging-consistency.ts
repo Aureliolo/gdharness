@@ -101,7 +101,6 @@ const operationsModules = [
 for (const requiredFile of [
   'package/package.json',
   'package/build/cli.js',
-  'package/build/index.js',
   'package/build/keeper.js',
   ...operationsModules.map((module) => `package/build/godot/operations/${module}`),
   'package/build/godot/addons/auto_reload/plugin.cfg',
@@ -182,13 +181,13 @@ try {
   const packedRoot = path.join(extractionRoot, 'package');
 
   // Bun reads a file carrying its `// @bun` pragma as Latin-1, so every character past ASCII in one
-  // arrives as two or three. Entry files whose shebang named bun gave cli.js and index.js that
-  // pragma, and under bunx the server answered every `…` in a repeated shape as `â€¦`.
+  // arrives as two or three. An entry file whose shebang named bun gave cli.js that pragma, and
+  // under bunx the server answered every `…` in a repeated shape as `â€¦`.
   const bundles = (await readdir(path.join(packedRoot, 'build'), { recursive: true })).filter((entry) =>
     entry.endsWith('.js'),
   );
   assert.ok(
-    bundles.includes('cli.js') && bundles.includes('index.js'),
+    bundles.includes('cli.js') && bundles.includes('keeper.js'),
     `the bundles were walked: ${bundles.length}`,
   );
   for (const bundle of bundles) {
@@ -259,14 +258,14 @@ try {
   // or directory" on every machine without Bun: published green, installed broken, on every
   // release until the job that types the line out on three platforms was added.
   const cliPath = path.join(packedRoot, 'build', 'cli.js');
-  for (const executable of ['cli.js', 'index.js']) {
+  for (const executable of ['cli.js']) {
     const bundle = await readFile(path.join(packedRoot, 'build', executable), 'utf8');
     assert.ok(
       bundle.startsWith('#!/usr/bin/env node\n'),
       `packed ${executable} should start under the runtime npx is, got ${bundle.slice(0, 40)}`,
     );
   }
-  for (const bundleName of ['cli.js', 'index.js', 'keeper.js']) {
+  for (const bundleName of ['cli.js', 'keeper.js']) {
     const bundle = await readFile(path.join(packedRoot, 'build', bundleName), 'utf8');
     const externalPackageImport =
       /(?:from\s+|import\()["'](?:@modelcontextprotocol|fs-extra)(?:[/"'])/.exec(bundle)?.[0] ?? null;

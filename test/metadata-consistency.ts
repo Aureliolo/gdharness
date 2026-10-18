@@ -175,28 +175,23 @@ assert.equal(
   'CLI version output should stay in sync with package.json',
 );
 
-// In both eras, since each puts the identity in a different place and a client of either reads it.
-for (const era of ['modern', 'legacy'] as const) {
-  const server = new ServerProcess({ entry: './build/cli.js', era });
+{
+  const server = new ServerProcess({ entry: './build/cli.js' });
   try {
     const init = await server.initialize('metadata-test');
-    assert.equal(init.error, undefined, `the ${era} opening failed: ${JSON.stringify(init.error)}`);
+    assert.equal(init.error, undefined, `the opening failed: ${JSON.stringify(init.error)}`);
     const identity = serverIdentity(init);
-    assert.equal(identity['name'], pkg.name, `the ${era} opening should report package-aligned server name`);
+    assert.equal(identity['name'], pkg.name, 'the opening should report package-aligned server name');
     assert.equal(
       identity['version'],
       pkg.version,
-      `the ${era} opening should report package-aligned server version`,
+      'the opening should report package-aligned server version',
     );
     const result = isRecord(init.result) ? init.result : {};
     const capabilities = isRecord(result['capabilities']) ? result['capabilities'] : {};
     const tools = isRecord(capabilities['tools']) ? capabilities['tools'] : {};
     // The list never changes, so a client is not told to expect it to.
-    assert.equal(
-      tools['listChanged'],
-      undefined,
-      `the ${era} opening should not advertise a changing tool list`,
-    );
+    assert.equal(tools['listChanged'], undefined, 'the opening should not advertise a changing tool list');
   } finally {
     await server.stop();
   }

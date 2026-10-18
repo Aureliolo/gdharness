@@ -518,7 +518,7 @@ func _handle_message(json_string: String) -> void:
 
 
 ## Says [param tool_name] was not run because the editor is scanning or importing, for the server to
-## ask again once that is over. An older server reads it as an ordinary refusal.
+## ask again once that is over.
 func send_busy(request_id: String, tool_name: String) -> void:
 	_send_message(
 		{

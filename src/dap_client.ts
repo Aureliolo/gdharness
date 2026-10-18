@@ -487,8 +487,8 @@ export class GodotDAPClient {
 
     const response = await this.sendRequest('initialize', {
       adapterID: 'godot',
-      clientID: 'godot-mcp',
-      clientName: 'godot-mcp',
+      clientID: 'gdharness',
+      clientName: 'gdharness',
       locale: 'en',
       linesStartAt1: true,
       columnsStartAt1: true,

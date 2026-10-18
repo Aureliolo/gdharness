@@ -154,12 +154,6 @@ export interface ServerOptions {
   args?: string[];
   /** The directory the server runs in, which is the suite's own unless a fixture is about it. */
   cwd?: string;
-  /**
-   * Which protocol era to speak. 2026-07-28 by default, because it is what Claude Code opens with,
-   * and so what the projects driving gdharness every day reach; `legacy` for the 2025 handshake
-   * the clients that have not moved on still send.
-   */
-  era?: 'modern' | 'legacy';
 }
 
 const MODERN_REVISION = '2026-07-28';
@@ -181,14 +175,11 @@ function enveloped(params: unknown): unknown {
   return { ...given, _meta: { ...ENVELOPE, ...meta } };
 }
 
-/**
- * The name and version a server gave in its opening answer, from wherever its era puts them: the
- * 2025 `initialize` result carries `serverInfo`, and a 2026 result carries them in `_meta`.
- */
+/** The name and version a server gave in the `_meta` of its opening answer. */
 export function serverIdentity(opening: JsonRpcMessage): Record<string, unknown> {
   const result = opening.result as Record<string, unknown> | undefined;
   const meta = result?.['_meta'] as Record<string, unknown> | undefined;
-  const found = result?.['serverInfo'] ?? meta?.['io.modelcontextprotocol/serverInfo'];
+  const found = meta?.['io.modelcontextprotocol/serverInfo'];
   return typeof found === 'object' && found !== null ? (found as Record<string, unknown>) : {};
 }
 
@@ -290,14 +281,11 @@ export class ServerProcess {
   /** The runtime directory this server was given, or null when the fixture named its own. */
   readonly runtimeDir: string | null;
 
-  readonly era: 'modern' | 'legacy';
-
   constructor(options: ServerOptions = {}) {
-    const entry = options.entry ?? 'build/index.js';
+    const entry = options.entry ?? 'build/cli.js';
     refuseAStaleBuild(entry);
     const { env, runtimeDir } = testServerEnvironment(options.env);
     this.runtimeDir = runtimeDir;
-    this.era = options.era ?? 'modern';
     this.child = spawnHidden(process.execPath, [resolvePath(entry), ...(options.args ?? [])], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
@@ -340,7 +328,7 @@ export class ServerProcess {
   }
 
   notify(method: string, params?: unknown): void {
-    this.write({ jsonrpc: '2.0', method, params: this.era === 'modern' ? enveloped(params) : params });
+    this.write({ jsonrpc: '2.0', method, params: enveloped(params) });
   }
 
   /** The id the next request will carry, so a fixture can cancel a request it has sent. */
@@ -380,28 +368,15 @@ export class ServerProcess {
         resolve(message);
       });
     });
-    this.write({ jsonrpc: '2.0', id, method, params: this.era === 'modern' ? enveloped(params) : params });
+    this.write({ jsonrpc: '2.0', id, method, params: enveloped(params) });
     return await response;
   }
 
-  /** The MCP handshake every session starts with. */
-  /**
-   * The opening a session starts with: `server/discover` in the 2026 era, which has no handshake to
-   * finish, and the 2025 `initialize` and its acknowledgement otherwise.
-   */
+  /** The opening a session starts with, `server/discover`, which has no handshake to finish. */
   async initialize(clientName = 'gdharness-test'): Promise<JsonRpcMessage> {
-    if (this.era === 'modern') {
-      return await this.request('server/discover', {
-        _meta: { 'io.modelcontextprotocol/clientInfo': { name: clientName, version: '1.0.0' } },
-      });
-    }
-    const init = await this.request('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: clientName, version: '1.0.0' },
+    return await this.request('server/discover', {
+      _meta: { 'io.modelcontextprotocol/clientInfo': { name: clientName, version: '1.0.0' } },
     });
-    this.notify('notifications/initialized');
-    return init;
   }
 
   async stop(): Promise<void> {

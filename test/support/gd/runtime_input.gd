@@ -169,26 +169,26 @@ func _check_keys(input: InputCommands) -> void:
 
 
 func _check_mouse(input: InputCommands) -> void:
-	# The tool schema sends flat x and y; the older nested form still has to work.
 	var flat: Dictionary = await input.inject_mouse_click({"x": 10, "y": 20, "button": "right"})
 	if flat.get("position", []) != [10.0, 20.0] or flat.get("button", 0) != MOUSE_BUTTON_RIGHT:
 		_fail("flat click: %s" % JSON.stringify(flat))
 
-	var nested: Dictionary = await input.inject_mouse_click({"position": [1, 2], "button": 3})
-	if nested.get("position", []) != [1.0, 2.0] or nested.get("button", 0) != MOUSE_BUTTON_MIDDLE:
-		_fail("nested click: %s" % JSON.stringify(nested))
+	var numbered: Dictionary = await input.inject_mouse_click({"x": 1, "y": 2, "button": 3})
+	if numbered.get("position", []) != [1.0, 2.0] or numbered.get("button", 0) != MOUSE_BUTTON_MIDDLE:
+		_fail("click by button number: %s" % JSON.stringify(numbered))
 
-	var short: Dictionary = await input.inject_mouse_click({"position": [1]})
-	if short.get("type", "") != "error":
-		_fail("a one-element position should be refused: %s" % JSON.stringify(short))
+	var short: Dictionary = await input.inject_mouse_click({"x": 1})
+	var refusal: String = str(short.get("message", ""))
+	if short.get("type", "") != "error" or not refusal.contains("x and y"):
+		_fail("a point missing y should be refused: %s" % JSON.stringify(short))
 
 	var motion: Dictionary = input.inject_mouse_motion({"x": 1, "y": 2, "relativeX": 3, "relativeY": 4})
 	if motion.get("position", []) != [1.0, 2.0] or motion.get("relative", []) != [3.0, 4.0]:
 		_fail("flat motion: %s" % JSON.stringify(motion))
 
-	var nested_motion: Dictionary = input.inject_mouse_motion({"position": [5, 6], "relative": [7, 8]})
-	if nested_motion.get("relative", []) != [7.0, 8.0]:
-		_fail("nested motion: %s" % JSON.stringify(nested_motion))
+	var position_only: Dictionary = input.inject_mouse_motion({"position": [5, 6]})
+	if position_only.get("type", "") != "error":
+		_fail("a position list is not a point: %s" % JSON.stringify(position_only))
 
 	if Mouse.button_of("WHEEL_UP") != MOUSE_BUTTON_WHEEL_UP:
 		_fail("button names are read in any case")

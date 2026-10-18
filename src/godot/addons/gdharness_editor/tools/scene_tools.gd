@@ -410,7 +410,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 	var new_name: String = str(args.get("newName", ""))
-	var parent_path: String = str(args.get("parentPath", ""))
+	var parent_path: String = str(args.get("parentNodePath", ""))
 
 	if node_path.is_empty() or new_name.is_empty():
 		return {"ok": false, "error": "Missing nodePath or newName"}

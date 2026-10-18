@@ -24,7 +24,7 @@ import { startTimesOf } from './process-children.js';
 import { asParams, readNumber, readParams, readString } from './tool-args.js';
 
 /** The protocol version the addon has to speak. Bumped whenever a reply or request changes. */
-export const RUNTIME_PROTOCOL = 2;
+export const RUNTIME_PROTOCOL = 3;
 
 const ANNOUNCEMENT_PATTERN = /^runtime-(\d+)\.json$/;
 
@@ -37,17 +37,16 @@ export interface RuntimeEndpoint {
   /**
    * The editor that played this game, when the game was played by one running the editor addon:
    * the addon puts its process id into its environment and the game announces what it inherited.
-   * Absent for a game started any other way, and for one carrying a runtime addon from before
-   * this was announced.
+   * Absent for a game started any other way.
    */
   readonly editorPid?: number;
   /** When the announcement was written, which is what `judgeAnnouncedGame` holds the process to. */
   readonly announcedAt?: number;
   /**
    * The runtime addon the game loaded, as its markers said when it started: empty strings when it
-   * could not read them. Absent for a runtime addon from before games reported it.
+   * could not read them, as for a copy gdharness did not install.
    */
-  readonly addon?: LoadedAddon;
+  readonly addon: LoadedAddon;
 }
 
 interface LoadedAddon {
@@ -147,8 +146,8 @@ export function consoleBoundaryAt(bytes: Buffer): number {
  * came, which that server had read by the time it reached the boundary. A transcript without the
  * boundary is one whose server never reached it, and has at most the errors before it.
  *
- * A report without the boundary is from an addon that writes errors alone, taken by that server
- * at moments nothing recorded, so it is read again from the start: an error counted twice leaves
+ * A report without the boundary is from a game not listening yet, which has written errors alone,
+ * taken by that server at moments nothing recorded, so it is read again from the start: an error counted twice leaves
  * the verdict right, and one missed can make a failing run read clean. When the transcript's end
  * does not match the report from the boundary on, which copying bytes as they are does not
  * produce, only what the game writes from now on is taken, rather than the whole console twice.
@@ -236,6 +235,10 @@ function parseAnnouncement(file: string, pid: number): Announced {
   }
   const editorPid = readNumber(fields, 'editor_pid');
   const addonVersion = readString(fields, 'addon_version');
+  const addonDigest = readString(fields, 'addon_digest');
+  if (addonVersion === undefined || addonDigest === undefined) {
+    return { kind: 'rubbish' };
+  }
   return {
     kind: 'runtime',
     endpoint: {
@@ -246,9 +249,7 @@ function parseAnnouncement(file: string, pid: number): Announced {
       file,
       ...(editorPid !== undefined && Number.isInteger(editorPid) && editorPid > 0 ? { editorPid } : {}),
       ...when,
-      ...(addonVersion === undefined
-        ? {}
-        : { addon: { version: addonVersion, digest: readString(fields, 'addon_digest') ?? '' } }),
+      addon: { version: addonVersion, digest: addonDigest },
     },
   };
 }
@@ -727,12 +728,6 @@ function severalFrom(project: string, games: readonly RuntimeEndpoint[]): string
 }
 
 /**
- * What to say when the only games running speak a protocol this server was not built for.
- *
- * Which half is behind, and what to do about it, because "no game is running" is the one answer
- * that is certainly false here and it sends the reader to start a second game.
- */
-/**
  * Which half is behind, and what to do about it, for games announcing [param unspoken].
  *
  * One function because the sentence is said in two places, here and in the refusal `editor_run`
@@ -761,6 +756,12 @@ export function whichHalfIsBehind(unspoken: readonly UnspokenRuntime[]): string 
   return `the addon is the older half: reinstall it and restart ${behind.length === 1 ? 'the game' : 'those games'}`;
 }
 
+/**
+ * What to say when the only games running speak a protocol this server was not built for.
+ *
+ * Which half is behind, and what to do about it, because "no game is running" is the one answer
+ * that is certainly false here and it sends the reader to start a second game.
+ */
 function tooNew(unspoken: readonly UnspokenRuntime[]): string {
   const named = unspoken
     .map(
@@ -1034,9 +1035,9 @@ function waitForAPlace(game: string, granted: (giveBack: () => void) => void): v
 /**
  * One request to one game, answered by the reply that carries its id.
  *
- * The first line a game sends is its welcome, which names the protocol it speaks; a game built
- * against an older addon is told apart from one that answered wrongly. Anything else on the
- * wire that does not carry the id is somebody else's business and is skipped.
+ * The first line a game sends is its welcome, which names the protocol it speaks, and a game
+ * whose first line is anything else does not speak this one. After it, anything on the wire that
+ * does not carry the id is somebody else's business and is skipped.
  *
  * A request the wait runs out on is not cancelled, and nothing could cancel it: the game has it,
  * and a call that takes longer than the wait goes on and does everything it was asked. The answer
@@ -1180,18 +1181,17 @@ export function runtimeRequest(
           if (!welcomed) {
             welcomed = true;
             taken();
-            if (readString(message, 'type') === 'welcome') {
-              const spoken = readNumber(message, 'protocol');
-              if (spoken !== RUNTIME_PROTOCOL) {
-                finish({
-                  ok: false,
-                  reason: 'protocol',
-                  message: `The game (${describe(endpoint)}) speaks runtime protocol ${spoken ?? 'unknown'} and this server speaks ${RUNTIME_PROTOCOL}. Reinstall the runtime addon into the project.`,
-                });
-                return;
-              }
-              continue;
+            const spoken =
+              readString(message, 'type') === 'welcome' ? readNumber(message, 'protocol') : undefined;
+            if (spoken !== RUNTIME_PROTOCOL) {
+              finish({
+                ok: false,
+                reason: 'protocol',
+                message: `The game (${describe(endpoint)}) speaks runtime protocol ${spoken ?? 'unknown'} and this server speaks ${RUNTIME_PROTOCOL}. Reinstall the runtime addon into the project.`,
+              });
+              return;
             }
+            continue;
           }
           if (message['id'] !== id) {
             continue;

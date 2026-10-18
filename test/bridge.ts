@@ -16,6 +16,7 @@ import { RUNTIME_PROTOCOL } from '../src/runtime-client.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { shippedRuntimeDigest } from '../src/setup.js';
 import { spawnHidden } from '../src/spawn.js';
+import { greeting } from './support/greeting.js';
 import { asArray, asObject, get, text } from './support/json.js';
 import {
   isRecord,
@@ -96,8 +97,8 @@ interface MockRuntimeOptions {
   protocol?: number;
   /** Accept connections and never answer, which is what a game paused at a breakpoint does. */
   silent?: boolean;
-  /** The runtime addon it says it loaded; this server's by default, and null to say nothing. */
-  addon?: { version: string; digest: string } | null;
+  /** The runtime addon it says it loaded; this server's by default. */
+  addon?: { version: string; digest: string };
 }
 
 interface MockRuntime {
@@ -242,10 +243,7 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
         return;
       }
       const announcement = join(directory, `runtime-${options.pid}.json`);
-      const addon =
-        options.addon === undefined
-          ? { version: SERVER_VERSION, digest: shippedRuntimeDigest() ?? '' }
-          : options.addon;
+      const addon = options.addon ?? { version: SERVER_VERSION, digest: shippedRuntimeDigest() };
       writeFileSync(
         announcement,
         JSON.stringify({
@@ -254,7 +252,8 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
           port: address.port,
           address: '127.0.0.1',
           project: { name: options.name, path: options.projectPath },
-          ...(addon === null ? {} : { addon_version: addon.version, addon_digest: addon.digest }),
+          addon_version: addon.version,
+          addon_digest: addon.digest,
         }),
       );
       resolve({
@@ -326,7 +325,7 @@ async function main(): Promise<void> {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-runtime-'));
   const server = new ServerProcess({
     env: {
-      DEBUG: 'true',
+      GDHARNESS_DEBUG: '1',
       GDHARNESS_BRIDGE_PORT: String(bridgePort),
       GDHARNESS_BRIDGE_HOST: BRIDGE_HOST,
       GDHARNESS_RUNTIME_DIR: runtimeDir,
@@ -774,50 +773,37 @@ async function main(): Promise<void> {
     try {
       assert.match(
         textOf(await call('runtime_inspect', {})) ?? '',
-        /speaks runtime protocol 1 and this server speaks 2/,
-        'an addon from before this protocol is told apart from a broken one',
+        new RegExp(`speaks runtime protocol 1 and this server speaks ${RUNTIME_PROTOCOL}`),
+        'a game on another protocol is told apart from a broken one',
       );
     } finally {
       await older.close();
     }
 
     // A game on another runtime addon, as a second checkout of a project carries: named in the
-    // status, and on every answer from it, a refusal included, since a command the old code does
-    // not know is where it shows.
-    for (const [addon, said] of [
-      [
-        { version: '1.1.20', digest: 'an older digest' },
-        /running the 1\.1\.20 runtime addon, while this server ships/,
-      ],
-      [null, /running a runtime addon from before games reported theirs/],
-    ] as const) {
-      const behind = await startMockRuntime(runtimeDir, {
-        pid: process.pid,
-        projectPath,
-        name: 'behind',
-        addon,
-      });
-      try {
-        const listed = await payload('editor_status', {});
-        assert.equal(get(listed, 'game', 'runtimes', 0, 'addonIsStale'), true, JSON.stringify(listed));
-        assert.equal(get(listed, 'game', 'runtimes', 0, 'addonVersion'), addon?.version ?? null);
-        const staleNote = String(get(listed, 'game', 'runtimes', 0, 'staleNote'));
-        assert.match(staleNote, said, staleNote);
-        // The fixture project holds no addons, so it is sent to upgrade rather than to a restart.
-        assert.ok(
-          staleNote.includes(`run  npx -y gdharness@${SERVER_VERSION} upgrade "${projectPath}"  in a shell`),
-          staleNote,
-        );
-        const answered = await payload('runtime_inspect', {});
-        assert.equal(get(answered, 'type'), 'tree', JSON.stringify(answered));
-        assert.equal(get(answered, 'addonIsStale'), true, JSON.stringify(answered));
-        assert.equal(get(answered, 'staleNote'), staleNote);
-        const unknown = textOf(await call('runtime_input', { op: 'key', keycode: 'A' })) ?? '';
-        assert.match(unknown, /Unknown command: inject_key/, unknown);
-        assert.ok(unknown.endsWith(staleNote), `a refusal carries the note too: ${unknown}`);
-      } finally {
-        await behind.close();
-      }
+    // status, and refused rather than asked, since its answers would be the old code's.
+    const behind = await startMockRuntime(runtimeDir, {
+      pid: process.pid,
+      projectPath,
+      name: 'behind',
+      addon: { version: '1.1.20', digest: 'an older digest' },
+    });
+    try {
+      const listed = await payload('editor_status', {});
+      assert.equal(get(listed, 'game', 'runtimes', 0, 'addonIsStale'), true, JSON.stringify(listed));
+      assert.equal(get(listed, 'game', 'runtimes', 0, 'addonVersion'), '1.1.20');
+      const staleNote = String(get(listed, 'game', 'runtimes', 0, 'staleNote'));
+      assert.match(staleNote, /running the 1\.1\.20 runtime addon, while this server ships/, staleNote);
+      // The fixture project holds no addons, so it is sent to upgrade rather than to a restart.
+      assert.ok(
+        staleNote.includes(`run  npx -y gdharness@${SERVER_VERSION} upgrade "${projectPath}"  in a shell`),
+        staleNote,
+      );
+      const refused = textOf(await call('runtime_inspect', {})) ?? '';
+      assert.ok(refused.startsWith(staleNote), `a call is refused with the note: ${refused}`);
+      assert.match(staleNote, /so this server asks it nothing/, staleNote);
+    } finally {
+      await behind.close();
     }
     const unsaid = await startMockRuntime(runtimeDir, {
       pid: process.pid,
@@ -844,6 +830,8 @@ async function main(): Promise<void> {
         port: closedPort,
         address: '127.0.0.1',
         project: { name: 'nobody', path: projectPath },
+        addon_version: SERVER_VERSION,
+        addon_digest: shippedRuntimeDigest(),
       }),
     );
     try {
@@ -902,17 +890,17 @@ async function main(): Promise<void> {
       // debugger per machine rather than per editor, so a second editor is moved off them and
       // this is how a server learns where it went. Zero is an addon that could not find out,
       // which is not a port and is not reported as one.
-      godot.send(
-        JSON.stringify({
-          type: 'godot_ready',
-          project_path: projectPath,
-          lsp_port: lspPort,
-          dap_port: 6106,
-          debug_port: 0,
-        }),
-      );
-      await delay(300);
-      const afterReady = await payload('editor_status', {});
+      godot.send(JSON.stringify(greeting(projectPath, { lsp_port: lspPort, dap_port: 6106, debug_port: 0 })));
+      // Until the greeting lands the socket is connected and the editor has said nothing, and a
+      // greeting without a server's mark then has its process's command line read, to tell an
+      // editor from a one-shot engine run, which can take seconds on Windows.
+      const settled = (status: unknown): boolean =>
+        get(status, 'editor', 'connected') === true && get(status, 'editor', 'greeting') === undefined;
+      let afterReady = await payload('editor_status', {});
+      for (let waited = 0; waited < 15_000 && !settled(afterReady); waited += 200) {
+        await delay(200);
+        afterReady = await payload('editor_status', {});
+      }
       assert.equal(
         get(afterReady, 'editor', 'connected'),
         true,
@@ -948,9 +936,9 @@ async function main(): Promise<void> {
         });
       });
       const pendingCreate = call('scene_create', {
-        project_path: projectPath,
-        scene_path: 'res://test_bridge.tscn',
-        root_node_type: 'Node2D',
+        projectPath,
+        scenePath: 'res://test_bridge.tscn',
+        rootNodeType: 'Node2D',
       });
       const invoke = await invoked;
       assert.equal(invoke['tool'], 'create_scene', 'the tool is routed to the editor command it stands for');
@@ -961,7 +949,7 @@ async function main(): Promise<void> {
           rootNodeType: get(invoke, 'args', 'rootNodeType'),
         },
         { projectPath, scenePath: 'res://test_bridge.tscn', rootNodeType: 'Node2D' },
-        'bridge arguments are normalised to camelCase before dispatch',
+        'bridge arguments reach the editor under the names the tool takes',
       );
 
       godot.send(

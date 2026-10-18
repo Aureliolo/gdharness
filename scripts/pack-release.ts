@@ -20,7 +20,6 @@ const releasePackage = {
   mcpName: sourcePackage.mcpName,
   description: sourcePackage.description,
   type: sourcePackage.type,
-  main: sourcePackage.main,
   bin: {
     gdharness: 'build/cli.js',
   },
@@ -39,9 +38,9 @@ try {
   await mkdir(path.join(stagingRoot, 'build'), { recursive: true });
 
   await Promise.all([
-    // keeper.js is started by index.js with Node rather than run as a bin, so it needs no mode, but
-    // without it every editor and run the server starts would fail to start.
-    ...['cli.js', 'index.js', 'keeper.js'].map((name) =>
+    // keeper.js is started by the server with Node rather than run as a bin, so it needs no mode,
+    // but without it every editor and run the server starts would fail to start.
+    ...['cli.js', 'keeper.js'].map((name) =>
       cp(path.join(root, 'build', name), path.join(stagingRoot, 'build', name)),
     ),
     cp(path.join(root, 'build', 'godot'), path.join(stagingRoot, 'build', 'godot'), { recursive: true }),
@@ -54,7 +53,7 @@ try {
   // here rather than left to whatever cp produced. Windows cannot express a POSIX mode at
   // all and would ship a world-writable executable without saying so, so the release is
   // refused there instead: cut it where the modes are real.
-  for (const executable of ['cli.js', 'index.js']) {
+  for (const executable of ['cli.js']) {
     const staged = path.join(stagingRoot, 'build', executable);
     await chmod(staged, 0o755);
     const mode = (await stat(staged)).mode & 0o777;
