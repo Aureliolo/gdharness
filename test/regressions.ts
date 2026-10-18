@@ -27120,8 +27120,81 @@ async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
       even(pixel[0]) && even(pixel[2]),
       `the screen with the game's red window over its right half: ${pixel.join(',')}`,
     );
-    await stopItsRun(server);
-    stopped = true;
+
+    // The window on its own, shown and then hidden. Hidden it holds no frame, and asking it for its
+    // image made the engine log an error into the game's output, so the run stopped unclean for the
+    // capture's doing rather than the game's.
+    const ofTheWindow = async (): Promise<JsonRpcMessage> =>
+      await server.request(
+        'tools/call',
+        {
+          name: 'runtime_capture',
+          arguments: { op: 'viewport', viewportPath: '/root/Main/Over', width: 1, height: 1 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    const shown = await ofTheWindow();
+    const shownImage = asArray(get(shown, 'result', 'content')).find(
+      (chunk) => get(chunk, 'type') === 'image',
+    );
+    assert.ok(shownImage !== undefined, `a shown window is captured: ${JSON.stringify(shown)}`);
+    const red = [...onePixelOf(Buffer.from(String(get(shownImage, 'data')), 'base64'))];
+    assert.ok((red[0] ?? 0) > 200 && (red[2] ?? 255) < 60, `as the red it draws: ${red.join(',')}`);
+    await server.request('tools/call', {
+      name: 'runtime_invoke',
+      arguments: { op: 'set', nodePath: '/root/Main/Over', property: 'visible', value: false },
+    });
+    const hidden = textOf(await ofTheWindow()) ?? '';
+    assert.match(
+      hidden,
+      /The Window at \/root\/Main\/Over is hidden, so nothing is drawn to it\. Show it \(its visible property\) and ask again\./,
+      hidden,
+    );
+    for (const [property, value] of [
+      ['visible', true],
+      ['mode', 1],
+    ] as const) {
+      await server.request('tools/call', {
+        name: 'runtime_invoke',
+        arguments: { op: 'set', nodePath: '/root/Main/Over', property, value },
+      });
+    }
+    // Windows minimises the window on its desktop by itself. An X server with no window manager
+    // has nobody to take the request, so there the window says whether it went.
+    const mode = get(
+      parseTextContent(
+        await server.request('tools/call', {
+          name: 'runtime_inspect',
+          arguments: { op: 'property', nodePath: '/root/Main/Over', property: 'mode' },
+        }),
+      ),
+      'value',
+    );
+    if (process.platform === 'win32' || mode === 1) {
+      const minimised = textOf(await ofTheWindow()) ?? '';
+      assert.match(
+        minimised,
+        /Nothing is being drawn to the Window at \/root\/Main\/Over, which is minimised\. Restore it and ask again\./,
+        `${minimised} (mode ${String(mode)})`,
+      );
+    } else {
+      console.log(
+        `minimised window capture step skipped: the window manager left it in mode ${String(mode)}`,
+      );
+    }
+    const ended = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    stopped = get(ended, 'stopped') === true;
+    assert.deepEqual(
+      [get(ended, 'stopped'), get(ended, 'errors'), get(ended, 'clean')],
+      [true, 0, true],
+      `and the run stops clean, the refusal having asked the engine nothing: ${JSON.stringify(ended)}`,
+    );
   } finally {
     if (!stopped) {
       await server.request(

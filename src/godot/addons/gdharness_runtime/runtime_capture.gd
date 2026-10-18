@@ -36,6 +36,35 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 	if not node is Viewport:
 		return {"type": "error", "message": "Node is not a Viewport: " + viewport_path}
 	var viewport: Viewport = node
+	# The root's own state is refused in _capture. Another window of the game's that is hidden or
+	# minimised holds no frame, and asking it for its image makes the engine log the empty read into
+	# the game's output, so the run would stop unclean for an error the capture raised.
+	if viewport is Window and viewport != _host.get_tree().root:
+		var window: Window = viewport
+		if not window.visible:
+			return {
+				"type": "error",
+				"message":
+				(
+					(
+						"The Window at %s is hidden, so nothing is drawn to it. Show it (its visible "
+						+ "property) and ask again."
+					)
+					% viewport_path
+				),
+			}
+		if not window.can_draw():
+			return {
+				"type": "error",
+				"message":
+				(
+					(
+						"Nothing is being drawn to the Window at %s, which is minimised. Restore it and "
+						+ "ask again."
+					)
+					% viewport_path
+				),
+			}
 	if not viewport is SubViewport:
 		return await _capture(viewport, params)
 	# Drawn now rather than taken as it stands. A SubViewport the game does not redraw every frame

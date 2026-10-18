@@ -1900,7 +1900,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       viewportPath: {
         type: 'string',
         ops: ['viewport'],
-        description: 'viewport: the Viewport node. Default the root viewport.',
+        description:
+          'viewport: the Viewport node. Default the root viewport. A Window of the game that is hidden or minimised has nothing drawn to it, and is refused naming which.',
       },
       width: {
         type: 'integer',
