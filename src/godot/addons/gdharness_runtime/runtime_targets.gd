@@ -195,14 +195,19 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 		}
 	var index: int = 0 if which == null else Read.as_int(which, -1)
 	if index < 0 or index >= targets.size():
-		var plural: String = "" if targets.size() == 1 else "s"
+		# A number arrives from JSON as a float, and 5 was quoted back as 5.0.
+		var given: String = str(index) if index >= 0 else str(which)
+		var among: String = (
+			'the only match on screen%s saying "%s" is index 0' % [under, wanted]
+			if targets.size() == 1
+			else (
+				'the %d matches on screen%s saying "%s" are 0 to %d'
+				% [targets.size(), under, wanted, targets.size() - 1]
+			)
+		)
 		return {
 			"type": "error",
-			"message":
-			(
-				'index %s is not one of the %d control%s on screen%s saying "%s": %s'
-				% [str(which), targets.size(), plural, under, wanted, _candidates(targets, lines)]
-			)
+			"message": "index %s picks nothing: %s: %s" % [given, among, _candidates(targets, lines)]
 		}
 	# A match saying the words as part of more, while another control says exactly them, is a stand-in
 	# for that one, not the control meant: a tab reading "Out" sat in a collapsed drawer and a dispatch

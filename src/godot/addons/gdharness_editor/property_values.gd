@@ -590,7 +590,7 @@ static func _listed(type: int) -> bool:
 
 ## [param value] as a caller would write it, for a refusal to quote.
 func shown(value: Variant) -> String:
-	return JSON.stringify(_values.serialize_value(value))
+	return JSON.stringify(_values.serialize_value(value), "", false)
 
 
 ## A dictionary carrying its own type name, as the serialiser writes it.

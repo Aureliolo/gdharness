@@ -4576,13 +4576,13 @@ class GodotServer {
               async () => await bridge('read_animation_states'),
             );
           case 'create':
-            return await bridge('create_animation');
+            return await editorOrEngine('create_animation', 'writes');
           case 'add_track':
-            return await bridge('add_animation_track');
+            return await editorOrEngine('add_animation_track', 'writes');
           case 'add_state':
-            return await bridge('add_animation_state');
+            return await editorOrEngine('add_animation_state', 'writes');
           default:
-            return await bridge('connect_animation_states');
+            return await editorOrEngine('connect_animation_states', 'writes');
         }
 
       case 'script_edit':

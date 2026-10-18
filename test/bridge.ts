@@ -866,18 +866,17 @@ async function main(): Promise<void> {
 
     const noEditor =
       textOf(
-        await call('scene_animation', {
-          op: 'create',
+        await call('project_settings', {
+          op: 'get',
           projectPath,
-          scenePath: 'res://test.tscn',
-          playerNodePath: 'Anim',
-          animationName: 'idle',
+          setting: 'application/config/name',
+          from: 'editor',
         }),
       ) ?? '';
     assert.match(
       noEditor,
       /Editor not connected/,
-      'scene_animation create refuses when no editor is connected',
+      'a read asked of the editor refuses when no editor is connected',
     );
 
     // Only the editor's path is served: the bridge port is not a place for a browser tab to

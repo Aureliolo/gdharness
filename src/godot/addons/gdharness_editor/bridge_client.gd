@@ -544,7 +544,8 @@ func send_tool_result(request_id: String, success: bool, result: Variant = null,
 
 func _send_message(message: Dictionary) -> void:
 	if socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
-		var sent: Error = socket.send_text(JSON.stringify(message))
+		# Keys in the order they were put in, which for a map read is the order the project keeps.
+		var sent: Error = socket.send_text(JSON.stringify(message, "", false))
 		if sent != OK:
 			push_error("gdharness: could not send to the server: " + error_string(sent))
 

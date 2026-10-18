@@ -660,7 +660,9 @@ static func _is_empty(owed: Variant) -> bool:
 ## taken the lot: see [member _outgoing].
 func _send_response(client: StreamPeerTCP, data: Dictionary) -> void:
 	var owed: PackedByteArray = _outgoing.get(client, PackedByteArray())
-	owed.append_array((JSON.stringify(data) + "\n").to_utf8_buffer())
+	# Keys left in the order they were put in: sorted, a map read came back in another order than
+	# its keys() and the game iterate it in.
+	owed.append_array((JSON.stringify(data, "", false) + "\n").to_utf8_buffer())
 	_outgoing[client] = owed
 
 

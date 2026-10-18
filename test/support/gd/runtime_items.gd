@@ -112,6 +112,11 @@ func _check_tabs_by_their_titles() -> void:
 	var disabled: Dictionary = await input.click({"says": "Gh"})
 	if tabs.current_tab != 2 or not _says(disabled, 'the tab "Gh" of %s is disabled' % bar.get_path()):
 		_fail("a disabled tab is refused: %s" % JSON.stringify(disabled))
+	# A number arrives from JSON as a float, and the refusal quoted 5 back as 5.0.
+	var past: Dictionary = await input.click({"says": "Ef", "index": 5.0})
+	var only: String = 'index 5 picks nothing: the only match on screen saying "Ef" is index 0: 0 %s ("Ef")'
+	if tabs.current_tab != 2 or not _says(past, only % bar.get_path()):
+		_fail("an index past the matches is refused as the number given: %s" % JSON.stringify(past))
 	tabs.queue_free()
 	cover.queue_free()
 

@@ -2558,6 +2558,15 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
   );
   await call('scene_node', set('Pointer', { spawns: { a: { _type: 'Vector2', x: 1, y: 2 } } }));
   assert.match(nodeBody(fileText(project, 'checks.tscn'), 'Pointer'), /"a": Vector2\(1, 2\)/);
+  // The engine's JSON writer sorts keys unless told not to, so the properties came back in
+  // alphabetical order rather than the order the script declares them. A saved map's own keys cannot
+  // show it: the scene writer sorts those.
+  const ordered = await call('scene_node', { ...scene, op: 'get', nodePath: 'Pointer' });
+  assert.deepEqual(
+    Object.keys(asObject(get(ordered, 'properties'))),
+    ['script', 'target', 'spawns'],
+    JSON.stringify(ordered),
+  );
   // Keys that are not text travel as entries, both ways, so a number key stays a number.
   const numbered = { _type: 'Dictionary', entries: [[1, 'first']] };
   await call('scene_node', set('Pointer', { spawns: numbered }));

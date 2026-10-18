@@ -477,5 +477,7 @@ func _element(item: Variant, builtin: int, declared: String, script: Script, res
 		var wanted: String = type_string(builtin)
 		if builtin == TYPE_OBJECT:
 			wanted = declared if script == null else script_named(script)
-		return {"message": "is %s, which cannot become %s" % [JSON.stringify(serialize(item)), wanted]}
+		return {
+			"message": "is %s, which cannot become %s" % [JSON.stringify(serialize(item), "", false), wanted]
+		}
 	return {"value": fitted_item}

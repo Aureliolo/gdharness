@@ -30,6 +30,7 @@ const HeadlessCheck = preload("headless_check.gd")
 ## How many times what scripts changed is put back before a write is refused for it.
 const PUTTING_BACK_PASSES: int = 4
 const PropertyValues = preload("property_values.gd")
+const Read = preload("reading.gd")
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
 ## for the editor's files to settle has to wait through as well.
@@ -148,6 +149,14 @@ static func unsaved_in_editor(scene_path: String) -> String:
 func refuse(error: String) -> Dictionary:
 	close()
 	return {"ok": false, "error": error}
+
+
+## [param said], the refusal for [param node_path] found nowhere in this scene, with how a path is
+## read when it starts with the root's own name.
+func not_found(said: String, node_path: String) -> String:
+	if root == null or root.has_node(NodePath(node_path.get_slice("/", 0))):
+		return said
+	return Read.from_the_root(said, node_path, str(root.name))
 
 
 func close() -> void:

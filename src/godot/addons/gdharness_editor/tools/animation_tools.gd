@@ -1,9 +1,11 @@
 @tool
 extends Node
 
-## Animations and animation trees, edited in the open editor.
+## Animations and animation trees, edited in the open editor or, for a project no editor serves, by a
+## headless engine.
 
 const AnimationReads = preload("../animation_reads.gd")
+const HeadlessCheck = preload("../headless_check.gd")
 const PropertyValues = preload("../property_values.gd")
 const Read = preload("../reading.gd")
 const SceneFile = preload("../scene_file.gd")
@@ -46,7 +48,9 @@ func _open_at(scene_path: String, node_path: String, kind: String) -> Array:
 		return [scene, null, refused]
 	var node: Node = _find_node(scene.root, node_path)
 	if node == null or not node.is_class(kind):
-		return [scene, null, scene.refuse("%s not found at: %s" % [kind, node_path])]
+		return [
+			scene, null, scene.refuse(scene.not_found("%s not found at: %s" % [kind, node_path], node_path))
+		]
 	var foreign: String = scene.foreign(node)
 	if not foreign.is_empty():
 		return [scene, null, scene.refuse(foreign)]
@@ -62,23 +66,53 @@ func _read_at(scene_path: String, node_path: String, kind: String) -> Array:
 		return [scene, null, refused]
 	var node: Node = _find_node(scene.root, node_path)
 	if node == null or not node.is_class(kind):
-		return [scene, null, scene.refuse("%s not found at: %s" % [kind, node_path])]
+		return [
+			scene, null, scene.refuse(scene.not_found("%s not found at: %s" % [kind, node_path], node_path))
+		]
 	return [scene, node, {}]
 
 
 ## Writes [param scene] once [param check] passes, then the files of [param homes], answering
 ## [param answer] or a refusal.
 func _finish(scene: SceneFile, check: Callable, homes: Dictionary, answer: Dictionary) -> Dictionary:
+	if not Engine.is_editor_hint():
+		for file: Variant in homes:
+			var home: Resource = homes[file]
+			if _scripted(home):
+				return (
+					scene
+					. refuse(
+						(
+							(
+								(
+									"Nothing was written: %s holds a resource with a script that is not a tool, and what "
+									+ "that script changed when a headless engine loaded it cannot be told apart from the "
+									+ "edit. "
+								)
+								% file
+							)
+							+ HeadlessCheck.REMEDY
+						)
+					)
+				)
 	var written: Dictionary = scene.write(check)
 	if not written.is_empty():
 		return written
 	for file: Variant in homes:
 		var resource: Resource = homes[file]
-		var saving: Error = ResourceSaver.save(resource, str(file))
+		var saving: Error = SceneFile.save_keeping_uid(resource, str(file))
 		if saving != OK:
 			return {"ok": false, "error": "Failed to save %s: %s" % [file, error_string(saving)]}
-		EditorInterface.get_resource_filesystem().update_file(str(file))
+		if Engine.is_editor_hint():
+			EditorInterface.get_resource_filesystem().update_file(str(file))
 	return answer
+
+
+## Whether [param resource], or one it embeds, has a script that is not a tool, which a headless
+## engine ran as it loaded the file.
+func _scripted(resource: Resource) -> bool:
+	var script: Script = resource.get_script()
+	return (script != null and not script.is_tool()) or HeadlessCheck.holds_scripted_embedded(resource, {})
 
 
 func _parse_json_maybe(value: Variant) -> Variant:
