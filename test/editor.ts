@@ -16,7 +16,6 @@
 
 import assert from 'node:assert/strict';
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -41,7 +40,7 @@ import { NOT_INHERITED, RESOLVED_ELSEWHERE } from '../src/rename.js';
 import { readLatestRun } from '../src/run-record.js';
 import { frameFunctionsFor, queuedMessagesOf } from '../src/script-profile.js';
 import { SERVER_VERSION } from '../src/server-version.js';
-import { RUNTIME_AUTOLOAD } from '../src/setup.js';
+import { installAddons, RUNTIME_AUTOLOAD } from '../src/setup.js';
 import { type ChildProcess, spawnHidden, spawnSyncHidden } from '../src/spawn.js';
 import { endEnginesUnder } from './support/engines.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
@@ -652,10 +651,9 @@ function createProject(): string {
   // fixture would then be holding one spelling of the project while the editor holds another.
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-')));
 
-  cpSync('src/godot/addons', join(dir, 'addons'), { recursive: true });
-  // The marker an install writes beside the addon, which is how the editor knows which version
-  // it is running: a copy without one is a copy gdharness did not put there.
-  writeFileSync(join(dir, 'addons', 'gdharness_editor', '.gdharness-version'), `${SERVER_VERSION}\n`);
+  // Installed as setup installs them, markers and digests included: a copy without them is one
+  // gdharness did not put there, and its editor is asked nothing but to quit.
+  installAddons(dir);
 
   writeFileSync(
     join(dir, 'project.godot'),
