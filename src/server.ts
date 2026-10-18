@@ -2541,6 +2541,7 @@ const OUTPUT_PATH_SOLUTIONS = [
 export const PROJECT_FILE_ARGUMENTS = [
   'scenePath',
   'instancePath',
+  'inherits',
   'scriptPath',
   'resourcePath',
   'newPath',

@@ -7316,7 +7316,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 132;
+const READ_IN_WORDS = 134;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -43350,6 +43350,261 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
 }
 
 /**
+ * An inherited scene and an instance with editable children, with no editor, through the server and
+ * a real engine: the two ways a scene keeps its own values for nodes another scene makes. The base
+ * scene's root script is not a tool and tints the root in _init, which a headless engine runs, so
+ * no write here may save a modulate.
+ */
+async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('inherited and editable scenes without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kin-engine-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kin-engine-rt-'));
+  mkdirSync(join(project, 'parts'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Kin"\n',
+    'crate.gd':
+      'extends StaticBody2D\n\n\nfunc _init() -> void:\n\tmodulate = Color(1, 0, 0)\n' +
+      '\tvar spare: Node = load("res://parts/bolt.tscn").instantiate()\n\tspare.name = "Spare"\n\tadd_child(spare)\n',
+    'heavy.gd': 'extends StaticBody2D\n',
+    'panel.gd': 'extends Control\n',
+    'parts/crate.tscn':
+      '[gd_scene format=3 uid="uid://dcratehw2x"]\n\n[ext_resource type="Script" path="res://crate.gd" id="1_crate"]\n' +
+      '[ext_resource type="PackedScene" path="res://parts/bolt.tscn" id="2_bolt"]\n\n' +
+      '[node name="Crate" type="StaticBody2D"]\nscript = ExtResource("1_crate")\n\n' +
+      '[node name="Look" type="Sprite2D" parent="."]\n\n[node name="Hit" type="CollisionShape2D" parent="."]\n\n' +
+      '[node name="Bolt" parent="." instance=ExtResource("2_bolt")]\n',
+    'parts/bolt.tscn':
+      '[gd_scene format=3]\n\n[node name="Bolt" type="Node2D"]\n\n[node name="Head" type="Sprite2D" parent="."]\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/crate.tscn" id="1_crate"]\n\n' +
+      '[node name="Main" type="Node2D"]\n\n[node name="Floor" type="Node2D" parent="."]\n\n' +
+      '[node name="Crate1" parent="." instance=ExtResource("1_crate")]\n\n' +
+      '[node name="Crate2" parent="." instance=ExtResource("1_crate")]\nposition = Vector2(30, 0)\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  const written = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+    const answer = await call(name, args);
+    const payload = parseTextContent(answer);
+    assert.match(
+      text(get(payload, 'writtenBy')),
+      /^a headless engine, since no editor serves this project$/,
+      `${name} ${String(args['op'])}: ${textOf(answer) ?? JSON.stringify(answer)}`,
+    );
+    return payload;
+  };
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const inheriting = { op: 'create', inherits: 'parts/crate.tscn' };
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('kin-engine');
+
+    const made = await written('scene_create', { ...inheriting, scenePath: 'parts/big_crate.tscn' });
+    assert.deepEqual(
+      [get(made, 'inherits'), get(made, 'rootNodeType'), get(made, 'rootNodeName')],
+      ['res://parts/crate.tscn', 'StaticBody2D', 'Crate'],
+      JSON.stringify(made),
+    );
+    const big = fileOf('parts/big_crate.tscn');
+    assert.match(
+      big,
+      /\[ext_resource type="PackedScene" uid="uid:\/\/dcratehw2x" path="res:\/\/parts\/crate\.tscn" id="1_base"\]/,
+      big,
+    );
+    assert.match(big, /\[node name="Crate" instance=ExtResource\("1_base"\)\]/, big);
+    const tree = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'parts/big_crate.tscn' })),
+      'tree',
+    );
+    assert.deepEqual(
+      asArray(get(tree, 'children')).map((child) => get(child, 'name')),
+      ['Look', 'Hit', 'Bolt'],
+      JSON.stringify(tree),
+    );
+    const further = await written('scene_create', {
+      op: 'create',
+      inherits: 'parts/big_crate.tscn',
+      scenePath: 'parts/bigger_crate.tscn',
+    });
+    assert.deepEqual(
+      [get(further, 'inherits'), get(further, 'rootNodeType'), get(further, 'rootNodeName')],
+      ['res://parts/big_crate.tscn', 'StaticBody2D', 'Crate'],
+      `a scene inheriting an inherited one: ${JSON.stringify(further)}`,
+    );
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'parts/big_crate.tscn',
+      nodePath: 'Look',
+      properties: { scale: [2, 2] },
+    });
+    const overridden = fileOf('parts/big_crate.tscn');
+    assert.match(overridden, /\[node name="Look" parent="\."[^\]]*\]\nscale = Vector2\(2, 2\)\n/, overridden);
+    assert.doesNotMatch(overridden, /modulate/, 'what the base root script set in _init is not saved');
+
+    const scripted = await written('scene_create', {
+      ...inheriting,
+      scenePath: 'parts/heavy_crate.tscn',
+      rootNodeName: 'Heavy',
+      script: 'heavy.gd',
+    });
+    assert.equal(get(scripted, 'rootNodeName'), 'Heavy', JSON.stringify(scripted));
+    assert.match(
+      fileOf('parts/heavy_crate.tscn'),
+      /\[node name="Heavy" instance=ExtResource\("1_base"\)\]\nscript = ExtResource\("2_script"\)\n/,
+    );
+    for (const [args, refusal] of [
+      [
+        { rootNodeType: 'Node2D' },
+        "inherits takes the root's class from res://parts/crate.tscn, so rootNodeType is not given with it.",
+      ],
+      [{ inherits: 'parts/none.tscn' }, 'inherits: Scene not found: res://parts/none.tscn'],
+      [
+        { script: 'panel.gd' },
+        'res://panel.gd extends Control, so it cannot be on the StaticBody2D root res://parts/crate.tscn inherits.',
+      ],
+    ] as const) {
+      assert.equal(
+        textOf(await call('scene_create', { ...inheriting, scenePath: 'parts/refused.tscn', ...args })),
+        refusal,
+      );
+      assert.ok(!existsSync(join(project, 'parts', 'refused.tscn')), `and nothing is written for ${refusal}`);
+    }
+
+    const inside = {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2/Look',
+      properties: { scale: [3, 3] },
+    };
+    assert.equal(
+      textOf(await call('scene_node', inside)),
+      'Crate2/Look belongs to the scene instanced at Crate2 (res://parts/crate.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it, or have this scene keep its own values for this instance with scene_node set nodePath Crate2 editableChildren true.',
+    );
+    const opened = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2',
+      editableChildren: true,
+    });
+    assert.equal(get(opened, 'editableChildren'), true, JSON.stringify(opened));
+    assert.match(fileOf('main.tscn'), /\n\[editable path="Crate2"\]\n/, fileOf('main.tscn'));
+    await written('scene_node', inside);
+    const kept = fileOf('main.tscn');
+    assert.match(kept, /\[node name="Look" parent="Crate2"[^\]]*\]\nscale = Vector2\(3, 3\)\n/, kept);
+    assert.doesNotMatch(kept, /parent="Crate1"/, 'the other instance keeps nothing of its own');
+    assert.doesNotMatch(kept, /modulate/, 'and nothing the root script set is saved');
+
+    const head = { ...inside, nodePath: 'Crate2/Bolt/Head', properties: { scale: [4, 4] } };
+    assert.equal(
+      textOf(await call('scene_node', head)),
+      'Crate2/Bolt/Head belongs to the scene instanced at Crate2/Bolt (res://parts/bolt.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it, or have this scene keep its own values for this instance with scene_node set nodePath Crate2/Bolt editableChildren true.',
+      'with Crate2 editable, only the instance nested in it is named',
+    );
+    await written('scene_node', {
+      ...inside,
+      nodePath: 'Crate2/Bolt',
+      properties: {},
+      editableChildren: true,
+    });
+    await written('scene_node', head);
+    const nested = fileOf('main.tscn');
+    assert.match(nested, /\n\[editable path="Crate2\/Bolt"\]\n/, nested);
+    assert.match(
+      nested,
+      /\[node name="Head" parent="Crate2\/Bolt"[^\]]*\]\nscale = Vector2\(4, 4\)\n/,
+      nested,
+    );
+    assert.equal(
+      textOf(await call('scene_node', { ...head, nodePath: 'Crate1/Bolt/Head' })),
+      'Crate1/Bolt/Head belongs to the scene instanced at Crate1/Bolt (res://parts/bolt.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it, or have this scene keep its own values for this instance with scene_node set nodePath Crate1 editableChildren true, then nodePath Crate1/Bolt editableChildren true.',
+      'with neither instance around it editable, both are named, outermost first',
+    );
+    assert.equal(
+      textOf(await call('scene_node', { ...head, nodePath: 'Crate2/Spare' })),
+      'Crate2/Spare is made by a script as the scene is instanced, and no scene file saves anything about it.',
+    );
+    assert.equal(
+      textOf(await call('scene_node', { ...head, nodePath: 'Crate2/Spare/Head' })),
+      'Crate2/Spare/Head belongs to the scene instanced at Crate2/Spare (res://parts/bolt.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it.',
+      'no editable children reach an instance a script makes',
+    );
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2',
+      editableChildren: false,
+    });
+    const closed = fileOf('main.tscn');
+    assert.doesNotMatch(
+      closed,
+      /\[editable|parent="Crate2[/"]/,
+      `closing them drops what was kept: ${closed}`,
+    );
+    assert.match(closed, /\[node name="Crate2" parent="\." [^\]]*\]\nposition = Vector2\(30, 0\)\n/, closed);
+
+    for (const nodePath of ['.', 'Floor']) {
+      assert.equal(
+        textOf(
+          await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath, editableChildren: true }),
+        ),
+        `editableChildren is a setting of an instance in this scene, and ${nodePath} is not one.`,
+      );
+    }
+    assert.equal(
+      textOf(await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath: 'Crate1' })),
+      'set takes properties, editableChildren, or both.',
+    );
+
+    // A scene copied whole carries the uid of the one it was copied from, so one of the two names a
+    // uid the loader resolves to the other, whichever the import kept.
+    writeFileSync(
+      join(project, 'parts', 'crate_copy.tscn'),
+      `${files['parts/crate.tscn']}\n[node name="Lid" type="Sprite2D" parent="."]\n`,
+    );
+    const reimported = await runImport(godotPath, project);
+    assert.ok(reimported.ok, `the import after the copy failed: ${JSON.stringify(reimported)}`);
+    for (const [base, children] of [
+      ['parts/crate.tscn', ['Look', 'Hit', 'Bolt']],
+      ['parts/crate_copy.tscn', ['Look', 'Hit', 'Bolt', 'Lid']],
+    ] as const) {
+      const scenePath = `from_${base.slice(6)}`;
+      const from = await written('scene_create', { op: 'create', inherits: base, scenePath });
+      assert.equal(get(from, 'inherits'), `res://${base}`, JSON.stringify(from));
+      const copied = get(parseTextContent(await call('scene_tree', { scenePath })), 'tree');
+      assert.deepEqual(
+        asArray(get(copied, 'children')).map((child) => get(child, 'name')),
+        children,
+        `${scenePath} inherits ${base}: ${fileOf(scenePath)}`,
+      );
+    }
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * A theme and a tile set with no editor, through the server and a real engine. A font size Godot
  * would read back as the theme's default is refused; a theme type that is no class is set as the
  * variation it is and said to be one; and an image written since the import is named as not yet
@@ -43786,6 +44041,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWriteWithNoEditorGoesThroughAHeadlessEngine,
   testAnAnimationIsWrittenWithNoEditor,
   testAThemeAndATilesetWithNoEditor,
+  testASceneKeepsItsOwnValuesForAnotherScenesNodes,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
   testEveryFileArgumentIsContained,

@@ -761,7 +761,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       rootNodeName: {
         type: 'string',
         ops: ['create'],
-        description: 'create: the root node name. Default the class name, as the editor names a new root.',
+        description:
+          "create: the root node name. Default the class name, as the editor names a new root, or with inherits the name of that scene's root.",
+      },
+      inherits: {
+        type: 'string',
+        ops: ['create'],
+        description:
+          "create: a scene for the new one to inherit, such as \"parts/crate.tscn\", as the editor's New Inherited Scene makes one. Its root is an instance of that scene, so changes there reach it, and scene_node set gives the nodes it inherits values of this scene's own. The root's class is that scene's, so rootNodeType is not given with it; the answer names it under rootNodeType and the scene under inherits.",
       },
       script: { type: 'string', ops: ['create'], description: 'create: a script to attach to the root.' },
       newPath: { type: 'string', ops: ['save_as'], description: 'save_as: where the copy goes.' },
@@ -796,7 +803,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_node',
     title: 'Scene nodes',
-    description: `One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type or script class can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties, and another scene is instanced by an add with instancePath. A set with properties {"name": "Boss"} renames a node. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene, and for a node that belongs to a scene this one instances or inherits. ${WITHOUT_AN_EDITOR}`,
+    description: `One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type or script class can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties, and another scene is instanced by an add with instancePath. A set with properties {"name": "Boss"} renames a node. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene. A node this scene inherits takes values of this scene's own, and so does a node inside an instance of another scene once that instance's editableChildren is true; neither can be moved, renamed, copied or deleted, since the other scene makes it again on load. ${WITHOUT_AN_EDITOR}`,
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -820,6 +827,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       nodeName: { type: 'string', ops: ['add'], description: "add: the new node's name." },
       properties: { ...PROPERTIES, ops: ['add', 'set'] },
+      editableChildren: {
+        type: 'boolean',
+        ops: ['set'],
+        description:
+          "set: on an instance of another scene, whether its children are editable here, as the editor's Editable Children makes them. True lets scene_node set give the nodes inside that instance values of this scene's own, which no other instance shares. An instance nested inside another takes it once the one around it has editable children. False drops every value this scene keeps for them. The answer says editableChildren as the file now holds it.",
+      },
       newName: { type: 'string', ops: ['duplicate'], description: "duplicate: the copy's name." },
       newParentPath: {
         type: 'string',
@@ -860,8 +873,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       set: {
         effect: 'destructive',
-        summary: 'set properties on a node',
-        requires: ['nodePath', 'properties'],
+        summary:
+          'set properties on a node, or make the children of an instance editable; give either or both',
+        requires: ['nodePath'],
       },
       duplicate: {
         effect: 'additive',

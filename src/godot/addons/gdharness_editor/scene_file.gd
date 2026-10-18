@@ -175,16 +175,46 @@ func path_of(node: Node) -> String:
 func foreign(node: Node) -> String:
 	if node == root or node.owner == root:
 		return ""
-	if node.owner != null and root.is_editable_instance(node.owner):
+	if node.owner == null:
+		return (
+			"%s is made by a script as the scene is instanced, and no scene file saves anything about it."
+			% path_of(node)
+		)
+	if root.is_editable_instance(node.owner):
 		return ""
-	var owner_path: String = path_of(node.owner) if node.owner != null else "?"
-	return (
+	var said: String = (
 		(
 			"%s belongs to the scene instanced at %s (%s), and this scene saves nothing about it. Edit "
-			+ "that scene instead."
+			+ "that scene instead, which changes every instance of it"
 		)
-		% [path_of(node), owner_path, node.owner.scene_file_path if node.owner != null else "?"]
+		% [path_of(node), path_of(node.owner), node.owner.scene_file_path]
 	)
+	var steps: PackedStringArray = []
+	for closed: String in _closed_around(node):
+		var _added: bool = steps.append("nodePath %s editableChildren true" % closed)
+	if steps.is_empty():
+		return said + "."
+	return (
+		said
+		+ ", or have this scene keep its own values for this instance with scene_node set "
+		+ ", then ".join(steps)
+		+ "."
+	)
+
+
+## The instances around [param node] whose children are not editable, outermost first: each must be
+## made editable, in that order, before this scene keeps values of its own for [param node], since
+## the packer skips every node under an instance that is not. Empty when nothing would let it.
+func _closed_around(node: Node) -> PackedStringArray:
+	var closed: PackedStringArray = []
+	var instance: Node = node.owner
+	while instance != root:
+		if instance == null:
+			return []
+		if not root.is_editable_instance(instance):
+			var _at: int = closed.insert(0, path_of(instance))
+		instance = instance.owner
+	return closed
 
 
 ## Why [param node] cannot be moved, renamed, copied or deleted, or "": the scene may only
@@ -447,7 +477,7 @@ static func save_packed(packed: PackedScene, scene_path: String) -> Dictionary:
 static func save_keeping_uid(resource: Resource, file_path: String) -> Error:
 	if Engine.is_editor_hint():
 		return ResourceSaver.save(resource, file_path)
-	var uid: int = _uid_in(file_path)
+	var uid: int = uid_in(file_path)
 	var saving: Error = ResourceSaver.save(resource, file_path)
 	if saving != OK:
 		return saving
@@ -457,7 +487,7 @@ static func save_keeping_uid(resource: Resource, file_path: String) -> Error:
 
 
 ## The uid the file at [param file_path] declares, or [constant ResourceUID.INVALID_ID].
-static func _uid_in(file_path: String) -> int:
+static func uid_in(file_path: String) -> int:
 	if not FileAccess.file_exists(file_path):
 		return ResourceUID.INVALID_ID
 	var file: FileAccess = FileAccess.open(file_path, FileAccess.READ)

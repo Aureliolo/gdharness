@@ -5,6 +5,7 @@ extends Node
 
 const FileReads = preload("../file_reads.gd")
 const Read = preload("../reading.gd")
+const Kin = preload("scene_kin.gd")
 const Placing = preload("scene_placing.gd")
 const PropertyValues = preload("../property_values.gd")
 const ResourceTools = preload("resource_tools.gd")
@@ -175,17 +176,42 @@ func _collect_nodes_recursive(node: Node, path: String, out_nodes: Array) -> voi
 		_collect_nodes_recursive(child, child_path, out_nodes)
 
 
-func create_scene(args: Dictionary) -> Dictionary:
+func _inherited(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
+	var script_path: String = str(args.get("script", ""))
+	return Kin.inherited(
+		args,
+		_new_scene_path(args),
+		_to_scene_res_path(project_path, str(args.get("inherits", ""))),
+		"" if script_path.is_empty() else _to_scene_res_path(project_path, script_path)
+	)
+
+
+## The res:// path a create in [param args] writes, given .tscn when it has no extension, or "".
+func _new_scene_path(args: Dictionary) -> String:
+	var scene_path: String = _to_scene_res_path(
+		str(args.get("projectPath", "")), str(args.get("scenePath", ""))
+	)
+	if scene_path == "res://":
+		return ""
+	return scene_path if scene_path.ends_with(".tscn") else scene_path + ".tscn"
+
+
+func create_scene(args: Dictionary) -> Dictionary:
+	if str(args.get("inherits", "")).is_empty():
+		return _create_of_a_class(args)
+	return _inherited(args)
+
+
+func _create_of_a_class(args: Dictionary) -> Dictionary:
+	var project_path: String = str(args.get("projectPath", ""))
+	var scene_path: String = _new_scene_path(args)
 	var root_node_type: String = str(args.get("rootNodeType", "Node"))
 	var root_node_name: String = str(args.get("rootNodeName", root_node_type))
 	var script_path: String = str(args.get("script", ""))
 
-	if scene_path == "res://":
+	if scene_path.is_empty():
 		return {"ok": false, "error": "Missing scenePath"}
-	if not scene_path.ends_with(".tscn"):
-		scene_path += ".tscn"
 	var asked_type: String = root_node_type
 	var made: Dictionary = SceneFile.made_as(
 		root_node_type,
@@ -208,19 +234,8 @@ func create_scene(args: Dictionary) -> Dictionary:
 	var unfit: String = SceneFile.unfit_name(root_node_name)
 	if not unfit.is_empty():
 		return {"ok": false, "error": unfit}
-	# Saving over a scene that is there replaced it, nodes and all, and answered as a new scene.
 	if FileAccess.file_exists(scene_path):
-		return {
-			"ok": false,
-			"error":
-			(
-				(
-					"%s already exists, and scene_create op=create would replace everything in it. Edit it "
-					+ "with scene_node, or create the scene under another path."
-				)
-				% scene_path
-			)
-		}
+		return Kin.taken(scene_path)
 
 	var root: Node = ClassDB.instantiate(root_node_type)
 	root.name = root_node_name
@@ -553,6 +568,9 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", "."))
 	var properties: Dictionary = _parse_properties_arg(args.get("properties", {}))
+	var editable: Variant = args.get("editableChildren")
+	if properties.is_empty() and editable == null:
+		return {"ok": false, "error": "set takes properties, editableChildren, or both."}
 
 	var opened: Array = _open(scene_path, true)
 	var scene: SceneFile = opened[0]
@@ -574,6 +592,11 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		if not unusable.is_empty():
 			return scene.refuse(unusable)
 
+	if editable != null:
+		var not_an_instance: String = Kin.set_editable(scene, node, Read.as_bool(editable))
+		if not not_an_instance.is_empty():
+			return scene.refuse(not_an_instance)
+
 	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
 	if not refused_property.is_empty():
@@ -584,12 +607,20 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
 	var new_path: String = scene.path_of(node)
 	var written: Dictionary = scene.write(
-		func(saved: Node) -> String: return _kept(scene, saved, node, properties.keys())
+		func(saved: Node) -> String:
+			var unkept: String = _kept(scene, saved, node, properties.keys())
+			if unkept.is_empty() and editable != null:
+				if saved.is_editable_instance(saved.get_node(new_path)) != Read.as_bool(editable):
+					return "%s would load with editableChildren %s." % [new_path, not Read.as_bool(editable)]
+			return unkept
 	)
 	if not written.is_empty():
 		return written
 
-	return {"ok": true, "nodePath": new_path, "properties": held}
+	var answer: Dictionary = {"ok": true, "nodePath": new_path, "properties": held}
+	if editable != null:
+		answer["editableChildren"] = Read.as_bool(editable)
+	return answer
 
 
 func get_node_properties(args: Dictionary) -> Dictionary:

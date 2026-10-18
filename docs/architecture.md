@@ -969,9 +969,13 @@ The scene tools never touch the editor's open scene. Each one works on a copy of
 - It instantiates with the editor's edit state. Without one the copy keeps no record of which nodes
   came from another scene, and the pack wrote an inherited scene out as a standalone copy of its base
   and froze each instanced scene's root properties into the scene instancing it.
-- It refuses to change what the scene does not own: a node inside an instanced scene (unless its
-  children are editable here), and the removal or renaming of a node a base scene gives. The pack
-  saves only what the scene owns, so these were answered as done and were not in the file.
+- It refuses to change what the scene does not own: a node inside an instanced scene whose children
+  are not editable here, a node a script made as the scene was instanced, and the removal or
+  renaming of a node a base scene gives. The pack saves only what the scene owns, so these were
+  answered as done and were not in the file. The refusal for a node inside an instance names the
+  `scene_node set editableChildren` calls that would let the scene keep its own values for it, one
+  for each instance around it that is not editable, outermost first, because the pack skips
+  everything under such an instance.
 - It packs the copy and instantiates the pack before writing anything, and each tool checks its change
   in that result, which is what loading the file will give. A property the node took but the file does
   not keep, such as a variable a `@tool` script does not export, is refused there.
@@ -982,6 +986,11 @@ The scene tools never touch the editor's open scene. Each one works on a copy of
 
 `scene_create save` of a scene open in the editor saves the editor's copy through the editor's own
 save, bringing its tab to the front for the save and putting back the tab that was there.
+`scene_create` with `inherits` writes the new scene's text itself, as the editor's New Inherited
+Scene saves it, rather than packing an instance of the base: a headless engine instancing the base
+runs its scripts, and the pack would keep what they set as the new scene's own values. It leaves out
+the base's uid when that uid leads to another file, as it does for a scene copied whole, and loads
+the result back to check that it inherits the base.
 `resource_edit` reads the file back after saving a resource, and puts the old file back when a
 property set did not survive the save.
 

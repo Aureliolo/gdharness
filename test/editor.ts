@@ -1679,6 +1679,68 @@ async function testAScenesInstancedAndPlaced({ call, refusal, project }: Editor)
   }
 }
 
+/**
+ * An inherited scene made through the editor, and an instance given editable children while its
+ * scene is open in a tab, so the write goes through the editor's own copy of the scene.
+ */
+async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'kin'), { recursive: true });
+  writeFileSync(
+    join(project, 'kin', 'crate.tscn'),
+    '[gd_scene format=3]\n\n[node name="Crate" type="Node2D"]\n\n[node name="Look" type="Sprite2D" parent="."]\n',
+  );
+  writeFileSync(
+    join(project, 'kin', 'host.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://kin/crate.tscn" id="1_crate"]\n\n' +
+      '[node name="Host" type="Node2D"]\n\n[node name="Crate1" parent="." instance=ExtResource("1_crate")]\n',
+  );
+  const host = { projectPath: project, scenePath: 'res://kin/host.tscn' };
+  try {
+    await call('editor_rescan', { projectPath: project });
+    const made = await call('scene_create', {
+      projectPath: project,
+      op: 'create',
+      inherits: 'kin/crate.tscn',
+      scenePath: 'kin/big.tscn',
+    });
+    assert.deepEqual(
+      [get(made, 'inherits'), get(made, 'rootNodeType')],
+      ['res://kin/crate.tscn', 'Node2D'],
+      text(made),
+    );
+    assert.match(fileText(project, 'kin/big.tscn'), /\[node name="Crate" instance=ExtResource\("1_base"\)\]/);
+    await call('scene_node', {
+      projectPath: project,
+      scenePath: 'res://kin/big.tscn',
+      op: 'set',
+      nodePath: 'Look',
+      properties: { scale: [2, 2] },
+    });
+    const big = fileText(project, 'kin/big.tscn');
+    assert.match(big, /\[node name="Look" parent="\."[^\]]*\]\nscale = Vector2\(2, 2\)\n/, big);
+
+    await hook(project, { op: 'open', path: host.scenePath });
+    const opened = await call('scene_node', {
+      ...host,
+      op: 'set',
+      nodePath: 'Crate1',
+      editableChildren: true,
+    });
+    assert.equal(get(opened, 'editableChildren'), true, text(opened));
+    await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1/Look', properties: { scale: [3, 3] } });
+    const kept = fileText(project, 'kin/host.tscn');
+    assert.match(kept, /\n\[editable path="Crate1"\]\n/, kept);
+    assert.match(kept, /\[node name="Look" parent="Crate1"[^\]]*\]\nscale = Vector2\(3, 3\)\n/, kept);
+    await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1', editableChildren: false });
+    const closed = fileText(project, 'kin/host.tscn');
+    assert.doesNotMatch(closed, /\[editable|parent="Crate1"/, `closing them drops what was kept: ${closed}`);
+  } finally {
+    await hook(project, { op: 'open', path: 'res://main.tscn' });
+    rmSync(join(project, 'kin'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
 /** An animation and a track on it, read back out of the sub-resources the scene gained. */
 async function testSceneAnimation({ call, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: SCENE };
@@ -6521,6 +6583,7 @@ async function main(): Promise<void> {
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
     ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
+    ['testASceneKeepsItsOwnValuesInTheEditor', testASceneKeepsItsOwnValuesInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [
       'testAClassReloadedOnceItsBaseExistsReachesItsUsers',
