@@ -195,6 +195,7 @@ import {
   discoverRuntimes,
   errorReportOf,
   JUDGED_AFTER_MS,
+  notSent,
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   reportAlreadyInTranscript,
@@ -7316,7 +7317,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 132;
+const READ_IN_WORDS = 134;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -14625,11 +14626,13 @@ async function testCallsSentTogetherWaitTheirTurnAtTheGame(): Promise<void> {
       `a call refused at first was answered: ${throughTheRefusal}`,
     );
 
+    // macOS has held one dial to this closed port past the wait rather than refusing it, which is
+    // answered as the dial it is: nothing was sent either way.
     game.close();
     const refusedThroughout = await read();
     assert.match(
       refusedThroughout,
-      /The game \(.*\) is running but nothing answered on its port: it refused all \d+ connections tried within 2000ms\. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do\. Nothing was sent, so nothing ran\./,
+      /The game \(.*\) is running but nothing answered on its port: it refused (all \d+ connections tried within 2000ms|(one connection|\d+ connections) and had not accepted the next when the wait ended, after 2000ms)\. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do\. Nothing was sent, so nothing ran\./,
       refusedThroughout,
     );
     game.listen(port, '127.0.0.1');
@@ -14654,6 +14657,165 @@ async function testCallsSentTogetherWaitTheirTurnAtTheGame(): Promise<void> {
     sweep(runtimeDir);
     sweep(project);
   }
+}
+
+/**
+ * A call whose connection the system holds, neither accepted nor refused, is answered as not sent.
+ *
+ * Godot's TCPServer queues eight connections a game has not taken. Past those Windows refuses a dial
+ * at once, while Linux and macOS hold it unanswered, and a request is written only once its
+ * connection is accepted, so a wait ending on a held dial has sent nothing. It was answered as a
+ * request the game had and would run, with a requestId to read the reply by, and the dial was left
+ * open to send it whenever the game took it. The listener is an engine that never takes a
+ * connection, as a game in one long frame does, and its queue is filled before the call.
+ */
+async function testACallTheSystemHoldsIsNotSent(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('held dial regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-dial-'));
+  const home = join(project, '.home');
+  mkdirSync(home, { recursive: true });
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-dial-rt-'));
+  const port = await reservePort();
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  writeFileSync(
+    join(project, 'hold.gd'),
+    `extends SceneTree\n\nvar server := TCPServer.new()\n\n\nfunc _initialize() -> void:\n\tvar _listening: Error = server.listen(${port}, "127.0.0.1")\n`,
+  );
+  const engine = spawnHidden(godotPath, ['--headless', '--path', project, '-s', 'res://hold.gd'], {
+    env: {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: home,
+      LOCALAPPDATA: home,
+      XDG_CONFIG_HOME: home,
+      XDG_DATA_HOME: home,
+      XDG_CACHE_HOME: home,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const printed: string[] = [];
+  engine.stdout.on('data', (chunk: Buffer) => printed.push(String(chunk)));
+  engine.stderr.on('data', (chunk: Buffer) => printed.push(String(chunk)));
+  const queued: Socket[] = [];
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_RUNTIME_TIMEOUT_MS: '2000',
+    },
+  });
+  try {
+    const dial = async (): Promise<Socket | null> =>
+      await new Promise((settled) => {
+        const socket = createConnection({ port, host: '127.0.0.1' });
+        socket.once('connect', () => {
+          settled(socket);
+        });
+        socket.once('error', () => {
+          socket.destroy();
+          settled(null);
+        });
+      });
+    // The first connection accepted says the engine is listening, and stays as the first queued.
+    for (const deadline = Date.now() + 60_000; queued.length === 0; ) {
+      assert.ok(
+        Date.now() < deadline && engine.exitCode === null,
+        `the engine never listened on ${port}: ${printed.join('')}`,
+      );
+      const first = await dial();
+      if (first === null) {
+        await delay(100);
+      } else {
+        queued.push(first);
+      }
+    }
+    for (let more = 0; more < 24; more += 1) {
+      const socket = createConnection({ port, host: '127.0.0.1' });
+      socket.on('error', () => {});
+      queued.push(socket);
+    }
+    await delay(500);
+    const pid = engine.pid ?? 0;
+    writeFileSync(
+      join(runtimeDir, `runtime-${pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid,
+        port,
+        address: '127.0.0.1',
+        project: { name: basename(project), path: project },
+      }),
+      'utf8',
+    );
+    await server.initialize('regression-test');
+    const answer =
+      textOf(
+        await server.request(
+          'tools/call',
+          { name: 'runtime_inspect', arguments: { op: 'property', nodePath: '/root/Main', property: 'day' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      ) ?? '';
+    assert.match(
+      answer,
+      process.platform === 'win32'
+        ? /is running but nothing answered on its port: it refused all \d+ connections tried within 2000ms\. .*Nothing was sent, so nothing ran\./
+        : /'get_property' was not sent to the game \(.*\) within 2000ms: its port had not accepted the connection, which is how Linux and macOS hold one while the game's queue is full, .*Nothing was sent, so nothing ran\./,
+      answer,
+    );
+    assert.doesNotMatch(answer, /requestId/, `nothing was sent, so there is no reply to read: ${answer}`);
+  } finally {
+    await server.stop();
+    for (const socket of queued) {
+      socket.destroy();
+    }
+    if (engine.exitCode === null && engine.signalCode === null) {
+      const gone = new Promise<void>((done) => {
+        engine.once('exit', () => {
+          done();
+        });
+      });
+      engine.kill();
+      await gone;
+    }
+    sweep(runtimeDir);
+    sweep(project);
+  }
+}
+
+/**
+ * Every answer for a request the wait ended on before it reached the game. Only the engine legs
+ * reach the held dial, and only a closed port that a system holds a dial to past refusing others
+ * reaches both at once, which no fixture can arrange.
+ */
+function testANotSentAnswerSaysWhatHeldIt(): void {
+  const said = (refusals: number, dialling: boolean): string => {
+    const reply = notSent('pid 7 on 127.0.0.1:9', 'get_property', 2000, refusals, dialling);
+    return `${reply.reason}: ${reply.message}`;
+  };
+  const refusedTail =
+    '. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do. Nothing was sent, so nothing ran.';
+  const refused =
+    'refused: The game (pid 7 on 127.0.0.1:9) is running but nothing answered on its port: it refused';
+  assert.deepEqual(
+    [said(0, false), said(0, true), said(1, false), said(3, false), said(1, true), said(3, true)],
+    [
+      "busy: 'get_property' was not sent to the game (pid 7 on 127.0.0.1:9) within 2000ms: 4 connections from this server were already waiting for the game to take them, which it does between frames, so a long frame or a breakpoint holds them. Nothing was sent, so nothing ran.",
+      "busy: 'get_property' was not sent to the game (pid 7 on 127.0.0.1:9) within 2000ms: its port had not accepted the connection, which is how Linux and macOS hold one while the game's queue is full, as it is when the game has not taken the connections before it during a long frame or at a breakpoint. Nothing was sent, so nothing ran.",
+      `${refused} the connection within 2000ms${refusedTail}`,
+      `${refused} all 3 connections tried within 2000ms${refusedTail}`,
+      `${refused} one connection and had not accepted the next when the wait ended, after 2000ms${refusedTail}`,
+      `${refused} 3 connections and had not accepted the next when the wait ended, after 2000ms${refusedTail}`,
+    ],
+  );
 }
 
 /**
@@ -23506,10 +23668,13 @@ async function testTheFrameTimeIsTheFrame(): Promise<void> {
           ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
           : { ok: true },
     async ({ server, project }) => {
+      // The held step has to stand clear of an ordinary frame, which is about 7 ms headless but took
+      // 24 ms on a loaded macOS runner, where a 30 ms hold left the mean within half of the slowest
+      // step. Held 120 ms, the slowest step is twice the mean while ordinary frames stay under 50 ms.
       writeFileSync(
         join(project, 'main.gd'),
         'extends Node\n\nvar frames: int = 0\n\n\nfunc _process(_delta: float) -> void:\n' +
-          '\tframes += 1\n\tif frames % 20 == 0:\n\t\tOS.delay_msec(30)\n',
+          '\tframes += 1\n\tif frames % 20 == 0:\n\t\tOS.delay_msec(120)\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -23542,9 +23707,9 @@ async function testTheFrameTimeIsTheFrame(): Promise<void> {
         read('frame_time') > measured / 2 && read('frame_time') < measured * 2,
         `frame_time is the frame the wait measured: ${shown}`,
       );
-      assert.ok(read('frame_time_max') >= 0.025, `frame_time_max is the held frame: ${shown}`);
+      assert.ok(read('frame_time_max') >= 0.115, `frame_time_max is the held frame: ${shown}`);
       assert.ok(
-        read('process_time_max') >= 0.025 && read('frame_time') < read('process_time_max') / 2,
+        read('process_time_max') >= 0.115 && read('frame_time') < read('process_time_max') / 2,
         `process_time_max is the engine's slowest step, which the mean frame is well under: ${shown}`,
       );
       assert.equal(get(metrics, 'data', 'vsync'), 'none, headless', shown);
@@ -42899,7 +43064,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       JSON.stringify(hero),
     );
     assert.deepEqual(sets('hero.tscn', '[node name="Hero" type="Node2D"'), ['script = ExtResource']);
-    assert.match(fileOf('hero.tscn'), /\[ext_resource type="Script" path="res:\/\/hero\.gd"/);
+    assert.match(
+      fileOf('hero.tscn'),
+      /\[ext_resource type="Script" uid="uid:\/\/[a-y0-8]+" path="res:\/\/hero\.gd"/,
+      'and names the script by the uid the import gave it',
+    );
     const boss = await written('scene_node', {
       op: 'add',
       scenePath: 'made.tscn',
@@ -42981,7 +43150,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     });
     assert.equal(get(made, 'resourceType'), 'Stats', JSON.stringify(made));
     assert.deepEqual(sets('named.tres', '[resource]'), ['script = ExtResource', 'max_hp = 50', tags]);
-    assert.match(fileOf('named.tres'), /\[ext_resource type="Script" path="res:\/\/stats\.gd"/);
+    assert.match(
+      fileOf('named.tres'),
+      /\[ext_resource type="Script" uid="uid:\/\/[a-y0-8]+" path="res:\/\/stats\.gd"/,
+      fileOf('named.tres'),
+    );
     const notAClass =
       textOf(
         await call('resource_edit', { op: 'create', resourcePath: 'none.tres', resourceType: 'Statz' }),
@@ -43298,8 +43471,8 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     }
     assert.equal(
       textOf(await call({ op: 'read', playerNodePath: 'Nowhere/Player' })),
-      'AnimationPlayer not found at: Nowhere/Player',
-      'and a path that is simply wrong is told only that',
+      'AnimationPlayer not found at: Nowhere/Player. The root, Root, has no Nowhere; its children are Body, Player, Tree, Bare.',
+      'and a path that is simply wrong is told where it leaves the scene, with no word of the root',
     );
     // A root with a child of its own name: there the path names that child, which has no player.
     for (const op of ['create', 'read']) {
@@ -43312,7 +43485,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
             animationName: 'more',
           }),
         ),
-        'AnimationPlayer not found at: Root/Player',
+        'AnimationPlayer not found at: Root/Player. Root has no Player; it has no children.',
         `${op} under a child named like the root`,
       );
     }
@@ -43342,6 +43515,1197 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       /^The AnimationTree has no tree_root\. Make one with resource_edit create of an AnimationNodeStateMachine, then give its res:\/\/ path to tree_root with scene_node set\./,
       bare,
     );
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * An inherited scene and an instance with editable children, with no editor, through the server and
+ * a real engine: the two ways a scene keeps its own values for nodes another scene makes. The base
+ * scene's root script is not a tool and tints the root in _init, which a headless engine runs, so
+ * no write here may save a modulate.
+ */
+async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('inherited and editable scenes without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kin-engine-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kin-engine-rt-'));
+  mkdirSync(join(project, 'parts'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Kin"\n',
+    'crate.gd':
+      'extends StaticBody2D\n\n\nfunc _init() -> void:\n\tmodulate = Color(1, 0, 0)\n' +
+      '\tvar spare: Node = load("res://parts/bolt.tscn").instantiate()\n\tspare.name = "Spare"\n\tadd_child(spare)\n',
+    'heavy.gd': 'extends StaticBody2D\n',
+    'panel.gd': 'extends Control\n',
+    'parts/crate.tscn':
+      '[gd_scene format=3 uid="uid://dcratehw2x"]\n\n[ext_resource type="Script" path="res://crate.gd" id="1_crate"]\n' +
+      '[ext_resource type="PackedScene" path="res://parts/bolt.tscn" id="2_bolt"]\n\n' +
+      '[node name="Crate" type="StaticBody2D"]\nscript = ExtResource("1_crate")\n\n' +
+      '[node name="Look" type="Sprite2D" parent="."]\n\n[node name="Hit" type="CollisionShape2D" parent="."]\n\n' +
+      '[node name="Bolt" parent="." instance=ExtResource("2_bolt")]\n',
+    'parts/bolt.tscn':
+      '[gd_scene format=3]\n\n[node name="Bolt" type="Node2D"]\n\n[node name="Head" type="Sprite2D" parent="."]\n',
+    'gloss.tres': '[gd_resource type="AnimationNodeStateMachine" format=3]\n\n[resource]\n',
+    // Peg's Tip has the id Grain has: ids are numbered within a file, so a search by id stops at an
+    // instance, whose nodes are numbered in its own file.
+    'parts/peg.tscn':
+      '[gd_scene format=3]\n\n[node name="Peg" type="Node2D" unique_id=20]\n\n' +
+      '[node name="Tip" type="Sprite2D" parent="." unique_id=12]\n',
+    'parts/plank.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/peg.tscn" id="1_peg"]\n\n' +
+      '[node name="Plank" type="Node2D" unique_id=11]\n\n' +
+      '[node name="Peg" parent="." unique_id=13 instance=ExtResource("1_peg")]\n\n' +
+      '[node name="Grain" type="Sprite2D" parent="." unique_id=12]\n',
+    'wide_plank.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/plank.tscn" id="1_plank"]\n\n' +
+      '[node name="Plank" instance=ExtResource("1_plank")]\n\n[node name="Grain" parent="." unique_id=12]\nscale = Vector2(2, 2)\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/crate.tscn" id="1_crate"]\n\n' +
+      '[node name="Main" type="Node2D"]\n\n[node name="Floor" type="Node2D" parent="."]\n\n' +
+      '[node name="Crate1" parent="." instance=ExtResource("1_crate")]\n\n' +
+      '[node name="Crate2" parent="." instance=ExtResource("1_crate")]\nposition = Vector2(30, 0)\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  const written = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+    const answer = await call(name, args);
+    const payload = parseTextContent(answer);
+    assert.match(
+      text(get(payload, 'writtenBy')),
+      /^a headless engine, since no editor serves this project$/,
+      `${name} ${String(args['op'])}: ${textOf(answer) ?? JSON.stringify(answer)}`,
+    );
+    // A reference written with a uid the uid cache does not hold warns on every later load.
+    assert.doesNotMatch(JSON.stringify(payload), /invalid UID/, JSON.stringify(payload));
+    return payload;
+  };
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const inheriting = { op: 'create', inherits: 'parts/crate.tscn' };
+  const crateByUid =
+    /\[ext_resource type="PackedScene" uid="uid:\/\/dcratehw2x" path="res:\/\/parts\/crate\.tscn" id="[^"]+"\]/;
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('kin-engine');
+
+    const made = await written('scene_create', { ...inheriting, scenePath: 'parts/big_crate.tscn' });
+    assert.deepEqual(
+      [get(made, 'inherits'), get(made, 'rootNodeType'), get(made, 'rootNodeName')],
+      ['res://parts/crate.tscn', 'StaticBody2D', 'Crate'],
+      JSON.stringify(made),
+    );
+    const big = fileOf('parts/big_crate.tscn');
+    assert.match(big, crateByUid, big);
+    assert.match(big, /\[node name="Crate" instance=ExtResource\("1_base"\)\]/, big);
+    const tree = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'parts/big_crate.tscn' })),
+      'tree',
+    );
+    assert.deepEqual(
+      asArray(get(tree, 'children')).map((child) => get(child, 'name')),
+      ['Look', 'Hit', 'Bolt'],
+      JSON.stringify(tree),
+    );
+    const further = await written('scene_create', {
+      op: 'create',
+      inherits: 'parts/big_crate.tscn',
+      scenePath: 'parts/bigger_crate.tscn',
+    });
+    assert.deepEqual(
+      [get(further, 'inherits'), get(further, 'rootNodeType'), get(further, 'rootNodeName')],
+      ['res://parts/big_crate.tscn', 'StaticBody2D', 'Crate'],
+      `a scene inheriting an inherited one: ${JSON.stringify(further)}`,
+    );
+    const bigger = fileOf('parts/bigger_crate.tscn');
+    assert.match(
+      bigger,
+      /\[ext_resource type="PackedScene" path="res:\/\/parts\/big_crate\.tscn" id="1_base"\]/,
+      `big_crate.tscn was made since the import, so the uid cache has no uid for it to be named by: ${bigger}`,
+    );
+    assert.equal(
+      get(further, 'namedByPath'),
+      "res://parts/big_crate.tscn is named by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
+      'and the answer says why, with the call that changes it',
+    );
+    assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
+    const refreshed = parseTextContent(await call('project_import', { op: 'refresh_uids' }));
+    assert.ok(Array.isArray(get(refreshed, 'uidsCreated')), JSON.stringify(refreshed));
+    const cached = asArray(get(refreshed, 'uidsCached')).map(String);
+    assert.ok(
+      cached.includes('res://parts/big_crate.tscn') && cached.includes('res://parts/bigger_crate.tscn'),
+      `the answer names the scenes made since the import as gaining their uid in the cache: ${JSON.stringify(refreshed)}`,
+    );
+    assert.ok(
+      !cached.includes('res://parts/crate.tscn'),
+      `and not the one it held already: ${cached.join(', ')}`,
+    );
+    const after = await written('scene_node', {
+      op: 'set',
+      scenePath: 'parts/bigger_crate.tscn',
+      nodePath: '.',
+      properties: { position: [1, 1] },
+    });
+    assert.equal(get(after, 'namedByPath'), undefined, JSON.stringify(after));
+    const bigUid = /uid="(uid:\/\/[a-y0-8]+)"/.exec(fileOf('parts/big_crate.tscn'))?.[1] ?? 'no header uid';
+    assert.ok(
+      fileOf('parts/bigger_crate.tscn').includes(
+        `[ext_resource type="PackedScene" uid="${bigUid}" path="res://parts/big_crate.tscn"`,
+      ),
+      `after the scan the reference names big_crate.tscn by its uid: ${fileOf('parts/bigger_crate.tscn')}`,
+    );
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'parts/big_crate.tscn',
+      nodePath: 'Look',
+      properties: { scale: [2, 2] },
+    });
+    const overridden = fileOf('parts/big_crate.tscn');
+    assert.match(overridden, /\[node name="Look" parent="\."[^\]]*\]\nscale = Vector2\(2, 2\)\n/, overridden);
+    assert.doesNotMatch(overridden, /modulate/, 'what the base root script set in _init is not saved');
+    assert.match(overridden, crateByUid, `a headless save keeps the uid of what it names: ${overridden}`);
+    assert.equal(
+      textOf(
+        await call('scene_node', { op: 'delete', scenePath: 'parts/bigger_crate.tscn', nodePath: 'Look' }),
+      ),
+      'Look is made by res://parts/crate.tscn, a scene res://parts/bigger_crate.tscn inherits, which creates it again on load. Edit that scene instead.',
+      'the refusal names the scene that makes the node, past the base that only sets values on it',
+    );
+
+    const scripted = await written('scene_create', {
+      ...inheriting,
+      scenePath: 'parts/heavy_crate.tscn',
+      rootNodeName: 'Heavy',
+      script: 'heavy.gd',
+    });
+    assert.equal(get(scripted, 'rootNodeName'), 'Heavy', JSON.stringify(scripted));
+    assert.match(
+      fileOf('parts/heavy_crate.tscn'),
+      /\[node name="Heavy" instance=ExtResource\("1_base"\)\]\nscript = ExtResource\("2_script"\)\n/,
+    );
+    for (const [args, refusal] of [
+      [
+        { rootNodeType: 'Node2D' },
+        "inherits takes the root's class from res://parts/crate.tscn, so rootNodeType is not given with it.",
+      ],
+      [{ inherits: 'parts/none.tscn' }, 'inherits: Scene not found: res://parts/none.tscn'],
+      [
+        { inherits: 'gloss.tres' },
+        'inherits: res://gloss.tres is an AnimationNodeStateMachine, not a scene: resource_edit read reads its properties.',
+      ],
+      [
+        { script: 'panel.gd' },
+        'res://panel.gd extends Control, so it cannot be on the StaticBody2D root res://parts/crate.tscn inherits.',
+      ],
+    ] as const) {
+      assert.equal(
+        textOf(await call('scene_create', { ...inheriting, scenePath: 'parts/refused.tscn', ...args })),
+        refusal,
+      );
+      assert.ok(!existsSync(join(project, 'parts', 'refused.tscn')), `and nothing is written for ${refusal}`);
+    }
+
+    const inside = {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2/Look',
+      properties: { scale: [3, 3] },
+    };
+    assert.equal(
+      textOf(await call('scene_node', inside)),
+      'Crate2/Look belongs to the scene instanced at Crate2 (res://parts/crate.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it, or have this scene keep its own values for this instance with scene_node set nodePath Crate2 editableChildren true.',
+    );
+    const opened = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2',
+      editableChildren: true,
+    });
+    assert.equal(get(opened, 'editableChildren'), true, JSON.stringify(opened));
+    assert.match(fileOf('main.tscn'), /\n\[editable path="Crate2"\]\n/, fileOf('main.tscn'));
+    assert.match(
+      fileOf('main.tscn'),
+      crateByUid,
+      'a reference the file made by path gains the uid the cache holds',
+    );
+    await written('scene_node', inside);
+    const kept = fileOf('main.tscn');
+    assert.match(kept, /\[node name="Look" parent="Crate2"[^\]]*\]\nscale = Vector2\(3, 3\)\n/, kept);
+    assert.doesNotMatch(kept, /parent="Crate1"/, 'the other instance keeps nothing of its own');
+    assert.doesNotMatch(kept, /modulate/, 'and nothing the root script set is saved');
+
+    const head = { ...inside, nodePath: 'Crate2/Bolt/Head', properties: { scale: [4, 4] } };
+    assert.equal(
+      textOf(await call('scene_node', head)),
+      'Crate2/Bolt/Head belongs to the scene instanced at Crate2/Bolt (res://parts/bolt.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it, or have this scene keep its own values for this instance with scene_node set nodePath Crate2/Bolt editableChildren true.',
+      'with Crate2 editable, only the instance nested in it is named',
+    );
+    await written('scene_node', {
+      ...inside,
+      nodePath: 'Crate2/Bolt',
+      properties: {},
+      editableChildren: true,
+    });
+    await written('scene_node', head);
+    const nested = fileOf('main.tscn');
+    assert.match(nested, /\n\[editable path="Crate2\/Bolt"\]\n/, nested);
+    assert.match(
+      nested,
+      /\[node name="Head" parent="Crate2\/Bolt"[^\]]*\]\nscale = Vector2\(4, 4\)\n/,
+      nested,
+    );
+    const editableIn = async (scenePath: string): Promise<Record<string, unknown>> => {
+      const found: Record<string, unknown> = {};
+      const walk = (entry: unknown): void => {
+        if (get(entry, 'instanceOf') !== undefined) {
+          found[String(get(entry, 'path'))] = get(entry, 'editableChildren');
+        }
+        asArray(get(entry, 'children')).forEach(walk);
+      };
+      walk(get(parseTextContent(await call('scene_tree', { scenePath })), 'tree'));
+      return found;
+    };
+    const opening = { Crate1: false, 'Crate1/Bolt': false, Crate2: true, 'Crate2/Bolt': true };
+    assert.deepEqual(await editableIn('main.tscn'), opening, 'scene_tree says which instances are editable');
+    const asked = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'main.tscn', nodePath: 'Crate2/Bolt' }),
+    );
+    assert.deepEqual(
+      [get(asked, 'instanceOf'), get(asked, 'editableChildren')],
+      ['res://parts/bolt.tscn', true],
+      JSON.stringify(asked),
+    );
+    await written('scene_create', { op: 'create', inherits: 'main.tscn', scenePath: 'main_kin.tscn' });
+    assert.deepEqual(
+      await editableIn('main_kin.tscn'),
+      opening,
+      'a scene inheriting main.tscn shares its root',
+    );
+    const kinAsked = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'main_kin.tscn', nodePath: 'Crate2' }),
+    );
+    assert.equal(get(kinAsked, 'editableChildren'), true, JSON.stringify(kinAsked));
+    await written('scene_create', { op: 'create', scenePath: 'hall.tscn', rootNodeType: 'Node2D' });
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'hall.tscn',
+      instancePath: 'main.tscn',
+      nodeName: 'Main',
+    });
+    assert.deepEqual(
+      await editableIn('hall.tscn'),
+      {
+        Main: false,
+        'Main/Crate1': false,
+        'Main/Crate1/Bolt': false,
+        'Main/Crate2': false,
+        'Main/Crate2/Bolt': false,
+      },
+      "main.tscn's editable instances are its own root's: a scene instancing it keeps nothing for them",
+    );
+    assert.equal(
+      textOf(await call('scene_node', { ...head, nodePath: 'Crate1/Bolt/Head' })),
+      'Crate1/Bolt/Head belongs to the scene instanced at Crate1/Bolt (res://parts/bolt.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it, or have this scene keep its own values for this instance with scene_node set nodePath Crate1 editableChildren true, then nodePath Crate1/Bolt editableChildren true.',
+      'with neither instance around it editable, both are named, outermost first',
+    );
+    assert.equal(
+      textOf(await call('scene_node', { ...head, nodePath: 'Crate2/Spare' })),
+      'Crate2/Spare is made by a script as the scene is instanced, and no scene file saves anything about it.',
+    );
+    assert.equal(
+      textOf(await call('scene_node', { ...head, nodePath: 'Crate2/Spare/Head' })),
+      'Crate2/Spare/Head belongs to the scene instanced at Crate2/Spare (res://parts/bolt.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it.',
+      'no editable children reach an instance a script makes',
+    );
+    for (const [parentNodePath, nodeName] of [
+      ['Crate2/Look', 'Tag'],
+      ['Crate2', 'Badge'],
+    ]) {
+      await written('scene_node', {
+        op: 'add',
+        scenePath: 'main.tscn',
+        parentNodePath,
+        nodeType: 'Node2D',
+        nodeName,
+      });
+    }
+    const shut = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2',
+      editableChildren: false,
+    });
+    assert.deepEqual(
+      [get(shut, 'droppedValues'), get(shut, 'droppedNodes')],
+      [['Crate2/Look', 'Crate2/Bolt/Head'], ['Crate2/Look/Tag']],
+      JSON.stringify(shut),
+    );
+    const closed = fileOf('main.tscn');
+    assert.doesNotMatch(
+      closed,
+      /\[editable|name="(Look|Head|Tag)" /,
+      `closing them drops what was kept, and what was added below a node of the instance: ${closed}`,
+    );
+    assert.match(
+      closed,
+      /\[node name="Badge" type="Node2D" parent="Crate2"/,
+      `and keeps the node added straight under the instance: ${closed}`,
+    );
+    assert.match(closed, /\[node name="Crate2" parent="\." [^\]]*\]\nposition = Vector2\(30, 0\)\n/, closed);
+    assert.deepEqual(
+      await editableIn('main.tscn'),
+      { Crate1: false, 'Crate1/Bolt': false, Crate2: false, 'Crate2/Bolt': false },
+      'and the read says so',
+    );
+
+    for (const nodePath of ['.', 'Floor']) {
+      assert.equal(
+        textOf(
+          await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath, editableChildren: true }),
+        ),
+        `editableChildren is a setting of an instance in this scene, and ${nodePath} is not one.`,
+      );
+    }
+    assert.equal(
+      textOf(await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath: 'Crate1' })),
+      'set takes properties, editableChildren, or both.',
+    );
+
+    const shallow = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'main.tscn', depth: 1 })),
+      'tree',
+    );
+    assert.deepEqual(
+      asArray(get(shallow, 'children')).map((child) => [get(child, 'name'), get(child, 'childrenNotListed')]),
+      [
+        ['Floor', undefined],
+        ['Crate1', 3],
+        ['Crate2', 4],
+      ],
+      `a node cut off by depth says how many children it has: ${JSON.stringify(shallow)}`,
+    );
+
+    // A scene copied whole carries the uid of the one it was copied from, so one of the two names a
+    // uid the loader resolves to the other, whichever the import kept.
+    writeFileSync(
+      join(project, 'parts', 'crate_copy.tscn'),
+      `${files['parts/crate.tscn']}\n[node name="Lid" type="Sprite2D" parent="."]\n`,
+    );
+    const reimported = await runImport(godotPath, project);
+    assert.ok(reimported.ok, `the import after the copy failed: ${JSON.stringify(reimported)}`);
+    for (const [base, children] of [
+      ['parts/crate.tscn', ['Look', 'Hit', 'Bolt']],
+      ['parts/crate_copy.tscn', ['Look', 'Hit', 'Bolt', 'Lid']],
+    ] as const) {
+      const scenePath = `from_${base.slice(6)}`;
+      const from = await written('scene_create', { op: 'create', inherits: base, scenePath });
+      assert.equal(get(from, 'inherits'), `res://${base}`, JSON.stringify(from));
+      const copied = get(parseTextContent(await call('scene_tree', { scenePath })), 'tree');
+      assert.deepEqual(
+        asArray(get(copied, 'children')).map((child) => get(child, 'name')),
+        children,
+        `${scenePath} inherits ${base}: ${fileOf(scenePath)}`,
+      );
+    }
+
+    // The engine finds a value entry whose node was renamed in the scene it comes from by its
+    // unique_id, and so must a read of the file.
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'parts/plank.tscn',
+      nodePath: 'Grain',
+      properties: { name: 'Knot' },
+    });
+    assert.match(fileOf('parts/plank.tscn'), /\[node name="Knot" type="Sprite2D" parent="\." unique_id=12\]/);
+    const wide = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'wide_plank.tscn', includeProperties: true })),
+      'tree',
+    );
+    const knot = asArray(get(wide, 'children'));
+    assert.deepEqual(
+      knot.map((child) => [get(child, 'name'), get(get(get(child, 'properties'), 'scale'), 'x')]),
+      [
+        ['Peg', 1],
+        ['Knot', 2],
+      ],
+      `the renamed node keeps the scale wide_plank.tscn gives it: ${JSON.stringify(wide)}`,
+    );
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A node renamed or moved in a scene, with no editor, is followed into the scenes that name it by
+ * path. Godot finds a moved node's values by its unique_id, but editable children only by path, so
+ * room.tscn saved after the rename would drop the light it keeps inside DeskB's lamp. unrelated.tscn
+ * has the same shape of paths through a Top of its own and instances nothing that moved.
+ */
+async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('followed move regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-rt-'));
+  const lamp = '[ext_resource type="PackedScene" path="res://lamp.tscn" id="1_lamp"]';
+  const desk = '[ext_resource type="PackedScene" path="res://desk.tscn" id="1_desk"]';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Follow"\n',
+    'lamp.tscn':
+      '[gd_scene format=3]\n\n[node name="Lamp" type="Node3D"]\n\n[node name="Bulb" type="OmniLight3D" parent="."]\n',
+    'desk.tscn':
+      `[gd_scene format=3]\n\n${lamp}\n\n[node name="Desk" type="Node3D"]\n\n` +
+      '[node name="Top" type="Node3D" parent="."]\n\n[node name="Leg" type="Node3D" parent="."]\n\n' +
+      '[node name="DeskLamp" parent="Top" instance=ExtResource("1_lamp")]\n',
+    'room.tscn':
+      `[gd_scene format=3]\n\n${desk}\n\n[node name="Room" type="Node3D"]\n\n` +
+      '[node name="Top" type="Node3D" parent="."]\n\n' +
+      '[node name="DeskA" parent="." instance=ExtResource("1_desk")]\n\n' +
+      '[node name="DeskB" parent="." instance=ExtResource("1_desk")]\n\n' +
+      '[node name="Top" parent="DeskB"]\nvisible = false\n\n' +
+      '[node name="Tag" type="Node3D" parent="DeskB/Top"]\n\n' +
+      '[node name="Bulb" parent="DeskB/Top/DeskLamp"]\nlight_energy = 4.0\n\n' +
+      '[connection signal="visibility_changed" from="DeskB/Top/DeskLamp" to="." method="notify_property_list_changed"]\n\n' +
+      '[editable path="DeskB"]\n[editable path="DeskB/Top/DeskLamp"]\n',
+    'study.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://room.tscn" id="1_room"]\n\n' +
+      '[node name="Room" instance=ExtResource("1_room")]\n\n' +
+      '[node name="Top" parent="."]\nvisible = false\n\n' +
+      '[node name="DeskLamp" parent="DeskA/Top"]\nvisible = false\n\n' +
+      '[node name="Bulb" parent="DeskA/Top/DeskLamp"]\nlight_energy = 2.0\n\n' +
+      '[editable path="DeskA"]\n[editable path="DeskA/Top/DeskLamp"]\n',
+    'long_desk.tscn':
+      `[gd_scene format=3]\n\n${desk}\n\n[node name="Desk" instance=ExtResource("1_desk")]\n\n` +
+      '[node name="Top" parent="."]\nvisible = false\n',
+    'crowd.tscn': `[gd_scene format=3]\n\n[node name="Crowd" type="Node"]\n${Array.from({ length: 14 }, (_, at) => `\n[node name="N${at + 1}" type="Node" parent="."]\n`).join('')}`,
+    // Names desk.tscn but does not load, so where its instances are cannot be read.
+    'broken.tscn':
+      `[gd_scene format=3]\n\n${desk}\n\n[node name="Broken" type="Node3D"]\n\n` +
+      '[node name="D" parent="." instance=ExtResource("9_gone")]\n\n[editable path="D/Top/DeskLamp"]\n',
+    'unrelated.tscn':
+      `[gd_scene format=3]\n\n${lamp}\n\n[node name="Other" type="Node3D"]\n\n` +
+      '[node name="Top" type="Node3D" parent="."]\n\n[node name="DeskLamp" parent="Top" instance=ExtResource("1_lamp")]\n\n' +
+      '[node name="Bulb" parent="Top/DeskLamp"]\nlight_energy = 3.0\n\n[editable path="Top/DeskLamp"]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+    parseTextContent(
+      await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000),
+    );
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const energy = async (scenePath: string, nodePath: string): Promise<unknown> =>
+    get(await call('scene_node', { op: 'get', scenePath, nodePath }), 'properties', 'light_energy');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('follow-engine');
+
+    const renamed = await call('scene_node', {
+      op: 'set',
+      scenePath: 'desk.tscn',
+      nodePath: 'Top',
+      properties: { name: 'Surface' },
+    });
+    assert.deepEqual(
+      asArray(get(renamed, 'followed')).map(String).sort(),
+      ['res://long_desk.tscn', 'res://room.tscn', 'res://study.tscn'],
+      JSON.stringify(renamed),
+    );
+    assert.deepEqual(
+      get(renamed, 'notFollowed'),
+      [{ scenePath: 'res://broken.tscn', reason: 'Failed to load res://broken.tscn as a scene' }],
+      JSON.stringify(renamed),
+    );
+    assert.equal(fileOf('broken.tscn'), files['broken.tscn'], 'and it is left as it was');
+    const room = fileOf('room.tscn');
+    for (const line of [
+      '[node name="Surface" parent="DeskB"]',
+      '[node name="Tag" type="Node3D" parent="DeskB/Surface"]',
+      '[node name="Bulb" parent="DeskB/Surface/DeskLamp"]',
+      '[connection signal="visibility_changed" from="DeskB/Surface/DeskLamp" to="."',
+      '[editable path="DeskB"]',
+      '[editable path="DeskB/Surface/DeskLamp"]',
+    ]) {
+      assert.ok(room.includes(line), `room.tscn names ${line}: ${room}`);
+    }
+    assert.deepEqual(
+      room.match(/[^\n]*Top[^\n]*/g),
+      ['[node name="Top" type="Node3D" parent="."]'],
+      `only room.tscn's own Top is left, since room.tscn does not inherit desk.tscn: ${room}`,
+    );
+    const study = fileOf('study.tscn');
+    assert.ok(study.includes('[node name="Bulb" parent="DeskA/Surface/DeskLamp"]'), study);
+    assert.ok(study.includes('[editable path="DeskA/Surface/DeskLamp"]'), study);
+    assert.ok(study.includes('[node name="DeskLamp" parent="DeskA/Surface"]'), study);
+    assert.ok(
+      study.includes('[node name="Top" parent="."]'),
+      `study.tscn inherits room.tscn, not desk.tscn, so its value for room.tscn's own Top stays: ${study}`,
+    );
+    assert.ok(
+      fileOf('long_desk.tscn').includes('[node name="Surface" parent="."]'),
+      fileOf('long_desk.tscn'),
+    );
+    assert.equal(fileOf('unrelated.tscn'), files['unrelated.tscn'], 'a scene instancing nothing that moved');
+
+    // The effect: the next save of each scene keeps the lights, which a lost editable path drops.
+    await call('scene_node', {
+      op: 'set',
+      scenePath: 'room.tscn',
+      nodePath: 'DeskA',
+      properties: { visible: false },
+    });
+    await call('scene_node', {
+      op: 'set',
+      scenePath: 'study.tscn',
+      nodePath: '.',
+      properties: { visible: false },
+    });
+    assert.deepEqual(
+      [
+        await energy('room.tscn', 'DeskB/Surface/DeskLamp/Bulb'),
+        await energy('study.tscn', 'DeskA/Surface/DeskLamp/Bulb'),
+        await energy('study.tscn', 'DeskB/Surface/DeskLamp/Bulb'),
+      ],
+      [4, 2, 4],
+      `after saving again: ${fileOf('room.tscn')}\n${fileOf('study.tscn')}`,
+    );
+
+    // The save wrote the unique_ids along each path, which a reparent leaves running through the old
+    // parent: the loader follows them when a path has vanished, and Surface is still there to find.
+    const lineOf = (scene: string, start: string): string =>
+      fileOf(scene)
+        .split('\n')
+        .find((line) => line.startsWith(start)) ?? `no line starting ${start}`;
+    const bulb = '[node name="Bulb" parent="DeskB/';
+    const signal = '[connection signal="visibility_changed"';
+    const chain = / parent_id_path=(PackedInt32Array\([^)]*\))/.exec(lineOf('room.tscn', bulb))?.[1];
+    assert.ok(chain !== undefined, `the save wrote the ids along Bulb's parent: ${fileOf('room.tscn')}`);
+    assert.match(
+      lineOf('study.tscn', '[node name="DeskLamp" parent="DeskA/'),
+      / parent_id_path=PackedInt32Array\(/,
+      fileOf('study.tscn'),
+    );
+    // The saver writes them on a connection only for some sources, so the lamp's own chain, the same
+    // path's, is put on this one's.
+    writeFileSync(
+      join(project, 'room.tscn'),
+      fileOf('room.tscn').replace(
+        lineOf('room.tscn', signal),
+        `${lineOf('room.tscn', signal).slice(0, -1)} from_uid_path=${chain}]`,
+      ),
+    );
+    const moved = await call('scene_node', {
+      op: 'reparent',
+      scenePath: 'desk.tscn',
+      nodePath: 'Surface/DeskLamp',
+      newParentPath: 'Leg',
+    });
+    assert.deepEqual(
+      asArray(get(moved, 'followed')).map(String).sort(),
+      ['res://room.tscn', 'res://study.tscn'],
+      JSON.stringify(moved),
+    );
+    const again = fileOf('room.tscn');
+    assert.ok(again.includes('[editable path="DeskB/Leg/DeskLamp"]'), again);
+    assert.match(lineOf('room.tscn', bulb), /^\[node name="Bulb" parent="DeskB\/Leg\/DeskLamp"/, again);
+    assert.doesNotMatch(lineOf('room.tscn', bulb), /_id_path/, `the ids through Surface went: ${again}`);
+    const lamp = '[node name="DeskLamp" parent="DeskA/';
+    assert.match(
+      lineOf('study.tscn', lamp),
+      /^\[node name="DeskLamp" parent="DeskA\/Leg"/,
+      fileOf('study.tscn'),
+    );
+    assert.doesNotMatch(lineOf('study.tscn', lamp), /_id_path/, fileOf('study.tscn'));
+    assert.match(lineOf('room.tscn', signal), / from="DeskB\/Leg\/DeskLamp" /, again);
+    assert.doesNotMatch(lineOf('room.tscn', signal), /_uid_path/, again);
+    await call('scene_node', {
+      op: 'set',
+      scenePath: 'room.tscn',
+      nodePath: 'DeskA',
+      properties: { visible: true },
+    });
+    assert.equal(await energy('room.tscn', 'DeskB/Leg/DeskLamp/Bulb'), 4, fileOf('room.tscn'));
+
+    // A rename keeps every node's id, so the ids along a renamed path stay as they were.
+    const ids = / parent_id_path=PackedInt32Array\([^)]*\)/.exec(lineOf('room.tscn', bulb))?.[0];
+    assert.ok(ids !== undefined, `the save wrote ids again: ${fileOf('room.tscn')}`);
+    const stood = await call('scene_node', {
+      op: 'set',
+      scenePath: 'desk.tscn',
+      nodePath: 'Leg',
+      properties: { name: 'Stand' },
+    });
+    assert.ok(asArray(get(stood, 'followed')).includes('res://room.tscn'), JSON.stringify(stood));
+    assert.match(
+      lineOf('room.tscn', bulb),
+      /^\[node name="Bulb" parent="DeskB\/Stand\/DeskLamp"/,
+      fileOf('room.tscn'),
+    );
+    assert.ok(lineOf('room.tscn', bulb).includes(ids), `the ids are kept: ${fileOf('room.tscn')}`);
+    assert.equal(await energy('room.tscn', 'DeskB/Stand/DeskLamp/Bulb'), 4, fileOf('room.tscn'));
+
+    // A path from before the moves is told what is there instead.
+    const refusal = async (args: Record<string, unknown>): Promise<string | null> =>
+      textOf(
+        await server.request(
+          'tools/call',
+          {
+            name: 'scene_node',
+            arguments: { projectPath: project, scenePath: 'desk.tscn', op: 'get', ...args },
+          },
+          240_000,
+        ),
+      );
+    assert.deepEqual(
+      [
+        await refusal({ nodePath: 'Leg/DeskLamp' }),
+        await refusal({ nodePath: 'Stand/Lamp' }),
+        await refusal({ nodePath: 'Surface/DeskLamp/Bulb' }),
+      ],
+      [
+        'Node not found: Leg/DeskLamp. The root, Desk, has no Leg; its children are Surface, Stand.',
+        'Node not found: Stand/Lamp. Stand has no Lamp; its children are DeskLamp.',
+        'Node not found: Surface/DeskLamp/Bulb. Surface has no DeskLamp; it has no children.',
+      ],
+    );
+    assert.equal(
+      await refusal({ scenePath: 'crowd.tscn', nodePath: 'N15' }),
+      'Node not found: N15. The root, Crowd, has no N15; its children are N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12 and 2 more.',
+    );
+    const copy = await call('scene_node', {
+      op: 'duplicate',
+      scenePath: 'desk.tscn',
+      nodePath: 'Stand',
+      newName: 'Spare',
+      parentNodePath: 'Surface',
+    });
+    assert.deepEqual(
+      [get(copy, 'newNodePath'), get(copy, 'parentNodePath'), get(copy, 'index')],
+      ['Surface/Spare', 'Surface', 0],
+      JSON.stringify(copy),
+    );
+
+    // Neither lamp.tscn nor desk.tscn has a uid the cache holds, as hand-written scenes with none.
+    const both = await call('scene_node', {
+      op: 'add',
+      scenePath: 'unrelated.tscn',
+      instancePath: 'desk.tscn',
+      nodeName: 'Spare',
+    });
+    assert.equal(
+      get(both, 'namedByPath'),
+      "res://lamp.tscn, res://desk.tscn are named by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
+      JSON.stringify(both),
+    );
+    assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The node paths a scene holds after one of its nodes is renamed, moved or deleted with no editor:
+ * NodePath values in properties, in arrays, dictionaries and a resource built into the scene, under a
+ * unique name, and the tracks of animations built into the scene or kept in a library of their own.
+ * They are carried as the editor's rename carries them, into the scenes instancing this one too,
+ * whether or not those scenes had anything else to rewrite. A track kept in another scene's file is
+ * named and left. A delete names what is left pointing at nothing. Each scene is then loaded by an
+ * engine, which lists every path that names no node.
+ */
+async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('carried paths regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-paths-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-paths-rt-'));
+  const track = (at: number, path: string, values: string, update = 0): string =>
+    `tracks/${at}/type = "value"\ntracks/${at}/imported = false\ntracks/${at}/enabled = true\n` +
+    `tracks/${at}/path = NodePath("${path}")\ntracks/${at}/interp = 1\ntracks/${at}/loop_wrap = true\n` +
+    `tracks/${at}/keys = {"times": PackedFloat32Array(0, 1), "transitions": PackedFloat32Array(1, 1), "update": ${update}, "values": ${values}}\n`;
+  const well = '[ext_resource type="PackedScene" path="res://well.tscn" id="1_well"]';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Paths"\n',
+    'kept.tres':
+      '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_dip"]\n' +
+      `resource_name = "dip"\nlength = 1.0\n${track(0, 'Bucket:scale', '[Vector2(1, 1), Vector2(2, 2)]')}\n` +
+      '[resource]\n_data = {\n&"dip": SubResource("Animation_dip")\n}\n',
+    // Its track leads out of the node that moves from a root inside it, so the copy square.tscn
+    // reaches is in the new terms already and is not carried twice.
+    'aim.gd': 'extends Resource\n',
+    'swing.gd': 'extends Animation\n',
+    'hand.tres':
+      '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_tug"]\n' +
+      `resource_name = "tug"\nlength = 1.0\n${track(0, '../Post:position', '[Vector2(0, 0), Vector2(2, 2)]')}\n` +
+      '[resource]\n_data = {\n&"tug": SubResource("Animation_tug")\n}\n',
+    'well.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="res://kept.tres" id="1_kept"]\n' +
+      '[ext_resource type="AnimationLibrary" path="res://hand.tres" id="2_hand"]\n' +
+      '[ext_resource type="Script" path="res://aim.gd" id="3_aim"]\n' +
+      '[ext_resource type="Script" path="res://swing.gd" id="4_swing"]\n\n' +
+      '[sub_resource type="Animation" id="Animation_swing"]\nscript = ExtResource("4_swing")\nresource_name = "swing"\nlength = 1.0\n' +
+      track(0, 'Bucket:rotation', '[0.0, 0.5]') +
+      track(1, 'Bucket/Rope:position', '[Vector2(0, 0), Vector2(0, 4)]') +
+      track(2, 'Post:position', '[Vector2(0, 0), Vector2(1, 1)]') +
+      // A node square.tscn adds inside its instance, which this scene does not have.
+      track(3, 'Bucket/Bell:visible', '[true, false]', 1) +
+      '\n[sub_resource type="AnimationLibrary" id="AnimationLibrary_well"]\n_data = {\n&"swing": SubResource("Animation_swing")\n}\n\n' +
+      // With a script that is not a tool, whose changes a headless save puts back unless told otherwise.
+      '[sub_resource type="Resource" id="Resource_aim"]\nscript = ExtResource("3_aim")\nmetadata/aim = NodePath("../Bucket/Rope")\n\n' +
+      // Played from inside Bucket: Hand's and Grip's tracks start at Bucket, Crank's at the root above it.
+      `[sub_resource type="Animation" id="Animation_pull"]\nresource_name = "pull"\nlength = 1.0\n${track(0, '../Post:position', '[Vector2(0, 0), Vector2(3, 3)]')}\n` +
+      '[sub_resource type="AnimationLibrary" id="AnimationLibrary_grip"]\n_data = {\n&"pull": SubResource("Animation_pull")\n}\n\n' +
+      `[sub_resource type="Animation" id="Animation_turn"]\nresource_name = "turn"\nlength = 1.0\n${track(0, 'Post:rotation', '[0.0, 1.0]')}\n` +
+      '[sub_resource type="AnimationLibrary" id="AnimationLibrary_crank"]\n_data = {\n&"turn": SubResource("Animation_turn")\n}\n\n' +
+      // Names a node square.tscn adds, as the track below does, from the root an instance takes over.
+      '[node name="Well" type="Node2D"]\nmetadata/bell = NodePath("Bucket/Bell")\n\n' +
+      '[node name="Bucket" type="Sprite2D" parent="."]\nunique_name_in_owner = true\n\n' +
+      '[node name="Rope" type="Node2D" parent="Bucket"]\nmetadata/post = NodePath("../../Post")\n\n' +
+      '[node name="Hand" type="AnimationPlayer" parent="Bucket"]\nlibraries = {\n&"": ExtResource("2_hand")\n}\n\n' +
+      '[node name="Grip" type="AnimationPlayer" parent="Bucket"]\nlibraries = {\n&"": SubResource("AnimationLibrary_grip")\n}\n\n' +
+      '[node name="Crank" type="AnimationPlayer" parent="Bucket"]\nroot_node = NodePath("../..")\n' +
+      'libraries = {\n&"": SubResource("AnimationLibrary_crank")\n}\n\n' +
+      '[node name="Post" type="Node2D" parent="."]\n' +
+      'metadata/marks = [NodePath("../Bucket"), NodePath("../Bucket/Rope:position"), 4]\n' +
+      'metadata/named = {"rope": NodePath("../Bucket/Rope")}\nmetadata/aimer = SubResource("Resource_aim")\n' +
+      'metadata/unique = NodePath("%Bucket/Rope")\n\n' +
+      '[node name="Follow" type="RemoteTransform2D" parent="."]\nremote_path = NodePath("../Bucket")\n\n' +
+      '[node name="Anim" type="AnimationPlayer" parent="."]\nlibraries = {\n&"": SubResource("AnimationLibrary_well"),\n&"kept": ExtResource("1_kept")\n}\n',
+    'square.tscn':
+      `[gd_scene format=3]\n\n${well}\n\n[sub_resource type="Animation" id="Animation_look"]\nresource_name = "look"\nlength = 1.0\n` +
+      track(0, 'Well1/Bucket:visible', '[true, false]', 1) +
+      '\n[sub_resource type="AnimationLibrary" id="AnimationLibrary_square"]\n_data = {\n&"look": SubResource("Animation_look")\n}\n\n' +
+      '[node name="Square" type="Node2D"]\n\n[node name="Well1" parent="." instance=ExtResource("1_well")]\n\n' +
+      '[node name="Bell" type="Node2D" parent="Well1/Bucket"]\nmetadata/post = NodePath("../../Post")\n\n' +
+      // A value of square.tscn's own for a node of the instance, in square.tscn's terms.
+      '[node name="Follow" parent="Well1"]\nremote_path = NodePath("../Bucket/Rope")\n\n' +
+      '[node name="Tie" type="RemoteTransform2D" parent="."]\nremote_path = NodePath("../Well1/Bucket/Rope")\n\n' +
+      '[node name="Show" type="AnimationPlayer" parent="."]\nlibraries = {\n&"": SubResource("AnimationLibrary_square")\n}\n\n' +
+      '[editable path="Well1"]\n',
+    // Holds nothing a move rewrites but a node path, so only the paths bring it into the follow.
+    'plaza.tscn':
+      `[gd_scene format=3]\n\n${well}\n\n[node name="Plaza" type="Node2D"]\n\n` +
+      '[node name="W" parent="." instance=ExtResource("1_well")]\n\n' +
+      '[node name="Tie" type="RemoteTransform2D" parent="."]\nremote_path = NodePath("../W/Bucket")\n',
+    // Every node path and track each scene holds that names no node, as an engine loads the scene.
+    'check.gd': [
+      'extends SceneTree',
+      '',
+      '',
+      'func _init() -> void:',
+      '\tfor scene_path: String in ["res://well.tscn", "res://square.tscn", "res://plaza.tscn"]:',
+      '\t\tvar root: Node = (load(scene_path) as PackedScene).instantiate()',
+      '\t\tvar nodes: Array[Node] = [root]',
+      '\t\twhile not nodes.is_empty():',
+      '\t\t\tvar node: Node = nodes.pop_back()',
+      '\t\t\tnodes.append_array(node.get_children())',
+      '\t\t\tvar at: String = "%s %s" % [scene_path, root.get_path_to(node)]',
+      '\t\t\tfor property: Dictionary in node.get_property_list():',
+      '\t\t\t\t_check(at + " " + str(property["name"]), node, node.get(str(property["name"])))',
+      '\t\t\tif node is AnimationPlayer:',
+      '\t\t\t\tvar player: AnimationPlayer = node',
+      '\t\t\t\tfor name: StringName in player.get_animation_list():',
+      '\t\t\t\t\tvar animation: Animation = player.get_animation(name)',
+      '\t\t\t\t\tfor track: int in animation.get_track_count():',
+      '\t\t\t\t\t\tvar path: NodePath = animation.track_get_path(track)',
+      '\t\t\t\t\t\tif player.get_node(player.root_node).get_node_or_null(path) == null:',
+      '\t\t\t\t\t\t\tprint("unresolved %s %s/%d %s" % [at, name, track, path])',
+      '\t\troot.free()',
+      '\tprint("checked")',
+      '\tquit()',
+      '',
+      '',
+      'func _check(at: String, node: Node, value: Variant) -> void:',
+      '\tif value is NodePath:',
+      '\t\tif not (value as NodePath).is_empty() and node.get_node_or_null(value) == null:',
+      '\t\t\tprint("unresolved %s %s" % [at, value])',
+      '\telif value is Array:',
+      '\t\tfor item: Variant in value:',
+      '\t\t\t_check(at, node, item)',
+      '\telif value is Dictionary:',
+      '\t\tfor key: Variant in value:',
+      '\t\t\t_check(at, node, value[key])',
+      '\telif value is Resource and (value as Resource).get_class() == "Resource":',
+      '\t\tfor property: Dictionary in (value as Resource).get_property_list():',
+      '\t\t\t_check(at, node, (value as Resource).get(str(property["name"])))',
+      '',
+    ].join('\n'),
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+    const result = await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      240_000,
+    );
+    const parsed = parseTextContent(result);
+    assert.ok(parsed !== null, `${name} ${String(args['op'])} answered: ${JSON.stringify(result)}`);
+    return parsed;
+  };
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const unresolved = async (): Promise<string[]> => {
+    const ran = await runEngine(godotPath, ['--headless', '--path', project, '-s', 'res://check.gd']);
+    const said = ran.log.all.map((entry) => entry.text);
+    assert.ok(said.includes('checked'), `the check ran: ${said.join(' | ')}`);
+    return said.filter((text) => text.startsWith('unresolved ')).sort();
+  };
+  // Each entry an answer lists, in one line: where, what, and the path from and to.
+  const lines = (answer: unknown, field: string): string[] => {
+    const listed = get(answer, field);
+    assert.ok(Array.isArray(listed), `${field} in ${JSON.stringify(answer)}`);
+    const said = (value: unknown): string =>
+      typeof value === 'string' || typeof value === 'number' ? String(value) : JSON.stringify(value);
+    return listed
+      .map((entry) => {
+        const e = entry as Record<string, unknown>;
+        const what =
+          e['property'] === undefined ? `${said(e['animation'])}/${said(e['track'])}` : said(e['property']);
+        const tail =
+          e['to'] !== undefined
+            ? ` -> ${said(e['to'])}`
+            : e['reason'] !== undefined
+              ? ` (${said(e['reason'])})`
+              : '';
+        return `${said(e['scenePath']).replace('res://', '')} ${said(e['nodePath'])} ${what} ${said(e['from'])}${tail}`;
+      })
+      .sort();
+  };
+  const kept = 'The animation is kept in res://well.tscn, and an edit here would not be saved there.';
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('paths-engine');
+    // Only the track naming a node square.tscn adds is unresolved where it is not added, as written.
+    const asWritten = [
+      'unresolved res://plaza.tscn W metadata/bell Bucket/Bell',
+      'unresolved res://plaza.tscn W/Anim swing/3 Bucket/Bell:visible',
+      'unresolved res://well.tscn . metadata/bell Bucket/Bell',
+      'unresolved res://well.tscn Anim swing/3 Bucket/Bell:visible',
+    ];
+    assert.deepEqual(await unresolved(), asWritten, 'the fixture resolves before anything moves');
+
+    const renamed = await call('scene_node', {
+      op: 'set',
+      scenePath: 'well.tscn',
+      nodePath: 'Bucket',
+      properties: { name: 'Pail' },
+    });
+    assert.deepEqual(
+      lines(renamed, 'retargeted'),
+      [
+        'plaza.tscn Tie remote_path ../W/Bucket -> ../W/Pail',
+        'square.tscn Show look/0 Well1/Bucket:visible -> Well1/Pail:visible',
+        'square.tscn Tie remote_path ../Well1/Bucket/Rope -> ../Well1/Pail/Rope',
+        'square.tscn Well1/Follow remote_path ../Bucket/Rope -> ../Pail/Rope',
+        'well.tscn Anim kept/dip/0 Bucket:scale -> Pail:scale',
+        'well.tscn Anim swing/0 Bucket:rotation -> Pail:rotation',
+        'well.tscn Anim swing/1 Bucket/Rope:position -> Pail/Rope:position',
+        'well.tscn Follow remote_path ../Bucket -> ../Pail',
+        'well.tscn Post metadata/aimer ../Bucket/Rope -> ../Pail/Rope',
+        'well.tscn Post metadata/marks ../Bucket -> ../Pail',
+        'well.tscn Post metadata/marks ../Bucket/Rope:position -> ../Pail/Rope:position',
+        'well.tscn Post metadata/named ../Bucket/Rope -> ../Pail/Rope',
+        'well.tscn Post metadata/unique %Bucket/Rope -> %Pail/Rope',
+      ],
+      JSON.stringify(renamed),
+    );
+    assert.deepEqual(
+      lines(renamed, 'notRetargeted'),
+      [
+        'square.tscn Well1 metadata/bell Bucket/Bell (The value is set in res://well.tscn, and an edit here would not be saved there.)',
+        `square.tscn Well1/Anim swing/3 Bucket/Bell:visible (${kept})`,
+      ],
+      JSON.stringify(renamed),
+    );
+    assert.deepEqual(
+      asArray(get(renamed, 'followed')).map(String).sort(),
+      ['res://plaza.tscn', 'res://square.tscn'],
+      JSON.stringify(renamed),
+    );
+    assert.equal(get(renamed, 'stillNaming'), undefined, JSON.stringify(renamed));
+    assert.ok(fileOf('kept.tres').includes('tracks/0/path = NodePath("Pail:scale")'), fileOf('kept.tres'));
+    assert.ok(
+      fileOf('well.tscn').includes('metadata/post = NodePath("../../Post")'),
+      `a path that moved with its holder and its target is left alone: ${fileOf('well.tscn')}`,
+    );
+    assert.ok(fileOf('well.tscn').includes('tracks/2/path = NodePath("Post:position")'), fileOf('well.tscn'));
+    const lostInSquare = [
+      ...asWritten,
+      'unresolved res://square.tscn Well1 metadata/bell Bucket/Bell',
+      'unresolved res://square.tscn Well1/Anim swing/3 Bucket/Bell:visible',
+    ].sort();
+    assert.deepEqual(
+      await unresolved(),
+      lostInSquare,
+      'after the rename only the track notRetargeted names is lost',
+    );
+
+    // Pail goes under Post: paths from inside it to outside change, and the unique name still holds.
+    const moved = await call('scene_node', {
+      op: 'reparent',
+      scenePath: 'well.tscn',
+      nodePath: 'Pail',
+      newParentPath: 'Post',
+    });
+    assert.deepEqual(
+      lines(moved, 'retargeted'),
+      [
+        'plaza.tscn Tie remote_path ../W/Pail -> ../W/Post/Pail',
+        'square.tscn Show look/0 Well1/Pail:visible -> Well1/Post/Pail:visible',
+        'square.tscn Tie remote_path ../Well1/Pail/Rope -> ../Well1/Post/Pail/Rope',
+        'square.tscn Well1/Follow remote_path ../Pail/Rope -> ../Post/Pail/Rope',
+        'square.tscn Well1/Post/Pail/Bell metadata/post ../../Post -> ../..',
+        'well.tscn Anim kept/dip/0 Pail:scale -> Post/Pail:scale',
+        'well.tscn Anim swing/0 Pail:rotation -> Post/Pail:rotation',
+        'well.tscn Anim swing/1 Pail/Rope:position -> Post/Pail/Rope:position',
+        'well.tscn Follow remote_path ../Pail -> ../Post/Pail',
+        'well.tscn Post metadata/aimer ../Pail/Rope -> Pail/Rope',
+        'well.tscn Post metadata/marks ../Pail -> Pail',
+        'well.tscn Post metadata/marks ../Pail/Rope:position -> Pail/Rope:position',
+        'well.tscn Post metadata/named ../Pail/Rope -> Pail/Rope',
+        'well.tscn Post/Pail/Crank root_node ../.. -> ../../..',
+        'well.tscn Post/Pail/Grip pull/0 ../Post:position -> ..:position',
+        'well.tscn Post/Pail/Hand tug/0 ../Post:position -> ..:position',
+        'well.tscn Post/Pail/Rope metadata/post ../../Post -> ../..',
+      ],
+      JSON.stringify(moved),
+    );
+    assert.equal(get(moved, 'notRetargeted'), undefined, JSON.stringify(moved));
+    assert.ok(fileOf('well.tscn').includes('metadata/unique = NodePath("%Pail/Rope")'), fileOf('well.tscn'));
+    assert.deepEqual(await unresolved(), lostInSquare, 'after the reparent');
+
+    // A delete changes nothing else and names every path left pointing at nothing.
+    const square = fileOf('square.tscn');
+    const plaza = fileOf('plaza.tscn');
+    const deleted = await call('scene_node', { op: 'delete', scenePath: 'well.tscn', nodePath: 'Post/Pail' });
+    assert.deepEqual(
+      lines(deleted, 'stillNaming'),
+      [
+        'plaza.tscn Tie remote_path ../W/Post/Pail',
+        'square.tscn Show look/0 Well1/Post/Pail:visible',
+        'square.tscn Tie remote_path ../Well1/Post/Pail/Rope',
+        'square.tscn Well1/Follow remote_path ../Post/Pail/Rope',
+        'well.tscn Anim kept/dip/0 Post/Pail:scale',
+        'well.tscn Anim swing/0 Post/Pail:rotation',
+        'well.tscn Anim swing/1 Post/Pail/Rope:position',
+        'well.tscn Follow remote_path ../Post/Pail',
+        'well.tscn Post metadata/aimer Pail/Rope',
+        'well.tscn Post metadata/marks Pail',
+        'well.tscn Post metadata/marks Pail/Rope:position',
+        'well.tscn Post metadata/named Pail/Rope',
+        'well.tscn Post metadata/unique %Pail/Rope',
+      ],
+      JSON.stringify(deleted),
+    );
+    assert.equal(get(deleted, 'retargeted'), undefined, JSON.stringify(deleted));
+    assert.equal(get(deleted, 'followed'), undefined, JSON.stringify(deleted));
+    assert.equal(fileOf('square.tscn'), square, 'a delete rewrites no other scene');
+    assert.equal(fileOf('plaza.tscn'), plaza, 'a delete rewrites no other scene');
+    assert.ok(
+      fileOf('well.tscn').includes('tracks/0/path = NodePath("Post/Pail:rotation")'),
+      fileOf('well.tscn'),
+    );
+
+    // A scene a headless engine cannot write, since a script replaces a resource it names: its paths
+    // are named as left, and the library it plays is put back rather than saved without it.
+    const lane = {
+      'swap.gd':
+        'extends Resource\n\n@export var other: Resource:\n\tset(value):\n\t\tother = Resource.new()\n',
+      'lane_lib.tres':
+        '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_wave"]\n' +
+        `resource_name = "wave"\nlength = 1.0\n${track(0, 'W/Post:position', '[Vector2(0, 0), Vector2(1, 1)]')}\n` +
+        '[resource]\n_data = {\n&"wave": SubResource("Animation_wave")\n}\n',
+      'lane.tscn':
+        `[gd_scene format=3]\n\n${well}\n[ext_resource type="Script" path="res://swap.gd" id="2_swap"]\n` +
+        '[ext_resource type="AnimationLibrary" path="res://lane_lib.tres" id="3_lib"]\n\n' +
+        '[sub_resource type="Resource" id="Resource_inner"]\n\n' +
+        '[sub_resource type="Resource" id="Resource_swap"]\nscript = ExtResource("2_swap")\nother = SubResource("Resource_inner")\n\n' +
+        '[node name="Lane" type="Node2D"]\nmetadata/swap = SubResource("Resource_swap")\n\n' +
+        '[node name="W" parent="." instance=ExtResource("1_well")]\n\n' +
+        '[node name="Tie" type="RemoteTransform2D" parent="."]\nremote_path = NodePath("../W/Post")\n\n' +
+        '[node name="Show" type="AnimationPlayer" parent="."]\nlibraries = {\n&"": ExtResource("3_lib")\n}\n',
+    };
+    for (const [path, content] of Object.entries(lane)) {
+      writeFileSync(join(project, path), content);
+    }
+    const unwritable = await call('scene_node', {
+      op: 'set',
+      scenePath: 'well.tscn',
+      nodePath: 'Post',
+      properties: { name: 'Pole' },
+    });
+    const why = asArray(get(unwritable, 'notFollowed'))
+      .filter((entry) => get(entry, 'scenePath') === 'res://lane.tscn')
+      .map((entry) => String(get(entry, 'reason')));
+    assert.equal(why.length, 1, JSON.stringify(unwritable));
+    const reason = String(why[0]);
+    assert.match(reason, /^Nothing was written: The embedded resource Resource_swap\.other /, reason);
+    const listed = ['notRetargeted', 'retargeted'].flatMap((field) =>
+      get(unwritable, field) === undefined ? [] : lines(unwritable, field),
+    );
+    assert.deepEqual(
+      listed.filter((line) => line.startsWith('lane.tscn ')),
+      [
+        `lane.tscn Show wave/0 W/Post:position (${reason})`,
+        `lane.tscn Tie remote_path ../W/Post (${reason})`,
+      ],
+      JSON.stringify(unwritable),
+    );
+    assert.equal(fileOf('lane.tscn'), lane['lane.tscn'], 'the scene is as it was');
+    assert.equal(fileOf('lane_lib.tres'), lane['lane_lib.tres'], 'and so is the library it plays');
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A headless write to a file with a resource whose script is not a tool, written by hand: a default
+ * set outright, which the saver leaves out, and a value spelt otherwise than the saver spells it, 3
+ * for 3.0. Neither is a change the script made, so neither refuses the write, in a resource built
+ * into a scene or in a resource file's own.
+ */
+async function testAHandWrittenValueIsNoChangeOfAScripts(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('hand-written value regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spelt-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spelt-rt-'));
+  const note = '[ext_resource type="Script" path="res://note.gd" id="1_note"]';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Spelt"\n',
+    'note.gd': 'extends Resource\n\n@export var reach: float = 2.0\n@export var tag: String = ""\n',
+    'note.tres': `[gd_resource type="Resource" format=3]\n\n${note}\n\n[resource]\nscript = ExtResource("1_note")\nreach = 3\nresource_local_to_scene = false\ntag = ""\n`,
+    // Only a default set outright, which the saver leaves out.
+    'plain.tres': `[gd_resource type="Resource" format=3]\n\n${note}\n\n[resource]\nscript = ExtResource("1_note")\ntag = ""\n`,
+    'room.tscn':
+      `[gd_scene format=3]\n\n${note}\n\n[sub_resource type="Resource" id="Resource_note"]\nscript = ExtResource("1_note")\nreach = 3\ntag = ""\n\n` +
+      '[node name="Room" type="Node2D"]\nmetadata/note = SubResource("Resource_note")\n',
+    'hall.tscn':
+      `[gd_scene format=3]\n\n${note}\n\n[sub_resource type="Resource" id="Resource_plain"]\nscript = ExtResource("1_note")\ntag = ""\n\n` +
+      '[node name="Hall" type="Node2D"]\nmetadata/note = SubResource("Resource_plain")\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => {
+    const result = await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      240_000,
+    );
+    assert.equal(
+      get(result, 'result', 'isError'),
+      undefined,
+      `${name} ${String(args['op'])}: ${JSON.stringify(result)}`,
+    );
+    return JSON.stringify(result);
+  };
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('spelt-engine');
+
+    await call('scene_node', {
+      op: 'set',
+      scenePath: 'room.tscn',
+      nodePath: '.',
+      properties: { visible: false },
+    });
+    const room = fileOf('room.tscn');
+    assert.ok(room.includes('visible = false'), room);
+    assert.ok(/reach = 3(\.0)?\n/.test(room), `the embedded resource keeps its value: ${room}`);
+
+    await call('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://note.tres',
+      properties: { tag: 'kept' },
+    });
+    const kept = fileOf('note.tres');
+    assert.ok(kept.includes('tag = "kept"'), kept);
+    assert.ok(/reach = 3(\.0)?\n/.test(kept), `the resource keeps its value: ${kept}`);
+
+    await call('scene_node', {
+      op: 'set',
+      scenePath: 'hall.tscn',
+      nodePath: '.',
+      properties: { visible: false },
+    });
+    assert.ok(fileOf('hall.tscn').includes('visible = false'), fileOf('hall.tscn'));
+    await call('resource_edit', { op: 'modify', resourcePath: 'res://plain.tres', properties: { reach: 5 } });
+    assert.ok(fileOf('plain.tres').includes('reach = 5.0'), fileOf('plain.tres'));
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
@@ -43786,6 +45150,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWriteWithNoEditorGoesThroughAHeadlessEngine,
   testAnAnimationIsWrittenWithNoEditor,
   testAThemeAndATilesetWithNoEditor,
+  testASceneKeepsItsOwnValuesForAnotherScenesNodes,
+  testAMovedNodeIsFollowedIntoTheScenesNamingIt,
+  testAMovedNodeKeepsThePathsNamingIt,
+  testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
   testEveryFileArgumentIsContained,
@@ -44014,6 +45382,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameOnEveryInterfaceIsReached,
   testACaptureTheWaitRanOutOnKeepsItsFolder,
   testCallsSentTogetherWaitTheirTurnAtTheGame,
+  testACallTheSystemHoldsIsNotSent,
+  testANotSentAnswerSaysWhatHeldIt,
   testAGameOnAnotherRuntimeAddonSaysSo,
   testAGameSaysWhichRuntimeAddonItLoaded,
   testAWorktreeFindsItsMainCheckoutsEngine,

@@ -183,7 +183,7 @@ import {
   whyTheProcessTreeFailed,
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
-import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
+import { pathsInUidCache, projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
 import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
 import {
@@ -2541,6 +2541,7 @@ const OUTPUT_PATH_SOLUTIONS = [
 export const PROJECT_FILE_ARGUMENTS = [
   'scenePath',
   'instancePath',
+  'inherits',
   'scriptPath',
   'resourcePath',
   'newPath',
@@ -4147,8 +4148,9 @@ class GodotServer {
           server_is: SERVER_VERSION,
           project_is: moved,
           what_to_do:
-            `The project's gdharness addons are ${moved}, older than this ${SERVER_VERSION} server, so an ` +
-            'editor restart loads the old code and reconnecting spawns this same server again. Tell the ' +
+            `The project's gdharness addons are ${moved}, older than this ${SERVER_VERSION} server. ` +
+            'Restarting the editor would load that older addon code again, and reconnecting would start ' +
+            'this same server version again, so neither brings the two into step. Tell the ' +
             `user, and offer to run  ${gdharnessCommand(SERVER_VERSION, this.ownProject === null ? 'upgrade' : `upgrade "${this.ownProject}"`)}  ` +
             "in a shell, which replaces the addons with this server's; ask first, since it changes " +
             'files in their project. editor_launch restart then loads them.',
@@ -5415,12 +5417,20 @@ class GodotServer {
     // for the open editor's scan the way every other engine started here does.
     const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
     const before = scriptsWithoutUid(projectPath);
+    const cachedBefore = pathsInUidCache(projectPath);
     const imported = await runImport(engine.value, projectPath);
     if (!imported.ok) {
       return this.answer(withScanWait(imported, scanned));
     }
     const after = scriptsWithoutUid(projectPath);
     const given = before.filter((script) => !after.includes(script));
+    // Read off the cache itself, since a file named by path under namedByPath gains its uid there
+    // and nowhere a caller could look: its own header already held it.
+    const cachedAfter = pathsInUidCache(projectPath);
+    const cached =
+      cachedAfter === null
+        ? null
+        : [...cachedAfter].filter((path) => cachedBefore?.has(path) !== true).sort();
 
     return this.answer(
       withScanWait(
@@ -5430,6 +5440,12 @@ class GodotServer {
           ...(imported.messagesOmitted === undefined ? {} : { messagesOmitted: imported.messagesOmitted }),
           payload: {
             uidsCreated: given,
+            ...(cached === null
+              ? {
+                  uidCacheNote:
+                    'The import pass left no uid cache this server could read, .godot/uid_cache.bin.',
+                }
+              : { uidsCached: cached }),
             stillWithoutUid: after,
             // Said rather than implied: the op resaved every scene for as long as it existed, so a
             // caller who knows it by its diff needs telling that the diff is the bug and is gone.

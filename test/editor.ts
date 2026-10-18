@@ -1679,6 +1679,213 @@ async function testAScenesInstancedAndPlaced({ call, refusal, project }: Editor)
   }
 }
 
+/**
+ * An inherited scene made through the editor, and an instance given editable children while its
+ * scene is open in a tab, so the write goes through the editor's own copy of the scene.
+ */
+async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'kin'), { recursive: true });
+  writeFileSync(
+    join(project, 'kin', 'crate.tscn'),
+    '[gd_scene format=3]\n\n[node name="Crate" type="Node2D"]\n\n[node name="Look" type="Sprite2D" parent="."]\n',
+  );
+  writeFileSync(
+    join(project, 'kin', 'host.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://kin/crate.tscn" id="1_crate"]\n\n' +
+      '[node name="Host" type="Node2D"]\n\n[node name="Crate1" parent="." instance=ExtResource("1_crate")]\n',
+  );
+  writeFileSync(
+    join(project, 'kin', 'aside.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://kin/crate.tscn" id="1_crate"]\n\n' +
+      '[node name="Aside" type="Node2D"]\n\n[node name="Crate9" parent="." instance=ExtResource("1_crate")]\n\n' +
+      '[node name="Look" parent="Crate9"]\nscale = Vector2(5, 5)\n\n[editable path="Crate9"]\n',
+  );
+  const host = { projectPath: project, scenePath: 'res://kin/host.tscn' };
+  try {
+    await call('editor_rescan', { projectPath: project });
+    const made = await call('scene_create', {
+      projectPath: project,
+      op: 'create',
+      inherits: 'kin/crate.tscn',
+      scenePath: 'kin/big.tscn',
+    });
+    assert.deepEqual(
+      [get(made, 'inherits'), get(made, 'rootNodeType')],
+      ['res://kin/crate.tscn', 'Node2D'],
+      text(made),
+    );
+    assert.match(fileText(project, 'kin/big.tscn'), /\[node name="Crate" instance=ExtResource\("1_base"\)\]/);
+    await call('scene_node', {
+      projectPath: project,
+      scenePath: 'res://kin/big.tscn',
+      op: 'set',
+      nodePath: 'Look',
+      properties: { scale: [2, 2] },
+    });
+    const big = fileText(project, 'kin/big.tscn');
+    assert.match(big, /\[node name="Look" parent="\."[^\]]*\]\nscale = Vector2\(2, 2\)\n/, big);
+
+    await hook(project, { op: 'open', path: host.scenePath });
+    const opened = await call('scene_node', {
+      ...host,
+      op: 'set',
+      nodePath: 'Crate1',
+      editableChildren: true,
+    });
+    assert.equal(get(opened, 'editableChildren'), true, text(opened));
+    await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1/Look', properties: { scale: [3, 3] } });
+    const kept = fileText(project, 'kin/host.tscn');
+    assert.match(kept, /\n\[editable path="Crate1"\]\n/, kept);
+    assert.match(kept, /\[node name="Look" parent="Crate1"[^\]]*\]\nscale = Vector2\(3, 3\)\n/, kept);
+    const read = await call('scene_tree', { ...host, depth: 1 });
+    const children: unknown = get(read, 'tree', 'children');
+    assert.ok(Array.isArray(children), text(read));
+    assert.ok(
+      children.some((child) => get(child, 'name') === 'Crate1' && get(child, 'editableChildren') === true),
+      `the editor's scene_tree says Crate1 is editable: ${text(read)}`,
+    );
+    const asked = await call('scene_node', { ...host, op: 'get', nodePath: 'Crate1' });
+    assert.equal(get(asked, 'editableChildren'), true, text(asked));
+
+    // A rename is followed into the scenes naming the node, host.tscn open in a tab among them, and
+    // not into one with unsaved changes in the editor, which writing its file would discard.
+    await hook(project, { op: 'edit', path: 'res://kin/aside.tscn', node: 'ByHand' });
+    const renamed = await call('scene_node', {
+      projectPath: project,
+      scenePath: 'res://kin/crate.tscn',
+      op: 'set',
+      nodePath: 'Look',
+      properties: { name: 'Face' },
+    });
+    const followed: unknown = get(renamed, 'followed');
+    assert.ok(Array.isArray(followed), text(renamed));
+    assert.deepEqual(
+      followed.map(String).sort(),
+      ['res://kin/big.tscn', 'res://kin/host.tscn'],
+      text(renamed),
+    );
+    const left: unknown = get(renamed, 'notFollowed');
+    assert.ok(Array.isArray(left) && left.length === 1, text(renamed));
+    assert.equal(get(left[0], 'scenePath'), 'res://kin/aside.tscn', text(renamed));
+    assert.match(text(get(left[0], 'reason')), /^res:\/\/kin\/aside\.tscn has unsaved changes in the editor/);
+    assert.match(fileText(project, 'kin/aside.tscn'), /\[node name="Look" parent="Crate9"\]/);
+    // The tab was reloaded with the followed file, so the editor's next save of it keeps the entry.
+    await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1', properties: { position: [1, 1] } });
+    const after = fileText(project, 'kin/host.tscn');
+    assert.match(after, /\[node name="Face" parent="Crate1"[^\]]*\]\nscale = Vector2\(3, 3\)\n/, after);
+    assert.match(after, /\n\[editable path="Crate1"\]\n/, after);
+    await call('scene_create', { projectPath: project, scenePath: 'res://kin/aside.tscn', op: 'save' });
+
+    await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1', editableChildren: false });
+    const closed = fileText(project, 'kin/host.tscn');
+    assert.doesNotMatch(closed, /\[editable|parent="Crate1"/, `closing them drops what was kept: ${closed}`);
+
+    // A scene copied whole carries the uid in its header, and the editor reads a reference's uid from
+    // the file it names, so each base is named by a uid only where the editor's cache gives it that one.
+    writeFileSync(
+      join(project, 'kin', 'crate.tscn'),
+      '[gd_scene format=3 uid="uid://bkincrate1"]\n\n[node name="Crate" type="Node2D"]\n\n[node name="Look" type="Sprite2D" parent="."]\n',
+    );
+    writeFileSync(
+      join(project, 'kin', 'crate_copy.tscn'),
+      `${fileText(project, 'kin/crate.tscn')}\n[node name="Lid" type="Sprite2D" parent="."]\n`,
+    );
+    await call('editor_rescan', { projectPath: project });
+    for (const [base, children] of [
+      ['kin/crate.tscn', ['Look']],
+      ['kin/crate_copy.tscn', ['Look', 'Lid']],
+    ] as const) {
+      const scenePath = `kin/from_${base.slice(4)}`;
+      await call('scene_create', { projectPath: project, op: 'create', inherits: base, scenePath });
+      const tree = get(await call('scene_tree', { projectPath: project, scenePath }), 'tree');
+      assert.deepEqual(
+        asArray(get(tree, 'children')).map((child) => get(child, 'name')),
+        children,
+        `${scenePath} inherits ${base}: ${fileText(project, scenePath)}`,
+      );
+    }
+  } finally {
+    await hook(project, { op: 'open', path: 'res://main.tscn' });
+    rmSync(join(project, 'kin'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/**
+ * A rename in a scene open in a tab, whose player plays a library kept in a file of its own. The
+ * editor holds that library for the tab, the same copy the write edits, so a write that is then
+ * refused puts its tracks back, and one that goes through saves them with the scene.
+ */
+async function testAMovedNodeKeepsItsPathsInTheEditor({ call, refusal, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'crane'), { recursive: true });
+  const track = (path: string): string =>
+    `tracks/0/type = "value"\ntracks/0/imported = false\ntracks/0/enabled = true\ntracks/0/path = NodePath("${path}")\n` +
+    'tracks/0/interp = 1\ntracks/0/loop_wrap = true\n' +
+    'tracks/0/keys = {"times": PackedFloat32Array(0, 1), "transitions": PackedFloat32Array(1, 1), "update": 0, "values": [Vector2(1, 1), Vector2(2, 2)]}\n';
+  writeFileSync(
+    join(project, 'crane', 'lifts.tres'),
+    `[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_lift"]\nresource_name = "lift"\nlength = 1.0\n${track('Arm:scale')}\n` +
+      '[resource]\n_data = {\n&"lift": SubResource("Animation_lift")\n}\n',
+  );
+  writeFileSync(
+    join(project, 'crane', 'crane.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="res://crane/lifts.tres" id="1_lifts"]\n\n' +
+      '[node name="Crane" type="Node2D"]\n\n[node name="Arm" type="Sprite2D" parent="."]\n\n' +
+      '[node name="Follow" type="RemoteTransform2D" parent="."]\nremote_path = NodePath("../Arm")\n\n' +
+      '[node name="Anim" type="AnimationPlayer" parent="."]\nlibraries = {\n&"lifts": ExtResource("1_lifts")\n}\n',
+  );
+  const crane = { projectPath: project, scenePath: 'res://crane/crane.tscn' };
+  const lifted = async (): Promise<unknown> =>
+    get(
+      await call('scene_animation', {
+        ...crane,
+        op: 'read',
+        playerNodePath: 'Anim',
+        animationName: 'lifts/lift',
+      }),
+      'tracks',
+    );
+  try {
+    await call('editor_rescan', { projectPath: project });
+    await hook(project, { op: 'open', path: crane.scenePath });
+    const asWritten = await lifted();
+    assert.match(JSON.stringify(asWritten), /"Arm"/, JSON.stringify(asWritten));
+
+    // Arm made an instance of a file that is not there cannot be packed, so the write is refused once
+    // the tracks were carried.
+    const refused = await refusal('scene_node', {
+      ...crane,
+      op: 'set',
+      nodePath: 'Arm',
+      properties: { name: 'Boom', scene_file_path: 'res://crane/elsewhere.tscn' },
+    });
+    assert.match(refused, /Failed to pack res:\/\/crane\/crane\.tscn/, refused);
+    assert.deepEqual(await lifted(), asWritten, "the editor's copy of the library is as it was");
+    assert.match(fileText(project, 'crane/lifts.tres'), /NodePath\("Arm:scale"\)/);
+
+    const renamed = await call('scene_node', {
+      ...crane,
+      op: 'set',
+      nodePath: 'Arm',
+      properties: { name: 'Boom' },
+    });
+    const retargeted: unknown = get(renamed, 'retargeted');
+    assert.ok(Array.isArray(retargeted), text(renamed));
+    assert.deepEqual(
+      retargeted.map((entry) => `${String(get(entry, 'nodePath'))} ${String(get(entry, 'to'))}`).sort(),
+      ['Anim Boom:scale', 'Follow ../Boom'],
+      text(renamed),
+    );
+    assert.match(fileText(project, 'crane/lifts.tres'), /NodePath\("Boom:scale"\)/);
+    assert.match(fileText(project, 'crane/crane.tscn'), /remote_path = NodePath\("\.\.\/Boom"\)/);
+    assert.match(JSON.stringify(await lifted()), /"Boom"/);
+  } finally {
+    await hook(project, { op: 'open', path: 'res://main.tscn' });
+    rmSync(join(project, 'crane'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
 /** An animation and a track on it, read back out of the sub-resources the scene gained. */
 async function testSceneAnimation({ call, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: SCENE };
@@ -2142,7 +2349,7 @@ async function testAWriteKeepsWhatTheSceneComesFrom({ call, refusal, project }: 
   );
   assert.match(
     await refusal('scene_node', { ...inherited, op: 'delete', nodePath: 'Given' }),
-    /Given comes from the scene res:\/\/layers\/inherited\.tscn inherits from/,
+    /Given is made by res:\/\/layers\/base\.tscn, a scene res:\/\/layers\/inherited\.tscn inherits/,
   );
   assert.match(
     await refusal('scene_node', { ...host, op: 'reparent', nodePath: 'Panel', newParentPath: 'Panel/Leaf' }),
@@ -6521,6 +6728,8 @@ async function main(): Promise<void> {
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
     ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
+    ['testASceneKeepsItsOwnValuesInTheEditor', testASceneKeepsItsOwnValuesInTheEditor],
+    ['testAMovedNodeKeepsItsPathsInTheEditor', testAMovedNodeKeepsItsPathsInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [
       'testAClassReloadedOnceItsBaseExistsReachesItsUsers',

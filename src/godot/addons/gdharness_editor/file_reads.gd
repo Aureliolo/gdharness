@@ -15,9 +15,10 @@ const Read = preload("reading.gd")
 const Serialisation = preload("serialisation.gd")
 
 
-## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf on a node that
-## instances another scene and every stored property when [param include_properties] is set, the
-## file's value or the default where it sets none. [param depth] -1 reads every level.
+## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
+## editableChildren on a node that instances another scene and every stored property when
+## [param include_properties] is set, the file's value or the default where it sets none.
+## [param depth] -1 reads every level.
 static func scene_tree(scene_path: String, depth: int, include_properties: bool) -> Dictionary:
 	var laid: Dictionary = _laid(scene_path)
 	if not laid.get("ok", false):
@@ -41,6 +42,31 @@ static func scene_node(scene_path: String, node_path: String) -> Dictionary:
 	return {"ok": true, "name": found["name"], "type": found["type"], "properties": found["properties"]}
 
 
+## [param said], the refusal for [param node_path], which [param scene_path] does not have, with
+## where the path leaves the scene as [method Read.missing_below] says it.
+static func missing_from(said: String, scene_path: String, node_path: String) -> String:
+	var laid: Dictionary = _laid(scene_path)
+	if not laid.get("ok", false):
+		return said
+	var nodes: Dictionary = laid["nodes"]
+	var parts: PackedStringArray = node_path.trim_prefix("./").split("/", false)
+	var at: String = "."
+	var reached: PackedStringArray = []
+	for part: String in parts:
+		var below: String = _joined(at, part)
+		if not nodes.has(below):
+			break
+		at = below
+		var _walked: bool = reached.append(part)
+	if reached.size() >= parts.size():
+		return said
+	var names: PackedStringArray = []
+	var children: Array[String] = nodes[at]["children"]
+	for child: String in children:
+		var _named: bool = names.append(str(nodes[child]["name"]))
+	return Read.missing_below(said, str(nodes["."]["name"]), reached, parts[reached.size()], names)
+
+
 ## Every node of [param scene_path] as {ok, nodes}, keyed by path, or a refusal.
 static func _laid(scene_path: String) -> Dictionary:
 	if not FileAccess.file_exists(scene_path):
@@ -51,13 +77,11 @@ static func _laid(scene_path: String) -> Dictionary:
 	if loaded == null:
 		return {"ok": false, "error": "Failed to load %s as a scene" % scene_path}
 	if not loaded is PackedScene:
+		var kind: String = loaded.get_class()
+		var sort: String = ("an " if kind.left(1).to_upper() in ["A", "E", "I", "O", "U"] else "a ") + kind
 		return {
 			"ok": false,
-			"error":
-			(
-				"%s is a %s, not a scene: resource_edit read reads its properties."
-				% [scene_path, loaded.get_class()]
-			)
+			"error": "%s is %s, not a scene: resource_edit read reads its properties." % [scene_path, sort]
 		}
 	var packed: PackedScene = loaded
 	var nodes: Dictionary = {}
@@ -82,8 +106,18 @@ static func _lay(state: SceneState, prefix: String, nodes: Dictionary, within: A
 		var refused: String = _lay(base, prefix, nodes, within)
 		if not refused.is_empty():
 			return refused
+	var ids: Array[int] = _unique_ids(state.get_path(), state.get_node_count())
 	for index: int in state.get_node_count():
 		var path: String = _joined(prefix, str(state.get_node_path(index)))
+		var recovered: bool = false
+		if not nodes.has(path) and index > 0 and _overrides(state, index) and ids[index] >= 0:
+			# The engine finds an entry whose node was renamed or moved in the scene it comes from by
+			# the node's unique_id, and keeps the node's new name.
+			var parent: String = _joined(prefix, str(state.get_node_path(index, true)))
+			var found: String = _by_id(nodes, _owner_of(nodes, parent, prefix), ids[index])
+			recovered = not found.is_empty()
+			if recovered:
+				path = found
 		var fresh: bool = not nodes.has(path)
 		if fresh:
 			var instance: PackedScene = state.get_node_instance(index)
@@ -98,6 +132,7 @@ static func _lay(state: SceneState, prefix: String, nodes: Dictionary, within: A
 				if not nodes.has(path):
 					return "%s holds no nodes" % instance.resource_path
 				nodes[path]["instanceOf"] = instance.resource_path
+				nodes[path]["editableChildren"] = false
 			elif state.is_node_instance_placeholder(index):
 				nodes[path] = _made("InstancePlaceholder")
 				nodes[path]["instanceOf"] = state.get_node_instance_placeholder(index)
@@ -106,9 +141,12 @@ static func _lay(state: SceneState, prefix: String, nodes: Dictionary, within: A
 				continue
 			else:
 				nodes[path] = _made(str(state.get_node_type(index)))
+			if ids[index] >= 0:
+				nodes[path]["uniqueId"] = ids[index]
 		# The name is the state's even for an entry laid already, since an inherited scene names its
 		# root itself; a root instanced inside another scene is renamed by that scene once laid.
-		nodes[path]["name"] = str(state.get_node_name(index))
+		if not recovered:
+			nodes[path]["name"] = str(state.get_node_name(index))
 		if fresh:
 			# The root of what is laid here is placed by whoever instanced it.
 			if path != prefix:
@@ -123,6 +161,86 @@ static func _lay(state: SceneState, prefix: String, nodes: Dictionary, within: A
 			held[str(state.get_node_property_name(index, property))] = state.get_node_property_value(
 				index, property
 			)
+	# Only the scene being read and the scenes it inherits share its root, the owner whose editable
+	# instances a write here sets; a file instanced below makes its own owner's editable.
+	if prefix == ".":
+		for editable: String in _editable_in(state.get_path()):
+			var at: String = _joined(prefix, editable)
+			var marked: Dictionary = nodes.get(at, {})
+			if marked.has("editableChildren"):
+				marked["editableChildren"] = true
+	return ""
+
+
+## The paths of the instances [param scene_path] gives editable children, from its root. SceneState
+## does not give them to a script, so they are read off the scene's bundle.
+static func _editable_in(scene_path: String) -> PackedStringArray:
+	var found: PackedStringArray = []
+	var loaded: Resource = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	if not loaded is PackedScene:
+		return found
+	var given: Variant = loaded.get("_bundled")
+	if not given is Dictionary:
+		return found
+	var bundled: Dictionary = given
+	var listed: Variant = bundled.get("editable_instances", [])
+	if listed is Array:
+		for one: Variant in listed:
+			var _kept: bool = found.append(str(one))
+	return found
+
+
+## The unique_id of each node entry in the text scene at [param scene_path], in the order its state
+## holds them, -1 where an entry has none. All -1 for a binary scene, and for a file whose entries do
+## not number [param count], since SceneState does not give the ids to a script.
+static func _unique_ids(scene_path: String, count: int) -> Array[int]:
+	var ids: Array[int] = []
+	var _sized: int = ids.resize(count)
+	ids.fill(-1)
+	if not scene_path.ends_with(".tscn") or not FileAccess.file_exists(scene_path):
+		return ids
+	var read: Array[int] = []
+	var pattern: RegEx = RegEx.create_from_string(" unique_id=(\\d+)")
+	for line: String in FileAccess.get_file_as_string(scene_path).split("\n"):
+		if line.begins_with("[node "):
+			var found: RegExMatch = pattern.search(line)
+			read.append(int(found.get_string(1)) if found != null else -1)
+	return read if read.size() == count else ids
+
+
+## Whether entry [param index] of [param state] only sets values on a node another file makes.
+static func _overrides(state: SceneState, index: int) -> bool:
+	return (
+		state.get_node_instance(index) == null
+		and not state.is_node_instance_placeholder(index)
+		and str(state.get_node_type(index)).is_empty()
+	)
+
+
+## The node whose file owns what sits under [param parent]: the nearest instance at or above it, or
+## [param prefix], the root of what is being laid, as the engine searches.
+static func _owner_of(nodes: Dictionary, parent: String, prefix: String) -> String:
+	var at: String = parent
+	while at != prefix and at != "." and nodes.has(at):
+		var entry: Dictionary = nodes[at]
+		if entry.has("instanceOf"):
+			break
+		at = "." if not at.contains("/") else at.get_base_dir()
+	return at if nodes.has(at) else prefix
+
+
+## The path of the node [param owner] owns whose unique_id is [param id], or "": one under an instance
+## nested below [param owner] belongs to that instance's file, whose ids are numbered apart.
+static func _by_id(nodes: Dictionary, owner: String, id: int) -> String:
+	for path: String in nodes:
+		if path == owner or not (owner == "." or path.begins_with(owner + "/")):
+			continue
+		var entry: Dictionary = nodes[path]
+		if Read.as_int(entry.get("uniqueId", -1), -1) != id:
+			continue
+		var above: String = "." if not path.contains("/") else path.get_base_dir()
+		if _owner_of(nodes, above, owner) == owner:
+			return path
 	return ""
 
 
@@ -162,12 +280,18 @@ static func _entry(
 	# The root's file is the scene being read, so only another node's names a second scene.
 	if path != "." and node.has("instanceOf"):
 		data["instanceOf"] = node["instanceOf"]
+		if node.has("editableChildren"):
+			data["editableChildren"] = node["editableChildren"]
 	if include_properties:
 		var given: Dictionary = node["properties"]
 		data["properties"] = _stored(str(node["type"]), given)
+	var below: Array[String] = node["children"]
+	# Counted rather than left as an empty list, which reads as a node with no children.
 	if depth >= 0 and current_depth >= depth:
+		if not below.is_empty():
+			data["childrenNotListed"] = below.size()
 		return data
-	for child: String in node["children"]:
+	for child: String in below:
 		children.append(_entry(nodes, child, include_properties, depth, current_depth + 1))
 	return data
 
