@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   chmodSync,
@@ -27031,6 +27031,111 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
 }
 
 /**
+ * A start whose game came up on a runtime addon other than this server's says so in its answer.
+ *
+ * No runtime_* call is sent to such a game, and the start answered `listening: true` and nothing
+ * else, so a caller learned it from the refusal of the first call they made. The project here holds
+ * the runtime addon of this release with one script changed and markers naming that build, which is
+ * a different build of the same version, as a project set up before a rebuild has. A game reads
+ * what it runs from the markers, so a changed script without them is a copy that cannot say, which
+ * is not called stale. Then the shipped addon and its markers are put back, which is what the
+ * note's upgrade does, and the next start says nothing of the kind.
+ */
+async function testAStartSaysItsGameIsOnAnotherBuild(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('stale runtime start regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-stale-start-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-stale-start-rt-'));
+  const addon = join(project, 'addons', 'gdharness_runtime');
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), addon, { recursive: true });
+  const autoload = join(addon, 'runtime_autoload.gd');
+  const shipped = readFileSync(autoload, 'utf8');
+  const another = `${shipped}\n# Another build of the same version.\n`;
+  writeFileSync(autoload, another);
+  writeFileSync(join(addon, '.gdharness-version'), `${SERVER_VERSION}\n`);
+  writeFileSync(join(addon, '.gdharness-digest'), `${createHash('sha256').update(another).digest('hex')}\n`);
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Stale"\nrun/main_scene="res://main.tscn"\n\n' +
+      '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  assert.notEqual(installedRuntimeDigest(project), shippedRuntimeDigest(), 'the project holds another build');
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const start = async (): Promise<unknown> =>
+    parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, op: 'start', headless: true } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+  const stop = async (): Promise<void> => {
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  };
+  try {
+    await server.initialize('regression-test');
+    const behind = await start();
+    try {
+      const said = JSON.stringify(behind);
+      assert.deepEqual(
+        [get(behind, 'runtime', 'listening'), get(behind, 'runtime', 'addonIsStale')],
+        [true, true],
+        `the game listens and the start says it is asked nothing: ${said}`,
+      );
+      assert.match(
+        text(get(behind, 'runtime', 'staleNote')),
+        new RegExp(
+          `is running a different build of the ${SERVER_VERSION.replaceAll('.', '\\.')} runtime addon from the one this server ships, so this server asks it nothing`,
+        ),
+        said,
+      );
+      assert.ok(
+        text(get(behind, 'runtime', 'staleNote')).includes(
+          `run  npx -y gdharness@${SERVER_VERSION} upgrade "${project.replaceAll('\\', '/')}"  in a shell`,
+        ),
+        `and names the upgrade, since the project's own addon is the other build: ${said}`,
+      );
+    } finally {
+      await stop();
+    }
+
+    writeFileSync(autoload, shipped);
+    writeFileSync(join(addon, '.gdharness-digest'), `${shippedRuntimeDigest()}\n`);
+    const current = await start();
+    try {
+      const said = JSON.stringify(current);
+      assert.deepEqual(
+        [
+          get(current, 'runtime', 'listening'),
+          get(current, 'runtime', 'addonIsStale'),
+          get(current, 'runtime', 'staleNote'),
+        ],
+        [true, undefined, undefined],
+        `on the shipped addon the start says nothing of it: ${said}`,
+      );
+    } finally {
+      await stop();
+    }
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * A screenshot holds the game's windows that the root viewport does not draw.
  *
  * With subwindows not embedded, a dialog or a popup is an operating-system window with a render
@@ -45601,6 +45706,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACaptureOfOneNodeIsThatNodeAtItsOwnPixels,
   testAOneShotEngineRunIsNotTheEditor,
   testASubViewportCaptureIsDrawnNow,
+  testAStartSaysItsGameIsOnAnotherBuild,
   testAScreenshotHoldsTheGamesOwnWindows,
   testTheRendererIsChosenAndItsMemoryRead,
   testWhatTheGameTellsAScreenReaderIsRead,
