@@ -22,6 +22,9 @@ extends RefCounted
 # number was expected. Absent keys never reach here: the callers pass their own default to
 # `Dictionary.get`, so what arrives is that default.
 
+## How many of a node's children a refusal for a path missing below it names.
+const NAMED_CHILDREN: int = 12
+
 
 static func as_int(value: Variant, fallback: int = 0) -> int:
 	if value is int:
@@ -114,3 +117,25 @@ static func from_the_root(said: String, node_path: String, root_name: String) ->
 	if not rest.is_empty():
 		how += ', so this one is "%s"' % rest
 	return "%s%s %s." % [said, "" if said.ends_with(".") else ".", how]
+
+
+## [param said], the refusal for a path a scene does not have, with where the path leaves it: the
+## last node of the path it has, [param reached] from the root, called [param root_name], when that
+## is empty; the name below it that is missing; and [param children], the names that node has, as
+## after a node was moved or renamed. Names up to [constant NAMED_CHILDREN] of them.
+static func missing_below(
+	said: String, root_name: String, reached: PackedStringArray, missing: String, children: PackedStringArray
+) -> String:
+	var shown: String = ", ".join(children.slice(0, NAMED_CHILDREN))
+	if children.size() > NAMED_CHILDREN:
+		shown += " and %d more" % (children.size() - NAMED_CHILDREN)
+	return (
+		"%s%s %s has no %s; %s."
+		% [
+			said,
+			"" if said.ends_with(".") else ".",
+			"The root, %s," % root_name if reached.is_empty() else "/".join(reached),
+			missing,
+			"its children are " + shown if not children.is_empty() else "it has no children",
+		]
+	)

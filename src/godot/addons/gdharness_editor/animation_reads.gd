@@ -62,10 +62,13 @@ static func _bare(scene_path: String, node_path: String, kind: String) -> Array:
 	var type: String = str(read.get("type", ""))
 	if not ClassDB.class_exists(type) or not ClassDB.is_parent_class(type, kind):
 		var said: String = "%s not found at: %s" % [kind, node_path]
-		if read.is_empty() and FileReads.scene_node(scene_path, node_path.get_slice("/", 0)).is_empty():
-			said = Read.from_the_root(
-				said, node_path, str(FileReads.scene_node(scene_path, ".").get("name", ""))
-			)
+		if read.is_empty():
+			var hinted: String = said
+			if FileReads.scene_node(scene_path, node_path.get_slice("/", 0)).is_empty():
+				hinted = Read.from_the_root(
+					said, node_path, str(FileReads.scene_node(scene_path, ".").get("name", ""))
+				)
+			said = hinted if hinted != said else FileReads.missing_from(said, scene_path, node_path)
 		return [null, {"ok": false, "error": said}]
 	var bare: Node = ClassDB.instantiate(type)
 	bare.name = str(read["name"])

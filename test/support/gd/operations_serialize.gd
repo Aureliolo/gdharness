@@ -130,6 +130,12 @@ func _check_serialize() -> void:
 	if values.serialize_value("plain") != "plain":
 		_fail("passthrough string")
 
+	var no_bytes: Variant = values.serialize_value(PackedByteArray())
+	if no_bytes != {"base64": "", "size": 0, "_type": "PackedByteArray"}:
+		_fail("an empty PackedByteArray: %s" % JSON.stringify(no_bytes))
+	elif values.deserialize_value(no_bytes) != PackedByteArray():
+		_fail("an empty PackedByteArray back: %s" % str(values.deserialize_value(no_bytes)))
+
 
 ## Keys that are not text, through JSON and back. JSON keys are text, so an int key was answered as
 ## its text and a dictionary written back from the answer had words where its numbers were.

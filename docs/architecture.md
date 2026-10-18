@@ -836,12 +836,19 @@ alone can say, whether it holds unsaved changes to the scene, and the headless a
 `readBy` instead. A scene is read off its `SceneState`, with each instanced scene laid where it
 is instanced, rather than instantiated: outside the editor, instantiating runs every node
 script's member initialisers and `_init`, so a read would have run the game's code on every node.
-The stored properties come from a bare node of each engine class with the file's values set on
-it, since what a node lists depends on its values and some setters set others. A resource kept
-inside a file (`res://hero.tscn::Animation_jump`, the path a property holding one is answered
-with) is found among what the file holds, because the engine loads such a path only while the
-file is cached and a read loads it uncached; the server takes the id off before the project
-boundary judges the path, which is a file's.
+The read matches entries to nodes as instantiating does. An entry that sets values on a node the
+scene it comes from has since renamed or moved is found by the node's `unique_id`, searched among
+the nodes owned by the nearest instance above it, and the node keeps its new name. `SceneState`
+does not give scripts the ids, so they are read from the text of a `.tscn`; a binary scene's entries
+are matched by path alone. Nor does it give them its list of editable instances, which is read off
+the scene's `_bundled` dictionary, from the scene being read and the scenes it inherits only: those
+share its root, and a scene instanced below lists the instances its own root keeps values for. The
+stored properties come from a bare node of each engine class with
+the file's values set on it, since what a node lists depends on its values and some setters set
+others. A resource kept inside a file (`res://hero.tscn::Animation_jump`, the path a property
+holding one is answered with) is found among what the file holds, because the engine loads such a
+path only while the file is cached and a read loads it uncached; the server takes the id off before
+the project boundary judges the path, which is a file's.
 
 `scene_animation read` and `read_states` share `animation_reads.gd` the same way. The editor
 hands it the node from the scene it opens; with no editor, the operation builds a bare
@@ -870,13 +877,22 @@ four rounds; a resource file gets one. What still differs then is refused, with 
 and so is a scene whose script did not compile, which the engine instances without it. A line that
 only restates a property's default does not count against a write: the engine reports no default for
 an export initialised by a constructor call, such as `PackedStringArray()`, so every save writes one,
-the editor's too, and that default is read from the declaration in the script instead. A headless
-save also writes back the uid the file had, which an engine with no editor's uid cache otherwise
-drops. An animation library kept in a file of its own is saved beside the scene, and refused when
-it, or a resource it embeds, carries a script that is not a tool, since nothing compares that file
-with its text. An editor of the project that is running and has not reached this server
-holds its own copy of anything it has open, and saving that would put back what the engine wrote,
-so a write waits for it to connect instead.
+the editor's too, and that default is read from the declaration in the script instead. Nor does a
+line the saver writes another way: a file written by hand may set a default outright, which the
+saver leaves out, or spell a value as `3` where the saver writes `3.0`, so the texts before and
+after are compared as the values they read as, a line that is not there reading as the default. A headless
+save also writes back the uid the file had, and the uid on each external resource it names, which an
+engine with no editor's file system drops, since only that tells the saver a path's uid. A reference
+is given the uid the uid cache holds for its path and no other: one the cache does not know (a file
+made with no editor since the last scan) warns on every load, and one the cache gives another file
+(the original of a scene copied whole) loads that file. A file left to be named by path for the
+first reason is listed under `namedByPath` with `project_import refresh_uids`, whose import pass
+gives the cache its uid. Each headless call is an engine of its own, so the list gathered in a
+static on `scene_file.gd` holds that call's saves alone. An animation library kept in a file of its
+own is saved beside the scene, and refused when it, or a resource it embeds, carries a script that
+is not a tool, since nothing compares that file with its text. An editor of the project that is
+running and has not reached this server holds its own copy of anything it has open, and saving that
+would put back what the engine wrote, so a write waits for it to connect instead.
 
 `project_export add_preset` writes `export_presets.cfg` from an operation in `export_presets.gd`,
 with the keys the editor's Export dialog writes for a new preset; the exporter fills every platform
@@ -969,9 +985,36 @@ The scene tools never touch the editor's open scene. Each one works on a copy of
 - It instantiates with the editor's edit state. Without one the copy keeps no record of which nodes
   came from another scene, and the pack wrote an inherited scene out as a standalone copy of its base
   and froze each instanced scene's root properties into the scene instancing it.
-- It refuses to change what the scene does not own: a node inside an instanced scene (unless its
-  children are editable here), and the removal or renaming of a node a base scene gives. The pack
-  saves only what the scene owns, so these were answered as done and were not in the file.
+- It refuses to change what the scene does not own: a node inside an instanced scene whose children
+  are not editable here, a node a script made as the scene was instanced, and the removal or
+  renaming of a node a base scene gives. The pack saves only what the scene owns, so these were
+  answered as done and were not in the file. The refusal for a node inside an instance names the
+  `scene_node set editableChildren` calls that would let the scene keep its own values for it, one
+  for each instance around it that is not editable, outermost first, because the pack skips
+  everything under such an instance.
+- A node renamed or reparented is followed into the other `.tscn` files that name it by path:
+  those instancing or inheriting the scene, found from the `path=` of their external resources and
+  then from those of the scenes found, until no more are. In each one, `scene_kin.gd` takes where
+  the instances of the scene are from its read tree, then rewrites the editable paths, the entries'
+  names and parents, and the connections it names below them. Godot finds an entry whose node moved
+  by `unique_id`, and its parent by `parent_id_path`, but an editable path only by the path, so that
+  scene's next save dropped what it kept below the instance. A reparent also drops the ids saved
+  beside each rewritten path, since they run through the old parent, which still exists for a
+  recovery to find; a rename keeps every id. A scene that does not load, or that the
+  editor holds unsaved changes to, is left as it was and named under `notFollowed`.
+- The node paths a moved node leaves behind are carried by `scene_paths.gd`, as the editor's
+  `SceneTreeDock` carries them on a rename: NodePath values in properties, arrays, dictionaries and
+  the resources built into the scene, and the tracks of every player's animations, read from the
+  player's root node. It works each path out from where its holder was and where it pointed before
+  the move, rather than from the live tree, so the same code follows the paths in the scenes
+  `scene_kin.gd` reaches, which are loaded after the move and no longer resolve the old paths.
+  Each scene has its own terms. A value another file gives, the instanced scene's or a base's, is
+  in that file's terms and was carried by that file's own pass, so it is only named under
+  `notRetargeted` when the move has left it naming nothing. A track of an animation kept in another
+  scene or an imported file is treated the same way. An animation kept in a `.tres` of its own is
+  saved after the scene, and the editor shares that resource with every scene using it, so a write
+  that is refused puts its tracks back. A delete rewrites nothing and lists what is left naming the
+  deleted node under `stillNaming`, since dropping a track loses its keys.
 - It packs the copy and instantiates the pack before writing anything, and each tool checks its change
   in that result, which is what loading the file will give. A property the node took but the file does
   not keep, such as a variable a `@tool` script does not export, is refused there.
@@ -982,6 +1025,11 @@ The scene tools never touch the editor's open scene. Each one works on a copy of
 
 `scene_create save` of a scene open in the editor saves the editor's copy through the editor's own
 save, bringing its tab to the front for the save and putting back the tab that was there.
+`scene_create` with `inherits` writes the new scene's text itself, as the editor's New Inherited
+Scene saves it, rather than packing an instance of the base: a headless engine instancing the base
+runs its scripts, and the pack would keep what they set as the new scene's own values. It names the
+base by uid on the same rule as a headless save, and loads the result back to check that it inherits
+the base.
 `resource_edit` reads the file back after saving a resource, and puts the old file back when a
 property set did not survive the save.
 
