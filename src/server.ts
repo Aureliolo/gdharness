@@ -8199,7 +8199,7 @@ class GodotServer {
           before.projectPath ?? '',
           before.editorPid,
           args['hidden'] === true,
-          resolveSilent(args['silent']),
+          resolveSilent(false),
         )
       : await this.handleViaBridge('restart_editor', {});
     if (asked.isError === true) {
@@ -8553,7 +8553,7 @@ class GodotServer {
       project.value.path,
       ports,
       args['hidden'] === true,
-      resolveSilent(args['silent']),
+      resolveSilent(false),
     );
     if (opened.error !== null) {
       return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
