@@ -248,7 +248,8 @@ static func entries(lines: PackedStringArray) -> Dictionary:
 
 
 ## Each property the main resource of [param after] sets differently from [param before], leaving
-## out [param asked], as [name, whether before sets it, the text before gives it].
+## out [param asked], as [name, whether before sets it, the text before gives it, the text after
+## gives it or null].
 static func main_changes(before: String, after: String, asked: Dictionary) -> Array[Array]:
 	var was: Dictionary = _main_entries(before)
 	var now: Dictionary = _main_entries(after)
@@ -259,8 +260,23 @@ static func main_changes(before: String, after: String, asked: Dictionary) -> Ar
 		var name: String = str(key)
 		if asked.has(name) or was.get(name) == now.get(name):
 			continue
-		changed.append([name, was.has(name), str(was.get(name, ""))])
+		changed.append([name, was.has(name), str(was.get(name, "")), now.get(name)])
 	return changed
+
+
+## Whether [param was] and [param now], the texts two files give a property or null where one sets
+## nothing, read as the same value, nothing standing for [param default]. A file written by hand
+## spells a value its own way, 1 for 1.0, and may set a default, which the saver leaves out.
+static func reads_the_same(was: Variant, now: Variant, default: Variant) -> bool:
+	var values: Array = []
+	for text: Variant in [was, now]:
+		if text == null:
+			values.append(default)
+		elif "Resource(" in str(text):
+			return false
+		else:
+			values.append(str_to_var(str(text)))
+	return PropertyValues.same(values[0], values[1])
 
 
 static func _main_entries(text: String) -> Dictionary:
@@ -298,7 +314,8 @@ static func scripted_sections(text: String) -> Dictionary:
 
 
 ## Each property an embedded resource of [param after] sets differently from [param before], as
-## [its id, name, whether before sets it, the text before gives it]. Only those with a script that
+## [its id, name, whether before sets it, the text before gives it, the text after gives it or
+## null]. Only those with a script that
 ## is not a tool are compared, since only a script runs differently here, and those in
 ## [param reached_ids], which the tool changed, are left out.
 static func embedded_changes(before: String, after: String, reached_ids: Dictionary) -> Array[Array]:
@@ -321,7 +338,7 @@ static func embedded_changes(before: String, after: String, reached_ids: Diction
 		for entry: Variant in all:
 			var name: String = str(entry)
 			if was.get(name) != now.get(name):
-				changed.append([id, name, was.has(name), str(was.get(name, ""))])
+				changed.append([id, name, was.has(name), str(was.get(name, "")), now.get(name)])
 	return changed
 
 
@@ -345,11 +362,15 @@ static func settle_saved(
 		var embedded: Array[Array] = []
 		for found: Array in embedded_changes(before, after, reached_ids):
 			var holder: Resource = by_id.get(found[0])
+			if holder != null and _unchanged(holder, found.slice(1)):
+				continue
 			if found[2] or holder == null or not at_default(holder, str(found[1])):
 				embedded.append(found)
 		var top: Array[Array] = []
 		if main != null:
 			for found: Array in main_changes(before, after, asked):
+				if _unchanged(main, found):
+					continue
 				if found[1] or not at_default(main, str(found[0])):
 					top.append(found)
 		if embedded.is_empty() and top.is_empty():
@@ -380,6 +401,15 @@ static func settle_saved(
 		if saving != OK:
 			return "Failed to save %s again: %s." % [path, error_string(saving)]
 	return ""
+
+
+## Whether the saved text gives a property of [param object] what the file did, spelt another way.
+## [param change] is [name, whether the file set it, the text it gave, the text after or null].
+static func _unchanged(object: Object, change: Array) -> bool:
+	var name: String = change[0]
+	var was_set: bool = change[1]
+	var was: Variant = change[2] if was_set else null
+	return reads_the_same(was, change[3], default_of(object, name))
 
 
 ## Every embedded resource [param values] reach, at any depth, by its id in the file.

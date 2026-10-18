@@ -5,6 +5,7 @@ extends RefCounted
 ## or by instancing it with its children editable.
 
 const FileReads = preload("../file_reads.gd")
+const Paths = preload("scene_paths.gd")
 const SceneFile = preload("../scene_file.gd")
 
 
@@ -146,9 +147,12 @@ static func set_editable(scene: SceneFile, node: Node, editable: bool) -> String
 ## node and for what is below it (their names and parents), and its connections are rewritten to
 ## the new path. The engine finds
 ## a moved node's entries by its unique_id, but an editable instance only by its path, so a scene
-## saved after the move lost the values it kept below one. Answers followed, the scenes rewritten,
-## and notFollowed, each one left as it was with why, each only when it names any.
-static func follow(changed: String, old_path: String, new_path: String) -> Dictionary:
+## saved after the move lost the values it kept below one. The node paths each holds are carried
+## into [param carried], which holds those of [param changed] already; with [param new_path] "",
+## for a node deleted, they are only named. Answers followed, the scenes rewritten, and
+## notFollowed, each one left as it was with why, each only when it names any, with what
+## [param carried] gives.
+static func follow(changed: String, old_path: String, new_path: String, carried: Paths) -> Dictionary:
 	var texts: Dictionary = {}
 	_read_scenes("res://", texts)
 	var kin: Array[String] = [changed]
@@ -179,23 +183,35 @@ static func follow(changed: String, old_path: String, new_path: String) -> Dicti
 		var tree: Dictionary = read["tree"]
 		_instances_of(tree, changed, old_path, new_path, moves)
 		var text: String = texts[scene_path]
-		var rewritten: String = _rewritten(text, moves, old_path.get_base_dir() != new_path.get_base_dir())
-		if rewritten == text:
-			continue
 		var unsaved: String = SceneFile.unsaved_in_editor(scene_path)
-		if not unsaved.is_empty():
+		var rewritten: String = text
+		if not new_path.is_empty():
+			rewritten = _rewritten(text, moves, old_path.get_base_dir() != new_path.get_base_dir())
+		if rewritten != text:
+			if not unsaved.is_empty():
+				not_followed.append({"scenePath": scene_path, "reason": unsaved})
+				continue
+			var file: FileAccess = FileAccess.open(scene_path, FileAccess.WRITE)
+			if file == null or not file.store_string(rewritten):
+				not_followed.append(
+					{"scenePath": scene_path, "reason": error_string(FileAccess.get_open_error())}
+				)
+				continue
+			file.close()
+			SceneFile.refresh(scene_path)
+			followed.append(scene_path)
+		if moves.is_empty() or not text.contains("NodePath("):
+			continue
+		if not unsaved.is_empty() and not new_path.is_empty():
 			not_followed.append({"scenePath": scene_path, "reason": unsaved})
 			continue
-		var file: FileAccess = FileAccess.open(scene_path, FileAccess.WRITE)
-		if file == null or not file.store_string(rewritten):
-			not_followed.append(
-				{"scenePath": scene_path, "reason": error_string(FileAccess.get_open_error())}
-			)
-			continue
-		file.close()
-		SceneFile.refresh(scene_path)
-		followed.append(scene_path)
-	var answer: Dictionary = {}
+		var before: int = carried.retargeted.size()
+		var unwritten: String = carried.carry_into(scene_path, moves)
+		if not unwritten.is_empty() and not followed.has(scene_path):
+			not_followed.append({"scenePath": scene_path, "reason": unwritten})
+		elif carried.retargeted.size() > before and not followed.has(scene_path):
+			followed.append(scene_path)
+	var answer: Dictionary = carried.answer()
 	if not followed.is_empty():
 		answer["followed"] = followed
 	if not not_followed.is_empty():
@@ -246,13 +262,13 @@ static func _base_of(text: String) -> String:
 
 
 ## Into [param moves], the path below each instance of [param changed] in [param entry]'s tree that
-## [param old_path] was at, with where it is now.
+## [param old_path] was at, with where it is now, or "" when [param new_path] is.
 static func _instances_of(
 	entry: Dictionary, changed: String, old_path: String, new_path: String, moves: Dictionary
 ) -> void:
 	if str(entry.get("instanceOf", "")) == changed:
 		var at: String = str(entry["path"])
-		moves[_under(at, old_path)] = _under(at, new_path)
+		moves[_under(at, old_path)] = "" if new_path.is_empty() else _under(at, new_path)
 	var children: Array = entry.get("children", [])
 	for child: Variant in children:
 		if child is Dictionary:
@@ -299,16 +315,6 @@ static func _under(at: String, path: String) -> String:
 	return path if at == "." else at + "/" + path
 
 
-## [param given] moved by [param moves]: to where a path it names went, or below it.
-static func _moved(given: String, moves: Dictionary) -> String:
-	for old: String in moves:
-		if given == old:
-			return moves[old]
-		if given.begins_with(old + "/"):
-			return str(moves[old]) + given.substr(old.length())
-	return given
-
-
 static func _attribute(line: String, attribute: String) -> String:
 	var found: RegExMatch = RegEx.create_from_string(' %s="([^"]*)"' % attribute).search(line)
 	return found.get_string(1) if found != null else ""
@@ -329,7 +335,7 @@ static func _attribute_moved(
 	var found: RegExMatch = RegEx.create_from_string(' %s="([^"]*)"' % attribute).search(line)
 	if found == null:
 		return line
-	var moved: String = _moved(found.get_string(1), moves)
+	var moved: String = Paths.moved(found.get_string(1), moves)
 	if moved == found.get_string(1):
 		return line
 	var placed: String = _attribute_set(line, attribute, moved)

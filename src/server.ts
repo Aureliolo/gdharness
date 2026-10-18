@@ -183,7 +183,7 @@ import {
   whyTheProcessTreeFailed,
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
-import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
+import { pathsInUidCache, projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
 import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
 import {
@@ -5417,12 +5417,20 @@ class GodotServer {
     // for the open editor's scan the way every other engine started here does.
     const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
     const before = scriptsWithoutUid(projectPath);
+    const cachedBefore = pathsInUidCache(projectPath);
     const imported = await runImport(engine.value, projectPath);
     if (!imported.ok) {
       return this.answer(withScanWait(imported, scanned));
     }
     const after = scriptsWithoutUid(projectPath);
     const given = before.filter((script) => !after.includes(script));
+    // Read off the cache itself, since a file named by path under namedByPath gains its uid there
+    // and nowhere a caller could look: its own header already held it.
+    const cachedAfter = pathsInUidCache(projectPath);
+    const cached =
+      cachedAfter === null
+        ? null
+        : [...cachedAfter].filter((path) => cachedBefore?.has(path) !== true).sort();
 
     return this.answer(
       withScanWait(
@@ -5432,6 +5440,12 @@ class GodotServer {
           ...(imported.messagesOmitted === undefined ? {} : { messagesOmitted: imported.messagesOmitted }),
           payload: {
             uidsCreated: given,
+            ...(cached === null
+              ? {
+                  uidCacheNote:
+                    'The import pass left no uid cache this server could read, .godot/uid_cache.bin.',
+                }
+              : { uidsCached: cached }),
             stillWithoutUid: after,
             // Said rather than implied: the op resaved every scene for as long as it existed, so a
             // caller who knows it by its diff needs telling that the diff is the bug and is gone.

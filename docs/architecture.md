@@ -877,7 +877,10 @@ four rounds; a resource file gets one. What still differs then is refused, with 
 and so is a scene whose script did not compile, which the engine instances without it. A line that
 only restates a property's default does not count against a write: the engine reports no default for
 an export initialised by a constructor call, such as `PackedStringArray()`, so every save writes one,
-the editor's too, and that default is read from the declaration in the script instead. A headless
+the editor's too, and that default is read from the declaration in the script instead. Nor does a
+line the saver writes another way: a file written by hand may set a default outright, which the
+saver leaves out, or spell a value as `3` where the saver writes `3.0`, so the texts before and
+after are compared as the values they read as, a line that is not there reading as the default. A headless
 save also writes back the uid the file had, and the uid on each external resource it names, which an
 engine with no editor's file system drops, since only that tells the saver a path's uid. A reference
 is given the uid the uid cache holds for its path and no other: one the cache does not know (a file
@@ -999,6 +1002,19 @@ The scene tools never touch the editor's open scene. Each one works on a copy of
   beside each rewritten path, since they run through the old parent, which still exists for a
   recovery to find; a rename keeps every id. A scene that does not load, or that the
   editor holds unsaved changes to, is left as it was and named under `notFollowed`.
+- The node paths a moved node leaves behind are carried by `scene_paths.gd`, as the editor's
+  `SceneTreeDock` carries them on a rename: NodePath values in properties, arrays, dictionaries and
+  the resources built into the scene, and the tracks of every player's animations, read from the
+  player's root node. It works each path out from where its holder was and where it pointed before
+  the move, rather than from the live tree, so the same code follows the paths in the scenes
+  `scene_kin.gd` reaches, which are loaded after the move and no longer resolve the old paths.
+  Each scene has its own terms. A value another file gives, the instanced scene's or a base's, is
+  in that file's terms and was carried by that file's own pass, so it is only named under
+  `notRetargeted` when the move has left it naming nothing. A track of an animation kept in another
+  scene or an imported file is treated the same way. An animation kept in a `.tres` of its own is
+  saved after the scene, and the editor shares that resource with every scene using it, so a write
+  that is refused puts its tracks back. A delete rewrites nothing and lists what is left naming the
+  deleted node under `stillNaming`, since dropping a track loses its keys.
 - It packs the copy and instantiates the pack before writing anything, and each tool checks its change
   in that result, which is what loading the file will give. A property the node took but the file does
   not keep, such as a variable a `@tool` script does not export, is refused there.

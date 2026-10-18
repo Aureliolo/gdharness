@@ -1811,6 +1811,81 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
   }
 }
 
+/**
+ * A rename in a scene open in a tab, whose player plays a library kept in a file of its own. The
+ * editor holds that library for the tab, the same copy the write edits, so a write that is then
+ * refused puts its tracks back, and one that goes through saves them with the scene.
+ */
+async function testAMovedNodeKeepsItsPathsInTheEditor({ call, refusal, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'crane'), { recursive: true });
+  const track = (path: string): string =>
+    `tracks/0/type = "value"\ntracks/0/imported = false\ntracks/0/enabled = true\ntracks/0/path = NodePath("${path}")\n` +
+    'tracks/0/interp = 1\ntracks/0/loop_wrap = true\n' +
+    'tracks/0/keys = {"times": PackedFloat32Array(0, 1), "transitions": PackedFloat32Array(1, 1), "update": 0, "values": [Vector2(1, 1), Vector2(2, 2)]}\n';
+  writeFileSync(
+    join(project, 'crane', 'lifts.tres'),
+    `[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_lift"]\nresource_name = "lift"\nlength = 1.0\n${track('Arm:scale')}\n` +
+      '[resource]\n_data = {\n&"lift": SubResource("Animation_lift")\n}\n',
+  );
+  writeFileSync(
+    join(project, 'crane', 'crane.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="res://crane/lifts.tres" id="1_lifts"]\n\n' +
+      '[node name="Crane" type="Node2D"]\n\n[node name="Arm" type="Sprite2D" parent="."]\n\n' +
+      '[node name="Follow" type="RemoteTransform2D" parent="."]\nremote_path = NodePath("../Arm")\n\n' +
+      '[node name="Anim" type="AnimationPlayer" parent="."]\nlibraries = {\n&"lifts": ExtResource("1_lifts")\n}\n',
+  );
+  const crane = { projectPath: project, scenePath: 'res://crane/crane.tscn' };
+  const lifted = async (): Promise<unknown> =>
+    get(
+      await call('scene_animation', {
+        ...crane,
+        op: 'read',
+        playerNodePath: 'Anim',
+        animationName: 'lifts/lift',
+      }),
+      'tracks',
+    );
+  try {
+    await call('editor_rescan', { projectPath: project });
+    await hook(project, { op: 'open', path: crane.scenePath });
+    const asWritten = await lifted();
+    assert.match(JSON.stringify(asWritten), /"Arm"/, JSON.stringify(asWritten));
+
+    // Arm made an instance of a file that is not there cannot be packed, so the write is refused once
+    // the tracks were carried.
+    const refused = await refusal('scene_node', {
+      ...crane,
+      op: 'set',
+      nodePath: 'Arm',
+      properties: { name: 'Boom', scene_file_path: 'res://crane/elsewhere.tscn' },
+    });
+    assert.match(refused, /Failed to pack res:\/\/crane\/crane\.tscn/, refused);
+    assert.deepEqual(await lifted(), asWritten, "the editor's copy of the library is as it was");
+    assert.match(fileText(project, 'crane/lifts.tres'), /NodePath\("Arm:scale"\)/);
+
+    const renamed = await call('scene_node', {
+      ...crane,
+      op: 'set',
+      nodePath: 'Arm',
+      properties: { name: 'Boom' },
+    });
+    const retargeted: unknown = get(renamed, 'retargeted');
+    assert.ok(Array.isArray(retargeted), text(renamed));
+    assert.deepEqual(
+      retargeted.map((entry) => `${String(get(entry, 'nodePath'))} ${String(get(entry, 'to'))}`).sort(),
+      ['Anim Boom:scale', 'Follow ../Boom'],
+      text(renamed),
+    );
+    assert.match(fileText(project, 'crane/lifts.tres'), /NodePath\("Boom:scale"\)/);
+    assert.match(fileText(project, 'crane/crane.tscn'), /remote_path = NodePath\("\.\.\/Boom"\)/);
+    assert.match(JSON.stringify(await lifted()), /"Boom"/);
+  } finally {
+    await hook(project, { op: 'open', path: 'res://main.tscn' });
+    rmSync(join(project, 'crane'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
 /** An animation and a track on it, read back out of the sub-resources the scene gained. */
 async function testSceneAnimation({ call, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: SCENE };
@@ -6654,6 +6729,7 @@ async function main(): Promise<void> {
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
     ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
     ['testASceneKeepsItsOwnValuesInTheEditor', testASceneKeepsItsOwnValuesInTheEditor],
+    ['testAMovedNodeKeepsItsPathsInTheEditor', testAMovedNodeKeepsItsPathsInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [
       'testAClassReloadedOnceItsBaseExistsReachesItsUsers',

@@ -6,6 +6,7 @@ extends Node
 const FileReads = preload("../file_reads.gd")
 const Read = preload("../reading.gd")
 const Kin = preload("scene_kin.gd")
+const Paths = preload("scene_paths.gd")
 const Placing = preload("scene_placing.gd")
 const PropertyValues = preload("../property_values.gd")
 const ResourceTools = preload("resource_tools.gd")
@@ -387,6 +388,8 @@ func delete_node(args: Dictionary) -> Dictionary:
 	var at: String = scene.path_of(node)
 	node.get_parent().remove_child(node)
 	node.free()
+	var carried: Paths = Paths.new()
+	var _rewritten: int = carried.carry(scene, {at: ""})
 
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
@@ -397,7 +400,9 @@ func delete_node(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {"ok": true, "deletedNodePath": at}
+	var answer: Dictionary = {"ok": true, "deletedNodePath": at}
+	answer.merge(Kin.follow(scene_path, at, "", carried))
+	return answer
 
 
 func duplicate_node(args: Dictionary) -> Dictionary:
@@ -525,6 +530,8 @@ func reparent_node(args: Dictionary) -> Dictionary:
 
 	var new_path: String = scene.path_of(node)
 	var index: int = node.get_index()
+	var carried: Paths = Paths.new()
+	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var copy: Node = saved.get_node_or_null(new_path)
@@ -537,6 +544,7 @@ func reparent_node(args: Dictionary) -> Dictionary:
 			return ""
 	)
 	if not written.is_empty():
+		carried.put_back(scene_path)
 		return written
 
 	var answer: Dictionary = {
@@ -547,7 +555,7 @@ func reparent_node(args: Dictionary) -> Dictionary:
 		"index": index,
 	}
 	if new_path != old_path:
-		answer.merge(Kin.follow(scene_path, old_path, new_path))
+		answer.merge(Kin.follow(scene_path, old_path, new_path, carried))
 	return answer
 
 
@@ -598,6 +606,8 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	for key: Variant in properties:
 		held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
 	var new_path: String = scene.path_of(node)
+	var carried: Paths = Paths.new()
+	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var unkept: String = _kept(scene, saved, node, properties.keys())
@@ -607,6 +617,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 			return unkept
 	)
 	if not written.is_empty():
+		carried.put_back(scene_path)
 		return written
 
 	var answer: Dictionary = {"ok": true, "nodePath": new_path, "properties": held}
@@ -616,7 +627,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		answer["droppedValues"] = dropped["values"]
 		answer["droppedNodes"] = dropped["nodes"]
 	if new_path != old_path:
-		answer.merge(Kin.follow(scene_path, old_path, new_path))
+		answer.merge(Kin.follow(scene_path, old_path, new_path, carried))
 	return answer
 
 

@@ -143,6 +143,13 @@ func asked(node: Node, names: Array) -> void:
 		_reached.merge(HeadlessCheck.reached(node, property))
 
 
+## Takes [param resource], built into the scene, as one the tool changed, which a write saves as it is.
+func reached_into(resource: Resource) -> void:
+	var id: String = resource.get_scene_unique_id()
+	if not id.is_empty():
+		_reached[id] = true
+
+
 ## Takes each copy in [param copies], keyed by the node it was made from, as holding what that node's
 ## file entry holds.
 func copied(copies: Dictionary) -> void:
@@ -436,10 +443,25 @@ func unusable_name(parent: Node, child_name: String, moving: Node = null) -> Str
 
 ## The names of the properties this scene's own file sets on [param node], whatever their values.
 func set_here(node: Node) -> Dictionary:
+	return set_at(path_of(node))
+
+
+## Where the values of [param node], at [param at] in the file, come from when the file does not set
+## them: "" for a node this scene makes, which holds them all, or the scene that makes the node, the
+## one it is instanced from or one this scene inherits.
+func values_from(node: Node, at: String) -> String:
+	if node != root and not node.scene_file_path.is_empty():
+		return node.scene_file_path
+	if node != root and node.owner != root:
+		return node.owner.scene_file_path if node.owner != null else ""
+	return str(_base_paths.get(at, ""))
+
+
+## The names of the properties this scene's own file sets on the node at [param at].
+func set_at(at: String) -> Dictionary:
 	var names: Dictionary = {}
 	if _state == null:
 		return names
-	var at: String = path_of(node)
 	for index: int in _state.get_node_count():
 		if _relative(str(_state.get_node_path(index))) != at:
 			continue
