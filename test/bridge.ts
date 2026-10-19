@@ -404,7 +404,7 @@ async function main(): Promise<void> {
     assert.match(described('editor_launch', 'projectPath'), /\. Only for op open\.$/, 'one op is named');
     assert.match(
       described('scene_node', 'index'),
-      /\. Only for ops add, reparent\.$/,
+      /\. Only for ops add, duplicate, reparent\.$/,
       'several ops are named',
     );
     assert.match(
