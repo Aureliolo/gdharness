@@ -3481,6 +3481,87 @@ function testTheClassListIsTheEnginesOwn(godotPath: string): void {
 }
 
 /**
+ * The shipped scripts compile and run in a project whose own classes and autoloads share the names
+ * they would otherwise use.
+ *
+ * Godot resolves a type as a global class, then an autoload, before the script's own constants and
+ * inner classes, so in a project with `class_name Log` a module's `var logger: Log` named the
+ * project's class and the module refused to compile, losing every headless call; an inner class of
+ * that name is refused as hiding the global one. Found when a fixture here declared
+ * `class_name Shapes`. So every name a shipped script declares in a class's casing carries the
+ * prefix, and the same name without it is one class, and in a second project one autoload, here.
+ * The names in capitals are constants, which no project names a class after.
+ */
+function testOurNamesStandAsideForAProjectsClasses(godotPath: string): void {
+  const declared = new Set<string>();
+  for (const script of shippedScripts()) {
+    const source = readFileSync(join('src', 'godot', script.slice('res://'.length)), 'utf8');
+    for (const found of source.matchAll(/^\s*(?:const|class|enum|static var|var)\s+([A-Z]\w*)/gm)) {
+      const name = found[1] ?? '';
+      if (/[a-z]/.test(name)) {
+        declared.add(name);
+      }
+    }
+  }
+  assert.ok(
+    declared.size >= 64,
+    `the shipped scripts declare names in a class's casing: ${[...declared].join(', ')}`,
+  );
+  const unprefixed = [...declared].filter((name) => !name.startsWith('Gdh'));
+  assert.deepEqual(unprefixed, [], 'a name a project could also declare is shadowed by the project');
+  const bare = [...declared].map((name) => name.replace(/^Gdh/, ''));
+
+  const asClasses = createProject(godotPath);
+  try {
+    mkdirSync(join(asClasses, 'clashes'));
+    for (const name of bare) {
+      writeFileSync(
+        join(asClasses, 'clashes', `${name.toLowerCase()}.gd`),
+        `class_name ${name}\nextends RefCounted\n`,
+      );
+    }
+    const imported = spawnSyncHidden(godotPath, ['--headless', '--path', asClasses, '--import'], {
+      encoding: 'utf8',
+      timeout: 180000,
+    });
+    assert.equal(imported.status, 0, `the engine imports the project: ${imported.stderr}`);
+    const listed = readFileSync(join(asClasses, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+    assert.ok(
+      bare.every((name) => listed.includes(`"class": &"${name}"`)),
+      `every clashing class is one the engine lists: ${listed}`,
+    );
+    standsAside(godotPath, asClasses, 'classes');
+  } finally {
+    sweep(asClasses);
+  }
+
+  const asAutoloads = createProject(godotPath);
+  try {
+    writeFileSync(join(asAutoloads, 'clash.gd'), 'extends Node\n');
+    const settings = join(asAutoloads, 'project.godot');
+    const autoloads = bare.map((name) => `${name}="*res://clash.gd"`).join('\n');
+    writeFileSync(settings, `${readFileSync(settings, 'utf8')}\n[autoload]\n\n${autoloads}\n`);
+    standsAside(godotPath, asAutoloads, 'autoloads');
+  } finally {
+    sweep(asAutoloads);
+  }
+}
+
+/** Every shipped script compiles in [projectDir], and an operation runs there and answers cleanly. */
+function standsAside(godotPath: string, projectDir: string, beside: string): void {
+  assert.equal(
+    get(runFixture(godotPath, projectDir, 'typed'), 'checked'),
+    shippedScripts().length,
+    `every shipped script compiles beside the project's ${beside}`,
+  );
+  const rebuilt = runOperation(godotPath, projectDir, 'refresh_class_cache', {});
+  assert.ok(
+    Array.isArray(get(rebuilt, 'added')),
+    `and an operation runs and answers: ${JSON.stringify(rebuilt)}`,
+  );
+}
+
+/**
  * A font's OpenType features are written as the engine reads them, and the font is shaped by them.
  *
  * JSON names every key as a string and every number as a float, so set_options wrote
@@ -3616,6 +3697,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   binaryScenes: testBinaryScenesAreScenes,
   classBases: (godotPath) => {
     testTheClassListIsTheEnginesOwn(godotPath);
+  },
+  ourNames: (godotPath) => {
+    testOurNamesStandAsideForAProjectsClasses(godotPath);
   },
 };
 

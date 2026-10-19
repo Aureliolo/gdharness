@@ -23,14 +23,14 @@ extends RefCounted
 ## setter setting scale were both saved into the file by a write to another node, and a root whose
 ## script failed in [code]_init[/code] was saved without it. Outside the editor, then, what a node
 ## stores is put back to what the file holds wherever the tool did not ask for a change, before
-## anything is saved, and a write is refused when that does not hold. See [HeadlessCheck].
+## anything is saved, and a write is refused when that does not hold. See [GdhHeadlessCheck].
 
-const HeadlessCheck = preload("headless_check.gd")
+const GdhHeadlessCheck = preload("headless_check.gd")
 
 ## How many times what scripts changed is put back before a write is refused for it.
 const PUTTING_BACK_PASSES: int = 4
-const PropertyValues = preload("property_values.gd")
-const Read = preload("reading.gd")
+const GdhPropertyValues = preload("property_values.gd")
+const GdhRead = preload("reading.gd")
 ## The names Object.ConnectFlags gives each bit. The number alone left a reader guessing that 2 is
 ## the persistence every connection in a saved scene carries.
 const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
@@ -135,12 +135,12 @@ func asked(node: Node, names: Array) -> void:
 	var id: int = node.get_instance_id()
 	var on: Dictionary = _asked.get_or_add(id, {})
 	if not _before.has(id):
-		_before[id] = HeadlessCheck.stored(node)
+		_before[id] = GdhHeadlessCheck.stored(node)
 	for name: Variant in names:
 		var property: String = str(name)
 		on[property] = true
 		on[property.get_slice(":", 0)] = true
-		_reached.merge(HeadlessCheck.reached(node, property))
+		_reached.merge(GdhHeadlessCheck.reached(node, property))
 
 
 ## Takes [param resource], built into the scene, as one the tool changed, which a write saves as it is.
@@ -199,7 +199,7 @@ func not_found(said: String, node_path: String) -> String:
 	if root == null:
 		return said
 	if not root.has_node(NodePath(node_path.get_slice("/", 0))):
-		var hinted: String = Read.from_the_root(said, node_path, str(root.name))
+		var hinted: String = GdhRead.from_the_root(said, node_path, str(root.name))
 		if hinted != said:
 			return hinted
 	var parts: PackedStringArray = node_path.trim_prefix("./").split("/", false)
@@ -216,7 +216,7 @@ func not_found(said: String, node_path: String) -> String:
 	var names: PackedStringArray = []
 	for child: Node in at.get_children():
 		var _named: bool = names.append(str(child.name))
-	return Read.missing_below(said, str(root.name), reached, parts[reached.size()], names)
+	return GdhRead.missing_below(said, str(root.name), reached, parts[reached.size()], names)
 
 
 func close() -> void:
@@ -477,7 +477,7 @@ func kept(saved: Node, loaded: Variant, given: Variant) -> bool:
 		var loaded_node: Node = loaded
 		var given_node: Node = given
 		return str(saved.get_path_to(loaded_node)) == str(root.get_path_to(given_node))
-	return PropertyValues.same(loaded, given)
+	return GdhPropertyValues.same(loaded, given)
 
 
 ## Packs [member root], has [param check] read the result as the file will hold it, and writes the
@@ -508,7 +508,7 @@ func write(check: Callable = Callable()) -> Dictionary:
 						)
 						% path
 					)
-					+ HeadlessCheck.REMEDY
+					+ GdhHeadlessCheck.REMEDY
 				)
 			)
 	if check.is_valid():
@@ -530,12 +530,14 @@ func write(check: Callable = Callable()) -> Dictionary:
 	var values: Array = []
 	for index: int in state.get_node_count():
 		values.append_array(_stored_at(state, index).values())
-	var unkept: String = HeadlessCheck.settle_saved(
+	var unkept: String = GdhHeadlessCheck.settle_saved(
 		path, _text, values, null, {}, _reached, func() -> Error: return save_keeping_uid(packed, path)
 	)
 	if unkept.is_empty():
 		return {}
-	return {"ok": false, "error": "Nothing was written: " + unkept + HeadlessCheck.put_back(path, previous)}
+	return {
+		"ok": false, "error": "Nothing was written: " + unkept + GdhHeadlessCheck.put_back(path, previous)
+	}
 
 
 func _holds_scripted_embedded() -> bool:
@@ -543,7 +545,7 @@ func _holds_scripted_embedded() -> bool:
 	var nodes: Array[Node] = [root]
 	while not nodes.is_empty():
 		var node: Node = nodes.pop_back()
-		if HeadlessCheck.holds_scripted_embedded(node, seen):
+		if GdhHeadlessCheck.holds_scripted_embedded(node, seen):
 			return true
 		nodes.append_array(node.get_children())
 	return false
@@ -742,7 +744,7 @@ func _settled(packed: PackedScene) -> Array:
 			var node: Node = found[0]
 			var before: Dictionary = _before[node.get_instance_id()]
 			for name: String in found[1]:
-				node.set(name, before.get(name, HeadlessCheck.default_of(node, name)))
+				node.set(name, before.get(name, GdhHeadlessCheck.default_of(node, name)))
 		current = PackedScene.new()
 		var packing: Error = current.pack(root)
 		if packing != OK:
@@ -766,10 +768,10 @@ func _moved_by_scripts() -> Array[Array]:
 		if node == null or not root.is_ancestor_of(node) and node != root:
 			continue
 		var on: Dictionary = _asked[id]
-		if not HeadlessCheck.through_script(node, on):
+		if not GdhHeadlessCheck.through_script(node, on):
 			continue
 		var before: Dictionary = _before[id]
-		var changed: Array[String] = HeadlessCheck.differing(node, before, on)
+		var changed: Array[String] = GdhHeadlessCheck.differing(node, before, on)
 		if not changed.is_empty():
 			moved.append([node, changed])
 	return moved
@@ -792,7 +794,10 @@ func _strays(state: SceneState) -> Array[Array]:
 		# changes is Godot's doing and the editor's pack does it too: a Control saved without its
 		# grow directions gets them back from anchors_preset's setter, and loses an anchors_preset
 		# its layout mode does not store.
-		if not HeadlessCheck.untooled(node.get_script()) and not HeadlessCheck.untooled(filed.get("script")):
+		if (
+			not GdhHeadlessCheck.untooled(node.get_script())
+			and not GdhHeadlessCheck.untooled(filed.get("script"))
+		):
 			continue
 		var stored: Dictionary = _stored_at(state, index)
 		var names: Dictionary = filed.duplicate()
@@ -800,9 +805,9 @@ func _strays(state: SceneState) -> Array[Array]:
 		for key: Variant in names:
 			var name: String = str(key)
 			var held: bool = filed.has(name)
-			if held == stored.has(name) and (not held or PropertyValues.same(stored[name], filed[name])):
+			if held == stored.has(name) and (not held or GdhPropertyValues.same(stored[name], filed[name])):
 				continue
-			if not held and HeadlessCheck.at_default(node, name):
+			if not held and GdhHeadlessCheck.at_default(node, name):
 				continue
 			stray.append([node, name, held, filed.get(name)])
 	return stray
@@ -819,7 +824,7 @@ func _stray_text(node: Node, name: String) -> String:
 				)
 				% [at, path]
 			)
-			+ HeadlessCheck.REMEDY
+			+ GdhHeadlessCheck.REMEDY
 		)
 	return (
 		(
@@ -830,7 +835,7 @@ func _stray_text(node: Node, name: String) -> String:
 			)
 			% [at, name, path]
 		)
-		+ HeadlessCheck.REMEDY
+		+ GdhHeadlessCheck.REMEDY
 	)
 
 
@@ -845,7 +850,7 @@ func _unset_value(node: Node, name: String) -> Variant:
 	while top != root and top.owner != root:
 		top = top.get_parent()
 	if top == root or top.scene_file_path.is_empty():
-		return HeadlessCheck.default_of(node, name)
+		return GdhHeadlessCheck.default_of(node, name)
 	if _base_paths.has(path_of(top)):
 		return _value_in(base, path_of(node), node, name)
 	var instanced: PackedScene = ResourceLoader.load(top.scene_file_path) as PackedScene
@@ -881,7 +886,7 @@ func _value_in(state: SceneState, at: String, node: Node, name: String) -> Varia
 			state = instanced.get_state()
 		else:
 			state = state.get_base_scene_state()
-	return HeadlessCheck.default_of(node, name)
+	return GdhHeadlessCheck.default_of(node, name)
 
 
 func _node_at(node_path: String) -> Node:

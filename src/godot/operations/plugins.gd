@@ -1,13 +1,13 @@
 extends RefCounted
 
-const Patterns = preload("patterns.gd")
-const Log = preload("logger.gd")
-const ProjectFile = preload("project_file.gd")
+const GdhPatterns = preload("patterns.gd")
+const GdhLog = preload("logger.gd")
+const GdhProjectFile = preload("project_file.gd")
 
-var _log: Log
+var _log: GdhLog
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -148,7 +148,7 @@ func _enabled_paths() -> Array[String]:
 		paths.assign(packed)
 	elif enabled_value is String:
 		var listed: String = enabled_value
-		for m: RegExMatch in Patterns.compiled("res://[^\"',)]+?plugin\\.cfg").search_all(listed):
+		for m: RegExMatch in GdhPatterns.compiled("res://[^\"',)]+?plugin\\.cfg").search_all(listed):
 			paths.append(m.get_string())
 	return paths
 
@@ -172,11 +172,11 @@ static func _names_of(paths: Array[String]) -> Array[String]:
 func _save_enabled_paths(paths: Array[String]) -> Error:
 	if paths.is_empty():
 		ProjectSettings.set_setting("editor_plugins/enabled", null)
-		return ProjectFile.save()
+		return GdhProjectFile.save()
 
 	# Kept in an Array[String] and converted here, because appending to a packed array answers with
 	# whether it worked and a project holding return_value_discarded at error level will not compile
 	# a script that drops that answer. The conversion is what matters: an Array[String] handed to
 	# set_setting is written as Array[String]([...]), which the editor does not read as a plugin list.
 	ProjectSettings.set_setting("editor_plugins/enabled", PackedStringArray(paths))
-	return ProjectFile.save()
+	return GdhProjectFile.save()

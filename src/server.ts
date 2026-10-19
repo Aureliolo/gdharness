@@ -9183,7 +9183,7 @@ class GodotServer {
     if (going !== null && !running) {
       this.drainTranscript(going);
     }
-    return runtimeVerdict(endpoint, {
+    const verdict = runtimeVerdict(endpoint, {
       addon: true,
       budgetMs,
       ...(budget.sizedToMs === undefined ? {} : { sizedToMs: budget.sizedToMs }),
@@ -9197,6 +9197,10 @@ class GodotServer {
         !running &&
         going.log.all.some((entry) => entry.text.startsWith(RUNTIME_LISTENING_LINE)),
     });
+    // Listening is not answering: a game on another build's runtime addon is asked nothing, and a
+    // start that says only that it listened leaves the caller to learn it from the first refusal.
+    const staleNote = endpoint === null ? undefined : this.runtimeStaleNote(endpoint);
+    return staleNote === undefined ? verdict : { ...verdict, addonIsStale: true, staleNote };
   }
 
   /**
@@ -13699,9 +13703,7 @@ class GodotServer {
     // The game is not asked: an answer from another release's runtime is that release's answer.
     const staleNote = this.runtimeStaleNote(choice.endpoint);
     if (staleNote !== undefined) {
-      return this.createErrorResponse(staleNote, [
-        'editor_status lists the game and the runtime addon it loaded',
-      ]);
+      return this.createErrorResponse(staleNote);
     }
     const screenshotDir = expectsScreenshot ? scratchDirectory('runtime-screenshot') : null;
     const screenshotPath = screenshotDir ? join(screenshotDir, 'capture.png') : null;

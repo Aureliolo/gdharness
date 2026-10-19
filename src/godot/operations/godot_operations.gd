@@ -14,25 +14,25 @@ extends SceneTree
 # the operations directory ships inside the server package and is handed to the engine as an
 # absolute path outside the project. A res:// path would only resolve in the test fixture.
 
-const AnimationReads = preload("animation_reads.gd")
-const AudioBuses = preload("audio_buses.gd")
-const ClassCache = preload("class_cache.gd")
-const ClassDbQueries = preload("classdb_queries.gd")
-const Dependencies = preload("dependencies.gd")
-const ExportPresets = preload("export_presets.gd")
-const FileReads = preload("file_reads.gd")
-const GdscriptAnalysis = preload("gdscript_analysis.gd")
-const GdscriptAuthoring = preload("gdscript_authoring.gd")
-const ImportPipeline = preload("import_pipeline.gd")
-const InputActions = preload("input_actions.gd")
-const Log = preload("logger.gd")
-const Plugins = preload("plugins.gd")
-const ProjectConfig = preload("project_config.gd")
-const ProjectDiagnostics = preload("project_diagnostics.gd")
-const Read = preload("reading.gd")
-const RenameChecks = preload("rename_checks.gd")
-const ResourceFiles = preload("resource_files.gd")
-const ScriptCheck = preload("script_check.gd")
+const GdhAnimationReads = preload("animation_reads.gd")
+const GdhAudioBuses = preload("audio_buses.gd")
+const GdhClassCache = preload("class_cache.gd")
+const GdhClassDbQueries = preload("classdb_queries.gd")
+const GdhDependencies = preload("dependencies.gd")
+const GdhExportPresets = preload("export_presets.gd")
+const GdhFileReads = preload("file_reads.gd")
+const GdhGdscriptAnalysis = preload("gdscript_analysis.gd")
+const GdhGdscriptAuthoring = preload("gdscript_authoring.gd")
+const GdhImportPipeline = preload("import_pipeline.gd")
+const GdhInputActions = preload("input_actions.gd")
+const GdhLog = preload("logger.gd")
+const GdhPlugins = preload("plugins.gd")
+const GdhProjectConfig = preload("project_config.gd")
+const GdhProjectDiagnostics = preload("project_diagnostics.gd")
+const GdhRead = preload("reading.gd")
+const GdhRenameChecks = preload("rename_checks.gd")
+const GdhResourceFiles = preload("resource_files.gd")
+const GdhScriptCheck = preload("script_check.gd")
 
 ## Printed once the answer is written, after which the engine runs the project's autoloads. Kept in
 ## step with `ANSWERED` in src/headless.ts.
@@ -59,12 +59,12 @@ const AFTER_THE_AUTOLOADS: Array[String] = [
 	"run_editor_tool",
 ]
 
-var _log: Log
+var _log: GdhLog
 
 
 func _init() -> void:
 	var args: PackedStringArray = OS.get_cmdline_args()
-	_log = Log.new("--debug-godot" in args)
+	_log = GdhLog.new("--debug-godot" in args)
 
 	# The script path is the argument after --script, so the operation and its parameters are
 	# the two that follow it.
@@ -180,26 +180,27 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 	match operation:
 		# Resource files
 		"get_uid":
-			payload = ResourceFiles.new(_log).get_uid(params)
+			payload = GdhResourceFiles.new(_log).get_uid(params)
 		"refresh_class_cache":
-			payload = ClassCache.new(_log).refresh_class_cache(params)
+			payload = GdhClassCache.new(_log).refresh_class_cache(params)
 		"read_scene_tree":
 			payload = _read(
-				FileReads.scene_tree(
+				GdhFileReads.scene_tree(
 					str(params.get("scene_path", "")),
-					Read.as_int(params.get("depth", -1), -1),
-					Read.as_bool(params.get("include_properties", false))
+					GdhRead.as_int(params.get("depth", -1), -1),
+					GdhRead.as_bool(params.get("include_properties", false))
 				)
 			)
 		"read_resource":
 			payload = _read(
-				FileReads.resource(
-					str(params.get("resource_path", "")), Read.as_bool(params.get("include_defaults", false))
+				GdhFileReads.resource(
+					str(params.get("resource_path", "")),
+					GdhRead.as_bool(params.get("include_defaults", false))
 				)
 			)
 		"read_animations":
 			payload = _read(
-				AnimationReads.scene_animations(
+				GdhAnimationReads.scene_animations(
 					str(params.get("scene_path", "")),
 					str(params.get("player_node_path", ".")),
 					str(params.get("animation_name", ""))
@@ -207,7 +208,7 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			)
 		"read_animation_states":
 			payload = _read(
-				AnimationReads.scene_states(
+				GdhAnimationReads.scene_states(
 					str(params.get("scene_path", "")),
 					str(params.get("anim_tree_path", "")),
 					str(params.get("state_machine_path", ""))
@@ -219,83 +220,83 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 
 		# Import and export pipeline
 		"get_import_status":
-			payload = ImportPipeline.new(_log).get_import_status(params)
+			payload = GdhImportPipeline.new(_log).get_import_status(params)
 		"get_import_options":
-			payload = ImportPipeline.new(_log).get_import_options(params)
+			payload = GdhImportPipeline.new(_log).get_import_options(params)
 		"set_import_options":
-			payload = ImportPipeline.new(_log).set_import_options(params)
+			payload = GdhImportPipeline.new(_log).set_import_options(params)
 		"list_export_presets":
-			payload = ExportPresets.new(_log).list_export_presets(params)
+			payload = GdhExportPresets.new(_log).list_export_presets(params)
 		"add_export_preset":
-			payload = ExportPresets.new(_log).add_export_preset(params)
+			payload = GdhExportPresets.new(_log).add_export_preset(params)
 		"validate_project":
-			payload = ImportPipeline.new(_log).validate_project(params)
+			payload = GdhImportPipeline.new(_log).validate_project(params)
 
 		# Dependencies and project inspection
 		"get_dependencies":
-			payload = Dependencies.new(_log).get_dependencies(params)
+			payload = GdhDependencies.new(_log).get_dependencies(params)
 		"find_resource_usages":
-			payload = Dependencies.new(_log).find_resource_usages(params)
+			payload = GdhDependencies.new(_log).find_resource_usages(params)
 		"get_project_health":
-			payload = ProjectDiagnostics.new(_log).get_project_health(params)
+			payload = GdhProjectDiagnostics.new(_log).get_project_health(params)
 
 		# project.godot
 		"get_project_setting":
-			payload = ProjectConfig.new(_log).get_project_setting(params)
+			payload = GdhProjectConfig.new(_log).get_project_setting(params)
 		"set_project_setting":
-			payload = ProjectConfig.new(_log).set_project_setting(params)
+			payload = GdhProjectConfig.new(_log).set_project_setting(params)
 		"add_autoload":
-			payload = ProjectConfig.new(_log).add_autoload(params)
+			payload = GdhProjectConfig.new(_log).add_autoload(params)
 		"remove_autoload":
-			payload = ProjectConfig.new(_log).remove_autoload(params)
+			payload = GdhProjectConfig.new(_log).remove_autoload(params)
 		"list_autoloads":
-			payload = ProjectConfig.new(_log).list_autoloads(params)
+			payload = GdhProjectConfig.new(_log).list_autoloads(params)
 		"set_main_scene":
-			payload = ProjectConfig.new(_log).set_main_scene(params)
+			payload = GdhProjectConfig.new(_log).set_main_scene(params)
 
 		# GDScript files
 		"create_script":
-			payload = GdscriptAuthoring.new(_log).create_gdscript(params)
+			payload = GdhGdscriptAuthoring.new(_log).create_gdscript(params)
 		"modify_script":
-			payload = GdscriptAuthoring.new(_log).modify_gdscript(params)
+			payload = GdhGdscriptAuthoring.new(_log).modify_gdscript(params)
 		"get_script_info":
-			payload = GdscriptAnalysis.new(_log).get_gdscript_info(params)
+			payload = GdhGdscriptAnalysis.new(_log).get_gdscript_info(params)
 		"names_taken":
-			payload = RenameChecks.new(_log).names_taken(params)
+			payload = GdhRenameChecks.new(_log).names_taken(params)
 		"check_scripts":
-			payload = ScriptCheck.new(_log).check_scripts(params)
+			payload = GdhScriptCheck.new(_log).check_scripts(params)
 
 		# Plugins and input
 		"list_plugins":
-			payload = Plugins.new(_log).list_plugins(params)
+			payload = GdhPlugins.new(_log).list_plugins(params)
 		"enable_plugin":
-			payload = Plugins.new(_log).enable_plugin(params)
+			payload = GdhPlugins.new(_log).enable_plugin(params)
 		"disable_plugin":
-			payload = Plugins.new(_log).disable_plugin(params)
+			payload = GdhPlugins.new(_log).disable_plugin(params)
 		"add_input_action":
-			payload = InputActions.new(_log).add_input_action(params)
+			payload = GdhInputActions.new(_log).add_input_action(params)
 		"remove_input_action":
-			payload = InputActions.new(_log).remove_input_action(params)
+			payload = GdhInputActions.new(_log).remove_input_action(params)
 
 		# Audio
 		"create_audio_bus":
-			payload = AudioBuses.new(_log).create_audio_bus(params)
+			payload = GdhAudioBuses.new(_log).create_audio_bus(params)
 		"remove_audio_bus":
-			payload = AudioBuses.new(_log).remove_audio_bus(params)
+			payload = GdhAudioBuses.new(_log).remove_audio_bus(params)
 		"get_audio_buses":
-			payload = AudioBuses.new(_log).get_audio_buses(params)
+			payload = GdhAudioBuses.new(_log).get_audio_buses(params)
 		"set_audio_bus_effect":
-			payload = AudioBuses.new(_log).set_audio_bus_effect(params)
+			payload = GdhAudioBuses.new(_log).set_audio_bus_effect(params)
 		"set_audio_bus_volume":
-			payload = AudioBuses.new(_log).set_audio_bus_volume(params)
+			payload = GdhAudioBuses.new(_log).set_audio_bus_volume(params)
 
 		# ClassDB
 		"query_classes":
-			payload = ClassDbQueries.new(_log).query_classes(params)
+			payload = GdhClassDbQueries.new(_log).query_classes(params)
 		"query_class_info":
-			payload = ClassDbQueries.new(_log).query_class_info(params)
+			payload = GdhClassDbQueries.new(_log).query_class_info(params)
 		"inspect_inheritance":
-			payload = ClassDbQueries.new(_log).inspect_inheritance(params)
+			payload = GdhClassDbQueries.new(_log).inspect_inheritance(params)
 
 		_:
 			_log.error("Unknown operation: " + operation)

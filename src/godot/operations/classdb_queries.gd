@@ -1,8 +1,8 @@
 extends RefCounted
 
-const Read = preload("reading.gd")
-const Log = preload("logger.gd")
-const Serialisation = preload("serialisation.gd")
+const GdhRead = preload("reading.gd")
+const GdhLog = preload("logger.gd")
+const GdhSerialisation = preload("serialisation.gd")
 
 # The base classes each category name stands for. Kept to the list the tool's schema offers, which
 # a case holds: the schema offered physics3d and ui, which this refused, and physics answered the 3D
@@ -33,11 +33,11 @@ const METHOD_FLAG_NAMES: Dictionary[int, String] = {
 	METHOD_FLAG_VIRTUAL_REQUIRED: "virtual_required",
 }
 
-var _log: Log
-var _values: Serialisation = Serialisation.new()
+var _log: GdhLog
+var _values: GdhSerialisation = GdhSerialisation.new()
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -53,7 +53,7 @@ static func _under_any(name: String, bases: Array) -> bool:
 func query_classes(params: Dictionary) -> Dictionary:
 	var filter: String = str(params.get("filter", ""))
 	var category: String = str(params.get("category", ""))
-	var instantiable_only: bool = Read.as_bool(params.get("instantiable_only", false))
+	var instantiable_only: bool = GdhRead.as_bool(params.get("instantiable_only", false))
 
 	_log.info(
 		(
@@ -107,7 +107,7 @@ func query_classes(params: Dictionary) -> Dictionary:
 # Query detailed info about a specific class from ClassDB
 func query_class_info(params: Dictionary) -> Dictionary:
 	var class_name_str: String = str(params.get("class_name", ""))
-	var include_inherited: bool = Read.as_bool(params.get("include_inherited", false))
+	var include_inherited: bool = GdhRead.as_bool(params.get("include_inherited", false))
 
 	_log.info(
 		"Querying class info for: " + class_name_str + " (include_inherited: " + str(include_inherited) + ")"
@@ -344,7 +344,7 @@ func _methods_of(class_name_str: String, include_inherited: bool) -> Array[Dicti
 						"class_name": return_info.get("class_name", "")
 					},
 					"flags": m.get("flags", 0),
-					"flag_names": _flag_names(Read.as_int(m.get("flags", 0))),
+					"flag_names": _flag_names(GdhRead.as_int(m.get("flags", 0))),
 					# As values, tagged the way every other answer tags one: JSON writes a Vector2i it is
 					# handed as its text, so TileMapLayer.set_cell's default atlas coords read "(-1, -1)".
 					"default_args": _values.serialize_value(m.get("default_args", []))
@@ -370,12 +370,12 @@ static func _flag_names(flags: int) -> Array[String]:
 # Nil is a value that can be anything when the usage says so, and [param nil_name] otherwise: void
 # for what a method returns, and Variant for an argument or property with no type.
 static func _type_name(info: Dictionary, nil_name: String) -> String:
-	var type: int = Read.as_int(info.get("type", 0))
+	var type: int = GdhRead.as_int(info.get("type", 0))
 	var named: String = str(info.get("class_name", ""))
 	if type == TYPE_OBJECT and not named.is_empty():
 		return named
 	if type == TYPE_NIL:
-		return "Variant" if Read.as_int(info.get("usage", 0)) & PROPERTY_USAGE_NIL_IS_VARIANT else nil_name
+		return "Variant" if GdhRead.as_int(info.get("usage", 0)) & PROPERTY_USAGE_NIL_IS_VARIANT else nil_name
 	return type_string(type)
 
 
@@ -384,7 +384,7 @@ func _properties_of(class_name_str: String, include_inherited: bool) -> Array[Di
 
 	for p: Dictionary in ClassDB.class_get_property_list(class_name_str, not include_inherited):
 		# A category, group or subgroup is an editor heading rather than a property.
-		var usage: int = Read.as_int(p.get("usage", 0))
+		var usage: int = GdhRead.as_int(p.get("usage", 0))
 		if usage & PROPERTY_USAGE_CATEGORY or usage & PROPERTY_USAGE_GROUP or usage & PROPERTY_USAGE_SUBGROUP:
 			continue
 		properties.append(

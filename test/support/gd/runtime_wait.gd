@@ -6,7 +6,7 @@ extends SceneTree
 ## when they are done.
 
 const Checked = preload("checked.gd")
-const Read = preload("res://addons/gdharness_runtime/reading.gd")
+const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 
 ## How tall the room's camera sees, in metres. Against a 480 pixel viewport that is 48 pixels a
@@ -554,7 +554,7 @@ func _check_a_dialog() -> void:
 	var buttons: Dictionary = await node._execute_command(
 		"find_nodes", {"class": "Button", "root": "/root/AreYouSure"}
 	)
-	if Read.as_int(buttons.get("count", 0)) < 2:
+	if GdhRead.as_int(buttons.get("count", 0)) < 2:
 		_fail("a dialog's own buttons should be findable: %s" % str(buttons))
 
 	var answered: Dictionary = await node._execute_command(
@@ -804,21 +804,21 @@ func _check_until_a_reference_is_let_go() -> void:
 		var met: Dictionary = await node._execute_command(
 			"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": null, "timeout_ms": 1000}
 		)
-		if met.get("met") != true or met.get("value") != null or Read.as_int(met.get("frames"), -1) > 5:
+		if met.get("met") != true or met.get("value") != null or GdhRead.as_int(met.get("frames"), -1) > 5:
 			_fail("a reference %s meets a wait for null within frames: %s" % [way, JSON.stringify(met)])
 
 	holder.set("quarrel", null)
 	var as_text: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": "null", "timeout_ms": 1000}
 	)
-	if as_text.get("met") != true or Read.as_int(as_text.get("frames"), -1) != 0:
+	if as_text.get("met") != true or GdhRead.as_int(as_text.get("frames"), -1) != 0:
 		_fail("the text null on a null object property meets at once: %s" % JSON.stringify(as_text))
 	# And on an untyped slot holding null, which declares no type to read against: set already read
 	# the text as null there, and the wait ran out on it.
 	var untyped: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Holder", "property": "loose", "value": "null", "timeout_ms": 1000}
 	)
-	if untyped.get("met") != true or Read.as_int(untyped.get("frames"), -1) != 0:
+	if untyped.get("met") != true or GdhRead.as_int(untyped.get("frames"), -1) != 0:
 		_fail("the text null on an untyped slot holding null meets at once: %s" % JSON.stringify(untyped))
 
 	var number: Dictionary = await node._execute_command(
@@ -910,7 +910,7 @@ func _check_until_something_says_it() -> void:
 	var never: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Panel", "says": "Autumn 4", "timeout_ms": 60}
 	)
-	if never.get("met") != false or Read.as_int(never.get("elapsed_ms", 0)) < 60:
+	if never.get("met") != false or GdhRead.as_int(never.get("elapsed_ms", 0)) < 60:
 		_fail("and give up saying so when they never come: %s" % str(never))
 
 	var nowhere: Dictionary = await node._execute_command(
@@ -958,7 +958,7 @@ func _check_words_on_a_hidden_node_are_not_yet_shown() -> void:
 	var shown: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Panel", "says": "carry on"}
 	)
-	if shown.get("met") != true or Read.as_int(shown.get("elapsed_ms", 0)) < 1:
+	if shown.get("met") != true or GdhRead.as_int(shown.get("elapsed_ms", 0)) < 1:
 		_fail("the wait ends when the button is shown, and not before: %s" % str(shown))
 
 	carry_on.queue_free()

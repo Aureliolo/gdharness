@@ -5,7 +5,7 @@ extends SceneTree
 ## comparison is checked beside the wait that is not met, so a wait meeting everything fails too.
 
 const Checked = preload("checked.gd")
-const Read = preload("res://addons/gdharness_runtime/reading.gd")
+const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 
 
@@ -86,7 +86,7 @@ func _check_physics_steps_through_a_frame_wait() -> void:
 	var waited: Dictionary = await node._execute_command("wait_frames", {"frames": 120})
 	var stepped: int = counter.physics_steps - before
 	var due: int = floori(
-		Read.as_float(waited.get("elapsed_ms", 0)) * Engine.physics_ticks_per_second / 1000.0
+		GdhRead.as_float(waited.get("elapsed_ms", 0)) * Engine.physics_ticks_per_second / 1000.0
 	)
 	if waited.get("type") != "waited" or stepped < due - 2:
 		_fail(
@@ -191,4 +191,4 @@ func _check_what_is_refused() -> void:
 
 
 static func _as_int(value: Variant) -> int:
-	return Read.as_int(value, -1) if typeof(value) == TYPE_INT or typeof(value) == TYPE_FLOAT else -1
+	return GdhRead.as_int(value, -1) if typeof(value) == TYPE_INT or typeof(value) == TYPE_FLOAT else -1

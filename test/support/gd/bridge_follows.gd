@@ -9,7 +9,7 @@ extends SceneTree
 ## server that knows its project says where it landed, inside that project, and this is the half
 ## that reads it.
 
-const BridgeClient = preload("res://addons/gdharness_editor/bridge_client.gd")
+const GdhBridgeClient = preload("res://addons/gdharness_editor/bridge_client.gd")
 const ANNOUNCEMENT: String = "res://.godot/gdharness-bridge.json"
 const PROTOCOL: int = 1
 
@@ -18,7 +18,7 @@ const DEADLINE_MSEC: int = 30000
 
 var failures: Array[String] = []
 
-var _client: BridgeClient
+var _client: GdhBridgeClient
 var _first: TCPServer = TCPServer.new()
 var _second: TCPServer = TCPServer.new()
 var _peer: WebSocketPeer = null
@@ -35,7 +35,7 @@ func _initialize() -> void:
 		return
 
 	_announce(first_port)
-	_client = BridgeClient.new()
+	_client = GdhBridgeClient.new()
 	root.add_child(_client)
 	# No address, so it works one out for itself, which is the thing being tested.
 	_client.connect_to_server()

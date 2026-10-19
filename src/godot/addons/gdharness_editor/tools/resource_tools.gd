@@ -3,11 +3,11 @@ extends Node
 
 ## Resource files, shaders, tilesets and themes, written through the open editor.
 
-const FileReads = preload("../file_reads.gd")
-const HeadlessCheck = preload("../headless_check.gd")
-const PropertyValues = preload("../property_values.gd")
-const Read = preload("../reading.gd")
-const SceneFile = preload("../scene_file.gd")
+const GdhFileReads = preload("../file_reads.gd")
+const GdhHeadlessCheck = preload("../headless_check.gd")
+const GdhPropertyValues = preload("../property_values.gd")
+const GdhRead = preload("../reading.gd")
+const GdhSceneFile = preload("../scene_file.gd")
 
 # The minimal shader of a type: its declaration and the one function the engine calls for it.
 const SHADER_EMPTY: String = """shader_type %s;
@@ -23,7 +23,7 @@ const SHADER_ENTRY: Dictionary[String, String] = {
 const CELLS_SHOWN: int = 1000
 
 var _editor_plugin: EditorPlugin = null
-var _properties: PropertyValues = PropertyValues.new()
+var _properties: GdhPropertyValues = GdhPropertyValues.new()
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
@@ -48,7 +48,7 @@ func _written(path: String) -> void:
 	if ResourceLoader.has_cached(path):
 		var _replaced: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REPLACE)
 	if _editor_plugin:
-		SceneFile.scan_later()
+		GdhSceneFile.scan_later()
 
 
 ## Why a tool that creates [param path] must not write there, or "". Saving over a file that was
@@ -89,12 +89,15 @@ func _xy(value: Variant, label: String) -> Array:
 			x = pair[0]
 			y = pair[1]
 	for number: Variant in [x, y]:
-		if not (number is float or number is int) or Read.as_float(number) != floorf(Read.as_float(number)):
+		if (
+			not (number is float or number is int)
+			or GdhRead.as_float(number) != floorf(GdhRead.as_float(number))
+		):
 			return [
 				false,
 				'%s must be two whole numbers, {"x": .., "y": ..}, not %s.' % [label, JSON.stringify(value)]
 			]
-	return [true, Vector2i(Read.as_int(x), Read.as_int(y))]
+	return [true, Vector2i(GdhRead.as_int(x), GdhRead.as_int(y))]
 
 
 ## The theme on disk at this path, or null when there is not one.
@@ -119,12 +122,12 @@ func _load_theme(theme_path: String) -> Theme:
 ## Read back because a property can be set and still not be saved: one without storage, a
 ## script variable that is not exported. Both were answered as changed.
 func _save_checked(resource: Resource, path: String, names: Array, previous: Variant) -> String:
-	var saving: Error = SceneFile.save_keeping_uid(resource, path)
+	var saving: Error = GdhSceneFile.save_keeping_uid(resource, path)
 	if saving != OK:
 		return "Failed to save %s: %s" % [path, error_string(saving)]
 	var unkept: String = _unkept_headless(resource, path, names, previous)
 	if not unkept.is_empty():
-		return "Nothing was written: " + unkept + HeadlessCheck.put_back(path, previous)
+		return "Nothing was written: " + unkept + GdhHeadlessCheck.put_back(path, previous)
 	var loaded: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
 	var lost: String = ""
 	if loaded == null:
@@ -133,7 +136,7 @@ func _save_checked(resource: Resource, path: String, names: Array, previous: Var
 		for key: Variant in names:
 			var property: String = str(key)
 			var read: Variant = _properties.read_at(loaded, property)
-			if not PropertyValues.same(read, _properties.read_at(resource, property)):
+			if not GdhPropertyValues.same(read, _properties.read_at(resource, property)):
 				lost = (
 					(
 						"%s.%s would load from the file as %s: it is not a property the file keeps, so "
@@ -145,19 +148,19 @@ func _save_checked(resource: Resource, path: String, names: Array, previous: Var
 	if lost.is_empty():
 		_written(path)
 		return ""
-	return lost + HeadlessCheck.put_back(path, previous)
+	return lost + GdhHeadlessCheck.put_back(path, previous)
 
 
 ## Outside the editor, puts back in the file just saved at [param path] what a script that is not a
 ## tool changed and the call did not ask for, [param names] being what it asked for, and answers ""
-## or why that did not hold. See [HeadlessCheck].
+## or why that did not hold. See [GdhHeadlessCheck].
 func _unkept_headless(resource: Resource, path: String, names: Array, previous: Variant) -> String:
 	if Engine.is_editor_hint():
 		return ""
 	var script: Script = resource.get_script()
 	var scripted: bool = script != null and not script.is_tool()
 	if not path.ends_with(".tres"):
-		if scripted or HeadlessCheck.holds_scripted_embedded(resource, {}):
+		if scripted or GdhHeadlessCheck.holds_scripted_embedded(resource, {}):
 			return (
 				(
 					(
@@ -166,7 +169,7 @@ func _unkept_headless(resource: Resource, path: String, names: Array, previous: 
 					)
 					% path
 				)
-				+ HeadlessCheck.REMEDY
+				+ GdhHeadlessCheck.REMEDY
 			)
 		return ""
 	var before: String = ""
@@ -179,15 +182,15 @@ func _unkept_headless(resource: Resource, path: String, names: Array, previous: 
 		var property: String = str(key)
 		asked[property] = true
 		asked[property.get_slice(":", 0)] = true
-		reached.merge(HeadlessCheck.reached(resource, property))
-	return HeadlessCheck.settle_saved(
+		reached.merge(GdhHeadlessCheck.reached(resource, property))
+	return GdhHeadlessCheck.settle_saved(
 		path,
 		before,
-		HeadlessCheck.stored(resource).values(),
+		GdhHeadlessCheck.stored(resource).values(),
 		resource if scripted else null,
 		asked,
 		reached,
-		func() -> Error: return SceneFile.save_keeping_uid(resource, path)
+		func() -> Error: return GdhSceneFile.save_keeping_uid(resource, path)
 	)
 
 
@@ -202,7 +205,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": taken}
 
 	var script_path: String = str(args.get("script", ""))
-	var made: Dictionary = SceneFile.made_as(
+	var made: Dictionary = GdhSceneFile.made_as(
 		resource_type, "" if script_path == "" else _ensure_res_path(script_path), "Resource", "resourceType"
 	)
 	if made.has("error"):
@@ -229,7 +232,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 		var script: Script = load(script_file) as Script
 		if script == null:
 			return {"ok": false, "error": "No script loads from " + script_file}
-		var uncompiled: String = SceneFile.uncompiled(script, script_file)
+		var uncompiled: String = GdhSceneFile.uncompiled(script, script_file)
 		if not uncompiled.is_empty():
 			return {"ok": false, "error": uncompiled}
 		var base: String = str(script.get_instance_base_type())
@@ -245,7 +248,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 	if not refused.is_empty():
 		return {"ok": false, "error": refused}
 
-	var folder: String = SceneFile.make_folder_for(res_path)
+	var folder: String = GdhSceneFile.make_folder_for(res_path)
 	if not folder.is_empty():
 		return {"ok": false, "error": folder}
 	var failed: String = _save_checked(resource, res_path, properties.keys(), null)
@@ -300,7 +303,7 @@ func read_resource(args: Dictionary) -> Dictionary:
 	var inner: String = str(args.get("subResource", ""))
 	if not inner.is_empty():
 		res_path += "::" + inner
-	return FileReads.resource(res_path, Read.as_bool(args.get("includeDefaults", false)))
+	return GdhFileReads.resource(res_path, GdhRead.as_bool(args.get("includeDefaults", false)))
 
 
 func create_shader(args: Dictionary) -> Dictionary:
@@ -316,7 +319,7 @@ func create_shader(args: Dictionary) -> Dictionary:
 	if code == "":
 		code = SHADER_EMPTY % [shader_type, SHADER_ENTRY.get(shader_type, "fragment")]
 
-	var folder: String = SceneFile.make_folder_for(shader_path)
+	var folder: String = GdhSceneFile.make_folder_for(shader_path)
 	if not folder.is_empty():
 		return {"ok": false, "error": folder}
 	var file: FileAccess = FileAccess.open(shader_path, FileAccess.WRITE)
@@ -371,10 +374,10 @@ func create_tileset(args: Dictionary) -> Dictionary:
 			{"sourceId": added, "texture": atlas.texture.resource_path, "tiles": atlas.get_tiles_count()}
 		)
 
-	var folder: String = SceneFile.make_folder_for(tileset_path)
+	var folder: String = GdhSceneFile.make_folder_for(tileset_path)
 	if not folder.is_empty():
 		return {"ok": false, "error": folder}
-	var saving: Error = SceneFile.save_keeping_uid(tileset, tileset_path)
+	var saving: Error = GdhSceneFile.save_keeping_uid(tileset, tileset_path)
 	if saving != OK:
 		return {"ok": false, "error": "Failed to save %s: %s" % [tileset_path, error_string(saving)]}
 
@@ -491,12 +494,12 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	if placed.is_empty():
 		return {"ok": false, "error": "cells is empty, so there is nothing to place"}
 
-	var scene: SceneFile = SceneFile.new()
+	var scene: GdhSceneFile = GdhSceneFile.new()
 	var refused: Dictionary = scene.open(scene_path, true)
 	if not refused.is_empty():
 		return refused
 
-	var layer: int = Read.as_int(args.get("layer", 0))
+	var layer: int = GdhRead.as_int(args.get("layer", 0))
 	var found: Array = _tile_node(scene, node_path, layer)
 	if found[0] == null:
 		return scene.refuse(str(found[1]))
@@ -544,7 +547,7 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 
 ## The node at [param node_path] cells are painted on, with a TileSet, as [node, why not].
 ## TileMapLayer is the node since 4.3, and TileMap the one it replaced, which keeps its layers.
-func _tile_node(scene: SceneFile, node_path: String, layer: int) -> Array:
+func _tile_node(scene: GdhSceneFile, node_path: String, layer: int) -> Array:
 	var node: Node = (
 		scene.root if node_path == "." or node_path == "" else scene.root.get_node_or_null(node_path)
 	)
@@ -582,12 +585,12 @@ func _cell(entry: Variant, index: int, tile_set: TileSet) -> Array:
 	var atlas_at: Array = _xy(cell["atlasCoords"], "cells[%d].atlasCoords" % index)
 	if not atlas_at[0]:
 		return atlas_at
-	var source_id: int = Read.as_int(cell["sourceId"], -1)
+	var source_id: int = GdhRead.as_int(cell["sourceId"], -1)
 	if not tile_set.has_source(source_id):
 		return [false, "The TileSet has no source %d; it has %s" % [source_id, _source_ids(tile_set)]]
 	var source: TileSetSource = tile_set.get_source(source_id)
 	var atlas_coords: Vector2i = atlas_at[1]
-	var alternative: int = Read.as_int(cell.get("alternativeTile", 0))
+	var alternative: int = GdhRead.as_int(cell.get("alternativeTile", 0))
 	if not source.has_tile(atlas_coords):
 		return [
 			false,
@@ -691,12 +694,12 @@ func _cell_at(node: Node, layer: int, at: Vector2i) -> Array:
 ## Saves [param theme] over [param theme_path] with [param item] changed, answering "" or why not.
 func _save_theme(theme: Theme, theme_path: String, item: String) -> String:
 	var previous: PackedByteArray = FileAccess.get_file_as_bytes(theme_path)
-	var saving: Error = SceneFile.save_keeping_uid(theme, theme_path)
+	var saving: Error = GdhSceneFile.save_keeping_uid(theme, theme_path)
 	if saving != OK:
 		return "Failed to save %s: %s" % [theme_path, error_string(saving)]
 	var unkept: String = _unkept_headless(theme, theme_path, [item], previous)
 	if not unkept.is_empty():
-		return "Nothing was written: " + unkept + HeadlessCheck.put_back(theme_path, previous)
+		return "Nothing was written: " + unkept + GdhHeadlessCheck.put_back(theme_path, previous)
 	_written(theme_path)
 	return ""
 
@@ -717,10 +720,10 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 
 	var c: Dictionary = args.get("color", {})
 	var color: Color = Color(
-		Read.as_float(c.get("r", 1.0), 1.0),
-		Read.as_float(c.get("g", 1.0), 1.0),
-		Read.as_float(c.get("b", 1.0), 1.0),
-		Read.as_float(c.get("a", 1.0), 1.0)
+		GdhRead.as_float(c.get("r", 1.0), 1.0),
+		GdhRead.as_float(c.get("g", 1.0), 1.0),
+		GdhRead.as_float(c.get("b", 1.0), 1.0),
+		GdhRead.as_float(c.get("a", 1.0), 1.0)
 	)
 	theme.set_color(color_name, control_type, color)
 
@@ -760,7 +763,7 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 
 	# Godot reads a size of 0 or less as unset and answers the theme's default, so -3 would be read
 	# back as 16.
-	var pixels: float = Read.as_float(args.get("size"), 0.0)
+	var pixels: float = GdhRead.as_float(args.get("size"), 0.0)
 	if not is_finite(pixels) or pixels < 1 or pixels != floorf(pixels):
 		var shown: String = str(int(pixels)) if pixels == floorf(pixels) else str(pixels)
 		return {
