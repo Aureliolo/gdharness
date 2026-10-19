@@ -20474,6 +20474,57 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         'res://made/listed.gd',
         'because the class list on disk now holds it',
       );
+
+      // A file that is not GDScript is refused with what does write it.
+      const shaderText = 'shader_type canvas_item;\n\nuniform vec4 tint : source_color;\n';
+      writeFileSync(join(project, 'kept.gdshader'), shaderText);
+      writeFileSync(join(project, 'notes.txt'), 'notes\n');
+      for (const [args, refusal] of [
+        [
+          { op: 'create', scriptPath: 'res://tint.gdshader' },
+          'res://tint.gdshader is not a .gd file, and script_edit makes GDScript only. resource_edit create_shader makes a shader, with its source as code.',
+        ],
+        [
+          {
+            op: 'modify',
+            scriptPath: 'res://kept.gdshader',
+            modifications: [{ type: 'add_variable', name: 'sides', varType: 'int' }],
+          },
+          "res://kept.gdshader is not a .gd file, and script_edit changes GDScript only. A shader's text is edited as a file.",
+        ],
+        [
+          { op: 'create', scriptPath: 'res://notes.txt' },
+          'res://notes.txt is not a .gd file, and script_edit makes GDScript only.',
+        ],
+      ] as const) {
+        assert.equal(
+          textOf(
+            await server.request(
+              'tools/call',
+              { name: 'script_edit', arguments: { projectPath: project, ...args } },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          ),
+          refusal,
+        );
+      }
+      assert.ok(!existsSync(join(project, 'tint.gdshader')), 'the refused create writes nothing');
+      assert.equal(readFileSync(join(project, 'kept.gdshader'), 'utf8'), shaderText);
+      assert.equal(readFileSync(join(project, 'notes.txt'), 'utf8'), 'notes\n');
+      const shaderCode = `${shaderText}\nvoid fragment() {\n\tCOLOR *= tint;\n}\n`;
+      const shader = await call('resource_edit', {
+        projectPath: project,
+        op: 'create_shader',
+        resourcePath: 'res://tint.gdshader',
+        shaderType: 'canvas_item',
+        code: shaderCode,
+      });
+      assert.equal(get(shader, 'shaderPath'), 'res://tint.gdshader', JSON.stringify(shader));
+      assert.equal(
+        readFileSync(join(project, 'tint.gdshader'), 'utf8'),
+        shaderCode,
+        'and the tool the refusal names writes the shader',
+      );
     } finally {
       await server.stop();
     }
