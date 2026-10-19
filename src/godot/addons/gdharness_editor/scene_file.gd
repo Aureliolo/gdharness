@@ -62,7 +62,8 @@ var _asked: Dictionary = {}
 var _before: Dictionary = {}
 ## Each copy a tool made, by instance id, to the instance id of the node it copies.
 var _copied_from: Dictionary = {}
-## The embedded resources a tool reached into through an indexed property, by their id in the file.
+## What a tool wrote in the embedded resources it reached into, by their id in the file, as
+## [method GdhHeadlessCheck.reached] answers it.
 var _reached: Dictionary = {}
 ## The file as it was opened, to compare its embedded resources with what the write saves.
 var _text: String = ""
@@ -140,7 +141,7 @@ func asked(node: Node, names: Array) -> void:
 		var property: String = str(name)
 		on[property] = true
 		on[property.get_slice(":", 0)] = true
-		_reached.merge(GdhHeadlessCheck.reached(node, property))
+		GdhHeadlessCheck.spare(_reached, GdhHeadlessCheck.reached(node, property))
 
 
 ## Takes [param resource], built into the scene, as one the tool changed, which a write saves as it is.

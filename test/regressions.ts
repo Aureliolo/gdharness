@@ -15072,10 +15072,12 @@ async function testACallTheSystemHoldsIsNotSent(): Promise<void> {
           ENGINE_CALL_TIMEOUT_MS,
         ),
       ) ?? '';
+    // Windows refuses each dial and the server dials again 50ms later, so the wait can end between
+    // two dials or during one, and the answer says which.
     assert.match(
       answer,
       process.platform === 'win32'
-        ? /is running but nothing answered on its port: it refused all \d+ connections tried within 2000ms\. .*Nothing was sent, so nothing ran\./
+        ? /is running but nothing answered on its port: it refused (?:all \d+ connections tried within|\d+ connections and had not accepted the next when the wait ended, after) 2000ms\. .*Nothing was sent, so nothing ran\./
         : /'get_property' was not sent to the game \(.*\) within 2000ms: its port had not accepted the connection, which is how Linux and macOS hold one while the game's queue is full, .*Nothing was sent, so nothing ran\./,
       answer,
     );
@@ -44580,7 +44582,8 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       '[node name="Panel" type="Control" parent="."]\nanchors_preset = 15\nanchor_right = 1.0\nanchor_bottom = 1.0\n',
     'stats.gd':
       'class_name Stats\nextends Resource\n\n@export var max_hp: int = 10:\n\tset(value):\n\t\tmax_hp = value\n\t\thp = value\n' +
-      '@export var hp: int = 10\n@export var tags: PackedStringArray = PackedStringArray()\n\n\n' +
+      '@export var hp: int = 10\n@export var tags: PackedStringArray = PackedStringArray()\n' +
+      '@export var spot: Vector2 = Vector2.ZERO\n\n\n' +
       'func _init() -> void:\n\tresource_name = "made by _init"\n',
     'stats.tres': `[gd_resource type="Resource" format=3 uid="uid://cstatshw4"]\n\n${stats}[resource]\nscript = ExtResource("1_stats")\nmax_hp = 20\n`,
     'keeps.gd': 'extends Node\n\n@export var stats: Resource\n',
@@ -45080,6 +45083,18 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       sets('pack.tres', '[sub_resource type="Resource"'),
       ['script = ExtResource', 'max_hp = 20', tags],
       'an embedded resource of a resource file keeps what it held too',
+    );
+    // Reached by a slash path, the scripted resource built into the file keeps what was written to
+    // it, which the check for what its script changed would otherwise put back.
+    await written('resource_edit', {
+      op: 'modify',
+      resourcePath: 'pack.tres',
+      properties: { 'inner/hp': 7, 'inner/spot:x': 3 },
+    });
+    assert.deepEqual(
+      sets('pack.tres', '[sub_resource type="Resource"'),
+      ['script = ExtResource', 'max_hp = 20', 'hp = 7', tags, 'spot = Vector2(3, 0)'],
+      fileOf('pack.tres'),
     );
 
     await written('scene_node', {
@@ -47392,6 +47407,50 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       'res://set.tres already exists, and create_tileset builds a whole new TileSet, which would replace everything in it, the tiles a scene paints with among them. Give resourcePath a path nothing is at.',
     );
 
+    // A layer the TileSet has none of yet is made by writing to it, and so is a tile's polygon on
+    // it, reached in the atlas source the TileSet holds; one past the next is refused.
+    const set = { op: 'modify', resourcePath: 'res://set.tres' };
+    const square = [
+      [-1, -1],
+      [1, -1],
+      [1, 1],
+      [-1, 1],
+    ];
+    assert.equal(
+      textOf(await call('resource_edit', { ...set, properties: { 'physics_layer_1/collision_layer': 1 } })),
+      'TileSet has 0 physics layers, and a new one goes after the last, so physics_layer_1 cannot be written yet: write physics_layer_0 first.',
+    );
+    const layered = await call('resource_edit', {
+      ...set,
+      properties: {
+        'physics_layer_0/collision_layer': 2,
+        'sources/0/0:0/0/physics_layer_0/polygon_0/points': square,
+      },
+    });
+    assert.equal(get(parseTextContent(layered), 'resourcePath'), 'res://set.tres', textOf(layered) ?? '');
+    assert.match(fileOf('set.tres'), /^physics_layer_0\/collision_layer = 2$/m, fileOf('set.tres'));
+    assert.match(
+      fileOf('set.tres'),
+      /^0:0\/0\/physics_layer_0\/polygon_0\/points = PackedVector2Array\(-1, -1, 1, -1, 1, 1, -1, 1\)$/m,
+      fileOf('set.tres'),
+    );
+    // A list inside a list grows through its own add method, given the index of the one around it.
+    const terrains = await call('resource_edit', {
+      ...set,
+      properties: { 'terrain_set_0/mode': 1, 'terrain_set_0/terrain_0/name': 'Grass' },
+    });
+    assert.equal(get(parseTextContent(terrains), 'resourcePath'), 'res://set.tres', textOf(terrains) ?? '');
+    assert.match(fileOf('set.tres'), /^terrain_set_0\/terrain_0\/name = "Grass"$/m, fileOf('set.tres'));
+    assert.equal(
+      textOf(
+        await call('resource_edit', {
+          ...set,
+          properties: { 'sources/0/1:0/0/physics_layer_0/polygon_1/points': square },
+        }),
+      ),
+      '1:0/0/physics_layer_0 has 0 polygons, and a new one goes after the last, so 1:0/0/physics_layer_0/polygon_1 cannot be written yet: write 1:0/0/physics_layer_0/polygon_0 first.',
+    );
+
     // A cell wholly transparent gets no tile, and a strip the tile size does not reach is in none,
     // and the answer names both rather than leaving a count to be worked back.
     writeFileSync(
@@ -47423,10 +47482,38 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     // Every cell refused is named by where it is, and -1 erases one, as set_cell takes it.
     writeFileSync(
       join(project, 'map.tscn'),
-      '[gd_scene format=3]\n\n[node name="Map" type="Node2D"]\n\n[node name="Ground" type="TileMapLayer" parent="."]\n',
+      '[gd_scene format=3]\n\n[node name="Map" type="Node2D"]\n\n[node name="Ground" type="TileMapLayer" parent="."]\n\n' +
+        '[node name="Built" type="TileMapLayer" parent="."]\n',
     );
     const map = { scenePath: 'res://map.tscn', nodePath: 'Ground' };
     await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://set.tres' } });
+    // A TileSet kept in its own file is written there, and one built into the scene through it.
+    assert.equal(
+      textOf(
+        await call('scene_node', {
+          ...map,
+          op: 'set',
+          properties: { 'tile_set/physics_layer_1/collision_layer': 4 },
+        }),
+      ),
+      'TileMapLayer.tile_set is res://set.tres, a file of its own, so physics_layer_1/collision_layer is written there, with resource_edit modify on res://set.tres.',
+    );
+    const built = { scenePath: 'res://map.tscn', nodePath: 'Built', op: 'set' };
+    await call('scene_node', { ...built, properties: { tile_set: { _type: 'TileSet' } } });
+    const reachedIn = await call('scene_node', {
+      ...built,
+      properties: { 'tile_set/physics_layer_0/collision_layer': 8 },
+    });
+    assert.deepEqual(
+      get(parseTextContent(reachedIn), 'properties'),
+      { 'tile_set/physics_layer_0/collision_layer': 8 },
+      textOf(reachedIn) ?? '',
+    );
+    assert.match(
+      fileOf('map.tscn'),
+      /\[sub_resource type="TileSet" id="[^"]+"\]\nphysics_layer_0\/collision_layer = 8\n/,
+      fileOf('map.tscn'),
+    );
     const paint = async (cells: unknown[]): Promise<JsonRpcMessage> =>
       await call('scene_node', { ...map, op: 'set_tilemap_cells', cells });
     assert.equal(

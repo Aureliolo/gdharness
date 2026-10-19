@@ -45,8 +45,8 @@ that preloads its logger as `Log`. The engine leg's `ourNames` case refuses a na
 prefix and compiles the shipped scripts beside a class and an autoload for each name.
 
 The modules listed in `scripts/sync-shared-gd.ts` (`reading.gd`, `serialisation.gd`,
-`value_shapes.gd`, `property_values.gd`, `declared_values.gd`, `same_values.gd`, `file_reads.gd`,
-`file_walk.gd` and `animation_reads.gd`) are edited in
+`value_shapes.gd`, `property_values.gd`, `property_paths.gd`, `declared_values.gd`,
+`same_values.gd`, `file_reads.gd`, `file_walk.gd` and `animation_reads.gd`) are edited in
 `src/godot/operations/` only; `bun run sync:gd` writes the copies inside the addons, and a
 regression fails on a copy that has drifted. Commit the `.gd.uid` Godot writes beside every new
 addon script, and add a new operations module to the list in `test/packaging-consistency.ts`.

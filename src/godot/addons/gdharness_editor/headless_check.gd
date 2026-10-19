@@ -11,6 +11,7 @@ extends RefCounted
 ## both, so a property a built-in setter derives (a Control's offsets from its size) is left alone
 ## unless a script that is not a tool is involved.
 
+const GdhPropertyPaths = preload("property_paths.gd")
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
 
@@ -125,23 +126,41 @@ static func at_default(object: Object, name: String) -> bool:
 	return GdhSame.same(object.get(name), default_of(object, name))
 
 
-## The ids, in the file, of the embedded resources [param property] reaches into on [param object],
-## such as the material of [code]material:albedo_color[/code], as a set.
+## What [param property] writes in the embedded resource it reaches into on [param object], by its
+## id in the file, as the set of names written in it: the hp of the resource built in as inner for
+## [code]inner/hp[/code], or position for [code]inner/position:x[/code]. Only those names are spared
+## from the check for what a script changed: the resource's _init still ran when it was loaded, and
+## sparing the whole resource saved what that set.
 static func reached(object: Object, property: String) -> Dictionary:
 	var ids: Dictionary = {}
-	var parts: PackedStringArray = property.split(":")
-	var current: Variant = object
-	for index: int in parts.size() - 1:
-		if not current is Object:
-			break
-		var holder: Object = current
-		current = holder.get(parts[index])
-		if current is Resource:
-			var resource: Resource = current
-			var id: String = resource.get_scene_unique_id()
-			if not id.is_empty():
-				ids[id] = true
+	var place: Array = GdhPropertyPaths.holder_of(object, property)
+	var through: Array[Resource] = place[2]
+	if through.is_empty():
+		return ids
+	var holder: Resource = through.back()
+	var name: String = place[1]
+	if GdhPropertyPaths.declared_on(holder, name).is_empty():
+		name = name.get_slice(":", 0)
+	var id: String = holder.get_scene_unique_id()
+	if not id.is_empty():
+		ids[id] = {name: true}
 	return ids
+
+
+## Adds what [param more] spares to [param into], both as [method reached] answers them; true for an
+## id spares the whole resource, as one a tool rebuilt.
+static func spare(into: Dictionary, more: Dictionary) -> void:
+	for id: Variant in more:
+		var held: Variant = into.get(id)
+		var given: Variant = more[id]
+		if held is bool or given is bool:
+			into[id] = true
+		elif held is Dictionary:
+			var names: Dictionary = held
+			var added: Dictionary = given
+			names.merge(added)
+		else:
+			into[id] = given
 
 
 ## Whether [param object] holds, at any depth, an embedded resource with a script that is not a tool.
@@ -315,9 +334,9 @@ static func scripted_sections(text: String) -> Dictionary:
 
 ## Each property an embedded resource of [param after] sets differently from [param before], as
 ## [its id, name, whether before sets it, the text before gives it, the text after gives it or
-## null]. Only those with a script that
-## is not a tool are compared, since only a script runs differently here, and those in
-## [param reached_ids], which the tool changed, are left out.
+## null]. Only those with a script that is not a tool are compared, since only a script runs
+## differently here, and what [param reached_ids] says the tool wrote is left out, as
+## [method reached] answers it.
 static func embedded_changes(before: String, after: String, reached_ids: Dictionary) -> Array[Array]:
 	var changed: Array[Array] = []
 	if before.is_empty():
@@ -327,8 +346,10 @@ static func embedded_changes(before: String, after: String, reached_ids: Diction
 	for key: Variant in scripted_sections(before):
 		var section: String = str(key)
 		var id: String = section.trim_prefix("sub:")
-		if not section.begins_with("sub:") or reached_ids.has(id) or not new.has(section):
+		var spared: Variant = reached_ids.get(id, {})
+		if not section.begins_with("sub:") or spared is bool or not new.has(section):
 			continue
+		var written: Dictionary = spared
 		var was_section: Dictionary = old[section]
 		var now_section: Dictionary = new[section]
 		var was: Dictionary = entries_of(was_section)
@@ -337,7 +358,7 @@ static func embedded_changes(before: String, after: String, reached_ids: Diction
 		all.merge(now)
 		for entry: Variant in all:
 			var name: String = str(entry)
-			if was.get(name) != now.get(name):
+			if was.get(name) != now.get(name) and not written.has(name):
 				changed.append([id, name, was.has(name), str(was.get(name, "")), now.get(name)])
 	return changed
 

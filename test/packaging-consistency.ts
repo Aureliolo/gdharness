@@ -91,6 +91,7 @@ const operationsModules = [
   'project_config.gd',
   'project_diagnostics.gd',
   'project_file.gd',
+  'property_paths.gd',
   'property_values.gd',
   'reading.gd',
   'rename_checks.gd',

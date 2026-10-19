@@ -183,7 +183,7 @@ func _unkept_headless(resource: Resource, path: String, names: Array, previous: 
 		var property: String = str(key)
 		asked[property] = true
 		asked[property.get_slice(":", 0)] = true
-		reached.merge(GdhHeadlessCheck.reached(resource, property))
+		GdhHeadlessCheck.spare(reached, GdhHeadlessCheck.reached(resource, property))
 	return GdhHeadlessCheck.settle_saved(
 		path,
 		before,
