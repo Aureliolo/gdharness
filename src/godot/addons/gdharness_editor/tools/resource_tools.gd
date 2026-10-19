@@ -252,7 +252,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 	if not folder.is_empty():
 		return {"ok": false, "error": folder}
 	var answer: Dictionary = {"ok": true, "resourcePath": res_path, "resourceType": asked_type}
-	_properties.note_also_changed(answer)
+	_properties.note_write(answer)
 	var failed: String = _save_checked(resource, res_path, properties.keys(), null)
 	if not failed.is_empty():
 		return {"ok": false, "error": failed}
@@ -290,7 +290,7 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	if not refused.is_empty():
 		return {"ok": false, "error": refused}
 	var answer: Dictionary = {"ok": true, "resourcePath": res_path}
-	_properties.note_also_changed(answer)
+	_properties.note_write(answer)
 	var previous: PackedByteArray = FileAccess.get_file_as_bytes(res_path)
 	var failed: String = _save_checked(resource, res_path, properties.keys(), previous)
 	if not failed.is_empty():

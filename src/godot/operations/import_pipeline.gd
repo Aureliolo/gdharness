@@ -471,13 +471,13 @@ func validate_project(params: Dictionary) -> Dictionary:
 	# stops the export's game at the first scene using it, which the comment check above never saw.
 	var compiled: Dictionary = params.get("compiled", {})
 	if compiled.has("checked"):
-		checks_performed.append("script_compile")
+		checks_performed.append("compiles")
 	var failures: Array = compiled.get("failures", [])
 	for failure: Dictionary in failures:
 		issues.append(
 			_finding(
 				"error",
-				"script_compile",
+				"compiles",
 				GdhScriptCheck.failure_line(failure),
 				"script_diagnostics gives every error in it with its line",
 				include_suggestions

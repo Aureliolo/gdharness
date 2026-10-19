@@ -2005,6 +2005,15 @@ function testOperations(godotPath: string, projectDir: string): void {
     /Class not found: FixtureNobody\. editor_classes reads the engine's ClassDB/,
     nowhere.stderr,
   );
+  // A letter short of an engine class is offered the class, as the usual miss is a spelling.
+  const misspelt = runRefusedOperation(godotPath, projectDir, 'query_class_info', {
+    class_name: 'CharacterBody2',
+  });
+  assert.match(
+    misspelt.stderr,
+    /Class not found: CharacterBody2\. The nearest engine classes are CharacterBody2D, CharacterBody3D[,.].* editor_classes reads the engine's ClassDB/,
+    misspelt.stderr,
+  );
 }
 
 /**

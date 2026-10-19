@@ -53,7 +53,7 @@ export function withNearestFiles(said: string, wanted: string, files: readonly s
 }
 
 /** Up to three of [param names] closest to [param word], closest first, ignoring case. */
-function nearest(word: string, names: readonly string[]): string[] {
+export function nearest(word: string, names: readonly string[]): string[] {
   const wanted = word.toLowerCase();
   const score = (name: string): number => similarity(name.toLowerCase(), wanted);
   return names

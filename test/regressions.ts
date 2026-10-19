@@ -18752,7 +18752,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     );
     assert.deepEqual(
       asArray(get(judged, 'validation', 'issues')).map((issue) => get(issue, 'check')),
-      ['main_scene', 'script_compile', 'script_compile', 'script_compile', 'references'],
+      ['main_scene', 'compiles', 'compiles', 'compiles', 'references'],
       shownInfo,
     );
     assert.equal(get(judged, 'validation', 'valid'), false, shownInfo);
@@ -39095,6 +39095,275 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
 }
 
 /**
+ * A write reads what the property declares. A probe of a project resource found the declaration
+ * unread four ways: an enum refused its value's name as text that could not become an int, 1 and 2
+ * for an Array[String] were saved as "1.0" and "2.0" and answered as written, 12 went past
+ * @export_range(0, 10) without a word, and a picture never imported was "No resource at" a path
+ * that held one.
+ */
+async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('declared values regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-declared-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-declared-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Declared"\n',
+  );
+  writeFileSync(
+    join(project, 'item_data.gd'),
+    'class_name ItemData\nextends Resource\n\nenum Kind { SWORD, SHIELD, POTION }\n\n' +
+      '@export var title: String = ""\n@export var kind: Kind = Kind.SWORD\n@export var tags: Array[String] = []\n' +
+      '@export var icon: Texture2D\n@export_range(0, 10) var rarity: int = 0\n@export_range(0, 10, 1, "or_greater") var level: int = 0\n',
+  );
+  writeFileSync(
+    join(project, 'icon.svg'),
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#3366ff"/></svg>\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const request = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  const modify = async (properties: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await request('resource_edit', { op: 'modify', resourcePath: 'res://sword.tres', properties });
+  const written = async (properties: Record<string, unknown>): Promise<unknown> => {
+    const response = await modify(properties);
+    const answer = parseTextContent(response);
+    assert.ok(
+      answer !== null,
+      `${JSON.stringify(properties)}: ${textOf(response) ?? JSON.stringify(response)}`,
+    );
+    return answer;
+  };
+  const refused = async (properties: Record<string, unknown>): Promise<string> => {
+    const response = await modify(properties);
+    assert.equal(get(response, 'result', 'isError'), true, `${JSON.stringify(properties)} is refused`);
+    return textOf(response) ?? '';
+  };
+  const file = (): string => readFileSync(join(project, 'sword.tres'), 'utf8');
+  try {
+    await server.initialize('regression-test');
+    const made = parseTextContent(
+      await request('resource_edit', {
+        op: 'create',
+        resourcePath: 'res://sword.tres',
+        resourceType: 'Resource',
+        script: 'res://item_data.gd',
+      }),
+    );
+    assert.equal(get(made, 'resourcePath'), 'res://sword.tres', JSON.stringify(made));
+
+    // An enum by the name of a value, as written and in another case, and by its number.
+    await written({ kind: 'POTION' });
+    assert.match(file(), /^kind = 2$/m, file());
+    await written({ kind: 'shield' });
+    assert.match(file(), /^kind = 1$/m, file());
+    const unknown = await refused({ kind: 'AXE' });
+    assert.match(
+      unknown,
+      /ItemData\.kind is an enum, and AXE is none of its values: send SWORD \(0\), SHIELD \(1\), POTION \(2\) by name or by number\.$/m,
+      unknown,
+    );
+    const misspelt = await refused({ kind: 'SHIELDS' });
+    assert.match(misspelt, /by name or by number\. The nearest is SHIELD\./, misspelt);
+    assert.match(file(), /^kind = 1$/m, 'a refused name leaves the file as it was');
+    const beyond = await written({ kind: 7 });
+    assert.deepEqual(
+      get(beyond, 'outsideDeclared'),
+      { kind: '7 is none of the values kind declares: SWORD (0), SHIELD (1), POTION (2).' },
+      JSON.stringify(beyond),
+    );
+    assert.match(file(), /^kind = 7$/m, 'a number outside the enum is still written as given');
+
+    // A number for text is refused rather than saved as the text of a double.
+    const listed = await refused({ tags: [1, 2] });
+    assert.match(
+      listed,
+      /ItemData\.tags is Array and item 0 of the list given is float, not String\. Text is sent in quotes, as "1"\. Setting it would save a different value/,
+      listed,
+    );
+    const titled = await refused({ title: 5 });
+    assert.match(
+      titled,
+      /ItemData\.title is String and the value given is float, which cannot become one\. Text is sent in quotes, as "5"\./,
+      titled,
+    );
+    await written({ tags: ['1', '2'] });
+    assert.match(file(), /^tags = Array\[String\]\(\["1", "2"\]\)$/m, file());
+
+    // A refusal of one of several says the others were not written either, and they were not.
+    const together = await refused({ title: 'Sword', kind: 'AXE' });
+    assert.match(together, / None of the 2 properties given was written\.$/m, together);
+    assert.doesNotMatch(file(), /^title = /m, file());
+    assert.doesNotMatch(
+      await refused({ kind: 'AXE' }),
+      /None of the/,
+      'one property refused alone says nothing of others',
+    );
+
+    // Past a range closed on that side is named; past one open on it, or inside it, is not.
+    const ranged = await written({ rarity: 12, level: 40 });
+    assert.deepEqual(
+      get(ranged, 'outsideDeclared'),
+      {
+        rarity:
+          '12 is outside the range rarity declares, 0 to 10, which the inspector holds it to; the engine stores it as given.',
+      },
+      JSON.stringify(ranged),
+    );
+    assert.match(file(), /^rarity = 12$/m, file());
+    assert.equal(get(await written({ rarity: 4 }), 'outsideDeclared'), undefined);
+
+    // A picture that is there and never imported is told apart from one that is not there, and the
+    // remedy given makes the write go through.
+    const raw = await refused({ icon: 'res://icon.svg' });
+    assert.match(
+      raw,
+      /res:\/\/icon\.svg is there, but it has never been imported, so the engine has no resource to load from it for icon\. project_import reimport with resourcePath res:\/\/icon\.svg imports it\./,
+      raw,
+    );
+    assert.match(
+      await refused({ icon: 'res://nowhere.svg' }),
+      /No resource at res:\/\/nowhere\.svg for icon/,
+    );
+    const imported = await request('project_import', { op: 'reimport', resourcePath: 'res://icon.svg' });
+    assert.ok(existsSync(join(project, 'icon.svg.import')), textOf(imported) ?? JSON.stringify(imported));
+    await written({ icon: 'res://icon.svg' });
+    assert.match(file(), /path="res:\/\/icon\.svg"/, file());
+
+    const read = parseTextContent(
+      await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' }),
+    );
+    assert.deepEqual(
+      [get(read, 'resourceType'), get(read, 'scriptClass'), get(read, 'script')],
+      ['Resource', 'ItemData', 'res://item_data.gd'],
+      JSON.stringify(read),
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A run of named cases. gdUnit4 takes suites and leaves cases out, so a probe that wanted one case
+ * ran its suite with every other case under ignore, by names it had to read off the file first.
+ */
+async function testATestRunTakesTheCasesNamed(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('named cases regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-named-cases-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="NamedCases"\n',
+    );
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(project, 'test', 'more'), { recursive: true });
+    const suite = (cases: Record<string, boolean>): string =>
+      `extends GdUnitTestSuite\n${Object.entries(cases)
+        .map(([name, passes]) => `\n\nfunc ${name}() -> void:\n\tassert_bool(${String(passes)}).is_true()\n`)
+        .join('')}`;
+    writeFileSync(
+      join(project, 'test', 'math_test.gd'),
+      suite({ test_adds: true, test_doubles: false, test_halves: true }),
+    );
+    writeFileSync(
+      join(project, 'test', 'more', 'math_extra_test.gd'),
+      suite({ test_doubles: true, test_adds: true }),
+    );
+    // A test_ function in a script gdUnit4 does not run, which the selection reads as a case all the same.
+    writeFileSync(
+      join(project, 'test', 'helper.gd'),
+      'extends RefCounted\n\n\nfunc test_fixture() -> void:\n\tpass\n',
+    );
+    await withStdioServer(async (_call, request) => {
+      const run = async (args: Record<string, unknown>): Promise<{ text: string; answer: unknown }> => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project, path: 'res://test', ...args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        return {
+          text: blocks.join('\n'),
+          answer: JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown,
+        };
+      };
+      const failedIn = (answer: unknown): string[] =>
+        asArray(get(answer, 'failed')).map((one) => `${text(get(one, 'path'))}:${text(get(one, 'name'))}`);
+
+      // A bare name takes the case from every suite declaring it, and nothing else.
+      const doubles = await run({ tests: ['test_doubles'] });
+      assert.deepEqual(
+        [get(doubles.answer, 'tests'), get(doubles.answer, 'failures'), failedIn(doubles.answer)],
+        [2, 1, ['res://test/math_test.gd:test_doubles']],
+        doubles.text,
+      );
+      // A suite by its file name or its path narrows it to that suite.
+      const one = await run({
+        tests: ['math_extra_test:test_doubles', 'res://test/math_test.gd:test_halves'],
+      });
+      assert.deepEqual(
+        [get(one.answer, 'tests'), get(one.answer, 'failures'), get(one.answer, 'passed')],
+        [2, 0, true],
+        one.text,
+      );
+      // A name no suite declares is refused before an engine starts, with the nearest names.
+      const misspelt = await run({ tests: ['test_dobles'] });
+      assert.match(
+        misspelt.text,
+        /^No suite under res:\/\/test has a case test_dobles\. The nearest are test_doubles, /m,
+        misspelt.text,
+      );
+      const elsewhere = await run({ tests: ['math_extra_test:test_halves'] });
+      assert.match(
+        elsewhere.text,
+        /^No suite under res:\/\/test has a case math_extra_test:test_halves\. The nearest /m,
+        elsewhere.text,
+      );
+      // A case read off a file gdUnit4 never ran is named, and the run is not called passed.
+      const unrun = await run({ tests: ['test_fixture', 'math_test:test_adds'] });
+      assert.deepEqual(
+        [
+          get(unrun.answer, 'tests'),
+          get(unrun.answer, 'testsNotRun'),
+          get(unrun.answer, 'passed'),
+          get(unrun.answer, 'verdict'),
+        ],
+        [1, ['helper:test_fixture'], false, 'passed; not run: helper:test_fixture'],
+        unrun.text,
+      );
+      assert.match(
+        text(get(unrun.answer, 'note')),
+        /helper:test_fixture was asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite/,
+        unrun.text,
+      );
+    });
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * A project setting takes a value the way a property write does.
  *
  * Settings were built from the value alone, so a vector written as its fields without a tag was a
@@ -46088,6 +46357,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASettingTakesWhatAPropertyTakes,
   testAnElementIsToldWhatItsTypeTakes,
   testAWriteSaysWhatElseItChanged,
+  testAWriteReadsWhatThePropertyDeclares,
+  testATestRunTakesTheCasesNamed,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,

@@ -300,6 +300,7 @@ import {
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
 // array element, so a path full of backslashes, spaces or quotes is just a path.
 import { runHidden as run, spawnHidden } from './spawn.js';
+import { selectTests } from './test-selection.js';
 import {
   asParams,
   readArray,
@@ -6069,7 +6070,7 @@ class GodotServer {
     const detailed = args['detail'] === 'full';
     // Both sections judge the scripts, and only engines started here can: the one running a
     // section stops reading at the first script that fails, as every engine does. Once for both.
-    const compiled =
+    const compiledScripts =
       include.includes('health') || include.includes('validation')
         ? await this.compiledForProjectInfo(project.value.path)
         : undefined;
@@ -6080,7 +6081,9 @@ class GodotServer {
       }
       const params = {
         ...spec.params(args, detailed),
-        ...(compiled !== undefined && (section === 'health' || section === 'validation') ? { compiled } : {}),
+        ...(compiledScripts !== undefined && (section === 'health' || section === 'validation')
+          ? { compiled: compiledScripts }
+          : {}),
       };
       const outcome = await this.operation(spec.operation, params, project.value.path);
       info[section] = outcome.ok
@@ -6415,6 +6418,10 @@ class GodotServer {
         'Install gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4',
       ]);
     }
+    const selection = selectTests(project.value.path, asked, args['tests']);
+    if (!selection.ok) {
+      return this.createErrorResponse(selection.reason);
+    }
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response;
@@ -6463,8 +6470,8 @@ class GodotServer {
       `res://${runner}`,
       '--ignoreHeadlessMode',
       ...(readBoolean(args, 'failFast') === true ? [] : ['-c']),
-      ...asked.flatMap((path) => ['-a', path]),
-      ...ignored.flatMap((entry) => ['-i', entry]),
+      ...(selection.value?.suites ?? asked).flatMap((path) => ['-a', path]),
+      ...[...ignored, ...(selection.value?.ignore ?? [])].flatMap((entry) => ['-i', entry]),
       '-rd',
       reports,
       '-rc',
@@ -6797,6 +6804,24 @@ class GodotServer {
     const uncaughtFolded = foldedRepeats(uncaught.map(aboveTheRunner));
     const listedAsUncaught = new Set(uncaughtFolded.map((entry) => entry.index));
     const notApplied = ignoredYetRan(report, ignored);
+    // A case read from its file that gdUnit4 never reported, which is a run of less than was asked
+    // for. A parameterised case is reported under its name and its parameters.
+    const testsNotRun = [
+      ...new Set(
+        (selection.value?.selected ?? [])
+          .filter(
+            (one) =>
+              !report.suites.some(
+                (suite) =>
+                  (suite.path === one.suite || suite.name === basename(one.suite, '.gd')) &&
+                  suite.cases.some(
+                    (ran) => ran.name === one.test || new RegExp(`^${one.test}\\W`).test(ran.name),
+                  ),
+              ),
+          )
+          .map((one) => `${basename(one.suite, '.gd')}:${one.test}`),
+      ),
+    ];
     return this.jsonTextResponse({
       // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
       // passed beside a verdict saying no test cases were found.
@@ -6809,9 +6834,11 @@ class GodotServer {
         report.errors === 0 &&
         hookFailures.length === 0 &&
         uncaught.length === 0 &&
-        missing.length === 0,
-      verdict,
+        missing.length === 0 &&
+        testsNotRun.length === 0,
+      verdict: testsNotRun.length === 0 ? verdict : `${verdict}; not run: ${testsNotRun.join(', ')}`,
       ...(missing.length > 0 ? { missing } : {}),
+      ...(testsNotRun.length > 0 ? { testsNotRun } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
       exitCode,
       exitSignal: run.exitSignal ?? undefined,
@@ -6838,6 +6865,9 @@ class GodotServer {
       note:
         [
           missingNote,
+          testsNotRun.length > 0
+            ? `${testsNotRun.join(', ')} ${testsNotRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`
+            : undefined,
           briefed > 0
             ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver; pass one case's suite path to see its reports.`
             : undefined,
