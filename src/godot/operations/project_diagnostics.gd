@@ -1,8 +1,11 @@
 extends RefCounted
 
+const GdhDependencies = preload("dependencies.gd")
 const GdhFileWalk = preload("file_walk.gd")
 const GdhImportPipeline = preload("import_pipeline.gd")
 const GdhLog = preload("logger.gd")
+const GdhRead = preload("reading.gd")
+const GdhScriptCheck = preload("script_check.gd")
 
 var _log: GdhLog
 var _files: GdhFileWalk = GdhFileWalk.new()
@@ -15,7 +18,7 @@ func _init(p_log: GdhLog) -> void:
 # Get comprehensive project health check with scoring
 func get_project_health(params: Dictionary) -> Dictionary:
 	var check_categories: Array = params.get(
-		"categories", ["structure", "resources", "scripts", "scenes", "config"]
+		"categories", ["structure", "resources", "scripts", "references", "scenes", "config"]
 	)
 
 	_log.info("Performing project health check")
@@ -87,12 +90,34 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		if todo_count > 0:
 			recommendations.append("%d scripts have TODO or FIXME comments to look at" % todo_count)
 
-		checks["scripts"] = {
+		# Compiled by the server before this runs, since an engine stops at the first script that
+		# fails, and handed in. Without it the check read only comments and said "passed" beside
+		# scripts the engine refused.
+		var compiled: Dictionary = params.get("compiled", {})
+		var failures: Array = compiled.get("failures", [])
+		for failure: Dictionary in failures:
+			details.append(GdhScriptCheck.failure_line(failure))
+			deductions += 10
+
+		var scripts: Dictionary = {
 			"name": "Scripts",
 			"passed": details.is_empty(),
 			"details": details,
 			"total_scripts": script_files.size()
 		}
+		if compiled.has("checked"):
+			scripts["compiled"] = GdhRead.as_int(compiled["checked"])
+		else:
+			scripts["not_compiled"] = str(compiled.get("not_checked", "no compile was asked for"))
+		checks["scripts"] = scripts
+
+	# 3b. References
+	if "references" in check_categories:
+		var details: Array[String] = []
+		for entry: Dictionary in GdhDependencies.new(_log).missing_references():
+			details.append(GdhDependencies.missing_line(entry))
+			deductions += 5
+		checks["references"] = {"name": "References", "passed": details.is_empty(), "details": details}
 
 	# 4. Scenes Check
 	if "scenes" in check_categories:

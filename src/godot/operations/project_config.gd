@@ -1,5 +1,6 @@
 extends RefCounted
 
+const GdhFileWalk = preload("file_walk.gd")
 const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhProjectFile = preload("project_file.gd")
@@ -215,7 +216,9 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	_log.info("Adding autoload: " + name + " -> " + path)
 
 	if not FileAccess.file_exists(path):
-		return _log.failure("Autoload file does not exist: " + path)
+		return _log.failure(
+			GdhFileWalk.new().with_nearest_files("Autoload file does not exist: " + path, path)
+		)
 
 	# Through ProjectSettings so the file is saved the way the editor saves it, which includes
 	# putting Godot's header back and dropping any comment somebody wrote into the file by hand.
@@ -295,7 +298,9 @@ func set_main_scene(params: Dictionary) -> Dictionary:
 	_log.info("Setting main scene: " + scene_path)
 
 	if not FileAccess.file_exists(scene_path):
-		return _log.failure("Scene file does not exist: " + scene_path)
+		return _log.failure(
+			GdhFileWalk.new().with_nearest_files("Scene file does not exist: " + scene_path, scene_path)
+		)
 
 	var old_main_scene: String = str(ProjectSettings.get_setting("application/run/main_scene", ""))
 

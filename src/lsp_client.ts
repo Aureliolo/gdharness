@@ -1182,7 +1182,7 @@ async function resolveLSPPaths(
   try {
     scriptPath = await realpath(contained.absolutePath);
   } catch {
-    throw new ArgumentRefusal(`Script file does not exist: ${contained.absolutePath}`);
+    throw new ArgumentRefusal(`Script file does not exist: res://${contained.relativePath}`);
   }
 
   if (!isWithinRoot(projectPath, scriptPath)) {

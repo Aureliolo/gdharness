@@ -18563,6 +18563,14 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     'extends Node\n\nconst Broken = preload("res://checked/broken.gd")\n',
   );
   writeFileSync(join(project, 'checked', 'fine.gd'), 'extends Node\n');
+  // The project has never been opened, so no class cache lists the class it declares, which is
+  // the state a fresh clone is in.
+  writeFileSync(join(project, 'checked', 'stash.gd'), 'class_name FixtureStash\nextends Node\n');
+  writeFileSync(join(project, 'checked', 'holder.gd'), 'extends Node\n\nvar held: FixtureStash\n');
+  writeFileSync(
+    join(project, 'stage.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Texture2D" path="res://gone.png" id="1_gone"]\n\n[node name="Stage" type="Sprite2D"]\ntexture = ExtResource("1_gone")\n',
+  );
   const server = new ServerProcess({
     env: {
       GODOT_PATH: engine,
@@ -18624,12 +18632,12 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(all, 'nothingReported'),
         get(all, 'checkedBy'),
       ],
-      [false, 3, 3, null, ['checked/fine.gd'], 'engine'],
-      `a folder compiled whole, an engine past each failure, the clean script named apart: ${said}`,
+      [false, 5, 4, null, ['checked/fine.gd', 'checked/stash.gd'], 'engine'],
+      `a folder compiled whole, an engine past each failure, the clean scripts named apart: ${said}`,
     );
-    const dependent = asArray(get(all, 'scripts')).find(
-      (entry) => get(entry, 'scriptPath') === 'checked/dependent.gd',
-    );
+    const entryFor = (scriptPath: string): unknown =>
+      asArray(get(all, 'scripts')).find((entry) => get(entry, 'scriptPath') === scriptPath);
+    const dependent = entryFor('checked/dependent.gd');
     assert.deepEqual(
       [get(dependent, 'diagnostics'), get(dependent, 'dependenciesWithErrors')],
       [
@@ -18638,6 +18646,89 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       ],
       `a script failing for what it loads says which, without a line of its own: ${said}`,
     );
+    // A class the project declares and the cache lacks is named as the cache's fault, and a script
+    // failing for anything else is told nothing of the cache.
+    const holder = entryFor('checked/holder.gd');
+    assert.deepEqual(
+      get(holder, 'typesMissingFromTheClassCache'),
+      [{ type: 'FixtureStash', declaredIn: 'res://checked/stash.gd' }],
+      said,
+    );
+    assert.match(
+      text(get(holder, 'staleAnalysis')),
+      /^FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project and missing from \.godot\/global_script_class_cache\.cfg, .* project_import refresh_classes rewrites the cache from the declarations on disk;/,
+      said,
+    );
+    assert.deepEqual(
+      [get(dependent, 'typesMissingFromTheClassCache'), get(entryFor('checked/broken.gd'), 'staleAnalysis')],
+      [undefined, undefined],
+      said,
+    );
+
+    // A script that is not there is named by its res:// path with the nearest the project holds,
+    // and one outside the project is told how to name one inside it.
+    assert.equal(
+      textOf(await diagnose('checked/brokn.gd')),
+      'Script file does not exist: res://checked/brokn.gd. The nearest .gd file is res://checked/broken.gd.',
+    );
+    const outside = textOf(await diagnose(join(tmpdir(), 'elsewhere.gd'))) ?? '';
+    assert.match(outside, /is absolute; give a path inside the project/, outside);
+    assert.match(outside, /Possible solutions:\n- Give the path relative to the project/, outside);
+    const info = await server.request(
+      'tools/call',
+      { name: 'script_info', arguments: { projectPath: project, scriptPath: 'checked/holdr.gd' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    assert.match(
+      textOf(info) ?? '',
+      /Script file does not exist: res:\/\/checked\/holdr\.gd\. The nearest \.gd file is res:\/\/checked\/holder\.gd\./,
+      textOf(info) ?? '',
+    );
+
+    // The health and validation sections compile what script_diagnostics does and follow every
+    // reference, where the health check had read only comments and called the scripts passed.
+    const projectInfo = await server.request(
+      'tools/call',
+      { name: 'project_info', arguments: { projectPath: project, include: ['health', 'validation'] } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const judged = parseTextContent(projectInfo);
+    const shownInfo = textOf(projectInfo) ?? '';
+    const scriptsCheck = get(judged, 'health', 'checks', 'scripts');
+    assert.deepEqual(
+      [
+        get(scriptsCheck, 'passed'),
+        get(scriptsCheck, 'compiled'),
+        asArray(get(scriptsCheck, 'details')).length,
+      ],
+      [false, 5, 3],
+      `every script compiled, each failure a detail: ${shownInfo}`,
+    );
+    assert.ok(
+      asArray(get(scriptsCheck, 'details')).includes(
+        'res://checked/broken.gd does not compile: line 5, Parse Error: Function "rage()" not found in base self. (and 1 more)',
+      ),
+      shownInfo,
+    );
+    assert.ok(
+      asArray(get(scriptsCheck, 'details')).some((detail) =>
+        /^res:\/\/checked\/holder\.gd does not compile: line 3, .*FixtureStash.* FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project and missing from/.test(
+          String(detail),
+        ),
+      ),
+      `a failure for the cache says so where it is listed: ${shownInfo}`,
+    );
+    assert.deepEqual(
+      get(judged, 'health', 'checks', 'references', 'details'),
+      ['res://gone.png does not exist, and res://stage.tscn refers to it'],
+      shownInfo,
+    );
+    assert.deepEqual(
+      asArray(get(judged, 'validation', 'issues')).map((issue) => get(issue, 'check')),
+      ['main_scene', 'script_compile', 'script_compile', 'script_compile', 'references'],
+      shownInfo,
+    );
+    assert.equal(get(judged, 'validation', 'valid'), false, shownInfo);
   } finally {
     await server.stop();
     sweep(project, runtimeDir);

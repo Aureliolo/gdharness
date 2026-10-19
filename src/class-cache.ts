@@ -401,6 +401,27 @@ export function unloadedTypes(
 }
 
 /**
+ * For each script's engine errors in [param messagesPer], the classes [param projectPath] declares
+ * that the errors could not resolve and the class cache does not list. A class the cache lists and
+ * an engine still could not resolve is some other fault, such as its own script failing, which the
+ * errors beside it already say. The declarations are read only when an error could name a class,
+ * since a project that compiles is the usual answer and the walk reads every script in it.
+ */
+export function uncachedFor(
+  projectPath: string,
+  messagesPer: readonly (readonly string[])[],
+): UnloadedType[][] {
+  if (!messagesPer.some((messages) => messages.some((message) => unknownTypeIn(message) !== null))) {
+    return messagesPer.map(() => []);
+  }
+  const declared = declaredClasses(projectPath);
+  const cached = cachedClasses(projectPath);
+  return messagesPer.map((messages) =>
+    unloadedTypes(messages, declared, cached).filter((type) => !type.inTheClassCache),
+  );
+}
+
+/**
  * The global classes a script names, which are the types its own analysed copy is built from.
  *
  * What this is for: the editor's held copy of a type is refreshed when one of the things it depends
@@ -824,6 +845,30 @@ export function uncachedClassNote(types: readonly string[]): string {
     'walk does not look inside it. project_import refresh_classes rewrites the cache from the ' +
     'declarations on disk and does reach that case, at the cost of a short headless engine, which ' +
     'is worth knowing when something else is already running against this project.'
+  );
+}
+
+/**
+ * The same state met by a headless engine compiling the scripts, where no editor is open to scan.
+ *
+ * Without it the error read as a fault in the script: `Could not find type "Item"` against a script
+ * using a class the project declares, in a project whose `.godot` had never been written, and the
+ * caller was told nothing that pointed at the cache. The engine resolves a class only from that
+ * file, so the remedy is the one that rewrites it, and the editor rescan offered beside an editor
+ * has nothing to ask here.
+ */
+export function uncachedForTheEngineNote(types: readonly UnloadedType[]): string {
+  if (types.length === 0) {
+    return '';
+  }
+  const one = types.length === 1;
+  const named = types.map((type) => `${type.type} (${type.declaredIn})`).join(', ');
+  return (
+    `${named} ${one ? 'is' : 'are'} declared in this project and missing from ` +
+    '.godot/global_script_class_cache.cfg, which is where the engine that compiled these scripts ' +
+    `resolves a class name from, so the error is the cache being behind the files rather than the script. ` +
+    'project_import refresh_classes rewrites the cache from the declarations on disk; editor_run start ' +
+    'rewrites it before a game, and an editor opening the project rewrites it when it scans.'
   );
 }
 

@@ -1,5 +1,6 @@
 extends RefCounted
 
+const GdhFileWalk = preload("file_walk.gd")
 const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhPatterns = preload("patterns.gd")
@@ -111,7 +112,11 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 		full_script_path = "res://" + full_script_path
 
 	if not FileAccess.file_exists(full_script_path):
-		return _log.failure("Script file does not exist: " + full_script_path)
+		return _log.failure(
+			GdhFileWalk.new().with_nearest_files(
+				"Script file does not exist: " + full_script_path, full_script_path
+			)
+		)
 
 	var file: FileAccess = FileAccess.open(full_script_path, FileAccess.READ)
 	if not file:

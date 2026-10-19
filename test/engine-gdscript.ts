@@ -1275,7 +1275,11 @@ function testOperations(godotPath: string, projectDir: string): void {
 
   const validation = operation('validate_project', {});
   assert.ok(asArray(get(validation, 'checks_performed')).includes('main_scene'));
-  assert.equal(get(validation, 'valid'), true, 'the main scene was set above, so the project validates');
+  assert.equal(
+    get(validation, 'valid'),
+    true,
+    `the main scene was set above, so the project validates: ${JSON.stringify(get(validation, 'issues'))}`,
+  );
   assert.ok(
     asArray(get(validation, 'warnings')).some((warning) => get(warning, 'check') === 'export_presets'),
     'a project with no export presets should be warned about',
@@ -1981,6 +1985,142 @@ function testOperations(godotPath: string, projectDir: string): void {
     /Class not found: FixtureNobody\. editor_classes reads the engine's ClassDB/,
     nowhere.stderr,
   );
+}
+
+/**
+ * A reference is missing only where the engine would fail to load it, and a missing one is named
+ * in the summary as well as in the tree.
+ *
+ * Two shapes were called missing that load: an ext_resource whose path is stale and whose uid the
+ * cache resolves, which is how a file moved outside the editor still loads, and a literal that is
+ * a directory or the start of a path a script builds as it runs. A file that is really gone was one
+ * `exists: false` deep in the tree, which a caller reading the summary never met.
+ */
+function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _projectDir: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  const importAll = (): void => {
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180_000,
+    });
+    assert.equal(run.status, 0, `the project should import: ${run.stdout}\n${run.stderr}`);
+  };
+  try {
+    writeFileSync(join(dir, 'leaf.gd'), 'extends Node\n');
+    importAll();
+    const uid = readFileSync(join(dir, 'leaf.gd.uid'), 'utf8').trim();
+    assert.match(uid, /^uid:\/\/[a-z0-9]+$/, 'the import mints the script a uid');
+    // Moved with its sidecar and imported again, so the cache has the uid at the new place while
+    // the scene still names the old one.
+    mkdirSync(join(dir, 'moved'));
+    for (const name of ['leaf.gd', 'leaf.gd.uid']) {
+      writeFileSync(join(dir, 'moved', name), readFileSync(join(dir, name)));
+      rmSync(join(dir, name));
+    }
+    writeFileSync(
+      join(dir, 'stage.tscn'),
+      `[gd_scene format=3]\n\n[ext_resource type="Script" uid="${uid}" path="res://leaf.gd" id="1_leaf"]\n[ext_resource type="Texture2D" path="res://gone.png" id="2_gone"]\n\n[node name="Stage" type="Node"]\nscript = ExtResource("1_leaf")\n`,
+    );
+    writeFileSync(
+      join(dir, 'top.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://stage.tscn" id="1_stage"]\n\n[node name="Top" type="Node"]\n\n[node name="Stage" parent="." instance=ExtResource("1_stage")]\n',
+    );
+    writeFileSync(
+      join(dir, 'walker.gd'),
+      'extends Node\n\nconst Leaf = preload("res://moved/leaf.gd")\n\n\nfunc level(n: int) -> String:\n\treturn "res://levels/" + str(n) + ".tscn"\n',
+    );
+    importAll();
+
+    const stage = operation('get_dependencies', { resource_path: 'res://stage.tscn' });
+    assert.deepEqual(
+      asArray(get(stage, 'dependencies', 'res://stage.tscn')).map((dep) => [
+        get(dep, 'path'),
+        get(dep, 'exists'),
+      ]),
+      [
+        ['res://moved/leaf.gd', true],
+        ['res://gone.png', false],
+      ],
+      `the moved script is followed by its uid and the gone image is missing: ${JSON.stringify(stage)}`,
+    );
+    const top = operation('get_dependencies', { resource_path: 'res://top.tscn' });
+    assert.deepEqual(
+      get(top, 'summary', 'missing'),
+      [{ path: 'res://gone.png', referenced_by: ['res://stage.tscn'] }],
+      `the summary names the missing file and the scene that refers to it, not the one asked about: ${JSON.stringify(top)}`,
+    );
+    const walker = operation('get_dependencies', { resource_path: 'res://walker.gd' });
+    assert.deepEqual(
+      asArray(get(walker, 'dependencies', 'res://walker.gd')).map((dep) => get(dep, 'path')),
+      ['res://moved/leaf.gd'],
+      `a path built at run time is no dependency: ${JSON.stringify(walker)}`,
+    );
+    assert.deepEqual(get(walker, 'summary', 'missing'), [], 'and nothing is missing from it');
+
+    // A path nothing is at is refused with the files of its kind nearest it, or every one of few.
+    assert.match(
+      runRefusedOperation(godotPath, dir, 'get_dependencies', { resource_path: 'res://stagee.tscn' }).stderr,
+      /Resource file does not exist: res:\/\/stagee\.tscn\. The nearest \.tscn file is res:\/\/stage\.tscn\./,
+    );
+    assert.match(
+      runRefusedOperation(godotPath, dir, 'get_import_status', { resource_path: 'res://qq.tscn' }).stderr,
+      /Nothing is at res:\/\/qq\.tscn, and no import sidecar names it\. The project's \.tscn files are res:\/\/stage\.tscn, res:\/\/top\.tscn\./,
+    );
+    assert.match(
+      runRefusedOperation(godotPath, dir, 'find_resource_usages', { resource_path: 'res://glow.gdshader' })
+        .stderr,
+      /Resource file does not exist: res:\/\/glow\.gdshader\. The project holds no \.gdshader file\./,
+    );
+    // Every operation that reads a named file refuses one that is not there the same way. A script
+    // named unlike the operations and addons this project carries, which are scripts of it too.
+    writeFileSync(join(dir, 'zebra_pen.gd'), 'extends Node\n');
+    const nearStage = 'The nearest .tscn file is res://stage.tscn.';
+    const nearZebra = 'The nearest .gd file is res://zebra_pen.gd.';
+    for (const [name, params, said] of [
+      [
+        'set_main_scene',
+        { scene_path: 'res://stagee.tscn' },
+        `Scene file does not exist: res://stagee.tscn. ${nearStage}`,
+      ],
+      [
+        'get_uid',
+        { resource_path: 'res://stagee.tscn' },
+        `File does not exist: res://stagee.tscn. ${nearStage}`,
+      ],
+      [
+        'add_autoload',
+        { name: 'Zebra', path: 'res://zebra_pn.gd' },
+        `Autoload file does not exist: res://zebra_pn.gd. ${nearZebra}`,
+      ],
+      [
+        'get_script_info',
+        { script_path: 'res://zebra_pn.gd' },
+        `Script file does not exist: res://zebra_pn.gd. ${nearZebra}`,
+      ],
+      [
+        'modify_script',
+        { script_path: 'res://zebra_pn.gd', modifications: [{ type: 'add_signal', name: 'went' }] },
+        `Script file does not exist: res://zebra_pn.gd. ${nearZebra}`,
+      ],
+    ] as const) {
+      const refused = runRefusedOperation(godotPath, dir, name, params).stderr;
+      assert.ok(refused.includes(said), `${name}: ${refused}`);
+    }
+    mkdirSync(join(dir, 'pile'));
+    for (let at = 0; at < 13; at += 1) {
+      writeFileSync(
+        join(dir, 'pile', `p${at}.tres`),
+        '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+      );
+    }
+    assert.match(
+      runRefusedOperation(godotPath, dir, 'get_dependencies', { resource_path: 'res://zzzz.tres' }).stderr,
+      /Resource file does not exist: res:\/\/zzzz\.tres\. None of the project's 13 \.tres files is named like it\./,
+    );
+  } finally {
+    sweep(dir);
+  }
 }
 
 /**
@@ -3732,6 +3872,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   operations: testOperations,
   gdignore: testAGdignoreStopsTheWalk,
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
+  referencesMissing: testAReferenceIsMissingOnlyWhereTheEngineMissesIt,
   fontFeatures: testAFontsFeaturesAreWrittenAsTheEngineReadsThem,
   importerFirst: (godotPath) => {
     testTheImporterIsAskedFirst(godotPath);

@@ -61,6 +61,8 @@ import {
   staleClassNames,
   type UnseenClass,
   uncachedClassNote,
+  uncachedFor,
+  uncachedForTheEngineNote,
   unknownTypeIn,
   unloadedTypes,
   unseenByEditor,
@@ -162,6 +164,7 @@ import {
   LSPTimeout,
   normalizeLSPError,
 } from './lsp_client.js';
+import { withNearestFiles } from './nearest.js';
 import { launchOutsideTheTree } from './outside.js';
 import {
   exportedBuild,
@@ -185,7 +188,13 @@ import {
   whyTheProcessTreeFailed,
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
-import { pathsInUidCache, projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
+import {
+  pathsInUidCache,
+  projectFiles,
+  projectStructure,
+  scriptsWithoutUid,
+  searchProject,
+} from './project-scan.js';
 import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
 import {
@@ -6058,17 +6067,56 @@ class GodotServer {
     };
 
     const detailed = args['detail'] === 'full';
+    // Both sections judge the scripts, and only engines started here can: the one running a
+    // section stops reading at the first script that fails, as every engine does. Once for both.
+    const compiled =
+      include.includes('health') || include.includes('validation')
+        ? await this.compiledForProjectInfo(project.value.path)
+        : undefined;
     for (const section of include) {
       const spec = PROJECT_INFO_SECTIONS[section];
       if (spec === undefined) {
         continue;
       }
-      const outcome = await this.operation(spec.operation, spec.params(args, detailed), project.value.path);
+      const params = {
+        ...spec.params(args, detailed),
+        ...(compiled !== undefined && (section === 'health' || section === 'validation') ? { compiled } : {}),
+      };
+      const outcome = await this.operation(spec.operation, params, project.value.path);
       info[section] = outcome.ok
         ? { ...outcome.payload, ...engineExtras(outcome) }
         : { error: outcome.message, ...engineExtras(outcome) };
     }
     return this.jsonTextResponse(info);
+  }
+
+  /**
+   * Every script of the project compiled, for the health and validation sections: how many were
+   * read and each that failed, with the note on a class the cache lacks, or why none could be.
+   */
+  private async compiledForProjectInfo(projectPath: string): Promise<OperationParams> {
+    const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
+    if (scripts.length === 0) {
+      return { checked: 0, failures: [] };
+    }
+    const checked = await this.compileScripts(projectPath, scripts);
+    if (!checked.ok) {
+      return { not_checked: `no headless engine could compile the scripts: ${checked.message}` };
+    }
+    const failures = checked.payload.scripts.map(asParams);
+    const uncached = uncachedFor(
+      projectPath,
+      failures.map((failure) =>
+        (readArray(failure, 'errors') ?? []).map((entry) => String(asParams(entry)['message'])),
+      ),
+    );
+    return {
+      checked: checked.payload.checked.length,
+      failures: failures.map((failure, at) => {
+        const types = uncached[at] ?? [];
+        return types.length === 0 ? failure : { ...failure, note: uncachedForTheEngineNote(types) };
+      }),
+    };
   }
 
   /** The extensions a search is limited to, when the call names any. */
@@ -6867,6 +6915,19 @@ class GodotServer {
       return this.createErrorResponse(scripts.reason);
     }
     if (scripts?.value == null) {
+      // Judged here rather than by whichever half answers, which named a missing script by its
+      // absolute path and refused a path outside the project with no remedy, while every other
+      // tool given either gave the res:// path and the remedies.
+      const asked = readString(args, 'scriptPath');
+      if (project.ok && asked !== undefined) {
+        const location = resolveWithinProject(project.value.path, asked);
+        if (!location.ok) {
+          return this.createErrorResponse(location.reason, PATH_SOLUTIONS);
+        }
+        if (!existsSync(location.absolutePath)) {
+          return this.missingScript(project.value.path, location.relativePath);
+        }
+      }
       const one = await this.diagnosticsOf(args);
       if ('noLanguageServer' in one) {
         const checked = project.ok
@@ -6951,6 +7012,15 @@ class GodotServer {
     });
   }
 
+  /** The refusal for [param relativePath], a script the project does not hold, with the nearest it does. */
+  private missingScript(projectPath: string, relativePath: string): ToolResponse {
+    const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
+    const wanted = `res://${relativePath}`;
+    return this.createErrorResponse(
+      withNearestFiles(`Script file does not exist: ${wanted}`, wanted, scripts),
+    );
+  }
+
   /**
    * Whether each of [param paths], res:// paths, compiles, by as many headless engines as it takes:
    * an engine stops at the first script that raises an error, since every script after it that
@@ -7023,15 +7093,21 @@ class GodotServer {
         asParams(entry),
       ]),
     );
+    const errorsOf = scripts.map((_, at) => readArray(failures.get(named[at] ?? '') ?? {}, 'errors') ?? []);
+    const uncachedPer = uncachedFor(
+      projectPath,
+      errorsOf.map((errors) => errors.map((entry) => String(asParams(entry)['message']))),
+    );
     return {
       answers: scripts.map((scriptPath, at) => {
         const failure = failures.get(named[at] ?? '');
-        const diagnostics = (readArray(failure ?? {}, 'errors') ?? []).map((entry) => {
+        const diagnostics = (errorsOf[at] ?? []).map((entry) => {
           const { line, message } = asParams(entry);
           // Line 0 is the engine's for the whole script, a dependency that failed to compile.
           return { severity: 'error', message, ...(typeof line === 'number' && line > 0 ? { line } : {}) };
         });
         const dependencies = readArray(failure ?? {}, 'dependencies_with_errors');
+        const uncached = uncachedPer[at] ?? [];
         return {
           scriptPath,
           clean: diagnostics.length === 0,
@@ -7039,6 +7115,12 @@ class GodotServer {
           warnings: null,
           diagnostics,
           ...(dependencies === undefined ? {} : { dependenciesWithErrors: dependencies }),
+          ...(uncached.length === 0
+            ? {}
+            : {
+                typesMissingFromTheClassCache: uncached.map(({ type, declaredIn }) => ({ type, declaredIn })),
+                staleAnalysis: uncachedForTheEngineNote(uncached),
+              }),
         };
       }),
     };
@@ -12590,7 +12672,7 @@ class GodotServer {
       return this.createErrorResponse(scriptPath.reason);
     }
     if (!existsSync(scriptPath.absolutePath)) {
-      return this.createErrorResponse(`Script file does not exist: ${scriptPath.absolutePath}`);
+      return this.missingScript(projectPath, scriptPath.relativePath);
     }
     const asked = readNonEmptyString(args, 'newScriptPath');
     const moveTo = asked === undefined ? null : resolveWithinProject(projectPath, asked);

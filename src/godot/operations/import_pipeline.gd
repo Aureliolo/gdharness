@@ -1,6 +1,8 @@
 extends RefCounted
 
+const GdhDependencies = preload("dependencies.gd")
 const GdhExportPresets = preload("export_presets.gd")
+const GdhScriptCheck = preload("script_check.gd")
 const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhFileWalk = preload("file_walk.gd")
@@ -85,6 +87,14 @@ func get_import_status(params: Dictionary) -> Dictionary:
 		if not full_path.begins_with("res://"):
 			full_path = "res://" + full_path
 
+		# missing_source is a sidecar whose source has gone; with neither, the path names nothing the
+		# engine ever imported, and answering it as a lost source sent a caller to restore a file.
+		if not FileAccess.file_exists(full_path) and not FileAccess.file_exists(full_path + ".import"):
+			return _log.failure(
+				_files.with_nearest_files(
+					"Nothing is at %s, and no import sidecar names it" % full_path, full_path
+				)
+			)
 		var status: Dictionary = _import_status_of(full_path, full_path + ".import")
 		resources.append(status)
 		_tally(summary, status)
@@ -456,6 +466,35 @@ func validate_project(params: Dictionary) -> Dictionary:
 				script_issues.append({"path": script_path, "issue": "Contains TODO/FIXME comments"})
 			if "pass # TODO" in content:
 				script_issues.append({"path": script_path, "issue": "Contains unimplemented functions"})
+
+	# Compiled by the server and handed in, as for the health check: a script the engine refuses
+	# stops the export's game at the first scene using it, which the comment check above never saw.
+	var compiled: Dictionary = params.get("compiled", {})
+	if compiled.has("checked"):
+		checks_performed.append("script_compile")
+	var failures: Array = compiled.get("failures", [])
+	for failure: Dictionary in failures:
+		issues.append(
+			_finding(
+				"error",
+				"script_compile",
+				GdhScriptCheck.failure_line(failure),
+				"script_diagnostics gives every error in it with its line",
+				include_suggestions
+			)
+		)
+
+	checks_performed.append("references")
+	for entry: Dictionary in GdhDependencies.new(_log).missing_references():
+		issues.append(
+			_finding(
+				"error",
+				"references",
+				GdhDependencies.missing_line(entry),
+				"Restore the file, or point the reference at the file that replaced it",
+				include_suggestions
+			)
+		)
 
 	if script_issues.size() > 0:
 		var warning: Dictionary = _finding(
