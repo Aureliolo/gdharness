@@ -4,12 +4,12 @@ extends RefCounted
 ## a tree row or a menu bar title. Each is drawn by the control rather than held as a node, so a click
 ## on the control's path presses its middle, which is whichever item happens to sit there.
 
-const Says = preload("runtime_says.gd")
-const Values = preload("runtime_values.gd")
-const Words = preload("runtime_words.gd")
+const GdhSays = preload("runtime_says.gd")
+const GdhValues = preload("runtime_values.gd")
+const GdhWords = preload("runtime_words.gd")
 
 
-## Where [param control] draws [param item], one of [method Words.items_of], in the control's own
+## Where [param control] draws [param item], one of [method GdhWords.items_of], in the control's own
 ## space, or an empty rectangle while it draws it nowhere a pointer reaches: a tab scrolled off its
 ## bar, an entry or a row scrolled out of its list, a menu bar the operating system draws. A tree
 ## row is the cell saying [param wanted] when one does, and the whole row otherwise.
@@ -54,7 +54,7 @@ static func item_rect(control: Control, item: Variant, wanted: String) -> Rect2:
 ## does, its cells read together.
 static func tree_column(tree: Tree, row: TreeItem, wanted: String) -> int:
 	for column: int in tree.columns:
-		if Says.matches(Words.cell_says(tree, row, column), wanted):
+		if GdhSays.matches(GdhWords.cell_says(tree, row, column), wanted):
 			return column
 	return -1
 
@@ -96,7 +96,7 @@ static func in_view(
 		if scrolled:
 			# A tree places its rows by the scroll it last drew with.
 			await scene.process_frame
-			var left: String = Values.afterwards(control)
+			var left: String = GdhValues.afterwards(control)
 			if left != "in_tree" or (typeof(item) == TYPE_OBJECT and not is_instance_valid(item)):
 				return {
 					"type": "error",

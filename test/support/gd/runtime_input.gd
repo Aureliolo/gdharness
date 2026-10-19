@@ -9,12 +9,12 @@ extends SceneTree
 ## place for the rest and is not: the root is not inside the tree yet there, measured rather than
 ## assumed.
 
-const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
-const Typing = preload("res://addons/gdharness_runtime/runtime_typing.gd")
+const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const GdhTyping = preload("res://addons/gdharness_runtime/runtime_typing.gd")
 const Checked = preload("checked.gd")
-const Read = preload("res://addons/gdharness_runtime/reading.gd")
-const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
-const Mouse = preload("res://addons/gdharness_runtime/runtime_mouse.gd")
+const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
+const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
+const GdhMouse = preload("res://addons/gdharness_runtime/runtime_mouse.gd")
 
 
 ## Counts both halves of a press, which is the only way to see one that is over by the time the
@@ -48,14 +48,14 @@ class Counter:
 			return
 		var button: InputEventMouseButton = event
 		var tally: Dictionary = presses if button.pressed else releases
-		var so_far: int = Read.as_int(tally.get(button.button_index, 0), 0)
+		var so_far: int = GdhRead.as_int(tally.get(button.button_index, 0), 0)
 		tally[button.button_index] = so_far + 1
 
 
 var failures: Array[String] = []
 
 var _field: LineEdit = null
-var _typing: Typing = null
+var _typing: GdhTyping = null
 var _begun: bool = false
 
 
@@ -74,8 +74,8 @@ func _process(_delta: float) -> bool:
 func _everything() -> void:
 	var host: Node = Node.new()
 	root.add_child(host)
-	var input: InputCommands = InputCommands.new(host, Values.new())
-	_typing = Typing.new(host)
+	var input: GdhInputCommands = GdhInputCommands.new(host, GdhValues.new())
+	_typing = GdhTyping.new(host)
 
 	await _check_keys(input)
 	await _check_mouse(input)
@@ -119,7 +119,7 @@ func _pressed(action: String) -> bool:
 	return Input.is_action_pressed(action)
 
 
-func _check_keys(input: InputCommands) -> void:
+func _check_keys(input: GdhInputCommands) -> void:
 	# A string keycode is a key label, and the label is what names the key.
 	var by_string: Dictionary = await input.inject_key({"keycode": "A"})
 	if by_string.get("type", "") != "input_injected":
@@ -156,7 +156,7 @@ func _check_keys(input: InputCommands) -> void:
 	# And the shape a caller gets by saying nothing: the key goes down and comes back up, so the
 	# action it is bound to is not left held for the rest of the session.
 	var whole: Dictionary = await input.inject_key({"keycode": "C"})
-	if not Read.as_bool(whole.get("whole", false)):
+	if not GdhRead.as_bool(whole.get("whole", false)):
 		_fail("a key with no `pressed` should be the whole press: %s" % JSON.stringify(whole))
 	if _pressed("fixture_physical"):
 		_fail("the whole press should leave the action released")
@@ -168,7 +168,7 @@ func _check_keys(input: InputCommands) -> void:
 	await input.inject_key({"keycode": KEY_D, "pressed": false})
 
 
-func _check_mouse(input: InputCommands) -> void:
+func _check_mouse(input: GdhInputCommands) -> void:
 	var flat: Dictionary = await input.inject_mouse_click({"x": 10, "y": 20, "button": "right"})
 	if flat.get("position", []) != [10.0, 20.0] or flat.get("button", 0) != MOUSE_BUTTON_RIGHT:
 		_fail("flat click: %s" % JSON.stringify(flat))
@@ -190,9 +190,9 @@ func _check_mouse(input: InputCommands) -> void:
 	if position_only.get("type", "") != "error":
 		_fail("a position list is not a point: %s" % JSON.stringify(position_only))
 
-	if Mouse.button_of("WHEEL_UP") != MOUSE_BUTTON_WHEEL_UP:
+	if GdhMouse.button_of("WHEEL_UP") != MOUSE_BUTTON_WHEEL_UP:
 		_fail("button names are read in any case")
-	if Mouse.button_of(2) != MOUSE_BUTTON_RIGHT:
+	if GdhMouse.button_of(2) != MOUSE_BUTTON_RIGHT:
 		_fail("a numeric button is taken as it is")
 
 	# A spelling nobody recognises used to come back as the left button, so a right click asked for
@@ -217,7 +217,7 @@ func _check_mouse(input: InputCommands) -> void:
 ## what the two controls were handed rather than on the echo, since a lone press echoes exactly
 ## like a whole step. The click on the second control is the positive: with the wheel released,
 ## the viewport looks under the pointer again.
-func _check_a_wheel_step(input: InputCommands) -> void:
+func _check_a_wheel_step(input: GdhInputCommands) -> void:
 	var taker: Counter = Counter.new()
 	taker.position = Vector2(0, 0)
 	taker.size = Vector2(100, 100)
@@ -265,7 +265,7 @@ func _check_a_wheel_step(input: InputCommands) -> void:
 ## needs: a Button presses on it by default, and a rich label opens a link on it. The press alone
 ## answered input_injected and pressed neither. The held press and its release are the positive
 ## that the halves still come apart when asked for.
-func _check_a_whole_click(input: InputCommands) -> void:
+func _check_a_whole_click(input: GdhInputCommands) -> void:
 	var button: Button = _small_button(root, "Go", Vector2(4, 4))
 	var link: RichTextLabel = RichTextLabel.new()
 	link.bbcode_enabled = true
@@ -314,7 +314,7 @@ func _check_a_whole_click(input: InputCommands) -> void:
 ## other assertion here reads the event back, and an event can carry a keycode, a physical
 ## keycode and a label and still put no character anywhere: LineEdit inserts `unicode` and
 ## consults nothing else, so for a year every injected key pressed actions and typed nothing.
-func _check_typing(input: Typing) -> void:
+func _check_typing(input: GdhTyping) -> void:
 	var field: LineEdit = LineEdit.new()
 	root.add_child(field)
 	field.grab_focus()
@@ -339,7 +339,7 @@ func _check_typing(input: Typing) -> void:
 	# and parsed itself straight back to 2.1.
 	if str(typed.get("holds", "")) != "Ash & Marek, 12!":
 		_fail("typing should say what the field holds: %s" % JSON.stringify(typed))
-	if Read.as_bool(typed.get("replaced", true), true):
+	if GdhRead.as_bool(typed.get("replaced", true), true):
 		_fail("and should not claim to have replaced anything: %s" % JSON.stringify(typed))
 
 	# Filling a field in, which is what a caller means nearly every time and could not be asked
@@ -347,7 +347,7 @@ func _check_typing(input: Typing) -> void:
 	var over: Dictionary = input.inject_text({"text": "8", "replace": true})
 	if field.text != "8":
 		_fail("replace should write over what the field said: %s" % field.text)
-	if not Read.as_bool(over.get("replaced", false)) or str(over.get("holds", "")) != "8":
+	if not GdhRead.as_bool(over.get("replaced", false)) or str(over.get("holds", "")) != "8":
 		_fail("and should say so: %s" % JSON.stringify(over))
 
 	var appended: Dictionary = input.inject_text({"text": "9"})
@@ -362,7 +362,7 @@ func _check_typing(input: Typing) -> void:
 	var cleared: Dictionary = input.inject_text({"text": "", "replace": true})
 	if field.text != "":
 		_fail("replace with nothing should empty the field: %s" % field.text)
-	if not Read.as_bool(cleared.get("replaced", false)) or str(cleared.get("holds", "x")) != "":
+	if not GdhRead.as_bool(cleared.get("replaced", false)) or str(cleared.get("holds", "x")) != "":
 		_fail("and should say so: %s" % JSON.stringify(cleared))
 
 	var empty: Dictionary = input.inject_text({})
@@ -385,7 +385,7 @@ func _check_typing(input: Typing) -> void:
 
 
 ## The key op types too, which is the half that was missing rather than the whole command.
-func _type_with_keys(input: InputCommands) -> void:
+func _type_with_keys(input: GdhInputCommands) -> void:
 	_field.clear()
 	await input.inject_key({"keycode": "K"})
 	await input.inject_key({"keycode": "K", "shift": true})
@@ -427,7 +427,7 @@ func _check_what_the_keys_typed() -> void:
 	_field.queue_free()
 
 
-func _check_actions(input: InputCommands) -> void:
+func _check_actions(input: GdhInputCommands) -> void:
 	var missing: Dictionary = await input.inject_action({"action": "fixture_missing"})
 	if missing.get("type", "") != "error":
 		_fail("an unknown action should be refused: %s" % JSON.stringify(missing))
@@ -449,7 +449,7 @@ func _check_actions(input: InputCommands) -> void:
 
 	var whole: Dictionary = await input.inject_action({"action": "fixture_physical"})
 
-	if not Read.as_bool(whole.get("whole", false)):
+	if not GdhRead.as_bool(whole.get("whole", false)):
 		_fail("an action with no `pressed` should be the whole press: %s" % JSON.stringify(whole))
 	if _pressed("fixture_physical"):
 		_fail("the whole press should leave the action released")
@@ -470,7 +470,7 @@ func _check_actions(input: InputCommands) -> void:
 ## driving a game: the answer said the action had landed and the dialog was still on screen.
 ## Written down here because the tool cannot say it: an action nobody listened for looks exactly
 ## like one somebody did.
-func _check_a_dialog(input: InputCommands) -> void:
+func _check_a_dialog(input: GdhInputCommands) -> void:
 	var asking: AcceptDialog = AcceptDialog.new()
 	root.add_child(asking)
 	asking.popup_centered()
@@ -499,7 +499,7 @@ func _small_button(parent: Node, words: String, at: Vector2) -> Button:
 	button.set_meta("presses", 0)
 	Checked.done(
 		button.pressed.connect(
-			func() -> void: button.set_meta("presses", Read.as_int(button.get_meta("presses"), 0) + 1)
+			func() -> void: button.set_meta("presses", GdhRead.as_int(button.get_meta("presses"), 0) + 1)
 		),
 		"counting presses on %s" % words
 	)
@@ -508,13 +508,13 @@ func _small_button(parent: Node, words: String, at: Vector2) -> Button:
 
 
 func _presses(button: Button) -> int:
-	return Read.as_int(button.get_meta("presses"), 0)
+	return GdhRead.as_int(button.get_meta("presses"), 0)
 
 
 ## A click that names its control by the words on it, found and pressed in the same frame: one
 ## match, several refused with an index for each and picked by index, narrowed by path, words on a
 ## label pressing the button holding it, a glob, and words only a hidden control says.
-func _check_a_click_by_words(input: InputCommands) -> void:
+func _check_a_click_by_words(input: GdhInputCommands) -> void:
 	var screen: Control = Control.new()
 	screen.size = Vector2(64, 64)
 	root.add_child(screen)
@@ -607,7 +607,7 @@ func _check_a_click_by_words(input: InputCommands) -> void:
 ## over it, under the pointer. A player's click opens the menu and leaves it open with nothing
 ## chosen; the release of a click held for one frame landed on the item the menu opened under the
 ## pointer and chose it.
-func _check_a_click_opening_a_menu_over_itself(input: InputCommands) -> void:
+func _check_a_click_opening_a_menu_over_itself(input: GdhInputCommands) -> void:
 	var dropdown: OptionButton = OptionButton.new()
 	dropdown.position = Vector2(2, 30)
 	dropdown.size = Vector2(60, 20)
@@ -711,7 +711,7 @@ func _check_a_click_opening_a_menu_over_itself(input: InputCommands) -> void:
 	await root.get_tree().process_frame
 
 
-func _check_a_click_by_words_ranked(input: InputCommands) -> void:
+func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	# Placed by centre, and a button in the default theme grows to about 31 pixels tall whatever size
 	# it is given: the page covers the top 48 rows, so the hall's two buttons have their centres
 	# under it and the button saying more has its centre below it.

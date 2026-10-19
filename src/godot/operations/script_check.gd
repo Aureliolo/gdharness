@@ -13,17 +13,17 @@ extends RefCounted
 ## reaches, and every script loaded after it that depends on it compiles in silence, reload() and all.
 ## So a run ends at the first script that raised anything, and the rest go to a fresh engine.
 
-const Read = preload("reading.gd")
-const Log = preload("logger.gd")
+const GdhRead = preload("reading.gd")
+const GdhLog = preload("logger.gd")
 
 ## Where the engine raises a script's compile errors from.
 const RELOAD: String = "GDScript::reload"
 
-var _log: Log
+var _log: GdhLog
 
 
 ## Every compile error the engine raises while it is attached, in order.
-class Caught:
+class GdhCaught:
 	extends Logger
 
 	var raised: Array[Dictionary] = []
@@ -50,7 +50,7 @@ class Caught:
 		)
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -62,7 +62,7 @@ func _init(p_log: Log) -> void:
 ## resource cache, so a script loaded for an earlier one is compiled again for its own entry.
 func check_scripts(params: Dictionary) -> Dictionary:
 	var asked: Array = params.get("paths", [])
-	var caught: Caught = Caught.new()
+	var caught: GdhCaught = GdhCaught.new()
 	OS.add_logger(caught)
 	var checked: Array[String] = []
 	var failed: Array[String] = []
@@ -80,7 +80,7 @@ func check_scripts(params: Dictionary) -> Dictionary:
 				if not at in others:
 					others.append(at)
 				continue
-			var found: Dictionary = {"line": Read.as_int(error["line"]), "message": str(error["message"])}
+			var found: Dictionary = {"line": GdhRead.as_int(error["line"]), "message": str(error["message"])}
 			if not found in errors:
 				errors.append(found)
 		if loaded == null and errors.is_empty():

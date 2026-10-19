@@ -2,8 +2,8 @@ extends RefCounted
 
 ## export_presets.cfg, read and written in the format the editor's Project > Export saves it in.
 
-const Read = preload("reading.gd")
-const Log = preload("logger.gd")
+const GdhRead = preload("reading.gd")
+const GdhLog = preload("logger.gd")
 
 const PRESETS_FILE: String = "res://export_presets.cfg"
 ## Where the editor names the one preset of each platform it runs on a device.
@@ -19,10 +19,10 @@ const PLATFORMS: Dictionary[String, String] = {
 	"Web": "web_",
 }
 
-var _log: Log
+var _log: GdhLog
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -88,7 +88,7 @@ static func _runnable(config: ConfigFile, section: String) -> bool:
 	var platform: String = str(config.get_value(section, "platform", ""))
 	if config.has_section_key(RUNNABLE_SECTION, platform):
 		return str(config.get_value(RUNNABLE_SECTION, platform)) == str(config.get_value(section, "name", ""))
-	return Read.as_bool(config.get_value(section, "runnable", false))
+	return GdhRead.as_bool(config.get_value(section, "runnable", false))
 
 
 ## Adds an export preset to export_presets.cfg, written with the keys the editor's Project > Export
@@ -188,9 +188,11 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 ## self-contained one, otherwise in the user's data directory, as the editor's own paths have it.
 static func _templates_dir() -> String:
 	var version: Dictionary = Engine.get_version_info()
-	var named: String = "%d.%d" % [Read.as_int(version.get("major", 0)), Read.as_int(version.get("minor", 0))]
-	if Read.as_int(version.get("patch", 0)) != 0:
-		named += "." + str(Read.as_int(version.get("patch", 0)))
+	var named: String = (
+		"%d.%d" % [GdhRead.as_int(version.get("major", 0)), GdhRead.as_int(version.get("minor", 0))]
+	)
+	if GdhRead.as_int(version.get("patch", 0)) != 0:
+		named += "." + str(GdhRead.as_int(version.get("patch", 0)))
 	named += "." + str(version.get("status", ""))
 	if ClassDB.class_exists("CSharpScript"):
 		named += ".mono"

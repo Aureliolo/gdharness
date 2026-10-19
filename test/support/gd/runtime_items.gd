@@ -8,11 +8,11 @@ extends SceneTree
 ## Everything sits in the 64 by 64 viewport a script run with no window has, so the items are drawn
 ## small and unpadded.
 
-const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
-const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
+const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 
 var failures: Array[String] = []
-var input: InputCommands = null
+var input: GdhInputCommands = null
 var _begun: bool = false
 
 
@@ -27,7 +27,7 @@ func _process(_delta: float) -> bool:
 func _everything() -> void:
 	var host: Node = Node.new()
 	root.add_child(host)
-	input = InputCommands.new(host, Values.new())
+	input = GdhInputCommands.new(host, GdhValues.new())
 
 	await _check_tabs_by_their_titles()
 	await _check_list_entries_by_their_words()

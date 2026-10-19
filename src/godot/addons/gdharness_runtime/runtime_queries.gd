@@ -4,12 +4,12 @@ extends RefCounted
 ## question, where one is on screen, a property's value, the metrics. What it changes, a property
 ## written or a method called, is in runtime_changes.gd.
 
-const Paths = preload("runtime_paths.gd")
-const Read = preload("reading.gd")
-const Says = preload("runtime_says.gd")
-const Screen = preload("runtime_screen.gd")
-const Values = preload("runtime_values.gd")
-const Words = preload("runtime_words.gd")
+const GdhPaths = preload("runtime_paths.gd")
+const GdhRead = preload("reading.gd")
+const GdhSays = preload("runtime_says.gd")
+const GdhScreen = preload("runtime_screen.gd")
+const GdhValues = preload("runtime_values.gd")
+const GdhWords = preload("runtime_words.gd")
 
 ## The most nodes one find answers with, unless asked for fewer: enough for any real query and
 ## far short of the tree dump a query exists to avoid.
@@ -32,7 +32,7 @@ const LIMIT_CEILING: int = 5000
 const FRAMES_TIMED: int = 120
 
 var _host: Node
-var _values: Values
+var _values: GdhValues
 ## How long each of the last frames took, oldest first, in microseconds, as the game timed them.
 var _frame_usec: PackedInt64Array = PackedInt64Array()
 ## How many physics steps ran in each of those frames, in the same order.
@@ -43,7 +43,7 @@ var _last_physics_frames: int = 0
 
 ## The host is the autoload, which is how the tree is reached: it is not in one when the
 ## modules are built, and a fixture may put it in one later.
-func _init(host: Node, values: Values) -> void:
+func _init(host: Node, values: GdhValues) -> void:
 	_host = host
 	_values = values
 
@@ -56,8 +56,8 @@ func _init(host: Node, values: Values) -> void:
 ## characters, and the same question as a find with one property answered two.
 func get_tree(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
-	var max_depth: int = Read.as_int(params.get("depth", 3), 3)
-	var include_properties: bool = Read.as_bool(params.get("include_properties", false))
+	var max_depth: int = GdhRead.as_int(params.get("depth", 3), 3)
+	var include_properties: bool = GdhRead.as_bool(params.get("include_properties", false))
 	var named: Array[String] = []
 	var listed: Variant = params.get("properties", [])
 	if listed is Array:
@@ -66,7 +66,7 @@ func get_tree(params: Dictionary) -> Dictionary:
 	else:
 		return {"type": "error", "message": "properties must be a list of property names"}
 
-	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
+	var reached: Dictionary = GdhValues.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):
 		return reached
 	var root: Node = reached["node"]
@@ -101,8 +101,8 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	for filter: String in FILTERS:
 		wanted[filter] = str(params.get(filter, ""))
 	var wanted_property: String = str(params.get("property", ""))
-	var include_hidden: bool = Read.as_bool(params.get("include_hidden", true), true)
-	var limit: int = Read.as_int(params.get("limit", FIND_LIMIT), FIND_LIMIT)
+	var include_hidden: bool = GdhRead.as_bool(params.get("include_hidden", true), true)
+	var limit: int = GdhRead.as_int(params.get("limit", FIND_LIMIT), FIND_LIMIT)
 	if limit < 1 or limit > LIMIT_CEILING:
 		return {
 			"type": "error", "message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit]
@@ -114,12 +114,12 @@ func find_nodes(params: Dictionary) -> Dictionary:
 		wanted["script"] = "res://" + wanted["script"]
 
 	# Split once here rather than for each node the walk passes.
-	var names: Array[String] = Says.split_at_bars(wanted["name"])
+	var names: Array[String] = GdhSays.split_at_bars(wanted["name"])
 	if not wanted["name"].is_empty() and names.is_empty():
 		var bars_only: String = 'name "%s" is only bars, so it names no node; write the names between them'
 		return {"type": "error", "message": bars_only % wanted["name"]}
 
-	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
+	var reached: Dictionary = GdhValues.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):
 		return reached
 	var root: Node = reached["node"]
@@ -131,14 +131,14 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	# find would have matched if the name had been read the way it was probably meant.
 	var plain_names: Array[String] = []
 	for named: String in names:
-		if Says.is_plain(named):
+		if GdhSays.is_plain(named):
 			plain_names.append(named)
 	var nearly: int = 0
 	# The same for the words: a glob is matched against the whole text, and one written as a prefix
 	# by habit, "Taken together*", missed the label whose sentence those words are in the middle of.
 	# Nothing found then read as the words not being on screen, which is the wrong conclusion when
 	# checking that a change to the text landed.
-	var widened_says: String = Says.widened(wanted["says"])
+	var widened_says: String = GdhSays.widened(wanted["says"])
 	var widened: Dictionary[String, String] = {}
 	for filter: String in wanted:
 		widened[filter] = widened_says if filter == "says" else wanted[filter]
@@ -192,7 +192,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			near_words.append('"%s"' % named)
 		var opened: Array[String] = []
 		for named: String in names:
-			opened.append("*%s*" % named if Says.is_plain(named) else named)
+			opened.append("*%s*" % named if GdhSays.is_plain(named) else named)
 		(
 			notes
 			. append(
@@ -203,7 +203,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 						"" if nearly > 0 else "hidden ",
 						holding,
 						" or ".join(PackedStringArray(near_words)),
-						Says.joined_at_bars(opened),
+						GdhSays.joined_at_bars(opened),
 						"" if nearly > 0 else " with includeHidden true",
 					]
 				)
@@ -304,19 +304,19 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 	if wanted_property.is_empty():
 		return entry
 	entry["property"] = wanted_property
-	# Through a path as well, for the reason [method Paths.walk_to] gives. A step that is not there on
+	# Through a path as well, for the reason [method GdhPaths.walk_to] gives. A step that is not there on
 	# this node reads as not having the property rather than as a refusal, which is the rule this
 	# whole function is written to: a find matches nodes of several classes on purpose.
-	var reached: Dictionary = Paths.walk_to(node, str(entry["path"]), wanted_property)
+	var reached: Dictionary = GdhPaths.walk_to(node, str(entry["path"]), wanted_property)
 	if reached.has("message"):
 		entry["has_property"] = false
 		return entry
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
-	var has: bool = Paths.can_read(holder, named)
+	var has: bool = GdhPaths.can_read(holder, named)
 	entry["has_property"] = has
 	if has:
-		entry["value"] = _values.serialize(Paths.read_under(holder, named))
+		entry["value"] = _values.serialize(GdhPaths.read_under(holder, named))
 	return entry
 
 
@@ -356,7 +356,7 @@ func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) ->
 	# What this node says, rather than everything said underneath it. A row is then found by the
 	# label in it, and the path answered is that label's, which is where the words a caller is
 	# looking at actually are: matching every container above it would answer with the screen.
-	if not wanted["says"].is_empty() and not Says.says(node, wanted["says"]):
+	if not wanted["says"].is_empty() and not GdhSays.says(node, wanted["says"]):
 		return false
 	var script: Variant = node.get_script()
 	if not wanted["script"].is_empty():
@@ -408,14 +408,14 @@ static func _script_is(attached: Script, wanted: String) -> bool:
 ## whose interesting half is below the cut says so in a number rather than in a flag.
 func read_text(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
-	var include_hidden: bool = Read.as_bool(params.get("include_hidden", false))
-	var limit: int = Read.as_int(params.get("limit", READ_LIMIT), READ_LIMIT)
+	var include_hidden: bool = GdhRead.as_bool(params.get("include_hidden", false))
+	var limit: int = GdhRead.as_int(params.get("limit", READ_LIMIT), READ_LIMIT)
 	if limit < 1 or limit > LIMIT_CEILING:
 		return {
 			"type": "error", "message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit]
 		}
 
-	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
+	var reached: Dictionary = GdhValues.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):
 		return reached
 	var root: Node = reached["node"]
@@ -453,7 +453,7 @@ func read_text(params: Dictionary) -> Dictionary:
 func _read_into(node: Node, include_hidden: bool, most: int, into: Array[String]) -> int:
 	var left_out: int = 0
 	if include_hidden or shown(node):
-		for said: String in Words.lines_said_by(node):
+		for said: String in GdhWords.lines_said_by(node):
 			if into.size() < most:
 				into.append(said)
 			else:
@@ -472,7 +472,7 @@ func get_rect(params: Dictionary) -> Dictionary:
 	if node_path.is_empty():
 		return {"type": "error", "message": "Node path required"}
 
-	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
@@ -491,7 +491,7 @@ func get_rect(params: Dictionary) -> Dictionary:
 			"canvas": _values.serialize(canvas_rect),
 			"window":
 			_values.serialize(
-				Screen.rect_in_window(
+				GdhScreen.rect_in_window(
 					control.get_viewport(),
 					control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size)
 				)
@@ -500,7 +500,7 @@ func get_rect(params: Dictionary) -> Dictionary:
 	if node is Node2D:
 		var item: Node2D = node
 		var canvas_position: Vector2 = item.get_global_transform_with_canvas().origin
-		var window_position: Vector2 = Screen.in_window(item.get_viewport(), canvas_position)
+		var window_position: Vector2 = GdhScreen.in_window(item.get_viewport(), canvas_position)
 		return {
 			"type": "point",
 			"path": node_path,
@@ -544,12 +544,12 @@ func _in_the_frame(node_path: String, item: Node3D) -> Dictionary:
 	if found.has("aim"):
 		var aim: Vector2 = found["aim"]
 		answer["canvas"] = _values.serialize(aim)
-		answer["window"] = _values.serialize(Screen.in_window(drawn_in, aim))
+		answer["window"] = _values.serialize(GdhScreen.in_window(drawn_in, aim))
 	if found.has("rect"):
 		var covered: Rect2 = found["rect"]
 		answer["covers"] = {
 			"canvas": _values.serialize(covered),
-			"window": _values.serialize(Screen.rect_in_window(drawn_in, covered)),
+			"window": _values.serialize(GdhScreen.rect_in_window(drawn_in, covered)),
 		}
 	return answer
 
@@ -634,12 +634,12 @@ func get_property(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or property.is_empty():
 		return {"type": "error", "message": "Node path and property required"}
 
-	var standing: Dictionary = Values.target_at(_host.get_tree().root, node_path)
+	var standing: Dictionary = GdhValues.target_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
 	var target: Object = standing["object"]
 
-	var reached: Dictionary = Paths.walk_to(target, node_path, property)
+	var reached: Dictionary = GdhPaths.walk_to(target, node_path, property)
 	if reached.has("message"):
 		return reached
 
@@ -647,14 +647,14 @@ func get_property(params: Dictionary) -> Dictionary:
 	var named: String = reached["name"]
 	# Asked of the holder rather than read and compared to null, because a property the holder does
 	# not have and a property that is null both read as null.
-	if not Paths.can_read(holder, named):
-		return {"type": "error", "message": Paths.nothing_there(holder, named, str(reached["called"]))}
+	if not GdhPaths.can_read(holder, named):
+		return {"type": "error", "message": GdhPaths.nothing_there(holder, named, str(reached["called"]))}
 
 	return {
 		"type": "property",
 		"path": node_path,
 		"property": property,
-		"value": _values.serialize(Paths.read_under(holder, named)),
+		"value": _values.serialize(GdhPaths.read_under(holder, named)),
 	}
 
 
@@ -793,13 +793,13 @@ func _serialize_node_tree(
 func _named_properties_of(node: Node, path: String, named: Array[String]) -> Dictionary:
 	var properties: Dictionary = {}
 	for wanted: String in named:
-		var reached: Dictionary = Paths.walk_to(node, path, wanted)
+		var reached: Dictionary = GdhPaths.walk_to(node, path, wanted)
 		if reached.has("message"):
 			continue
 		var holder: Variant = reached["holder"]
 		var name: String = reached["name"]
-		if Paths.can_read(holder, name):
-			properties[wanted] = _values.serialize(Paths.read_under(holder, name))
+		if GdhPaths.can_read(holder, name):
+			properties[wanted] = _values.serialize(GdhPaths.read_under(holder, name))
 	return properties
 
 

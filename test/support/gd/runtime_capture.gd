@@ -7,7 +7,7 @@ extends SceneTree
 ## got; what it proves is that a frame nobody drew is not handed back as a success.
 
 const CaptureCommands = preload("res://addons/gdharness_runtime/runtime_capture.gd")
-const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
+const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 const Checked = preload("checked.gd")
 
 var failures: Array[String] = []
@@ -20,7 +20,7 @@ func _init() -> void:
 
 
 func _run() -> void:
-	var capture: CaptureCommands = CaptureCommands.new(host, Values.new())
+	var capture: CaptureCommands = CaptureCommands.new(host, GdhValues.new())
 
 	var output_path: String = OS.get_temp_dir().path_join("gdharness-capture-fixture.png")
 	_check_refused(await capture.capture_screenshot({"output_path": output_path}), "screenshot", output_path)
@@ -110,7 +110,7 @@ func _check_what_is_asked(capture: CaptureCommands, output_path: String) -> void
 ## What a region names, and where that falls in a picture drawn at the window's size or at the
 ## project's own and stretched.
 func _check_regions() -> void:
-	var values: Values = Values.new()
+	var values: GdhValues = GdhValues.new()
 	var expected: Rect2 = Rect2(40, 30, 20, 10)
 	var spelled: Array = [
 		{"x": 40, "y": 30, "width": 20, "height": 10},

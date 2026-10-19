@@ -6,7 +6,7 @@ extends SceneTree
 ## refusal is checked beside the write or call that works, so a check that refused everything fails.
 
 const Checked = preload("checked.gd")
-const Read = preload("res://addons/gdharness_runtime/reading.gd")
+const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const WALKER_SCRIPT: String = "res://change_walker.gd"
 const HOLDER_SOURCE: String = """extends Node
@@ -30,6 +30,7 @@ var named_stock: Dictionary = {&"base:dew": 5}
 var spare: RefCounted = RefCounted.new()
 var spot: Vector2 = Vector2.ZERO
 var area: Rect2 = Rect2()
+var tint: Color = Color.WHITE
 
 
 func press(point: Vector2, forward: bool) -> bool:
@@ -291,12 +292,42 @@ func _check_a_value_given_by_its_fields() -> void:
 	var said: String = str(short.get("message", ""))
 	if short.get("type") != "error" or not said.ends_with('A Vector2 is sent as {"x": ..., "y": ...}.'):
 		_fail("one missing a field is refused naming the shape: %s" % JSON.stringify(short))
+	var shape: String = 'A Vector2 is sent as {"x": ..., "y": ...}.'
+	var deep: Dictionary = await _write("spot", {"x": 7, "y": 8, "z": 9})
+	var deep_said: String = str(deep.get("message", ""))
+	if not deep_said.ends_with("A Vector2 has no z, so the value is not read as one. " + shape):
+		_fail("one carrying a field a Vector2 has not is refused naming it: %s" % JSON.stringify(deep))
+	if holder.get("spot") != Vector2(1.5, -2):
+		_fail("and the slot keeps what it held: %s" % holder.get("spot"))
+	var named: Dictionary = await _write("spot", {"type": "Vector2", "x": 7, "y": 8})
+	var named_said: String = str(named.get("message", ""))
+	if not named_said.contains(
+		'A Vector2 has no type, so the value is not read as one: a value names its type under "_type". '
+	):
+		_fail("a type named under type is refused saying where it goes: %s" % JSON.stringify(named))
+	var tagged: Dictionary = await _invoke("press", [{"_type": "Vector2", "x": 1, "y": 2, "w": 3}, true])
+	if not str(tagged.get("message", "")).contains("A Vector2 has no w, so the value is not read as one."):
+		_fail("and an argument tagged as one: %s" % JSON.stringify(tagged))
 	var unshaped: Dictionary = await _write("spot", "east")
 	if not str(unshaped.get("message", "")).ends_with('A Vector2 is sent as {"x": ..., "y": ...}.'):
 		_fail("and so is a write of a word: %s" % JSON.stringify(unshaped))
 	var counted: Dictionary = await _write("counted", "many")
 	if str(counted.get("message", "")).contains("is sent as"):
 		_fail("a number names no shape: %s" % JSON.stringify(counted))
+	var coded: Dictionary = await _write("tint", "#00ff0080")
+	if coded.get("type") != "property_set" or holder.get("tint") != Color.html("#00ff0080"):
+		_fail("a colour takes its html code: %s, holding %s" % [JSON.stringify(coded), holder.get("tint")])
+	var alpha: Dictionary = await _write("tint", {"r": 1, "g": 0, "b": 0, "alpha": 0.5})
+	var colour_shape: String = 'A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code'
+	if not str(alpha.get("message", "")).contains(
+		"A Color has no alpha, so the value is not read as one. " + colour_shape
+	):
+		_fail(
+			"one naming its alpha otherwise is refused with the key it goes under: %s" % JSON.stringify(alpha)
+		)
+	var uncoded: Dictionary = await _write("tint", "#00ff0")
+	if uncoded.get("type") != "error" or holder.get("tint") != Color.html("#00ff0080"):
+		_fail("and a word that is no html code is refused: %s" % JSON.stringify(uncoded))
 
 
 ## A slot declared as Variant takes what it is given, as the engine does; one declared as a number
@@ -349,7 +380,7 @@ func _check_a_slot_that_takes_anything() -> void:
 	if (
 		turned.get("met") != false
 		or turned.get("value") != 3
-		or Read.as_int(turned.get("elapsed_ms"), 0) >= 3000
+		or GdhRead.as_int(turned.get("elapsed_ms"), 0) >= 3000
 	):
 		_fail("a wait on a slot that turns into a number ends there: %s" % JSON.stringify(turned))
 
@@ -418,7 +449,7 @@ func _check_a_key_holding_a_colon() -> void:
 	var met: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Holder", "property": 'stock:"base:dew"', "value": 2, "timeout_ms": 1000}
 	)
-	if met.get("met") != true or Read.as_int(met.get("elapsed_ms"), 1000) >= 1000:
+	if met.get("met") != true or GdhRead.as_int(met.get("elapsed_ms"), 1000) >= 1000:
 		_fail('a wait on stock:"base:dew" is met at once: %s' % JSON.stringify(met))
 	var split: Dictionary = await node._execute_command(
 		"get_property", {"path": "/root/Holder", "property": "stock:base:dew"}

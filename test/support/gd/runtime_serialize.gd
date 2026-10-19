@@ -4,13 +4,13 @@ extends SceneTree
 ## the operations script and with a different key order, and the same round trip is asserted
 ## against it.
 
-const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
+const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 
 var failures: Array[String] = []
 
 
 func _init() -> void:
-	_check(Values.new())
+	_check(GdhValues.new())
 
 	if failures.is_empty():
 		print(JSON.stringify({"ok": true}))
@@ -32,7 +32,7 @@ func _tag_of(value: Variant) -> String:
 	return ""
 
 
-func _check(values: Values) -> void:
+func _check(values: GdhValues) -> void:
 	var vec2: Variant = values.serialize(Vector2(1.5, -2.5))
 	if vec2 != {"_type": "Vector2", "x": 1.5, "y": -2.5}:
 		_fail("Vector2: %s" % JSON.stringify(vec2))

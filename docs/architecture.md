@@ -965,6 +965,13 @@ object does not declare is refused rather than ignored. The running game asks th
 argument before `callv` and of a value before a wait compares it, through `acceptable` beside the
 serialiser, so the two sides cannot answer it differently.
 
+What each tag has to carry, the fields it reads when they are there, and how a refusal says a type is
+written are `value_shapes.gd`, shared the same way. A value carrying a field its type does not have
+is not built, because a builder takes the fields it knows and drops the rest: `{"x": 1, "y": 2,
+"z": 3}` for a `Vector2` would be written as `(1, 2)` and answered as written. Every refusal of a
+value where such a type goes ends with the key that stopped it and the shape that is read, from the
+same function on every side.
+
 A value that passes is still read back once set, because a setter can refuse or change it and say so
 only in the editor's log: a `Timer` given a `wait_time` of 0 holds 1, a `Sprite2D` given a material
 for its texture holds nothing. Each property set in a call is set once more after the rest, so a
@@ -1040,6 +1047,16 @@ every warning this engine has at error level: nothing untyped handed to a typed 
 answered and dropped. `test/engine-gdscript.ts` asks the engine for its own list of warnings rather
 than keeping one, turns all of them up, empties `directory_rules` so the addons are held to it too,
 and runs an operation from outside the project the way the server does.
+
+The project's names reach into the shipped scripts too. Godot resolves a type by looking for a
+global class and then an autoload before it looks at the script's own constants and inner classes,
+so in a project with `class_name Log`, or an autoload called `Log`, a module's `var logger: Log`
+names the project's `Log` and not the logger it preloads, and the script refuses to compile at any
+warning level. An inner class of the same name is refused outright as hiding the global one. Every
+name a shipped script declares in a class's casing, a preloaded module, an inner class, an enum,
+therefore starts with `Gdh`, which no project's own names do. The engine suite declares a class
+and an autoload for each such name, without the prefix, and compiles and runs the shipped scripts
+beside them, and refuses a declared name in a class's casing that lacks it.
 
 Not everything under `debug/gdscript/warnings/` is a warning level, which is the part worth knowing
 before writing anything that sets them. On 4.7.2 there are 52 settings there and 49 take a level:

@@ -14,10 +14,10 @@ extends Node
 ## question asked of two places: a value spelled differently here would read as the editor and the
 ## file disagreeing about something they agree about.
 
-const Read = preload("../reading.gd")
-const Serialisation = preload("../serialisation.gd")
+const GdhRead = preload("../reading.gd")
+const GdhSerialisation = preload("../serialisation.gd")
 
-var _values: Serialisation = Serialisation.new()
+var _values: GdhSerialisation = GdhSerialisation.new()
 
 
 func get_project_setting(args: Dictionary) -> Dictionary:
@@ -47,7 +47,7 @@ func _settings_under(prefix: String) -> Dictionary:
 		var setting: String = str(property.get("name", ""))
 		if not setting.begins_with(prefix):
 			continue
-		var kind: int = Read.as_int(property.get("type", TYPE_NIL), TYPE_NIL)
+		var kind: int = GdhRead.as_int(property.get("type", TYPE_NIL), TYPE_NIL)
 		var described: Dictionary = {
 			"setting": setting,
 			"type": type_string(kind),

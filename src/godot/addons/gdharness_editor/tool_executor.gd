@@ -5,25 +5,25 @@ extends Node
 ## preloaded rather than looked up on disk at runtime, so a missing one fails to parse here
 ## instead of leaving a command silently unanswered.
 
-const SceneTools = preload("tools/scene_tools.gd")
-const ResourceTools = preload("tools/resource_tools.gd")
-const AnimationTools = preload("tools/animation_tools.gd")
-const PlayTools = preload("tools/play_tools.gd")
-const ClassTools = preload("tools/class_tools.gd")
-const SettingsTools = preload("tools/settings_tools.gd")
-const FilesystemTools = preload("tools/filesystem_tools.gd")
-const ProfileTools = preload("tools/profile_tools.gd")
+const GdhSceneTools = preload("tools/scene_tools.gd")
+const GdhResourceTools = preload("tools/resource_tools.gd")
+const GdhAnimationTools = preload("tools/animation_tools.gd")
+const GdhPlayTools = preload("tools/play_tools.gd")
+const GdhClassTools = preload("tools/class_tools.gd")
+const GdhSettingsTools = preload("tools/settings_tools.gd")
+const GdhFilesystemTools = preload("tools/filesystem_tools.gd")
+const GdhProfileTools = preload("tools/profile_tools.gd")
 
 var _editor_plugin: EditorPlugin = null
 
-var _scene_tools: SceneTools = null
-var _resource_tools: ResourceTools = null
-var _animation_tools: AnimationTools = null
-var _play_tools: PlayTools = null
-var _class_tools: ClassTools = null
-var _settings_tools: SettingsTools = null
-var _filesystem_tools: FilesystemTools = null
-var _profile_tools: ProfileTools = null
+var _scene_tools: GdhSceneTools = null
+var _resource_tools: GdhResourceTools = null
+var _animation_tools: GdhAnimationTools = null
+var _play_tools: GdhPlayTools = null
+var _class_tools: GdhClassTools = null
+var _settings_tools: GdhSettingsTools = null
+var _filesystem_tools: GdhFilesystemTools = null
+var _profile_tools: GdhProfileTools = null
 
 var _tool_map: Dictionary = {}
 var _initialized: bool = false
@@ -46,35 +46,35 @@ func _init_tools() -> void:
 		return
 	_initialized = true
 
-	_scene_tools = SceneTools.new()
+	_scene_tools = GdhSceneTools.new()
 	_scene_tools.name = "SceneTools"
 	add_child(_scene_tools)
 
-	_resource_tools = ResourceTools.new()
+	_resource_tools = GdhResourceTools.new()
 	_resource_tools.name = "ResourceTools"
 	add_child(_resource_tools)
 
-	_animation_tools = AnimationTools.new()
+	_animation_tools = GdhAnimationTools.new()
 	_animation_tools.name = "AnimationTools"
 	add_child(_animation_tools)
 
-	_play_tools = PlayTools.new()
+	_play_tools = GdhPlayTools.new()
 	_play_tools.name = "PlayTools"
 	add_child(_play_tools)
 
-	_class_tools = ClassTools.new()
+	_class_tools = GdhClassTools.new()
 	_class_tools.name = "ClassTools"
 	add_child(_class_tools)
 
-	_settings_tools = SettingsTools.new()
+	_settings_tools = GdhSettingsTools.new()
 	_settings_tools.name = "SettingsTools"
 	add_child(_settings_tools)
 
-	_filesystem_tools = FilesystemTools.new()
+	_filesystem_tools = GdhFilesystemTools.new()
 	_filesystem_tools.name = "FilesystemTools"
 	add_child(_filesystem_tools)
 
-	_profile_tools = ProfileTools.new()
+	_profile_tools = GdhProfileTools.new()
 	_profile_tools.name = "ProfileTools"
 	add_child(_profile_tools)
 

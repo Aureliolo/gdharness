@@ -4,8 +4,8 @@ extends RefCounted
 ## What a new node in a scene is made or copied from, what the scene owns of it, and where among its
 ## siblings a node may go.
 
-const Read = preload("../reading.gd")
-const PropertyValues = preload("../property_values.gd")
+const GdhRead = preload("../reading.gd")
+const GdhPropertyValues = preload("../property_values.gd")
 
 
 ## The scene to instance for an add, or null for a node of a class, beside why neither can be made
@@ -64,11 +64,11 @@ static func copied(source: Node, root: Node, copies: Dictionary) -> Node:
 			return null
 		copy = packed.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE)
 		for declared: Dictionary in source.get_property_list():
-			if not (Read.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
+			if not (GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
 				continue
 			var property: String = str(declared.get("name", ""))
 			var value: Variant = source.get(property)
-			if not PropertyValues.same(copy.get(property), value):
+			if not GdhPropertyValues.same(copy.get(property), value):
 				copy.set(property, value)
 		for group: StringName in source.get_groups():
 			if not copy.is_in_group(group):
@@ -100,7 +100,7 @@ static func reconnect(copies: Dictionary, top: Node) -> void:
 		for info: Dictionary in source.get_signal_list():
 			var signal_name: String = str(info.get("name", ""))
 			for conn: Dictionary in source.get_signal_connection_list(signal_name):
-				var flags: int = Read.as_int(conn.get("flags", 0))
+				var flags: int = GdhRead.as_int(conn.get("flags", 0))
 				var callable: Callable = conn.get("callable", Callable())
 				var target: Object = callable.get_object()
 				if not flags & Object.CONNECT_PERSIST or target == null:
@@ -134,7 +134,7 @@ static func unplaceable(parent: Node, node: Node, asked: Variant) -> String:
 	if asked == null:
 		return ""
 	var others: int = parent.get_child_count() - (1 if node != null and node.get_parent() == parent else 0)
-	var at: int = Read.as_int(asked, -1)
+	var at: int = GdhRead.as_int(asked, -1)
 	if at < 0 or at > others:
 		return (
 			"index %s is not a place among the %d other children of %s: give 0 to %d, 0 for first."
@@ -151,7 +151,7 @@ static func unplaceable(parent: Node, node: Node, asked: Variant) -> String:
 ## Moves [param node] to [param asked] among its siblings, when a place was asked for.
 static func place(node: Node, asked: Variant) -> void:
 	if asked != null:
-		node.get_parent().move_child(node, Read.as_int(asked))
+		node.get_parent().move_child(node, GdhRead.as_int(asked))
 
 
 ## Why [param instanced] cannot be instanced into [param scene_path], or "" when it can: a scene

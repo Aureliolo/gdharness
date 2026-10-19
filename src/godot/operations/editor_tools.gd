@@ -7,10 +7,10 @@ extends RefCounted
 ## made here passes the same checks and answers in the same shape. What the engine does that an
 ## editor does not, running every script, is put back in scene_file.gd and headless_check.gd.
 
-const AnimationTools = preload("../addons/gdharness_editor/tools/animation_tools.gd")
-const ResourceTools = preload("../addons/gdharness_editor/tools/resource_tools.gd")
-const SceneTools = preload("../addons/gdharness_editor/tools/scene_tools.gd")
-const SceneFile = preload("../addons/gdharness_editor/scene_file.gd")
+const GdhAnimationTools = preload("../addons/gdharness_editor/tools/animation_tools.gd")
+const GdhResourceTools = preload("../addons/gdharness_editor/tools/resource_tools.gd")
+const GdhSceneTools = preload("../addons/gdharness_editor/tools/scene_tools.gd")
+const GdhSceneFile = preload("../addons/gdharness_editor/scene_file.gd")
 
 const SCENE_COMMANDS: Array[String] = [
 	"create_scene",
@@ -51,18 +51,18 @@ static func run(params: Dictionary) -> Dictionary:
 	var arguments: Dictionary = given
 	var tools: Node = null
 	if command in SCENE_COMMANDS:
-		tools = SceneTools.new()
+		tools = GdhSceneTools.new()
 	elif command in RESOURCE_COMMANDS:
-		tools = ResourceTools.new()
+		tools = GdhResourceTools.new()
 	elif command in ANIMATION_COMMANDS:
-		tools = AnimationTools.new()
+		tools = GdhAnimationTools.new()
 	else:
 		return {"ok": false, "error": "No editor tool runs headless as " + command}
 	var answer: Variant = tools.call(command, arguments)
 	tools.free()
 	if answer is Dictionary:
 		var answered: Dictionary = answer
-		if not SceneFile.by_path.is_empty():
+		if not GdhSceneFile.by_path.is_empty():
 			answered["namedByPath"] = (
 				(
 					"%s %s named by path rather than by uid. A uid in a file's own header is resolved "
@@ -72,10 +72,10 @@ static func run(params: Dictionary) -> Dictionary:
 					+ "it name %s by uid."
 				)
 				% [
-					", ".join(SceneFile.by_path),
-					"is" if SceneFile.by_path.size() == 1 else "are",
-					"it" if SceneFile.by_path.size() == 1 else "them",
-					"it" if SceneFile.by_path.size() == 1 else "them",
+					", ".join(GdhSceneFile.by_path),
+					"is" if GdhSceneFile.by_path.size() == 1 else "are",
+					"it" if GdhSceneFile.by_path.size() == 1 else "them",
+					"it" if GdhSceneFile.by_path.size() == 1 else "them",
 				]
 			)
 		return answered

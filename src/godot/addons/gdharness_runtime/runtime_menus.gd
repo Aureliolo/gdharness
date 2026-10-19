@@ -3,9 +3,9 @@ extends RefCounted
 ## The menu a choice is made from and the item in it, for a choice made by what an item says or by
 ## where it is in the list.
 
-const Read = preload("reading.gd")
-const Says = preload("runtime_says.gd")
-const Words = preload("runtime_words.gd")
+const GdhRead = preload("reading.gd")
+const GdhSays = preload("runtime_says.gd")
+const GdhWords = preload("runtime_words.gd")
 
 
 ## The menu [param node] is, or the one it holds. An [OptionButton] and a [MenuButton] both keep
@@ -38,7 +38,7 @@ static func menu_of(node: Node) -> PopupMenu:
 ## still count after them, for a caller that has the key from the source.
 static func wanted_items(menu: PopupMenu, params: Dictionary) -> Array[int]:
 	if params.has("index"):
-		var asked: int = Read.as_int(params.get("index", -1), -1)
+		var asked: int = GdhRead.as_int(params.get("index", -1), -1)
 		return _items([asked] if asked >= 0 and asked < menu.get_item_count() else [])
 	var wanted: String = str(params.get("text", ""))
 	if wanted.is_empty():
@@ -54,14 +54,14 @@ static func wanted_items(menu: PopupMenu, params: Dictionary) -> Array[int]:
 	var shown: Array[String] = []
 	var held: Array[String] = []
 	for index: int in order:
-		shown.append(Words.item_says(menu, index))
+		shown.append(GdhWords.item_says(menu, index))
 		held.append(menu.get_item_text(index))
 	for words: Array[String] in [shown, held]:
 		for at: int in words.size():
 			if words[at] == wanted:
 				return _items([order[at]])
 		for at: int in words.size():
-			if Says.spaced(words[at]).nocasecmp_to(Says.spaced(wanted)) == 0:
+			if GdhSays.spaced(words[at]).nocasecmp_to(GdhSays.spaced(wanted)) == 0:
 				return _items([order[at]])
 	# Separators are left out here: a heading is refused when named in full, and a pattern that
 	# matched one beside the item it heads would tie the two.
@@ -70,7 +70,7 @@ static func wanted_items(menu: PopupMenu, params: Dictionary) -> Array[int]:
 		var enabled: Array[int] = []
 		for at: int in words.size():
 			var index: int = order[at]
-			if menu.is_item_separator(index) or not Says.matches(words[at], wanted):
+			if menu.is_item_separator(index) or not GdhSays.matches(words[at], wanted):
 				continue
 			matched.append(index)
 			if not menu.is_item_disabled(index):
@@ -93,7 +93,7 @@ static func _items(indices: Array) -> Array[int]:
 static func items_of(menu: PopupMenu) -> Array[String]:
 	var said: Array[String] = []
 	for index: int in menu.get_item_count():
-		var words: String = Words.item_says(menu, index)
+		var words: String = GdhWords.item_says(menu, index)
 		if not menu.is_item_separator(index):
 			said.append("%d: %s" % [index, words])
 		elif not words.strip_edges().is_empty():

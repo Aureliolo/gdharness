@@ -4,7 +4,7 @@ extends SceneTree
 ## JSON-safe dictionaries and back, and they are dispatch chains where a reordered branch
 ## silently changes the answer rather than failing, so the round trip is asserted value by value.
 
-const Serialisation = preload("res://operations/serialisation.gd")
+const GdhSerialisation = preload("res://operations/serialisation.gd")
 
 ## The types that are described rather than rebuilt, because nothing can send one back.
 const DESCRIBED: Array[int] = [TYPE_OBJECT, TYPE_CALLABLE, TYPE_SIGNAL]
@@ -12,7 +12,7 @@ const DESCRIBED: Array[int] = [TYPE_OBJECT, TYPE_CALLABLE, TYPE_SIGNAL]
 const EXACT: int = 9007199254740992
 
 var failures: Array[String] = []
-var values: Serialisation = Serialisation.new()
+var values: GdhSerialisation = GdhSerialisation.new()
 var samples: Dictionary = {}
 
 
@@ -168,9 +168,21 @@ func _check_deserialize() -> void:
 		_fail("Vector2i round trip")
 	if values.deserialize_value(values.serialize_value(Vector3i(6, 7, 8))) != Vector3i(6, 7, 8):
 		_fail("Vector3i round trip")
+	var deep: Dictionary = {"_type": "Vector2", "x": 1, "y": 2, "z": 3}
+	var deep_back: Variant = values.deserialize_value(deep)
+	if typeof(deep_back) != TYPE_DICTIONARY or deep_back != deep:
+		_fail("a Vector2 carrying a z should come back as it arrived, not as %s" % str(deep_back))
+	var framed: Dictionary = {"_type": "Rect2", "position": {"x": 1, "y": 2}, "size": {"x": 3, "y": 4}}
+	if values.deserialize_value(framed) != Rect2(1, 2, 3, 4):
+		_fail("a Rect2 by its corners: %s" % str(values.deserialize_value(framed)))
+	var counted: Dictionary = {"_type": "Rect2", "x": 1, "y": 2, "width": 3, "height": 4}
+	if values.deserialize_value(counted) != Rect2(1, 2, 3, 4):
+		_fail("and by its four numbers: %s" % str(values.deserialize_value(counted)))
 	var colour: Color = Color(0.25, 0.5, 0.75, 1)
 	if values.deserialize_value(values.serialize_value(colour)) != colour:
 		_fail("Color round trip")
+	if values.deserialize_value({"_type": "Color", "r": 1, "g": 0, "b": 0}) != Color(1, 0, 0, 1):
+		_fail("a Color without its alpha is opaque")
 	if values.deserialize_value(values.serialize_value(NodePath("Root/Child"))) != NodePath("Root/Child"):
 		_fail("NodePath round trip")
 
@@ -327,9 +339,9 @@ func _check_exact_ints() -> void:
 	var digits: Variant = values.fitted(str((1 << 62) + 1), TYPE_INT)
 	if not digits is int or digits != (1 << 62) + 1:
 		_fail("digits fitted to an int came back %s" % var_to_str(digits))
-	if Serialisation.inexact(float(EXACT) + 2, TYPE_INT).is_empty():
+	if GdhSerialisation.inexact(float(EXACT) + 2, TYPE_INT).is_empty():
 		_fail("a number past 2^53 for an int was not refused")
-	if not Serialisation.inexact(float(EXACT) - 1, TYPE_INT).is_empty():
+	if not GdhSerialisation.inexact(float(EXACT) - 1, TYPE_INT).is_empty():
 		_fail("2^53 - 1 for an int was refused")
 
 

@@ -8,10 +8,10 @@ extends SceneTree
 ## Everything sits in the 64 by 64 viewport a script run with no window has.
 
 const Checked = preload("checked.gd")
-const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
-const Says = preload("res://addons/gdharness_runtime/runtime_says.gd")
-const Typing = preload("res://addons/gdharness_runtime/runtime_typing.gd")
-const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
+const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const GdhSays = preload("res://addons/gdharness_runtime/runtime_says.gd")
+const GdhTyping = preload("res://addons/gdharness_runtime/runtime_typing.gd")
+const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 
 
 ## Counts presses that reach the game's own input past the interface.
@@ -28,8 +28,8 @@ class Unhandled:
 
 var failures: Array[String] = []
 var pressed: Dictionary = {}
-var input: InputCommands = null
-var typing: Typing = null
+var input: GdhInputCommands = null
+var typing: GdhTyping = null
 var _begun: bool = false
 
 
@@ -44,8 +44,8 @@ func _process(_delta: float) -> bool:
 func _everything() -> void:
 	var host: Node = Node.new()
 	root.add_child(host)
-	input = InputCommands.new(host, Values.new())
-	typing = Typing.new(host)
+	input = GdhInputCommands.new(host, GdhValues.new())
+	typing = GdhTyping.new(host)
 
 	await _check_a_button_that_presses_nothing()
 	await _check_typing_where_the_keys_go()
@@ -801,9 +801,9 @@ func _check_a_field_by_its_placeholder() -> void:
 ## button saying the words exactly, which ranks as the exact match it is.
 func _check_words_held_together_by_a_space_that_does_not_break() -> void:
 	for code: int in [0x00A0, 0x1680, 0x2000, 0x2007, 0x200A, 0x202F, 0x205F, 0x3000]:
-		if not Says.matches("Ab%sCd" % String.chr(code), "ab cd"):
+		if not GdhSays.matches("Ab%sCd" % String.chr(code), "ab cd"):
 			_fail("a typed space matches U+%04X" % code)
-	if Says.matches("Ab%sCd" % String.chr(0x200B), "ab cd"):
+	if GdhSays.matches("Ab%sCd" % String.chr(0x200B), "ab cd"):
 		_fail("and a zero-width space, which draws no space, is not one")
 	# A space stands for any one character only while a text is sorted out cheaply; what matches is
 	# still decided on the words spaced.
@@ -821,7 +821,7 @@ func _check_words_held_together_by_a_space_that_does_not_break() -> void:
 		var said: String = case[0]
 		var wanted: String = case[1]
 		var expected: bool = case[2]
-		if Says.matches(said, wanted) != expected:
+		if GdhSays.matches(said, wanted) != expected:
 			_fail("%s says %s: %s" % [JSON.stringify(said), JSON.stringify(wanted), not expected])
 
 	var line: RichTextLabel = RichTextLabel.new()

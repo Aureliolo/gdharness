@@ -1,7 +1,7 @@
 extends RefCounted
 
-const Log = preload("logger.gd")
-const Patterns = preload("patterns.gd")
+const GdhLog = preload("logger.gd")
+const GdhPatterns = preload("patterns.gd")
 
 ## Where the engine keeps a file's UID, by what kind of file it is. Measured on 4.7.2: a script or
 ## shader has a `.uid` file beside it, an imported file has it in its `.import`, and a text scene or
@@ -10,10 +10,10 @@ const Patterns = preload("patterns.gd")
 const SIDECAR_KINDS: Array[String] = ["gd", "gdshader", "gdshaderinc", "cs"]
 const TEXT_RESOURCE_KINDS: Array[String] = ["tscn", "tres", "escn"]
 
-var _log: Log
+var _log: GdhLog
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -59,7 +59,7 @@ static func uid_of(file_path: String) -> Dictionary:
 		if file != null:
 			var header: String = file.get_line()
 			file.close()
-			var matched: RegExMatch = Patterns.compiled('\\buid="(uid://[^"]+)"').search(header)
+			var matched: RegExMatch = GdhPatterns.compiled('\\buid="(uid://[^"]+)"').search(header)
 			if matched != null:
 				return {"uid": matched.get_string(1), "from": "the file's header"}
 	var id: int = ResourceLoader.get_resource_uid(file_path)

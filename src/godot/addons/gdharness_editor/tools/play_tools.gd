@@ -9,7 +9,7 @@ extends Node
 ## tools answer at all.
 
 ## What the display server calls itself when the engine was started with no display at all.
-const Read = preload("../reading.gd")
+const GdhRead = preload("../reading.gd")
 
 const HEADLESS_DISPLAY: String = "headless"
 ## Where Godot keeps the port its own debugger listens on for a game it is playing. One setting
@@ -245,7 +245,7 @@ func playing_status(_args: Dictionary) -> Dictionary:
 	# play, so the one from when this editor greeted the server is a number it has moved off.
 	var settings: EditorSettings = EditorInterface.get_editor_settings()
 	var debugger: int = (
-		Read.as_int(settings.get_setting(DEBUGGER_SETTING))
+		GdhRead.as_int(settings.get_setting(DEBUGGER_SETTING))
 		if settings != null and settings.has_setting(DEBUGGER_SETTING)
 		else 0
 	)

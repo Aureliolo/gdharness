@@ -13,7 +13,7 @@ extends SceneTree
 ## it: read at connect time, the second arrival claimed the new version and `addonIsStale`
 ## reported false over an editor still running the old code.
 
-const BridgeClient = preload("res://addons/gdharness_editor/bridge_client.gd")
+const GdhBridgeClient = preload("res://addons/gdharness_editor/bridge_client.gd")
 const MARKER: String = "res://addons/gdharness_editor/.gdharness-version"
 
 ## Past the point where the socket gives up, which is what the client has to survive. Measured
@@ -28,7 +28,7 @@ const NOW: String = "9.9.9"
 
 var failures: Array[String] = []
 
-var _client: BridgeClient
+var _client: GdhBridgeClient
 var _server: TCPServer = TCPServer.new()
 var _peer: WebSocketPeer = null
 var _port: int = 0
@@ -46,7 +46,7 @@ func _initialize() -> void:
 		return
 
 	_write_marker(WAS)
-	_client = BridgeClient.new()
+	_client = GdhBridgeClient.new()
 	root.add_child(_client)
 	if _client.connected.connect(_on_connected) != OK:
 		_fail("the fixture could not listen for the client connecting")

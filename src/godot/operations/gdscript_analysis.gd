@@ -1,16 +1,16 @@
 extends RefCounted
 
-const Dependencies = preload("dependencies.gd")
-const Patterns = preload("patterns.gd")
-const Read = preload("reading.gd")
-const Log = preload("logger.gd")
+const GdhDependencies = preload("dependencies.gd")
+const GdhPatterns = preload("patterns.gd")
+const GdhRead = preload("reading.gd")
+const GdhLog = preload("logger.gd")
 
-var _log: Log
+var _log: GdhLog
 ## Kept for the call, so the project's class names are read once however many bases are walked.
-var _dependencies: Dependencies = null
+var _dependencies: GdhDependencies = null
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -62,7 +62,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 			if _triple_quotes(raw) % 2 == 1:
 				in_multiline_string = false
 			continue
-		var stripped: String = Patterns.without_comment(raw)
+		var stripped: String = GdhPatterns.without_comment(raw)
 
 		if stripped.is_empty():
 			continue
@@ -85,7 +85,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		# on the line with them off. `@abstract class_name X` was reported as no declared class,
 		# and `@abstract func x()` and `@warning_ignore("...") func x()` as no function at all:
 		# gdUnit4 alone declares 248 methods that way and this answered with none of them.
-		var header: String = Patterns.without_annotations(stripped)
+		var header: String = GdhPatterns.without_annotations(stripped)
 
 		var at: int = i
 		# A declaration wrapped across lines is one declaration, and reading the first line alone
@@ -104,9 +104,9 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		if _can_wrap(header):
 			while _bracket_depth(stripped) > 0 and i + 1 < lines.size():
 				i += 1
-				stripped = (stripped + " " + Patterns.without_comment(lines[i])).strip_edges()
-			header = Patterns.without_annotations(stripped)
-		var declaration: RegExMatch = Patterns.declared_class(header)
+				stripped = (stripped + " " + GdhPatterns.without_comment(lines[i])).strip_edges()
+			header = GdhPatterns.without_annotations(stripped)
+		var declaration: RegExMatch = GdhPatterns.declared_class(header)
 		if declaration != null:
 			declared_class_name = declaration.get_string(1)
 			# `class_name X extends Y` is also one line, and taking the rest of it as the name
@@ -144,9 +144,9 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	# named it. The same reading as that tool's, so the two agree.
 	var classes_used: Array[Dictionary] = []
 	if _dependencies == null:
-		_dependencies = Dependencies.new(_log)
+		_dependencies = GdhDependencies.new(_log)
 	var declared_by: Dictionary = _dependencies.classes_declared()
-	for used: String in Dependencies.classes_used_in(content, declared_by):
+	for used: String in GdhDependencies.classes_used_in(content, declared_by):
 		var declaring: String = str(declared_by[used])
 		if declaring == full_script_path:
 			continue
@@ -165,7 +165,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		if value.begins_with("*"):
 			global_autoloads[setting.trim_prefix("autoload/")] = value.trim_prefix("*")
 	var autoloads_used: Array[Dictionary] = []
-	for used: String in Dependencies.classes_used_in(content, global_autoloads):
+	for used: String in GdhDependencies.classes_used_in(content, global_autoloads):
 		if str(global_autoloads[used]) != full_script_path:
 			autoloads_used.append({"name": used, "path": str(global_autoloads[used])})
 
@@ -185,7 +185,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		"autoloads_used": autoloads_used,
 		"line_count": lines.size()
 	}
-	if Read.as_bool(params.get("include_inherited", false)):
+	if GdhRead.as_bool(params.get("include_inherited", false)):
 		_add_inherited(answer, [full_script_path])
 	return answer
 
@@ -202,7 +202,7 @@ func _mark_virtuals(functions: Array[Dictionary], extends_name: String, from_pat
 	var virtuals: Dictionary = {}
 	if not native.is_empty():
 		for m: Dictionary in ClassDB.class_get_method_list(native, false):
-			var flags: int = Read.as_int(m.get("flags", 0))
+			var flags: int = GdhRead.as_int(m.get("flags", 0))
 			if flags & METHOD_FLAG_VIRTUAL:
 				virtuals[str(m.get("name", ""))] = true
 	for one: Dictionary in functions:
@@ -366,7 +366,7 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 
 	# From the annotations themselves rather than from where they sit. `@onready @export var x` put
 	# the export second and so read as not exported, and a hint with a space in it was cut at it.
-	for one: String in Patterns.annotations_on(line):
+	for one: String in GdhPatterns.annotations_on(line):
 		if one.begins_with("export"):
 			is_export = true
 			var after: String = one.substr(6)
@@ -457,7 +457,7 @@ func _parse_function(line: String, line_num: int, annotated: String = "") -> Dic
 		"is_static": is_static,
 		# Said rather than left to be inferred: an abstract method has no body, so a caller that
 		# saw only the declaration would otherwise take it for one whose body it failed to read.
-		"is_abstract": "abstract" in Patterns.annotations_on(annotated),
+		"is_abstract": "abstract" in GdhPatterns.annotations_on(annotated),
 		"line": line_num
 	}
 
@@ -624,7 +624,7 @@ static func _triple_quotes(line: String) -> int:
 
 func _extract_dependencies(line: String) -> Array[String]:
 	var deps: Array[String] = []
-	var regex: RegEx = Patterns.compiled("(?:preload|load)\\s*\\(\\s*[\"']([^\"']+)[\"']\\s*\\)")
+	var regex: RegEx = GdhPatterns.compiled("(?:preload|load)\\s*\\(\\s*[\"']([^\"']+)[\"']\\s*\\)")
 
 	for m: RegExMatch in regex.search_all(line):
 		deps.append(m.get_string(1))

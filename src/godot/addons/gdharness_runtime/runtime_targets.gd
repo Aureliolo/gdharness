@@ -2,13 +2,13 @@ extends RefCounted
 
 ## Which control a click means when it names the control by the words on it rather than by path.
 
-const Items = preload("runtime_items.gd")
-const Queries = preload("runtime_queries.gd")
-const Read = preload("reading.gd")
-const Says = preload("runtime_says.gd")
-const Screen = preload("runtime_screen.gd")
-const Values = preload("runtime_values.gd")
-const Words = preload("runtime_words.gd")
+const GdhItems = preload("runtime_items.gd")
+const GdhQueries = preload("runtime_queries.gd")
+const GdhRead = preload("reading.gd")
+const GdhSays = preload("runtime_says.gd")
+const GdhScreen = preload("runtime_screen.gd")
+const GdhValues = preload("runtime_values.gd")
+const GdhWords = preload("runtime_words.gd")
 
 ## How many of the controls saying the same words a refusal names, with the index for each.
 const LISTED_CANDIDATES: int = 10
@@ -26,7 +26,7 @@ const WHOLE: int = 1
 ## The control a click by [param wanted] words presses, found under [param root_path] in the tree
 ## [param root] heads, or the refusal saying why there is none or which of several:
 ## {"path", "found"} or {"type", "message"}, with `item` as well when the match is an item of a
-## control drawing a list, which [method Items.item_rect] places.
+## control drawing a list, which [method GdhItems.item_rect] places.
 ##
 ## Matched the way a find matches `says`, against a control's own words, and only among controls
 ## the player can see. A match inside a button presses the button, because the label is what says
@@ -45,7 +45,7 @@ const WHOLE: int = 1
 ## on screen for a player, and a click at it lands on the thing on top. The screen a game shows
 ## over its hall covers the hall's drawers without hiding them, so their words matched as well.
 static func control_saying(root: Node, root_path: String, wanted: String, which: Variant) -> Dictionary:
-	var reached: Dictionary = Values.node_at(root, root_path)
+	var reached: Dictionary = GdhValues.node_at(root, root_path)
 	if reached.has("message"):
 		return reached
 	var matched: Array[Control] = []
@@ -66,22 +66,22 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	var pending: Array[Node] = [reached["node"]]
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
-		if node is Control and Says.says(node, wanted):
-			if not Queries.shown(node):
+		if node is Control and GdhSays.says(node, wanted):
+			if not GdhQueries.shown(node):
 				hidden += 1
-				if _says_exactly(Words.said_by(node), wanted):
+				if _says_exactly(GdhWords.said_by(node), wanted):
 					exact_out_of_reach.append(node)
 					out_of_reach_as.append("hidden")
-			elif Words.draws_a_list(node):
+			elif GdhWords.draws_a_list(node):
 				# Each item a match of its own, so the words of one tab are matched as a whole and the
 				# index picks between two items saying them as it does between two buttons.
 				var drawing: Control = node
-				for entry: Dictionary in Words.items_of(drawing):
+				for entry: Dictionary in GdhWords.items_of(drawing):
 					var words: String = entry["says"]
-					if not Says.matches(words, wanted):
+					if not GdhSays.matches(words, wanted):
 						continue
 					var whole: bool = _says_exactly(words, wanted)
-					var drawn_at_now: Rect2 = Items.item_rect(drawing, entry["item"], wanted)
+					var drawn_at_now: Rect2 = GdhItems.item_rect(drawing, entry["item"], wanted)
 					matched.append(drawing)
 					said.append(words)
 					exact.append(whole)
@@ -95,7 +95,7 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 			else:
 				var control: Control = node
 				var target: Control = _pressed_through(control)
-				var words: String = Words.said_by(node)
+				var words: String = GdhWords.said_by(node)
 				var whole: bool = _says_exactly(words, wanted)
 				var buried: bool = not whole and _inside_a_word(words, wanted)
 				var at: int = matched.find(target)
@@ -193,7 +193,7 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 				% [_described(best, ranks[0], wanted, under), order, _candidates(targets, lines)]
 			)
 		}
-	var index: int = 0 if which == null else Read.as_int(which, -1)
+	var index: int = 0 if which == null else GdhRead.as_int(which, -1)
 	if index < 0 or index >= targets.size():
 		# A number arrives from JSON as a float, and 5 was quoted back as 5.0.
 		var given: String = str(index) if index >= 0 else str(which)
@@ -295,7 +295,7 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	var answer: Dictionary = {"path": str(targets[index].get_path()), "found": found}
 	if picked_items[index] != null:
 		answer["item"] = picked_items[index]
-		found["item"] = Items.item_named(targets[index], picked_items[index], lines[index])
+		found["item"] = GdhItems.item_named(targets[index], picked_items[index], lines[index])
 	return answer
 
 
@@ -345,9 +345,9 @@ static func pointer_turned_off_by(control: Control) -> Control:
 ## named WARD, and read as its words run together it said WARD only as part of more, level with
 ## "WARDSPITE" over its own description, and a click on WARD was refused as not clear.
 static func _says_exactly(written: String, wanted: String) -> bool:
-	var said: String = Says.spaced(written)
-	for words: String in Says.alternatives(wanted):
-		if not Says.is_plain(words):
+	var said: String = GdhSays.spaced(written)
+	for words: String in GdhSays.alternatives(wanted):
+		if not GdhSays.is_plain(words):
 			if said.matchn(words):
 				return true
 			continue
@@ -364,11 +364,11 @@ static func _says_exactly(written: String, wanted: String) -> bool:
 ## never starting where a word starts: "out" in "Scout". Words starting a longer one count as said,
 ## "Recruit" in "Recruits", and so does anything matched by a pattern.
 static func _inside_a_word(written: String, wanted: String) -> bool:
-	var said: String = Says.spaced(written).to_lower()
+	var said: String = GdhSays.spaced(written).to_lower()
 	var found: bool = false
-	for words: String in Says.alternatives(wanted):
+	for words: String in GdhSays.alternatives(wanted):
 		var looked_for: String = words.to_lower()
-		if not Says.is_plain(words) or not _in_a_word(looked_for.unicode_at(0)):
+		if not GdhSays.is_plain(words) or not _in_a_word(looked_for.unicode_at(0)):
 			return false
 		var at: int = said.find(looked_for)
 		while at >= 0:
@@ -391,8 +391,8 @@ static func _described(count: int, rank: int, wanted: String, under: String) -> 
 	var what: String = "button" if rank & ENABLED_BUTTON else "control"
 	var how: String = '"%s"' % wanted
 	var plain: bool = true
-	for words: String in Says.alternatives(wanted):
-		plain = plain and Says.is_plain(words)
+	for words: String in GdhSays.alternatives(wanted):
+		plain = plain and GdhSays.is_plain(words)
 	if plain:
 		how = ('exactly "%s"' if rank & WHOLE else '"%s" as part of more') % wanted
 	if count == 1:
@@ -756,7 +756,7 @@ static func _window_over(target: Control, point: Vector2, window: Window) -> boo
 	if window.get_parent() == null or window.is_ancestor_of(target):
 		return false
 	var host: Viewport = window.get_parent().get_viewport()
-	for step: Dictionary in Screen.steps_out(target.get_viewport(), point):
+	for step: Dictionary in GdhScreen.steps_out(target.get_viewport(), point):
 		if step["viewport"] != host:
 			continue
 		var there: Vector2 = step["point"]
@@ -820,7 +820,7 @@ static func _off_screen(target: Control, aim: Vector2) -> bool:
 	var point: Vector2 = target.get_global_transform_with_canvas() * aim + _moved_by(target, moves)
 	if _clipped_away(target, point, moves) or not target.get_viewport().get_visible_rect().has_point(point):
 		return true
-	var reached: Dictionary = Screen.reach(target.get_viewport(), point)
+	var reached: Dictionary = GdhScreen.reach(target.get_viewport(), point)
 	var viewport: Viewport = reached["viewport"]
 	var there: Vector2 = reached["point"]
 	return not viewport.get_visible_rect().has_point(there)
@@ -855,11 +855,11 @@ static func _clipped_away(
 ## words. A line in another font or holding an image measures off from what is drawn, which a wide
 ## line with nothing between the words and its start hardly does.
 static func point_on_words(label: RichTextLabel, wanted: String) -> Dictionary:
-	var text: String = Says.spaced(Words.said_by(label))
+	var text: String = GdhSays.spaced(GdhWords.said_by(label))
 	var start: int = -1
 	var length: int = 0
-	for words: String in Says.alternatives(wanted):
-		if not Says.is_plain(words):
+	for words: String in GdhSays.alternatives(wanted):
+		if not GdhSays.is_plain(words):
 			continue
 		var at: int = text.findn(words)
 		if at >= 0 and (start < 0 or at < start):
@@ -927,7 +927,7 @@ static func _open_menu_note(root: Node, wanted: String) -> String:
 		if menu != null and menu.visible:
 			for item: int in menu.item_count:
 				var text: String = menu.get_item_text(item)
-				if Says.matches(text, wanted):
+				if GdhSays.matches(text, wanted):
 					var owner: Node = menu.get_parent()
 					var named: Node = owner if owner is MenuButton or owner is OptionButton else menu
 					return (

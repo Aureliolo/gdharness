@@ -8,8 +8,8 @@ extends RefCounted
 ## reached it as an InputEventAction it never reads, so a controller layout could only be driven by
 ## calling the game's own methods. The engine still fires the actions bound to a button from these.
 
-const Read = preload("reading.gd")
-const Values = preload("runtime_values.gd")
+const GdhRead = preload("reading.gd")
+const GdhValues = preload("runtime_values.gd")
 
 ## Controller buttons by the names Godot gives them, for a caller naming one rather than numbering it.
 const JOY_BUTTONS: Dictionary[String, int] = {
@@ -60,10 +60,10 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 	var button: int = _named_or_numbered(given, JOY_BUTTONS, JOY_BUTTON_MAX)
 	if button < 0:
 		return {"type": "error", "message": _not_one_of("button", given, JOY_BUTTONS, JOY_BUTTON_MAX)}
-	var device: int = Read.as_int(params.get("device", 0), 0)
-	var held: bool = Read.as_bool(params.get("pressed", true), true)
+	var device: int = GdhRead.as_int(params.get("device", 0), 0)
+	var held: bool = GdhRead.as_bool(params.get("pressed", true), true)
 	var whole: bool = not params.has("pressed")
-	var holding: Variant = Values.held_for(params)
+	var holding: Variant = GdhValues.held_for(params)
 	if holding is String:
 		return {"type": "error", "message": holding}
 	var frames: int = holding
@@ -80,7 +80,7 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 	return {
 		"type": "input_injected",
 		"input_type": "joypad_button",
-		"held_frames": Values.held_answer(whole, frames),
+		"held_frames": GdhValues.held_answer(whole, frames),
 		"button": button,
 		"button_name": _name_of(button, JOY_BUTTONS),
 		"device": device,
@@ -98,12 +98,12 @@ func inject_joypad_motion(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": _not_one_of("axis", given, JOY_AXES, JOY_AXIS_MAX)}
 	if not params.has("value"):
 		return {"type": "error", "message": "joypad_motion needs value, where the axis is, -1 to 1"}
-	var value: float = Read.as_float(params.get("value"), 0.0)
+	var value: float = GdhRead.as_float(params.get("value"), 0.0)
 	if value < -1.0 or value > 1.0:
 		return {
 			"type": "error", "message": "value %s is outside -1 to 1, the whole travel of an axis" % value
 		}
-	var device: int = Read.as_int(params.get("device", 0), 0)
+	var device: int = GdhRead.as_int(params.get("device", 0), 0)
 
 	var event: InputEventJoypadMotion = InputEventJoypadMotion.new()
 	event.axis = axis as JoyAxis
@@ -133,9 +133,9 @@ static func _button(button: int, device: int, down: bool) -> InputEventJoypadBut
 static func _named_or_numbered(given: Variant, names: Dictionary[String, int], count: int) -> int:
 	if given is String:
 		var named: String = given
-		return Read.as_int(names.get(named.strip_edges().to_lower(), -1), -1)
+		return GdhRead.as_int(names.get(named.strip_edges().to_lower(), -1), -1)
 	if given is int or given is float:
-		var number: int = Read.as_int(given, -1)
+		var number: int = GdhRead.as_int(given, -1)
 		return number if number >= 0 and number < count else -1
 	return -1
 

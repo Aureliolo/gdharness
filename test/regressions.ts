@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   chmodSync,
@@ -19651,7 +19651,7 @@ function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
   // satisfy the line above while the sentence describes a setting with no effect.
   assert.match(
     addon,
-    /_script_run\(\)\s*and\s*not\s*Read\.as_bool\(ProjectSettings\.get_setting\(SCRIPT_RUNS_SETTING/,
+    /_script_run\(\)\s*and\s*not\s*GdhRead\.as_bool\(ProjectSettings\.get_setting\(SCRIPT_RUNS_SETTING/,
     'and the script-run refusal should be the thing that consults it',
   );
 
@@ -27025,6 +27025,112 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
         ENGINE_CALL_TIMEOUT_MS,
       );
     }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A start whose game came up on a runtime addon other than this server's says so in its answer.
+ *
+ * No runtime_* call is sent to such a game, and the start answered `listening: true` and nothing
+ * else, so a caller learned it from the refusal of the first call they made. The project here holds
+ * the runtime addon of this release with one script changed and markers naming that build, which is
+ * a different build of the same version, as a project set up before a rebuild has. A game reads
+ * what it runs from the markers, so a changed script without them is a copy that cannot say, which
+ * is not called stale. Then the shipped addon and its markers are put back, which is what the
+ * note's upgrade does, and the next start says nothing of the kind.
+ */
+async function testAStartSaysItsGameIsOnAnotherBuild(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('stale runtime start regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-stale-start-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-stale-start-rt-'));
+  const addon = join(project, 'addons', 'gdharness_runtime');
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), addon, { recursive: true });
+  const autoload = join(addon, 'runtime_autoload.gd');
+  const shipped = readFileSync(autoload, 'utf8');
+  const another = `${shipped}\n# Another build of the same version.\n`;
+  writeFileSync(autoload, another);
+  writeFileSync(join(addon, '.gdharness-version'), `${SERVER_VERSION}\n`);
+  writeFileSync(join(addon, '.gdharness-digest'), `${createHash('sha256').update(another).digest('hex')}\n`);
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Stale"\nrun/main_scene="res://main.tscn"\n\n' +
+      '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  assert.notEqual(installedRuntimeDigest(project), shippedRuntimeDigest(), 'the project holds another build');
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const start = async (): Promise<unknown> =>
+    parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, op: 'start', headless: true } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+  const stop = async (): Promise<void> => {
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  };
+  try {
+    await server.initialize('regression-test');
+    const behind = await start();
+    try {
+      const said = JSON.stringify(behind);
+      assert.deepEqual(
+        [get(behind, 'runtime', 'listening'), get(behind, 'runtime', 'addonIsStale')],
+        [true, true],
+        `the game listens and the start says it is asked nothing: ${said}`,
+      );
+      assert.match(
+        text(get(behind, 'runtime', 'staleNote')),
+        new RegExp(
+          `is running a different build of the ${SERVER_VERSION.replaceAll('.', '\\.')} runtime addon from the one this server ships, so this server asks it nothing`,
+        ),
+        said,
+      );
+      // The project as the game announced it, which Godot spells with forward slashes and macOS
+      // with the /private its temporary directory links to.
+      const upgraded = new RegExp(
+        `run {2}npx -y gdharness@${SERVER_VERSION.replaceAll('.', '\\.')} upgrade "([^"]+)" {2}in a shell`,
+      ).exec(text(get(behind, 'runtime', 'staleNote')));
+      assert.ok(upgraded, `and names the upgrade, since the project's own addon is the other build: ${said}`);
+      assert.equal(realpathSync(upgraded[1] ?? ''), realpathSync(project), `of this project: ${said}`);
+    } finally {
+      await stop();
+    }
+
+    writeFileSync(autoload, shipped);
+    writeFileSync(join(addon, '.gdharness-digest'), `${shippedRuntimeDigest()}\n`);
+    const current = await start();
+    try {
+      const said = JSON.stringify(current);
+      assert.deepEqual(
+        [
+          get(current, 'runtime', 'listening'),
+          get(current, 'runtime', 'addonIsStale'),
+          get(current, 'runtime', 'staleNote'),
+        ],
+        [true, undefined, undefined],
+        `on the shipped addon the start says nothing of it: ${said}`,
+      );
+    } finally {
+      await stop();
+    }
+  } finally {
     await server.stop();
     sweep(project, runtimeDir);
   }
@@ -36761,7 +36867,7 @@ function testNoShippedScriptParsesJsonLoudly(): void {
       .split('\n')
       .some((line) => !line.trimStart().startsWith('#') && line.includes('JSON.parse_string(')),
   );
-  assert.deepEqual(loud, [], 'read JSON through Read.json_or_null, which fails without printing');
+  assert.deepEqual(loud, [], 'read JSON through GdhRead.json_or_null, which fails without printing');
 }
 
 /**
@@ -38617,6 +38723,81 @@ function testTheEditorIsOfferedWhereItCanAnswer(): void {
   );
   assert.ok(answerable.size >= 1, 'no op has an editor side, so this compared two empty sets');
   assert.deepEqual([...offered].sort(), [...answerable].sort());
+}
+
+/**
+ * A project setting takes a value the way a property write does.
+ *
+ * Settings were built from the value alone, so a vector written as its fields without a tag was a
+ * dictionary to them and refused, while scene_node set took it, and a colour given as its html code
+ * was refused by both. A value carrying a field its type has not is refused here too, naming it.
+ */
+async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('setting values regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-setting-values-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-setting-values-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Values"\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const set = async (setting: string, value: unknown): Promise<{ answer: unknown; said: string }> => {
+    const response = await server.request(
+      'tools/call',
+      { name: 'project_settings', arguments: { projectPath: project, op: 'set', setting, value } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    return { answer: parseTextContent(response), said: textOf(response) ?? JSON.stringify(response) };
+  };
+  const file = (): string => readFileSync(join(project, 'project.godot'), 'utf8');
+  try {
+    await server.initialize('regression-test');
+    const gravity = 'physics/2d/default_gravity_vector';
+    const fields = await set(gravity, { x: 0, y: 2 });
+    assert.equal(get(fields.answer, 'saved'), true, `a vector written as its fields: ${fields.said}`);
+    assert.match(file(), /default_gravity_vector=Vector2\(0, 2\)/, `is saved as one: ${file()}`);
+    const deep = await set(gravity, { x: 0, y: 3, z: 1 });
+    assert.match(
+      deep.said,
+      /declared as Vector2, .* cannot become one\. A Vector2 has no z, so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\./,
+      'one carrying a field it has not is refused naming it',
+    );
+    assert.match(
+      file(),
+      /default_gravity_vector=Vector2\(0, 2\)/,
+      `and the file keeps what it held: ${file()}`,
+    );
+
+    const clear = 'rendering/environment/defaults/default_clear_color';
+    const coded = await set(clear, '#336699');
+    assert.equal(get(coded.answer, 'saved'), true, `a colour given as its html code: ${coded.said}`);
+    assert.deepEqual(
+      ['r', 'g', 'b', 'a'].map((channel) =>
+        Math.round(asNumber(get(coded.answer, 'new_value', channel)) * 255),
+      ),
+      [0x33, 0x66, 0x99, 255],
+      `is that colour: ${coded.said}`,
+    );
+    const alpha = await set(clear, { r: 1, g: 0, b: 0, alpha: 0.5 });
+    assert.ok(
+      alpha.said.includes(
+        'A Color has no alpha, so the value is not read as one. A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code, "#ff8000".',
+      ),
+      `a colour naming its alpha otherwise is told the key it goes under: ${alpha.said}`,
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
 }
 
 /**
@@ -45491,6 +45672,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovieIsWrittenOnlyWhereACaptureCouldBe,
   testAWindowedRunWritesItsMovie,
   testTheEditorIsOfferedWhereItCanAnswer,
+  testASettingTakesWhatAPropertyTakes,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,
@@ -45601,6 +45783,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACaptureOfOneNodeIsThatNodeAtItsOwnPixels,
   testAOneShotEngineRunIsNotTheEditor,
   testASubViewportCaptureIsDrawnNow,
+  testAStartSaysItsGameIsOnAnotherBuild,
   testAScreenshotHoldsTheGamesOwnWindows,
   testTheRendererIsChosenAndItsMemoryRead,
   testWhatTheGameTellsAScreenReaderIsRead,

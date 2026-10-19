@@ -13,7 +13,7 @@ extends SceneTree
 ## here accepts the connection and never completes the handshake, because that is a leftover that
 ## takes the longest to find out about: a port nobody holds at all is refused sooner.
 
-const BridgeClient = preload("res://addons/gdharness_editor/bridge_client.gd")
+const GdhBridgeClient = preload("res://addons/gdharness_editor/bridge_client.gd")
 const ANNOUNCEMENT: String = "res://.godot/gdharness-bridge.json"
 const PROTOCOL: int = 1
 
@@ -21,7 +21,7 @@ const DEADLINE_MSEC: int = 60000
 
 var failures: Array[String] = []
 
-var _client: BridgeClient
+var _client: GdhBridgeClient
 var _stuck: TCPServer = TCPServer.new()
 var _configured: TCPServer = TCPServer.new()
 ## The sockets the stuck server accepted, held open so the client waits on a handshake rather than
@@ -42,7 +42,7 @@ func _initialize() -> void:
 	OS.set_environment("GDHARNESS_BRIDGE_PORT", str(configured_port))
 	_announce(stuck_port)
 
-	_client = BridgeClient.new()
+	_client = GdhBridgeClient.new()
 	root.add_child(_client)
 	_client.connect_to_server()
 	_started = Time.get_ticks_msec()

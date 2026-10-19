@@ -14,8 +14,9 @@ extends RefCounted
 ## write accepts. What is here on top of it is the part only a property knows: the type wanted, so a
 ## dictionary shaped like a vector or a bare pair of numbers can be read as one.
 
-const Read = preload("reading.gd")
-const Serialisation = preload("serialisation.gd")
+const GdhRead = preload("reading.gd")
+const GdhSerialisation = preload("serialisation.gd")
+const GdhShapes = preload("value_shapes.gd")
 
 # The data types a Theme names its items by, as in "Button/colors/font_color", and what each holds.
 const THEME_ITEMS: Dictionary[String, Array] = {
@@ -65,7 +66,7 @@ const FLOAT_SHAPES: Array[int] = [
 # names, so a write to "Visibility" or "Transform" changed nothing and was answered as made.
 const HEADINGS: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP
 
-var _values: Serialisation = Serialisation.new()
+var _values: GdhSerialisation = GdhSerialisation.new()
 
 # Why the value being parsed cannot be written, when the parse is what found out. A resource is
 # built inside the parse and there is nowhere in a parsed value to put the reason it is wrong.
@@ -85,7 +86,7 @@ func parse(value: Variant, expected_type: int = TYPE_NIL, elements: Array = []) 
 		var fields: Dictionary = value
 		# A dictionary with keys that are not text arrives as its entries, and is read against the
 		# declared element types like any other.
-		if str(fields.get("_type", "")) == "Dictionary" and Serialisation.pairs(fields.get("entries")):
+		if str(fields.get("_type", "")) == "Dictionary" and GdhSerialisation.pairs(fields.get("entries")):
 			var built: Dictionary = _values.deserialize_value(fields)
 			return _parse_entries(built, elements)
 		var tagged: Array = _parse_tagged_dictionary(fields)
@@ -113,20 +114,21 @@ func cannot_hold(
 ) -> String:
 	var held: String = type_string(expected_type)
 	var cost: String = " Setting it would save a different value than the one asked for."
-	if not Serialisation.acceptable(value, expected_type):
+	if not GdhSerialisation.acceptable(value, expected_type):
 		var shape: String = "%s.%s is %s and the value given is %s, which cannot become one."
-		return shape % [holder, property, held, type_string(typeof(value))] + cost
+		var remedy: String = GdhShapes.remedy(value, expected_type)
+		return shape % [holder, property, held, type_string(typeof(value))] + remedy + cost
 
 	# And the same question of each element, because a list is accepted for a packed or typed array
 	# whatever is in it: a polygon written as [{"x": 1}] passes the check above and lands as one zero
 	# vector, and [1.5, "x"] for a PackedInt32Array as [1, 0].
-	var element: int = Read.as_int(PACKED_ELEMENTS.get(expected_type, TYPE_NIL), TYPE_NIL)
+	var element: int = GdhRead.as_int(PACKED_ELEMENTS.get(expected_type, TYPE_NIL), TYPE_NIL)
 	if expected_type == TYPE_ARRAY and not elements.is_empty():
-		element = Read.as_int(elements[0], TYPE_NIL)
+		element = GdhRead.as_int(elements[0], TYPE_NIL)
 	if element != TYPE_NIL and value is Array:
 		var items: Array = value
 		for index: int in items.size():
-			if not Serialisation.acceptable(items[index], element):
+			if not GdhSerialisation.acceptable(items[index], element):
 				var shape: String = "%s.%s is %s and item %d of the list given is %s, not %s."
 				var named: Array = [
 					holder, property, held, index, type_string(typeof(items[index])), type_string(element)
@@ -134,14 +136,14 @@ func cannot_hold(
 				return shape % named + cost
 	if expected_type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
 		var entries: Dictionary = value
-		var key_type: int = Read.as_int(elements[0], TYPE_NIL)
-		var value_type: int = Read.as_int(elements[1], TYPE_NIL)
+		var key_type: int = GdhRead.as_int(elements[0], TYPE_NIL)
+		var value_type: int = GdhRead.as_int(elements[1], TYPE_NIL)
 		for key: Variant in entries:
-			if not Serialisation.acceptable(key, key_type):
+			if not GdhSerialisation.acceptable(key, key_type):
 				var shape: String = "%s.%s has %s keys, and %s is not one."
 				return shape % [holder, property, type_string(key_type), shown(key)] + cost
 			var entry: Variant = entries[key]
-			if not Serialisation.acceptable(entry, value_type):
+			if not GdhSerialisation.acceptable(entry, value_type):
 				var shape: String = "%s.%s holds %s values, and the one given for %s is %s."
 				var named: Array = [holder, property, type_string(value_type), shown(key), shown(entry)]
 				return shape % named + cost
@@ -228,7 +230,7 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 	var walked: String = steps[0]
 	for index: int in range(1, steps.size()):
 		var step: String = steps[index]
-		var has: PackedStringArray = Serialisation.components_of(value)
+		var has: PackedStringArray = GdhSerialisation.components_of(value)
 		var kind: String = type_string(typeof(value))
 		var sort: String = ("an " if kind.left(1).to_upper() in ["A", "E", "I", "O", "U"] else "a ") + kind
 		if has.is_empty():
@@ -255,8 +257,8 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 ## [param raw] as the value [param declared] takes, as [ok, value] or [false, why not].
 func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 	var property: String = str(declared.get("name", ""))
-	var expected_type: int = Read.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
-	var hint: int = Read.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+	var expected_type: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
+	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
 	if expected_type == TYPE_OBJECT and hint == PROPERTY_HINT_NODE_TYPE:
 		return _node_reference(target, property, raw)
 
@@ -272,7 +274,7 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 		var elements: Array = elements_of(declared)
 		if _fraction(raw, expected_type, elements):
 			return [false, _fraction_refusal(target, property, raw)]
-		var rounded: String = Serialisation.inexact(raw, expected_type)
+		var rounded: String = GdhSerialisation.inexact(raw, expected_type)
 		if not rounded.is_empty():
 			return [false, "%s.%s holds int: %s." % [target.get_class(), property, rounded]]
 		_refused = ""
@@ -328,7 +330,7 @@ func _node_reference(target: Object, property: String, raw: Variant) -> Array:
 ## an object of the wrong class: measured on 4.7.2, a Sprite2D given a Material for its texture
 ## held nothing afterwards, and the scene was saved without the texture it had.
 func _wrong_class(value: Object, declared: Dictionary) -> String:
-	var hint: int = Read.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
 	var wanted: String = str(declared.get("hint_string", ""))
 	if hint != PROPERTY_HINT_RESOURCE_TYPE or wanted.is_empty():
 		return ""
@@ -354,8 +356,8 @@ func _wrong_class(value: Object, declared: Dictionary) -> String:
 ## behind a placeholder in the editor, and measured on 4.7.2 that placeholder stores [1.5, 2.0]
 ## as given, which the game then fails to load into the typed array.
 static func elements_of(declared: Dictionary) -> Array:
-	var type: int = Read.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
-	var hint: int = Read.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+	var type: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
+	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
 	var wanted: String = str(declared.get("hint_string", ""))
 	if wanted.is_empty():
 		return []
@@ -397,21 +399,21 @@ func _fraction(value: Variant, type: int, elements: Array = []) -> bool:
 	if type == TYPE_INT:
 		var number: Variant = value
 		if typeof(value) == TYPE_STRING:
-			number = Read.json_or_null(str(value))
+			number = GdhRead.json_or_null(str(value))
 		if typeof(number) != TYPE_FLOAT:
 			return false
 		var whole: float = number
 		return is_finite(whole) and whole != floorf(whole)
-	var element: int = Read.as_int(PACKED_ELEMENTS.get(type, TYPE_NIL), TYPE_NIL)
+	var element: int = GdhRead.as_int(PACKED_ELEMENTS.get(type, TYPE_NIL), TYPE_NIL)
 	if type == TYPE_ARRAY and not elements.is_empty():
-		element = Read.as_int(elements[0], TYPE_NIL)
+		element = GdhRead.as_int(elements[0], TYPE_NIL)
 	if value is Array and element != TYPE_NIL:
 		var items: Array = value
 		return items.any(func(item: Variant) -> bool: return _fraction(item, element))
 	if type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
 		var entries: Dictionary = value
-		var key_type: int = Read.as_int(elements[0], TYPE_NIL)
-		var value_type: int = Read.as_int(elements[1], TYPE_NIL)
+		var key_type: int = GdhRead.as_int(elements[0], TYPE_NIL)
+		var value_type: int = GdhRead.as_int(elements[1], TYPE_NIL)
 		for key: Variant in entries:
 			if _fraction(key, key_type) or _fraction(entries[key], value_type):
 				return true
@@ -463,7 +465,7 @@ func declaration(target: Object, property: String) -> Dictionary:
 	for declared: Dictionary in target.get_property_list():
 		if str(declared.get("name", "")) != property:
 			continue
-		if Read.as_int(declared.get("usage", 0)) & HEADINGS:
+		if GdhRead.as_int(declared.get("usage", 0)) & HEADINGS:
 			continue
 		return declared
 	if target is Theme:
@@ -503,13 +505,13 @@ static func same(held: Variant, given: Variant) -> bool:
 		return held_none == given_none
 	if held_type == TYPE_OBJECT or given_type == TYPE_OBJECT:
 		return _same_object(held, given)
-	if Serialisation.NUMBERS.has(held_type) and Serialisation.NUMBERS.has(given_type):
+	if GdhSerialisation.NUMBERS.has(held_type) and GdhSerialisation.NUMBERS.has(given_type):
 		if held_type == TYPE_BOOL or given_type == TYPE_BOOL:
 			return held_type == given_type and held == given
-		var held_number: float = Read.as_float(held)
-		var given_number: float = Read.as_float(given)
+		var held_number: float = GdhRead.as_float(held)
+		var given_number: float = GdhRead.as_float(given)
 		return (is_nan(held_number) and is_nan(given_number)) or is_equal_approx(held_number, given_number)
-	if Serialisation.TEXTS.has(held_type) and Serialisation.TEXTS.has(given_type):
+	if GdhSerialisation.TEXTS.has(held_type) and GdhSerialisation.TEXTS.has(given_type):
 		return str(held) == str(given)
 	if _listed(held_type) and _listed(given_type):
 		var held_items: Array = type_convert(held, TYPE_ARRAY)
@@ -675,7 +677,7 @@ func _parse_shaped_dictionary(value: Dictionary, expected_type: int, elements: A
 	if expected_type == TYPE_NIL or expected_type == TYPE_DICTIONARY:
 		return _parse_entries(value, elements)
 	var tag: String = type_string(expected_type)
-	if Serialisation.REQUIRED.has(tag):
+	if GdhShapes.REQUIRED.has(tag):
 		var tagged: Dictionary = value.duplicate()
 		tagged["_type"] = tag
 		var built: Variant = _values.deserialize_value(tagged)
@@ -690,8 +692,8 @@ func _parse_entries(value: Dictionary, elements: Array) -> Dictionary:
 	var key_type: int = TYPE_NIL
 	var value_type: int = TYPE_NIL
 	if elements.size() == 2:
-		key_type = Read.as_int(elements[0], TYPE_NIL)
-		value_type = Read.as_int(elements[1], TYPE_NIL)
+		key_type = GdhRead.as_int(elements[0], TYPE_NIL)
+		value_type = GdhRead.as_int(elements[1], TYPE_NIL)
 	var entries: Dictionary = {}
 	for key: Variant in value:
 		entries[_values.fitted(key, key_type)] = parse(value[key], value_type)
@@ -709,7 +711,7 @@ func _typed_dictionary(entries: Dictionary, key_type: int, value_type: int) -> D
 	for key: Variant in entries:
 		if key_type != TYPE_NIL and typeof(key) != key_type:
 			return entries
-		if not Serialisation.acceptable(entries[key], value_type):
+		if not GdhSerialisation.acceptable(entries[key], value_type):
 			return entries
 	var fitted: Dictionary = {}
 	for key: Variant in entries:
@@ -720,46 +722,48 @@ func _typed_dictionary(entries: Dictionary, key_type: int, value_type: int) -> D
 ## An array, either positional for a vector the property declares, or a list to parse per item.
 func _parse_array(value: Array, expected_type: int, elements: Array) -> Variant:
 	if PACKED_ELEMENTS.has(expected_type):
-		var element: int = Read.as_int(PACKED_ELEMENTS[expected_type], TYPE_NIL)
+		var element: int = GdhRead.as_int(PACKED_ELEMENTS[expected_type], TYPE_NIL)
 		return value.map(func(item: Variant) -> Variant: return parse(item, element))
 
 	match expected_type:
 		TYPE_VECTOR2:
 			if value.size() == 2:
-				return Vector2(Read.as_float(value[0]), Read.as_float(value[1]))
+				return Vector2(GdhRead.as_float(value[0]), GdhRead.as_float(value[1]))
 		TYPE_VECTOR2I:
 			if value.size() == 2:
-				return Vector2i(Read.as_int(value[0]), Read.as_int(value[1]))
+				return Vector2i(GdhRead.as_int(value[0]), GdhRead.as_int(value[1]))
 		TYPE_VECTOR3:
 			if value.size() == 3:
-				return Vector3(Read.as_float(value[0]), Read.as_float(value[1]), Read.as_float(value[2]))
+				return Vector3(
+					GdhRead.as_float(value[0]), GdhRead.as_float(value[1]), GdhRead.as_float(value[2])
+				)
 		TYPE_VECTOR3I:
 			if value.size() == 3:
-				return Vector3i(Read.as_int(value[0]), Read.as_int(value[1]), Read.as_int(value[2]))
+				return Vector3i(GdhRead.as_int(value[0]), GdhRead.as_int(value[1]), GdhRead.as_int(value[2]))
 		TYPE_VECTOR4:
 			if value.size() == 4:
 				return Vector4(
-					Read.as_float(value[0]),
-					Read.as_float(value[1]),
-					Read.as_float(value[2]),
-					Read.as_float(value[3])
+					GdhRead.as_float(value[0]),
+					GdhRead.as_float(value[1]),
+					GdhRead.as_float(value[2]),
+					GdhRead.as_float(value[3])
 				)
 		TYPE_COLOR:
 			if value.size() == 3 or value.size() == 4:
 				return Color(
-					Read.as_float(value[0]),
-					Read.as_float(value[1]),
-					Read.as_float(value[2]),
-					Read.as_float(value[3]) if value.size() == 4 else 1.0
+					GdhRead.as_float(value[0]),
+					GdhRead.as_float(value[1]),
+					GdhRead.as_float(value[2]),
+					GdhRead.as_float(value[3]) if value.size() == 4 else 1.0
 				)
 
 	var element_type: int = TYPE_NIL
 	if expected_type == TYPE_ARRAY and not elements.is_empty():
-		element_type = Read.as_int(elements[0], TYPE_NIL)
+		element_type = GdhRead.as_int(elements[0], TYPE_NIL)
 	var items: Array = value.map(func(item: Variant) -> Variant: return parse(item, element_type))
 	if element_type == TYPE_NIL or element_type == TYPE_OBJECT:
 		return items
-	if not items.all(func(item: Variant) -> bool: return Serialisation.acceptable(item, element_type)):
+	if not items.all(func(item: Variant) -> bool: return GdhSerialisation.acceptable(item, element_type)):
 		return items
 	var fitted: Array = items.map(func(item: Variant) -> Variant: return type_convert(item, element_type))
 	return Array(fitted, element_type, &"", null)

@@ -5,7 +5,7 @@ extends SceneTree
 ## the first frame rather than in _init.
 
 const Checked = preload("checked.gd")
-const Read = preload("res://addons/gdharness_runtime/reading.gd")
+const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 
 var failures: Array[String] = []
@@ -67,7 +67,7 @@ func _check_signal() -> void:
 	var expired: Dictionary = await node._execute_command(
 		"wait_signal", {"path": "/root/Fuse", "signal": "timeout", "timeout_ms": 60}
 	)
-	if expired.get("fired") != false or Read.as_int(expired.get("elapsed_ms", 0)) < 60:
+	if expired.get("fired") != false or GdhRead.as_int(expired.get("elapsed_ms", 0)) < 60:
 		_fail(
 			"a signal that never fires should be reported as not fired after the timeout: %s" % str(expired)
 		)
@@ -132,7 +132,7 @@ func _check_watch(timer: Timer) -> void:
 		or caught.get("fired_before_wait") != true
 		or caught.get("times") != 2
 		or str(caught.get("args")) != str([1, 2, 3, 4, 5, 6])
-		or Read.as_int(caught.get("elapsed_ms", 9999)) > 100
+		or GdhRead.as_int(caught.get("elapsed_ms", 9999)) > 100
 	):
 		_fail("a signal fired before the wait is collected at once, with the first's args: %s" % str(caught))
 	var again: Dictionary = await node._execute_command("wait_signal", {"watch": armed["watch"]})

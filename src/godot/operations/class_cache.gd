@@ -5,18 +5,18 @@ extends RefCounted
 # A game started from a stale editor then cannot resolve any class_name written since, and the
 # engine reads the same file headless, so the list is rebuilt here from the scripts themselves.
 
-const Patterns = preload("patterns.gd")
-const Read = preload("reading.gd")
-const FileWalk = preload("file_walk.gd")
-const Log = preload("logger.gd")
+const GdhPatterns = preload("patterns.gd")
+const GdhRead = preload("reading.gd")
+const GdhFileWalk = preload("file_walk.gd")
+const GdhLog = preload("logger.gd")
 
 const CACHE_PATH: String = "res://.godot/global_script_class_cache.cfg"
 
-var _log: Log
-var _files: FileWalk = FileWalk.new()
+var _log: GdhLog
+var _files: GdhFileWalk = GdhFileWalk.new()
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -102,8 +102,8 @@ func _entry_for(path: String, skipped: Array[Dictionary]) -> Dictionary:
 		"base": StringName(str(base)),
 		"class": StringName(declared),
 		"icon": str(header.get("icon", "")),
-		"is_abstract": Read.as_bool(header.get("abstract", false)),
-		"is_tool": Read.as_bool(header.get("tool", false)),
+		"is_abstract": GdhRead.as_bool(header.get("abstract", false)),
+		"is_tool": GdhRead.as_bool(header.get("tool", false)),
 		"language": StringName("GDScript"),
 		"path": path,
 	}
@@ -166,7 +166,7 @@ static func _extends_parts(text: String) -> Dictionary:
 		path = rest.substr(1, closing - 1)
 		rest = rest.substr(closing + 1)
 	var names: Array[String] = []
-	var name_at: RegEx = Patterns.compiled("^([A-Za-z_][A-Za-z0-9_]*)")
+	var name_at: RegEx = GdhPatterns.compiled("^([A-Za-z_][A-Za-z0-9_]*)")
 	var dotted: bool = not path.is_empty()
 	while true:
 		if dotted:
@@ -195,8 +195,8 @@ static func _as_the_engine_opens(path: String) -> String:
 # previous, as {"found": true, "extends": the text after its keyword} with no "extends" for one that
 # extends nothing, or {} when one of them is not there.
 func _inner_class(lines: PackedStringArray, names: Array[String]) -> Dictionary:
-	var class_line: RegEx = Patterns.compiled("^class\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(.*)$")
-	var inline_extends: RegEx = Patterns.compiled("^extends\\s+(.*)$")
+	var class_line: RegEx = GdhPatterns.compiled("^class\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(.*)$")
+	var inline_extends: RegEx = GdhPatterns.compiled("^extends\\s+(.*)$")
 	var start: int = 0
 	var end: int = lines.size()
 	var depth: int = 0
@@ -255,9 +255,9 @@ func _header_of(path: String) -> Dictionary:
 # which is where the body begins.
 func _header_in(lines: PackedStringArray) -> Dictionary:
 	var header: Dictionary = {}
-	var annotation: RegEx = Patterns.compiled('^@([a-z_]+)(?:\\(\\s*(?:"([^"]*)")?[^)]*\\))?\\s*')
-	var extends_line: RegEx = Patterns.compiled("^extends\\s+(.*)$")
-	var same_line: RegEx = Patterns.compiled("^\\s+extends\\s+(.*)$")
+	var annotation: RegEx = GdhPatterns.compiled('^@([a-z_]+)(?:\\(\\s*(?:"([^"]*)")?[^)]*\\))?\\s*')
+	var extends_line: RegEx = GdhPatterns.compiled("^extends\\s+(.*)$")
+	var same_line: RegEx = GdhPatterns.compiled("^\\s+extends\\s+(.*)$")
 	for line: String in lines:
 		var rest: String = line.strip_edges()
 		# Annotations may share a line with what they annotate, as in `@abstract class_name X`.
@@ -275,7 +275,7 @@ func _header_in(lines: PackedStringArray) -> Dictionary:
 		if rest.is_empty() or rest.begins_with("#"):
 			continue
 		if rest.begins_with("class_name"):
-			var declared: RegExMatch = Patterns.declared_class(rest)
+			var declared: RegExMatch = GdhPatterns.declared_class(rest)
 			if declared != null:
 				header["class_name"] = declared.get_string(1)
 				var after: RegExMatch = same_line.search(rest.substr(declared.get_end(1)))

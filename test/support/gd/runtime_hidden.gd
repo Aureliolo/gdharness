@@ -10,16 +10,16 @@ extends SceneTree
 ## Everything sits in the 64 by 64 viewport a script run with no window has.
 
 const Checked = preload("checked.gd")
-const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
-const Typing = preload("res://addons/gdharness_runtime/runtime_typing.gd")
-const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
+const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const GdhTyping = preload("res://addons/gdharness_runtime/runtime_typing.gd")
+const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 
 const TAB: String = "/root/Main/Hall/Rail/Tab"
 
 var failures: Array[String] = []
 var pressed: Dictionary = {}
-var input: InputCommands = null
-var typing: Typing = null
+var input: GdhInputCommands = null
+var typing: GdhTyping = null
 var _begun: bool = false
 
 
@@ -34,8 +34,8 @@ func _process(_delta: float) -> bool:
 func _everything() -> void:
 	var host: Node = Node.new()
 	root.add_child(host)
-	input = InputCommands.new(host, Values.new())
-	typing = Typing.new(host)
+	input = GdhInputCommands.new(host, GdhValues.new())
+	typing = GdhTyping.new(host)
 
 	await _check_a_tab_under_a_hidden_hall()
 	await _check_a_screen_drawn_over_a_hidden_one()

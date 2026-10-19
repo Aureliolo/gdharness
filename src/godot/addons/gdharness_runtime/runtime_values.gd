@@ -8,8 +8,9 @@ extends RefCounted
 ## only true of a running game: reaching a node by path, and fitting an argument to the type the
 ## method it is going to declares.
 
-const Read = preload("reading.gd")
-const Serialisation = preload("serialisation.gd")
+const GdhRead = preload("reading.gd")
+const GdhSerialisation = preload("serialisation.gd")
+const GdhShapes = preload("value_shapes.gd")
 
 ## The engine singletons a call, a write or a read may name instead of a node: what the engine
 ## measures, and the engine settings that are the game's own. Not every singleton: OS runs programs
@@ -30,7 +31,7 @@ const SINGLETONS: Array[String] = [
 ## The most frames a press is held in one call, as many as a frames wait takes.
 const MOST_HELD: int = 600
 
-var _shared: Serialisation = Serialisation.new()
+var _shared: GdhSerialisation = GdhSerialisation.new()
 
 
 ## Converts a Godot value into something JSON can carry.
@@ -86,7 +87,7 @@ static func held_for(params: Dictionary) -> Variant:
 			"holdFrames holds a whole press and then lets go, and pressed asks for one half of one:"
 			+ " give one or the other."
 		)
-	var frames: int = Read.as_int(params["holdFrames"], 0)
+	var frames: int = GdhRead.as_int(params["holdFrames"], 0)
 	if frames < 1 or frames > MOST_HELD:
 		return "holdFrames is %d, and it takes 1 to %d." % [frames, MOST_HELD]
 	return frames
@@ -126,12 +127,12 @@ static func target_at(root: Node, path: String) -> Dictionary:
 
 ## Whether two values can be compared without the comparison itself failing.
 static func comparable(one: Variant, other: Variant) -> bool:
-	return Serialisation.comparable(one, other)
+	return GdhSerialisation.comparable(one, other)
 
 
 ## Whether a value can be handed to a parameter declared as [param type] without the call failing.
 static func acceptable(value: Variant, type: int) -> bool:
-	return Serialisation.acceptable(value, type)
+	return GdhSerialisation.acceptable(value, type)
 
 
 ## Whether [param given] would have to be cut to become a [param type]: a fraction made a whole
@@ -146,10 +147,10 @@ static func cuts(given: Variant, type: int) -> bool:
 	var number: Variant = given
 	if given is String:
 		var text: String = given
-		number = Read.json_or_null(text)
+		number = GdhRead.json_or_null(text)
 	if typeof(number) != TYPE_FLOAT and typeof(number) != TYPE_INT:
 		return false
-	var value: float = Read.as_float(number)
+	var value: float = GdhRead.as_float(number)
 	var whole: bool = value == floorf(value)
 	if type == TYPE_INT:
 		return not whole
@@ -161,14 +162,14 @@ static func cut_by(type: int) -> String:
 	return "an int" if type == TYPE_INT else "a bool"
 
 
-## Why [param given] may not be the whole number sent, or "": see [method Serialisation.inexact].
+## Why [param given] may not be the whole number sent, or "": see [method GdhSerialisation.inexact].
 static func inexact(given: Variant, type: int) -> String:
-	return Serialisation.inexact(given, type)
+	return GdhSerialisation.inexact(given, type)
 
 
-## How a value of [param type] is written to be read as one, or empty when it is not built from fields.
-static func written_as(type: int) -> String:
-	return Serialisation.written_as(type)
+## What a refusal of [param value] where a [param type] goes ends with: see [method GdhShapes.remedy].
+static func remedy(value: Variant, type: int) -> String:
+	return GdhShapes.remedy(value, type)
 
 
 ## The declared type of one parameter of a method, or TYPE_NIL when the method or the parameter
@@ -181,7 +182,7 @@ func parameter_type(object: Object, method: String, index: int) -> int:
 		if index < 0 or index >= params.size():
 			return TYPE_NIL
 		var parameter: Dictionary = params[index]
-		return Read.as_int(parameter.get("type", TYPE_NIL), TYPE_NIL)
+		return GdhRead.as_int(parameter.get("type", TYPE_NIL), TYPE_NIL)
 	return TYPE_NIL
 
 
@@ -214,7 +215,7 @@ func parameter_class(object: Object, method: String, index: int) -> String:
 static func slot_declared(holder: Variant, named: String) -> Dictionary:
 	# A component holds one kind of value and no other: a vector's axis is a number, its integer
 	# form's an integer, a rectangle's size a vector of the same form.
-	if named in Serialisation.components_of(holder):
+	if named in GdhSerialisation.components_of(holder):
 		var component: Variant = holder[named]
 		return {"type": typeof(component), "class": "", "script": null}
 	if holder is Array:
@@ -238,7 +239,7 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 		for entry: Dictionary in object.get_property_list():
 			if str(entry.get("name", "")) == named:
 				return {
-					"type": Read.as_int(entry.get("type", TYPE_NIL), TYPE_NIL),
+					"type": GdhRead.as_int(entry.get("type", TYPE_NIL), TYPE_NIL),
 					"class": str(entry.get("class_name", "")),
 					"script": null,
 				}
@@ -336,7 +337,7 @@ func parameter_container(object: Object, method: String, index: int) -> Variant:
 		if index < 0 or index >= params.size():
 			return null
 		var parameter: Dictionary = params[index]
-		var hint: int = Read.as_int(parameter.get("hint", 0), 0)
+		var hint: int = GdhRead.as_int(parameter.get("hint", 0), 0)
 		var named: String = str(parameter.get("hint_string", ""))
 		if hint == PROPERTY_HINT_ARRAY_TYPE:
 			var element: Dictionary = _element_type(named)

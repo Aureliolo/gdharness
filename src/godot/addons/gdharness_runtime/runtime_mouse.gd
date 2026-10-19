@@ -3,7 +3,7 @@ extends RefCounted
 ## What a pointer call names: a point, the stroke of a drag, a mouse button and its mask bit. Read
 ## here and sent from runtime_input.gd, which keeps where the pointer is.
 
-const Read = preload("reading.gd")
+const GdhRead = preload("reading.gd")
 
 
 ## A point the tool schema sends as two flat numbers. Answers a Vector2, or the String that says
@@ -11,7 +11,7 @@ const Read = preload("reading.gd")
 static func read_point(params: Dictionary, x_key: String, y_key: String) -> Variant:
 	if not params.has(x_key) or not params.has(y_key):
 		return "%s and %s are both needed." % [x_key, y_key]
-	return Vector2(Read.as_float(params[x_key]), Read.as_float(params[y_key]))
+	return Vector2(GdhRead.as_float(params[x_key]), GdhRead.as_float(params[y_key]))
 
 
 ## The points of a drag: x, y, then each of via, then toX, toY. Answers the String saying what is
@@ -20,7 +20,7 @@ static func stroke_of(params: Dictionary) -> Variant:
 	for key: String in ["x", "y", "toX", "toY"]:
 		if not params.has(key):
 			return "mouse_drag needs x, y, toX and toY: %s is missing." % key
-	var points: Array[Vector2] = [Vector2(Read.as_float(params["x"]), Read.as_float(params["y"]))]
+	var points: Array[Vector2] = [Vector2(GdhRead.as_float(params["x"]), GdhRead.as_float(params["y"]))]
 	var via: Variant = params.get("via", [])
 	if not via is Array:
 		return "via must be a list of [x, y] points."
@@ -29,8 +29,8 @@ static func stroke_of(params: Dictionary) -> Variant:
 		var pair: Array = point if point is Array else []
 		if pair.size() < 2:
 			return "via must be a list of [x, y] points, and holds %s." % JSON.stringify(point)
-		points.append(Vector2(Read.as_float(pair[0]), Read.as_float(pair[1])))
-	points.append(Vector2(Read.as_float(params["toX"]), Read.as_float(params["toY"])))
+		points.append(Vector2(GdhRead.as_float(pair[0]), GdhRead.as_float(pair[1])))
+	points.append(Vector2(GdhRead.as_float(params["toX"]), GdhRead.as_float(params["toY"])))
 	return points
 
 
@@ -100,5 +100,5 @@ static func button_of(raw: Variant) -> int:
 				return -1
 	# The engine's buttons run from 1 to 9: 0 is MOUSE_BUTTON_NONE, which no event carries, and a
 	# number past the two extra buttons names nothing a mask bit can be made for.
-	var number: int = Read.as_int(raw, -1)
+	var number: int = GdhRead.as_int(raw, -1)
 	return number if number >= MOUSE_BUTTON_LEFT and number <= MOUSE_BUTTON_XBUTTON2 else -1

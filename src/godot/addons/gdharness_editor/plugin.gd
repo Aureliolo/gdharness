@@ -5,8 +5,8 @@ extends EditorPlugin
 ## that does what the server asks, with a label in the toolbar saying whether the two are
 ## connected.
 
-const BridgeClient = preload("bridge_client.gd")
-const ToolExecutor = preload("tool_executor.gd")
+const GdhBridgeClient = preload("bridge_client.gd")
+const GdhToolExecutor = preload("tool_executor.gd")
 
 ## The tools answered while the editor scans or imports, because none of them saves a file: the
 ## ones a caller waits on a scan with, and the ones that only read or stop a played game.
@@ -19,17 +19,17 @@ const ANSWERED_WHILE_SCANNING: Array[String] = [
 	"profile_read",
 ]
 
-var _client: BridgeClient
-var _tool_executor: ToolExecutor
+var _client: GdhBridgeClient
+var _tool_executor: GdhToolExecutor
 var _status_label: Label
 
 
 func _enter_tree() -> void:
-	_client = BridgeClient.new()
+	_client = GdhBridgeClient.new()
 	_client.name = "GdharnessBridgeClient"
 	add_child(_client)
 
-	_tool_executor = ToolExecutor.new()
+	_tool_executor = GdhToolExecutor.new()
 	_tool_executor.name = "GdharnessToolExecutor"
 	add_child(_tool_executor)
 	_tool_executor.set_editor_plugin(self)

@@ -11,9 +11,9 @@ extends RefCounted
 
 enum { UNCHANGED, REWRITTEN, DELETED }
 
-const HeadlessCheck = preload("../headless_check.gd")
-const Read = preload("../reading.gd")
-const SceneFile = preload("../scene_file.gd")
+const GdhHeadlessCheck = preload("../headless_check.gd")
+const GdhRead = preload("../reading.gd")
+const GdhSceneFile = preload("../scene_file.gd")
 ## PROPERTY_HINT_NO_NODEPATH, which marks a property the editor's rename skips. It is not bound for
 ## scripts, and follows PROPERTY_HINT_ONESHOT in the engine's list.
 const HINT_NO_NODEPATH: int = PROPERTY_HINT_ONESHOT + 1
@@ -30,7 +30,7 @@ var _homes: Dictionary = {}
 ## it had, its record, the file]. The editor shares such a resource with every scene using it, so a
 ## rewrite that is not saved is put back.
 var _outside: Array[Array] = []
-var _scene: SceneFile = null
+var _scene: GdhSceneFile = null
 var _moves: Dictionary = {}
 var _back: Dictionary = {}
 var _seen: Dictionary = {}
@@ -50,7 +50,7 @@ static func moved(given: String, moves: Dictionary) -> String:
 
 ## Carries [param moves], from the root of [param scene], into the paths it holds. Called after the
 ## move and before the write. Answers how many paths it rewrote.
-func carry(scene: SceneFile, moves: Dictionary) -> int:
+func carry(scene: GdhSceneFile, moves: Dictionary) -> int:
 	if moves.is_empty():
 		return 0
 	_scene = scene
@@ -92,7 +92,7 @@ func carry(scene: SceneFile, moves: Dictionary) -> int:
 ## Opens [param scene_path], carries [param moves] into it, and writes it when that rewrote a path.
 ## Answers "" or why it was left as it was.
 func carry_into(scene_path: String, moves: Dictionary) -> String:
-	var scene: SceneFile = SceneFile.new()
+	var scene: GdhSceneFile = GdhSceneFile.new()
 	var refused: Dictionary = scene.open(scene_path, true)
 	if not refused.is_empty():
 		return str(refused.get("error", ""))
@@ -127,7 +127,7 @@ func put_back(scene_path: String, why: String = "") -> void:
 func answer() -> Dictionary:
 	for file: String in _homes:
 		var resource: Resource = _homes[file]
-		var saving: Error = SceneFile.save_keeping_uid(resource, file)
+		var saving: Error = GdhSceneFile.save_keeping_uid(resource, file)
 		if saving == OK:
 			if Engine.is_editor_hint():
 				EditorInterface.get_resource_filesystem().update_file(file)
@@ -181,11 +181,13 @@ static func _left(record: Dictionary, why: String) -> Dictionary:
 ## Whether [param property] can hold a node path the editor's rename would follow: one saved or
 ## shown, of a type that holds paths, and not marked as holding none.
 static func _may_hold_paths(property: Dictionary) -> bool:
-	if not Read.as_int(property.get("usage")) & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR):
+	if not GdhRead.as_int(property.get("usage")) & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR):
 		return false
-	if Read.as_int(property.get("hint")) == HINT_NO_NODEPATH:
+	if GdhRead.as_int(property.get("hint")) == HINT_NO_NODEPATH:
 		return false
-	return [TYPE_OBJECT, TYPE_NODE_PATH, TYPE_ARRAY, TYPE_DICTIONARY].has(Read.as_int(property.get("type")))
+	return [TYPE_OBJECT, TYPE_NODE_PATH, TYPE_ARRAY, TYPE_DICTIONARY].has(
+		GdhRead.as_int(property.get("type"))
+	)
 
 
 ## [param value], held by the node that was at [param was] and is at [param now], with each path in
@@ -421,7 +423,7 @@ func _home_of(animation: Animation, library: AnimationLibrary) -> Dictionary:
 		}
 	if not Engine.is_editor_hint():
 		var script: Script = home.get_script()
-		if (script != null and not script.is_tool()) or HeadlessCheck.holds_scripted_embedded(home, {}):
+		if (script != null and not script.is_tool()) or GdhHeadlessCheck.holds_scripted_embedded(home, {}):
 			return {
 				"why":
 				(
@@ -432,7 +434,7 @@ func _home_of(animation: Animation, library: AnimationLibrary) -> Dictionary:
 						)
 						% file
 					)
-					+ HeadlessCheck.REMEDY
+					+ GdhHeadlessCheck.REMEDY
 				)
 			}
 	return {"file": file, "home": home, "why": ""}

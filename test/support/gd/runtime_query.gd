@@ -6,7 +6,7 @@ extends SceneTree
 ## main loop starts, so the checks run on the first frame rather than in _init.
 
 const Checked = preload("checked.gd")
-const Read = preload("res://addons/gdharness_runtime/reading.gd")
+const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const HERO_SCRIPT: String = "res://query_hero.gd"
 
@@ -669,21 +669,21 @@ func _check_the_time_work_takes() -> void:
 	var slow: Dictionary = await node._execute_command(
 		"call_method", {"path": "/root/Level/Hero", "method": "linger", "args": [30000]}
 	)
-	var slow_usec: int = Read.as_int(slow.get("elapsed_usec", -1), -1)
+	var slow_usec: int = GdhRead.as_int(slow.get("elapsed_usec", -1), -1)
 	if slow.get("result") != 30000 or slow_usec < 30000 or slow_usec > 1000000:
 		_fail("a call says how long the method took inside the game: %s" % str(slow))
 
 	var quick: Dictionary = await node._execute_command(
 		"call_method", {"path": "/root/Level/Hero", "method": "linger", "args": [0]}
 	)
-	var quick_usec: int = Read.as_int(quick.get("elapsed_usec", -1), -1)
+	var quick_usec: int = GdhRead.as_int(quick.get("elapsed_usec", -1), -1)
 	if quick_usec < 0 or quick_usec >= 30000:
 		_fail("and a quick one says it was quick: %s" % str(quick))
 
 	var written: Dictionary = await node._execute_command(
 		"set_property", {"path": "/root/Level/Hero", "property": "burden", "value": 5}
 	)
-	var written_usec: int = Read.as_int(written.get("elapsed_usec", -1), -1)
+	var written_usec: int = GdhRead.as_int(written.get("elapsed_usec", -1), -1)
 	if written.get("new_value") != 5 or written_usec < 15000 or written_usec > 1000000:
 		_fail("a write says how long it took, its setter included: %s" % str(written))
 
@@ -698,7 +698,7 @@ func _check_calling_through_a_path() -> void:
 	var before: Dictionary = await node._execute_command(
 		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
 	)
-	var was: int = Read.as_int(before.get("value", 0))
+	var was: int = GdhRead.as_int(before.get("value", 0))
 
 	var called: Dictionary = await node._execute_command(
 		"call_method", {"path": "/root/Level/Hero", "method": "held:inner:deepen", "args": [3]}
@@ -744,7 +744,7 @@ func _check_calling_a_step_along_the_path(hero: Node2D, button: Button) -> void:
 	var before: Dictionary = await node._execute_command(
 		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
 	)
-	var was: int = Read.as_int(before.get("value", 0))
+	var was: int = GdhRead.as_int(before.get("value", 0))
 
 	var through: Dictionary = await node._execute_command(
 		"get_property", {"path": "/root/Level/Hero", "property": "keeper():inner:depth"}

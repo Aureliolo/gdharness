@@ -1,14 +1,14 @@
 extends RefCounted
 
-const FileWalk = preload("file_walk.gd")
-const ImportPipeline = preload("import_pipeline.gd")
-const Log = preload("logger.gd")
+const GdhFileWalk = preload("file_walk.gd")
+const GdhImportPipeline = preload("import_pipeline.gd")
+const GdhLog = preload("logger.gd")
 
-var _log: Log
-var _files: FileWalk = FileWalk.new()
+var _log: GdhLog
+var _files: GdhFileWalk = GdhFileWalk.new()
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -44,7 +44,7 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		# Every format the engine imports, the list the import status reads: five of them were checked
 		# here, so a project of glTF models, fonts and WebP textures had nothing to reimport.
 		var resources: Array[String] = _files.find_files_with_extensions(
-			"res://", ImportPipeline.IMPORTABLE_EXTENSIONS
+			"res://", GdhImportPipeline.IMPORTABLE_EXTENSIONS
 		)
 
 		var missing_imports: int = 0
@@ -119,8 +119,8 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		if main_scene.is_empty():
 			details.append("No main scene configured")
 			deductions += 10
-		elif not FileWalk.missing_reason(main_scene).is_empty():
-			details.append("Main scene " + FileWalk.missing_reason(main_scene))
+		elif not GdhFileWalk.missing_reason(main_scene).is_empty():
+			details.append("Main scene " + GdhFileWalk.missing_reason(main_scene))
 			deductions += 15
 
 		var project_name: String = str(ProjectSettings.get_setting("application/config/name", ""))

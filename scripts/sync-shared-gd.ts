@@ -32,6 +32,7 @@ export const SHARED_GDSCRIPT: Readonly<Record<string, readonly string[]>> = {
   'property_values.gd': ['gdharness_editor'],
   'reading.gd': ['gdharness_editor', 'gdharness_runtime'],
   'serialisation.gd': ['gdharness_editor', 'gdharness_runtime'],
+  'value_shapes.gd': ['gdharness_editor', 'gdharness_runtime'],
 };
 
 /** Every copy of the shared helpers, as [original, copy] pairs. */

@@ -3,7 +3,7 @@ extends RefCounted
 ## Whether a node says what a caller asked for in `says`: the one set of rules a find, a click and a
 ## wait all match words by, so the three never disagree about which control a word names.
 
-const Words = preload("runtime_words.gd")
+const GdhWords = preload("runtime_words.gd")
 
 ## Stands in for a bar written as `\|` while `says` is split into its alternatives: a character from
 ## the private use area, which no game's text uses.
@@ -25,7 +25,7 @@ static var _spaces: RegEx = null
 
 ## Whether [param node]'s own words are what [param wanted] asks for.
 static func says(node: Node, wanted: String) -> bool:
-	return matches(Words.said_by(node), wanted)
+	return matches(GdhWords.said_by(node), wanted)
 
 
 ## Whether [param said] is what [param wanted] asks for.
@@ -57,7 +57,7 @@ static func matches(said: String, wanted: String) -> bool:
 
 
 ## Each alternative of [param wanted] as a glob, open at both ends for words written plain, with
-## every space as `?`. Words that match once spaced match this as written, since spacing changes
+## every space as `?`. GdhWords that match once spaced match this as written, since spacing changes
 ## only the characters a `?` stands for, so a text that does not is answered without being spaced.
 ## Kept by what was written, as [method alternatives] keeps its split.
 static func _loose(wanted: String) -> Array[String]:

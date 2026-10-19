@@ -9,7 +9,7 @@ extends SceneTree
 ## after the refused reload, beside a reload that compiles so a copy that never reloads fails too.
 
 const Checked = preload("checked.gd")
-const ClassTools = preload("res://addons/gdharness_editor/tools/class_tools.gd")
+const GdhClassTools = preload("res://addons/gdharness_editor/tools/class_tools.gd")
 const TOWER: String = "res://reload_tower.gd"
 const GOOD: String = "extends Node\n\n\nfunc ring() -> int:\n\treturn 1\n"
 
@@ -20,7 +20,7 @@ func _initialize() -> void:
 	_write(GOOD)
 	var script: GDScript = load(TOWER)
 	var held: Node = script.new()
-	var tools: ClassTools = ClassTools.new()
+	var tools: GdhClassTools = GdhClassTools.new()
 
 	_write(GOOD + "\n\nfunc broken( -> int:\n\treturn 1\n")
 	var refused: Dictionary = tools.reload_script({"scriptPath": "res://Reload_Tower.gd"})

@@ -3,11 +3,11 @@ extends RefCounted
 ## What reaches the running game the way a keyboard reaches it: text typed into the field that has
 ## the focus, and an item chosen out of a menu the way a keyboard chooses one.
 
-const Menus = preload("runtime_menus.gd")
-const Read = preload("reading.gd")
-const Targets = preload("runtime_targets.gd")
-const Values = preload("runtime_values.gd")
-const Words = preload("runtime_words.gd")
+const GdhMenus = preload("runtime_menus.gd")
+const GdhRead = preload("reading.gd")
+const GdhTargets = preload("runtime_targets.gd")
+const GdhValues = preload("runtime_values.gd")
+const GdhWords = preload("runtime_words.gd")
 
 ## The two characters a field reads as keys rather than as text.
 const NEWLINE: int = 10
@@ -41,7 +41,7 @@ func _init(host: Node) -> void:
 ## back now rather than echoed from the request, so a call that typed somewhere unhelpful says so.
 func inject_text(params: Dictionary) -> Dictionary:
 	var text: String = str(params.get("text", ""))
-	var over: bool = Read.as_bool(params.get("replace", false))
+	var over: bool = GdhRead.as_bool(params.get("replace", false))
 	if text.is_empty() and not over:
 		return {"type": "error", "message": "text needs something to type, or replace to empty a field"}
 
@@ -127,7 +127,7 @@ static func _select_everything(focused: Control) -> bool:
 static func _what_it_holds(focused: Control) -> Variant:
 	var field: LineEdit = focused as LineEdit
 	if field != null:
-		return Words.masked(field) if field.secret else field.text
+		return GdhWords.masked(field) if field.secret else field.text
 	var box: TextEdit = focused as TextEdit
 	if box == null:
 		return null
@@ -219,12 +219,12 @@ func choose(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	if node_path.is_empty():
 		return {"type": "error", "message": "Node path required"}
-	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
 
-	var menu: PopupMenu = Menus.menu_of(node)
+	var menu: PopupMenu = GdhMenus.menu_of(node)
 	if menu == null:
 		return {
 			"type": "error",
@@ -241,7 +241,7 @@ func choose(params: Dictionary) -> Dictionary:
 			"message":
 			(
 				"%s needs the item named, by text or index. It holds: %s"
-				% [node_path, ", ".join(Menus.items_of(menu))]
+				% [node_path, ", ".join(GdhMenus.items_of(menu))]
 			)
 		}
 
@@ -255,7 +255,7 @@ func choose(params: Dictionary) -> Dictionary:
 		return {
 			"type": "error",
 			"message":
-			"%s is not visible%s, so its menu cannot be opened" % [node_path, Targets.why_hidden(holder)]
+			"%s is not visible%s, so its menu cannot be opened" % [node_path, GdhTargets.why_hidden(holder)]
 		}
 
 	# Shown first, because a menu nobody has opened has no focus to move and the press would go to
@@ -263,15 +263,15 @@ func choose(params: Dictionary) -> Dictionary:
 	# a menu: one rebuilt on about_to_popup was read as it stood before, measured on 4.7.2, and the
 	# index found in the old items chose another item of the new ones. An OptionButton opens its own;
 	# a bare PopupMenu is popped where it already sits, which leaves a menu already open where it is.
-	var opened: bool = Menus.open_the_menu(node, menu)
+	var opened: bool = GdhMenus.open_the_menu(node, menu)
 	await _host.get_tree().process_frame
 
-	var found: Array[int] = Menus.wanted_items(menu, params)
+	var found: Array[int] = GdhMenus.wanted_items(menu, params)
 	if found.size() > 1:
 		await _shut(menu, opened)
 		var tied: Array[String] = []
 		for at: int in found:
-			tied.append("%d: %s" % [at, Words.item_says(menu, at)])
+			tied.append("%d: %s" % [at, GdhWords.item_says(menu, at)])
 		return {
 			"type": "error",
 			"message":
@@ -294,7 +294,7 @@ func choose(params: Dictionary) -> Dictionary:
 		"type": "chosen",
 		"path": node_path,
 		"index": index,
-		"text": Words.item_says(menu, index),
+		"text": GdhWords.item_says(menu, index),
 		"id": menu.get_item_id(index),
 		"opened": opened,
 		"menu": str(menu.get_path()),
@@ -329,13 +329,13 @@ func choose(params: Dictionary) -> Dictionary:
 			)
 		}
 
-	answer["control_afterwards"] = Values.afterwards(node)
+	answer["control_afterwards"] = GdhValues.afterwards(node)
 	# What the button in front of the menu reads now: a menu item that fired changes the thing
 	# holding it. A button the pick took away has nothing to read, and that it went is the answer.
 	if answer["control_afterwards"] == "in_tree" and node is OptionButton:
 		var chooser: OptionButton = node
 		answer["selected"] = chooser.get_selected()
-		answer["shows"] = Words.said_by(chooser)
+		answer["shows"] = GdhWords.said_by(chooser)
 	return answer
 
 
@@ -352,9 +352,9 @@ func _shut(menu: PopupMenu, opened: bool) -> void:
 ## Why item [param index] of [param menu] is not something to choose, or "" when it is.
 static func _not_a_choice(node_path: String, menu: PopupMenu, index: int) -> String:
 	if index < 0:
-		return "%s has no such item. It holds: %s" % [node_path, ", ".join(Menus.items_of(menu))]
+		return "%s has no such item. It holds: %s" % [node_path, ", ".join(GdhMenus.items_of(menu))]
 	if menu.is_item_separator(index):
-		var heading: String = Words.item_says(menu, index).strip_edges()
+		var heading: String = GdhWords.item_says(menu, index).strip_edges()
 		if heading.is_empty():
 			return "%s item %d is a separator, not a choice" % [node_path, index]
 		return (
@@ -362,7 +362,7 @@ static func _not_a_choice(node_path: String, menu: PopupMenu, index: int) -> Str
 			% [node_path, index, heading]
 		)
 	if menu.is_item_disabled(index):
-		return "%s item %d, %s, is disabled" % [node_path, index, Words.item_says(menu, index)]
+		return "%s item %d, %s, is disabled" % [node_path, index, GdhWords.item_says(menu, index)]
 	return ""
 
 

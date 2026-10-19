@@ -4,8 +4,8 @@ extends RefCounted
 ## run off the game the node keeps. Every op that reads, writes, calls or waits on a game's state
 ## walks the same way, so the walk and what it says when a step is not there live in one place.
 
-const Serialisation = preload("serialisation.gd")
-const Values = preload("runtime_values.gd")
+const GdhSerialisation = preload("serialisation.gd")
+const GdhValues = preload("runtime_values.gd")
 
 ## The calls a path makes on a list or a map: those that take no arguments and change nothing.
 ##
@@ -96,7 +96,7 @@ const READS_ONLY: String = ", and a path, which a wait reads every frame, only c
 ##
 ## A step into a vector, a colour, a rectangle or a transform reads one of its components,
 ## "size:x" or "global_transform:origin:y", by the names GDScript gives them; see
-## [method Serialisation.components_of].
+## [method GdhSerialisation.components_of].
 ##
 ## Answers with a `message` instead when a step along the way is not there or holds something that
 ## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
@@ -151,7 +151,7 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 	if path.begins_with("/"):
 		var colon: int = path.find(":")
 		start_path = path if colon == -1 else path.substr(0, colon)
-		var standing: Dictionary = Values.node_at(root, start_path)
+		var standing: Dictionary = GdhValues.node_at(root, start_path)
 		if standing.has("message"):
 			return {"message": str(standing["message"])}
 		start = standing["node"]
@@ -185,7 +185,7 @@ static func can_hold(value: Variant) -> bool:
 ## Whether [param value] is read by its components, a vector or a colour or a transform, and is a
 ## copy wherever it is read from.
 static func composite(value: Variant) -> bool:
-	return not Serialisation.components_of(value).is_empty()
+	return not GdhSerialisation.components_of(value).is_empty()
 
 
 ## Whether [param value] is a packed list. Stepped into the way a list is, by index, and a write into
@@ -235,7 +235,7 @@ static func can_read(holder: Variant, named: String) -> bool:
 			return args.is_empty() and method in MAP_CALLS
 		return not _key_in(map, named).is_empty()
 	if composite(holder):
-		return method.is_empty() and named in Serialisation.components_of(holder)
+		return method.is_empty() and named in GdhSerialisation.components_of(holder)
 	if holder is Object:
 		var object: Object = holder
 		if not method.is_empty():
@@ -620,7 +620,7 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 	if composite(holder):
 		var kind: String = type_string(typeof(holder))
 		var sort: String = ("an " if kind.left(1) in ["A", "E", "I", "O", "U"] else "a ") + kind
-		var has: String = ", ".join(Serialisation.components_of(holder))
+		var has: String = ", ".join(GdhSerialisation.components_of(holder))
 		if not container_call.is_empty():
 			return (
 				"%s is %s, which a path reads by its components, %s, and makes no call on"
