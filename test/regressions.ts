@@ -250,6 +250,7 @@ import {
   foldedScriptErrors,
   leftRunningNote,
   longerWaitNote,
+  misshapen,
   movieRefusal,
   noCodeWillCome,
   notRunNote,
@@ -7268,6 +7269,48 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       /Not a Godot project/,
       'while modify with its additions reaches the project check',
     );
+    // Inside a list of objects too: params sent as a list was written into the script as
+    // `signal changed([])`, and a misspelt field was dropped, leaving a variable untyped.
+    const nested = async (modification: Record<string, unknown>): Promise<string> =>
+      await call('script_edit', {
+        op: 'modify',
+        projectPath: '/p',
+        scriptPath: 'a.gd',
+        modifications: [modification],
+      });
+    assert.equal(
+      await nested({ type: 'add_signal', name: 'changed', params: [] }),
+      'script_edit takes modifications[0].params as string, not a list.',
+    );
+    assert.equal(
+      await nested({ type: 'add_variable', name: 'x', vartype: 'int' }),
+      'script_edit takes modifications[0] with only the fields type, name, params, returnType, body, varType, defaultValue, isExport, exportHint, isOnready, position, and vartype is none of them (the nearest is varType).',
+    );
+    assert.equal(
+      await call('scene_animation', {
+        op: 'add_track',
+        projectPath: '/p',
+        scenePath: 'a.tscn',
+        playerNodePath: 'Player',
+        animationName: 'spin',
+        track: {
+          type: 'property',
+          nodePath: '.',
+          property: 'rotation',
+          keyframes: [{ time: '1', value: 1 }],
+        },
+      }),
+      'scene_animation takes track.keyframes[0].time as number, not a string.',
+    );
+    // An object that names its fields and leaves the rest open takes one it does not name; only a
+    // closed one refuses it, and either checks the type of a field it names. No tool has an open
+    // one today, so the schema is handed in.
+    const open = { type: 'object', properties: { x: { type: 'number' } } };
+    assert.deepEqual(misshapen(open, { x: 1, extra: true }, 'point'), []);
+    assert.deepEqual(misshapen({ ...open, additionalProperties: false }, { x: 1, extra: true }, 'point'), [
+      'point with only the fields x, and extra is none of them',
+    ]);
+    assert.deepEqual(misshapen(open, { x: 'one' }, 'point'), ['point.x as number, not a string']);
 
     // project_info has no ops, and its preset and detail are read by one section of include. Sent
     // without it they were dropped and the answer had no validation in it to say so.
@@ -20183,6 +20226,11 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         '',
       ].join('\n'),
     );
+    // A script that does not parse, its fault on line 5 until an addition above moves it.
+    writeFileSync(
+      join(project, 'stale.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tvar n: Resource = Node.new()\n\tprint(n)\n',
+    );
     // The same use written as a path, which is classified by a different line reading the same way.
     writeFileSync(
       join(project, 'by_path.gd'),
@@ -20349,6 +20397,27 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         modifications: [{ type: 'add_function', name: 'placed', body: 'pass', position: 'after_ready' }],
       });
       assert.equal(get(placed, 'success'), true, `the function should be added: ${JSON.stringify(placed)}`);
+
+      // The script is loaded once as it was, to learn whether it parsed, and once as written. Only
+      // the second is about the file the answer describes: beside it, the first's errors named
+      // line 5 for a fault the added signal had moved to line 7.
+      const moved = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://stale.gd',
+        modifications: [{ type: 'add_signal', name: 'hit' }],
+      });
+      assert.equal(get(moved, 'parses'), false, JSON.stringify(moved));
+      assert.equal(
+        readFileSync(join(project, 'stale.gd'), 'utf8').split('\n')[6],
+        '\tvar n: Resource = Node.new()',
+      );
+      const cited = asArray(get(moved, 'engine_messages'))
+        .filter((message) => String(get(message, 'text')).startsWith('Parse Error'))
+        .map((message) =>
+          asArray(get(message, 'detail')).find((line) => String(line).includes('res://stale.gd:')),
+        );
+      assert.deepEqual(cited, ['at: GDScript::reload (res://stale.gd:7)'], JSON.stringify(moved));
       const laidOut = readFileSync(join(project, 'place.gd'), 'utf8').split('\n');
       const ready = laidOut.findIndex((line) => line.includes('func _ready'));
       const abstract = laidOut.findIndex((line) => line.includes('func later'));
@@ -20673,6 +20742,21 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         '\tfunc inner_method() -> void:',
         '\t\tinner_fired.emit()',
         '',
+        '\tclass Deeper:',
+        '\t\tvar deep_held: int = 2',
+        '',
+        '',
+        // Back at the margin after the inner class, so its body has to end where this begins.
+        'static var made: int = 0',
+        '',
+        '',
+        // A Resource's virtual, which on the script's own Node2D base is an ordinary method.
+        'class Headed extends Resource:',
+        '\tvar speed: float = 1.0',
+        '',
+        '\tfunc _setup_local_to_scene() -> void:',
+        '\t\tpass',
+        '',
       ].join('\n'),
     );
 
@@ -20971,8 +21055,8 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
           extends: get(scoped, 'extends'),
           constants: members('constants'),
           variables: members('variables'),
+          static: asArray(get(scoped, 'variables')).map((each) => get(each, 'is_static')),
           signals: members('signals'),
-          inner: get(scoped, 'inner_classes'),
         },
         {
           extends: '"sub_base.gd"',
@@ -20980,11 +21064,64 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
             ['HELP', 3],
             ['AFTER', 4],
           ],
-          variables: [['member', 6]],
+          variables: [
+            ['member', 6],
+            ['made', 35],
+          ],
+          static: [false, true],
           signals: [],
-          inner: ['Inner'],
         },
         `a member is a declaration at the margin, outside every string: ${JSON.stringify(scoped)}`,
+      );
+      // An inner class is answered with its own members, in the fields the script's are in, and its
+      // body ends at the first line back at the margin.
+      const shaped = (entry: unknown): unknown => ({
+        name: get(entry, 'name'),
+        line: get(entry, 'line'),
+        extends: get(entry, 'extends'),
+        signals: asArray(get(entry, 'signals')).map((each) => [get(each, 'name'), get(each, 'line')]),
+        variables: asArray(get(entry, 'variables')).map((each) => [get(each, 'name'), get(each, 'line')]),
+        // Virtual against the inner class's own base, which the script's is not.
+        functions: asArray(get(entry, 'functions')).map((each) => [
+          get(each, 'name'),
+          get(each, 'line'),
+          get(each, 'is_virtual'),
+        ]),
+        inner: asArray(get(entry, 'inner_classes')).map(shaped),
+      });
+      assert.deepEqual(
+        asArray(get(scoped, 'inner_classes')).map(shaped),
+        [
+          {
+            name: 'Inner',
+            line: 23,
+            extends: 'Resource',
+            signals: [['inner_fired', 25]],
+            variables: [['inner_held', 26]],
+            functions: [['inner_method', 28, false]],
+            inner: [
+              {
+                name: 'Deeper',
+                line: 31,
+                extends: 'RefCounted',
+                signals: [],
+                variables: [['deep_held', 32]],
+                functions: [],
+                inner: [],
+              },
+            ],
+          },
+          {
+            name: 'Headed',
+            line: 38,
+            extends: 'Resource',
+            signals: [],
+            variables: [['speed', 39]],
+            functions: [['_setup_local_to_scene', 41, true]],
+            inner: [],
+          },
+        ],
+        JSON.stringify(get(scoped, 'inner_classes')),
       );
       assert.deepEqual(
         asArray(get(scoped, 'functions')).map((each) => [
@@ -38756,6 +38893,42 @@ function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
 }
 
 /**
+ * The sentences of [param text] that run into the next with no space between: a full stop or
+ * other stop, then a capitalised word and a lower-case one, as in "{was, now}.A write is". A
+ * description is assembled from template parts, and a part ending without its space reads fine in
+ * the source on either side of the join.
+ */
+function sentencesRunTogether(text: string): string[] {
+  return [...text.matchAll(/[a-z0-9)}\]"'`][.;:!?]([A-Z][a-z]* [a-z]+)/g)].map((found) =>
+    text.slice(Math.max(0, found.index - 20), found.index + 2 + (found[1]?.length ?? 0)),
+  );
+}
+
+/**
+ * Every description, title and summary a tool's schema carries keeps a space after each sentence,
+ * since that text is what an agent reads, and scene_node's ran one into the next.
+ */
+function testToolTextKeepsASpaceBetweenSentences(): void {
+  assert.deepEqual(sentencesRunTogether('as {was, now}.A write is refused'), ['as {was, now}.A write']);
+  // A class and its member, and an abbreviation's stop, are not a sentence's end.
+  assert.deepEqual(sentencesRunTogether('Object.ConnectFlags, such as 1. A write, e.g. this'), []);
+  const said: string[] = [];
+  const walk = (where: string, value: unknown): void => {
+    if (typeof value === 'string') {
+      said.push(...sentencesRunTogether(value).map((joined) => `${where}: ${joined}`));
+    } else if (typeof value === 'object' && value !== null) {
+      for (const [key, held] of Object.entries(value)) {
+        walk(`${where}.${key}`, held);
+      }
+    }
+  };
+  for (const spec of TOOL_SPECS) {
+    walk(spec.name, spec);
+  }
+  assert.deepEqual(said, []);
+}
+
+/**
  * How many tool names the tree mentions today, as a floor under the reading below.
  *
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
@@ -43698,6 +43871,21 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
     const uid = readFileSync(join(project, 'told.gd.uid'), 'utf8');
     await server.initialize('rename-engine');
 
+    // Its own name and a new path is a move of the script alone, which the file move makes; the
+    // refusal said only that there was nothing to rename, and the caller had no way to move it.
+    for (const [moving, said] of [
+      [{}, 'Told is already called Told; nothing to rename.'],
+      [
+        { newScriptPath: 'res://words/told.gd' },
+        'Told is already called Told; nothing to rename. resource_edit move moves the script alone, with every path in the project naming it.',
+      ],
+    ] as const) {
+      assert.equal(
+        textOf(await rename({ scriptPath: 'res://told.gd', symbol: 'Told', newName: 'Told', ...moving })),
+        said,
+      );
+    }
+
     const renamed = parseTextContent(
       await rename({
         scriptPath: 'res://told.gd',
@@ -44389,7 +44577,34 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       ['script', 'size'],
       `a read answers what the file holds, not what the scripts set: ${JSON.stringify(read)}`,
     );
+    assert.deepEqual(
+      [get(read, 'nodeType'), get(read, 'nodePath'), get(read, 'scriptClass')],
+      ['Node2D', 'Busy', undefined],
+      `a read names the node's class, and no declared class for a script without one: ${JSON.stringify(read)}`,
+    );
     assert.equal(get(read, 'unsavedInEditor'), undefined, 'only an editor can say what it holds unsaved');
+
+    // The script after a property only it declares, and a unique name to read the node back by.
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'main.tscn',
+      nodeName: 'Packed',
+      nodeType: 'Node',
+      properties: { items: ['a'], unique_name_in_owner: true, script: 'res://bag.gd' },
+    });
+    assert.deepEqual(
+      sets('main.tscn', '[node name="Packed"').sort(),
+      ['items = PackedStringArray("a")', 'script = ExtResource', 'unique_name_in_owner = true'],
+      fileOf('main.tscn'),
+    );
+    const packed = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'main.tscn', nodePath: '%Packed' }),
+    );
+    assert.deepEqual(
+      [get(packed, 'nodePath'), get(packed, 'nodeType'), get(packed, 'properties', 'items')],
+      ['Packed', 'Node', ['a']],
+      `a node read by its unique name answers the path it has: ${JSON.stringify(packed)}`,
+    );
     const connections = parseTextContent(await call('scene_signal', { op: 'list', scenePath: 'main.tscn' }));
     assert.deepEqual(
       asArray(get(connections, 'connections')).map(
@@ -44440,6 +44655,14 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     });
     assert.equal(get(boss, 'nodeType'), 'Hero', JSON.stringify(boss));
     assert.deepEqual(sets('made.tscn', '[node name="Boss" type="Node2D"'), ['script = ExtResource']);
+    const bossRead = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'made.tscn', nodePath: 'Boss' }),
+    );
+    assert.deepEqual(
+      [get(bossRead, 'nodeType'), get(bossRead, 'scriptClass')],
+      ['Node2D', 'Hero'],
+      `a read names the engine class and the class the script declares: ${JSON.stringify(bossRead)}`,
+    );
     // The root by its name: its path is ".", and ". already has a child" read as a typo.
     assert.equal(
       textOf(
@@ -46855,6 +47078,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryReservedPortIsItsOwn,
   testEveryToolNamedInProseIsATool,
   testShippedProseHasNoDashStandInsOrHabitPhrases,
+  testToolTextKeepsASpaceBetweenSentences,
   testEveryArgumentTheSkillNamesIsOneTheOpTakes,
   testACaptureIsSavedOnlyWhereItMayBe,
   testAMovieIsWrittenOnlyWhereACaptureCouldBe,

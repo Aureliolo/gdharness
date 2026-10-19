@@ -7,6 +7,12 @@ const GdhPatterns = preload("patterns.gd")
 const GdhScriptCheck = preload("script_check.gd")
 
 const MODIFICATION_TYPES: Array[String] = ["add_constant", "add_variable", "add_signal", "add_function"]
+## The class each template's code is written for, and the base a script made from it extends
+## when given none: the resource template's code is a Resource's, and on the default of Node it
+## does not parse.
+const TEMPLATE_BASES: Dictionary = {
+	"singleton": "Node", "state_machine": "Node", "component": "Node", "resource": "Resource"
+}
 const BLANKS_AROUND_FUNCTIONS: int = 2
 
 var _log: GdhLog
@@ -20,11 +26,11 @@ func _init(p_log: GdhLog) -> void:
 func create_gdscript(params: Dictionary) -> Dictionary:
 	var script_path: String = str(params.get("script_path", ""))
 	var cls_name_param: String = str(params.get("class_name", ""))
-	var extends_class: String = str(params.get("extends", "Node"))
-	if extends_class.is_empty():
-		extends_class = "Node"
 	var content: String = str(params.get("content", ""))
 	var template: String = str(params.get("template", ""))
+	var extends_class: String = str(params.get("extends", ""))
+	if extends_class.is_empty():
+		extends_class = str(TEMPLATE_BASES.get(template, "Node"))
 
 	_log.info("Creating GDScript: " + script_path)
 
@@ -62,6 +68,8 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	# and the first does not compile until the second exists.
 	if content.is_empty():
 		var header: String = _header_refusal(cls_name_param, extends_class)
+		if header.is_empty() and not template.is_empty():
+			header = _template_refusal(template, extends_class, full_script_path)
 		if not header.is_empty():
 			return _log.failure(header + " Nothing was written.")
 
@@ -80,8 +88,9 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		script_content += "extends " + extends_class + "\n"
 		# Only what was asked for: with no template the file was given an empty _ready beside a
 		# template_used of "none", which a caller had then to delete or leave lying in the script.
+		# Each template opens with the class's doc comment, which belongs straight below the header.
 		if not template.is_empty():
-			script_content += "\n" + _script_template(template)
+			script_content += _script_template(template)
 
 	var file: FileAccess = FileAccess.open(full_script_path, FileAccess.WRITE)
 	if not file:
@@ -93,19 +102,43 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		return _log.failure("Failed to write to script file: " + full_script_path)
 
 	var written: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+	var parses: bool = _parses(written)
 	var answer: Dictionary = {
 		"success": true,
 		"script_path": script_path,
 		"full_path": full_script_path,
 		"absolute_path": ProjectSettings.globalize_path(full_script_path),
 		"template_used": template if not template.is_empty() else "none",
-		"parses": _parses(written),
+		"parses": parses,
 	}
-	# Read off the file as the engine parsed it rather than off the arguments, which content leaves out.
-	if written != null:
+	# Read off the file as the engine parsed it rather than off the arguments, which content leaves
+	# out. A script that does not parse tells the engine nothing, and its empty base and name were
+	# answered for a file whose header says otherwise, so those are read off the text instead.
+	if parses:
 		answer["extends"] = _base_named(written)
 		answer["class_name"] = str(written.get_global_name())
+	else:
+		answer.merge(_header_written(script_content))
 	return answer
+
+
+## The class_name and extends [param text] declares at its margin, as written. A script with no
+## extends extends RefCounted.
+static func _header_written(text: String) -> Dictionary:
+	var header: Dictionary = {"extends": "RefCounted", "class_name": ""}
+	for line: String in text.split("\n"):
+		# An inner class's extends is indented, and is not the script's.
+		if line.begins_with(" ") or line.begins_with("\t"):
+			continue
+		var bare: String = GdhPatterns.without_annotations(GdhPatterns.without_comment(line))
+		var found: RegExMatch = GdhPatterns.declared_class(bare)
+		if found != null:
+			header["class_name"] = found.get_string(1)
+			if not found.get_string(2).is_empty():
+				header["extends"] = found.get_string(2)
+		elif bare.begins_with("extends "):
+			header["extends"] = bare.substr(8).strip_edges()
+	return header
 
 
 # Modify an existing GDScript file by adding functions, variables, or signals
@@ -135,7 +168,11 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 
 	var lines: Array[String] = []
 	lines.assign(original_content.split("\n"))
+	# Loaded only to learn whether it parsed as it was. What the engine says of that file carries its
+	# old line numbers, and beside the errors of the file written it named lines that had moved.
+	printerr(GdhLog.ASIDE)
 	var before: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+	printerr(GdhLog.RESUMED)
 	var parsed_before: bool = _parses(before)
 
 	# All of them checked before any is made, so a call is made whole or not at all: one skipped for a
@@ -257,6 +294,44 @@ static func _header_refusal(named: String, base: String) -> String:
 	if close.is_empty():
 		return said + "."
 	return said + "; the nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
+
+
+## Why [param template] cannot be written on [param base], or "". Each template's code calls
+## methods of the class it is written for, so a base outside it makes a script that does not parse.
+## A base whose engine class cannot be read here is left to the engine's parse.
+static func _template_refusal(template: String, base: String, script_path: String) -> String:
+	var wanted: String = str(TEMPLATE_BASES.get(template, ""))
+	var native: String = _engine_class_of(base, script_path)
+	if wanted.is_empty() or native.is_empty():
+		return ""
+	if native == wanted or ClassDB.is_parent_class(native, wanted):
+		return ""
+	var named: String = base if native == base else "%s, a %s," % [base, native]
+	return (
+		(
+			"The %s template is written for a %s, and extends %s is not one. Give extends a %s "
+			+ "class, or leave it out for %s."
+		)
+		% [template, wanted, named, wanted, wanted]
+	)
+
+
+## The engine class [param base] comes down to: itself, the one beneath the script a class_name or
+## a quoted path names, or "" when that script cannot be read.
+static func _engine_class_of(base: String, script_path: String) -> String:
+	if ClassDB.class_exists(base):
+		return base
+	var path: String = ""
+	if base.begins_with('"') or base.begins_with("'"):
+		path = base.substr(1, base.length() - 2)
+		if not path.begins_with("res://") and not path.begins_with("uid://"):
+			path = script_path.get_base_dir().path_join(path)
+	else:
+		path = str(_declared_classes().get(base, ""))
+	if path.is_empty() or not ResourceLoader.exists(path):
+		return ""
+	var script: Script = ResourceLoader.load(path, "Script") as Script
+	return "" if script == null else str(script.get_instance_base_type())
 
 
 # The class_name each script of the project declares, by name, with its path.
@@ -472,7 +547,18 @@ func _add_signal(lines: Array[String], mod: Dictionary, placed: Array[Dictionary
 		signal_line += "(" + signal_params + ")"
 
 	var insert_line: int = _signal_insertion_point(lines)
-	return insert_line if _insert(lines, insert_line, [signal_line], placed) else -1
+	# Set apart by a blank line from the header above and from whatever follows that is not a
+	# signal, as the style guide and gdformat lay the signals out.
+	var block: Array[String] = [signal_line]
+	var above: String = lines[insert_line - 1].strip_edges() if insert_line > 0 else ""
+	var at: int = insert_line
+	if not above.is_empty() and not GdhPatterns.without_annotations(above).begins_with("signal "):
+		block.push_front("")
+		at += 1
+	var below: String = lines[insert_line].strip_edges() if insert_line < lines.size() else ""
+	if not below.is_empty() and not GdhPatterns.without_annotations(below).begins_with("signal "):
+		block.append("")
+	return at if _insert(lines, insert_line, block, placed) else -1
 
 
 # Answers with the zero-based index of the `func` line, below the blank lines that separate it.
@@ -545,11 +631,26 @@ func _variable_insertion_point(lines: Array[String]) -> int:
 			before_func = i
 			break
 
+	after_header = _past_class_doc(lines, after_header)
 	for i: int in range(after_header, before_func):
 		if GdhPatterns.without_annotations(lines[i]).begins_with("var "):
 			after_header = i + 1
 
 	return after_header
+
+
+## [param at], or the line after the class's doc comment when [param at] follows the header and
+## one opens there. Godot reads the `##` lines straight below `extends` as the class's own
+## documentation, and a line put between them handed that documentation to the line put there.
+static func _past_class_doc(lines: Array[String], at: int) -> int:
+	if at == 0 or at > lines.size():
+		return at
+	var above: String = GdhPatterns.without_annotations(lines[at - 1])
+	if not (above.begins_with("extends ") or above.begins_with("class_name ")):
+		return at
+	while at < lines.size() and lines[at].strip_edges().begins_with("##"):
+		at += 1
+	return at
 
 
 func _signal_insertion_point(lines: Array[String]) -> int:
@@ -566,7 +667,7 @@ func _signal_insertion_point(lines: Array[String]) -> int:
 		elif line.begins_with("var ") or line.begins_with("func "):
 			break
 
-	return after_header
+	return _past_class_doc(lines, after_header)
 
 
 func _function_insertion_point(lines: Array[String], position: String) -> int:
@@ -621,24 +722,15 @@ static func _indentation(line: String) -> String:
 func _script_template(template_name: String) -> String:
 	match template_name:
 		"singleton":
-			return """## Singleton (Autoload) script
-## Add to Project Settings -> Autoload to use as a global singleton
+			return """## One instance for the whole game, which the project makes at start once
+## project_settings add_autoload names it, and every script reaches by that name.
 
-var _instance: Object = null
-
-func _init() -> void:
-\tif _instance != null:
-\t\tpush_error("Singleton instance already exists!")
-\t\treturn
-\t_instance = self
 
 func _ready() -> void:
 \tpass
-
-# Add your singleton methods here
 """
 		"state_machine":
-			return """## Finite State Machine implementation
+			return """## A finite state machine: one state at a time, entered and left through change_state.
 
 signal state_changed(old_state: String, new_state: String)
 
@@ -647,21 +739,26 @@ var current_state: String = ""
 ## physics_process(delta); whichever it has are called.
 var states: Dictionary = {}
 
+
 func _ready() -> void:
 \t_setup_states()
 \tif states.size() > 0:
 \t\tchange_state(str(states.keys()[0]))
+
 
 func _setup_states() -> void:
 \t# Override this to add states
 \t# Example: states["idle"] = IdleState.new()
 \tpass
 
+
 func _process(delta: float) -> void:
 \t_call_state(current_state, "process", [delta])
 
+
 func _physics_process(delta: float) -> void:
 \t_call_state(current_state, "physics_process", [delta])
+
 
 func change_state(new_state: String) -> void:
 \tif not states.has(new_state):
@@ -674,6 +771,7 @@ func change_state(new_state: String) -> void:
 \t_call_state(current_state, "enter", [])
 \tstate_changed.emit(old_state, new_state)
 
+
 ## Calls a method on the named state when it has one; a state without it is left alone.
 func _call_state(state_name: String, method: String, args: Array) -> void:
 \tif state_name.is_empty() or not states.has(state_name):
@@ -683,14 +781,16 @@ func _call_state(state_name: String, method: String, args: Array) -> void:
 \t\tstate.callv(method, args)
 """
 		"component":
-			return """## Component pattern - attach to nodes to add behavior
+			return """## A component: a child node that adds one behaviour to its parent, switched off with disable().
 
 @export var enabled: bool = true
+
 
 func _ready() -> void:
 \tif not enabled:
 \t\tset_process(false)
 \t\tset_physics_process(false)
+
 
 func _process(_delta: float) -> void:
 \tif not enabled:
@@ -698,10 +798,12 @@ func _process(_delta: float) -> void:
 \t# Component logic here
 \tpass
 
+
 func enable() -> void:
 \tenabled = true
 \tset_process(true)
 \tset_physics_process(true)
+
 
 func disable() -> void:
 \tenabled = false
@@ -709,25 +811,17 @@ func disable() -> void:
 \tset_physics_process(false)
 """
 		"resource":
-			return """## Custom Resource - save and load data
+			return """## Data kept in a .tres file, which resource_edit create makes and the game loads.
 
 @export var id: String = ""
 @export var display_name: String = ""
 @export var description: String = ""
 
+
 func _init(p_id: String = "", p_name: String = "", p_desc: String = "") -> void:
 \tid = p_id
 \tdisplay_name = p_name
 \tdescription = p_desc
-
-func duplicate_resource() -> Resource:
-\tvar new_resource: Resource = duplicate()
-\treturn new_resource
 """
 		_:
-			return """func _ready() -> void:
-\tpass
-
-func _process(_delta: float) -> void:
-\tpass
-"""
+			return ""

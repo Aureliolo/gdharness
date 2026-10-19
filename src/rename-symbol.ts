@@ -166,7 +166,12 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     };
   }
   if (newName === symbol) {
-    return { ok: false, reason: `${symbol} is already called ${newName}; nothing to rename.` };
+    // Sent with a new path, it is a move of the script alone, which is the file move's work.
+    const moving =
+      request.newScriptPath === null
+        ? ''
+        : ' resource_edit move moves the script alone, with every path in the project naming it.';
+    return { ok: false, reason: `${symbol} is already called ${newName}; nothing to rename.${moving}` };
   }
   const declaringPath = resourcePathOf(projectPath, request.scriptPath);
   if (declaringPath === null) {

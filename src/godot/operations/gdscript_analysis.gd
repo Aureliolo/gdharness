@@ -9,6 +9,39 @@ const GdhLog = preload("logger.gd")
 var _log: GdhLog
 ## Kept for the call, so the project's class names are read once however many bases are walked.
 var _dependencies: GdhDependencies = null
+## The script being read, which an inner class's base is resolved against.
+var _reading: String = ""
+
+
+## What one class body declares, the script's own or an inner class's.
+class GdhMembers:
+	var declared_class_name: Variant = null
+	var extends_name: String = "RefCounted"
+	var signals: Array[Dictionary] = []
+	var variables: Array[Dictionary] = []
+	var functions: Array[Dictionary] = []
+	var constants: Array[Dictionary] = []
+	var enums: Array[Dictionary] = []
+	var inner_classes: Array[Dictionary] = []
+	## The index of the last line the body holds.
+	var last: int = -1
+	## An inner class's name and the line its `class` is on.
+	var inner_name: String = ""
+	var line: int = 0
+
+	## The inner class as its entry under inner_classes, in the fields a script's own are in.
+	func as_inner() -> Dictionary:
+		return {
+			"name": inner_name,
+			"line": line,
+			"extends": extends_name,
+			"signals": signals,
+			"variables": variables,
+			"functions": functions,
+			"constants": constants,
+			"enums": enums,
+			"inner_classes": inner_classes,
+		}
 
 
 func _init(p_log: GdhLog) -> void:
@@ -41,106 +74,13 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 
 	var lines: PackedStringArray = content.split("\n")
 
-	var declared_class_name: Variant = null
-	var extends_name: String = "RefCounted"
-	var signals: Array[Dictionary] = []
-	var variables: Array[Dictionary] = []
-	var functions: Array[Dictionary] = []
-	var constants: Array[Dictionary] = []
-	var enums: Array[Dictionary] = []
-	var inner_classes: Array[String] = []
 	var dependencies: Array[String] = []
+	_reading = full_script_path
+	var own: GdhMembers = _members(lines, 0, "", dependencies)
+	var extends_name: String = own.extends_name
+	var functions: Array[Dictionary] = own.functions
 
-	var in_multiline_string: bool = false
-
-	var i: int = -1
-	while i + 1 < lines.size():
-		i += 1
-		# The comment off first, so nothing downstream has to know about them. It was reaching the
-		# answer: a `var x: int = 5  # note` carried `5  # note` as its default, and correcting the
-		# end of a parameter list put the comment into the return type, where `rfind(")")` had been
-		# hiding it by stopping inside the comment instead.
-		var raw: String = lines[i]
-		# Inside a string the raw line is counted, because a `#` in it is text and taking it for a
-		# comment would cut off the quotes that close the string.
-		if in_multiline_string:
-			if _triple_quotes(raw) % 2 == 1:
-				in_multiline_string = false
-			continue
-		var stripped: String = GdhPatterns.without_comment(raw)
-
-		if stripped.is_empty():
-			continue
-
-		# An odd count opens a string that runs on; an even one is a string that closed on the line
-		# it opened on. Toggling on any count lost `const HELP := """Usage"""`, and everything after
-		# it up to the next triple quote, with the state inverted from there to the end of the file.
-		# The line that opens one is still read: it can be the declaration the string belongs to.
-		if _triple_quotes(stripped) % 2 == 1:
-			in_multiline_string = true
-
-		# Only a line at the left margin declares one of the script's own members. Indented, it is a
-		# function's local or an inner class's member, and each was answered as the script's own:
-		# every `var` in every body, and an inner class's `extends` taken for the script's base.
-		if raw.begins_with(" ") or raw.begins_with("\t"):
-			_collect_dependencies(stripped, dependencies)
-			continue
-
-		# Annotations may share the line with anything they annotate, so every branch below decides
-		# on the line with them off. `@abstract class_name X` was reported as no declared class,
-		# and `@abstract func x()` and `@warning_ignore("...") func x()` as no function at all:
-		# gdUnit4 alone declares 248 methods that way and this answered with none of them.
-		var header: String = GdhPatterns.without_annotations(stripped)
-
-		var at: int = i
-		# A declaration wrapped across lines is one declaration, and reading the first line alone
-		# answered with the half that was not wrapped away: `values: []` for every `enum X {` on its
-		# own line and `params: []` with no return type for every `func x(`. `gdformat` wraps
-		# anything past the line length, so that is what a formatted project looks like: 23 and 19
-		# of them in gdUnit4 v6.2.1, 55 in one game project, and four in this addon.
-		#
-		# Only a declaration, because an unbalanced line anywhere else is a file mid-edit and
-		# joining from one swallows the rest of it: a body holding `print(` with nothing closing it
-		# took every declaration below it, which is the state an agent is most likely to ask about.
-		# `header` rather than `stripped`: an annotation in front pushes the keyword off the start
-		# of the line, so asking the raw line whether it can wrap says no to every annotated
-		# declaration that does. Held by the combined case, which nothing else in the fixture
-		# reaches: the single-feature cases each carry one of these and never a second.
-		if _can_wrap(header):
-			while _bracket_depth(stripped) > 0 and i + 1 < lines.size():
-				i += 1
-				stripped = (stripped + " " + GdhPatterns.without_comment(lines[i])).strip_edges()
-			header = GdhPatterns.without_annotations(stripped)
-		var declaration: RegExMatch = GdhPatterns.declared_class(header)
-		if declaration != null:
-			declared_class_name = declaration.get_string(1)
-			# `class_name X extends Y` is also one line, and taking the rest of it as the name
-			# reported `Blade extends Node2D` as the class while `extends` kept its default of
-			# `RefCounted`: the name unusable and the base flatly wrong.
-			if not declaration.get_string(2).is_empty():
-				extends_name = declaration.get_string(2)
-		elif header.begins_with("extends "):
-			extends_name = header.substr(8).strip_edges()
-		elif header.begins_with("signal "):
-			# `at`, not `i`: a wrapped declaration starts where it starts, and `i` is now sitting on
-			# the line that closed it.
-			signals.append(_parse_signal(header, at + 1))
-		elif header.begins_with("const "):
-			constants.append(_parse_constant(header, at + 1))
-		elif header.begins_with("enum "):
-			enums.append(_parse_enum(header, at + 1))
-		elif header.begins_with("var "):
-			# The whole line here, not the header: which annotations a variable carries is the
-			# answer rather than noise in front of it, and `@export_range(0, 1)` is the hint.
-			variables.append(_parse_variable(stripped, at + 1))
-		elif header.begins_with("func ") or header.begins_with("static func "):
-			functions.append(_parse_function(header, at + 1, stripped))
-		elif header.begins_with("class "):
-			inner_classes.append(header.substr(6).split(":")[0].split(" ")[0].strip_edges())
-
-		_collect_dependencies(stripped, dependencies)
-
-	# After the loop, because it needs the base the loop reads, and a file that declared one after
+	# After the walk, because it needs the base the walk reads, and a file that declared one after
 	# its first function would otherwise be judged against the default.
 	_mark_virtuals(functions, extends_name, full_script_path)
 
@@ -177,14 +117,14 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	var answer: Dictionary = {
 		"path": script_path,
 		"full_path": full_script_path,
-		"class_name": declared_class_name,
+		"class_name": own.declared_class_name,
 		"extends": extends_name,
-		"signals": signals,
-		"variables": variables,
+		"signals": own.signals,
+		"variables": own.variables,
 		"functions": functions,
-		"constants": constants,
-		"enums": enums,
-		"inner_classes": inner_classes,
+		"constants": own.constants,
+		"enums": own.enums,
+		"inner_classes": own.inner_classes,
 		"dependencies": dependencies,
 		"classes_used": classes_used,
 		"autoloads_used": autoloads_used,
@@ -193,6 +133,153 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	if GdhRead.as_bool(params.get("include_inherited", false)):
 		_add_inherited(answer, [full_script_path])
 	return answer
+
+
+## What one class body declares: the script's own at the left margin, or an inner class's at the
+## indent [param margin] its body is written at, read from line [param first] to the first line
+## less indented than that. [param dependencies] collects what every line loads, bodies included.
+func _members(
+	lines: PackedStringArray, first: int, margin: String, dependencies: Array[String]
+) -> GdhMembers:
+	var own: GdhMembers = GdhMembers.new()
+	var in_multiline_string: bool = false
+
+	var i: int = first - 1
+	while i + 1 < lines.size():
+		i += 1
+		# The comment off first, so nothing downstream has to know about them. It was reaching the
+		# answer: a `var x: int = 5  # note` carried `5  # note` as its default, and correcting the
+		# end of a parameter list put the comment into the return type, where `rfind(")")` had been
+		# hiding it by stopping inside the comment instead.
+		var raw: String = lines[i]
+		# Inside a string the raw line is counted, because a `#` in it is text and taking it for a
+		# comment would cut off the quotes that close the string.
+		if in_multiline_string:
+			if _triple_quotes(raw) % 2 == 1:
+				in_multiline_string = false
+			continue
+		var stripped: String = GdhPatterns.without_comment(raw)
+
+		if stripped.is_empty():
+			continue
+
+		# A line back at a shallower indent closes an inner class's body, and is the outer body's
+		# to read.
+		if not raw.begins_with(margin):
+			own.last = i - 1
+			return own
+
+		# An odd count opens a string that runs on; an even one is a string that closed on the line
+		# it opened on. Toggling on any count lost `const HELP := """Usage"""`, and everything after
+		# it up to the next triple quote, with the state inverted from there to the end of the file.
+		# The line that opens one is still read: it can be the declaration the string belongs to.
+		if _triple_quotes(stripped) % 2 == 1:
+			in_multiline_string = true
+
+		# Only a line at this body's own margin declares one of its members. Deeper, it is a
+		# function's local or an inner class's member, and each was answered as the script's own:
+		# every `var` in every body, and an inner class's `extends` taken for the script's base.
+		var indented: String = raw.substr(margin.length())
+		if indented.begins_with(" ") or indented.begins_with("\t"):
+			_collect_dependencies(stripped, dependencies)
+			continue
+
+		# Annotations may share the line with anything they annotate, so every branch below decides
+		# on the line with them off. `@abstract class_name X` was reported as no declared class,
+		# and `@abstract func x()` and `@warning_ignore("...") func x()` as no function at all:
+		# gdUnit4 alone declares 248 methods that way and this answered with none of them.
+		var header: String = GdhPatterns.without_annotations(stripped)
+
+		var at: int = i
+		# A declaration wrapped across lines is one declaration, and reading the first line alone
+		# answered with the half that was not wrapped away: `values: []` for every `enum X {` on its
+		# own line and `params: []` with no return type for every `func x(`. `gdformat` wraps
+		# anything past the line length, so that is what a formatted project looks like: 23 and 19
+		# of them in gdUnit4 v6.2.1, 55 in one game project, and four in this addon.
+		#
+		# Only a declaration, because an unbalanced line anywhere else is a file mid-edit and
+		# joining from one swallows the rest of it: a body holding `print(` with nothing closing it
+		# took every declaration below it, which is the state an agent is most likely to ask about.
+		# `header` rather than `stripped`: an annotation in front pushes the keyword off the start
+		# of the line, so asking the raw line whether it can wrap says no to every annotated
+		# declaration that does. Held by the combined case, which nothing else in the fixture
+		# reaches: the single-feature cases each carry one of these and never a second.
+		if _can_wrap(header):
+			while _bracket_depth(stripped) > 0 and i + 1 < lines.size():
+				i += 1
+				stripped = (stripped + " " + GdhPatterns.without_comment(lines[i])).strip_edges()
+			header = GdhPatterns.without_annotations(stripped)
+		var declaration: RegExMatch = GdhPatterns.declared_class(header)
+		if declaration != null:
+			own.declared_class_name = declaration.get_string(1)
+			# `class_name X extends Y` is also one line, and taking the rest of it as the name
+			# reported `Blade extends Node2D` as the class while `extends` kept its default of
+			# `RefCounted`: the name unusable and the base flatly wrong.
+			if not declaration.get_string(2).is_empty():
+				own.extends_name = declaration.get_string(2)
+		elif header.begins_with("extends "):
+			own.extends_name = header.substr(8).strip_edges()
+		elif header.begins_with("signal "):
+			# `at`, not `i`: a wrapped declaration starts where it starts, and `i` is now sitting on
+			# the line that closed it.
+			own.signals.append(_parse_signal(header, at + 1))
+		elif header.begins_with("const "):
+			own.constants.append(_parse_constant(header, at + 1))
+		elif header.begins_with("enum "):
+			own.enums.append(_parse_enum(header, at + 1))
+		elif header.begins_with("var ") or header.begins_with("static var "):
+			# The whole line here, not the header: which annotations a variable carries is the
+			# answer rather than noise in front of it, and `@export_range(0, 1)` is the hint.
+			own.variables.append(_parse_variable(stripped, at + 1))
+		elif header.begins_with("func ") or header.begins_with("static func "):
+			own.functions.append(_parse_function(header, at + 1, stripped))
+		elif header.begins_with("class "):
+			_collect_dependencies(stripped, dependencies)
+			var inner: GdhMembers = _inner_class(lines, i, margin, header, dependencies)
+			own.inner_classes.append(inner.as_inner())
+			i = inner.last
+			continue
+
+		_collect_dependencies(stripped, dependencies)
+
+	own.last = lines.size() - 1
+	return own
+
+
+## The inner class whose `class` line is [param at], [param header] with its annotations and
+## comment off, read with the members its body declares. Answered as a name alone, its members
+## were in no answer at all.
+func _inner_class(
+	lines: PackedStringArray, at: int, margin: String, header: String, dependencies: Array[String]
+) -> GdhMembers:
+	var signature: String = _up_to(header.substr(6), ":").strip_edges()
+	var based: String = ""
+	if " extends " in signature:
+		based = signature.get_slice(" extends ", 1).strip_edges()
+	# The body is at the indent of its first line, whatever this file indents with.
+	var body_margin: String = ""
+	for next: int in range(at + 1, lines.size()):
+		if GdhPatterns.without_comment(lines[next]).is_empty():
+			continue
+		var indent: String = _indentation(lines[next])
+		if indent.length() > margin.length() and lines[next].begins_with(margin):
+			body_margin = indent
+		break
+	var body: GdhMembers = (
+		GdhMembers.new() if body_margin.is_empty() else _members(lines, at + 1, body_margin, dependencies)
+	)
+	if body_margin.is_empty():
+		body.last = at
+	if not based.is_empty():
+		body.extends_name = based
+	body.inner_name = signature.get_slice(" ", 0)
+	body.line = at + 1
+	_mark_virtuals(body.functions, body.extends_name, _reading)
+	return body
+
+
+static func _indentation(line: String) -> String:
+	return line.substr(0, line.length() - line.strip_edges(true, false).length())
 
 
 # Which of these functions the engine will call, asked of the engine.
@@ -419,6 +506,8 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 		"is_export": is_export,
 		"export_hint": export_hint,
 		"is_onready": is_onready,
+		# One per class rather than per instance, which a caller reading a counter needs to know.
+		"is_static": GdhPatterns.without_annotations(line).begins_with("static "),
 		"line": line_num
 	}
 
