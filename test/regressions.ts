@@ -46432,7 +46432,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     }
     assert.equal(
       textOf(await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath: 'Crate1' })),
-      'set takes properties, editableChildren, or both.',
+      'set takes properties, editableChildren, addGroups or removeGroups.',
     );
 
     const shallow = get(
