@@ -2,10 +2,9 @@
  * The run that outlives the server which started it.
  *
  * An MCP server is restarted by the harness in front of it, on its own schedule and without
- * warning: a reconnect. Everything about a run used to live in that process, so a reconnect took
- * the run with it. The game was spawned as an ordinary child, which on every platform here means
- * it is torn down with its parent, and the log was an object in memory, so what the run had
- * already printed went with it too. `editor_output` afterwards answered "No game is running",
+ * warning: a reconnect. A run that lives in that process goes with it. A game spawned as an
+ * ordinary child is, on every platform here, torn down with its parent, and a log kept as an object
+ * in memory takes what the run had already printed with it. `editor_output` afterwards answered "No game is running",
  * which is true about the process and says nothing about the forty minutes of bench output that
  * had just been thrown away. Reported twice in one session by a project running sweeps: a
  * six-setting sweep died after one row, a nine-cell sweep after five cells.

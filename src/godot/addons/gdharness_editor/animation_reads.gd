@@ -5,7 +5,6 @@ extends RefCounted
 ## stores, which runs no script of the scene's, so a read answers the same either way.
 
 const GdhFileReads = preload("file_reads.gd")
-const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 
 const LOOP_MODE_NAMES: Dictionary[int, String] = {
@@ -56,21 +55,10 @@ static func scene_states(scene_path: String, tree_path: String, state_machine_pa
 ## A node of the class the file gives the node at [param node_path], holding every property the
 ## files set but its script, as [node, null] or [null, refusal]. The caller frees it.
 static func _bare(scene_path: String, node_path: String, kind: String) -> Array:
-	var read: Dictionary = GdhFileReads.scene_node(scene_path, node_path)
-	if not read.is_empty() and not read.get("ok", false):
+	var read: Dictionary = GdhFileReads.scene_node_of_kind(scene_path, node_path, kind)
+	if not read.get("ok", false):
 		return [null, read]
-	var type: String = str(read.get("type", ""))
-	if not ClassDB.class_exists(type) or not ClassDB.is_parent_class(type, kind):
-		var said: String = "%s not found at: %s" % [kind, node_path]
-		if read.is_empty():
-			var hinted: String = said
-			if GdhFileReads.scene_node(scene_path, node_path.get_slice("/", 0)).is_empty():
-				hinted = GdhRead.from_the_root(
-					said, node_path, str(GdhFileReads.scene_node(scene_path, ".").get("name", ""))
-				)
-			said = hinted if hinted != said else GdhFileReads.missing_from(said, scene_path, node_path)
-		return [null, {"ok": false, "error": said}]
-	var bare: Node = ClassDB.instantiate(type)
+	var bare: Node = ClassDB.instantiate(str(read["type"]))
 	bare.name = str(read["name"])
 	var given: Dictionary = read["properties"]
 	for property: Variant in given:
