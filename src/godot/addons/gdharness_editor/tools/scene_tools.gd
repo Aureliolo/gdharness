@@ -60,13 +60,11 @@ func _find_node(root: Node, path: String) -> Node:
 ## Why the property or signal [param missing] could not be found on [param node], adding the one
 ## cause the name alone does not show: a script that does not compile leaves the editor holding a
 ## placeholder with no properties or signals at all, and the refusal named the property instead.
+## Such a script has no engine class beneath it. Compiling a copy of the source to find out failed on
+## every script with a class_name, since the copy hides the global class the original declares.
 func _missing_on(node: Node, missing: String) -> String:
 	var script: Script = node.get_script()
-	if script == null or not script.has_source_code():
-		return missing
-	var probe: GDScript = GDScript.new()
-	probe.source_code = script.source_code
-	if probe.reload() == OK:
+	if script == null or not str(script.get_instance_base_type()).is_empty():
 		return missing
 	return (
 		"%s. Its script, %s, does not compile, so none of what it declares is known here."

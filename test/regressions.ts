@@ -39250,6 +39250,72 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       ['Resource', 'ItemData', 'res://item_data.gd'],
       JSON.stringify(read),
     );
+
+    // A ShaderMaterial's parameters are its shader's uniforms, so a name the shader does not
+    // declare is the shader's lack, and the refusal had said the material had no such property.
+    writeFileSync(
+      join(project, 'glow.gdshader'),
+      'shader_type canvas_item;\n\nuniform float glow_power : hint_range(0.0, 2.0) = 1.0;\nuniform vec4 tint : source_color;\n',
+    );
+    const material = async (
+      resourcePath: string,
+      properties: Record<string, unknown>,
+    ): Promise<JsonRpcMessage> => await request('resource_edit', { op: 'modify', resourcePath, properties });
+    for (const [resourcePath, shader] of [
+      ['res://glow.tres', { shader: 'res://glow.gdshader' }],
+      ['res://bare.tres', {}],
+    ] as const) {
+      const created = await request('resource_edit', {
+        op: 'create',
+        resourcePath,
+        resourceType: 'ShaderMaterial',
+        properties: shader,
+      });
+      assert.ok(parseTextContent(created) !== null, textOf(created) ?? JSON.stringify(created));
+    }
+    assert.equal(
+      textOf(await material('res://glow.tres', { 'shader_parameter/glow_powr': 1.5 })),
+      'res://glow.gdshader declares no uniform glow_powr, which shader_parameter/glow_powr would set; the nearest it has is glow_power.',
+    );
+    assert.equal(
+      textOf(await material('res://glow.tres', { 'shader_parameter/speed': 1.5 })),
+      'res://glow.gdshader declares no uniform speed, which shader_parameter/speed would set; it has glow_power, tint.',
+    );
+    assert.equal(
+      textOf(await material('res://bare.tres', { 'shader_parameter/glow_power': 1.5 })),
+      'The ShaderMaterial has no shader, so it has no parameter glow_power yet; set shader first.',
+    );
+    const lit = await material('res://glow.tres', { 'shader_parameter/glow_power': 1.5 });
+    assert.ok(parseTextContent(lit) !== null, textOf(lit) ?? JSON.stringify(lit));
+    assert.match(readFileSync(join(project, 'glow.tres'), 'utf8'), /^shader_parameter\/glow_power = 1\.5$/m);
+
+    // A refused value on a node whose script declares a class_name says only what was wrong with
+    // the value. The check for a script that does not compile compiled a copy of it, and a copy of
+    // a script with a class_name hides the global class the original declares, so every such
+    // script was said not to compile.
+    writeFileSync(
+      join(project, 'player.gd'),
+      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n',
+    );
+    writeFileSync(
+      join(project, 'hero.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://player.gd" id="1_player"]\n\n' +
+        '[node name="Hero" type="CharacterBody2D"]\nscript = ExtResource("1_player")\n',
+    );
+    const classes = await request('project_import', { op: 'refresh_classes' });
+    assert.match(
+      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+      /"class": &"Player"/,
+      textOf(classes) ?? JSON.stringify(classes),
+    );
+    const hero = { scenePath: 'res://hero.tscn', nodePath: '.', op: 'set' };
+    assert.equal(
+      textOf(await request('scene_node', { ...hero, properties: { speed: 'fast' } })),
+      'Player.speed is float and the value given is String, which cannot become one. Setting it would save a different value than the one asked for.',
+    );
+    const fast = await request('scene_node', { ...hero, properties: { speed: 300 } });
+    assert.ok(parseTextContent(fast) !== null, textOf(fast) ?? JSON.stringify(fast));
+    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^speed = 300\.0$/m);
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
