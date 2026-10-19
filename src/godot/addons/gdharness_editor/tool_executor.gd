@@ -124,6 +124,9 @@ func _init_tools() -> void:
 		"read_animation_states": [_animation_tools, "read_animation_states"],
 		"create_animation": [_animation_tools, "create_animation"],
 		"add_animation_track": [_animation_tools, "add_animation_track"],
+		"set_animation": [_animation_tools, "set_animation"],
+		"rename_animation": [_animation_tools, "rename_animation"],
+		"remove_animation": [_animation_tools, "remove_animation"],
 		"add_animation_state": [_animation_tools, "add_animation_state"],
 		"connect_animation_states": [_animation_tools, "connect_animation_states"],
 	}

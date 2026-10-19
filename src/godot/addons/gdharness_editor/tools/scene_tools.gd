@@ -202,9 +202,7 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 	# A class that is not a node went into a Node variable, which is a runtime error the caller
 	# heard about only as "Invalid tool result".
 	if not ClassDB.class_exists(root_node_type) or not ClassDB.is_parent_class(root_node_type, "Node"):
-		return {
-			"ok": false, "error": "rootNodeType must be a node class, and %s is not one." % root_node_type
-		}
+		return {"ok": false, "error": GdhPlacing.not_a_node_class("rootNodeType", root_node_type)}
 	if not ClassDB.can_instantiate(root_node_type):
 		return {"ok": false, "error": "%s cannot be instantiated." % root_node_type}
 	var unfit: String = GdhSceneFile.unfit_name(root_node_name)
@@ -243,6 +241,7 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 		# name is no property the write compares.
 		root.name = root_node_name
 
+	var had_folder: bool = DirAccess.dir_exists_absolute(scene_path.get_base_dir())
 	var folder: String = GdhSceneFile.make_folder_for(scene_path)
 	if not folder.is_empty():
 		root.free()
@@ -251,7 +250,12 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {"ok": true, "scenePath": scene_path, "rootNodeType": asked_type, "rootNodeName": root_node_name}
+	var answer: Dictionary = {
+		"ok": true, "scenePath": scene_path, "rootNodeType": asked_type, "rootNodeName": root_node_name
+	}
+	if not had_folder:
+		answer["madeFolder"] = scene_path.get_base_dir()
+	return answer
 
 
 func list_scene_nodes(args: Dictionary) -> Dictionary:

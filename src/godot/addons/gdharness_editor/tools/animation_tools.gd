@@ -14,6 +14,9 @@ const GdhSerialisation = preload("../serialisation.gd")
 ## How far right of the rightmost state a new one goes in the editor's graph, wider than a state's
 ## box there.
 const STATE_SPACING: float = 200.0
+const LOOP_MODES: Dictionary = {
+	"none": Animation.LOOP_NONE, "linear": Animation.LOOP_LINEAR, "pingpong": Animation.LOOP_PINGPONG
+}
 
 var _editor_plugin: EditorPlugin = null
 var _properties: GdhPropertyValues = GdhPropertyValues.new()
@@ -284,11 +287,12 @@ func create_animation(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Missing scenePath"}
 	if animation_name.strip_edges().is_empty():
 		return {"ok": false, "error": "Missing animationName"}
-	var loop_modes: Dictionary = {
-		"none": Animation.LOOP_NONE, "linear": Animation.LOOP_LINEAR, "pingpong": Animation.LOOP_PINGPONG
-	}
+	var loop_modes: Dictionary = LOOP_MODES
 	if not loop_modes.has(loop_mode_name):
 		return {"ok": false, "error": "Unsupported loopMode: " + loop_mode_name}
+	var timing: String = _timing_refusal(args)
+	if not timing.is_empty():
+		return {"ok": false, "error": timing}
 
 	var opened: Array = _open_at(scene_path, player_node_path, "AnimationPlayer")
 	var scene: GdhSceneFile = opened[0]
@@ -347,15 +351,13 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 	if not keyed[0]:
 		return {"ok": false, "error": keyed[1]}
 
-	var opened: Array = _open_at(scene_path, player_node_path, "AnimationPlayer")
+	# Asked of the player, which knows every library: looking only in the default one refused
+	# "moves/walk" as missing.
+	var opened: Array = _animation_at(scene_path, player_node_path, animation_name)
 	var scene: GdhSceneFile = opened[0]
 	if opened[1] == null:
 		return opened[2]
 	var player: AnimationPlayer = opened[1]
-	# Asked of the player, which knows every library: looking only in the default one refused
-	# "moves/walk" as missing.
-	if not player.has_animation(StringName(animation_name)):
-		return scene.refuse("%s has no animation %s" % [player_node_path, animation_name])
 	var anim: Animation = player.get_animation(StringName(animation_name))
 	var homes: Array = _homes(
 		scene, [[_library_of(player, animation_name), "animation library"], [anim, "animation"]]
@@ -394,55 +396,129 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 			return "the track would not be in %s when the scene loads." % animation_name
 		return ""
 	var answer: Dictionary = {
-		"ok": true, "trackType": str(track.get("type", "")), "trackIndex": track_idx, "keys": keys
+		"ok": true,
+		"trackType": str(track.get("type", "")),
+		"trackIndex": track_idx,
+		"keys": keys,
+		"keysAdded": keyframes.size(),
 	}
+	if built[3]:
+		answer["existingTrack"] = true
 	if built[2] != null:
 		answer["methodFound"] = built[2]
+	var past: String = _past_length(anim, animation_name)
+	if not past.is_empty():
+		answer["pastLength"] = past
 	var files: Dictionary = homes[1]
 	return _finish(scene, check, files, answer)
 
 
-## Adds [param track] to [param anim] with [param keyframes], as [index, why not, methodFound]:
-## methodFound is null for a property track.
+## Adds [param track] to [param anim] with [param keyframes], as [index, why not, methodFound,
+## existing]: methodFound is null for a property track, and existing is whether the keys went into
+## a track the animation already had for that path.
+##
+## Into that track rather than a second one beside it, as the editor keys a property it already
+## animates: two tracks for one path both play, the later overriding the earlier, and a key meant
+## to extend the motion was split off where reading the animation showed two halves.
 func _add_track(
 	anim: Animation, track: Dictionary, target: Node, target_path: String, keyframes: Array
 ) -> Array:
 	var track_type: String = str(track.get("type", ""))
 	var keys: Array = []
 	var method_found: Variant = null
-	var track_idx: int = -1
+	var kind: Animation.TrackType = Animation.TYPE_VALUE
+	var path: NodePath = NodePath(target_path)
 	if track_type == "property":
 		var prop_name: String = str(track.get("property", ""))
 		if prop_name.is_empty():
-			return [-1, "track.property is required for property track", null]
+			return [-1, "track.property is required for property track", null, false]
 		var values: Array = _key_values(target, prop_name, keyframes)
 		if not values[0]:
-			return [-1, values[1], null]
+			return [-1, values[1], null, false]
 		keys = values[1]
-		track_idx = anim.add_track(Animation.TYPE_VALUE)
-		anim.track_set_path(track_idx, NodePath(target_path + ":" + prop_name))
+		path = NodePath(target_path + ":" + prop_name)
 	elif track_type == "method":
 		var method_name: String = str(track.get("method", ""))
 		if method_name.is_empty():
-			return [-1, "track.method is required for method track", null]
+			return [-1, "track.method is required for method track", null, false]
 		for index: int in keyframes.size():
 			var keyframe: Dictionary = keyframes[index]
 			var given: Variant = keyframe.get("args", [])
 			if not given is Array:
-				return [-1, "keyframes[%d].args must be a list." % index, null]
+				return [-1, "keyframes[%d].args must be a list." % index, null, false]
 			var arguments: Array = given
 			keys.append({"method": method_name, "args": _parse_method_args(arguments)})
 		method_found = target.has_method(method_name)
-		track_idx = anim.add_track(Animation.TYPE_METHOD)
-		anim.track_set_path(track_idx, NodePath(target_path))
+		kind = Animation.TYPE_METHOD
 	else:
-		return [-1, "Unsupported track.type: " + track_type, null]
+		return [-1, "Unsupported track.type: " + track_type, null, false]
 
+	var track_idx: int = anim.find_track(path, kind)
+	var existing: bool = track_idx >= 0
+	if existing:
+		# Checked before any key goes in, since track_insert_key replaces a key at the same time
+		# without a word, and a refusal partway would leave the editor's scene half changed.
+		for index: int in keyframes.size():
+			var keyframe: Dictionary = keyframes[index]
+			var time: float = GdhRead.as_float(keyframe["time"])
+			if anim.track_find_key(track_idx, time, Animation.FIND_MODE_APPROX) >= 0:
+				return [
+					-1,
+					(
+						(
+							"Track %d already animates %s and has a key at %s s, which keyframes[%d] would "
+							+ "replace. Nothing was written."
+						)
+						% [track_idx, str(path), _seconds(time), index]
+					),
+					null,
+					false
+				]
+	else:
+		track_idx = anim.add_track(kind)
+		anim.track_set_path(track_idx, path)
 	for index: int in keyframes.size():
 		var keyframe: Dictionary = keyframes[index]
 		if anim.track_insert_key(track_idx, GdhRead.as_float(keyframe["time"]), keys[index]) < 0:
-			return [-1, "Keyframe %d could not be inserted." % index, null]
-	return [track_idx, "", method_found]
+			return [-1, "Keyframe %d could not be inserted." % index, null, false]
+	return [track_idx, "", method_found, existing]
+
+
+## The keys of [param anim], called [param animation_name], that lie past its end, where they never
+## play, as a sentence naming each by its track's path and time, or "" when none does. The engine
+## keeps such a key, as the editor does, so a longer length plays it again.
+static func _past_length(anim: Animation, animation_name: String) -> String:
+	var past: PackedStringArray = []
+	for track: int in anim.get_track_count():
+		for key: int in anim.track_get_key_count(track):
+			var time: float = anim.track_get_key_time(track, key)
+			if time > anim.length + 0.0001:
+				var _added: bool = past.append(
+					"%s at %s s" % [str(anim.track_get_path(track)), _seconds(time)]
+				)
+	if past.is_empty():
+		return ""
+	return (
+		(
+			"%s is %s s long, and %s past its end, where %s: %s. %s; scene_animation set "
+			+ "with a longer length plays %s."
+		)
+		% [
+			animation_name,
+			_seconds(anim.length),
+			"this key is" if past.size() == 1 else "these keys are",
+			"it never plays" if past.size() == 1 else "they never play",
+			", ".join(past),
+			"It is kept" if past.size() == 1 else "They are kept",
+			"it" if past.size() == 1 else "them",
+		]
+	)
+
+
+## [param seconds] as a caller wrote it: a key at 2 reads 2, not 2.0.
+static func _seconds(seconds: float) -> String:
+	var rounded: float = snappedf(seconds, 0.0001)
+	return str(int(rounded)) if rounded == floorf(rounded) else str(rounded)
 
 
 ## The keyframes of [param track], as [true, list] or [false, why]. Each needs its own time: one
@@ -494,6 +570,274 @@ func _key_values(target: Node, prop_name: String, keyframes: Array) -> Array:
 			return [false, "keyframes[%d]: %s" % [index, value[1]]]
 		values.append(value[1])
 	return [true, values]
+
+
+# =============================================================================
+# set_animation, rename_animation, remove_animation
+# =============================================================================
+## Why the length or step in [param args] cannot be taken, or "". The engine raises a length below
+## a thousandth of a second to that without a word.
+static func _timing_refusal(args: Dictionary) -> String:
+	if args.has("length"):
+		var length: Variant = args["length"]
+		if not (length is float or length is int) or GdhRead.as_float(length) <= 0.0:
+			return "length is the animation's length in seconds, more than 0, and %s is not." % _given(length)
+	if args.has("step"):
+		var step: Variant = args["step"]
+		if not (step is float or step is int) or GdhRead.as_float(step) < 0.0:
+			return "step is the keyframe snap in seconds, 0 or more, and %s is not." % _given(step)
+	return ""
+
+
+static func _given(value: Variant) -> String:
+	if value is float or value is int:
+		return _seconds(GdhRead.as_float(value))
+	return JSON.stringify(value)
+
+
+## [param scene_path] opened for writing with the player at [param player_node_path], which must
+## have [param animation_name], as [method _open_at] answers.
+func _animation_at(scene_path: String, player_node_path: String, animation_name: String) -> Array:
+	var opened: Array = _open_at(scene_path, player_node_path, "AnimationPlayer")
+	if opened[1] == null:
+		return opened
+	var scene: GdhSceneFile = opened[0]
+	var player: AnimationPlayer = opened[1]
+	if player.has_animation(StringName(animation_name)):
+		return opened
+	var said: String = GdhAnimationReads.no_animation(player, player_node_path, animation_name)
+	return [scene, null, scene.refuse(said)]
+
+
+## Changes the length, loop mode or step of an animation, naming any key a shorter length leaves
+## past the end.
+func set_animation(args: Dictionary) -> Dictionary:
+	var scene_path: String = _ensure_res_path(str(args.get("scenePath", "")))
+	var player_node_path: String = str(args.get("playerNodePath", "."))
+	var animation_name: String = str(args.get("animationName", ""))
+	var loop_mode_name: String = str(args.get("loopMode", ""))
+	if scene_path.strip_edges() == "res://":
+		return {"ok": false, "error": "Missing scenePath"}
+	if animation_name.strip_edges().is_empty():
+		return {"ok": false, "error": "Missing animationName"}
+	if not (args.has("length") or args.has("loopMode") or args.has("step")):
+		return {"ok": false, "error": "set changes length, loopMode or step, and was given none of them."}
+	if args.has("loopMode") and not LOOP_MODES.has(loop_mode_name):
+		return {"ok": false, "error": "Unsupported loopMode: " + loop_mode_name}
+	var timing: String = _timing_refusal(args)
+	if not timing.is_empty():
+		return {"ok": false, "error": timing}
+
+	var found: Array = _animation_at(scene_path, player_node_path, animation_name)
+	if found[1] == null:
+		return found[2]
+	var scene: GdhSceneFile = found[0]
+	var player: AnimationPlayer = found[1]
+	var anim: Animation = player.get_animation(StringName(animation_name))
+	var homes: Array = _homes(
+		scene, [[_library_of(player, animation_name), "animation library"], [anim, "animation"]]
+	)
+	if not homes[0]:
+		return scene.refuse(str(homes[1]))
+	if args.has("length"):
+		anim.length = GdhRead.as_float(args["length"])
+	if args.has("loopMode"):
+		anim.loop_mode = GdhRead.as_int(LOOP_MODES[loop_mode_name]) as Animation.LoopMode
+	if args.has("step"):
+		anim.step = GdhRead.as_float(args["step"])
+
+	var length: float = anim.length
+	var at: String = scene.path_of(player)
+	var check: Callable = func(saved: Node) -> String:
+		var copy: AnimationPlayer = saved.get_node_or_null(at) as AnimationPlayer
+		if copy == null or not copy.has_animation(StringName(animation_name)):
+			return "%s would not be in the scene when it loads." % animation_name
+		if not is_equal_approx(copy.get_animation(StringName(animation_name)).length, length):
+			return "%s would not be %s s long when the scene loads." % [animation_name, _seconds(length)]
+		return ""
+	var answer: Dictionary = {
+		"ok": true,
+		"animationName": animation_name,
+		"length": anim.length,
+		"loopMode": GdhAnimationReads.LOOP_MODE_NAMES.get(anim.loop_mode, str(anim.loop_mode)),
+		"step": anim.step,
+	}
+	var past: String = _past_length(anim, animation_name)
+	if not past.is_empty():
+		answer["pastLength"] = past
+	var files: Dictionary = homes[1]
+	return _finish(scene, check, files, answer)
+
+
+## Renames an animation within its library, taking along the player's autoplay and every state of
+## the scene's trees that plays it, since a state naming an animation the player lacks plays nothing
+## and says so only in the editor's log.
+func rename_animation(args: Dictionary) -> Dictionary:
+	var scene_path: String = _ensure_res_path(str(args.get("scenePath", "")))
+	var player_node_path: String = str(args.get("playerNodePath", "."))
+	var animation_name: String = str(args.get("animationName", ""))
+	var new_name: String = str(args.get("newName", "")).strip_edges()
+	if scene_path.strip_edges() == "res://":
+		return {"ok": false, "error": "Missing scenePath"}
+	if animation_name.strip_edges().is_empty():
+		return {"ok": false, "error": "Missing animationName"}
+	if new_name.is_empty():
+		return {"ok": false, "error": "Missing newName"}
+	var library_name: String = animation_name.get_slice("/", 0) if animation_name.contains("/") else ""
+	var prefix: String = "" if library_name.is_empty() else library_name + "/"
+	if not prefix.is_empty() and new_name.begins_with(prefix):
+		new_name = new_name.trim_prefix(prefix)
+	if new_name.contains("/"):
+		return {
+			"ok": false,
+			"error":
+			(
+				(
+					"rename keeps an animation in its library (%s), so newName is its name there, with "
+					+ "no library before a slash."
+				)
+				% ("the default one" if library_name.is_empty() else library_name)
+			),
+		}
+	for forbidden: String in [":", ",", "["]:
+		if new_name.contains(forbidden):
+			return {"ok": false, "error": "An animation's name cannot hold : , or [, and %s does." % new_name}
+	var new_full: String = prefix + new_name
+
+	var found: Array = _animation_at(scene_path, player_node_path, animation_name)
+	if found[1] == null:
+		return found[2]
+	var scene: GdhSceneFile = found[0]
+	var player: AnimationPlayer = found[1]
+	if new_full == animation_name:
+		return scene.refuse("%s is already called %s." % [animation_name, new_full])
+	if player.has_animation(StringName(new_full)):
+		return scene.refuse("%s already has an animation %s." % [player_node_path, new_full])
+	var library: AnimationLibrary = _library_of(player, animation_name)
+	var states: Array = _states_playing(scene, player, animation_name)
+	var held: Array = [[library, "animation library"]]
+	for state: Array in states:
+		held.append([state[0], "state playing %s" % animation_name])
+	var homes: Array = _homes(scene, held)
+	if not homes[0]:
+		return scene.refuse(str(homes[1]))
+
+	# Read before the rename, since the player moves its autoplay to the new name on its own; it
+	# does not clear one when an animation is removed.
+	var autoplayed: bool = str(player.autoplay) == animation_name
+	library.rename_animation(StringName(animation_name.trim_prefix(prefix)), StringName(new_name))
+	if not player.has_animation(StringName(new_full)):
+		return scene.refuse("The library did not take the name %s." % new_full)
+	var answer: Dictionary = {"ok": true, "animationName": new_full, "was": animation_name}
+	if autoplayed:
+		answer["autoplay"] = new_full
+	var followed: Array = []
+	for state: Array in states:
+		var plays: AnimationNodeAnimation = state[0]
+		plays.animation = StringName(new_full)
+		followed.append(state[1])
+	if not followed.is_empty():
+		answer["statesFollowed"] = followed
+
+	var at: String = scene.path_of(player)
+	var check: Callable = func(saved: Node) -> String:
+		var copy: AnimationPlayer = saved.get_node_or_null(at) as AnimationPlayer
+		if copy == null or not copy.has_animation(StringName(new_full)):
+			return "%s would not be in the scene when it loads." % new_full
+		return ""
+	var files: Dictionary = homes[1]
+	return _finish(scene, check, files, answer)
+
+
+## Removes an animation, clearing the player's autoplay when it named it and naming the states of
+## the scene's trees left playing nothing.
+func remove_animation(args: Dictionary) -> Dictionary:
+	var scene_path: String = _ensure_res_path(str(args.get("scenePath", "")))
+	var player_node_path: String = str(args.get("playerNodePath", "."))
+	var animation_name: String = str(args.get("animationName", ""))
+	if scene_path.strip_edges() == "res://":
+		return {"ok": false, "error": "Missing scenePath"}
+	if animation_name.strip_edges().is_empty():
+		return {"ok": false, "error": "Missing animationName"}
+
+	var found: Array = _animation_at(scene_path, player_node_path, animation_name)
+	if found[1] == null:
+		return found[2]
+	var scene: GdhSceneFile = found[0]
+	var player: AnimationPlayer = found[1]
+	var library: AnimationLibrary = _library_of(player, animation_name)
+	var homes: Array = _homes(scene, [[library, "animation library"]])
+	if not homes[0]:
+		return scene.refuse(str(homes[1]))
+	var called: String = animation_name.get_slice("/", 1) if animation_name.contains("/") else animation_name
+	var autoplayed: bool = str(player.autoplay) == animation_name
+	library.remove_animation(StringName(called))
+	if player.has_animation(StringName(animation_name)):
+		return scene.refuse("The library did not let go of %s." % animation_name)
+	var answer: Dictionary = {"ok": true, "removed": animation_name}
+	if autoplayed:
+		player.autoplay = ""
+		answer["autoplayCleared"] = true
+	var orphaned: Array = []
+	for state: Array in _states_playing(scene, player, animation_name):
+		orphaned.append(state[1])
+	if not orphaned.is_empty():
+		answer["statesPlayingNothing"] = orphaned
+
+	var at: String = scene.path_of(player)
+	var check: Callable = func(saved: Node) -> String:
+		var copy: AnimationPlayer = saved.get_node_or_null(at) as AnimationPlayer
+		if copy == null or copy.has_animation(StringName(animation_name)):
+			return "%s would still be in the scene when it loads." % animation_name
+		return ""
+	var files: Dictionary = homes[1]
+	return _finish(scene, check, files, answer)
+
+
+## The states of [param scene]'s AnimationTrees that play [param animation_name] from [param player],
+## as [[node, {animTreePath, state}]], a state named by the path of the nodes leading to it.
+func _states_playing(scene: GdhSceneFile, player: AnimationPlayer, animation_name: String) -> Array:
+	var found: Array = []
+	var trees: Array[Node] = scene.root.find_children("*", "AnimationTree", true, false)
+	if scene.root is AnimationTree:
+		trees.append(scene.root)
+	for node: Node in trees:
+		var tree: AnimationTree = node
+		if tree.tree_root == null or tree.get_node_or_null(tree.anim_player) != player:
+			continue
+		var tree_path: String = str(scene.root.get_path_to(tree))
+		_collect_playing(tree.tree_root, "", tree_path, animation_name, found)
+	return found
+
+
+static func _collect_playing(
+	node: AnimationNode, at: String, tree_path: String, animation_name: String, found: Array
+) -> void:
+	if node is AnimationNodeAnimation:
+		var plays: AnimationNodeAnimation = node
+		if plays.animation == StringName(animation_name):
+			found.append([plays, {"animTreePath": tree_path, "state": "." if at.is_empty() else at}])
+		return
+	var children: Dictionary = {}
+	if node is AnimationNodeStateMachine:
+		var machine: AnimationNodeStateMachine = node
+		for state: StringName in machine.get_node_list():
+			children[str(state)] = machine.get_node(state)
+	elif node is AnimationNodeBlendTree:
+		var blend: AnimationNodeBlendTree = node
+		for input: StringName in blend.get_node_list():
+			children[str(input)] = blend.get_node(input)
+	elif node is AnimationNodeBlendSpace1D:
+		var line: AnimationNodeBlendSpace1D = node
+		for point: int in line.get_blend_point_count():
+			children[str(point)] = line.get_blend_point_node(point)
+	elif node is AnimationNodeBlendSpace2D:
+		var plane: AnimationNodeBlendSpace2D = node
+		for point: int in plane.get_blend_point_count():
+			children[str(point)] = plane.get_blend_point_node(point)
+	for step: String in children:
+		var child: AnimationNode = children[step]
+		_collect_playing(child, step if at.is_empty() else at + "/" + step, tree_path, animation_name, found)
 
 
 # =============================================================================

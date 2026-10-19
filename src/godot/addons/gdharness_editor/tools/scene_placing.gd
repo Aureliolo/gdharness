@@ -4,6 +4,7 @@ extends RefCounted
 ## What a new node in a scene is made or copied from, what the scene owns of it, and where among its
 ## siblings a node may go.
 
+const GdhFileWalk = preload("../file_walk.gd")
 const GdhRead = preload("../reading.gd")
 const GdhPropertyValues = preload("../property_values.gd")
 
@@ -17,11 +18,15 @@ static func what_to_add(node_type: String, instance_path: String, scene_path: St
 			"add takes nodeType for a node of a class, or instancePath for a scene, and one of them only."
 		]
 	if not instance_path.is_empty():
+		# Asked before the cycle walk, which reads the file's dependencies and so loaded a file that
+		# was not there, laying the engine's error and a backtrace beneath the refusal.
+		if not ResourceLoader.exists(instance_path, "PackedScene"):
+			var said: String = "No scene at %s to instance" % instance_path
+			var offered: String = GdhFileWalk.new().with_nearest_files(said, instance_path)
+			return [null, offered if offered != said else said + "."]
 		var cycle: String = _instancing_cycle(scene_path, instance_path)
 		if not cycle.is_empty():
 			return [null, cycle]
-		if not ResourceLoader.exists(instance_path, "PackedScene"):
-			return [null, "No scene at %s to instance." % instance_path]
 		var packed: PackedScene = ResourceLoader.load(instance_path, "PackedScene") as PackedScene
 		if packed == null or not packed.can_instantiate():
 			return [null, "%s does not load as a scene that can be instanced." % instance_path]
@@ -35,10 +40,22 @@ static func what_to_add(node_type: String, instance_path: String, scene_path: St
 			)
 		]
 	if not ClassDB.class_exists(node_type) or not ClassDB.is_parent_class(node_type, "Node"):
-		return [null, "nodeType must be a node class, and %s is not one." % node_type]
+		return [null, not_a_node_class("nodeType", node_type)]
 	if not ClassDB.can_instantiate(node_type):
 		return [null, "%s cannot be instantiated." % node_type]
 	return [null, ""]
+
+
+## The refusal for [param given], sent as [param argument], which names no node class, with the
+## node classes nearest it, so "Node2DD" is offered Node2D.
+static func not_a_node_class(argument: String, given: String) -> String:
+	var said: String = "%s must be a node class, and %s is not one" % [argument, given]
+	var classes: PackedStringArray = ClassDB.get_inheriters_from_class("Node")
+	var _added: bool = classes.append("Node")
+	var close: PackedStringArray = GdhRead.nearest(given, classes)
+	if close.is_empty():
+		return said + "."
+	return "%s; the nearest %s %s." % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
 
 
 ## A new node of [param node_type], or an instance of [param packed] when there is one. The instance

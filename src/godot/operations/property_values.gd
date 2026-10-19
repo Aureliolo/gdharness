@@ -189,6 +189,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		named[str(key).get_slice(":", 0)] = true
 	var before: Dictionary = _stored(target, named)
 	var given: Dictionary = {}
+	var declarations: Dictionary = {}
 	# A refusal of one of several leaves the others unwritten too, which a refusal naming only the
 	# one it refused left a caller to guess.
 	var unwritten: String = (
@@ -213,6 +214,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			_outside_declared[property] = outside
 		_write(target, property, value[1])
 		given[property] = value[1]
+		declarations[property] = declared
 
 	for property: String in given:
 		if not same(read_at(target, property), given[property]):
@@ -220,18 +222,64 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	for property: String in given:
 		var held: Variant = read_at(target, property)
 		if not same(held, given[property]):
-			return (
-				(
-					"%s.%s was given %s and holds %s after it was set: the engine changed or refused the "
-					+ "value, so nothing was written."
-				)
-				% [target.get_class(), property, shown(given[property]), shown(held)]
-			)
+			var declared: Dictionary = declarations[property]
+			return _not_held(target, property, given[property], held, declared)
 	for property: String in before:
 		var now: Variant = target.get(property)
 		if not same(now, before[property]):
 			_also_changed[property] = [before[property], now]
 	return ""
+
+
+## Why [param property] of [param target], declared as [param declared], holds [param held] after
+## it was given [param value]. A text property with a list of names holds only one of them, and its
+## getter answers its default for any other. A player's bus is one, though the engine fills its list
+## only in the inspector, so the buses are read from the AudioServer, which holds the project's
+## layout; "the engine changed or refused the value" left a caller to guess the bus did not exist.
+func _not_held(
+	target: Object, property: String, value: Variant, held: Variant, declared: Dictionary
+) -> String:
+	var said: String = (
+		"%s.%s was given %s and holds %s after it was set"
+		% [target.get_class(), property, shown(value), shown(held)]
+	)
+	var type: int = GdhRead.as_int(declared.get("type", TYPE_NIL))
+	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+	var names: PackedStringArray = []
+	if hint == PROPERTY_HINT_ENUM and (type == TYPE_STRING or type == TYPE_STRING_NAME):
+		names = PackedStringArray(GdhDeclared.enum_values(str(declared.get("hint_string", ""))).keys())
+	var bus: bool = property == "bus" and target.get_class().begins_with("AudioStreamPlayer")
+	if bus:
+		names = []
+		for index: int in AudioServer.bus_count:
+			var _added: bool = names.append(AudioServer.get_bus_name(index))
+	if names.is_empty() or names.has(str(value)):
+		return said + ": the engine changed or refused the value, so nothing was written."
+	var close: PackedStringArray = GdhRead.nearest(str(value), names)
+	var nearest: String = (
+		"%s %s" % ["is" if close.size() == 1 else "are", ", ".join(close)] if not close.is_empty() else ""
+	)
+	if bus:
+		return (
+			(
+				"%s: it takes the name of one of the project's audio buses, and %s is none of them; %s. "
+				+ "project_info include audio_buses lists them, and project_settings add_audio_bus adds "
+				+ "one. Nothing was written."
+			)
+			% [
+				said,
+				shown(value),
+				"the buses are " + ", ".join(names) if nearest.is_empty() else "the nearest " + nearest
+			]
+		)
+	return (
+		"%s: it takes one of the names it lists, and %s is none of them; %s. Nothing was written."
+		% [
+			said,
+			shown(value),
+			"it lists " + ", ".join(names) if nearest.is_empty() else "the nearest it lists " + nearest
+		]
+	)
 
 
 ## Why [param material] has no [param property]: a ShaderMaterial's parameters are its shader's

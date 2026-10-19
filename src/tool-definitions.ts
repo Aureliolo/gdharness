@@ -401,7 +401,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_settings',
     title: 'Project settings',
     description:
-      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, or one on another release's addon that was not asked, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events and deadzone, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. Every write keeps the sections and keys of project.godot in the order the file had them, so a change moves no other line; the save is the engine's, and like the editor's it writes Godot's header and config/features into a file that lacks them. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
+      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. project_info include lists the autoloads, input actions and audio buses as the project holds them. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, or one on another release's addon that was not asked, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events and deadzone, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. Every write keeps the sections and keys of project.godot in the order the file had them, so a change moves no other line; the save is the engine's, and like the editor's it writes Godot's header and config/features into a file that lacks them. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
     parameters: {
       projectPath: PROJECT_PATH,
       setting: {
@@ -641,7 +641,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       reimport: {
         effect: 'destructive',
         summary:
-          "reimport what status says is outdated or failed, one resource with resourcePath, or what is current as well with force. Through the open editor when one serves the project, so it reloads what it holds, waiting for it to finish; otherwise through the engine's own import pass. The editor scans first, since its reimport passes over a file it has not taken in, such as one an installer has just written; what that scan imported is named under importedByTheScan and is not imported again unless force asks. Answered from a second status read: reimported lists what is current now, notReimported what is not, one entry per status and reason with the paths sharing them, and via says which of the two did the work. When nothing needs reimporting, nothing runs, and the answer has the two lists empty, a note saying so, and no via. A whole-project reimport also answers missingSource, the .import files whose source is not beside them, empty when there are none, whether or not anything needed reimporting; one resourcePath is not a walk of the project and leaves it out. stillImporting is an editor that had not finished within timeoutMs",
+          "reimport what status says is outdated or failed, one resource with resourcePath, or what is current as well with force. Through the open editor when one serves the project, so it reloads what it holds, waiting for it to finish; otherwise through the engine's own import pass. The editor scans first, since its reimport passes over a file it has not taken in, such as one an installer has just written; what that scan imported is named under importedByTheScan and is not imported again unless force asks. Answered from a second status read: reimported lists what is current now, notReimported what is not, one entry per status and reason with the paths sharing them, and via says which of the two did the work. Either takes in every file that is behind, so a reimport of one resourcePath names under alsoImported the others it imported. When nothing needs reimporting, nothing runs, and the answer has the two lists empty, a note saying so, and no via. A whole-project reimport also answers missingSource, the .import files whose source is not beside them, empty when there are none, whether or not anything needed reimporting; one resourcePath is not a walk of the project and leaves it out. stillImporting is an editor that had not finished within timeoutMs",
         requires: [],
       },
       uid: {
@@ -761,7 +761,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_create',
     title: 'Create or save a scene',
-    description: `Creates a scene file where none is, saves one, or saves a copy under a new path. A save of a scene open in the editor saves the editor's copy, unsaved changes included. ${WITHOUT_AN_EDITOR}`,
+    description: `Creates a scene file where none is, saves one, or saves a copy under a new path. create makes a folder the path names that is not there, and names it under madeFolder. A save of a scene open in the editor saves the editor's copy, unsaved changes included. ${WITHOUT_AN_EDITOR}`,
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -962,32 +962,43 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_animation',
     title: 'Animations',
     description:
-      "Animations in an AnimationPlayer and states in an AnimationTree state machine. read answers with every track of an animation in the shape add_track takes, so a track read off one animation can be added to another. read and read_states need no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without running the scene's scripts. The ops that write go through the editor when one serves the project; with none, a headless engine runs the editor's own tool and the answer says so under writtenBy. That engine runs every script of the file, where the editor runs only tool scripts, so what a script changes as the file loads is put back before anything is saved, and a file where that cannot be done, such as a scene whose script does not compile, is refused and nothing is written. An editor of the project that is running and has not reached this server is waited for rather than written around.",
+      "Animations in an AnimationPlayer and states in an AnimationTree state machine. read answers with every track of an animation in the shape add_track takes, so a track read off one animation can be added to another. add_track on a path the animation already has a track of that type for adds the keys to that track, as the editor keys a property it already animates, answering existingTrack true and keysAdded beside keys, the track's count; a key at a time that track already has a key at is refused. A key past the animation's end, where it never plays, is written and named under pastLength. remove clears the player's autoplay when it named the animation and names under statesPlayingNothing the states that played it. read and read_states need no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without running the scene's scripts. The ops that write go through the editor when one serves the project; with none, a headless engine runs the editor's own tool and the answer says so under writtenBy. That engine runs every script of the file, where the editor runs only tool scripts, so what a script changes as the file loads is put back before anything is saved, and a file where that cannot be done, such as a scene whose script does not compile, is refused and nothing is written. An editor of the project that is running and has not reached this server is waited for rather than written around.",
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
       playerNodePath: {
         type: 'string',
-        ops: ['read', 'create', 'add_track'],
+        ops: ['read', 'create', 'add_track', 'set', 'rename', 'remove'],
         description: 'The AnimationPlayer node.',
       },
       animationName: {
         type: 'string',
-        ops: ['read', 'create', 'add_track', 'add_state'],
+        ops: ['read', 'create', 'add_track', 'set', 'rename', 'remove', 'add_state'],
         description:
           'The animation in the player. read: the one to answer with whole, its tracks a list; without it, read lists them, each with the number of its tracks under tracks. add_state: the one that state plays.',
       },
-      length: { type: 'number', ops: ['create'], description: 'create: seconds. Default 1.' },
+      newName: {
+        type: 'string',
+        ops: ['rename'],
+        description:
+          "rename: the animation's new name in the library it is in. The player's autoplay and every state of the scene's AnimationTrees that plays it are renamed with it, named under autoplay and statesFollowed.",
+      },
+      length: {
+        type: 'number',
+        ops: ['create', 'set'],
+        description:
+          'create and set: seconds, more than 0. create: default 1. set: a key past the new end is kept, as the editor keeps it, and named under pastLength, since it never plays.',
+      },
       loopMode: {
         type: 'string',
-        ops: ['create'],
+        ops: ['create', 'set'],
         enum: ['none', 'linear', 'pingpong'],
         description: 'create: default none.',
       },
       step: {
         type: 'number',
-        ops: ['create'],
-        description: 'create: keyframe snap in seconds. Default 0.1.',
+        ops: ['create', 'set'],
+        description: 'create and set: keyframe snap in seconds, 0 or more. create: default 0.1.',
       },
       track: { ...ANIMATION_TRACK, ops: ['add_track'] },
       animTreePath: {
@@ -1049,6 +1060,21 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         effect: 'additive',
         summary: 'a property or method track with keyframes',
         requires: ['playerNodePath', 'animationName', 'track'],
+      },
+      set: {
+        effect: 'destructive',
+        summary: "an animation's length, loop mode or step",
+        requires: ['playerNodePath', 'animationName'],
+      },
+      rename: {
+        effect: 'destructive',
+        summary: 'an animation, with what plays it',
+        requires: ['playerNodePath', 'animationName', 'newName'],
+      },
+      remove: {
+        effect: 'destructive',
+        summary: 'an animation from its player',
+        requires: ['playerNodePath', 'animationName'],
       },
       add_state: {
         effect: 'additive',
@@ -1249,7 +1275,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       preview: {
         type: 'boolean',
         ops: ['move'],
-        description: 'move: answer with what would move and change, and write nothing. Default false.',
+        description:
+          'move: answer with what would move and change, and write nothing. A move that would be refused is refused here too, with the same reason. Default false.',
       },
       controlType: {
         type: 'string',
