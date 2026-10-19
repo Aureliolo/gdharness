@@ -4605,6 +4605,12 @@ class GodotServer {
             return await editorOrEngine('create_animation', 'writes');
           case 'add_track':
             return await editorOrEngine('add_animation_track', 'writes');
+          case 'set':
+            return await editorOrEngine('set_animation', 'writes');
+          case 'rename':
+            return await editorOrEngine('rename_animation', 'writes');
+          case 'remove':
+            return await editorOrEngine('remove_animation', 'writes');
           case 'add_state':
             return await editorOrEngine('add_animation_state', 'writes');
           default:
@@ -5847,6 +5853,24 @@ class GodotServer {
     const extra: OperationParams = {};
     const statusAsk: OperationParams =
       resourcePath === undefined ? { includeUpToDate: true } : { resourcePath };
+    // The engine's import pass, and the editor's scan before its reimport, take in every file that
+    // is behind, not only the one asked for. Unsaid, a second file imported beside the first was
+    // answered next as already current, with nothing to show what had imported it.
+    let behindElsewhere: string[] = [];
+    if (resourcePath !== undefined) {
+      const whole = await this.operation('get_import_status', {}, projectPath);
+      if (whole.ok) {
+        behindElsewhere = importStatuses(whole.payload)
+          .filter(
+            (one) =>
+              one.status !== 'up_to_date' &&
+              one.status !== 'missing_source' &&
+              one.status !== 'not_imported' &&
+              !targets.includes(one.path),
+          )
+          .map((one) => one.path);
+      }
+    }
     if (viaEditor) {
       // A scan first: the editor's reimport passes over a file its own file system has not taken in,
       // without a word. Downstream, 143 images an installer had just written came back as 143 files
@@ -5939,6 +5963,20 @@ class GodotServer {
       groups.set(key, group);
     }
     const notReimported = [...groups.values()];
+    if (behindElsewhere.length > 0) {
+      const whole = await this.operation('get_import_status', { includeUpToDate: true }, projectPath);
+      if (whole.ok) {
+        const current = new Set(
+          importStatuses(whole.payload)
+            .filter((one) => one.status === 'up_to_date')
+            .map((one) => one.path),
+        );
+        const alsoImported = behindElsewhere.filter((path) => current.has(path));
+        if (alsoImported.length > 0) {
+          extra['alsoImported'] = alsoImported;
+        }
+      }
+    }
     return {
       ok: true,
       payload: {

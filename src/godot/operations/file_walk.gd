@@ -1,3 +1,4 @@
+@tool
 extends RefCounted
 
 const GdhRead = preload("reading.gd")
