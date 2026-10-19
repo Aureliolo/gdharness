@@ -3819,7 +3819,7 @@ async function testAPresetAddedBesideTheEditorIsNoted({ call, project }: Editor)
  * `from: "editor"` exists because the two readings are not the same: the file is what a check with
  * nobody's window open can reproduce, and the editor is what it has been told. Asserting only that
  * the editor answers would be satisfied by a server that quietly read the file and called it the
- * editor's, which is exactly the ambiguity the argument was added to remove, so the file is changed
+ * editor's, which is exactly the ambiguity the argument exists to remove, so the file is changed
  * underneath the editor first, by hand rather than through a tool, and then both are asked. Whether
  * an editor ever picks a change up on its own is the engine's business; what is asserted is that
  * the two answers come from two places, and the editor's is the one it was holding.
@@ -3978,7 +3978,7 @@ async function testASettingReadFromTheEditor({ call, refusal, project }: Editor)
  *
  * Two projects hit this and neither could say which side was wrong: a declaration, the cache on
  * disk and a headless compile all agreeing a file was fine, against diagnostics reporting errors on
- * it. The answer now names the class under `typesTheEditorHasNotLoaded`, and this is what holds that
+ * it. The answer names the class under `typesTheEditorHasNotLoaded`, and this is what holds that
  * answer to the editor rather than to a reading of how the editor ought to behave.
  *
  * The idle waits are the load-bearing half and are not padding. The remedy takes time and so does
@@ -5911,7 +5911,7 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
  *
  * The note naming a played run's transcript stays after the play, and a server picking up a later
  * play opened it on the editor saying it was playing, which does not say which play: the later play
- * was given the earlier one's console and start time. The editor numbers its plays now. And a main
+ * was given the earlier one's console and start time; the editor's play number tells them apart. A main
  * scene that is not there got a dialog in the editor and no play, answered as `started: true`.
  */
 async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Editor): Promise<void> {

@@ -2602,7 +2602,7 @@ async function testALanguageServerStillStartingIsWaitedFor(): Promise<void> {
 }
 
 /**
- * #937: initialize is given a time of its own. Godot reads every script in the project before it
+ * Initialize is given a time of its own. Godot reads every script in the project before it
  * answers the first initialize after its editor starts: 7.3 s for 3000 small generated scripts on
  * 4.7.2, against 1 ms for the next one, so a larger project's first call after editor_launch ran
  * past the ten seconds every request was given, and the refusal sent the caller to the port.
@@ -8671,7 +8671,7 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
  * direction and the last one wrong in the other, and the middle one is every project between
  * installing an addon and committing it.
  *
- * Engine-free, like the doctor test above it: this is git and project.godot and nothing else.
+ * Engine-free, like the doctor cases: this is git and project.godot and nothing else.
  */
 function testAnAutoloadGitWillNotCarry(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
@@ -12016,7 +12016,7 @@ async function testACancelledCallEndsTheEngineItStarted(): Promise<void> {
 /**
  * A real editor writes its console where this server reads it, through the argv the server builds.
  *
- * The chain nothing else can check. The functions above are told what the file holds; this asks an
+ * The chain nothing else can check. The other console cases are told what the file holds; this asks an
  * engine to write one. `--log-file` on an editor is the whole mechanism, and it is a claim about
  * Godot rather than about this code: measured here so that an engine which stopped honouring it,
  * or an argv that stopped passing it, fails on the case built for it rather than as an empty
@@ -15389,11 +15389,10 @@ async function testACallBesideAnotherOnTheGameSaysSo(): Promise<void> {
 /**
  * A test server writes its run where no real run is, and is shown to have written one.
  *
- * The isolation this asserts was added after a suite run on a developer's machine ended another
- * project's bench, six times in fifty minutes, by adopting the note it found in the runtime
- * directory every gdharness on a machine shares. The fix was checked by running the suite and
- * seeing that directory not grow, which is the weakest kind of evidence there is: a suite that
- * stopped starting servers leaves it exactly as untouched.
+ * Without the isolation this asserts, a suite run on a developer's machine ended another project's
+ * bench, six times in fifty minutes, by adopting the note it found in the runtime directory every
+ * gdharness on a machine shares. Seeing that directory not grow during a suite is the weakest kind
+ * of evidence there is: a suite that stopped starting servers leaves it exactly as untouched.
  *
  * So both halves are asserted here, and the positive one first. The server must write a record
  * naming the run it started, which is the instrument reporting that it fired, and that record must
@@ -18631,7 +18630,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
 }
 
 /**
- * The same, asked of the server: `script_diagnostics` answers a stale enum member with the member
+ * testAStaleEnumMemberIsNamed asked of the server: `script_diagnostics` answers a stale enum member with the member
  * under contradictedByTheFile and the reload in staleAnalysis. The stand-in language server
  * publishes the two messages ostinato's reproduction returned, the member and its follow-on, and
  * the class cache and declaring file are the project's own, so what is checked is the answer a
@@ -20839,7 +20838,7 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
 /**
  * Refreshing UIDs makes the missing sidecar and writes no scene.
  *
- * The op used to load every scene and resave it. Outside the editor that round trip rebuilds the
+ * The op must not load every scene and save it again. Outside the editor that round trip rebuilds the
  * header from what the engine could see, so `load_steps` went, and so did the scene's own `uid=`:
  * an op whose entire purpose is keeping UID references resolvable was deleting the UID that other
  * resources point at, in every scene in the project, on a call that named no scene at all. A project
@@ -22464,7 +22463,7 @@ async function testAStopTheEditorDidNotTakeIsNotAStop(): Promise<void> {
 /**
  * A run this server stopped is still the run it answers about.
  *
- * The stop used to drop the run, so editor_output afterwards fell through to the notes on disk,
+ * A stop that drops the run leaves editor_output afterwards to fall through to the notes on disk,
  * and those are shared by every project on the machine: a played run stopped before its game
  * announced was answered with another project's recorded run, refused as not this server's to
  * answer for, and what the stop had done was nowhere. Written with another project's note on disk,
@@ -23516,7 +23515,7 @@ function testTheScanNoteNamesWhatStarted(): void {
  * An engine run says how it ended, and a run that talks a lot is not ended for it.
  *
  * A timeout kills with a signal and leaves no code, and a program that never started has none
- * either; both were once answered as exit code -1, which is also a code a program can exit with.
+ * either, and answering either as exit code -1 names a code a program can exit with.
  * The output case is the one execFile got wrong: it killed a process printing past a mebibyte and
  * reported Node's reason as the process failing, which is what a healthy import pass over a large
  * project does. The processes are real ones, because how they end is what is being read.
@@ -31064,7 +31063,7 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
  * The note naming a played run's transcript stays on disk after the play, and it was opened on the
  * editor saying it was playing, which does not say which play: a later play picked up after a
  * reconnect was given the earlier play's console and start time, with the new lines appended to
- * the same file. The editor numbers its plays now, and a note about another play, or from another
+ * the same file. The editor numbers its plays, and a note about another play, or from another
  * editor, is left alone.
  */
 async function testANoteFromAnEarlierPlayIsNotThisOnes(): Promise<void> {
@@ -32266,8 +32265,8 @@ async function testARecordedEndingIsReadBack(): Promise<void> {
 /**
  * A run whose server went away is answered with what it printed, not with "No game is running".
  *
- * The MCP server reconnects on its own schedule. Everything about a run used to live in that
- * process, so a reconnect killed the game and took the log with it, and `editor_output`
+ * The MCP server reconnects on its own schedule. A run that lives in that process goes with it: a
+ * reconnect killed the game and took the log with it, and `editor_output`
  * afterwards said no game was running: true about the process, and silent about the forty
  * minutes of bench output that had just been dropped. A project lost two sweeps this way in one
  * session, a six-setting one after a single row and a nine-cell one after five cells.
@@ -37704,7 +37703,7 @@ function parametersOf(block: string): string[] {
  * Every tool is named by a fixture, which is the rule this repository is built to and the claim
  * the README makes about it.
  *
- * Nothing held it before now: the consistency checks prove a tool's dispatch name exists on both
+ * Nothing else holds it: the consistency checks prove a tool's dispatch name exists on both
  * sides and that its arguments are read, all of which a tool nobody ever calls would pass. A tool
  * added with no fixture is the one shape of change this project says it does not ship.
  */
@@ -37719,7 +37718,8 @@ function testEveryToolIsDrivenSomewhere(): void {
 /**
  * Every parameter a tool declares is read by something.
  *
- * The other half of the question above, and the one that reads as a working tool for longest:
+ * The other half of testEveryToolIsDrivenSomewhere's question, and the one that reads as a working
+ * tool for longest:
  * a declared argument nothing looks at is a setting a caller can pass, watch accepted, and
  * never see obeyed. `scene_node` had one, and there was nothing to notice it with.
  */
