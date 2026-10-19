@@ -44448,6 +44448,25 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       ]),
     ),
     'calm.tscn': '[gd_scene format=3]\n\n[node name="Calm" type="Node2D"]\nposition = Vector2(3, 4)\n',
+    'shapes.tscn':
+      '[gd_scene format=3]\n\n[node name="Shapes" type="Node2D"]\n\n[node name="One" type="CollisionShape2D" parent="."]\n\n' +
+      '[node name="Two" type="CollisionShape2D" parent="."]\n',
+    'loop.gd': 'extends Resource\n\n@export var next: Resource\n',
+    'loop.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://loop.gd" id="1_loop"]\n\n' +
+      '[sub_resource type="Resource" id="Resource_loop"]\nscript = ExtResource("1_loop")\nnext = SubResource("Resource_loop")\n\n' +
+      '[node name="Loop" type="Node"]\nmetadata/loop = SubResource("Resource_loop")\n',
+    'wired.gd':
+      'extends Node2D\n\nsignal died(points: int)\n\n\nfunc take(amount: int) -> void:\n\tprint(amount)\n\n\n' +
+      'func take_node(node: Node2D) -> void:\n\tprint(node)\n',
+    // One connection with an argument bound and one with an argument unbound, which fit only once
+    // the bound one is added and the unbound one dropped.
+    'wires.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://wired.gd" id="1_wired"]\n\n' +
+      '[node name="Wires" type="Node2D"]\n\n[node name="Emitter" type="Node2D" parent="."]\nscript = ExtResource("1_wired")\n\n' +
+      '[node name="Taker" type="Node2D" parent="."]\nscript = ExtResource("1_wired")\n\n' +
+      '[connection signal="visibility_changed" from="Emitter" to="Taker" method="take" binds= [5]]\n' +
+      '[connection signal="child_entered_tree" from="Emitter" to="Taker" method="queue_free" unbinds=1]\n',
     // Does not compile, so the engine instances the scene without it, where the editor keeps it.
     'broken.gd': 'extends Node\n\n\nfunc _init() -> void:\n\tnot_declared_anywhere()\n',
     'broken.tscn':
@@ -44578,8 +44597,14 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       `a read answers what the file holds, not what the scripts set: ${JSON.stringify(read)}`,
     );
     assert.deepEqual(
-      [get(read, 'nodeType'), get(read, 'nodePath'), get(read, 'scriptClass')],
-      ['Node2D', 'Busy', undefined],
+      [
+        get(read, 'nodeType'),
+        get(read, 'nodePath'),
+        get(read, 'scriptClass'),
+        get(read, 'setHere'),
+        get(read, 'valuesFrom'),
+      ],
+      ['Node2D', 'Busy', undefined, ['script', 'size'], undefined],
       `a read names the node's class, and no declared class for a script without one: ${JSON.stringify(read)}`,
     );
     assert.equal(get(read, 'unsavedInEditor'), undefined, 'only an editor can say what it holds unsaved');
@@ -44615,6 +44640,90 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       JSON.stringify(connections),
     );
     assert.equal(get(connections, 'unsavedInEditor'), undefined, JSON.stringify(connections));
+
+    // A connection is written whether or not what the signal passes can reach the method, and the
+    // answer says when it cannot.
+    const wire = async (signalName: string, methodName: string, flags?: number): Promise<unknown> =>
+      await written('scene_signal', {
+        op: 'connect',
+        scenePath: 'wires.tscn',
+        sourceNodePath: 'Emitter',
+        signalName,
+        targetNodePath: 'Taker',
+        methodName,
+        ...(flags === undefined ? {} : { flags }),
+      });
+    const fails = ', so every emission fails to call it.';
+    for (const [signalName, methodName, flags, misfit] of [
+      ['died', 'take', undefined, undefined],
+      ['child_entered_tree', 'take_node', undefined, undefined],
+      ['visibility_changed', 'take_node', 16, undefined],
+      [
+        'child_entered_tree',
+        'take',
+        undefined,
+        `child_entered_tree passes argument 1 as Node, and take takes it as amount: int${fails}`,
+      ],
+      [
+        'visibility_changed',
+        'set_scale',
+        undefined,
+        `visibility_changed passes no arguments, and set_scale needs 1${fails}`,
+      ],
+      [
+        'child_entered_tree',
+        'hide',
+        undefined,
+        `child_entered_tree passes 1 argument, and hide takes none${fails}`,
+      ],
+      [
+        'child_entered_tree',
+        'set_material',
+        undefined,
+        `child_entered_tree passes argument 1 as Node, and set_material takes it as material: Material${fails}`,
+      ],
+    ] as const) {
+      const made = await wire(signalName, methodName, flags);
+      assert.deepEqual(
+        [get(made, 'methodFound'), get(made, 'argumentsFit'), get(made, 'misfit')],
+        [true, misfit === undefined, misfit],
+        `${signalName} to ${methodName}: ${JSON.stringify(made)}`,
+      );
+      assert.ok(
+        fileOf('wires.tscn').includes(
+          `[connection signal="${signalName}" from="Emitter" to="Taker" method="${methodName}"`,
+        ),
+        `and the connection is written all the same:\n${fileOf('wires.tscn')}`,
+      );
+    }
+    const unwritten = await wire('died', 'not_yet_written');
+    assert.deepEqual(
+      [get(unwritten, 'methodFound'), get(unwritten, 'argumentsFit'), get(unwritten, 'misfit')],
+      [false, undefined, undefined],
+      `a method not there is not judged: ${JSON.stringify(unwritten)}`,
+    );
+    const wires = parseTextContent(await call('scene_signal', { op: 'list', scenePath: 'wires.tscn' }));
+    const listedFit = Object.fromEntries(
+      asArray(get(wires, 'connections')).map((one) => [
+        `${text(get(one, 'signalName'))} ${text(get(one, 'methodName'))}`,
+        [get(one, 'methodFound'), get(one, 'misfit') ?? 'fits'],
+      ]),
+    );
+    assert.deepEqual(
+      [
+        listedFit['visibility_changed take'],
+        listedFit['child_entered_tree queue_free'],
+        listedFit['child_entered_tree take'],
+        listedFit['died not_yet_written'],
+      ],
+      [
+        [true, 'fits'],
+        [true, 'fits'],
+        [true, `child_entered_tree passes argument 1 as Node, and take takes it as amount: int${fails}`],
+        [false, 'fits'],
+      ],
+      `a list judges a bound and an unbound argument as the call meets them: ${JSON.stringify(wires)}`,
+    );
 
     await written('scene_create', {
       op: 'create',
@@ -44821,6 +44930,91 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       sets('holder.tscn', '[sub_resource type="Resource"'),
       ['script = ExtResource', 'max_hp = 20', tags],
       'an embedded resource keeps what its file held',
+    );
+    const holderRead = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'holder.tscn', nodePath: '.' }),
+    );
+    const heldStats = get(holderRead, 'properties', 'stats');
+    assert.deepEqual(
+      [get(heldStats, '_type'), get(heldStats, 'script', 'path'), get(heldStats, 'max_hp')],
+      ['Resource', 'res://stats.gd', 20],
+      `a resource built into the scene is read with what it holds: ${JSON.stringify(holderRead)}`,
+    );
+    assert.deepEqual(
+      Object.keys(asObject(heldStats)).sort(),
+      ['_type', 'hp', 'max_hp', 'script'],
+      `and only what it holds away from its script's defaults: ${JSON.stringify(heldStats)}`,
+    );
+    // A scripted resource tagged Resource is built from the read, not taken as the empty reference.
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'holder.tscn',
+      nodePath: '.',
+      properties: { stats: heldStats },
+    });
+    assert.deepEqual(
+      sets('holder.tscn', '[sub_resource type="Resource"'),
+      ['script = ExtResource', 'max_hp = 20', 'hp = 20', tags],
+      'what a read gave of a scripted resource writes back as the resource it was',
+    );
+
+    // Read in the form a write builds one from, so what a read gives can be written to another node.
+    const shaped = await written('scene_node', {
+      op: 'set',
+      scenePath: 'shapes.tscn',
+      nodePath: 'One',
+      properties: { shape: { _type: 'CircleShape2D', radius: 8 } },
+    });
+    assert.deepEqual(
+      get(shaped, 'properties', 'shape'),
+      { _type: 'CircleShape2D', radius: 8 },
+      JSON.stringify(shaped),
+    );
+    // A resource's name is what it holds, unlike the rest of its resource_ properties.
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'shapes.tscn',
+      nodeName: 'Named',
+      nodeType: 'CollisionShape2D',
+    });
+    const named = await written('scene_node', {
+      op: 'set',
+      scenePath: 'shapes.tscn',
+      nodePath: 'Named',
+      properties: { shape: { _type: 'CircleShape2D', radius: 2, resource_name: 'Hit circle' } },
+    });
+    assert.deepEqual(
+      get(named, 'properties', 'shape'),
+      { _type: 'CircleShape2D', radius: 2, resource_name: 'Hit circle' },
+      JSON.stringify(named),
+    );
+    const shapeRead = get(
+      parseTextContent(await call('scene_node', { op: 'get', scenePath: 'shapes.tscn', nodePath: 'One' })),
+      'properties',
+      'shape',
+    );
+    assert.deepEqual(shapeRead, { _type: 'CircleShape2D', radius: 8 }, JSON.stringify(shapeRead));
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'shapes.tscn',
+      nodePath: 'Two',
+      properties: { shape: shapeRead },
+    });
+    assert.equal(
+      fileOf('shapes.tscn').match(/\[sub_resource type="CircleShape2D" id="[^"]+"\]\nradius = 8\.0\n/g)
+        ?.length,
+      2,
+      fileOf('shapes.tscn'),
+    );
+    const looped = get(
+      parseTextContent(await call('scene_node', { op: 'get', scenePath: 'loop.tscn', nodePath: '.' })),
+      'properties',
+      'metadata/loop',
+    );
+    assert.deepEqual(
+      [get(looped, '_type'), get(looped, 'next')],
+      ['Resource', { class: 'Resource', _type: 'Resource' }],
+      `a resource holding itself is read once, and named by its class where it recurs: ${JSON.stringify(looped)}`,
     );
 
     // A whole number past 2^53 goes into the file as the digits sent, and sent as a number it is
@@ -45366,6 +45560,12 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       '[node name="Crate" type="StaticBody2D"]\nscript = ExtResource("1_crate")\n\n' +
       '[node name="Look" type="Sprite2D" parent="."]\n\n[node name="Hit" type="CollisionShape2D" parent="."]\n\n' +
       '[node name="Bolt" parent="." instance=ExtResource("2_bolt")]\n',
+    // A node with no visible to hide it by, in a scene another inherits.
+    'parts/tally.tscn':
+      '[gd_scene format=3]\n\n[node name="Tally" type="Node"]\n\n[node name="Count" type="Node" parent="."]\n',
+    'parts/tally_kin.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/tally.tscn" id="1_tally"]\n\n' +
+      '[node name="Tally" instance=ExtResource("1_tally")]\n',
     'parts/bolt.tscn':
       '[gd_scene format=3]\n\n[node name="Bolt" type="Node2D"]\n\n[node name="Head" type="Sprite2D" parent="."]\n',
     'gloss.tres': '[gd_resource type="AnimationNodeStateMachine" format=3]\n\n[resource]\n',
@@ -45502,8 +45702,27 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       textOf(
         await call('scene_node', { op: 'delete', scenePath: 'parts/bigger_crate.tscn', nodePath: 'Look' }),
       ),
-      'Look is made by res://parts/crate.tscn, a scene res://parts/bigger_crate.tscn inherits, which creates it again on load. Edit that scene instead.',
+      'Look is made by res://parts/crate.tscn, a scene res://parts/bigger_crate.tscn inherits, which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in res://parts/crate.tscn, which removes it from every scene using that one.',
       'the refusal names the scene that makes the node, past the base that only sets values on it',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_node', { op: 'delete', scenePath: 'parts/tally_kin.tscn', nodePath: 'Count' }),
+      ),
+      'Count is made by res://parts/tally.tscn, a scene res://parts/tally_kin.tscn inherits, which creates it again on load. No scene can delete a node another scene makes: delete it in res://parts/tally.tscn, which removes it from every scene using that one.',
+      'a node with nothing to hide it by is offered only the delete in its own scene',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_node', {
+          op: 'set',
+          scenePath: 'parts/bigger_crate.tscn',
+          nodePath: 'Look',
+          properties: { name: 'Peek' },
+        }),
+      ),
+      'Look is made by res://parts/crate.tscn, a scene res://parts/bigger_crate.tscn inherits, which creates it again on load. Edit that scene instead.',
+      'a rename, which the scene that makes the node can do, is sent there',
     );
 
     const scripted = await written('scene_create', {
@@ -45567,6 +45786,18 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     assert.match(kept, /\[node name="Look" parent="Crate2"[^\]]*\]\nscale = Vector2\(3, 3\)\n/, kept);
     assert.doesNotMatch(kept, /parent="Crate1"/, 'the other instance keeps nothing of its own');
     assert.doesNotMatch(kept, /modulate/, 'and nothing the root script set is saved');
+    const lookRead = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'main.tscn', nodePath: 'Crate2/Look' }),
+    );
+    assert.deepEqual(
+      [get(lookRead, 'setHere'), get(lookRead, 'valuesFrom')],
+      [['scale'], 'res://parts/crate.tscn'],
+      `a read says what this scene sets and where the rest comes from: ${JSON.stringify(lookRead)}`,
+    );
+    assert.equal(
+      textOf(await call('scene_node', { op: 'delete', scenePath: 'main.tscn', nodePath: 'Crate2/Look' })),
+      'Crate2/Look is inside an instanced scene, which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in res://parts/crate.tscn, which removes it from every scene using that one.',
+    );
 
     const head = { ...inside, nodePath: 'Crate2/Bolt/Head', properties: { scale: [4, 4] } };
     assert.equal(

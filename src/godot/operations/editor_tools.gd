@@ -10,6 +10,7 @@ extends RefCounted
 const GdhAnimationTools = preload("../addons/gdharness_editor/tools/animation_tools.gd")
 const GdhResourceTools = preload("../addons/gdharness_editor/tools/resource_tools.gd")
 const GdhSceneTools = preload("../addons/gdharness_editor/tools/scene_tools.gd")
+const GdhSignalTools = preload("../addons/gdharness_editor/tools/signal_tools.gd")
 const GdhSceneFile = preload("../addons/gdharness_editor/scene_file.gd")
 
 const SCENE_COMMANDS: Array[String] = [
@@ -21,10 +22,8 @@ const SCENE_COMMANDS: Array[String] = [
 	"duplicate_node",
 	"reparent_node",
 	"delete_node",
-	"connect_signal",
-	"disconnect_signal",
-	"list_connections",
 ]
+const SIGNAL_COMMANDS: Array[String] = ["connect_signal", "disconnect_signal", "list_connections"]
 const RESOURCE_COMMANDS: Array[String] = [
 	"set_tilemap_cells",
 	"create_resource",
@@ -55,6 +54,8 @@ static func run(params: Dictionary) -> Dictionary:
 	var tools: Node = null
 	if command in SCENE_COMMANDS:
 		tools = GdhSceneTools.new()
+	elif command in SIGNAL_COMMANDS:
+		tools = GdhSignalTools.new()
 	elif command in RESOURCE_COMMANDS:
 		tools = GdhResourceTools.new()
 	elif command in ANIMATION_COMMANDS:

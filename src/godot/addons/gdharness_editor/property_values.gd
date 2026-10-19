@@ -848,18 +848,22 @@ func _parse_resource_tag(value: Dictionary) -> Array:
 			_refused = str(found[1])
 			return [true, null]
 		return [true, found[1]]
-	# What a read answers for a resource built into the scene it was read from: a class and no
+	# What a read answers where a resource built into a scene recurs inside itself: a class and no
 	# path. Taken as nothing, it cleared the property it was written back to.
 	if value.has("class"):
 		_refused = (
 			(
-				"The %s given has no path: it was read from a resource built into a scene, which cannot "
-				+ 'be referred to from elsewhere. Build a new one with "_type" set to its class and its '
-				+ "properties beside it."
+				"The %s given has no path: a read names a resource built into a scene by its class "
+				+ "alone where it recurs inside itself, and nothing elsewhere can refer to it. Build "
+				+ 'a new one with "_type" set to its class and its properties beside it.'
 			)
 			% str(value["class"])
 		)
 		return [true, null]
+	# A plain Resource with a script or values of its own, as a read answers one built into a scene,
+	# is one to build; taken as nothing, writing such a read back cleared the property.
+	if value.size() > 1:
+		return _parse_new_resource("Resource", value)
 	return [true, null]
 
 
@@ -885,6 +889,7 @@ func _parse_new_resource(type_tag: String, value: Dictionary) -> Array:
 	if not refused.is_empty():
 		_refused = refused
 		return [true, null]
+	GdhDeclared.unmade(built, wanted)
 	return [true, built]
 
 

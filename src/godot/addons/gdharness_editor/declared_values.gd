@@ -114,3 +114,28 @@ static func _listed(choices: Dictionary) -> String:
 ## A range's end as the script wrote it: the engine's hint gives @export_range(0, 10) as 0.0 and 10.0.
 static func _bound(end: float) -> String:
 	return str(int(end)) if end == floorf(end) and absf(end) < 1e15 else str(end)
+
+
+## Puts back on [param built] what its script set as it was attached and was not among
+## [param wanted], to the defaults it declares, outside the editor. Attaching runs the script's _init
+## there, which the editor never runs for a script that is not a tool, so a resource_name _init chose
+## was saved as if asked for. A property whose default the engine cannot report is left as made.
+static func unmade(built: Resource, wanted: Dictionary) -> void:
+	var attached: Variant = built.get_script()
+	if Engine.is_editor_hint() or not attached is Script:
+		return
+	var script: Script = attached
+	var asked: Dictionary = {}
+	for key: Variant in wanted:
+		asked[str(key).get_slice(":", 0)] = true
+	for entry: Dictionary in built.get_property_list():
+		var name: String = str(entry["name"])
+		var usage: int = GdhRead.as_int(entry["usage"])
+		if usage & PROPERTY_USAGE_STORAGE == 0 or name == "script" or asked.has(name):
+			continue
+		var declared: Variant = ClassDB.class_get_property_default_value(built.get_class(), name)
+		if usage & PROPERTY_USAGE_SCRIPT_VARIABLE:
+			declared = script.get_property_default_value(name)
+		var held: Variant = built.get(name)
+		if declared != null and not (typeof(held) == typeof(declared) and held == declared):
+			built.set(name, declared)
