@@ -81,15 +81,7 @@ static func animations(player: AnimationPlayer, animation_name: String) -> Dicti
 			listed.append(summary)
 		return {"ok": true, "animations": listed}
 	if not player.has_animation(StringName(animation_name)):
-		var names: PackedStringArray = player.get_animation_list()
-		return {
-			"ok": false,
-			"error":
-			(
-				"%s has no animation %s. It has: %s."
-				% [player.name, animation_name, ", ".join(names) if not names.is_empty() else "none"]
-			)
-		}
+		return {"ok": false, "error": no_animation(player, str(player.name), animation_name)}
 	var anim: Animation = player.get_animation(StringName(animation_name))
 	var answer: Dictionary = _summary(anim)
 	answer["ok"] = true
@@ -100,6 +92,16 @@ static func animations(player: AnimationPlayer, animation_name: String) -> Dicti
 		tracks.append(_track(anim, track, values))
 	answer["tracks"] = tracks
 	return answer
+
+
+## Why [param player], called [param called], cannot be asked for [param animation_name], with the
+## animations it has.
+static func no_animation(player: AnimationPlayer, called: String, animation_name: String) -> String:
+	var names: PackedStringArray = player.get_animation_list()
+	return (
+		"%s has no animation %s. It has: %s."
+		% [called, animation_name, ", ".join(names) if not names.is_empty() else "none"]
+	)
 
 
 static func _summary(anim: Animation) -> Dictionary:

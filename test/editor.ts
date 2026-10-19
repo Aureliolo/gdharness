@@ -3075,6 +3075,42 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
     /has no animation moves\/run\. It has: .*moves\/walk/,
   );
 
+  // Through the editor, into the library file: a key on a path walk animates goes in that track,
+  // a shorter length names what it leaves past the end, and a rename and a removal are saved there.
+  const later = await call('scene_animation', {
+    ...scene,
+    op: 'add_track',
+    animationName: 'moves/walk',
+    track: {
+      type: 'property',
+      nodePath: 'Sprite',
+      property: 'position',
+      keyframes: [{ time: 0.75, value: [5, 6] }],
+    },
+  });
+  assert.deepEqual(
+    [get(later, 'trackIndex'), get(later, 'existingTrack'), get(later, 'keys')],
+    [0, true, 3],
+    JSON.stringify(later),
+  );
+  const shorter = await call('scene_animation', {
+    ...scene,
+    op: 'set',
+    animationName: 'moves/walk',
+    length: 0.5,
+  });
+  assert.match(
+    String(get(shorter, 'pastLength')),
+    /past its end, where it never plays: Sprite:position at 0\.75 s\./,
+  );
+  assert.match(fileText(project, 'moves/library.tres'), /\nlength = 0\.5\n/);
+  await call('scene_animation', { ...scene, op: 'rename', animationName: 'moves/walk', newName: 'stroll' });
+  assert.match(fileText(project, 'moves/library.tres'), /&"stroll"/);
+  assert.doesNotMatch(fileText(project, 'moves/library.tres'), /&"walk"/);
+  await call('scene_animation', { ...scene, op: 'remove', animationName: 'moves/stroll' });
+  assert.doesNotMatch(fileText(project, 'moves/library.tres'), /&"stroll"/);
+  assert.match(fileText(project, 'moves/library.tres'), /&"idle"/, 'and the rest of the library stays');
+
   assert.match(await refusal('scene_animation', track([{ value: [1, 2] }])), /keyframes\[0\] has no time/);
   assert.match(await refusal('scene_animation', track([], 'colour')), /Sprite2D has no property colour/);
   assert.match(

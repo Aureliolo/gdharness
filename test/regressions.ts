@@ -21586,6 +21586,21 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
         );
       }
 
+      // Two new files and one asked for: the engine's pass imports both, so the answer names the
+      // other, which the next reimport of it answered as current with nothing to show what had.
+      writeFileSync(join(project, 'hero.png'), solidPng(40, 40, 160));
+      writeFileSync(join(project, 'villain.png'), solidPng(160, 160, 40));
+      const one = await call({ op: 'reimport', resourcePath: 'hero.png' });
+      assert.deepEqual(asArray(get(one, 'reimported')), ['res://hero.png'], JSON.stringify(one));
+      assert.deepEqual(get(one, 'alsoImported'), ['res://villain.png'], JSON.stringify(one));
+      const villain = await call({ op: 'status', resourcePath: 'villain.png' });
+      assert.equal(get(villain, 'resources', 0, 'status'), 'up_to_date', JSON.stringify(villain));
+      // With nothing else behind, nothing is named beside it.
+      writeFileSync(join(project, 'lone.png'), solidPng(90, 90, 90));
+      const alone = await call({ op: 'reimport', resourcePath: 'lone.png' });
+      assert.deepEqual(asArray(get(alone, 'reimported')), ['res://lone.png'], JSON.stringify(alone));
+      assert.equal(get(alone, 'alsoImported'), undefined, JSON.stringify(alone));
+
       // An option, applied by the reimport that follows it.
       const set = await call({
         op: 'set_options',
@@ -39199,6 +39214,12 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     join(project, 'icon.svg'),
     '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#3366ff"/></svg>\n',
   );
+  writeFileSync(join(project, 'speaker.tscn'), '[gd_scene format=3]\n\n[node name="Speaker" type="Node"]\n');
+  writeFileSync(
+    join(project, 'default_bus_layout.tres'),
+    '[gd_resource type="AudioBusLayout" format=3]\n\n[resource]\nbus/1/name = &"Music"\nbus/1/solo = false\n' +
+      'bus/1/mute = false\nbus/1/bypass_fx = false\nbus/1/volume_db = 0.0\nbus/1/send = &"Master"\n',
+  );
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
   });
@@ -39236,6 +39257,30 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       }),
     );
     assert.equal(get(made, 'resourcePath'), 'res://sword.tres', JSON.stringify(made));
+
+    // A text property that lists its names holds only one of them, and a player's bus lists the
+    // project's buses: any other name reads back as Master, which was refused as a value the engine
+    // "changed or refused", with nothing to say the bus did not exist.
+    const speaker = async (bus: string): Promise<JsonRpcMessage> =>
+      await request('scene_node', {
+        op: 'add',
+        scenePath: 'res://speaker.tscn',
+        parentNodePath: '.',
+        nodeType: 'AudioStreamPlayer',
+        nodeName: `Bus${bus}`,
+        properties: { bus },
+      });
+    const music = await speaker('Music');
+    assert.equal(get(music, 'result', 'isError'), undefined, textOf(music) ?? '');
+    assert.match(readFileSync(join(project, 'speaker.tscn'), 'utf8'), /^bus = &"Music"$/m);
+    assert.equal(
+      textOf(await speaker('Musik')),
+      'AudioStreamPlayer.bus was given "Musik" and holds "Master" after it was set: it takes the name of one of the project\'s audio buses, and "Musik" is none of them; the nearest is Music. project_info include audio_buses lists them, and project_settings add_audio_bus adds one. Nothing was written.',
+    );
+    assert.match(
+      textOf(await speaker('Drums')) ?? '',
+      /and "Drums" is none of them; the buses are Master, Music\. project_info/,
+    );
 
     // An enum by the name of a value, as written and in another case, and by its number.
     await written({ kind: 'POTION' });
@@ -44724,6 +44769,144 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     }
     assert.equal(asArray(get(states, 'transitions')).length, 1, JSON.stringify(states));
     assert.doesNotMatch(fileOf('moves.tscn'), /position = Vector2\(9, 9\)/, 'what _init set is not saved');
+
+    // A second add_track on the path keys the track that animates it, as the editor keys a property
+    // it already animates, rather than laying a second track over the first; a key past the end is
+    // written and named, since it never plays.
+    assert.equal(get(track, 'pastLength'), undefined, JSON.stringify(track));
+    const rotation = (keyframes: unknown[]) => ({
+      op: 'add_track',
+      playerNodePath: 'Player',
+      animationName: 'spin',
+      track: { type: 'property', nodePath: 'Body', property: 'rotation', keyframes },
+    });
+    const more = await written(
+      rotation([
+        { time: 0.25, value: 1.5 },
+        { time: 2, value: 6 },
+      ]),
+    );
+    assert.deepEqual(
+      [get(more, 'trackIndex'), get(more, 'existingTrack'), get(more, 'keysAdded'), get(more, 'keys')],
+      [0, true, 2, 4],
+      JSON.stringify(more),
+    );
+    assert.equal(
+      get(more, 'pastLength'),
+      'spin is 0.5 s long, and this key is past its end, where it never plays: Body:rotation at 2 s. It is kept; scene_animation set with a longer length plays it.',
+    );
+    assert.doesNotMatch(fileOf('moves.tscn'), /tracks\/1\//, `one track: ${fileOf('moves.tscn')}`);
+    assert.equal(
+      textOf(await call(rotation([{ time: 0.5, value: 1 }]))),
+      'Track 0 already animates Body:rotation and has a key at 0.5 s, which keyframes[0] would replace. Nothing was written.',
+    );
+
+    const shorter = await written({
+      op: 'set',
+      playerNodePath: 'Player',
+      animationName: 'spin',
+      length: 0.25,
+      loopMode: 'linear',
+    });
+    assert.deepEqual(
+      [get(shorter, 'length'), get(shorter, 'loopMode')],
+      [0.25, 'linear'],
+      JSON.stringify(shorter),
+    );
+    // Held as a 32-bit float, so 0.1 comes back as 0.100000001490116.
+    assert.ok(Math.abs(asNumber(get(shorter, 'step')) - 0.1) < 1e-6, 'and the step it was made with stays');
+    assert.equal(
+      get(shorter, 'pastLength'),
+      'spin is 0.25 s long, and these keys are past its end, where they never play: Body:rotation at 0.5 s, Body:rotation at 2 s. They are kept; scene_animation set with a longer length plays them.',
+    );
+    assert.match(fileOf('moves.tscn'), /\nlength = 0\.25\nloop_mode = 1\n/, fileOf('moves.tscn'));
+    const longer = await written({ op: 'set', playerNodePath: 'Player', animationName: 'spin', length: 2 });
+    assert.equal(get(longer, 'pastLength'), undefined, 'a key at the very end plays');
+    assert.equal(get(longer, 'loopMode'), 'linear', 'what set was not given stays');
+    for (const [args, refusal] of [
+      [{}, 'set changes length, loopMode or step, and was given none of them.'],
+      [{ length: 0 }, "length is the animation's length in seconds, more than 0, and 0 is not."],
+      [{ step: -0.5 }, 'step is the keyframe snap in seconds, 0 or more, and -0.5 is not.'],
+    ] as const) {
+      assert.equal(
+        textOf(await call({ op: 'set', playerNodePath: 'Player', animationName: 'spin', ...args })),
+        refusal,
+      );
+    }
+
+    // A rename takes the player's autoplay and the state that plays it along: a state naming an
+    // animation the player lacks plays nothing.
+    const autoplay = await server.request(
+      'tools/call',
+      {
+        name: 'scene_node',
+        arguments: {
+          projectPath: project,
+          scenePath: 'moves.tscn',
+          op: 'set',
+          nodePath: 'Player',
+          properties: { autoplay: 'spin' },
+        },
+      },
+      240_000,
+    );
+    assert.match(fileOf('moves.tscn'), /autoplay = &"spin"/, textOf(autoplay) ?? '');
+    const renamed = await written({
+      op: 'rename',
+      playerNodePath: 'Player',
+      animationName: 'spin',
+      newName: 'turn',
+    });
+    assert.deepEqual(
+      [
+        get(renamed, 'animationName'),
+        get(renamed, 'was'),
+        get(renamed, 'autoplay'),
+        get(renamed, 'statesFollowed'),
+      ],
+      ['turn', 'spin', 'turn', [{ animTreePath: 'Tree', state: 'Spin' }]],
+      JSON.stringify(renamed),
+    );
+    const afterRename = fileOf('moves.tscn');
+    assert.match(afterRename, /&"turn": SubResource/, afterRename);
+    assert.match(afterRename, /autoplay = &"turn"/, afterRename);
+    assert.match(afterRename, /animation = &"turn"/, afterRename);
+    assert.doesNotMatch(afterRename, /"spin"/, afterRename);
+    for (const [args, refusal] of [
+      [
+        { animationName: 'turn', newName: 'moves/turn' },
+        'rename keeps an animation in its library (the default one), so newName is its name there, with no library before a slash.',
+      ],
+      [{ animationName: 'turn', newName: 'a:b' }, "An animation's name cannot hold : , or [, and a:b does."],
+      [{ animationName: 'moves/hop', newName: 'idle' }, 'Player already has an animation moves/idle.'],
+      [
+        { animationName: 'spin', newName: 'twirl' },
+        'Player has no animation spin. It has: moves/hop, moves/idle, turn.',
+      ],
+    ] as const) {
+      assert.equal(textOf(await call({ op: 'rename', playerNodePath: 'Player', ...args })), refusal);
+    }
+    // In a library kept apart, the rename is saved in its file, and the library may be named.
+    await written({
+      op: 'rename',
+      playerNodePath: 'Player',
+      animationName: 'moves/hop',
+      newName: 'moves/leap',
+    });
+    assert.match(fileOf('library.tres'), /&"leap": SubResource/, fileOf('library.tres'));
+
+    const removed = await written({ op: 'remove', playerNodePath: 'Player', animationName: 'turn' });
+    assert.deepEqual(
+      [get(removed, 'removed'), get(removed, 'autoplayCleared'), get(removed, 'statesPlayingNothing')],
+      ['turn', true, [{ animTreePath: 'Tree', state: 'Spin' }]],
+      JSON.stringify(removed),
+    );
+    const afterRemove = fileOf('moves.tscn');
+    assert.doesNotMatch(afterRemove, /&"turn": SubResource|autoplay = /, afterRemove);
+    assert.equal(
+      textOf(await call({ op: 'remove', playerNodePath: 'Player', animationName: 'turn' })),
+      'Player has no animation turn. It has: moves/idle, moves/leap.',
+    );
 
     const before = fileOf('stretched.tres');
     const scripted =
