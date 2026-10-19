@@ -14,6 +14,7 @@ extends RefCounted
 ## write accepts. What is here on top of it is the part only a property knows: the type wanted, so a
 ## dictionary shaped like a vector or a bare pair of numbers can be read as one.
 
+const GdhDeclared = preload("declared_values.gd")
 const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhShapes = preload("value_shapes.gd")
@@ -77,6 +78,11 @@ var _refused: String = ""
 # a Gradient given a third colour gives that point an offset of 0, a Control given a size moves its
 # offsets. An answer naming only what was given leaves the caller to guess the rest.
 var _also_changed: Dictionary = {}
+
+# The values the last write_all wrote outside what their property declares, by name, as a sentence
+# saying so: a number past an export range, or one no enum value has. The engine stores either, and
+# the inspector would not have let it be entered, so a write answered as made said nothing of it.
+var _outside_declared: Dictionary = {}
 
 
 ## Turns what arrived over the wire into the Godot value a property wants.
@@ -177,23 +183,34 @@ func cannot_hold(
 ## caller returns the refusal instead of saving.
 func write_all(target: Object, properties: Dictionary) -> String:
 	_also_changed = {}
+	_outside_declared = {}
 	var named: Dictionary = {}
 	for key: Variant in properties:
 		named[str(key).get_slice(":", 0)] = true
 	var before: Dictionary = _stored(target, named)
 	var given: Dictionary = {}
+	# A refusal of one of several leaves the others unwritten too, which a refusal naming only the
+	# one it refused left a caller to guess.
+	var unwritten: String = (
+		"" if properties.size() < 2 else " None of the %d properties given was written." % properties.size()
+	)
 	for key: Variant in properties:
 		var property: String = str(key)
 		var declared: Dictionary = declaration(target, property)
 		if declared.is_empty() and ":" in property:
 			declared = _component_slot(target, property)
 			if declared.has("refused"):
-				return str(declared["refused"])
+				return str(declared["refused"]) + unwritten
+		if declared.is_empty() and target is ShaderMaterial and property.begins_with("shader_parameter/"):
+			return _no_uniform(target as ShaderMaterial, property) + unwritten
 		if declared.is_empty():
-			return "%s has no property %s" % [target.get_class(), property]
+			return "%s has no property %s." % [class_called(target), property] + unwritten
 		var value: Array = value_for(target, declared, properties[key])
 		if not value[0]:
-			return str(value[1])
+			return str(value[1]) + unwritten
+		var outside: String = GdhDeclared.outside(target, declared, value[1], shown(value[1]))
+		if not outside.is_empty():
+			_outside_declared[property] = outside
 		_write(target, property, value[1])
 		given[property] = value[1]
 
@@ -217,11 +234,32 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	return ""
 
 
+## Why [param material] has no [param property]: a ShaderMaterial's parameters are its shader's
+## uniforms, so the shader is what lacks one, and "ShaderMaterial has no property" named the
+## material.
+static func _no_uniform(material: ShaderMaterial, property: String) -> String:
+	var uniform: String = property.trim_prefix("shader_parameter/")
+	if material.shader == null:
+		return "The ShaderMaterial has no shader, so it has no parameter %s yet; set shader first." % uniform
+	var shader: String = material.shader.resource_path
+	var named: String = shader if not shader.is_empty() else "Its shader"
+	var uniforms: Array = []
+	for entry: Dictionary in material.shader.get_shader_uniform_list():
+		uniforms.append(str(entry["name"]))
+	var said: String = "%s declares no uniform %s, which %s would set" % [named, uniform, property]
+	if uniforms.is_empty():
+		return said + "; it declares no uniforms."
+	return GdhRead.offered(said, uniform, uniforms) + "."
+
+
 ## Puts under alsoChanged in [param answer] each property the last [method write_all] changed
-## without being given it, as {was, now}, when there are any. A node is named by its path from
-## [param relative_to], as a scene answer names one. Called before the scene is written, since the
-## write frees the nodes these values can hold.
-func note_also_changed(answer: Dictionary, relative_to: Node = null) -> void:
+## without being given it, as {was, now}, and under outsideDeclared each value it wrote outside what
+## its property declares, when there are any. A node is named by its path from [param relative_to],
+## as a scene answer names one. Called before the scene is written, since the write frees the nodes
+## these values can hold.
+func note_write(answer: Dictionary, relative_to: Node = null) -> void:
+	if not _outside_declared.is_empty():
+		answer["outsideDeclared"] = _outside_declared.duplicate()
 	if _also_changed.is_empty():
 		return
 	var noted: Dictionary = {}
@@ -324,6 +362,18 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
 	if expected_type == TYPE_OBJECT and hint == PROPERTY_HINT_NODE_TYPE:
 		return _node_reference(target, property, raw)
+	# An enum is written by the name of a value as well as its number, since the name is what the
+	# script and the inspector show and the number is only where the value happens to sit.
+	if expected_type == TYPE_INT and hint == PROPERTY_HINT_ENUM and typeof(raw) == TYPE_STRING:
+		var choices: Dictionary = GdhDeclared.enum_of(target, declared)
+		var chosen: Variant = GdhDeclared.enum_named(choices, str(raw))
+		if chosen == null:
+			var hinted: Dictionary = GdhDeclared.enum_values(str(declared.get("hint_string", "")))
+			chosen = GdhDeclared.enum_named(hinted, str(raw))
+		if chosen != null:
+			return [true, chosen]
+		if not str(raw).strip_edges().is_valid_int():
+			return [false, GdhDeclared.enum_refusal(class_called(target), property, str(raw), choices)]
 
 	# A resource-valued property takes the path of one, which is how a caller names a TileSet,
 	# a material or a theme: there is no other way to hand a tool a Resource.
@@ -339,12 +389,12 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 			return [false, _fraction_refusal(target, property, raw)]
 		var rounded: String = GdhSerialisation.inexact(raw, expected_type)
 		if not rounded.is_empty():
-			return [false, "%s.%s holds int: %s." % [target.get_class(), property, rounded]]
+			return [false, "%s.%s holds int: %s." % [class_called(target), property, rounded]]
 		_refused = ""
 		value = parse(raw, expected_type, elements)
 		if not _refused.is_empty():
 			return [false, _refused]
-		var refusal: String = cannot_hold(target.get_class(), property, value, expected_type, elements)
+		var refusal: String = cannot_hold(class_called(target), property, value, expected_type, elements)
 		if not refusal.is_empty():
 			return [false, refusal]
 	if value is Object:
@@ -489,8 +539,41 @@ func _fraction_refusal(target: Object, property: String, raw: Variant) -> String
 			"%s.%s holds whole numbers, and %s would be cut to fit. Setting it would save a different "
 			+ "value than the one asked for."
 		)
-		% [target.get_class(), property, shown(raw)]
+		% [class_called(target), property, shown(raw)]
 	)
+
+
+## [param raw] as a colour, read as a property write reads one, as [true, Color] or [false, why]:
+## fields from 0 to 1 with a optional, or an html code. [param named] is what the refusal calls it.
+func colour_from(raw: Variant, named: String) -> Array:
+	_refused = ""
+	var value: Variant = parse(raw, TYPE_COLOR)
+	if not _refused.is_empty():
+		return [false, _refused]
+	if value is Color:
+		return [true, value]
+	return [
+		false,
+		(
+			(
+				'%s is {"r": .., "g": .., "b": .., "a": ..} from 0 to 1, a optional, or an html code such as '
+				+ '"#ff8000" or "#ff800080"; %s is neither.'
+			)
+			% [named, JSON.stringify(raw)]
+		)
+	]
+
+
+## What [param target] is called in a refusal: the class_name its script declares, or else its
+## engine class. A resource made as a project class is a Resource to the engine, and "Resource.kind"
+## named a property no Resource has.
+static func class_called(target: Object) -> String:
+	var attached: Variant = target.get_script()
+	if attached is Script:
+		var script: Script = attached
+		if not str(script.get_global_name()).is_empty():
+			return str(script.get_global_name())
+	return target.get_class()
 
 
 ## The resource [param path] names, as [found, resource or why not].
@@ -516,6 +599,19 @@ func _resource_at(path: String, property: String) -> Array:
 			)
 		]
 	if not ResourceLoader.exists(path):
+		# An image or a sound nobody has imported is a file the engine has no loader for, and "No
+		# resource at" sent a caller looking for a file that was there.
+		if path.begins_with("res://") and FileAccess.file_exists(path):
+			return [
+				false,
+				(
+					(
+						"%s is there, but it has never been imported, so the engine has no resource to load"
+						+ " from it for %s. project_import reimport with resourcePath %s imports it."
+					)
+					% [path, property, path]
+				)
+			]
 		return [false, "No resource at %s for %s" % [path, property]]
 	return [true, load(path)]
 

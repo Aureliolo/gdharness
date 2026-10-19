@@ -61,6 +61,8 @@ import {
   staleClassNames,
   type UnseenClass,
   uncachedClassNote,
+  uncachedFor,
+  uncachedForTheEngineNote,
   unknownTypeIn,
   unloadedTypes,
   unseenByEditor,
@@ -162,6 +164,7 @@ import {
   LSPTimeout,
   normalizeLSPError,
 } from './lsp_client.js';
+import { withNearestFiles } from './nearest.js';
 import { launchOutsideTheTree } from './outside.js';
 import {
   exportedBuild,
@@ -185,7 +188,13 @@ import {
   whyTheProcessTreeFailed,
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
-import { pathsInUidCache, projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
+import {
+  pathsInUidCache,
+  projectFiles,
+  projectStructure,
+  scriptsWithoutUid,
+  searchProject,
+} from './project-scan.js';
 import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
 import {
@@ -291,6 +300,7 @@ import {
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
 // array element, so a path full of backslashes, spaces or quotes is just a path.
 import { runHidden as run, spawnHidden } from './spawn.js';
+import { selectTests } from './test-selection.js';
 import {
   asParams,
   readArray,
@@ -1468,6 +1478,20 @@ interface AfterWaiting {
   readonly runtimeCameUp?: boolean;
 }
 
+/**
+ * The refusal for a breakpoint on [param line] of the script at [param absolutePath] when the line
+ * is past the script's end, or null. Lines are counted as an editor counts them, without one for
+ * the newline that ends the last.
+ */
+function lineBeyondScript(absolutePath: string, relativePath: string, line: number): string | null {
+  const text = readFileSync(absolutePath, 'utf8');
+  const lines = text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+  if (line <= lines) {
+    return null;
+  }
+  return `res://${relativePath} has ${lines} line${lines === 1 ? '' : 's'}, so there is no line ${line} to stop on.`;
+}
+
 /** What the runtime addon prints once it is listening, which a run's output is read for. */
 const RUNTIME_LISTENING_LINE = '[gdharness] runtime listening on ';
 
@@ -2626,6 +2650,7 @@ type Section = { operation: string; params: (args: OperationParams, detailed: bo
  */
 const PROJECT_INFO_SECTIONS: Readonly<Record<string, Section>> = dictionary<Section>({
   autoloads: { operation: 'list_autoloads', params: () => ({}) },
+  input_actions: { operation: 'list_input_actions', params: () => ({}) },
   plugins: { operation: 'list_plugins', params: () => ({}) },
   export_presets: { operation: 'list_export_presets', params: () => ({}) },
   audio_buses: { operation: 'get_audio_buses', params: () => ({}) },
@@ -4848,6 +4873,18 @@ class GodotServer {
         if (line === undefined) {
           return this.createErrorResponse('line is required: the one-based line to stop on.');
         }
+        // Neither the adapter nor a game refuses a line nothing is on, and a breakpoint held there
+        // is kept in the project's set and never stops anything. Removing one is left alone, so a
+        // breakpoint on a script since deleted or shortened can still be taken off.
+        if (op === 'set') {
+          if (!existsSync(located.absolutePath)) {
+            return this.missingScript(project.value.path, located.relativePath);
+          }
+          const beyond = lineBeyondScript(located.absolutePath, located.relativePath, line);
+          if (beyond !== null) {
+            return this.createErrorResponse(beyond);
+          }
+        }
         const editor = this.godotBridge.isConnected();
         let answer: Record<string, unknown>;
         if (editor) {
@@ -6058,17 +6095,60 @@ class GodotServer {
     };
 
     const detailed = args['detail'] === 'full';
+    // Both sections judge the scripts, and only engines started here can: the one running a
+    // section stops reading at the first script that fails, as every engine does. Once for both.
+    const compiledScripts =
+      include.includes('health') || include.includes('validation')
+        ? await this.compiledForProjectInfo(project.value.path)
+        : undefined;
     for (const section of include) {
       const spec = PROJECT_INFO_SECTIONS[section];
       if (spec === undefined) {
         continue;
       }
-      const outcome = await this.operation(spec.operation, spec.params(args, detailed), project.value.path);
+      const params = {
+        ...spec.params(args, detailed),
+        ...(compiledScripts !== undefined && (section === 'health' || section === 'validation')
+          ? { compiled: compiledScripts }
+          : {}),
+      };
+      const outcome = await this.operation(spec.operation, params, project.value.path);
       info[section] = outcome.ok
         ? { ...outcome.payload, ...engineExtras(outcome) }
         : { error: outcome.message, ...engineExtras(outcome) };
     }
     return this.jsonTextResponse(info);
+  }
+
+  /**
+   * Every script of the project compiled, for the health and validation sections: how many were
+   * read and each that failed, with the note on a class the cache lacks, or why none could be.
+   */
+  private async compiledForProjectInfo(projectPath: string): Promise<OperationParams> {
+    const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
+    if (scripts.length === 0) {
+      return { checked: 0, failures: [] };
+    }
+    const checked = await this.compileScripts(projectPath, scripts);
+    if (!checked.ok) {
+      return { not_checked: `no headless engine could compile the scripts: ${checked.message}` };
+    }
+    const failures = checked.payload.scripts.map(asParams);
+    const uncached = uncachedFor(
+      projectPath,
+      failures.map((failure) =>
+        (readArray(failure, 'errors') ?? []).map((entry) => String(asParams(entry)['message'])),
+      ),
+    );
+    return {
+      checked: checked.payload.checked.length,
+      failures: failures.map((failure, at) => {
+        const types = uncached[at] ?? [];
+        return types.length === 0
+          ? failure
+          : { ...failure, note: uncachedForTheEngineNote(projectPath, types) };
+      }),
+    };
   }
 
   /** The extensions a search is limited to, when the call names any. */
@@ -6365,6 +6445,10 @@ class GodotServer {
         'Install gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4',
       ]);
     }
+    const selection = selectTests(project.value.path, asked, args['tests']);
+    if (!selection.ok) {
+      return this.createErrorResponse(selection.reason);
+    }
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response;
@@ -6413,8 +6497,8 @@ class GodotServer {
       `res://${runner}`,
       '--ignoreHeadlessMode',
       ...(readBoolean(args, 'failFast') === true ? [] : ['-c']),
-      ...asked.flatMap((path) => ['-a', path]),
-      ...ignored.flatMap((entry) => ['-i', entry]),
+      ...(selection.value?.suites ?? asked).flatMap((path) => ['-a', path]),
+      ...[...ignored, ...(selection.value?.ignore ?? [])].flatMap((entry) => ['-i', entry]),
       '-rd',
       reports,
       '-rc',
@@ -6747,6 +6831,24 @@ class GodotServer {
     const uncaughtFolded = foldedRepeats(uncaught.map(aboveTheRunner));
     const listedAsUncaught = new Set(uncaughtFolded.map((entry) => entry.index));
     const notApplied = ignoredYetRan(report, ignored);
+    // A case read from its file that gdUnit4 never reported, which is a run of less than was asked
+    // for. A parameterised case is reported under its name and its parameters.
+    const testsNotRun = [
+      ...new Set(
+        (selection.value?.selected ?? [])
+          .filter(
+            (one) =>
+              !report.suites.some(
+                (suite) =>
+                  (suite.path === one.suite || suite.name === basename(one.suite, '.gd')) &&
+                  suite.cases.some(
+                    (ran) => ran.name === one.test || new RegExp(`^${one.test}\\W`).test(ran.name),
+                  ),
+              ),
+          )
+          .map((one) => `${basename(one.suite, '.gd')}:${one.test}`),
+      ),
+    ];
     return this.jsonTextResponse({
       // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
       // passed beside a verdict saying no test cases were found.
@@ -6759,9 +6861,11 @@ class GodotServer {
         report.errors === 0 &&
         hookFailures.length === 0 &&
         uncaught.length === 0 &&
-        missing.length === 0,
-      verdict,
+        missing.length === 0 &&
+        testsNotRun.length === 0,
+      verdict: testsNotRun.length === 0 ? verdict : `${verdict}; not run: ${testsNotRun.join(', ')}`,
       ...(missing.length > 0 ? { missing } : {}),
+      ...(testsNotRun.length > 0 ? { testsNotRun } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
       exitCode,
       exitSignal: run.exitSignal ?? undefined,
@@ -6788,6 +6892,9 @@ class GodotServer {
       note:
         [
           missingNote,
+          testsNotRun.length > 0
+            ? `${testsNotRun.join(', ')} ${testsNotRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`
+            : undefined,
           briefed > 0
             ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver; pass one case's suite path to see its reports.`
             : undefined,
@@ -6867,6 +6974,19 @@ class GodotServer {
       return this.createErrorResponse(scripts.reason);
     }
     if (scripts?.value == null) {
+      // Judged here rather than by whichever half answers, which named a missing script by its
+      // absolute path and refused a path outside the project with no remedy, while every other
+      // tool given either gave the res:// path and the remedies.
+      const asked = readString(args, 'scriptPath');
+      if (project.ok && asked !== undefined) {
+        const location = resolveWithinProject(project.value.path, asked);
+        if (!location.ok) {
+          return this.createErrorResponse(location.reason, PATH_SOLUTIONS);
+        }
+        if (!existsSync(location.absolutePath)) {
+          return this.missingScript(project.value.path, location.relativePath);
+        }
+      }
       const one = await this.diagnosticsOf(args);
       if ('noLanguageServer' in one) {
         const checked = project.ok
@@ -6951,6 +7071,15 @@ class GodotServer {
     });
   }
 
+  /** The refusal for [param relativePath], a script the project does not hold, with the nearest it does. */
+  private missingScript(projectPath: string, relativePath: string): ToolResponse {
+    const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
+    const wanted = `res://${relativePath}`;
+    return this.createErrorResponse(
+      withNearestFiles(`Script file does not exist: ${wanted}`, wanted, scripts),
+    );
+  }
+
   /**
    * Whether each of [param paths], res:// paths, compiles, by as many headless engines as it takes:
    * an engine stops at the first script that raises an error, since every script after it that
@@ -7023,15 +7152,21 @@ class GodotServer {
         asParams(entry),
       ]),
     );
+    const errorsOf = scripts.map((_, at) => readArray(failures.get(named[at] ?? '') ?? {}, 'errors') ?? []);
+    const uncachedPer = uncachedFor(
+      projectPath,
+      errorsOf.map((errors) => errors.map((entry) => String(asParams(entry)['message']))),
+    );
     return {
       answers: scripts.map((scriptPath, at) => {
         const failure = failures.get(named[at] ?? '');
-        const diagnostics = (readArray(failure ?? {}, 'errors') ?? []).map((entry) => {
+        const diagnostics = (errorsOf[at] ?? []).map((entry) => {
           const { line, message } = asParams(entry);
           // Line 0 is the engine's for the whole script, a dependency that failed to compile.
           return { severity: 'error', message, ...(typeof line === 'number' && line > 0 ? { line } : {}) };
         });
         const dependencies = readArray(failure ?? {}, 'dependencies_with_errors');
+        const uncached = uncachedPer[at] ?? [];
         return {
           scriptPath,
           clean: diagnostics.length === 0,
@@ -7039,6 +7174,12 @@ class GodotServer {
           warnings: null,
           diagnostics,
           ...(dependencies === undefined ? {} : { dependenciesWithErrors: dependencies }),
+          ...(uncached.length === 0
+            ? {}
+            : {
+                typesMissingFromTheClassCache: uncached.map(({ type, declaredIn }) => ({ type, declaredIn })),
+                staleAnalysis: uncachedForTheEngineNote(projectPath, uncached),
+              }),
         };
       }),
     };
@@ -12590,7 +12731,7 @@ class GodotServer {
       return this.createErrorResponse(scriptPath.reason);
     }
     if (!existsSync(scriptPath.absolutePath)) {
-      return this.createErrorResponse(`Script file does not exist: ${scriptPath.absolutePath}`);
+      return this.missingScript(projectPath, scriptPath.relativePath);
     }
     const asked = readNonEmptyString(args, 'newScriptPath');
     const moveTo = asked === undefined ? null : resolveWithinProject(projectPath, asked);

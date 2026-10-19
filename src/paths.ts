@@ -103,7 +103,10 @@ export function keptInside(given: string): { file: string; inner: string | undef
  * A caller-supplied path read as a location inside the project.
  *
  * Both spellings of the same file are accepted, `res://scenes/main.tscn` and
- * `scenes/main.tscn`. Anything absolute is refused, a leading `/` or `\` included.
+ * `scenes/main.tscn`, and so is the file's absolute path when it is inside the project, which a
+ * caller holding the project's path writes naturally and which was refused with "give a path
+ * inside the project" while being one. Any other absolute path is refused, a leading `/` or `\`
+ * included.
  *
  * Reading a leading `/` as the project root was tried and is worse on both counts. It makes
  * `/etc/passwd` quietly succeed as `<project>/etc/passwd`, when a caller who wrote that meant
@@ -135,7 +138,14 @@ export function resolveWithinProject(
     return { ok: false, reason: 'Path contains a null byte.' };
   }
 
-  const withoutScheme = trimmed.startsWith(RESOURCE_SCHEME) ? trimmed.slice(RESOURCE_SCHEME.length) : trimmed;
+  const root = resolve(projectPath);
+  // Made relative before anything else reads it, since a Windows path's drive colon is refused
+  // below as the stream marker it would otherwise be.
+  const withoutScheme = trimmed.startsWith(RESOURCE_SCHEME)
+    ? trimmed.slice(RESOURCE_SCHEME.length)
+    : isAbsolute(trimmed) && isWithinRoot(root, trimmed)
+      ? relative(root, resolve(trimmed)).split(sep).join('/')
+      : trimmed;
 
   // A UID names a file in this project, and where it is on disk is known only to the engine that
   // resolves it, so containment, which is a question about where, cannot be answered for one here.
@@ -158,7 +168,7 @@ export function resolveWithinProject(
   if (withoutScheme.startsWith('/') || withoutScheme.startsWith('\\') || isAbsolute(withoutScheme)) {
     return {
       ok: false,
-      reason: `Path '${trimmed}' is absolute; give a path inside the project, such as 'scenes/main.tscn'.`,
+      reason: `Path '${trimmed}' is absolute and outside the project; give a path inside it, such as 'scenes/main.tscn'.`,
     };
   }
 
@@ -180,7 +190,6 @@ export function resolveWithinProject(
     };
   }
 
-  const root = resolve(projectPath);
   const absolutePath = resolve(root, withoutScheme);
 
   if (!isWithinRoot(root, absolutePath)) {

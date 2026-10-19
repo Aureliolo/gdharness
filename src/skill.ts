@@ -198,6 +198,13 @@ declaration and the cache can both be right while the editor stays blind to it. 
 its own, which is the measured cure and needs no change to the declaring script; \`editor_launch
 restart\` also does it and costs a restart of the editor.
 
+With no editor open, the headless engine that compiles for \`script_diagnostics\` and for
+\`project_info\`'s health and validation resolves class names only from that cache file. A
+project never opened, as a fresh clone is, has no such file, so every script typed by a project
+class fails there. \`script_diagnostics\` names the class under
+\`typesMissingFromTheClassCache\`, health and validation say so beside the failure, and
+\`project_import refresh_classes\` writes the cache from the declarations on disk.
+
 The scan writes \`.godot/global_script_class_cache.cfg\` from the list the editor is holding, so
 a class it cannot resolve would go out of that file with it. The answer names that loss under
 \`cacheLost\` and rebuilds the cache from the declarations on disk, naming what came back under

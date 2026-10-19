@@ -60,17 +60,15 @@ func _find_node(root: Node, path: String) -> Node:
 ## Why the property or signal [param missing] could not be found on [param node], adding the one
 ## cause the name alone does not show: a script that does not compile leaves the editor holding a
 ## placeholder with no properties or signals at all, and the refusal named the property instead.
+## Such a script has no engine class beneath it. Compiling a copy of the source to find out failed on
+## every script with a class_name, since the copy hides the global class the original declares.
 func _missing_on(node: Node, missing: String) -> String:
 	var script: Script = node.get_script()
-	if script == null or not script.has_source_code():
-		return missing
-	var probe: GDScript = GDScript.new()
-	probe.source_code = script.source_code
-	if probe.reload() == OK:
+	if script == null or not str(script.get_instance_base_type()).is_empty():
 		return missing
 	return (
 		"%s. Its script, %s, does not compile, so none of what it declares is known here."
-		% [missing, script.resource_path]
+		% [missing.trim_suffix("."), script.resource_path]
 	)
 
 
@@ -343,7 +341,7 @@ func add_node(args: Dictionary) -> Dictionary:
 		"nodePath": new_path,
 		"index": new_node.get_index(),
 	}
-	_properties.note_also_changed(answer, new_node)
+	_properties.note_write(answer, new_node)
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			return _kept(
@@ -608,7 +606,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
 	var new_path: String = scene.path_of(node)
 	var answer: Dictionary = {"ok": true, "nodePath": new_path, "properties": held}
-	_properties.note_also_changed(answer, node)
+	_properties.note_write(answer, node)
 	var carried: GdhPaths = GdhPaths.new()
 	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
 	var written: Dictionary = scene.write(

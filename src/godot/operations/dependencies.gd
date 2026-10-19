@@ -75,7 +75,9 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 			full_path = "res://" + full_path
 
 		if not FileAccess.file_exists(full_path):
-			return _log.failure("Resource file does not exist: " + full_path)
+			return _log.failure(
+				_files.with_nearest_files("Resource file does not exist: " + full_path, full_path)
+			)
 
 		var walk: GdhDependencyWalk = GdhDependencyWalk.new(max_depth, include_built_in, circular_references)
 		dependencies[full_path] = _analyze_resource(full_path, 0, walk)
@@ -100,12 +102,19 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 
 	var references: int = 0
 	var distinct: Dictionary = {}
+	var missing: Dictionary = {}
 	for key: String in dependencies:
 		# Through a typed local: what comes out of a Dictionary is Variant, and a project that
 		# errors on handing one to a typed parameter will not compile this script at all.
 		var walked: Array[Dictionary] = dependencies[key]
 		references += _count_recursive(walked)
 		_gather_paths(walked, key, distinct)
+		_gather_missing(walked, key, missing)
+	# Said in the summary as well as in the tree, where a file that is not there was one
+	# `exists: false` among the entries, which a caller reading the summary never met.
+	var missing_files: Array[Dictionary] = []
+	for path: String in missing:
+		missing_files.append({"path": path, "referenced_by": missing[path]})
 
 	return {
 		"dependencies": dependencies,
@@ -117,9 +126,52 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 			# loads it, and counting its entries answered 11 for a scene with six dependencies.
 			"total_dependencies": distinct.size(),
 			"total_references": references,
-			"circular_count": circular_references.size()
+			"circular_count": circular_references.size(),
+			"missing": missing_files
 		}
 	}
+
+
+## Every file a scene or resource of the project loads through an ext_resource that is not there,
+## by its path or its uid, each with the files loading it. Only those: a script naming a path in
+## its code may be asking whether the file exists, and the shipped addons check for files they
+## write, so every project was told its addons referred to files that are missing. A script's
+## preloads are the compile's to judge.
+func missing_references() -> Array[Dictionary]:
+	var missing: Dictionary = {}
+	for file: String in _files.find_files_with_extensions("res://", GdhResourceFiles.TEXT_RESOURCE_KINDS):
+		var content: String = FileAccess.get_file_as_string(file)
+		var moved: Dictionary = _moved_by_uid(content)
+		for line: RegExMatch in GdhPatterns.compiled("\\[ext_resource[^\\]]*\\]").search_all(content):
+			var at: RegExMatch = GdhPatterns.compiled('path="([^"]+)"').search(line.get_string())
+			if at == null or moved.has(at.get_string(1)):
+				continue
+			var path: String = _resolved(at.get_string(1), file)
+			if FileAccess.file_exists(path):
+				continue
+			var naming: Array = missing.get_or_add(path, [])
+			if not file in naming:
+				naming.append(file)
+	# Sorted, since the walk meets files in the order the filesystem lists them, which differs
+	# between platforms.
+	var paths: Array = missing.keys()
+	paths.sort()
+	var found: Array[Dictionary] = []
+	for path: String in paths:
+		var naming: Array = missing[path]
+		naming.sort()
+		found.append({"path": path, "referenced_by": naming})
+	return found
+
+
+## One line for [param entry], one of [method missing_references].
+static func missing_line(entry: Dictionary) -> String:
+	var referring: Array = entry.get("referenced_by", [])
+	var naming: PackedStringArray = PackedStringArray(referring)
+	return (
+		"%s does not exist, and %s %s to it"
+		% [str(entry.get("path", "")), ", ".join(naming), "refers" if naming.size() == 1 else "refer"]
+	)
 
 
 # What refers to a resource, and how: the scenes that instance it, the scripts that extend or
@@ -130,8 +182,10 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 
 	if not resource_path.begins_with("res://"):
 		resource_path = "res://" + resource_path
-	if not FileAccess.file_exists(resource_path):
-		return _log.failure("Resource file does not exist: " + resource_path)
+	# A file that is gone is searched for all the same, since what still refers to it is what a
+	# caller asks about one, and the forward walk of a scene had just named it missing. Refused only
+	# when nothing refers to it either, which is a path written wrong.
+	var exists: bool = FileAccess.file_exists(resource_path)
 
 	_log.info("Finding usages of: " + resource_path)
 
@@ -140,7 +194,8 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 	if not class_name_declared.is_empty():
 		by_class = GdhPatterns.compiled("\\b" + _regex_escaped(class_name_declared) + "\\b")
 	var target: Dictionary = {
-		"path": resource_path, "uid": str(GdhResourceFiles.uid_of(resource_path).get("uid", ""))
+		"path": resource_path,
+		"uid": str(GdhResourceFiles.uid_of(resource_path).get("uid", "")) if exists else ""
 	}
 
 	var all_files: Array[String] = _usage_files(file_types)
@@ -204,11 +259,19 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 			usages.append({"file": file_path, "references": references})
 			total += references.size()
 
+	if not exists and usages.is_empty():
+		return _log.failure(
+			_files.with_nearest_files(
+				"Resource file does not exist: %s, and nothing in the project refers to it" % resource_path,
+				resource_path
+			)
+		)
 	var declared: Variant = null
 	if not class_name_declared.is_empty():
 		declared = class_name_declared
 	return {
 		"resource_path": resource_path,
+		"exists": exists,
 		"class_name": declared,
 		"usages": usages,
 		"summary":
@@ -357,6 +420,20 @@ func _gather_paths(deps: Array[Dictionary], root: String, into: Dictionary) -> v
 			_gather_paths(deeper, root, into)
 
 
+# Each file in [param deps] that does not exist, into [param into] with the files naming it, once
+# each however often the tree reaches them; [param parent] names the entries of [param deps].
+func _gather_missing(deps: Array[Dictionary], parent: String, into: Dictionary) -> void:
+	for dep: Dictionary in deps:
+		var path: String = str(dep.get("path", ""))
+		if not dep.get("exists", true):
+			var naming: Array = into.get_or_add(path, [])
+			if not parent in naming:
+				naming.append(parent)
+		if dep.has("dependencies"):
+			var deeper: Array[Dictionary] = dep["dependencies"]
+			_gather_missing(deeper, path, into)
+
+
 # A circular entry is not counted: it marks that the entry holding it was reached again, which that
 # entry already counts as one reference.
 func _count_recursive(deps: Array[Dictionary]) -> int:
@@ -404,13 +481,19 @@ func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk
 		# about `["res://addons/x/plugin.cfg"]` was a dependency of every project with the addon.
 		if path.get_extension() == "gd":
 			content = _code_lines(content)
+		var moved: Dictionary = _moved_by_uid(content)
 
 		for pattern: String in REFERENCE_PATTERNS:
 			var regex: RegEx = GdhPatterns.compiled(pattern)
 			for m: RegExMatch in regex.search_all(content):
 				var dep_path: String = _resolved(_referenced_path(m.get_string()), path)
+				dep_path = str(moved.get(dep_path, dep_path))
 
 				if not dep_path.begins_with("res://"):
+					continue
+				# A literal naming a directory, or the start of a path a script builds as it runs
+				# ("res://levels/" + name), names no file, and walked as one it was a missing dependency.
+				if dep_path.get_extension().is_empty():
 					continue
 
 				# Skip engine-internal resources unless requested. `addons/` is not one of
@@ -503,6 +586,27 @@ static func _resolved(written: String, from: String) -> String:
 
 
 # The path inside a preload(), load() or ext_resource match; a bare res:// match is the path.
+# The ext_resource paths in [param content] that nothing is at, each with the file its uid names
+# instead. The engine loads an ext_resource by its uid first, so a file moved outside the editor
+# still loads, and the walk called it missing; every pattern reads the old path, the bare res://
+# one included, so the paths are mapped before any of them runs.
+static func _moved_by_uid(content: String) -> Dictionary:
+	var moved: Dictionary = {}
+	for line: RegExMatch in GdhPatterns.compiled("\\[ext_resource[^\\]]*\\]").search_all(content):
+		var entry: String = line.get_string()
+		var at: RegExMatch = GdhPatterns.compiled('path="([^"]+)"').search(entry)
+		var uid: RegExMatch = GdhPatterns.compiled('uid="(uid://[^"]+)"').search(entry)
+		if at == null or uid == null or FileAccess.file_exists(at.get_string(1)):
+			continue
+		var id: int = ResourceUID.text_to_id(uid.get_string(1))
+		if id == ResourceUID.INVALID_ID or not ResourceUID.has_id(id):
+			continue
+		var found: String = ResourceUID.get_id_path(id)
+		if FileAccess.file_exists(found):
+			moved[at.get_string(1)] = found
+	return moved
+
+
 func _referenced_path(matched: String) -> String:
 	var expression: String = ""
 	if "preload" in matched or "load" in matched:

@@ -1,5 +1,6 @@
 extends RefCounted
 
+const GdhFileWalk = preload("file_walk.gd")
 const GdhLog = preload("logger.gd")
 const GdhPatterns = preload("patterns.gd")
 
@@ -29,7 +30,9 @@ func get_uid(params: Dictionary) -> Dictionary:
 
 	var absolute_path: String = ProjectSettings.globalize_path(file_path)
 	if not FileAccess.file_exists(file_path):
-		return _log.failure("File does not exist: " + file_path)
+		return _log.failure(
+			GdhFileWalk.new().with_nearest_files("File does not exist: " + file_path, file_path)
+		)
 
 	var answer: Dictionary = {"file": file_path, "absolute_path": absolute_path}
 	var found: Dictionary = uid_of(file_path)

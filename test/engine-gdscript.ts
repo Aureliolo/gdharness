@@ -706,6 +706,82 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   assert.ok(!existsSync(join(projectDir, 'made', 'doubled.gd')), 'and nothing is written');
 
+  // A header that cannot compile is refused before anything is written. FixtureHero is in no class
+  // list yet, since nothing has rebuilt one since hero.gd was made, so it is found in the script.
+  for (const [file, header, said] of [
+    [
+      'taken',
+      { class_name: 'FixtureHero', extends: 'Node' },
+      'class_name FixtureHero is taken: res://made/hero.gd declares it, and a second script of that name does not compile. Give this one another class_name, or script_edit rename the first. Nothing was written.',
+    ],
+    [
+      'engine_named',
+      { class_name: 'Node2D', extends: 'Node' },
+      'class_name Node2D is the name of an engine class, which a script cannot take. Nothing was written.',
+    ],
+    [
+      'misnamed_base',
+      { extends: 'FixtureHeroo' },
+      'extends names FixtureHeroo, which is neither an engine class nor a class_name this project declares; the nearest is FixtureHero. Nothing was written.',
+    ],
+  ] as const) {
+    const refused = runRefusedOperation(godotPath, projectDir, 'create_script', {
+      script_path: `made/${file}.gd`,
+      ...header,
+    });
+    assert.equal(refused.answer, null, `${file}: ${JSON.stringify(refused.answer)}`);
+    assert.ok(refused.stderr.includes(said), `${file}: ${refused.stderr}`);
+    assert.ok(!existsSync(join(projectDir, 'made', `${file}.gd`)), `${file}: and nothing is written`);
+  }
+
+  // An addition that would break a script that parses is the engine's to find, the base class's
+  // members and a body that does not compile among it, and the script is left as it was. One that
+  // does not parse yet is written to, since the addition can be what mends it.
+  const plain = 'extends Node2D\n\n\nfunc _ready() -> void:\n\tpass\n';
+  operation('create_script', { script_path: 'made/plain.gd', content: plain });
+  for (const [modification, reason] of [
+    [
+      { type: 'add_variable', name: 'position', varType: 'Vector2' },
+      /additions: line 3, Parse Error: Member "position" redefined \(original in native class 'Node2D'\); /,
+    ],
+    [{ type: 'add_function', name: 'stray', body: 'nowhere_at_all()' }, /line \d+, .*nowhere_at_all/],
+  ] as const) {
+    const refused = runRefusedOperation(godotPath, projectDir, 'modify_script', {
+      script_path: 'made/plain.gd',
+      modifications: [modification],
+    });
+    assert.equal(refused.answer, null, `${modification.name}: ${JSON.stringify(refused.answer)}`);
+    assert.match(
+      refused.stderr,
+      /Nothing was changed: made\/plain\.gd parses as it is and would not with these additions: /,
+      refused.stderr,
+    );
+    assert.match(refused.stderr, reason, refused.stderr);
+    assert.equal(
+      readFileSync(join(projectDir, 'made', 'plain.gd'), 'utf8'),
+      plain,
+      'and the script is as it was',
+    );
+  }
+  rmSync(join(projectDir, 'made', 'plain.gd'));
+  const unmended = runRefusedOperation(godotPath, projectDir, 'create_script', {
+    script_path: 'made/unmended.gd',
+    content: 'extends Node\n\n\nfunc _ready() -> void:\n\tmend()\n',
+  });
+  assert.equal(get(unmended.answer, 'parses'), false, JSON.stringify(unmended.answer));
+  const still = runRefusedOperation(godotPath, projectDir, 'modify_script', {
+    script_path: 'made/unmended.gd',
+    modifications: [{ type: 'add_variable', name: 'pace', varType: 'float', defaultValue: '1.0' }],
+  });
+  assert.equal(get(still.answer, 'parses'), false, `${JSON.stringify(still.answer)} ${still.stderr}`);
+  assert.match(readFileSync(join(projectDir, 'made', 'unmended.gd'), 'utf8'), /^var pace: float = 1\.0$/m);
+  const mended = runRefusedOperation(godotPath, projectDir, 'modify_script', {
+    script_path: 'made/unmended.gd',
+    modifications: [{ type: 'add_function', name: 'mend', body: 'pass' }],
+  });
+  assert.equal(get(mended.answer, 'parses'), true, `${JSON.stringify(mended.answer)} ${mended.stderr}`);
+  rmSync(join(projectDir, 'made', 'unmended.gd'));
+
   // The first variable is set apart from the header above it, and the second sits with the first.
   operation('create_script', {
     script_path: 'made/bare.gd',
@@ -913,6 +989,19 @@ function testOperations(godotPath: string, projectDir: string): void {
     'float',
     'the parser should read the type off the variable that was just added',
   );
+  // The newline ending the last line starts no line of its own, as an editor or wc counts them.
+  const countedPath = join(projectDir, 'made', 'counted.gd');
+  const counts = [
+    'extends Node\n\nvar a := 1\n',
+    'extends Node\r\n\r\nvar a := 1\r\n',
+    'extends Node\nvar a := 1',
+    '',
+  ].map((content) => {
+    writeFileSync(countedPath, content);
+    return get(operation('get_script_info', { script_path: 'made/counted.gd' }), 'line_count');
+  });
+  rmSync(countedPath);
+  assert.deepEqual(counts, [3, 3, 2, 0], 'a script counts the lines it holds');
 
   // Project settings, including the value serialisers on both the way in and the way out.
   const name = operation('get_project_setting', { setting: 'application/config/name' });
@@ -1087,11 +1176,37 @@ function testOperations(godotPath: string, projectDir: string): void {
     }
   };
 
+  // A setting nothing declares has no type to fit a number to, and JSON sends every number as a
+  // float, so a whole one was written as 800.0; one named like a declared setting is said to be.
+  const beforeNew = readFileSync(projectFile, 'utf8');
+  const widht = operation('set_project_setting', {
+    setting: 'display/window/size/viewport_widht',
+    value: 800,
+  });
+  assert.match(
+    text(get(widht, 'note')),
+    /^No setting display\/window\/size\/viewport_widht existed, so this wrote a new one, which the engine reads only where something asks for it by that name\. The nearest settings? (is|are) display\/window\/size\/viewport_width[,.]/,
+    JSON.stringify(widht),
+  );
+  assert.match(readFileSync(projectFile, 'utf8'), /^window\/size\/viewport_widht=800$/m);
+  const own = operation('set_project_setting', { setting: 'fixture_game/tempo', value: 3 });
+  assert.equal(
+    get(own, 'note'),
+    undefined,
+    `a section nothing declares has nothing to be near: ${JSON.stringify(own)}`,
+  );
+  assert.match(readFileSync(projectFile, 'utf8'), /^\[fixture_game\]\n\ntempo=3$/m);
+  writeFileSync(projectFile, beforeNew);
+
   // Autoloads are written into project.godot by hand, so the round trip is the only proof.
   const beforeAutoload = readFileSync(projectFile, 'utf8');
   const added = operation('add_autoload', { name: 'Hero', path: 'made/hero.gd' });
   assert.equal(get(added, 'action'), 'added');
   keptWhole(beforeAutoload, readFileSync(projectFile, 'utf8'), 'adding an autoload');
+  const withHero = readFileSync(projectFile, 'utf8');
+  const again = operation('add_autoload', { name: 'Hero', path: 'made/hero.gd' });
+  assert.deepEqual([get(again, 'action'), get(again, 'saved')], ['unchanged', false], JSON.stringify(again));
+  assert.equal(readFileSync(projectFile, 'utf8'), withHero, 'and the file is left as it was');
   const hero = named(get(operation('list_autoloads', {}), 'autoloads'), 'Hero');
   assert.ok(hero, 'the autoload that was just added should be listed');
   assert.deepEqual(
@@ -1126,6 +1241,15 @@ function testOperations(godotPath: string, projectDir: string): void {
 
   // The main scene is a project setting with a file behind it, so both halves are checked.
   writeFixtureScene(projectDir);
+  const notAScene = runRefusedOperation(godotPath, projectDir, 'set_main_scene', {
+    scene_path: 'made/hero.gd',
+  });
+  assert.equal(notAScene.answer, null, JSON.stringify(notAScene.answer));
+  assert.match(
+    notAScene.stderr,
+    /res:\/\/made\/hero\.gd is a GDScript, not a scene, and the main scene has to be one\. .*res:\/\/fixture_scene\.tscn/,
+    notAScene.stderr,
+  );
   assert.equal(get(operation('set_main_scene', { scene_path: 'fixture_scene.tscn' }), 'saved'), true);
   assert.equal(
     get(operation('get_project_setting', { setting: 'application/run/main_scene' }), 'value'),
@@ -1275,7 +1399,11 @@ function testOperations(godotPath: string, projectDir: string): void {
 
   const validation = operation('validate_project', {});
   assert.ok(asArray(get(validation, 'checks_performed')).includes('main_scene'));
-  assert.equal(get(validation, 'valid'), true, 'the main scene was set above, so the project validates');
+  assert.equal(
+    get(validation, 'valid'),
+    true,
+    `the main scene was set above, so the project validates: ${JSON.stringify(get(validation, 'issues'))}`,
+  );
   assert.ok(
     asArray(get(validation, 'warnings')).some((warning) => get(warning, 'check') === 'export_presets'),
     'a project with no export presets should be warned about',
@@ -1442,7 +1570,14 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
 
   // The chain the dependency walk was pointed at is also what refers to leaf.gd, and each
-  // reference says how: middle.gd preloads it.
+  // reference says how: middle.gd preloads it. Written here as dependencyWalk writes them, so the
+  // case reads the same files when it runs on its own.
+  mkdirSync(join(projectDir, 'chain'), { recursive: true });
+  writeFileSync(join(projectDir, 'chain', 'leaf.gd'), 'extends Node\n');
+  writeFileSync(
+    join(projectDir, 'chain', 'middle.gd'),
+    'extends Node\n\nconst Leaf = preload("res://chain/leaf.gd")\n',
+  );
   const usages = operation('find_resource_usages', { resource_path: 'chain/leaf.gd' });
   const middle = asArray(get(usages, 'usages')).find(
     (entry) => get(entry, 'file') === 'res://chain/middle.gd',
@@ -1713,6 +1848,26 @@ function testOperations(godotPath: string, projectDir: string): void {
     asArray(get(accept, 'old_events')).some((event) => String(get(event, 'text')).includes('Enter')),
     `the engine binds ui_accept to Enter: ${JSON.stringify(accept)}`,
   );
+  // What project.godot holds, the project's own and an engine action it rebinds, and none of the
+  // engine's that it leaves alone.
+  const actions = asArray(get(operation('list_input_actions', {}), 'actions'));
+  const listedAction = (name: string): unknown => actions.find((entry) => get(entry, 'name') === name);
+  assert.deepEqual(
+    [
+      get(listedAction('fixture_jump'), 'deadzone'),
+      get(listedAction('fixture_jump'), 'events', 0, 'keycode'),
+      get(listedAction('fixture_jump'), 'engineAction'),
+      get(listedAction('ui_accept'), 'events', 0, 'keycode'),
+      get(listedAction('ui_accept'), 'engineAction'),
+    ],
+    [0.2, 87, false, 69, true],
+    JSON.stringify(actions),
+  );
+  assert.equal(
+    listedAction('ui_cancel'),
+    undefined,
+    `an engine action left alone is not listed: ${JSON.stringify(actions)}`,
+  );
   writeFileSync(projectFile, beforeUi);
   // A name the Input Map would refuse, and a key no name reaches, are refused with what is taken.
   const quoted = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
@@ -1981,6 +2136,164 @@ function testOperations(godotPath: string, projectDir: string): void {
     /Class not found: FixtureNobody\. editor_classes reads the engine's ClassDB/,
     nowhere.stderr,
   );
+  // A letter short of an engine class is offered the class, as the usual miss is a spelling.
+  const misspelt = runRefusedOperation(godotPath, projectDir, 'query_class_info', {
+    class_name: 'CharacterBody2',
+  });
+  assert.match(
+    misspelt.stderr,
+    /Class not found: CharacterBody2\. The nearest engine classes are CharacterBody2D, CharacterBody3D[,.].* editor_classes reads the engine's ClassDB/,
+    misspelt.stderr,
+  );
+}
+
+/**
+ * A reference is missing only where the engine would fail to load it, and a missing one is named
+ * in the summary as well as in the tree.
+ *
+ * Two shapes were called missing that load: an ext_resource whose path is stale and whose uid the
+ * cache resolves, which is how a file moved outside the editor still loads, and a literal that is
+ * a directory or the start of a path a script builds as it runs. A file that is really gone was one
+ * `exists: false` deep in the tree, which a caller reading the summary never met.
+ */
+function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _projectDir: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  const importAll = (): void => {
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180_000,
+    });
+    assert.equal(run.status, 0, `the project should import: ${run.stdout}\n${run.stderr}`);
+  };
+  try {
+    writeFileSync(join(dir, 'leaf.gd'), 'extends Node\n');
+    importAll();
+    const uid = readFileSync(join(dir, 'leaf.gd.uid'), 'utf8').trim();
+    assert.match(uid, /^uid:\/\/[a-z0-9]+$/, 'the import mints the script a uid');
+    // Moved with its sidecar and imported again, so the cache has the uid at the new place while
+    // the scene still names the old one.
+    mkdirSync(join(dir, 'moved'));
+    for (const name of ['leaf.gd', 'leaf.gd.uid']) {
+      writeFileSync(join(dir, 'moved', name), readFileSync(join(dir, name)));
+      rmSync(join(dir, name));
+    }
+    writeFileSync(
+      join(dir, 'stage.tscn'),
+      `[gd_scene format=3]\n\n[ext_resource type="Script" uid="${uid}" path="res://leaf.gd" id="1_leaf"]\n[ext_resource type="Texture2D" path="res://gone.png" id="2_gone"]\n\n[node name="Stage" type="Node"]\nscript = ExtResource("1_leaf")\n`,
+    );
+    writeFileSync(
+      join(dir, 'top.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://stage.tscn" id="1_stage"]\n\n[node name="Top" type="Node"]\n\n[node name="Stage" parent="." instance=ExtResource("1_stage")]\n',
+    );
+    writeFileSync(
+      join(dir, 'walker.gd'),
+      'extends Node\n\nconst Leaf = preload("res://moved/leaf.gd")\n\n\nfunc level(n: int) -> String:\n\treturn "res://levels/" + str(n) + ".tscn"\n',
+    );
+    importAll();
+
+    const stage = operation('get_dependencies', { resource_path: 'res://stage.tscn' });
+    assert.deepEqual(
+      asArray(get(stage, 'dependencies', 'res://stage.tscn')).map((dep) => [
+        get(dep, 'path'),
+        get(dep, 'exists'),
+      ]),
+      [
+        ['res://moved/leaf.gd', true],
+        ['res://gone.png', false],
+      ],
+      `the moved script is followed by its uid and the gone image is missing: ${JSON.stringify(stage)}`,
+    );
+    const top = operation('get_dependencies', { resource_path: 'res://top.tscn' });
+    assert.deepEqual(
+      get(top, 'summary', 'missing'),
+      [{ path: 'res://gone.png', referenced_by: ['res://stage.tscn'] }],
+      `the summary names the missing file and the scene that refers to it, not the one asked about: ${JSON.stringify(top)}`,
+    );
+    const walker = operation('get_dependencies', { resource_path: 'res://walker.gd' });
+    assert.deepEqual(
+      asArray(get(walker, 'dependencies', 'res://walker.gd')).map((dep) => get(dep, 'path')),
+      ['res://moved/leaf.gd'],
+      `a path built at run time is no dependency: ${JSON.stringify(walker)}`,
+    );
+    assert.deepEqual(get(walker, 'summary', 'missing'), [], 'and nothing is missing from it');
+
+    // A path nothing is at is refused with the files of its kind nearest it, or every one of few.
+    assert.match(
+      runRefusedOperation(godotPath, dir, 'get_dependencies', { resource_path: 'res://stagee.tscn' }).stderr,
+      /Resource file does not exist: res:\/\/stagee\.tscn\. The nearest \.tscn file is res:\/\/stage\.tscn\./,
+    );
+    assert.match(
+      runRefusedOperation(godotPath, dir, 'get_import_status', { resource_path: 'res://qq.tscn' }).stderr,
+      /Nothing is at res:\/\/qq\.tscn, and no import sidecar names it\. The project's \.tscn files are res:\/\/stage\.tscn, res:\/\/top\.tscn\./,
+    );
+    assert.match(
+      runRefusedOperation(godotPath, dir, 'find_resource_usages', { resource_path: 'res://glow.gdshader' })
+        .stderr,
+      /Resource file does not exist: res:\/\/glow\.gdshader, and nothing in the project refers to it\. The project holds no \.gdshader file\./,
+    );
+    // A gone file something still refers to is searched for, since that is what is asked of one.
+    const gone = operation('find_resource_usages', { resource_path: 'res://gone.png' });
+    assert.deepEqual(
+      [
+        get(gone, 'exists'),
+        asArray(get(gone, 'usages')).map((usage) => [
+          get(usage, 'file'),
+          asArray(get(usage, 'references')).map((reference) => get(reference, 'kind')),
+        ]),
+      ],
+      [false, [['res://stage.tscn', ['ext_resource']]]],
+      JSON.stringify(gone),
+    );
+    // Every operation that reads a named file refuses one that is not there the same way. A script
+    // named unlike the operations and addons this project carries, which are scripts of it too.
+    writeFileSync(join(dir, 'zebra_pen.gd'), 'extends Node\n');
+    const nearStage = 'The nearest .tscn file is res://stage.tscn.';
+    const nearZebra = 'The nearest .gd file is res://zebra_pen.gd.';
+    for (const [name, params, said] of [
+      [
+        'set_main_scene',
+        { scene_path: 'res://stagee.tscn' },
+        `Scene file does not exist: res://stagee.tscn. ${nearStage}`,
+      ],
+      [
+        'get_uid',
+        { resource_path: 'res://stagee.tscn' },
+        `File does not exist: res://stagee.tscn. ${nearStage}`,
+      ],
+      [
+        'add_autoload',
+        { name: 'Zebra', path: 'res://zebra_pn.gd' },
+        `Autoload file does not exist: res://zebra_pn.gd. ${nearZebra}`,
+      ],
+      [
+        'get_script_info',
+        { script_path: 'res://zebra_pn.gd' },
+        `Script file does not exist: res://zebra_pn.gd. ${nearZebra}`,
+      ],
+      [
+        'modify_script',
+        { script_path: 'res://zebra_pn.gd', modifications: [{ type: 'add_signal', name: 'went' }] },
+        `Script file does not exist: res://zebra_pn.gd. ${nearZebra}`,
+      ],
+    ] as const) {
+      const refused = runRefusedOperation(godotPath, dir, name, params).stderr;
+      assert.ok(refused.includes(said), `${name}: ${refused}`);
+    }
+    mkdirSync(join(dir, 'pile'));
+    for (let at = 0; at < 13; at += 1) {
+      writeFileSync(
+        join(dir, 'pile', `p${at}.tres`),
+        '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+      );
+    }
+    assert.match(
+      runRefusedOperation(godotPath, dir, 'get_dependencies', { resource_path: 'res://zzzz.tres' }).stderr,
+      /Resource file does not exist: res:\/\/zzzz\.tres\. None of the project's 13 \.tres files is named like it\./,
+    );
+  } finally {
+    sweep(dir);
+  }
 }
 
 /**
@@ -3732,6 +4045,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   operations: testOperations,
   gdignore: testAGdignoreStopsTheWalk,
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
+  referencesMissing: testAReferenceIsMissingOnlyWhereTheEngineMissesIt,
   fontFeatures: testAFontsFeaturesAreWrittenAsTheEngineReadsThem,
   importerFirst: (godotPath) => {
     testTheImporterIsAskedFirst(godotPath);

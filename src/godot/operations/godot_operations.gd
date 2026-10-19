@@ -277,6 +277,8 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = GdhInputActions.new(_log).add_input_action(params)
 		"remove_input_action":
 			payload = GdhInputActions.new(_log).remove_input_action(params)
+		"list_input_actions":
+			payload = GdhInputActions.new(_log).list_input_actions(params)
 
 		# Audio
 		"create_audio_bus":

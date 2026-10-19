@@ -183,13 +183,23 @@ func _not_found(wanted: String) -> Dictionary:
 					)
 				)
 			)
+	# The usual miss is a spelling, one letter off a class the engine has.
+	var close: PackedStringArray = GdhRead.nearest(wanted, ClassDB.get_class_list())
+	var offered: String = (
+		""
+		if close.is_empty()
+		else (
+			" The nearest engine %s %s."
+			% ["class is" if close.size() == 1 else "classes are", ", ".join(close)]
+		)
+	)
 	return _log.failure(
 		(
 			(
-				"Class not found: %s. editor_classes reads the engine's ClassDB, so a class_name a project "
-				+ "script declares is not in it either; script_info structure reads one."
+				"Class not found: %s.%s editor_classes reads the engine's ClassDB, so a class_name a "
+				+ "project script declares is not in it either; script_info structure reads one."
 			)
-			% wanted
+			% [wanted, offered]
 		)
 	)
 

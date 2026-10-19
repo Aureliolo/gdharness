@@ -247,6 +247,42 @@ static func _shaped(event: InputEvent) -> Dictionary:
 	return shaped
 
 
+## The input actions project.godot holds, each with its deadzone and events in the form
+## add_input_action answers with. An engine ui_ action is listed only when the project rebinds it,
+## as engineAction, since the engine's own eighty are there in every project.
+func list_input_actions(_params: Dictionary) -> Dictionary:
+	var actions: Array[Dictionary] = []
+	for info: Dictionary in ProjectSettings.get_property_list():
+		var setting: String = str(info.get("name", ""))
+		if not setting.begins_with("input/"):
+			continue
+		var engine_default: Variant = ProjectSettings.property_get_revert(setting)
+		var held: Variant = ProjectSettings.get_setting(setting)
+		if engine_default != null and held == engine_default:
+			continue
+		var action: Dictionary = held if held is Dictionary else {}
+		var events: Array[Dictionary] = []
+		var listed: Variant = action.get("events", [])
+		if listed is Array:
+			var bound: Array = listed
+			for event: Variant in bound:
+				if event is InputEvent:
+					var shaped: InputEvent = event
+					events.append(_shaped(shaped))
+		(
+			actions
+			. append(
+				{
+					"name": setting.trim_prefix("input/"),
+					"deadzone": GdhRead.as_float(action.get("deadzone", 0.5), 0.5),
+					"events": events,
+					"engineAction": engine_default != null,
+				}
+			)
+		)
+	return {"actions": actions, "count": actions.size()}
+
+
 # Remove an input action the project defines, which add_input_action had no way back from.
 func remove_input_action(params: Dictionary) -> Dictionary:
 	var action_name: String = str(params.get("action_name", ""))

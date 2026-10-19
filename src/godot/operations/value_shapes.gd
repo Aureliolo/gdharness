@@ -82,6 +82,13 @@ static func spare(fields: Dictionary, tag: String) -> Array:
 ##
 ## The refusal names only the two types, and the key is what the caller has to take out.
 static func remedy(value: Variant, type: int) -> String:
+	if type == TYPE_STRING and typeof(value) in [TYPE_BOOL, TYPE_INT, TYPE_FLOAT]:
+		var number: Variant = value
+		if value is float:
+			var whole: float = value
+			if is_finite(whole) and whole == floorf(whole):
+				number = int(whole)
+		return ' Text is sent in quotes, as "%s".' % str(number)
 	var shape: String = written_as(type)
 	if shape.is_empty():
 		return ""

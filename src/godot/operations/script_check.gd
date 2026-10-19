@@ -54,6 +54,22 @@ func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
+## One line for [param failure], a script [method check_scripts] answered as failing, with its
+## first error and the note the server put on it.
+static func failure_line(failure: Dictionary) -> String:
+	var errors: Array = failure.get("errors", [])
+	var said: String = "%s does not compile" % str(failure.get("path", ""))
+	if not errors.is_empty():
+		var first: Dictionary = errors[0]
+		var line: int = GdhRead.as_int(first.get("line", 0))
+		var message: String = str(first.get("message", ""))
+		said += ": line %d, %s" % [line, message] if line > 0 else ": " + message
+		if errors.size() > 1:
+			said += " (and %d more)" % (errors.size() - 1)
+	var note: String = str(failure.get("note", ""))
+	return said if note.is_empty() else "%s %s" % [said, note]
+
+
 ## Whether the scripts in [code]paths[/code] compile in a fresh engine, which reads the class cache
 ## as it starts and so resolves every class the cache lists, up to and including the first that
 ## raised an error. [code]checked[/code] names the scripts read, in order, and [code]failed[/code]

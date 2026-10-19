@@ -1,5 +1,7 @@
 extends RefCounted
 
+const GdhRead = preload("reading.gd")
+
 # Two walks rather than one because they disagree about hidden entries on purpose: a suffix
 # walk descends into every visible directory and matches whole names, while the extension walk
 # skips anything beginning with a dot, including .import sidecars that would otherwise answer
@@ -28,6 +30,38 @@ static func missing_reason(path: String) -> String:
 			"" if FileAccess.file_exists(resolved) else path + " names " + resolved + ", which does not exist"
 		)
 	return "" if FileAccess.file_exists(path) else path + " does not exist"
+
+
+## [param said], the refusal for [param path], a res:// path nothing is at, with the files of its
+## extension whose names are nearest its own, or every one when there are few and none is near, so
+## the caller has a path to send instead.
+func with_nearest_files(said: String, path: String) -> String:
+	var extension: String = path.get_extension()
+	if extension.is_empty():
+		return said
+	var files: Array[String] = find_files_with_extensions("res://", [extension])
+	# The walk lists a directory in the order the filesystem keeps it, which differs between
+	# platforms, so the same project was answered with its files in another order on Linux.
+	files.sort()
+	if files.is_empty():
+		return "%s. The project holds no .%s file." % [said, extension]
+	var names: PackedStringArray = []
+	for file: String in files:
+		var _named: bool = names.append(file.get_file().get_basename())
+	var close: PackedStringArray = GdhRead.nearest(path.get_file().get_basename(), names)
+	var offered: PackedStringArray = []
+	for file: String in files:
+		if file.get_file().get_basename() in close:
+			var _offered: bool = offered.append(file)
+	if not offered.is_empty():
+		var one: bool = offered.size() == 1
+		return (
+			"%s. The nearest .%s %s %s."
+			% [said, extension, "file is" if one else "files are", ", ".join(offered)]
+		)
+	if files.size() <= GdhRead.NAMED_CHILDREN:
+		return "%s. The project's .%s files are %s." % [said, extension, ", ".join(files)]
+	return "%s. None of the project's %d .%s files is named like it." % [said, files.size(), extension]
 
 
 # A directory the engine steps over, marker file and all.

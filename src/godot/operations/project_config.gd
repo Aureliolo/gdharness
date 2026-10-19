@@ -1,5 +1,6 @@
 extends RefCounted
 
+const GdhFileWalk = preload("file_walk.gd")
 const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhProjectFile = preload("project_file.gd")
@@ -125,6 +126,12 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		if not _converts_faithfully(final_value, wanted):
 			return _log.failure(_cannot_hold(setting_path, wanted, final_value))
 		final_value = type_convert(final_value, wanted)
+	# JSON carries every number as a float and a new setting has no declared type to fit one to, so a
+	# whole number was saved as 800.0 beside an answer saying 800.
+	if not had_value and wanted == TYPE_NIL and final_value is float:
+		var number: float = final_value
+		if number == floorf(number) and absf(number) < 9.0e15:
+			final_value = int(number)
 
 	var answer: Dictionary = {
 		"setting_path": setting_path,
@@ -141,11 +148,34 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		answer["unchanged"] = true
 		return answer
 
+	var near: PackedStringArray = []
+	if not had_value:
+		near = _settings_near(setting_path)
+	if not near.is_empty():
+		answer["note"] = (
+			(
+				"No setting %s existed, so this wrote a new one, which the engine reads only where"
+				+ " something asks for it by that name. The nearest %s %s."
+			)
+			% [setting_path, "setting is" if near.size() == 1 else "settings are", ", ".join(near)]
+		)
 	ProjectSettings.set_setting(setting_path, final_value)
 	var err: Error = GdhProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 	return answer
+
+
+# The settings in the same section as [param setting_path] named nearest it, for a new one that is
+# likely a misspelt one: a setting nothing declares is written all the same, and is never read.
+static func _settings_near(setting_path: String) -> PackedStringArray:
+	var section: String = setting_path.get_slice("/", 0) + "/"
+	var names: PackedStringArray = []
+	for info: Dictionary in ProjectSettings.get_property_list():
+		var name: String = str(info.get("name", ""))
+		if name.begins_with(section) and name != setting_path:
+			var _added: bool = names.append(name)
+	return GdhRead.nearest(setting_path, names)
 
 
 # The type a setting wants, or TYPE_NIL where the engine names none and there is nothing to go on.
@@ -215,7 +245,9 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	_log.info("Adding autoload: " + name + " -> " + path)
 
 	if not FileAccess.file_exists(path):
-		return _log.failure("Autoload file does not exist: " + path)
+		return _log.failure(
+			GdhFileWalk.new().with_nearest_files("Autoload file does not exist: " + path, path)
+		)
 
 	# Through ProjectSettings so the file is saved the way the editor saves it, which includes
 	# putting Godot's header back and dropping any comment somebody wrote into the file by hand.
@@ -225,7 +257,17 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	# An asterisk in front of the path makes the autoload's name a global variable, the editor's
 	# "Global Variable" column. Without it the node still comes up under the root; only the name
 	# stops resolving.
-	ProjectSettings.set_setting(setting, ("*" if global else "") + path)
+	var entry: String = ("*" if global else "") + path
+	if was_updated and str(ProjectSettings.get_setting(setting)) == entry:
+		return {
+			"name": name,
+			"path": path,
+			"enabled": true,
+			"global": global,
+			"action": "unchanged",
+			"saved": false
+		}
+	ProjectSettings.set_setting(setting, entry)
 	var err: Error = GdhProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
@@ -236,6 +278,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 		"enabled": true,
 		"global": global,
 		"action": "updated" if was_updated else "added",
+		"saved": true,
 	}
 
 
@@ -295,7 +338,20 @@ func set_main_scene(params: Dictionary) -> Dictionary:
 	_log.info("Setting main scene: " + scene_path)
 
 	if not FileAccess.file_exists(scene_path):
-		return _log.failure("Scene file does not exist: " + scene_path)
+		return _log.failure(
+			GdhFileWalk.new().with_nearest_files("Scene file does not exist: " + scene_path, scene_path)
+		)
+
+	# The engine starts the game by instancing the main scene, so a script or any other resource set
+	# there was saved and answered as set, and the game then would not start.
+	if not ResourceLoader.exists(scene_path, "PackedScene"):
+		var loaded: Resource = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+		var kind: String = loaded.get_class() if loaded != null else ""
+		var said: String = (
+			"%s is %s, not a scene, and the main scene has to be one"
+			% [scene_path, "a " + kind if not kind.is_empty() else "no resource the engine loads"]
+		)
+		return _log.failure(GdhFileWalk.new().with_nearest_files(said, scene_path.get_basename() + ".tscn"))
 
 	var old_main_scene: String = str(ProjectSettings.get_setting("application/run/main_scene", ""))
 

@@ -345,6 +345,25 @@ export function ignoredTexts(projectPath: string): ProjectText[] {
   return found;
 }
 
+/**
+ * The first place [param needle] (lowered unless [param caseSensitive]) occurs in [param line], as
+ * the line spells it, or null. The text found rather than the query: a search for "Item" answered
+ * `match: "Item"` on a line holding only `item.gd`.
+ */
+function plainMatch(line: string, needle: string, caseSensitive: boolean): [string] | null {
+  if (caseSensitive) {
+    return line.includes(needle) ? [needle] : null;
+  }
+  const lowered = line.toLowerCase();
+  const at = lowered.indexOf(needle);
+  if (at < 0) {
+    return null;
+  }
+  // Lowering can change a line's length ("İ" becomes two characters), and then the offsets
+  // found in the lowered line do not land in the original, which is answered as lowered instead.
+  return [lowered.length === line.length ? line.slice(at, at + needle.length) : needle];
+}
+
 /** Where the query occurs in the project's text files, as res:// paths with line numbers. */
 export function searchProject(projectPath: string, options: SearchOptions): SearchResult {
   const extensions =
@@ -395,11 +414,7 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       // Split on either ending, so `$` in a pattern meets the end of a line in a CRLF checkout.
       for (const [index, line] of bytes.toString('utf8').split(/\r?\n/).entries()) {
         // Found or not, rather than by what it matched: a lookahead matches the empty string.
-        const found = regex
-          ? regex.exec(line)
-          : (options.caseSensitive ? line : line.toLowerCase()).includes(needle)
-            ? [options.query]
-            : null;
+        const found = regex ? regex.exec(line) : plainMatch(line, needle, options.caseSensitive);
         if (found === null) {
           continue;
         }
@@ -407,7 +422,7 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
           result.summary.truncated = true;
           break;
         }
-        matches.push({ line: index + 1, content: line.trim(), match: found[0] ?? '' });
+        matches.push({ line: index + 1, content: line.trim(), match: found[0] });
         result.summary.total_matches += 1;
       }
       if (matches.length > 0) {
