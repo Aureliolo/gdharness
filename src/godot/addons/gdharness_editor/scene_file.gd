@@ -29,8 +29,8 @@ const GdhHeadlessCheck = preload("headless_check.gd")
 
 ## How many times what scripts changed is put back before a write is refused for it.
 const PUTTING_BACK_PASSES: int = 4
-const GdhPropertyValues = preload("property_values.gd")
 const GdhRead = preload("reading.gd")
+const GdhSame = preload("same_values.gd")
 ## The names Object.ConnectFlags gives each bit. The number alone left a reader guessing that 2 is
 ## the persistence every connection in a saved scene carries.
 const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
@@ -539,7 +539,7 @@ func kept(saved: Node, loaded: Variant, given: Variant) -> bool:
 		var loaded_node: Node = loaded
 		var given_node: Node = given
 		return str(saved.get_path_to(loaded_node)) == str(root.get_path_to(given_node))
-	return GdhPropertyValues.same(loaded, given)
+	return GdhSame.same(loaded, given)
 
 
 ## Packs [member root], has [param check] read the result as the file will hold it, and writes the
@@ -867,7 +867,7 @@ func _strays(state: SceneState) -> Array[Array]:
 		for key: Variant in names:
 			var name: String = str(key)
 			var held: bool = filed.has(name)
-			if held == stored.has(name) and (not held or GdhPropertyValues.same(stored[name], filed[name])):
+			if held == stored.has(name) and (not held or GdhSame.same(stored[name], filed[name])):
 				continue
 			if not held and GdhHeadlessCheck.at_default(node, name):
 				continue

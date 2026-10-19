@@ -58,12 +58,46 @@ static func enum_named(choices: Dictionary, word: String) -> Variant:
 	return null
 
 
-static func enum_refusal(holder: String, property: String, word: String, choices: Dictionary) -> String:
+## The values of the engine enum [param property] of [param target] holds, by the constants its
+## class declares them as: blend_mode's Add is BLEND_MODE_ADD in a script, and the hint gives only
+## the inspector's word. Empty for an enum a script declares.
+##
+## The enum is named by the setter's argument, as Node.ProcessMode, since the property list gives
+## an engine enum property no class of its own.
+static func engine_constants(target: Object, property: String) -> Dictionary:
+	var values: Dictionary = {}
+	var engine_class: String = target.get_class()
+	var setter: String = str(ClassDB.class_get_property_setter(engine_class, property))
+	if setter.is_empty():
+		return values
+	var named: String = ""
+	for method: Dictionary in ClassDB.class_get_method_list(engine_class):
+		var arguments: Array = method.get("args", [])
+		if str(method.get("name", "")) == setter and not arguments.is_empty():
+			var value_argument: Dictionary = arguments[-1]
+			named = str(value_argument.get("class_name", ""))
+			break
+	var holder: String = named.get_slice(".", 0)
+	if named.count(".") != 1 or not ClassDB.class_exists(holder):
+		return values
+	for constant: String in ClassDB.class_get_enum_constants(holder, named.get_slice(".", 1)):
+		values[constant] = ClassDB.class_get_integer_constant(holder, constant)
+	return values
+
+
+static func enum_refusal(
+	holder: String, property: String, word: String, choices: Dictionary, constants: Dictionary = {}
+) -> String:
+	var ways: String = "by name or by number"
+	if not constants.is_empty():
+		ways = "by name, by number or by the engine's constant, such as %s" % str(constants.keys()[0])
 	var said: String = (
-		"%s.%s is an enum, and %s is none of its values: send %s by name or by number"
-		% [holder, property, word, _listed(choices)]
+		"%s.%s is an enum, and %s is none of its values: send %s %s"
+		% [holder, property, word, _listed(choices), ways]
 	)
-	var close: PackedStringArray = GdhRead.nearest(word, PackedStringArray(choices.keys()))
+	var named: PackedStringArray = PackedStringArray(choices.keys())
+	named.append_array(PackedStringArray(constants.keys()))
+	var close: PackedStringArray = GdhRead.nearest(word, named)
 	if close.is_empty():
 		return said + "."
 	return said + ". The nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]

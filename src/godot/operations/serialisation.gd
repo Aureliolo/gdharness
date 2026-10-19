@@ -673,7 +673,17 @@ func _serialize_object(value: Object) -> Variant:
 		# file can refer to.
 		if resource.resource_path.is_empty() or resource.resource_path.contains("::"):
 			return _describe_built_in(resource)
-		return {"path": resource.resource_path, "class": resource.get_class(), "_type": "Resource"}
+		var filed: Dictionary = {
+			"path": resource.resource_path, "class": resource.get_class(), "_type": "Resource"
+		}
+		# The engine class of a resource with a script is the one its script extends, so a Stats
+		# file read as a Resource and nothing said it was a Stats.
+		var attached: Variant = resource.get_script()
+		if attached is Script:
+			var script: Script = attached
+			if not script.get_global_name().is_empty():
+				filed["scriptClass"] = str(script.get_global_name())
+		return filed
 	if value is Node:
 		var node: Node = value
 		if node.is_inside_tree():

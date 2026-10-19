@@ -10,6 +10,7 @@ const GdhPaths = preload("scene_paths.gd")
 const GdhPlacing = preload("scene_placing.gd")
 const GdhPropertyValues = preload("../property_values.gd")
 const GdhResourceTools = preload("resource_tools.gd")
+const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSerialisation = preload("../serialisation.gd")
 
@@ -72,7 +73,7 @@ func _properties_of(node: Node, include_defaults: bool, set_here: Dictionary) ->
 				if scripted.has(property)
 				else ClassDB.class_get_property_default_value(node.get_class(), property)
 			)
-			if GdhPropertyValues.same(value, default):
+			if GdhSame.same(value, default):
 				continue
 		props[property] = _readable(node, value)
 	return props

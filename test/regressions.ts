@@ -38962,8 +38962,8 @@ function testEveryToolNamedInProseIsATool(): void {
   // bridge sends the addon, the autoload the runtime installs, a section of project.godot, the
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
-  // export_presets.cfg, the directory a self-contained editor keeps its data in and the file the
-  // editor caches its class reference in. Named one
+  // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
+  // editor caches its class reference in and the name every resource stores. Named one
   // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
   // and called a tool or called vocabulary.
   const notTools = new Set([
@@ -38990,6 +38990,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'script_export_mode',
     'editor_data',
     'editor_doc_cache',
+    'resource_name',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
@@ -39385,7 +39386,8 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     join(project, 'item_data.gd'),
     'class_name ItemData\nextends Resource\n\nenum Kind { SWORD, SHIELD, POTION }\n\n' +
       '@export var title: String = ""\n@export var kind: Kind = Kind.SWORD\n@export var tags: Array[String] = []\n' +
-      '@export var icon: Texture2D\n@export_range(0, 10) var rarity: int = 0\n@export_range(0, 10, 1, "or_greater") var level: int = 0\n',
+      '@export var icon: Texture2D\n@export_range(0, 10) var rarity: int = 0\n@export_range(0, 10, 1, "or_greater") var level: int = 0\n' +
+      '@export var growth: Curve\n',
   );
   writeFileSync(
     join(project, 'icon.svg'),
@@ -39619,13 +39621,58 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     assert.ok(parseTextContent(lit) !== null, textOf(lit) ?? JSON.stringify(lit));
     assert.match(readFileSync(join(project, 'glow.tres'), 'utf8'), /^shader_parameter\/glow_power = 1\.5$/m);
 
+    // A resource built into a file is a new object each time the file loads, and the check that a
+    // save kept what was set compared objects, so every one written into a resource file was
+    // refused as a property the file does not keep.
+    await written({ growth: { _type: 'Curve', max_value: 50 } });
+    assert.match(file(), /^growth = SubResource\("[^"]+"\)$/m);
+    assert.match(file(), /^_limits = \[0\.0, 50\.0, 0\.0, 1\.0\]$/m);
+    const grown = parseTextContent(
+      await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' }),
+    );
+    assert.deepEqual(get(grown, 'properties', 'growth'), { _type: 'Curve', _limits: [0, 50, 0, 1] });
+    await written({ growth: get(grown, 'properties', 'growth') });
+    // Comparing built-in resources by what they hold meets one that holds itself, and has to end.
+    // The check after the save compares the one set with the one the file loads, two objects that
+    // each hold themselves, which only a script can make: this one's setter links the ring to
+    // itself.
+    writeFileSync(join(project, 'link.gd'), 'extends Resource\n\n@export var next: Resource\n');
+    writeFileSync(
+      join(project, 'ring.gd'),
+      'extends Resource\n\n@export var label: String = "":\n\tset(value):\n\t\tlabel = value\n\t\tnext = self\n' +
+        '@export var next: Resource\n',
+    );
+    writeFileSync(
+      join(project, 'chain.tres'),
+      '[gd_resource type="Resource" load_steps=2 format=3]\n\n' +
+        '[ext_resource type="Script" path="res://link.gd" id="1_link"]\n\n' +
+        '[resource]\nscript = ExtResource("1_link")\n',
+    );
+    const ringed = await request('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://chain.tres',
+      properties: { next: { _type: 'Resource', script: 'res://ring.gd', label: 'ring' } },
+    });
+    assert.ok(parseTextContent(ringed) !== null, textOf(ringed) ?? JSON.stringify(ringed));
+    const chain = readFileSync(join(project, 'chain.tres'), 'utf8');
+    const ring = /^\[sub_resource type="Resource" id="([^"]+)"\]$/m.exec(chain)?.[1];
+    assert.ok(ring, chain);
+    assert.equal(chain.split(`next = SubResource("${ring}")`).length, 3, chain);
+
+    // Only a file resource with a script that declares a class names one; ItemData is below.
+    assert.deepEqual(get(grown, 'properties', 'icon'), {
+      path: 'res://icon.svg',
+      class: 'CompressedTexture2D',
+      _type: 'Resource',
+    });
+
     // A refused value on a node whose script declares a class_name says only what was wrong with
     // the value. The check for a script that does not compile compiled a copy of it, and a copy of
     // a script with a class_name hides the global class the original declares, so every such
     // script was said not to compile.
     writeFileSync(
       join(project, 'player.gd'),
-      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n',
+      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n@export var item: Resource\n',
     );
     writeFileSync(
       join(project, 'hero.tscn'),
@@ -39646,6 +39693,34 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     const fast = await request('scene_node', { ...hero, properties: { speed: 300 } });
     assert.ok(parseTextContent(fast) !== null, textOf(fast) ?? JSON.stringify(fast));
     assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^speed = 300\.0$/m);
+
+    // An engine enum is written in scripts by its class's constant, which the hint does not give.
+    const floating = await request('scene_node', {
+      ...hero,
+      properties: { motion_mode: 'MOTION_MODE_FLOATING' },
+    });
+    assert.ok(parseTextContent(floating) !== null, textOf(floating) ?? JSON.stringify(floating));
+    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^motion_mode = 1$/m);
+    const glowing = await request('scene_node', {
+      ...hero,
+      properties: { material: { _type: 'CanvasItemMaterial', blend_mode: 'BLEND_MODE_ADD' } },
+    });
+    assert.ok(parseTextContent(glowing) !== null, textOf(glowing) ?? JSON.stringify(glowing));
+    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^blend_mode = 1$/m);
+    assert.equal(
+      textOf(await request('scene_node', { ...hero, properties: { motion_mode: 'MOTION_MODE_FLYING' } })),
+      "Player.motion_mode is an enum, and MOTION_MODE_FLYING is none of its values: send Grounded (0), Floating (1) by name, by number or by the engine's constant, such as MOTION_MODE_GROUNDED. The nearest are MOTION_MODE_FLOATING, MOTION_MODE_GROUNDED.",
+    );
+    // A file resource says the class its script declares, which its own class, Resource, does not.
+    const held = parseTextContent(
+      await request('scene_node', { ...hero, properties: { item: 'res://sword.tres' } }),
+    );
+    assert.deepEqual(get(held, 'properties', 'item'), {
+      path: 'res://sword.tres',
+      class: 'Resource',
+      _type: 'Resource',
+      scriptClass: 'ItemData',
+    });
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
