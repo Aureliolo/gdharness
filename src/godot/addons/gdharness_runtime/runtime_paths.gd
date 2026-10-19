@@ -4,6 +4,7 @@ extends RefCounted
 ## run off the game the node keeps. Every op that reads, writes, calls or waits on a game's state
 ## walks the same way, so the walk and what it says when a step is not there live in one place.
 
+const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhValues = preload("runtime_values.gd")
 
@@ -640,7 +641,7 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 			"%s has no property %s; it has a method of that name, which a path calls as %s()"
 			% [called_as, named, named]
 		)
-	return "%s has no property %s" % [called_as, named]
+	return GdhRead.near_property("%s has no property %s" % [called_as, named], object, named)
 
 
 ## Why [param method] is not a call a path makes on [param sort] ("a list", "a packed list" or "a
