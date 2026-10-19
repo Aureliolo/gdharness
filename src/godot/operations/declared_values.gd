@@ -110,6 +110,17 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
 	var hint_string: String = str(declared.get("hint_string", ""))
 	var property: String = str(declared.get("name", ""))
+	if hint == PROPERTY_HINT_ENUM and (typeof(value) == TYPE_STRING or typeof(value) == TYPE_STRING_NAME):
+		var names: PackedStringArray = PackedStringArray(enum_values(hint_string).keys())
+		if names.is_empty() or names.has(str(value)):
+			return ""
+		return (
+			(
+				"%s is none of the names %s lists: %s, which the inspector holds it to; the engine "
+				+ "stores it as given."
+			)
+			% [shown, property, ", ".join(names)]
+		)
 	if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
 		return ""
 	var number: float = GdhRead.as_float(value)
@@ -173,3 +184,86 @@ static func unmade(built: Resource, wanted: Dictionary) -> void:
 		var held: Variant = built.get(name)
 		if declared != null and not (typeof(held) == typeof(declared) and held == declared):
 			built.set(name, declared)
+
+
+## The element types a typed Array or Dictionary property declares: [element] for an array,
+## [key, value] for a dictionary, [] when nothing is declared.
+##
+## Read from the declaration because the value cannot say: a script's exported `Array[int]` sits
+## behind a placeholder in the editor, and measured on 4.7.2 that placeholder stores [1.5, 2.0]
+## as given, which the game then fails to load into the typed array.
+static func elements_of(declared: Dictionary) -> Array:
+	var type: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
+	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+	var wanted: String = str(declared.get("hint_string", ""))
+	if wanted.is_empty():
+		return []
+	if hint == PROPERTY_HINT_TYPE_STRING:
+		var parts: PackedStringArray = wanted.split(";")
+		if type == TYPE_ARRAY and parts.size() == 1:
+			return [_type_in_hint(parts[0])]
+		if type == TYPE_DICTIONARY and parts.size() == 2:
+			return [_type_in_hint(parts[0]), _type_in_hint(parts[1])]
+		return []
+	if hint == PROPERTY_HINT_ARRAY_TYPE and type == TYPE_ARRAY:
+		return [_type_named(wanted)]
+	if hint == PROPERTY_HINT_DICTIONARY_TYPE and type == TYPE_DICTIONARY:
+		var parts: PackedStringArray = wanted.split(";")
+		if parts.size() == 2:
+			return [_type_named(parts[0]), _type_named(parts[1])]
+	return []
+
+
+## The type at the front of one entry of a type-string hint, "2:" or "24/17:Texture2D".
+static func _type_in_hint(entry: String) -> int:
+	var number: String = entry.get_slice(":", 0).get_slice("/", 0)
+	return number.to_int() if number.is_valid_int() else TYPE_NIL
+
+
+## The Variant type [param name] names, or TYPE_OBJECT for a class.
+static func _type_named(name: String) -> int:
+	var named: String = name.get_slice(":", 0).strip_edges()
+	for type: int in TYPE_MAX:
+		if type_string(type) == named:
+			return type
+	return TYPE_OBJECT if not named.is_empty() else TYPE_NIL
+
+
+## The class the objects of a typed list or map hold, and whether they are nodes, as
+## [class, nodes], read from entry [param at] of [param declared]'s hint: "24/17:Item" in a type
+## string, "Item" in an array or dictionary type.
+static func object_kind(declared: Dictionary, at: int) -> Array:
+	var entry: String = str(declared.get("hint_string", "")).get_slice(";", at)
+	if GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE)) != PROPERTY_HINT_TYPE_STRING:
+		return [entry.strip_edges(), false]
+	var nodes: bool = entry.get_slice(":", 0).get_slice("/", 1) == str(PROPERTY_HINT_NODE_TYPE)
+	return [entry.get_slice(":", 1), nodes]
+
+
+## The base class and script that type a list or map holding [param wanted], as [class, script],
+## or [] when nothing in the project or the engine is called that.
+static func object_typing(wanted: String) -> Array:
+	if ClassDB.class_exists(wanted):
+		return [StringName(wanted), null]
+	var script: Script = script_class(wanted)
+	return [] if script == null else [script.get_instance_base_type(), script]
+
+
+## The script declaring the class_name [param name], or null.
+static func script_class(name: String) -> Script:
+	for entry: Dictionary in ProjectSettings.get_global_class_list():
+		if str(entry.get("class", "")) == name:
+			return load(str(entry.get("path", ""))) as Script
+	return null
+
+
+## Whether [param value] is the class [param name] names, an engine class or a script's class_name.
+static func is_a(value: Object, name: String) -> bool:
+	if value.is_class(name):
+		return true
+	var script: Script = value.get_script()
+	while script != null:
+		if str(script.get_global_name()) == name:
+			return true
+		script = script.get_base_script()
+	return false

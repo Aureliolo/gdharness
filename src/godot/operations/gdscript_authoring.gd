@@ -57,7 +57,7 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		full_script_path = "res://" + full_script_path
 
 	if not full_script_path.ends_with(".gd"):
-		return _log.failure("Script path must end with .gd extension")
+		return _log.failure(_not_gdscript(full_script_path, "makes"))
 
 	if FileAccess.file_exists(full_script_path):
 		return _log.failure(
@@ -122,6 +122,17 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	return answer
 
 
+## The refusal for [param path], which is no GDScript file, naming what [param doing] it instead:
+## a shader is made with resource_edit, and once it exists its text is edited as a file's.
+static func _not_gdscript(path: String, doing: String) -> String:
+	var refusal: String = "%s is not a .gd file, and script_edit %s GDScript only." % [path, doing]
+	if path.get_extension() != "gdshader":
+		return refusal
+	if doing == "makes":
+		return refusal + " resource_edit create_shader makes a shader, with its source as code."
+	return refusal + " A shader's text is edited as a file."
+
+
 ## The class_name and extends [param text] declares at its margin, as written. A script with no
 ## extends extends RefCounted.
 static func _header_written(text: String) -> Dictionary:
@@ -151,6 +162,9 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	var full_script_path: String = script_path
 	if not full_script_path.begins_with("res://"):
 		full_script_path = "res://" + full_script_path
+
+	if not full_script_path.ends_with(".gd"):
+		return _log.failure(_not_gdscript(full_script_path, "changes"))
 
 	if not FileAccess.file_exists(full_script_path):
 		return _log.failure(

@@ -20474,6 +20474,57 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         'res://made/listed.gd',
         'because the class list on disk now holds it',
       );
+
+      // A file that is not GDScript is refused with what does write it.
+      const shaderText = 'shader_type canvas_item;\n\nuniform vec4 tint : source_color;\n';
+      writeFileSync(join(project, 'kept.gdshader'), shaderText);
+      writeFileSync(join(project, 'notes.txt'), 'notes\n');
+      for (const [args, refusal] of [
+        [
+          { op: 'create', scriptPath: 'res://tint.gdshader' },
+          'res://tint.gdshader is not a .gd file, and script_edit makes GDScript only. resource_edit create_shader makes a shader, with its source as code.',
+        ],
+        [
+          {
+            op: 'modify',
+            scriptPath: 'res://kept.gdshader',
+            modifications: [{ type: 'add_variable', name: 'sides', varType: 'int' }],
+          },
+          "res://kept.gdshader is not a .gd file, and script_edit changes GDScript only. A shader's text is edited as a file.",
+        ],
+        [
+          { op: 'create', scriptPath: 'res://notes.txt' },
+          'res://notes.txt is not a .gd file, and script_edit makes GDScript only.',
+        ],
+      ] as const) {
+        assert.equal(
+          textOf(
+            await server.request(
+              'tools/call',
+              { name: 'script_edit', arguments: { projectPath: project, ...args } },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          ),
+          refusal,
+        );
+      }
+      assert.ok(!existsSync(join(project, 'tint.gdshader')), 'the refused create writes nothing');
+      assert.equal(readFileSync(join(project, 'kept.gdshader'), 'utf8'), shaderText);
+      assert.equal(readFileSync(join(project, 'notes.txt'), 'utf8'), 'notes\n');
+      const shaderCode = `${shaderText}\nvoid fragment() {\n\tCOLOR *= tint;\n}\n`;
+      const shader = await call('resource_edit', {
+        projectPath: project,
+        op: 'create_shader',
+        resourcePath: 'res://tint.gdshader',
+        shaderType: 'canvas_item',
+        code: shaderCode,
+      });
+      assert.equal(get(shader, 'shaderPath'), 'res://tint.gdshader', JSON.stringify(shader));
+      assert.equal(
+        readFileSync(join(project, 'tint.gdshader'), 'utf8'),
+        shaderCode,
+        'and the tool the refusal names writes the shader',
+      );
     } finally {
       await server.stop();
     }
@@ -39762,12 +39813,16 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     // script was said not to compile.
     writeFileSync(
       join(project, 'player.gd'),
-      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n@export var item: Resource\n',
+      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n@export var item: Resource\n' +
+        '@export var pack: Array[ItemData]\n@export var named: Dictionary[String, ItemData]\n' +
+        '@export var mates: Array[Node]\n@export_enum("Day", "Night") var shift: String = "Day"\n' +
+        '@export var lives: int = 3:\n\tset(value):\n\t\tlives = clampi(value, 0, 9)\n',
     );
     writeFileSync(
       join(project, 'hero.tscn'),
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://player.gd" id="1_player"]\n\n' +
-        '[node name="Hero" type="CharacterBody2D"]\nscript = ExtResource("1_player")\n',
+        '[node name="Hero" type="CharacterBody2D"]\nscript = ExtResource("1_player")\n\n' +
+        '[node name="Buddy" type="Node2D" parent="."]\n',
     );
     const classes = await request('project_import', { op: 'refresh_classes' });
     assert.match(
@@ -39811,6 +39866,57 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       _type: 'Resource',
       scriptClass: 'ItemData',
     });
+
+    // A typed list or map of a script's class, and a list of nodes, on a node of a loaded scene,
+    // which holds an untyped list as empty. Each item may be a path, and a built one may name its
+    // script's class as its _type.
+    const packed = await request('scene_node', {
+      ...hero,
+      properties: {
+        pack: ['res://sword.tres', { _type: 'ItemData', title: 'Shield' }],
+        named: {
+          best: 'res://sword.tres',
+          spare: { _type: 'Resource', script: 'res://item_data.gd', title: 'Spare' },
+        },
+        mates: ['Buddy'],
+      },
+    });
+    assert.ok(parseTextContent(packed) !== null, textOf(packed) ?? JSON.stringify(packed));
+    const heroListed = readFileSync(join(project, 'hero.tscn'), 'utf8');
+    for (const line of [
+      /^pack = Array\[ExtResource\("[^"]+"\)\]\(\[ExtResource\("[^"]+"\), SubResource\("[^"]+"\)\]\)$/m,
+      /^named = Dictionary\[String, ExtResource\("[^"]+"\)\]\(\{\n"best": ExtResource\("[^"]+"\),\n"spare": SubResource\("[^"]+"\)\n\}\)$/m,
+      /^mates = \[NodePath\("Buddy"\)\]$/m,
+      /node_paths=PackedStringArray\("mates"\)/,
+      /^title = "Shield"$/m,
+      /^title = "Spare"$/m,
+    ]) {
+      assert.match(heroListed, line);
+    }
+    for (const [properties, refusal] of [
+      [{ pack: [{ _type: 'Curve' }] }, 'Player.pack holds ItemData, and item 0 of the list given is Curve.'],
+      [{ pack: ['res://nothing.tres'] }, 'No resource at res://nothing.tres for item 0 of pack'],
+      [{ named: { best: 'sword' } }, 'named["best"] takes a res:// or uid:// path, not sword'],
+      [{ mates: ['Nobody'] }, 'item 0 of mates names Nobody, and there is no node at that path from Hero.'],
+    ] as const) {
+      assert.equal(textOf(await request('scene_node', { ...hero, properties })), refusal);
+    }
+    assert.equal(
+      readFileSync(join(project, 'hero.tscn'), 'utf8'),
+      heroListed,
+      'and the refusals change nothing',
+    );
+    const night = parseTextContent(
+      await request('scene_node', { ...hero, properties: { shift: 'Evening' } }),
+    );
+    assert.deepEqual(get(night, 'outsideDeclared'), {
+      shift:
+        '"Evening" is none of the names shift lists: Day, Night, which the inspector holds it to; the engine stores it as given.',
+    });
+    assert.equal(
+      textOf(await request('scene_node', { ...hero, properties: { lives: 20 } })),
+      'Player.lives was given 20 and holds 9 after it was set: the engine changed or refused the value, so nothing was written.',
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
@@ -46068,12 +46174,19 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       '\tvar spare: Node = load("res://parts/bolt.tscn").instantiate()\n\tspare.name = "Spare"\n\tadd_child(spare)\n',
     'heavy.gd': 'extends StaticBody2D\n',
     'panel.gd': 'extends Control\n',
+    // Hit's shape and Mark's mesh are built into this file, so a scene instancing it cannot write
+    // into them.
     'parts/crate.tscn':
       '[gd_scene format=3 uid="uid://dcratehw2x"]\n\n[ext_resource type="Script" path="res://crate.gd" id="1_crate"]\n' +
       '[ext_resource type="PackedScene" path="res://parts/bolt.tscn" id="2_bolt"]\n\n' +
+      '[sub_resource type="CircleShape2D" id="CircleShape2D_hit"]\nradius = 5.0\n\n' +
+      '[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_mark"]\nalbedo_color = Color(1, 0, 0, 1)\n\n' +
+      '[sub_resource type="BoxMesh" id="BoxMesh_mark"]\nmaterial = SubResource("StandardMaterial3D_mark")\n\n' +
       '[node name="Crate" type="StaticBody2D"]\nscript = ExtResource("1_crate")\n\n' +
-      '[node name="Look" type="Sprite2D" parent="."]\n\n[node name="Hit" type="CollisionShape2D" parent="."]\n\n' +
-      '[node name="Bolt" parent="." instance=ExtResource("2_bolt")]\n',
+      '[node name="Look" type="Sprite2D" parent="."]\n\n' +
+      '[node name="Hit" type="CollisionShape2D" parent="."]\nshape = SubResource("CircleShape2D_hit")\n\n' +
+      '[node name="Bolt" parent="." instance=ExtResource("2_bolt")]\n\n' +
+      '[node name="Mark" type="MeshInstance3D" parent="."]\nmesh = SubResource("BoxMesh_mark")\n',
     // A node with no visible to hide it by, in a scene another inherits.
     'parts/tally.tscn':
       '[gd_scene format=3]\n\n[node name="Tally" type="Node"]\n\n[node name="Count" type="Node" parent="."]\n',
@@ -46152,7 +46265,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     );
     assert.deepEqual(
       asArray(get(tree, 'children')).map((child) => get(child, 'name')),
-      ['Look', 'Hit', 'Bolt'],
+      ['Look', 'Hit', 'Bolt', 'Mark'],
       JSON.stringify(tree),
     );
     const further = await written('scene_create', {
@@ -46308,6 +46421,41 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       [['scale'], 'res://parts/crate.tscn'],
       `a read says what this scene sets and where the rest comes from: ${JSON.stringify(lookRead)}`,
     );
+
+    // The shape and the mesh are built into crate.tscn, and main.tscn would be saved without them.
+    const crateBefore = fileOf('parts/crate.tscn');
+    const intoTheirs = [
+      [
+        'Crate2/Hit',
+        { 'shape/radius': 9 },
+        'CollisionShape2D.shape is built into res://parts/crate.tscn, so radius is written there, with scene_node set on Hit in res://parts/crate.tscn, which changes it wherever that scene is used. To change it here alone, give shape a CircleShape2D of its own: a value with "_type" set to its class and its properties beside it.',
+      ],
+      [
+        'Crate2/Mark',
+        { 'mesh/material/albedo_color': '#0000ff' },
+        'MeshInstance3D.mesh is built into res://parts/crate.tscn, so material/albedo_color is written there, with scene_node set on Mark in res://parts/crate.tscn, which changes it wherever that scene is used. To change it here alone, give mesh a BoxMesh of its own: a value with "_type" set to its class and its properties beside it. A material for this instance alone goes in material_override.',
+      ],
+    ] as const;
+    for (const [nodePath, properties, refusal] of intoTheirs) {
+      assert.equal(
+        textOf(await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath, properties })),
+        refusal,
+      );
+      assert.equal(fileOf('main.tscn'), kept, `main.tscn is left as it was after ${refusal}`);
+    }
+    await written('scene_node', {
+      ...inside,
+      nodePath: 'Crate2/Hit',
+      properties: { shape: { _type: 'CircleShape2D', radius: 9 } },
+    });
+    await written('scene_node', { ...inside, nodePath: 'Crate2/Hit', properties: { 'shape/radius': 11 } });
+    const ownShape = fileOf('main.tscn');
+    assert.match(
+      ownShape,
+      /\[sub_resource type="CircleShape2D" id="([^"]+)"\]\nradius = 11\.0\n[\s\S]*\[node name="Hit" parent="Crate2"[^\]]*\]\nshape = SubResource\("\1"\)\n/,
+      `a shape of this scene's own takes a write through its slash path: ${ownShape}`,
+    );
+    assert.equal(fileOf('parts/crate.tscn'), crateBefore, 'and crate.tscn keeps its own shape');
     assert.equal(
       textOf(await call('scene_node', { op: 'delete', scenePath: 'main.tscn', nodePath: 'Crate2/Look' })),
       'Crate2/Look is inside an instanced scene, which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in res://parts/crate.tscn, which removes it from every scene using that one.',
@@ -46416,13 +46564,13 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     });
     assert.deepEqual(
       [get(shut, 'droppedValues'), get(shut, 'droppedNodes')],
-      [['Crate2/Look', 'Crate2/Bolt/Head'], ['Crate2/Look/Tag']],
+      [['Crate2/Look', 'Crate2/Hit', 'Crate2/Bolt/Head'], ['Crate2/Look/Tag']],
       JSON.stringify(shut),
     );
     const closed = fileOf('main.tscn');
     assert.doesNotMatch(
       closed,
-      /\[editable|name="(Look|Head|Tag)" /,
+      /\[editable|name="(Look|Hit|Head|Tag)" |CircleShape2D/,
       `closing them drops what was kept, and what was added below a node of the instance: ${closed}`,
     );
     assert.match(
@@ -46458,8 +46606,8 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       asArray(get(shallow, 'children')).map((child) => [get(child, 'name'), get(child, 'childrenNotListed')]),
       [
         ['Floor', undefined],
-        ['Crate1', 3],
-        ['Crate2', 4],
+        ['Crate1', 4],
+        ['Crate2', 5],
       ],
       `a node cut off by depth says how many children it has: ${JSON.stringify(shallow)}`,
     );
@@ -46473,8 +46621,8 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     const reimported = await runImport(godotPath, project);
     assert.ok(reimported.ok, `the import after the copy failed: ${JSON.stringify(reimported)}`);
     for (const [base, children] of [
-      ['parts/crate.tscn', ['Look', 'Hit', 'Bolt']],
-      ['parts/crate_copy.tscn', ['Look', 'Hit', 'Bolt', 'Lid']],
+      ['parts/crate.tscn', ['Look', 'Hit', 'Bolt', 'Mark']],
+      ['parts/crate_copy.tscn', ['Look', 'Hit', 'Bolt', 'Mark', 'Lid']],
     ] as const) {
       const scenePath = `from_${base.slice(6)}`;
       const from = await written('scene_create', { op: 'create', inherits: base, scenePath });
