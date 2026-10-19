@@ -15550,6 +15550,11 @@ async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
  * between looks. A probe session's start on such a game answered "nothing announced itself", beside
  * output saying the runtime was listening. The control is the same scene with the addon on disk but
  * not registered, which never comes up and is told nothing announced.
+ *
+ * The scene here kills its own process in its first frame rather than quitting, so the game is gone
+ * a moment after it announces however long the frame takes. Quitting ends the frame first, and a
+ * Windows runner's first frame outlasted the look, so eight starts in a row found the game alive and
+ * the case could not reach the state it was written for.
  */
 async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -15569,7 +15574,10 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
         'run/main_scene="res://main.tscn"\n' +
         (registered ? `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n` : ''),
     );
-    writeFileSync(join(dir, 'main.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tget_tree().quit()\n');
+    writeFileSync(
+      join(dir, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tvar _gone: Error = OS.kill(OS.get_process_id())\n',
+    );
     writeFileSync(
       join(dir, 'main.tscn'),
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
@@ -15593,32 +15601,19 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
               ENGINE_CALL_TIMEOUT_MS,
             ),
           );
-        // A race by its nature: the announcement lasts a frame, and a start that looks during it has
-        // caught a runtime that was listening, which is a right answer of its own. A Windows runner
-        // whose frame outlasted the wait's look did that, so several starts are made, each one that
-        // missed is held to the note, and at least one has to have missed.
-        const outcomes: string[] = [];
-        let missed = 0;
-        for (let attempt = 0; attempt < 8 && missed === 0; attempt += 1) {
-          const went = await started(cameUp);
-          const said = JSON.stringify(went);
-          const output = await call('editor_output', { contains: 'runtime listening on' });
-          assert.match(output, /\[gdharness\] runtime listening on/, `the runtime did come up: ${output}`);
-          if (get(went, 'runtime', 'listening') === true) {
-            outcomes.push('caught listening');
-            continue;
-          }
-          missed += 1;
-          assert.equal(get(went, 'runtime', 'mayYetAnnounce'), false, said);
-          assert.match(
-            text(get(went, 'runtime', 'note')),
-            /^the game's runtime came up and the game quit before this start could reach it/,
-            `and the start says so: ${said}`,
-          );
-        }
-        assert.ok(
-          missed > 0,
-          `no start missed the announcement, so the note was never read: ${outcomes.join(', ')}`,
+        const went = await started(cameUp);
+        const said = JSON.stringify(went);
+        const output = await call('editor_output', { contains: 'runtime listening on' });
+        assert.match(output, /\[gdharness\] runtime listening on/, `the runtime did come up: ${output}`);
+        assert.deepEqual(
+          [get(went, 'runtime', 'listening'), get(went, 'runtime', 'mayYetAnnounce')],
+          [false, false],
+          said,
+        );
+        assert.match(
+          text(get(went, 'runtime', 'note')),
+          /^the game's runtime came up and the game quit before this start could reach it/,
+          `and the start says so: ${said}`,
         );
 
         const never = await started(neverUp);

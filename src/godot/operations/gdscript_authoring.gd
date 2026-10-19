@@ -4,6 +4,7 @@ const GdhFileWalk = preload("file_walk.gd")
 const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhPatterns = preload("patterns.gd")
+const GdhScriptCheck = preload("script_check.gd")
 
 const MODIFICATION_TYPES: Array[String] = ["add_constant", "add_variable", "add_signal", "add_function"]
 const BLANKS_AROUND_FUNCTIONS: int = 2
@@ -56,6 +57,13 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		return _log.failure(
 			"Script file already exists: " + full_script_path + ". script_edit modify adds to it."
 		)
+
+	# Content is left to the parse below: two scripts that name each other are written one at a time,
+	# and the first does not compile until the second exists.
+	if content.is_empty():
+		var header: String = _header_refusal(cls_name_param, extends_class)
+		if not header.is_empty():
+			return _log.failure(header + " Nothing was written.")
 
 	var dir: DirAccess = DirAccess.open("res://")
 	var script_dir: String = full_script_path.get_base_dir()
@@ -127,6 +135,8 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 
 	var lines: Array[String] = []
 	lines.assign(original_content.split("\n"))
+	var before: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+	var parsed_before: bool = _parses(before)
 
 	# All of them checked before any is made, so a call is made whole or not at all: one skipped for a
 	# missing name used to leave the rest written and the answer saying success over an empty list.
@@ -171,14 +181,97 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	if not rewrote:
 		return _log.failure("Failed to write to script file: " + full_script_path)
 
+	var caught: GdhScriptCheck.GdhCaught = GdhScriptCheck.GdhCaught.new()
+	OS.add_logger(caught)
 	var made: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+	OS.remove_logger(caught)
+	var parses: bool = _parses(made)
+	# The names checked above are the script's own, and a member the base class declares, or a body
+	# that does not compile, is found only by the engine; a script left broken by an addition breaks
+	# every scene that uses it, so it goes back as it was. One already broken is written, as the
+	# addition can be what mends it.
+	if parsed_before and not parses:
+		file = FileAccess.open(full_script_path, FileAccess.WRITE)
+		var restored: bool = file != null and file.store_string(original_content)
+		if file != null:
+			file.close()
+		if not restored:
+			return _log.failure(
+				"%s would not parse with these additions, and could not be put back as it was" % script_path
+			)
+		return _log.failure(
+			(
+				"Nothing was changed: %s parses as it is and would not with these additions: %s"
+				% [script_path, _reasons(caught.raised, full_script_path)]
+			)
+		)
 	return {
 		"success": true,
 		"script_path": script_path,
 		"modifications_applied": modifications_applied,
 		"total_modifications": modifications_applied.size(),
-		"parses": _parses(made),
+		"parses": parses,
 	}
+
+
+# The engine's errors in [param raised] for [param path], each with its line, as one sentence part.
+static func _reasons(raised: Array[Dictionary], path: String) -> String:
+	var reasons: PackedStringArray = []
+	for error: Dictionary in raised:
+		var reason: String = "line %d, %s" % [GdhRead.as_int(error["line"]), str(error["message"])]
+		if str(error["path"]) == path and not reason in reasons:
+			var _added: bool = reasons.append(reason)
+	if reasons.is_empty():
+		return "the engine would not load it as a script."
+	var last: String = reasons[-1]
+	return "; ".join(reasons) + ("" if last.ends_with(".") or last.ends_with(".)") else ".")
+
+
+# Why a script with [param named] as its class_name and extending [param base] cannot be written,
+# or "". A class_name another script holds does not compile ("hides a global script class"), and nor
+# does a base no class answers to; both were written and answered as made. Classes are read off the
+# scripts as well as the class list, which a fresh clone has not written yet.
+static func _header_refusal(named: String, base: String) -> String:
+	var declared: Dictionary = _declared_classes()
+	if not named.is_empty():
+		if ClassDB.class_exists(named):
+			return "class_name %s is the name of an engine class, which a script cannot take." % named
+		if declared.has(named):
+			return (
+				(
+					"class_name %s is taken: %s declares it, and a second script of that name does not "
+					+ "compile. Give this one another class_name, or script_edit rename the first."
+				)
+				% [named, declared[named]]
+			)
+	if base.begins_with('"') or base.begins_with("'") or "." in base:
+		return ""
+	if ClassDB.class_exists(base) or declared.has(base):
+		return ""
+	var said: String = (
+		"extends names %s, which is neither an engine class nor a class_name this project declares" % base
+	)
+	var close: PackedStringArray = GdhRead.nearest(base, PackedStringArray(declared.keys()))
+	if close.is_empty():
+		close = GdhRead.nearest(base, ClassDB.get_class_list())
+	if close.is_empty():
+		return said + "."
+	return said + "; the nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
+
+
+# The class_name each script of the project declares, by name, with its path.
+static func _declared_classes() -> Dictionary:
+	var declared: Dictionary = {}
+	for entry: Dictionary in ProjectSettings.get_global_class_list():
+		var path: String = str(entry.get("path", ""))
+		if FileAccess.file_exists(path):
+			declared[str(entry.get("class", ""))] = path
+	for path: String in GdhFileWalk.new().find_files("res://", ".gd"):
+		for line: String in FileAccess.get_file_as_string(path).split("\n"):
+			var found: RegExMatch = GdhPatterns.declared_class(GdhPatterns.without_annotations(line))
+			if found != null and not declared.has(found.get_string(1)):
+				declared[found.get_string(1)] = path
+	return declared
 
 
 # Every reason [param modifications] cannot be made as asked, each naming the entry by position.

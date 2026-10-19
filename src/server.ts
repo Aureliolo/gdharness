@@ -9287,7 +9287,11 @@ class GodotServer {
     // this server's own game found nothing under the run's. Only when it is this run's:
     // `announcedSince` excludes everything that was already announced before the start.
     const going = await this.currentRun();
-    const endpoint = await this.theRunsAmong(going, fresh);
+    // Asked again as the answer is made: the look that found a game that quits in its first frame
+    // could land just before it went, and the start answered listening for a game that was over,
+    // or said it came and went, as the timing fell.
+    const found = await this.theRunsAmong(going, fresh);
+    const endpoint = found !== null && alive(found.pid) ? found : null;
     if (endpoint !== null && going !== null && going.announcedPid === undefined) {
       this.tie(going, endpoint);
     }

@@ -706,6 +706,82 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   assert.ok(!existsSync(join(projectDir, 'made', 'doubled.gd')), 'and nothing is written');
 
+  // A header that cannot compile is refused before anything is written. FixtureHero is in no class
+  // list yet, since nothing has rebuilt one since hero.gd was made, so it is found in the script.
+  for (const [file, header, said] of [
+    [
+      'taken',
+      { class_name: 'FixtureHero', extends: 'Node' },
+      'class_name FixtureHero is taken: res://made/hero.gd declares it, and a second script of that name does not compile. Give this one another class_name, or script_edit rename the first. Nothing was written.',
+    ],
+    [
+      'engine_named',
+      { class_name: 'Node2D', extends: 'Node' },
+      'class_name Node2D is the name of an engine class, which a script cannot take. Nothing was written.',
+    ],
+    [
+      'misnamed_base',
+      { extends: 'FixtureHeroo' },
+      'extends names FixtureHeroo, which is neither an engine class nor a class_name this project declares; the nearest is FixtureHero. Nothing was written.',
+    ],
+  ] as const) {
+    const refused = runRefusedOperation(godotPath, projectDir, 'create_script', {
+      script_path: `made/${file}.gd`,
+      ...header,
+    });
+    assert.equal(refused.answer, null, `${file}: ${JSON.stringify(refused.answer)}`);
+    assert.ok(refused.stderr.includes(said), `${file}: ${refused.stderr}`);
+    assert.ok(!existsSync(join(projectDir, 'made', `${file}.gd`)), `${file}: and nothing is written`);
+  }
+
+  // An addition that would break a script that parses is the engine's to find, the base class's
+  // members and a body that does not compile among it, and the script is left as it was. One that
+  // does not parse yet is written to, since the addition can be what mends it.
+  const plain = 'extends Node2D\n\n\nfunc _ready() -> void:\n\tpass\n';
+  operation('create_script', { script_path: 'made/plain.gd', content: plain });
+  for (const [modification, reason] of [
+    [
+      { type: 'add_variable', name: 'position', varType: 'Vector2' },
+      /additions: line 3, Parse Error: Member "position" redefined \(original in native class 'Node2D'\); /,
+    ],
+    [{ type: 'add_function', name: 'stray', body: 'nowhere_at_all()' }, /line \d+, .*nowhere_at_all/],
+  ] as const) {
+    const refused = runRefusedOperation(godotPath, projectDir, 'modify_script', {
+      script_path: 'made/plain.gd',
+      modifications: [modification],
+    });
+    assert.equal(refused.answer, null, `${modification.name}: ${JSON.stringify(refused.answer)}`);
+    assert.match(
+      refused.stderr,
+      /Nothing was changed: made\/plain\.gd parses as it is and would not with these additions: /,
+      refused.stderr,
+    );
+    assert.match(refused.stderr, reason, refused.stderr);
+    assert.equal(
+      readFileSync(join(projectDir, 'made', 'plain.gd'), 'utf8'),
+      plain,
+      'and the script is as it was',
+    );
+  }
+  rmSync(join(projectDir, 'made', 'plain.gd'));
+  const unmended = runRefusedOperation(godotPath, projectDir, 'create_script', {
+    script_path: 'made/unmended.gd',
+    content: 'extends Node\n\n\nfunc _ready() -> void:\n\tmend()\n',
+  });
+  assert.equal(get(unmended.answer, 'parses'), false, JSON.stringify(unmended.answer));
+  const still = runRefusedOperation(godotPath, projectDir, 'modify_script', {
+    script_path: 'made/unmended.gd',
+    modifications: [{ type: 'add_variable', name: 'pace', varType: 'float', defaultValue: '1.0' }],
+  });
+  assert.equal(get(still.answer, 'parses'), false, `${JSON.stringify(still.answer)} ${still.stderr}`);
+  assert.match(readFileSync(join(projectDir, 'made', 'unmended.gd'), 'utf8'), /^var pace: float = 1\.0$/m);
+  const mended = runRefusedOperation(godotPath, projectDir, 'modify_script', {
+    script_path: 'made/unmended.gd',
+    modifications: [{ type: 'add_function', name: 'mend', body: 'pass' }],
+  });
+  assert.equal(get(mended.answer, 'parses'), true, `${JSON.stringify(mended.answer)} ${mended.stderr}`);
+  rmSync(join(projectDir, 'made', 'unmended.gd'));
+
   // The first variable is set apart from the header above it, and the second sits with the first.
   operation('create_script', {
     script_path: 'made/bare.gd',
