@@ -2030,7 +2030,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         maximum: 600,
         ops: ['action', 'key', 'mouse_click', 'joypad_button'],
         description:
-          'action, key, mouse_click, joypad_button: hold a whole press down for this many process frames and then let go, both inside the game, so a pour, a charge or a long press runs to a set length. A press, a frames wait and a release sent as three calls hold it for the time between the calls as well. The answer says held_frames. Not with pressed, and not on a wheel step. Default 1.',
+          'action, key, mouse_click, joypad_button: hold a whole press down for this many process frames and then let go, both inside the game, so a pour, a charge or a long press runs to a set length. A press, a frames wait and a release sent as three calls hold it for the time between the calls as well. The answer says held_frames, and under held_for the seconds the hold lasted and the physics_frames that ran in it: a process frame is no set time, and a headless game, drawing nothing, runs them far faster than the sixty physics ticks a second that _physics_process sees. Not with pressed, and not on a wheel step. Default 1.',
       },
       strength: {
         type: 'number',

@@ -24729,6 +24729,21 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
       const padded = await call('runtime_input', { op: 'joypad_button', button: 'a', holdFrames: 9 });
       assert.match(padded, /"held_frames": 9/, padded);
       assert.equal(await read('pad_held'), 9, `the pad button was down for the 9 frames asked: ${padded}`);
+      // Each hold says how long it lasted by the clock and in physics ticks, which keep to sixty a
+      // second whatever the process frames do: thirty held in a headless game, which runs them as
+      // fast as it can, moved a body for twelve ticks.
+      for (const [answer, frames] of [
+        [clicked, 30],
+        [keyed, 12],
+        [acted, 7],
+        [padded, 9],
+      ] as const) {
+        const held = get(JSON.parse(answer), 'held_for');
+        const seconds = Number(get(held, 'seconds'));
+        const ticks = Number(get(held, 'physics_frames'));
+        assert.ok(seconds >= (frames - 2) / 60 && seconds < 5, answer);
+        assert.ok(Number.isInteger(ticks) && Math.abs(ticks - seconds * 60) <= 4, answer);
+      }
 
       const both = await call('runtime_input', { op: 'key', keycode: 'Space', pressed: true, holdFrames: 5 });
       assert.match(
