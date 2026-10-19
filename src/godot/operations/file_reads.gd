@@ -188,6 +188,12 @@ static func _lay(
 					path,
 					state.get_node_index(index)
 				)
+		# Every file on the way puts the node in its own groups: the scene making it, and each scene
+		# instancing or inheriting that one.
+		var grouped: Array[String] = nodes[path]["groups"]
+		for group: StringName in state.get_node_groups(index):
+			if not grouped.has(str(group)):
+				grouped.append(str(group))
 		var held: Dictionary = nodes[path]["properties"]
 		for property: int in state.get_node_property_count(index):
 			held[str(state.get_node_property_name(index, property))] = state.get_node_property_value(
@@ -281,7 +287,8 @@ static func _by_id(nodes: Dictionary, owner: String, id: int) -> String:
 
 static func _made(type: String) -> Dictionary:
 	var children: Array[String] = []
-	return {"name": "", "type": type, "properties": {}, "children": children}
+	var groups: Array[String] = []
+	return {"name": "", "type": type, "properties": {}, "children": children, "groups": groups}
 
 
 ## Puts [param path] among [param parent]'s children, at [param at] when the file says where (a node
@@ -317,6 +324,11 @@ static func _entry(
 		data["instanceOf"] = node["instanceOf"]
 		if node.has("editableChildren"):
 			data["editableChildren"] = node["editableChildren"]
+	var groups: Array[String] = node["groups"]
+	if not groups.is_empty():
+		var sorted: Array[String] = groups.duplicate()
+		sorted.sort()
+		data["groups"] = sorted
 	if include_properties:
 		var given: Dictionary = node["properties"]
 		data["properties"] = _stored(str(node["type"]), given)

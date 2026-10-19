@@ -171,6 +171,72 @@ static func place(node: Node, asked: Variant) -> void:
 		node.get_parent().move_child(node, GdhRead.as_int(asked))
 
 
+## The properties that hold where [param node] is drawn, which a reparent keeping it in place
+## changes: a Control keeps only its position, as Node.reparent keeps it.
+static func placing(node: Node) -> Array[String]:
+	if node is Node3D:
+		return ["position", "rotation", "scale"]
+	if node is Control:
+		return ["position"]
+	if node is Node2D:
+		return ["position", "rotation", "scale", "skew"]
+	return []
+
+
+## Gives [param node], just moved from under [param was], the transform that keeps it where it was
+## drawn, as the editor's reparent and Node.reparent do. Worked out from the local transforms
+## rather than read off the global ones, which the engine answers only for a node in the tree, and
+## the scene a tool edits is loaded from its file and never is. Nothing changes for a top-level
+## node, or where the old and new parents place their children alike.
+static func keep_in_place(node: Node, was: Node) -> void:
+	if node is Node3D:
+		var spatial: Node3D = node
+		var before: Transform3D = _spatial_space(was)
+		var after: Transform3D = _spatial_space(node.get_parent())
+		if not spatial.top_level and not before.is_equal_approx(after):
+			spatial.transform = after.affine_inverse() * before * spatial.transform
+	elif node is CanvasItem:
+		var drawn: CanvasItem = node
+		var before_2d: Transform2D = _canvas_space(was)
+		var after_2d: Transform2D = _canvas_space(node.get_parent())
+		if drawn.top_level or before_2d.is_equal_approx(after_2d):
+			return
+		var held: Transform2D = after_2d.affine_inverse() * before_2d * drawn.get_transform()
+		if node is Control:
+			var control: Control = node
+			control.position = held.origin
+		else:
+			var flat: Node2D = node
+			flat.transform = held
+
+
+## Where the children of [param parent] are drawn in 3D: the transforms of it and the Node3Ds
+## above it, up to the first that is top-level or whose parent is no Node3D.
+static func _spatial_space(parent: Node) -> Transform3D:
+	var space: Transform3D = Transform3D.IDENTITY
+	var at: Node = parent
+	while at is Node3D:
+		var spatial: Node3D = at
+		space = spatial.transform * space
+		if spatial.top_level:
+			break
+		at = at.get_parent()
+	return space
+
+
+## Where the children of [param parent] are drawn in 2D, as [method _spatial_space] works it out in 3D.
+static func _canvas_space(parent: Node) -> Transform2D:
+	var space: Transform2D = Transform2D.IDENTITY
+	var at: Node = parent
+	while at is CanvasItem:
+		var drawn: CanvasItem = at
+		space = drawn.get_transform() * space
+		if drawn.top_level:
+			break
+		at = at.get_parent()
+	return space
+
+
 ## Why [param instanced] cannot be instanced into [param scene_path], or "" when it can: a scene
 ## inside itself, directly or through the scenes it instances, which Godot's own dialog refuses and
 ## which never finishes loading.
