@@ -1358,6 +1358,28 @@ async function testAValueTheSceneCannotHoldIsRefused({ call, refusal, project }:
     /position is Vector2 and the value given is String, which cannot become one/,
     'and where a vector goes, rather than stored as the origin',
   );
+  await call('scene_node', set({ position: { x: 4, y: 5 } }));
+  assert.match(
+    await refusal('scene_node', set({ position: { x: 1, y: 2, z: 3 } })),
+    /position is Vector2 and the value given is Dictionary, which cannot become one\. A Vector2 has no z, so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\. Setting it/,
+    'and a vector carrying a field it has not, rather than stored without it',
+  );
+  assert.match(
+    await refusal('scene_node', set({ color: { r: 1, g: 0, b: 0, alpha: 0.5 } })),
+    /A Color has no alpha, so the value is not read as one\. A Color is sent as \{"r": \.\.\., "g": \.\.\., "b": \.\.\., "a": \.\.\.\} or as its html code, "#ff8000"\./,
+    'and a colour naming its alpha otherwise, with the key it goes under',
+  );
+  await call('scene_node', set({ color: '#00ff0080' }));
+  const tinted = get(
+    await call('scene_node', { ...scene, op: 'get', nodePath: 'Guarded' }),
+    'properties',
+    'color',
+  );
+  assert.deepEqual(
+    [get(tinted, 'r'), get(tinted, 'g'), get(tinted, 'b'), Math.round(asNumber(get(tinted, 'a')) * 255)],
+    [0, 1, 0, 128],
+    `and a colour given as its html code is that colour: ${JSON.stringify(tinted)}`,
+  );
 
   // A list is a list whatever is in it, so the packed array is asked about its elements too.
   assert.match(

@@ -10,7 +10,7 @@ extends Node
 ## `debug_data` signal every ScriptEditorDebugger emits for every message, on a node Godot does not
 ## expose to scripts: found by its class in the editor's tree and connected to by name.
 
-const Read = preload("../reading.gd")
+const GdhRead = preload("../reading.gd")
 
 ## The most functions a frame may carry when the server does not say. The engine names a function
 ## once, as it first appears, and the game's debugger queue drops those messages past its size, so
@@ -28,7 +28,7 @@ const PROFILE_FROM_START: String = "GDHARNESS_PROFILE_FROM_START"
 
 
 ## The editor's debugger sessions, numbered as the editor numbers its debugger tabs.
-class Sessions:
+class GdhSessions:
 	extends EditorDebuggerPlugin
 
 	signal session_started(session_id: int)
@@ -53,7 +53,7 @@ class Sessions:
 
 
 var _editor_plugin: EditorPlugin = null
-var _sessions: Sessions = null
+var _sessions: GdhSessions = null
 ## The debugger tabs connected to, by instance id, so none is connected twice.
 var _hooked: Dictionary[int, bool] = {}
 
@@ -75,7 +75,7 @@ var _totals: Dictionary[String, PackedFloat64Array] = {}
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
-	_sessions = Sessions.new()
+	_sessions = GdhSessions.new()
 	var joined: int = _sessions.session_started.connect(_on_session_started)
 	if joined != OK:
 		push_error("gdharness could not watch debugger sessions start: %d" % joined)
@@ -105,9 +105,9 @@ func profile_start(args: Dictionary) -> Dictionary:
 			),
 		}
 	_reset()
-	var asked: int = Read.as_int(args.get("frameFunctions", FRAME_FUNCTIONS))
+	var asked: int = GdhRead.as_int(args.get("frameFunctions", FRAME_FUNCTIONS))
 	_frame_functions = asked if asked > 0 else FRAME_FUNCTIONS
-	if Read.as_bool(args.get("arm", false)):
+	if GdhRead.as_bool(args.get("arm", false)):
 		_armed = true
 		# The game the editor starts next inherits the editor's environment, and this tells its
 		# runtime addon to hold its start until the profiler is on, which the session's start
@@ -206,7 +206,7 @@ func _on_debug_data(message: String, data: Array, session_id: int) -> void:
 	if session_id != _session:
 		return
 	if message == "servers:function_signature" and data.size() >= 2:
-		_names[Read.as_int(data[1])] = str(data[0])
+		_names[GdhRead.as_int(data[1])] = str(data[0])
 	elif message == "servers:profile_frame":
 		var carried: int = _add(data, _totals)
 		if carried >= 0:
@@ -231,28 +231,28 @@ func _add(data: Array, into: Dictionary[String, PackedFloat64Array]) -> int:
 	var at: int = 6
 	if data.size() <= at:
 		return -1
-	var servers: int = Read.as_int(data[at])
+	var servers: int = GdhRead.as_int(data[at])
 	at += 1
 	for _server: int in servers:
 		if data.size() <= at + 1:
 			return -1
-		at += 2 + Read.as_int(data[at + 1])
+		at += 2 + GdhRead.as_int(data[at + 1])
 	if data.size() <= at:
 		return -1
-	var values: int = Read.as_int(data[at])
+	var values: int = GdhRead.as_int(data[at])
 	at += 1
 	if values % 5 != 0 or data.size() < at + values:
 		return -1
 	var carried: int = 0
 	for index: int in range(at, at + values, 5):
-		var id: int = Read.as_int(data[index])
+		var id: int = GdhRead.as_int(data[index])
 		var signature: String = _names[id] if _names.has(id) else "#%d" % id
 		var sum: PackedFloat64Array = (
 			into[signature] if into.has(signature) else PackedFloat64Array([0, 0, 0])
 		)
-		sum[0] += Read.as_float(data[index + 1])
-		sum[1] += Read.as_float(data[index + 2])
-		sum[2] += Read.as_float(data[index + 3])
+		sum[0] += GdhRead.as_float(data[index + 1])
+		sum[1] += GdhRead.as_float(data[index + 2])
+		sum[2] += GdhRead.as_float(data[index + 3])
 		into[signature] = sum
 		carried += 1
 	return carried

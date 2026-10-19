@@ -4,8 +4,8 @@ extends Node
 ## The editor's view of the files on disk: scans, the reimports asked for, where each stands, and
 ## files moved under it.
 
-const Read = preload("../reading.gd")
-const SceneFile = preload("../scene_file.gd")
+const GdhRead = preload("../reading.gd")
+const GdhSceneFile = preload("../scene_file.gd")
 
 var _editor_plugin: EditorPlugin = null
 
@@ -63,7 +63,7 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 	var started: bool = false
 	var completed_before: int = _scans_completed
 	var uids: Dictionary = {"reread": [], "duplicated": []}
-	if not Read.as_bool(args.get("statusOnly", false)) and not busy:
+	if not GdhRead.as_bool(args.get("statusOnly", false)) and not busy:
 		uids = _reread_changed_uids(filesystem)
 		# Files the caller has just written, moved or deleted, read again one by one. The scan finds a
 		# script that appeared and leaves the global class of one that has gone in the editor's list,
@@ -172,7 +172,7 @@ func scan_status(_args: Dictionary) -> Dictionary:
 		"ok": true,
 		"scanning": filesystem.is_scanning(),
 		"importing": filesystem.is_importing(),
-		"pending": SceneFile.scan_due,
+		"pending": GdhSceneFile.scan_due,
 		"sinceScanFinishedMs":
 		-1 if _scan_finished_at_msec < 0 else Time.get_ticks_msec() - _scan_finished_at_msec,
 		"reimportsCompleted": _reimports_completed,

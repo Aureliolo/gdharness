@@ -6,13 +6,13 @@ extends SceneTree
 ## tag that names a type it cannot build has to fall through rather than answer with a wrong
 ## value, and a tag that legitimately means nothing has to answer null rather than fall through.
 
-const PropertyValues = preload("res://addons/gdharness_editor/property_values.gd")
+const GdhPropertyValues = preload("res://addons/gdharness_editor/property_values.gd")
 
 var failures: Array[String] = []
 
 
 func _init() -> void:
-	var tools: PropertyValues = PropertyValues.new()
+	var tools: GdhPropertyValues = GdhPropertyValues.new()
 
 	_check_tagged(tools)
 	_check_shaped(tools)
@@ -32,7 +32,7 @@ func _fail(message: String) -> void:
 	failures.append(message)
 
 
-func _check_tagged(tools: PropertyValues) -> void:
+func _check_tagged(tools: GdhPropertyValues) -> void:
 	if tools.parse({"_type": "Vector2", "x": 1, "y": 2}) != Vector2(1, 2):
 		_fail("tagged Vector2")
 	if tools.parse({"_type": "Vector3", "x": 1, "y": 2, "z": 3}) != Vector3(1, 2, 3):
@@ -82,7 +82,7 @@ func _check_tagged(tools: PropertyValues) -> void:
 		_fail("tagged Transform3D origin: %s" % str(transform3d.origin))
 
 
-func _check_shaped(tools: PropertyValues) -> void:
+func _check_shaped(tools: GdhPropertyValues) -> void:
 	if tools.parse({"x": 1, "y": 2}, TYPE_VECTOR2) != Vector2(1, 2):
 		_fail("untagged dictionary against a declared Vector2")
 	if tools.parse({"x": 1, "y": 2, "z": 3}, TYPE_VECTOR3) != Vector3(1, 2, 3):
@@ -98,7 +98,7 @@ func _check_shaped(tools: PropertyValues) -> void:
 		_fail("untagged dictionary with no declared type should stay a dictionary: %s" % str(plain))
 
 
-func _check_positional(tools: PropertyValues) -> void:
+func _check_positional(tools: GdhPropertyValues) -> void:
 	if tools.parse([1, 2], TYPE_VECTOR2) != Vector2(1, 2):
 		_fail("array against a declared Vector2")
 	if tools.parse([1, 2, 3], TYPE_VECTOR3) != Vector3(1, 2, 3):
@@ -122,7 +122,7 @@ func _check_positional(tools: PropertyValues) -> void:
 		_fail("array does not parse its members: %s" % str(members))
 
 
-func _check_gaps(tools: PropertyValues) -> void:
+func _check_gaps(tools: GdhPropertyValues) -> void:
 	# A Resource with no path means nothing, which is not the same as the tag not matching.
 	var empty_resource: Variant = tools.parse({"_type": "Resource", "path": ""})
 	if empty_resource != null:

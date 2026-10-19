@@ -8,7 +8,8 @@ extends RefCounted
 ## before: the same Vector2 came back three ways depending on which tool was asked, and a caller
 ## reading a property off the editor could not feed it back to the game.
 
-const Read = preload("reading.gd")
+const GdhRead = preload("reading.gd")
+const GdhShapes = preload("value_shapes.gd")
 
 # What the engine carries from one to another without complaint, which is what a value written to a
 # property or handed to a parameter may arrive as. Numbers include bool because the engine counts it
@@ -120,35 +121,6 @@ const BUILDERS: Dictionary = {
 	"Dictionary": "_build_dictionary",
 }
 
-# What each tag has to carry before it is built. A tag naming a type whose keys are not there is a
-# tag somebody wrote by mistake or wrote for a different shape, and building one out of defaults
-# answers with a Transform2D of zeros where the caller meant something else entirely. Unbuilt, it
-# comes back as it arrived, and whoever asked can read it against the type they were expecting.
-const REQUIRED: Dictionary = {
-	"Vector2": [["x", "y"]],
-	"Vector2i": [["x", "y"]],
-	"Vector3": [["x", "y", "z"]],
-	"Vector3i": [["x", "y", "z"]],
-	"Vector4": [["x", "y", "z", "w"]],
-	"Vector4i": [["x", "y", "z", "w"]],
-	"Rect2": [["position", "size"], ["x", "y", "width", "height"]],
-	"Rect2i": [["position", "size"], ["x", "y", "width", "height"]],
-	"Plane": [["normal", "d"]],
-	"Quaternion": [["x", "y", "z", "w"]],
-	"AABB": [["position", "size"]],
-	"Basis": [["x", "y", "z"]],
-	"Transform2D": [["x", "y", "origin"]],
-	"Transform3D": [["basis", "origin"]],
-	"Projection": [["x", "y", "z", "w"]],
-	"Color": [["r", "g", "b"]],
-	"NodePath": [["path"]],
-	"PackedByteArray": [["base64"]],
-	"float": [["value"]],
-	"int": [["value"]],
-	"RID": [["id"]],
-	"Dictionary": [["entries"]],
-}
-
 
 # Converts a Godot value into something JSON can carry. A type with no entry in the table
 # passes through as itself, which is what the JSON-native ones want.
@@ -246,8 +218,8 @@ func deserialize_value(value: Variant) -> Variant:
 	# under the target project's warning levels, so one such project lost every headless call.
 	var tag: String = str(fields["_type"])
 	var builder: String = BUILDERS.get(tag, "")
-	var needed: Array = REQUIRED.get(tag, [])
-	if builder.is_empty() or not _carries(fields, needed):
+	var spare: Array = GdhShapes.spare(fields, tag)
+	if builder.is_empty() or not spare.any(func(left: Array) -> bool: return left.is_empty()):
 		return fields
 	if tag == "float" and str(fields["value"]) not in ["inf", "-inf", "nan"]:
 		return fields
@@ -430,6 +402,11 @@ func fitted(value: Variant, type: int) -> Variant:
 	if rebuilt is Array and LIST_TYPES.has(type):
 		return type_convert(rebuilt, type)
 
+	# The inspector and every colour picker give a colour as its html code. Anything else stays the
+	# text it is, for the refusal to name.
+	if type == TYPE_COLOR and rebuilt is String and Color.html_is_valid(str(rebuilt)):
+		return Color.html(str(rebuilt))
+
 	var simple: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING]
 	if not simple.has(type) or not simple.has(typeof(rebuilt)):
 		return rebuilt
@@ -441,7 +418,7 @@ func fitted(value: Variant, type: int) -> Variant:
 
 	if rebuilt is String and type != TYPE_STRING:
 		var text: String = rebuilt
-		var parsed: Variant = Read.json_or_null(text)
+		var parsed: Variant = GdhRead.json_or_null(text)
 		# A string that does not read as the type wanted is handed back as the string it is, so
 		# whoever asked can refuse it. type_convert answers 0 for "not an index" and true for any
 		# text at all, and a caller who sent a word got back a number they never sent: get_child
@@ -461,7 +438,7 @@ func fitted(value: Variant, type: int) -> Variant:
 static func inexact(given: Variant, type: int) -> String:
 	if type != TYPE_INT or (typeof(given) != TYPE_FLOAT and typeof(given) != TYPE_INT):
 		return ""
-	var number: float = Read.as_float(given)
+	var number: float = GdhRead.as_float(given)
 	if not is_finite(number) or absf(number) < EXACT:
 		return ""
 	return (
@@ -472,34 +449,6 @@ static func inexact(given: Variant, type: int) -> String:
 		)
 		% String.num(number, 0)
 	)
-
-
-## How a value of [param type] is written to be read as one, for a refusal to name, or empty for a
-## type that is not built from fields. A refusal naming only the two types left a caller to find
-## the shape in the description of another op.
-static func written_as(type: int) -> String:
-	var tag: String = type_string(type)
-	var alternatives: Array = REQUIRED.get(tag, [])
-	if alternatives.is_empty() or tag in ["float", "int", "Dictionary"]:
-		return ""
-	var keys: Array = alternatives[0]
-	var parts: Array[String] = []
-	for key: Variant in keys:
-		parts.append('"%s": ...' % key)
-	return "{%s}" % ", ".join(parts)
-
-
-## Whether [param fields] carries every key of any one of [param alternatives].
-##
-## More than one spelling because a rectangle has two: the two corners it is answered with, and the
-## four numbers the editor's own tools answered with before the serialisers were made one, which a
-## caller may have kept.
-func _carries(fields: Dictionary, alternatives: Array) -> bool:
-	for alternative: Variant in alternatives:
-		var keys: Array = alternative
-		if keys.all(func(key: Variant) -> bool: return fields.has(key)):
-			return true
-	return false
 
 
 func _serialize_nil(_value: Variant) -> Variant:
@@ -769,42 +718,44 @@ func _describe_object(value: Object) -> Dictionary:
 
 
 func _build_vector2(fields: Dictionary) -> Vector2:
-	return Vector2(Read.as_float(fields.get("x", 0)), Read.as_float(fields.get("y", 0)))
+	return Vector2(GdhRead.as_float(fields.get("x", 0)), GdhRead.as_float(fields.get("y", 0)))
 
 
 func _build_vector2i(fields: Dictionary) -> Vector2i:
-	return Vector2i(Read.as_int(fields.get("x", 0)), Read.as_int(fields.get("y", 0)))
+	return Vector2i(GdhRead.as_int(fields.get("x", 0)), GdhRead.as_int(fields.get("y", 0)))
 
 
 func _build_vector3(fields: Dictionary) -> Vector3:
 	return Vector3(
-		Read.as_float(fields.get("x", 0)),
-		Read.as_float(fields.get("y", 0)),
-		Read.as_float(fields.get("z", 0))
+		GdhRead.as_float(fields.get("x", 0)),
+		GdhRead.as_float(fields.get("y", 0)),
+		GdhRead.as_float(fields.get("z", 0))
 	)
 
 
 func _build_vector3i(fields: Dictionary) -> Vector3i:
 	return Vector3i(
-		Read.as_int(fields.get("x", 0)), Read.as_int(fields.get("y", 0)), Read.as_int(fields.get("z", 0))
+		GdhRead.as_int(fields.get("x", 0)),
+		GdhRead.as_int(fields.get("y", 0)),
+		GdhRead.as_int(fields.get("z", 0))
 	)
 
 
 func _build_vector4(fields: Dictionary) -> Vector4:
 	return Vector4(
-		Read.as_float(fields.get("x", 0)),
-		Read.as_float(fields.get("y", 0)),
-		Read.as_float(fields.get("z", 0)),
-		Read.as_float(fields.get("w", 0))
+		GdhRead.as_float(fields.get("x", 0)),
+		GdhRead.as_float(fields.get("y", 0)),
+		GdhRead.as_float(fields.get("z", 0)),
+		GdhRead.as_float(fields.get("w", 0))
 	)
 
 
 func _build_vector4i(fields: Dictionary) -> Vector4i:
 	return Vector4i(
-		Read.as_int(fields.get("x", 0)),
-		Read.as_int(fields.get("y", 0)),
-		Read.as_int(fields.get("z", 0)),
-		Read.as_int(fields.get("w", 0))
+		GdhRead.as_int(fields.get("x", 0)),
+		GdhRead.as_int(fields.get("y", 0)),
+		GdhRead.as_int(fields.get("z", 0)),
+		GdhRead.as_int(fields.get("w", 0))
 	)
 
 
@@ -813,10 +764,10 @@ func _build_vector4i(fields: Dictionary) -> Vector4i:
 func _build_rect2(fields: Dictionary) -> Rect2:
 	if not fields.has("position"):
 		return Rect2(
-			Read.as_float(fields.get("x", 0)),
-			Read.as_float(fields.get("y", 0)),
-			Read.as_float(fields.get("width", 0)),
-			Read.as_float(fields.get("height", 0))
+			GdhRead.as_float(fields.get("x", 0)),
+			GdhRead.as_float(fields.get("y", 0)),
+			GdhRead.as_float(fields.get("width", 0)),
+			GdhRead.as_float(fields.get("height", 0))
 		)
 	return Rect2(_vector2_at(fields, "position"), _vector2_at(fields, "size"))
 
@@ -824,24 +775,24 @@ func _build_rect2(fields: Dictionary) -> Rect2:
 func _build_rect2i(fields: Dictionary) -> Rect2i:
 	if not fields.has("position"):
 		return Rect2i(
-			Read.as_int(fields.get("x", 0)),
-			Read.as_int(fields.get("y", 0)),
-			Read.as_int(fields.get("width", 0)),
-			Read.as_int(fields.get("height", 0))
+			GdhRead.as_int(fields.get("x", 0)),
+			GdhRead.as_int(fields.get("y", 0)),
+			GdhRead.as_int(fields.get("width", 0)),
+			GdhRead.as_int(fields.get("height", 0))
 		)
 	return Rect2i(_vector2i_at(fields, "position"), _vector2i_at(fields, "size"))
 
 
 func _build_plane(fields: Dictionary) -> Plane:
-	return Plane(_vector3_at(fields, "normal"), Read.as_float(fields.get("d", 0)))
+	return Plane(_vector3_at(fields, "normal"), GdhRead.as_float(fields.get("d", 0)))
 
 
 func _build_quaternion(fields: Dictionary) -> Quaternion:
 	return Quaternion(
-		Read.as_float(fields.get("x", 0)),
-		Read.as_float(fields.get("y", 0)),
-		Read.as_float(fields.get("z", 0)),
-		Read.as_float(fields.get("w", 0))
+		GdhRead.as_float(fields.get("x", 0)),
+		GdhRead.as_float(fields.get("y", 0)),
+		GdhRead.as_float(fields.get("z", 0)),
+		GdhRead.as_float(fields.get("w", 0))
 	)
 
 
@@ -881,10 +832,10 @@ func _build_projection(fields: Dictionary) -> Projection:
 
 func _build_color(fields: Dictionary) -> Color:
 	return Color(
-		Read.as_float(fields.get("r", 0)),
-		Read.as_float(fields.get("g", 0)),
-		Read.as_float(fields.get("b", 0)),
-		Read.as_float(fields.get("a", 1), 1.0)
+		GdhRead.as_float(fields.get("r", 0)),
+		GdhRead.as_float(fields.get("g", 0)),
+		GdhRead.as_float(fields.get("b", 0)),
+		GdhRead.as_float(fields.get("a", 1), 1.0)
 	)
 
 
@@ -897,7 +848,7 @@ func _build_bytes(fields: Dictionary) -> PackedByteArray:
 
 
 func _build_float(fields: Dictionary) -> float:
-	return Read.as_float(fields)
+	return GdhRead.as_float(fields)
 
 
 func _build_int(fields: Dictionary) -> int:

@@ -4,19 +4,19 @@ extends Node
 ## Animations and animation trees, edited in the open editor or, for a project no editor serves, by a
 ## headless engine.
 
-const AnimationReads = preload("../animation_reads.gd")
-const HeadlessCheck = preload("../headless_check.gd")
-const PropertyValues = preload("../property_values.gd")
-const Read = preload("../reading.gd")
-const SceneFile = preload("../scene_file.gd")
-const Serialisation = preload("../serialisation.gd")
+const GdhAnimationReads = preload("../animation_reads.gd")
+const GdhHeadlessCheck = preload("../headless_check.gd")
+const GdhPropertyValues = preload("../property_values.gd")
+const GdhRead = preload("../reading.gd")
+const GdhSceneFile = preload("../scene_file.gd")
+const GdhSerialisation = preload("../serialisation.gd")
 
 ## How far right of the rightmost state a new one goes in the editor's graph, wider than a state's
 ## box there.
 const STATE_SPACING: float = 200.0
 
 var _editor_plugin: EditorPlugin = null
-var _properties: PropertyValues = PropertyValues.new()
+var _properties: GdhPropertyValues = GdhPropertyValues.new()
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
@@ -42,7 +42,7 @@ func _find_node(root: Node, path: String) -> Node:
 ## [param kind] the scene owns. Answers [scene, node, refusal]; the refusal is {} when both were
 ## found.
 func _open_at(scene_path: String, node_path: String, kind: String) -> Array:
-	var scene: SceneFile = SceneFile.new()
+	var scene: GdhSceneFile = GdhSceneFile.new()
 	var refused: Dictionary = scene.open(scene_path, true)
 	if not refused.is_empty():
 		return [scene, null, refused]
@@ -60,7 +60,7 @@ func _open_at(scene_path: String, node_path: String, kind: String) -> Array:
 ## [param scene_path] opened for reading, as [method _open_at] answers. A node an instanced scene
 ## owns is read like any other, since nothing is written.
 func _read_at(scene_path: String, node_path: String, kind: String) -> Array:
-	var scene: SceneFile = SceneFile.new()
+	var scene: GdhSceneFile = GdhSceneFile.new()
 	var refused: Dictionary = scene.open(scene_path, false)
 	if not refused.is_empty():
 		return [scene, null, refused]
@@ -74,7 +74,7 @@ func _read_at(scene_path: String, node_path: String, kind: String) -> Array:
 
 ## Writes [param scene] once [param check] passes, then the files of [param homes], answering
 ## [param answer] or a refusal.
-func _finish(scene: SceneFile, check: Callable, homes: Dictionary, answer: Dictionary) -> Dictionary:
+func _finish(scene: GdhSceneFile, check: Callable, homes: Dictionary, answer: Dictionary) -> Dictionary:
 	if not Engine.is_editor_hint():
 		for file: Variant in homes:
 			var home: Resource = homes[file]
@@ -91,7 +91,7 @@ func _finish(scene: SceneFile, check: Callable, homes: Dictionary, answer: Dicti
 								)
 								% file
 							)
-							+ HeadlessCheck.REMEDY
+							+ GdhHeadlessCheck.REMEDY
 						)
 					)
 				)
@@ -100,7 +100,7 @@ func _finish(scene: SceneFile, check: Callable, homes: Dictionary, answer: Dicti
 		return written
 	for file: Variant in homes:
 		var resource: Resource = homes[file]
-		var saving: Error = SceneFile.save_keeping_uid(resource, str(file))
+		var saving: Error = GdhSceneFile.save_keeping_uid(resource, str(file))
 		if saving != OK:
 			return {"ok": false, "error": "Failed to save %s: %s" % [file, error_string(saving)]}
 		if Engine.is_editor_hint():
@@ -112,14 +112,14 @@ func _finish(scene: SceneFile, check: Callable, homes: Dictionary, answer: Dicti
 ## engine ran as it loaded the file.
 func _scripted(resource: Resource) -> bool:
 	var script: Script = resource.get_script()
-	return (script != null and not script.is_tool()) or HeadlessCheck.holds_scripted_embedded(resource, {})
+	return (script != null and not script.is_tool()) or GdhHeadlessCheck.holds_scripted_embedded(resource, {})
 
 
 func _parse_json_maybe(value: Variant) -> Variant:
 	if typeof(value) != TYPE_STRING:
 		return value
 	var text: String = value
-	var parsed: Variant = Read.json_or_null(text)
+	var parsed: Variant = GdhRead.json_or_null(text)
 	if parsed == null and text != "null":
 		return value
 	return parsed
@@ -140,7 +140,7 @@ func _parse_method_args(raw_args: Array) -> Array:
 ## edited in memory while only the scene was saved, which refers to the file, so the edit was
 ## answered as made and was gone; it is saved too. One inside some other file (an imported model,
 ## the scene this one inherits from) is refused, since nothing written here would keep the edit.
-func _homes(scene: SceneFile, held: Array) -> Array:
+func _homes(scene: GdhSceneFile, held: Array) -> Array:
 	var homes: Dictionary = {}
 	for entry: Array in held:
 		var resource: Resource = entry[0]
@@ -195,10 +195,10 @@ func _library_of(player: AnimationPlayer, animation_name: String) -> AnimationLi
 
 ## The state machine at [param state_machine_path] in [param anim_tree], with the files it is kept
 ## in, as [machine, homes, why not].
-func _machine(scene: SceneFile, anim_tree: AnimationTree, state_machine_path: String) -> Array:
-	var sm: AnimationNodeStateMachine = AnimationReads.state_machine(anim_tree, state_machine_path)
+func _machine(scene: GdhSceneFile, anim_tree: AnimationTree, state_machine_path: String) -> Array:
+	var sm: AnimationNodeStateMachine = GdhAnimationReads.state_machine(anim_tree, state_machine_path)
 	if not sm:
-		return [null, {}, AnimationReads.no_machine(anim_tree, state_machine_path)]
+		return [null, {}, GdhAnimationReads.no_machine(anim_tree, state_machine_path)]
 	var homes: Array = _homes(scene, [[sm, "state machine"]])
 	if not homes[0]:
 		return [null, {}, homes[1]]
@@ -226,18 +226,18 @@ func read_animations(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Missing scenePath"}
 
 	var opened: Array = _read_at(scene_path, player_node_path, "AnimationPlayer")
-	var scene: SceneFile = opened[0]
+	var scene: GdhSceneFile = opened[0]
 	if opened[1] == null:
 		return opened[2]
 	var player: AnimationPlayer = opened[1]
-	return _read_in(scene, AnimationReads.animations(player, animation_name))
+	return _read_in(scene, GdhAnimationReads.animations(player, animation_name))
 
 
 ## [param answer] read from [param scene], with whether the editor holds the scene unsaved.
-func _read_in(scene: SceneFile, answer: Dictionary) -> Dictionary:
+func _read_in(scene: GdhSceneFile, answer: Dictionary) -> Dictionary:
 	if not answer.get("ok", false):
 		return scene.refuse(str(answer.get("error", "")))
-	answer["unsavedInEditor"] = SceneFile.unsaved(scene.path)
+	answer["unsavedInEditor"] = GdhSceneFile.unsaved(scene.path)
 	scene.close()
 	return answer
 
@@ -253,11 +253,11 @@ func read_animation_states(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Missing animTreePath"}
 
 	var opened: Array = _read_at(scene_path, anim_tree_path, "AnimationTree")
-	var scene: SceneFile = opened[0]
+	var scene: GdhSceneFile = opened[0]
 	if opened[1] == null:
 		return opened[2]
 	var anim_tree: AnimationTree = opened[1]
-	return _read_in(scene, AnimationReads.states(anim_tree, state_machine_path))
+	return _read_in(scene, GdhAnimationReads.states(anim_tree, state_machine_path))
 
 
 # =============================================================================
@@ -280,7 +280,7 @@ func create_animation(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Unsupported loopMode: " + loop_mode_name}
 
 	var opened: Array = _open_at(scene_path, player_node_path, "AnimationPlayer")
-	var scene: SceneFile = opened[0]
+	var scene: GdhSceneFile = opened[0]
 	if opened[1] == null:
 		return opened[2]
 	var player: AnimationPlayer = opened[1]
@@ -295,9 +295,9 @@ func create_animation(args: Dictionary) -> Dictionary:
 		return scene.refuse(str(homes[1]))
 
 	var anim: Animation = Animation.new()
-	anim.length = Read.as_float(args.get("length", 1.0), 1.0)
-	anim.loop_mode = Read.as_int(loop_modes[loop_mode_name]) as Animation.LoopMode
-	anim.step = Read.as_float(args.get("step", 0.1), 0.1)
+	anim.length = GdhRead.as_float(args.get("length", 1.0), 1.0)
+	anim.loop_mode = GdhRead.as_int(loop_modes[loop_mode_name]) as Animation.LoopMode
+	anim.step = GdhRead.as_float(args.get("step", 0.1), 0.1)
 	var called: String = animation_name.get_slice("/", 1) if animation_name.contains("/") else animation_name
 	var add_err: Error = anim_lib.add_animation(StringName(called), anim)
 	if add_err != OK:
@@ -337,7 +337,7 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": keyed[1]}
 
 	var opened: Array = _open_at(scene_path, player_node_path, "AnimationPlayer")
-	var scene: SceneFile = opened[0]
+	var scene: GdhSceneFile = opened[0]
 	if opened[1] == null:
 		return opened[2]
 	var player: AnimationPlayer = opened[1]
@@ -429,7 +429,7 @@ func _add_track(
 
 	for index: int in keyframes.size():
 		var keyframe: Dictionary = keyframes[index]
-		if anim.track_insert_key(track_idx, Read.as_float(keyframe["time"]), keys[index]) < 0:
+		if anim.track_insert_key(track_idx, GdhRead.as_float(keyframe["time"]), keys[index]) < 0:
 			return [-1, "Keyframe %d could not be inserted." % index, null]
 	return [track_idx, "", method_found]
 
@@ -450,7 +450,7 @@ func _keyframes(track: Dictionary) -> Array:
 		var time: Variant = keyframe.get("time")
 		if not (time is float or time is int):
 			return [false, "keyframes[%d] has no time." % index]
-		var seconds: float = Read.as_float(time)
+		var seconds: float = GdhRead.as_float(time)
 		if times.has(seconds):
 			return [
 				false, "keyframes[%d] and [%d] are both at %s seconds." % [times[seconds], index, seconds]
@@ -504,7 +504,7 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 			return {"ok": false, "error": "Missing " + str(required[1])}
 
 	var opened: Array = _open_at(scene_path, anim_tree_path, "AnimationTree")
-	var scene: SceneFile = opened[0]
+	var scene: GdhSceneFile = opened[0]
 	if opened[1] == null:
 		return opened[2]
 	var anim_tree: AnimationTree = opened[1]
@@ -547,7 +547,7 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 		"animationName": animation_name,
 		# False when the tree has no player to look the animation up in.
 		"animationFound": player != null,
-		"position": Serialisation.new().serialize_value(position),
+		"position": GdhSerialisation.new().serialize_value(position),
 	}
 	var files: Dictionary = machine[1]
 	return _finish(scene, Callable(), files, answer)
@@ -580,13 +580,13 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Unsupported transitionType: " + transition_type}
 	var transition: AnimationNodeStateMachineTransition = AnimationNodeStateMachineTransition.new()
 	transition.switch_mode = (
-		Read.as_int(modes[transition_type]) as AnimationNodeStateMachineTransition.SwitchMode
+		GdhRead.as_int(modes[transition_type]) as AnimationNodeStateMachineTransition.SwitchMode
 	)
 	if not advance_condition.is_empty():
 		transition.advance_condition = StringName(advance_condition)
 
 	var opened: Array = _open_at(scene_path, anim_tree_path, "AnimationTree")
-	var scene: SceneFile = opened[0]
+	var scene: GdhSceneFile = opened[0]
 	if opened[1] == null:
 		return opened[2]
 	var anim_tree: AnimationTree = opened[1]

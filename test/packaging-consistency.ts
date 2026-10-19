@@ -96,6 +96,7 @@ const operationsModules = [
   'resource_files.gd',
   'script_check.gd',
   'serialisation.gd',
+  'value_shapes.gd',
 ];
 
 for (const requiredFile of [

@@ -8,7 +8,7 @@ signal connected
 signal disconnected
 signal tool_requested(request_id: String, tool_name: String, args: Dictionary)
 
-const Read = preload("reading.gd")
+const GdhRead = preload("reading.gd")
 
 const DEFAULT_URL: String = "ws://127.0.0.1:6505/godot"
 ## Written beside the addon by the install, so it names the version this copy came from.
@@ -256,15 +256,15 @@ func announced_url() -> String:
 	var file: FileAccess = FileAccess.open(ANNOUNCEMENT, FileAccess.READ)
 	if file == null:
 		return ""
-	var said: Variant = Read.json_or_null(file.get_as_text())
+	var said: Variant = GdhRead.json_or_null(file.get_as_text())
 	file.close()
 	if not said is Dictionary:
 		return ""
 
 	var announcement: Dictionary = said
-	if Read.as_int(announcement.get("protocol", 0)) != ANNOUNCE_PROTOCOL:
+	if GdhRead.as_int(announcement.get("protocol", 0)) != ANNOUNCE_PROTOCOL:
 		return ""
-	var port: int = Read.as_int(announcement.get("port", 0))
+	var port: int = GdhRead.as_int(announcement.get("port", 0))
 	if port < 1 or port > 65535:
 		return ""
 	var host: String = str(announcement.get("host", "127.0.0.1"))
@@ -382,7 +382,7 @@ func _keep_breakpoints_through_sessions() -> void:
 	var settings: EditorSettings = EditorInterface.get_editor_settings()
 	if settings == null or not settings.has_setting(SYNC_BREAKPOINTS_SETTING):
 		return
-	if Read.as_bool(settings.get_setting(SYNC_BREAKPOINTS_SETTING)):
+	if GdhRead.as_bool(settings.get_setting(SYNC_BREAKPOINTS_SETTING)):
 		return
 	settings.set_setting(SYNC_BREAKPOINTS_SETTING, true)
 	# Stored is not the same as noticed. The adapter reads this setting again on the editor-wide
@@ -406,7 +406,7 @@ func _syncs_breakpoints() -> bool:
 	var settings: EditorSettings = EditorInterface.get_editor_settings()
 	if settings == null or not settings.has_setting(SYNC_BREAKPOINTS_SETTING):
 		return false
-	return Read.as_bool(settings.get_setting(SYNC_BREAKPOINTS_SETTING))
+	return GdhRead.as_bool(settings.get_setting(SYNC_BREAKPOINTS_SETTING))
 
 
 ## What the settings say this editor serves on, or 0 when there is nothing to ask.
@@ -416,7 +416,7 @@ func _serving(setting: String) -> int:
 	var settings: EditorSettings = EditorInterface.get_editor_settings()
 	if settings == null or not settings.has_setting(setting):
 		return 0
-	return Read.as_int(settings.get_setting(setting))
+	return GdhRead.as_int(settings.get_setting(setting))
 
 
 ## The version marker beside this addon, or "" when the copy was not installed by gdharness.
@@ -497,7 +497,7 @@ func _on_reconnect_timer() -> void:
 
 
 func _handle_message(json_string: String) -> void:
-	var parsed: Variant = Read.json_or_null(json_string)
+	var parsed: Variant = GdhRead.json_or_null(json_string)
 	if not parsed is Dictionary:
 		push_error("[gdharness] The server sent something that is not a message: %s" % json_string)
 		return

@@ -10,9 +10,9 @@ extends RefCounted
 ## without making a node. Loading the file still does what loading does in the game: static
 ## initialisers run, and a resource with a script is made with it.
 
-const PropertyValues = preload("property_values.gd")
-const Read = preload("reading.gd")
-const Serialisation = preload("serialisation.gd")
+const GdhPropertyValues = preload("property_values.gd")
+const GdhRead = preload("reading.gd")
+const GdhSerialisation = preload("serialisation.gd")
 
 
 ## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
@@ -43,7 +43,7 @@ static func scene_node(scene_path: String, node_path: String) -> Dictionary:
 
 
 ## [param said], the refusal for [param node_path], which [param scene_path] does not have, with
-## where the path leaves the scene as [method Read.missing_below] says it.
+## where the path leaves the scene as [method GdhRead.missing_below] says it.
 static func missing_from(said: String, scene_path: String, node_path: String) -> String:
 	var laid: Dictionary = _laid(scene_path)
 	if not laid.get("ok", false):
@@ -64,7 +64,7 @@ static func missing_from(said: String, scene_path: String, node_path: String) ->
 	var children: Array[String] = nodes[at]["children"]
 	for child: String in children:
 		var _named: bool = names.append(str(nodes[child]["name"]))
-	return Read.missing_below(said, str(nodes["."]["name"]), reached, parts[reached.size()], names)
+	return GdhRead.missing_below(said, str(nodes["."]["name"]), reached, parts[reached.size()], names)
 
 
 ## Every node of [param scene_path] as {ok, nodes}, keyed by path, or a refusal.
@@ -236,7 +236,7 @@ static func _by_id(nodes: Dictionary, owner: String, id: int) -> String:
 		if path == owner or not (owner == "." or path.begins_with(owner + "/")):
 			continue
 		var entry: Dictionary = nodes[path]
-		if Read.as_int(entry.get("uniqueId", -1), -1) != id:
+		if GdhRead.as_int(entry.get("uniqueId", -1), -1) != id:
 			continue
 		var above: String = "." if not path.contains("/") else path.get_base_dir()
 		if _owner_of(nodes, above, owner) == owner:
@@ -311,7 +311,7 @@ static func _stored(type: String, given: Dictionary) -> Dictionary:
 	if script != null:
 		for declared: Dictionary in script.get_script_property_list():
 			var property: String = str(declared.get("name", ""))
-			if not property.is_empty() and Read.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+			if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
 				scripted[property] = script.get_property_default_value(property)
 	var values: Dictionary = {}
 	if ClassDB.class_exists(type) and ClassDB.can_instantiate(type):
@@ -321,7 +321,7 @@ static func _stored(type: String, given: Dictionary) -> Dictionary:
 				bare.set(str(property), given[property])
 		for declared: Dictionary in bare.get_property_list():
 			var property: String = str(declared.get("name", ""))
-			if not property.is_empty() and Read.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+			if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
 				values[property] = bare.get(property)
 		if bare is Node:
 			bare.free()
@@ -330,7 +330,7 @@ static func _stored(type: String, given: Dictionary) -> Dictionary:
 	# Given last, which keeps what a bare node cannot hold: the script itself, and a path to a node
 	# for a property that holds the node once it is in a tree.
 	values.merge(given, true)
-	var serialiser: Serialisation = Serialisation.new()
+	var serialiser: GdhSerialisation = GdhSerialisation.new()
 	var answered: Dictionary = {}
 	for property: Variant in values:
 		answered[property] = serialiser.serialize_value(values[property])
@@ -369,13 +369,13 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	if script != null:
 		for declared: Dictionary in script.get_script_property_list():
 			scripted[str(declared.get("name", ""))] = true
-	var serialiser: Serialisation = Serialisation.new()
+	var serialiser: GdhSerialisation = GdhSerialisation.new()
 	var properties: Dictionary = {}
 	for p: Dictionary in loaded.get_property_list():
 		var property: String = str(p.get("name", ""))
 		if property.is_empty() or property == "script":
 			continue
-		if not (Read.as_int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
+		if not (GdhRead.as_int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
 			continue
 		var value: Variant = loaded.get(property)
 		if not include_defaults:
@@ -384,7 +384,7 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 				if scripted.has(property)
 				else ClassDB.class_get_property_default_value(loaded.get_class(), property)
 			)
-			if PropertyValues.same(value, default):
+			if GdhPropertyValues.same(value, default):
 				continue
 		properties[property] = serialiser.serialize_value(value)
 	var answer: Dictionary = {
@@ -412,7 +412,7 @@ static func _kept_in(value: Variant, file: String, id: String, seen: Dictionary)
 		if held.resource_scene_unique_id == id:
 			return held
 		for p: Dictionary in held.get_property_list():
-			if Read.as_int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+			if GdhRead.as_int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
 				var found: Resource = _kept_in(held.get(str(p.get("name", ""))), file, id, seen)
 				if found != null:
 					return found

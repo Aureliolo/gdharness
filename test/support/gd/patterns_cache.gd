@@ -1,6 +1,6 @@
 extends SceneTree
 
-## Whether `Patterns.compiled` hands back the same object for a pattern it has already built.
+## Whether `GdhPatterns.compiled` hands back the same object for a pattern it has already built.
 ##
 ## The cache is argued for in the source at length and was held by nothing, which is the shape a
 ## carefully written note hides: the readers call it once per line of every script in a project,
@@ -10,13 +10,13 @@ extends SceneTree
 ## Asked with `is_same` rather than `==`, because two RegEx built from one pattern match the same
 ## text and compare equal on everything this could otherwise look at. Identity is the claim.
 
-const Patterns = preload("res://operations/patterns.gd")
+const GdhPatterns = preload("res://operations/patterns.gd")
 
 
 func _initialize() -> void:
-	var first: RegEx = Patterns.compiled("^abc")
-	var again: RegEx = Patterns.compiled("^abc")
-	var other: RegEx = Patterns.compiled("^xyz")
+	var first: RegEx = GdhPatterns.compiled("^abc")
+	var again: RegEx = GdhPatterns.compiled("^abc")
+	var other: RegEx = GdhPatterns.compiled("^xyz")
 
 	var findings: Dictionary = {
 		"ok": true,
