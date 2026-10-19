@@ -6,6 +6,13 @@ extends RefCounted
 # Every module preloads this as `GdhLog`. `Logger` is a native class from Godot 4.5 on, and a
 # constant of that name is a parse error rather than a shadowing warning.
 
+## Printed around engine output an operation provokes to answer a question of its own, such as
+## whether a script parsed before a change, which src/headless.ts leaves out of the answer: its
+## errors are about a file the answer does not describe. Kept in step with `ASIDE` and `RESUMED`
+## there.
+const ASIDE: String = "[gdharness] aside"
+const RESUMED: String = "[gdharness] resumed"
+
 var debug_mode: bool = false
 
 

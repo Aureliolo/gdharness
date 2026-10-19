@@ -659,7 +659,8 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	# names this scene's file sets are always answered.
 	var props: Dictionary = _properties_of(node, include_defaults, scene.set_here(node))
 	var cells: Dictionary = GdhResourceTools.cells_of(node)
-	var answer: Dictionary = {"ok": true, "nodePath": node_path, "properties": props}
+	var answer: Dictionary = {"ok": true, "nodePath": scene.path_of(node), "properties": props}
+	answer.merge(GdhSceneFile.class_of(node))
 	if node != scene.root and node.owner != null and not node.scene_file_path.is_empty():
 		answer["instanceOf"] = node.scene_file_path
 		answer["editableChildren"] = scene.root.is_editable_instance(node)

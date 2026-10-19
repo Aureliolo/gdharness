@@ -27,8 +27,10 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   ANSWERED,
+  ASIDE,
   BEGUN,
   engineExtras,
+  RESUMED,
   runOperation as runThroughTheServersOwnPath,
   WAITING,
 } from '../src/headless.js';
@@ -523,10 +525,18 @@ function runOperation(
   // something the operation did, a leaked object or a resource still in use at exit included,
   // and the server hands every such line on to the caller. So an operation that passes here is
   // one that answers cleanly. The lines marking when it began and answered are the script's own,
-  // and the only ones.
+  // and the only ones, with what it set aside between its aside marks, which the server drops.
+  let aside = false;
   const complaints = run.stderr
     .split(/\r?\n/)
-    .filter((line) => ![ANSWERED, WAITING, BEGUN].includes(line.trim()))
+    .filter((line) => {
+      const said = line.trim();
+      if (said === ASIDE || said === RESUMED) {
+        aside = said === ASIDE;
+        return false;
+      }
+      return !aside && ![ANSWERED, WAITING, BEGUN].includes(said);
+    })
     .join('\n')
     .trim();
   assert.equal(complaints, '', `${operation} succeeded but wrote to stderr:\n${run.stderr.trim()}`);
@@ -655,18 +665,48 @@ function testOperations(godotPath: string, projectDir: string): void {
   // template that trips a warning there is a script the tool wrote that the engine refuses.
   // The operation loads what it wrote and says so, and anything it printed on the way is
   // stderr the run above refuses.
+  // Given no extends, each takes the class it is written for: the resource template on the default
+  // of Node wrote a script that did not parse.
   for (const [template, base] of [
     ['singleton', 'Node'],
+    ['state_machine', 'Node'],
     ['component', 'Node'],
     ['resource', 'Resource'],
     ['none', 'Node'],
   ] as const) {
     const made = operation('create_script', {
       script_path: `made/${template}_template.gd`,
-      extends: base,
       template: template === 'none' ? '' : template,
     });
-    assert.equal(get(made, 'parses'), true, `the ${template} template should parse under every warning`);
+    assert.deepEqual(
+      [get(made, 'parses'), get(made, 'extends')],
+      [true, base],
+      `the ${template} template should parse under every warning, on ${base}: ${JSON.stringify(made)}`,
+    );
+  }
+  // Its doc comment straight below the header, where Godot reads it as the class's.
+  assert.match(
+    readFileSync(join(projectDir, 'made', 'resource_template.gd'), 'utf8'),
+    /^extends Resource\n## Data kept in a \.tres file/,
+  );
+  for (const [base, named] of [
+    ['Node', 'Node'],
+    ['FixtureHero', 'FixtureHero, a Node2D,'],
+  ] as const) {
+    const misplaced = runRefusedOperation(godotPath, projectDir, 'create_script', {
+      script_path: 'made/misplaced.gd',
+      extends: base,
+      template: 'resource',
+    });
+    assert.equal(misplaced.answer, null, `the resource template on ${base} is refused`);
+    assert.match(
+      misplaced.stderr,
+      new RegExp(
+        `The resource template is written for a Resource, and extends ${named} is not one\\. Give extends a Resource class, or leave it out for Resource\\. Nothing was written\\.`,
+      ),
+      misplaced.stderr,
+    );
+    assert.ok(!existsSync(join(projectDir, 'made', 'misplaced.gd')), 'and nothing is written');
   }
   assert.equal(
     readFileSync(join(projectDir, 'made', 'none_template.gd'), 'utf8'),
@@ -675,10 +715,18 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   const broken = runRefusedOperation(godotPath, projectDir, 'create_script', {
     script_path: 'made/broken.gd',
-    content: 'func _ready() -> void:\n\tvar loose = 1\n',
+    // With an inner class whose own extends is not the script's.
+    content:
+      'class_name FixtureBroken\nextends Node2D\n\n\nfunc _ready() -> void:\n\tvar loose = 1\n\n\nclass Inner:\n\textends Resource\n',
   });
   assert.equal(broken.status, 0, 'a script that was written is a success, whatever it says');
   assert.equal(get(broken.answer, 'parses'), false, 'a script the engine refuses is reported as not parsing');
+  // The engine reads nothing off a script that does not parse, so the header comes off its text.
+  assert.deepEqual(
+    [get(broken.answer, 'extends'), get(broken.answer, 'class_name')],
+    ['Node2D', 'FixtureBroken'],
+    JSON.stringify(broken.answer),
+  );
   assert.match(broken.stderr, /loose/, 'the reason is on stderr, where the server reads it from');
   // Gone again before the resave below walks the project, which would trip over it.
   rmSync(join(projectDir, 'made', 'broken.gd'));
@@ -804,6 +852,44 @@ function testOperations(godotPath: string, projectDir: string): void {
     `and the lines answered are the ones they are on: ${JSON.stringify(apart)}`,
   );
   rmSync(join(projectDir, 'made', 'bare.gd'));
+
+  // A class doc comment stays with the header it documents: Godot reads the `##` lines straight
+  // below `extends` as the class's, and a signal or a variable put between them took them over. A
+  // signal is set apart by a blank line from the header above it and from a variable below it.
+  // Each body uses what the call adds, so the script parses once the additions are in and not before.
+  const ready = (body: string): string => `\n\nfunc _ready() -> void:\n\t${body}\n`;
+  for (const [content, modifications, expected] of [
+    [
+      `extends Node\n## What this node is for.\n## And a second line.\n${ready('hit.emit(int(speed))')}`,
+      [
+        { type: 'add_signal', name: 'hit', params: 'by: int' },
+        { type: 'add_variable', name: 'speed', varType: 'float', defaultValue: '1.0' },
+      ],
+      `extends Node\n## What this node is for.\n## And a second line.\n\nsignal hit(by: int)\n\nvar speed: float = 1.0\n${ready('hit.emit(int(speed))')}`,
+    ],
+    [
+      `extends Node\n## What this node is for.\n${ready('print(speed)')}`,
+      [{ type: 'add_variable', name: 'speed', varType: 'float', defaultValue: '1.0' }],
+      `extends Node\n## What this node is for.\n\nvar speed: float = 1.0\n${ready('print(speed)')}`,
+    ],
+    [
+      `extends Node\nvar kept: int = 1\n${ready('hit.emit()')}`,
+      [{ type: 'add_signal', name: 'hit' }],
+      `extends Node\n\nsignal hit\n\nvar kept: int = 1\n${ready('hit.emit()')}`,
+    ],
+  ] as const) {
+    runRefusedOperation(godotPath, projectDir, 'create_script', {
+      script_path: 'made/documented.gd',
+      content,
+    });
+    const laid = runRefusedOperation(godotPath, projectDir, 'modify_script', {
+      script_path: 'made/documented.gd',
+      modifications,
+    });
+    assert.equal(readFileSync(join(projectDir, 'made', 'documented.gd'), 'utf8'), expected);
+    assert.equal(get(laid.answer, 'parses'), true, `${JSON.stringify(laid.answer)} ${laid.stderr}`);
+    rmSync(join(projectDir, 'made', 'documented.gd'));
+  }
 
   // What gets written has to parse where an untyped declaration is an error, which the
   // autoload check further down proves by booting the project with this script as one.
