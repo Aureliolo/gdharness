@@ -545,12 +545,23 @@ func set_at(at: String) -> Dictionary:
 
 
 ## Whether [param loaded], read off [param saved] (a copy instantiated from the pack), is
-## [param given], held by the node in [member root]. A node is compared by where it sits in each.
+## [param given], held by the node in [member root]. A node is compared by where it sits in each,
+## in a list of nodes as much as alone: the copy's nodes are others with the same places.
 func kept(saved: Node, loaded: Variant, given: Variant) -> bool:
 	if loaded is Node and given is Node:
 		var loaded_node: Node = loaded
 		var given_node: Node = given
 		return str(saved.get_path_to(loaded_node)) == str(root.get_path_to(given_node))
+	if loaded is Array and given is Array:
+		var loaded_items: Array = loaded
+		var given_items: Array = given
+		if given_items.any(func(item: Variant) -> bool: return item is Node):
+			if loaded_items.size() != given_items.size():
+				return false
+			for index: int in given_items.size():
+				if not kept(saved, loaded_items[index], given_items[index]):
+					return false
+			return true
 	return GdhSame.same(loaded, given)
 
 

@@ -77,7 +77,8 @@ var _outside_declared: Dictionary = {}
 ## declares, or a bare array positional for a vector. Each is its own function; asking all three
 ## in one was twenty-four exits deep and impossible to follow.
 ##
-## [param elements] is what a typed Array or Dictionary holds, as [method elements_of] reads it.
+## [param elements] is what a typed Array or Dictionary holds, as [method GdhDeclared.elements_of]
+## reads it.
 func parse(value: Variant, expected_type: int = TYPE_NIL, elements: Array = []) -> Variant:
 	if value is Dictionary:
 		var fields: Dictionary = value
@@ -186,14 +187,18 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	if order.has("script"):
 		order.erase("script")
 		order.push_front("script")
+	var home: String = GdhPropertyPaths.home_of(target)
 	for key: Variant in order:
 		var property: String = str(key)
-		var place: Array = GdhPropertyPaths.holder_of(target, property)
+		var place: Array = GdhPropertyPaths.holder_of(target, property, home)
 		var holder: Object = place[0]
 		var name: String = place[1]
 		var declared: Dictionary = declaration(holder, name)
 		if declared.is_empty():
-			var ungrown: String = GdhPropertyPaths.grow(holder, name, class_called(holder))
+			var elsewhere: String = GdhPropertyPaths.held_elsewhere(holder, name, home)
+			if not elsewhere.is_empty():
+				return elsewhere + unwritten
+			var ungrown: String = GdhPropertyPaths.grow(holder, name, GdhPropertyPaths.class_called(holder))
 			if not ungrown.is_empty():
 				return ungrown + unwritten
 			declared = declaration(holder, name)
@@ -204,7 +209,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		if declared.is_empty() and holder is ShaderMaterial and name.begins_with("shader_parameter/"):
 			return _no_uniform(holder as ShaderMaterial, name) + unwritten
 		if declared.is_empty():
-			return _in_its_own_file(holder, name) + unwritten
+			return no_property(holder, name) + unwritten
 		var value: Array = value_for(holder, declared, properties[key])
 		if not value[0]:
 			return str(value[1]) + unwritten
@@ -240,7 +245,7 @@ func _not_held(
 ) -> String:
 	var said: String = (
 		"%s.%s was given %s and holds %s after it was set"
-		% [target.get_class(), property, shown(value), shown(held)]
+		% [GdhPropertyPaths.class_called(target), property, shown(value), shown(held)]
 	)
 	var type: int = GdhRead.as_int(declared.get("type", TYPE_NIL))
 	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
@@ -378,7 +383,7 @@ func _write(target: Object, key: String, value: Variant) -> void:
 ## {"refused": why} for the first step that is not there.
 func _component_slot(target: Object, path: String) -> Dictionary:
 	var steps: PackedStringArray = path.split(":")
-	var owner: String = class_called(target)
+	var owner: String = GdhPropertyPaths.class_called(target)
 	if declaration(target, steps[0]).is_empty():
 		return {"refused": no_property(target, steps[0])}
 	var value: Variant = target.get(steps[0])
@@ -431,7 +436,7 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 			return [true, chosen]
 		if not str(raw).strip_edges().is_valid_int():
 			var why: String = GdhDeclared.enum_refusal(
-				class_called(target), property, str(raw), choices, constants
+				GdhPropertyPaths.class_called(target), property, str(raw), choices, constants
 			)
 			return [false, why]
 
@@ -444,17 +449,28 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 			return found
 		value = found[1]
 	else:
-		var elements: Array = elements_of(declared)
+		var elements: Array = GdhDeclared.elements_of(declared)
 		if _fraction(raw, expected_type, elements):
 			return [false, _fraction_refusal(target, property, raw)]
 		var rounded: String = GdhSerialisation.inexact(raw, expected_type)
 		if not rounded.is_empty():
-			return [false, "%s.%s holds int: %s." % [class_called(target), property, rounded]]
+			return [
+				false, "%s.%s holds int: %s." % [GdhPropertyPaths.class_called(target), property, rounded]
+			]
 		_refused = ""
 		value = parse(raw, expected_type, elements)
 		if not _refused.is_empty():
 			return [false, _refused]
-		var refusal: String = cannot_hold(class_called(target), property, value, expected_type, elements)
+		if expected_type == TYPE_ARRAY and elements == [TYPE_OBJECT] and value is Array:
+			var listed: Array = value
+			return _object_list(target, declared, listed)
+		if expected_type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
+			if GdhRead.as_int(elements[1], TYPE_NIL) == TYPE_OBJECT:
+				var mapped: Dictionary = value
+				return _object_entries(target, declared, mapped)
+		var refusal: String = cannot_hold(
+			GdhPropertyPaths.class_called(target), property, value, expected_type, elements
+		)
 		if not refusal.is_empty():
 			return [false, refusal]
 	if value is Object:
@@ -509,60 +525,102 @@ func _wrong_class(value: Object, declared: Dictionary) -> String:
 		return ""
 	var names: PackedStringArray = wanted.split(",", false)
 	for name: String in names:
-		if value.is_class(name.strip_edges()):
+		if GdhDeclared.is_a(value, name.strip_edges()):
 			return ""
-		var script: Script = value.get_script()
-		while script != null:
-			if str(script.get_global_name()) == name.strip_edges():
-				return ""
-			script = script.get_base_script()
 	return (
 		"%s holds %s, and the value given is a %s."
 		% [str(declared.get("name", "")), " or ".join(names), value.get_class()]
 	)
 
 
-## The element types a typed Array or Dictionary property declares: [element] for an array,
-## [key, value] for a dictionary, [] when nothing is declared.
-##
-## Read from the declaration because the value cannot say: a script's exported `Array[int]` sits
-## behind a placeholder in the editor, and measured on 4.7.2 that placeholder stores [1.5, 2.0]
-## as given, which the game then fails to load into the typed array.
-static func elements_of(declared: Dictionary) -> Array:
-	var type: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
-	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
-	var wanted: String = str(declared.get("hint_string", ""))
-	if wanted.is_empty():
-		return []
-	if hint == PROPERTY_HINT_TYPE_STRING:
-		var parts: PackedStringArray = wanted.split(";")
-		if type == TYPE_ARRAY and parts.size() == 1:
-			return [_type_in_hint(parts[0])]
-		if type == TYPE_DICTIONARY and parts.size() == 2:
-			return [_type_in_hint(parts[0]), _type_in_hint(parts[1])]
-		return []
-	if hint == PROPERTY_HINT_ARRAY_TYPE and type == TYPE_ARRAY:
-		return [_type_named(wanted)]
-	if hint == PROPERTY_HINT_DICTIONARY_TYPE and type == TYPE_DICTIONARY:
-		var parts: PackedStringArray = wanted.split(";")
-		if parts.size() == 2:
-			return [_type_named(parts[0]), _type_named(parts[1])]
-	return []
+## [param value] as the typed list of objects that [param declared] holds on [param target], as
+## [ok, list or why not]. Measured on 4.7.2, a scene's node whose script exports Array[Item] holds []
+## after being given an untyped list of Items, and keeps a list typed as its own is.
+func _object_list(target: Object, declared: Dictionary, value: Array) -> Array:
+	var property: String = str(declared.get("name", ""))
+	var kind: Array = GdhDeclared.object_kind(declared, 0)
+	var holding: String = "%s.%s holds %s" % [GdhPropertyPaths.class_called(target), property, kind[0]]
+	var items: Array = []
+	for index: int in value.size():
+		var place: Array = ["item %d of the list given" % index, "item %d of %s" % [index, property]]
+		var item: Array = _object_item(target, value[index], kind, holding, place)
+		if not item[0]:
+			return item
+		items.append(item[1])
+	var held: Variant = target.get(property)
+	var current: Array = held if held is Array else []
+	if current.is_typed():
+		return [
+			true,
+			Array(
+				items, current.get_typed_builtin(), current.get_typed_class_name(), current.get_typed_script()
+			)
+		]
+	var typing: Array = GdhDeclared.object_typing(str(kind[0]))
+	if typing.is_empty():
+		return [true, items]
+	var base: StringName = typing[0]
+	var script: Script = typing[1]
+	return [true, Array(items, TYPE_OBJECT, base, script)]
 
 
-## The type at the front of one entry of a type-string hint, "2:" or "24/17:Texture2D".
-static func _type_in_hint(entry: String) -> int:
-	var number: String = entry.get_slice(":", 0).get_slice("/", 0)
-	return number.to_int() if number.is_valid_int() else TYPE_NIL
+## [param value] as the typed map to objects that [param declared] holds on [param target], as
+## [ok, map or why not], typed for the same reason as [method _object_list].
+func _object_entries(target: Object, declared: Dictionary, value: Dictionary) -> Array:
+	var property: String = str(declared.get("name", ""))
+	var kind: Array = GdhDeclared.object_kind(declared, 1)
+	var holding: String = "%s.%s holds %s values" % [GdhPropertyPaths.class_called(target), property, kind[0]]
+	var entries: Dictionary = {}
+	for key: Variant in value:
+		var place: Array = ["the one given for %s" % shown(key), "%s[%s]" % [property, shown(key)]]
+		var entry: Array = _object_item(target, value[key], kind, holding, place)
+		if not entry[0]:
+			return entry
+		entries[key] = entry[1]
+	var held: Variant = target.get(property)
+	var current: Dictionary = held if held is Dictionary else {}
+	if current.is_typed():
+		return [
+			true,
+			Dictionary(
+				entries,
+				current.get_typed_key_builtin(),
+				current.get_typed_key_class_name(),
+				current.get_typed_key_script(),
+				current.get_typed_value_builtin(),
+				current.get_typed_value_class_name(),
+				current.get_typed_value_script()
+			)
+		]
+	var typing: Array = GdhDeclared.object_typing(str(kind[0]))
+	var key_type: int = GdhRead.as_int(GdhDeclared.elements_of(declared)[0], TYPE_NIL)
+	if typing.is_empty() or key_type == TYPE_OBJECT:
+		return [true, entries]
+	var base: StringName = typing[0]
+	var script: Script = typing[1]
+	return [true, Dictionary(entries, key_type, &"", null, TYPE_OBJECT, base, script)]
 
 
-## The Variant type [param name] names, or TYPE_OBJECT for a class.
-static func _type_named(name: String) -> int:
-	var named: String = name.get_slice(":", 0).strip_edges()
-	for type: int in TYPE_MAX:
-		if type_string(type) == named:
-			return type
-	return TYPE_OBJECT if not named.is_empty() else TYPE_NIL
+## [param given], an object for a typed list or map, as [ok, object or why not]: a resource's
+## res:// path is the resource, and for nodes a path from [param target] is the node there.
+## [param holding] says what the list or map holds, and [param place] is [where the value sits in
+## what was given, what it is called in the property].
+func _object_item(target: Object, given: Variant, kind: Array, holding: String, place: Array) -> Array:
+	var item: Variant = given
+	if typeof(item) == TYPE_STRING:
+		var found: Array = (
+			_node_reference(target, str(place[1]), item)
+			if kind[1]
+			else _resource_at(str(item), str(place[1]))
+		)
+		if not found[0]:
+			return found
+		item = found[1]
+	var object: Object = item if item is Object else null
+	if item == null or (object != null and GdhDeclared.is_a(object, str(kind[0]))):
+		return [true, item]
+	var named: String = object.get_class() if object != null else shown(item)
+	return [false, "%s, and %s is %s." % [holding, place[0], named]]
 
 
 ## Whether [param value] holds a number with a fractional part where an integer is wanted, in a
@@ -599,7 +657,7 @@ func _fraction_refusal(target: Object, property: String, raw: Variant) -> String
 			"%s.%s holds whole numbers, and %s would be cut to fit. Setting it would save a different "
 			+ "value than the one asked for."
 		)
-		% [class_called(target), property, shown(raw)]
+		% [GdhPropertyPaths.class_called(target), property, shown(raw)]
 	)
 
 
@@ -624,23 +682,13 @@ func colour_from(raw: Variant, named: String) -> Array:
 	]
 
 
-## What [param target] is called in a refusal: the class_name its script declares, or else its
-## engine class. A resource made as a project class is a Resource to the engine, and "Resource.kind"
-## named a property no Resource has.
-static func class_called(target: Object) -> String:
-	var attached: Variant = target.get_script()
-	if attached is Script:
-		var script: Script = attached
-		if not str(script.get_global_name()).is_empty():
-			return str(script.get_global_name())
-	return target.get_class()
-
-
 ## The refusal for [param property], which [param target] does not declare, naming the declared
 ## ones nearest it: "StyleBoxFlat has no property shadow_sizee" left the caller nothing to send.
 static func no_property(target: Object, property: String) -> String:
 	return (
-		GdhRead.near_property("%s has no property %s" % [class_called(target), property], target, property)
+		GdhRead.near_property(
+			"%s has no property %s" % [GdhPropertyPaths.class_called(target), property], target, property
+		)
 		+ "."
 	)
 
@@ -694,25 +742,6 @@ func declaration(target: Object, property: String) -> Dictionary:
 	if declared.is_empty() and target is Theme:
 		return _theme_item(property)
 	return declared
-
-
-## The refusal for [param name], which [param target] does not declare. One that starts with a
-## property holding a resource kept in a file of its own names that file, since the write belongs
-## there: through a TileMapLayer's tile_set the layer's scene would be saved and the TileSet's file
-## left as it was.
-static func _in_its_own_file(target: Object, name: String) -> String:
-	var at: int = name.find("/")
-	while at > 0:
-		var head: String = name.left(at)
-		var held: Resource = GdhPropertyPaths.held_at(target, head)
-		if held != null and not held.is_built_in():
-			var file: String = held.resource_path
-			return (
-				"%s.%s is %s, a file of its own, so %s is written there, with resource_edit modify on %s."
-				% [class_called(target), head, file, name.substr(at + 1), file]
-			)
-		at = name.find("/", at + 1)
-	return no_property(target, name)
 
 
 ## The entry a Theme would declare for [param property] once it held that item, or {} when the name
@@ -790,15 +819,21 @@ func _parse_resource_tag(value: Dictionary) -> Array:
 ## NavigationRegion2D can arrive with its NavigationPolygon and an AnimationTree with its root
 ## state machine in the same add as any other property.
 func _parse_new_resource(type_tag: String, value: Dictionary) -> Array:
+	var built: Resource = null
 	if (
-		type_tag.is_empty()
-		or not ClassDB.class_exists(type_tag)
-		or not ClassDB.is_parent_class(type_tag, "Resource")
-		or not ClassDB.can_instantiate(type_tag)
+		ClassDB.class_exists(type_tag)
+		and ClassDB.is_parent_class(type_tag, "Resource")
+		and ClassDB.can_instantiate(type_tag)
 	):
+		built = ClassDB.instantiate(type_tag)
+	elif not type_tag.is_empty() and not ClassDB.class_exists(type_tag):
+		# A script's class_name, as a read answers it under scriptClass.
+		var script: Script = GdhDeclared.script_class(type_tag)
+		if script != null and ClassDB.is_parent_class(script.get_instance_base_type(), "Resource"):
+			built = ClassDB.instantiate(script.get_instance_base_type())
+			built.set_script(script)
+	if built == null:
 		return [false, null]
-
-	var built: Resource = ClassDB.instantiate(type_tag)
 	var wanted: Dictionary = {}
 	for key: Variant in value:
 		var property: String = str(key)

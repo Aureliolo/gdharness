@@ -26,9 +26,10 @@ static func declared_on(target: Object, property: String) -> Dictionary:
 ## start with the name of one holding a resource built into it, then a slash and a key of that
 ## resource: "sources/0/0:0/0/probability" is the probability of tile 0:0 in the atlas source a
 ## TileSet keeps as sources/0. A colon path cannot reach it, since the tile's own name holds colons.
-## A resource kept in a file of its own is not reached, since writing it here would leave its file
-## as it was.
-static func holder_of(target: Object, key: String) -> Array:
+## A resource kept in a file of its own is not reached, nor, given the file [param home] that
+## [param target] is saved in, one built into another file, since writing it here would leave that
+## file as it was.
+static func holder_of(target: Object, key: String, home: String = "") -> Array:
 	var through: Array[Resource] = []
 	var holder: Object = target
 	var name: String = key
@@ -36,7 +37,7 @@ static func holder_of(target: Object, key: String) -> Array:
 		var reached: Resource = null
 		var at: int = name.find("/")
 		while at > 0:
-			var held: Resource = built_in_at(holder, name.left(at))
+			var held: Resource = built_in_at(holder, name.left(at), home)
 			if held != null:
 				reached = held
 				break
@@ -49,10 +50,28 @@ static func holder_of(target: Object, key: String) -> Array:
 	return [holder, name, through]
 
 
-## The resource [param target] holds under [param property] when it is built into it, or null.
-static func built_in_at(target: Object, property: String) -> Resource:
+## The resource [param target] holds under [param property] when it is built into a file, or null;
+## given [param home], only one built into that file or into none yet.
+static func built_in_at(target: Object, property: String, home: String = "") -> Resource:
 	var held: Resource = held_at(target, property)
-	return held if held != null and held.is_built_in() else null
+	if held == null or not held.is_built_in():
+		return null
+	var file: String = held.resource_path.get_slice("::", 0)
+	return held if home.is_empty() or file.is_empty() or file == home else null
+
+
+## The file [param target] is saved in: its scene's for a node, as the nodes of an instance are
+## saved in the scene holding it, and its own for a resource; "" when it has none yet.
+static func home_of(target: Object) -> String:
+	if target is Node:
+		var top: Node = target
+		while top.owner != null:
+			top = top.owner
+		return top.scene_file_path
+	if target is Resource:
+		var resource: Resource = target
+		return resource.resource_path.get_slice("::", 0)
+	return ""
 
 
 ## The resource [param target] holds under [param property], built in or kept in a file, or null.
@@ -143,3 +162,64 @@ static func _elements(target: Object, prefix: String) -> int:
 		if index.is_valid_int():
 			count = maxi(count, index.to_int() + 1)
 	return count
+
+
+## What [param target] is called in a refusal: the class_name its script declares, or else its
+## engine class. A resource made as a project class is a Resource to the engine, and "Resource.kind"
+## named a property no Resource has.
+static func class_called(target: Object) -> String:
+	var attached: Variant = target.get_script()
+	if attached is Script:
+		var script: Script = attached
+		if not str(script.get_global_name()).is_empty():
+			return str(script.get_global_name())
+	return target.get_class()
+
+
+## The refusal for [param name], which [param target] does not declare, when it runs through a
+## resource saved in a file other than [param home], the one [param target] is saved in; or "". The
+## write belongs in that file, since this one would be saved and that one left as it was: through a
+## TileMapLayer's tile_set kept in a file of its own, or through the mesh of an instance's editable
+## child, which is built into the scene the instance comes from.
+static func held_elsewhere(target: Object, name: String, home: String) -> String:
+	var at: int = name.find("/")
+	while at > 0:
+		var head: String = name.left(at)
+		var rest: String = name.substr(at + 1)
+		var held: Resource = held_at(target, head)
+		var file: String = "" if held == null else held.resource_path.get_slice("::", 0)
+		if held != null and not held.is_built_in():
+			return (
+				"%s.%s is %s, a file of its own, so %s is written there, with resource_edit modify on %s."
+				% [class_called(target), head, file, rest, file]
+			)
+		if held != null and not file.is_empty() and not home.is_empty() and file != home:
+			return _built_in_elsewhere(target, head, rest, held, file)
+		at = name.find("/", at + 1)
+	return ""
+
+
+## The refusal for writing [param rest] into [param held], which [param target] holds under
+## [param head] and which is built into [param file], the scene an instance in this one comes from.
+static func _built_in_elsewhere(
+	target: Object, head: String, rest: String, held: Resource, file: String
+) -> String:
+	var node: String = ""
+	if target is Node:
+		var placed: Node = target
+		var from: Node = placed
+		while from != null and from.scene_file_path != file:
+			from = from.owner
+		if from != null:
+			node = " on %s" % from.get_path_to(placed)
+	var text: String = (
+		(
+			"%s.%s is built into %s, so %s is written there, with scene_node set%s in %s, which changes "
+			+ "it wherever that scene is used. To change it here alone, give %s a %s of its own: a "
+			+ 'value with "_type" set to its class and its properties beside it.'
+		)
+		% [class_called(target), head, file, rest, node, file, head, held.get_class()]
+	)
+	if target is GeometryInstance3D and (held is Material or rest.contains("material")):
+		text += " A material for this instance alone goes in material_override."
+	return text
