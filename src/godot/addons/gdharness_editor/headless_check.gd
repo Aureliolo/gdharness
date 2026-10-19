@@ -11,8 +11,8 @@ extends RefCounted
 ## both, so a property a built-in setter derives (a Control's offsets from its size) is left alone
 ## unless a script that is not a tool is involved.
 
-const GdhPropertyValues = preload("property_values.gd")
 const GdhRead = preload("reading.gd")
+const GdhSame = preload("same_values.gd")
 
 const REMEDY: String = (
 	"Open the project's editor (editor_launch with hidden: true) and ask again: the write then goes "
@@ -78,7 +78,7 @@ static func differing(object: Object, before: Dictionary, names: Dictionary) -> 
 		if names.has(name):
 			continue
 		var was: Variant = before[name] if before.has(name) else default_of(object, name)
-		if not GdhPropertyValues.same(now[name], was):
+		if not GdhSame.same(now[name], was):
 			changed.append(name)
 	return changed
 
@@ -122,7 +122,7 @@ static func _initialised(script: Script, name: String, type: int) -> Variant:
 ## nothing a script did: the saver writes a property whose default the engine cannot report whatever
 ## it holds, the editor's save as well.
 static func at_default(object: Object, name: String) -> bool:
-	return GdhPropertyValues.same(object.get(name), default_of(object, name))
+	return GdhSame.same(object.get(name), default_of(object, name))
 
 
 ## The ids, in the file, of the embedded resources [param property] reaches into on [param object],
@@ -276,7 +276,7 @@ static func reads_the_same(was: Variant, now: Variant, default: Variant) -> bool
 			return false
 		else:
 			values.append(str_to_var(str(text)))
-	return GdhPropertyValues.same(values[0], values[1])
+	return GdhSame.same(values[0], values[1])
 
 
 static func _main_entries(text: String) -> Dictionary:

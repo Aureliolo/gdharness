@@ -58,47 +58,21 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 	var max_depth: int = depth if depth > 0 else 1000
 	var include_built_in: bool = GdhRead.as_bool(params.get("include_builtin", false))
 
-	_log.info(
-		(
-			"Getting dependencies"
-			+ (" for: " + resource_path if not resource_path.is_empty() else " for all resources")
-		)
-	)
+	if resource_path.is_empty():
+		return _log.failure("resource_path is required")
+	_log.info("Getting dependencies for: " + resource_path)
 
 	var dependencies: Dictionary = {}
 	var circular_references: Array = []
-	var total_resources: int = 0
-
-	if not resource_path.is_empty():
-		var full_path: String = resource_path
-		if not full_path.begins_with("res://"):
-			full_path = "res://" + full_path
-
-		if not FileAccess.file_exists(full_path):
-			return _log.failure(
-				_files.with_nearest_files("Resource file does not exist: " + full_path, full_path)
-			)
-
-		var walk: GdhDependencyWalk = GdhDependencyWalk.new(max_depth, include_built_in, circular_references)
-		dependencies[full_path] = _analyze_resource(full_path, 0, walk)
-		total_resources = 1
-	else:
-		var resource_extensions: Array[String] = ["tscn", "tres", "gd", "gdshader", "shader"]
-		var all_resources: Array[String] = []
-		for ext: String in resource_extensions:
-			all_resources.append_array(_files.find_files("res://", "." + ext))
-
-		# Each root gets a fresh walk so a cycle is reported from every resource it passes
-		# through, rather than only from whichever one happened to be walked first.
-		for res_path: String in all_resources:
-			var walk: GdhDependencyWalk = GdhDependencyWalk.new(
-				max_depth, include_built_in, circular_references
-			)
-			var deps: Array[Dictionary] = _analyze_resource(res_path, 0, walk)
-			if deps.size() > 0:
-				dependencies[res_path] = deps
-
-		total_resources = all_resources.size()
+	var full_path: String = resource_path
+	if not full_path.begins_with("res://"):
+		full_path = "res://" + full_path
+	if not FileAccess.file_exists(full_path):
+		return _log.failure(
+			_files.with_nearest_files("Resource file does not exist: " + full_path, full_path)
+		)
+	var walk: GdhDependencyWalk = GdhDependencyWalk.new(max_depth, include_built_in, circular_references)
+	dependencies[full_path] = _analyze_resource(full_path, 0, walk)
 
 	var references: int = 0
 	var distinct: Dictionary = {}
@@ -121,7 +95,8 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 		"circular_references": circular_references,
 		"summary":
 		{
-			"total_resources": total_resources,
+			# The file the walk starts from, which a call always names one of.
+			"total_resources": 1,
 			# The files depended on, each once. The tree names a file again under everything that
 			# loads it, and counting its entries answered 11 for a scene with six dependencies.
 			"total_dependencies": distinct.size(),

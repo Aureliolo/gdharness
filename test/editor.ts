@@ -2180,6 +2180,52 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
  * no way through: `Object.set` takes a Resource, a caller has a path, and nothing turned one
  * into the other, so a TileMap could never be given the TileSet its cells are placed from.
  */
+/**
+ * A resource built into the scene is read with what it holds, in the form a write builds one from.
+ * Its script is not a tool, so the editor never runs it, and the read takes its defaults from what
+ * the script declares rather than from an instance its _init would have run in.
+ */
+async function testABuiltInResourceIsReadWithWhatItHolds({ call, project }: Editor): Promise<void> {
+  const scene = { projectPath: project, scenePath: SCENE };
+  writeFileSync(
+    join(project, 'tally_made.gd'),
+    'extends Resource\n\n@export var count: int = 1\n\n\nfunc _init() -> void:\n\tresource_name = "made by _init"\n',
+  );
+  writeFileSync(join(project, 'tally_holder.gd'), 'extends Node\n\n@export var tally: Resource\n');
+  await call('editor_rescan', { projectPath: project });
+  await call('scene_node', {
+    ...scene,
+    op: 'add',
+    nodeType: 'Node',
+    nodeName: 'Tallied',
+    properties: { script: 'res://tally_holder.gd' },
+  });
+  const set = await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Tallied',
+    properties: { tally: { _type: 'Resource', script: 'res://tally_made.gd', count: 3 } },
+  });
+  const read = await call('scene_node', { ...scene, op: 'get', nodePath: 'Tallied' });
+  assert.equal(get(set, 'properties', 'tally', 'count'), 3, `the set answers what it built: ${text(set)}`);
+  const tally = get(read, 'properties', 'tally');
+  assert.ok(
+    typeof tally === 'object' && tally !== null,
+    `the resource is read: ${text(read)}\n${fileText(project, 'fixture.tscn')}`,
+  );
+  assert.deepEqual(
+    [
+      get(tally, '_type'),
+      get(tally, 'script', 'path'),
+      get(tally, 'count'),
+      Object.keys(asObject(tally)).sort(),
+    ],
+    ['Resource', 'res://tally_made.gd', 3, ['_type', 'count', 'script']],
+    `the resource is read with what it holds, and no _init ran for its defaults: ${JSON.stringify(tally)}`,
+  );
+  await call('scene_node', { ...scene, op: 'delete', nodePath: 'Tallied' });
+}
+
 async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: SCENE };
 
@@ -3160,16 +3206,18 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
     }),
     /No transition can leave End/,
   );
+  const lost = await call('scene_animation', {
+    projectPath: project,
+    scenePath: 'res://moves/treed.tscn',
+    animTreePath: 'Tree',
+    op: 'add_state',
+    stateName: 'Lost',
+    animationName: 'moves/missing',
+  });
+  assert.equal(get(lost, 'animationFound'), false, JSON.stringify(lost));
   assert.match(
-    await refusal('scene_animation', {
-      projectPath: project,
-      scenePath: 'res://moves/treed.tscn',
-      animTreePath: 'Tree',
-      op: 'add_state',
-      stateName: 'Lost',
-      animationName: 'moves/missing',
-    }),
-    /The AnimationPlayer at Body\/Player has no animation moves\/missing for the state to play\./,
+    String(get(lost, 'animationMissing')),
+    /^The AnimationPlayer at Body\/Player has no animation moves\/missing yet, so the state plays nothing until it has one\./,
   );
 
   // A resource kept inside a file, read through the editor by the path a read answers it with.
@@ -6852,6 +6900,7 @@ async function main(): Promise<void> {
     ['testSceneSignals', testSceneSignals],
     ['testSceneAnimation', testSceneAnimation],
     ['testResources', testResources],
+    ['testABuiltInResourceIsReadWithWhatItHolds', testABuiltInResourceIsReadWithWhatItHolds],
     ['testResourcesOnNodes', testResourcesOnNodes],
     ['testAWriteKeepsWhatTheSceneComesFrom', testAWriteKeepsWhatTheSceneComesFrom],
     ['testAHeldSceneIsWrittenFromItsFile', testAHeldSceneIsWrittenFromItsFile],

@@ -121,6 +121,10 @@ const BUILDERS: Dictionary = {
 	"Dictionary": "_build_dictionary",
 }
 
+## The built-in resources being described, outermost first, so one holding itself somewhere inside
+## is answered by its class rather than without end.
+var _describing: Array[Resource] = []
+
 
 # Converts a Godot value into something JSON can carry. A type with no entry in the table
 # passes through as itself, which is what the JSON-native ones want.
@@ -665,14 +669,82 @@ func _serialize_object(value: Object) -> Variant:
 		return _describe_input_event(event)
 	if value is Resource:
 		var resource: Resource = value
-		if resource.resource_path.is_empty():
-			return {"class": resource.get_class(), "_type": "Resource"}
-		return {"path": resource.resource_path, "class": resource.get_class(), "_type": "Resource"}
+		# A file's built-in resources load with a path of the file's own and "::", which no other
+		# file can refer to.
+		if resource.resource_path.is_empty() or resource.resource_path.contains("::"):
+			return _describe_built_in(resource)
+		var filed: Dictionary = {
+			"path": resource.resource_path, "class": resource.get_class(), "_type": "Resource"
+		}
+		# The engine class of a resource with a script is the one its script extends, so a Stats
+		# file read as a Resource and nothing said it was a Stats.
+		var attached: Variant = resource.get_script()
+		if attached is Script:
+			var script: Script = attached
+			if not script.get_global_name().is_empty():
+				filed["scriptClass"] = str(script.get_global_name())
+		return filed
 	if value is Node:
 		var node: Node = value
 		if node.is_inside_tree():
 			return {"path": str(node.get_path()), "class": node.get_class(), "_type": "Node"}
 	return _describe_object(value)
+
+
+## A resource built into the file it was read from, in the form a write builds one from: its class
+## under _type beside every property it stores away from its default. As its class alone it said
+## nothing of what it held, so a CollisionShape2D's radius could not be read, and it could not be
+## written back.
+func _describe_built_in(resource: Resource) -> Dictionary:
+	if _describing.has(resource):
+		return {"class": resource.get_class(), "_type": "Resource"}
+	_describing.append(resource)
+	var described: Dictionary = {"_type": resource.get_class()}
+	var attached: Variant = resource.get_script()
+	var script: Script = null
+	if attached is Script:
+		script = attached
+		described["script"] = serialize_value(script)
+	var fresh: Object = _fresh(script)
+	for property: Dictionary in resource.get_property_list():
+		var usage: int = property.get("usage", 0)
+		var name: String = str(property.get("name", ""))
+		if (
+			not (usage & PROPERTY_USAGE_STORAGE)
+			or name == "script"
+			or (name.begins_with("resource_") and name != "resource_name")
+		):
+			continue
+		var held: Variant = resource.get(name)
+		var default: Variant = ClassDB.class_get_property_default_value(resource.get_class(), name)
+		if fresh != null:
+			default = fresh.get(name)
+		elif script != null and usage & PROPERTY_USAGE_SCRIPT_VARIABLE:
+			default = script.get_property_default_value(name)
+		if typeof(held) == typeof(default) and held == default:
+			continue
+		described[name] = serialize_value(held)
+	_describing.pop_back()
+	return described
+
+
+## A new instance of [param script] to read defaults off, or null where none should be made. What
+## the script's own code sets as it is made (a resource_name in _init, a list built by a
+## constructor, which the engine reports no default for) is then a default rather than a value
+## the file holds. None is made for a script whose _init needs arguments, nor in the editor for one
+## that is not a tool: the editor never runs those, and can_instantiate says so.
+static func _fresh(script: Script) -> Object:
+	if script == null or not script.can_instantiate():
+		return null
+	for method: Dictionary in script.get_script_method_list():
+		if str(method.get("name", "")) == "_init":
+			var arguments: Array = method.get("args", [])
+			var defaults: Array = method.get("default_args", [])
+			if arguments.size() > defaults.size():
+				return null
+	# Called by name: new() is declared on each kind of script rather than on Script.
+	var made: Variant = script.call("new")
+	return made if made is Object else null
 
 
 ## An input event, by what it is bound to: the engine's own words for it and every field it stores

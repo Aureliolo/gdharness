@@ -6,7 +6,7 @@ extends RefCounted
 
 const GdhFileWalk = preload("../file_walk.gd")
 const GdhRead = preload("../reading.gd")
-const GdhPropertyValues = preload("../property_values.gd")
+const GdhSame = preload("../same_values.gd")
 
 
 ## The scene to instance for an add, or null for a node of a class, beside why neither can be made
@@ -85,7 +85,7 @@ static func copied(source: Node, root: Node, copies: Dictionary) -> Node:
 				continue
 			var property: String = str(declared.get("name", ""))
 			var value: Variant = source.get(property)
-			if not GdhPropertyValues.same(copy.get(property), value):
+			if not GdhSame.same(copy.get(property), value):
 				copy.set(property, value)
 		for group: StringName in source.get_groups():
 			if not copy.is_in_group(group):

@@ -126,6 +126,36 @@ static func held_answer(whole: bool, frames: int) -> Variant:
 	return null
 
 
+## Waits out [param frames] process frames of [param tree], how long a whole press is held down,
+## and answers how long that was by the clock and in physics ticks. A process frame is no set
+## time: a headless game draws nothing and runs them as fast as it can, so thirty held a movement
+## read in _physics_process for twelve ticks, a fifth of a second, where a caller counting sixty
+## frames a second expected half of one.
+static func hold(tree: SceneTree, frames: int) -> Dictionary:
+	var began_usec: int = Time.get_ticks_usec()
+	var began_tick: int = Engine.get_physics_frames()
+	for _frame: int in frames:
+		await tree.process_frame
+	return {
+		"seconds": snappedf((Time.get_ticks_usec() - began_usec) / 1000000.0, 0.001),
+		"physics_frames": Engine.get_physics_frames() - began_tick,
+	}
+
+
+## The character a key produces, or nothing for a key that produces none.
+##
+## Godot's keycodes below [constant KEY_SPECIAL] are the Unicode code points of the keys that
+## print something, so the mapping is the value itself. Letters are held as their capitals, which
+## is the one place the shift a caller asked for changes the answer rather than the key: the small
+## letter is 32 above its capital.
+static func glyph_of(keycode: Key, shifted: bool) -> int:
+	if keycode >= KEY_SPECIAL:
+		return 0
+	if keycode >= KEY_A and keycode <= KEY_Z and not shifted:
+		return keycode + 32
+	return keycode
+
+
 ## What [param path] names: a node under [param root], as [method node_at] reads it, or an engine
 ## singleton by its name. Answers the object under "object", and under "node" the node that objects
 ## named in a value are found from, which for a singleton is [param root].

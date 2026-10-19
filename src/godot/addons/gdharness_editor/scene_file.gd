@@ -29,8 +29,8 @@ const GdhHeadlessCheck = preload("headless_check.gd")
 
 ## How many times what scripts changed is put back before a write is refused for it.
 const PUTTING_BACK_PASSES: int = 4
-const GdhPropertyValues = preload("property_values.gd")
 const GdhRead = preload("reading.gd")
+const GdhSame = preload("same_values.gd")
 ## The names Object.ConnectFlags gives each bit. The number alone left a reader guessing that 2 is
 ## the persistence every connection in a saved scene carries.
 const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
@@ -261,6 +261,41 @@ static func class_of(node: Node) -> Dictionary:
 	return named
 
 
+## [param given] as a res:// path, one inside [param project_path] taken relative to it.
+static func res_path(project_path: String, given: String) -> String:
+	var p: String = given.strip_edges()
+	if p.begins_with("res://"):
+		return p
+	if not project_path.strip_edges().is_empty():
+		var normalized_project: String = project_path.replace("\\", "/")
+		var normalized: String = p.replace("\\", "/")
+		if normalized.begins_with(normalized_project):
+			p = normalized.substr(normalized_project.length()).trim_prefix("/")
+	return "res://" + p
+
+
+## The node at [param at] under [param top], "." or "" naming [param top] itself, or null.
+static func node_at(top: Node, at: String) -> Node:
+	if at == "." or at.is_empty():
+		return top
+	return top.get_node_or_null(at)
+
+
+## Why the property or signal [param missing] could not be found on [param node], adding the one
+## cause the name alone does not show: a script that does not compile leaves the editor holding a
+## placeholder with no properties or signals at all, and the refusal named the property instead.
+## Such a script has no engine class beneath it. Compiling a copy of the source to find out failed on
+## every script with a class_name, since the copy hides the global class the original declares.
+static func missing_on(node: Node, missing: String) -> String:
+	var script: Script = node.get_script()
+	if script == null or not str(script.get_instance_base_type()).is_empty():
+		return missing
+	return (
+		"%s. Its script, %s, does not compile, so none of what it declares is known here."
+		% [missing.trim_suffix("."), script.resource_path]
+	)
+
+
 ## Why [param node]'s own properties and connections cannot be written, or "". A node inside an
 ## instanced scene belongs to that scene's file unless its children were made editable here.
 func foreign(node: Node) -> String:
@@ -309,25 +344,40 @@ func _closed_around(node: Node) -> PackedStringArray:
 
 
 ## Why [param node] cannot be moved, renamed, copied or deleted, or "": the scene may only
-## restructure nodes it declares itself, not ones its base scene or an instance creates.
-func fixed(node: Node) -> String:
+## restructure nodes it declares itself, not ones its base scene or an instance creates. With
+## [param deleting], the refusal says what can be done instead, since nothing in this scene can.
+func fixed(node: Node, deleting: bool = false) -> String:
 	if node == root:
 		return "The root of %s cannot be moved, renamed, copied or deleted." % path
 	if node.owner != root:
 		var why: String = foreign(node)
 		if why.is_empty():
 			why = "%s is inside an instanced scene, which creates it again on load." % path_of(node)
+			if deleting:
+				why += _deleted_elsewhere(node, node.owner.scene_file_path)
 		return why
 	var at: String = path_of(node)
 	if _base_paths.has(at):
-		return (
-			(
-				"%s is made by %s, a scene %s inherits, which creates it again on load. Edit that "
-				+ "scene instead."
-			)
-			% [at, _base_paths[at], path]
+		var maker: String = str(_base_paths[at])
+		var made: String = (
+			"%s is made by %s, a scene %s inherits, which creates it again on load." % [at, maker, path]
 		)
+		return made + (_deleted_elsewhere(node, maker) if deleting else " Edit that scene instead.")
 	return ""
+
+
+## What a caller can do with [param node], made by [param maker], instead of deleting it here.
+static func _deleted_elsewhere(node: Node, maker: String) -> String:
+	var hidden: String = (
+		"set its visible to false here to hide it in this scene alone, or " if "visible" in node else ""
+	)
+	return (
+		(
+			" No scene can delete a node another scene makes: %sdelete it in %s, which removes it from "
+			+ "every scene using that one."
+		)
+		% [hidden, maker]
+	)
 
 
 ## Why the folder a new file at [param file_path] goes in cannot be made, or "" once it is there. The
@@ -489,7 +539,7 @@ func kept(saved: Node, loaded: Variant, given: Variant) -> bool:
 		var loaded_node: Node = loaded
 		var given_node: Node = given
 		return str(saved.get_path_to(loaded_node)) == str(root.get_path_to(given_node))
-	return GdhPropertyValues.same(loaded, given)
+	return GdhSame.same(loaded, given)
 
 
 ## Packs [member root], has [param check] read the result as the file will hold it, and writes the
@@ -817,7 +867,7 @@ func _strays(state: SceneState) -> Array[Array]:
 		for key: Variant in names:
 			var name: String = str(key)
 			var held: bool = filed.has(name)
-			if held == stored.has(name) and (not held or GdhPropertyValues.same(stored[name], filed[name])):
+			if held == stored.has(name) and (not held or GdhSame.same(stored[name], filed[name])):
 				continue
 			if not held and GdhHeadlessCheck.at_default(node, name):
 				continue

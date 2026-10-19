@@ -6,6 +6,7 @@ extends Node
 ## instead of leaving a command silently unanswered.
 
 const GdhSceneTools = preload("tools/scene_tools.gd")
+const GdhSignalTools = preload("tools/signal_tools.gd")
 const GdhResourceTools = preload("tools/resource_tools.gd")
 const GdhAnimationTools = preload("tools/animation_tools.gd")
 const GdhPlayTools = preload("tools/play_tools.gd")
@@ -17,6 +18,7 @@ const GdhProfileTools = preload("tools/profile_tools.gd")
 var _editor_plugin: EditorPlugin = null
 
 var _scene_tools: GdhSceneTools = null
+var _signal_tools: GdhSignalTools = null
 var _resource_tools: GdhResourceTools = null
 var _animation_tools: GdhAnimationTools = null
 var _play_tools: GdhPlayTools = null
@@ -49,6 +51,10 @@ func _init_tools() -> void:
 	_scene_tools = GdhSceneTools.new()
 	_scene_tools.name = "SceneTools"
 	add_child(_scene_tools)
+
+	_signal_tools = GdhSignalTools.new()
+	_signal_tools.name = "SignalTools"
+	add_child(_signal_tools)
 
 	_resource_tools = GdhResourceTools.new()
 	_resource_tools.name = "ResourceTools"
@@ -89,9 +95,9 @@ func _init_tools() -> void:
 		"set_node_properties": [_scene_tools, "set_node_properties"],
 		"get_node_properties": [_scene_tools, "get_node_properties"],
 		"save_scene": [_scene_tools, "save_scene"],
-		"connect_signal": [_scene_tools, "connect_signal"],
-		"disconnect_signal": [_scene_tools, "disconnect_signal"],
-		"list_connections": [_scene_tools, "list_connections"],
+		"connect_signal": [_signal_tools, "connect_signal"],
+		"disconnect_signal": [_signal_tools, "disconnect_signal"],
+		"list_connections": [_signal_tools, "list_connections"],
 		"rescan_filesystem": [_filesystem_tools, "rescan_filesystem"],
 		"scan_status": [_filesystem_tools, "scan_status"],
 		"reimport_files": [_filesystem_tools, "reimport_files"],

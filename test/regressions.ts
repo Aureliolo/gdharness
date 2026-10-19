@@ -20597,6 +20597,32 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         '',
       ].join('\n'),
     );
+    writeFileSync(
+      join(project, 'inferred.gd'),
+      [
+        'extends RefCounted',
+        '',
+        'const MAX := 99',
+        'const RATE = 0.5',
+        'const NAME := "Bag"',
+        'const ORIGIN := Vector2(1, 2)',
+        'const SIDE := Vector2(1, 2).x',
+        // Ends in the constructor's bracket and is not one constructor: the bracket closing the
+        // first ( is not the last character, and the value is a float.
+        'const ALONG := Vector2(1, 2).dot(Vector2(3, 4))',
+        'const MASK := 0xFF',
+        'const TYPED: int = 3',
+        '',
+        'var count := 3  # a note',
+        'var loose = 3',
+        'var items := []',
+        'var label := "":',
+        '\tset(value):',
+        '\t\tlabel = value',
+        'var flag := true',
+        '',
+      ].join('\n'),
+    );
     // Commas that are not separators, and a bracket that is not the end of the signature. Each of
     // these is ordinary Godot and each one used to add parameters the function does not have.
     writeFileSync(
@@ -21018,6 +21044,37 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         // The `#` inside the string is not a comment, and the one after it is.
         [['LABEL', '"hash # inside"']],
         `nor of a constant, and a hash inside a string is not a comment: ${JSON.stringify(bracketed)}`,
+      );
+
+      // The type GDScript takes from a value is answered and marked inferred: a constant always has
+      // its value's, a variable only with :=. One only the analyser knows is left empty, not guessed.
+      const inferred = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://inferred.gd',
+      });
+      assert.deepEqual(
+        [...asArray(get(inferred, 'constants')), ...asArray(get(inferred, 'variables'))].map((each) => [
+          get(each, 'name'),
+          get(each, 'type'),
+          get(each, 'inferred'),
+        ]),
+        [
+          ['MAX', 'int', true],
+          ['RATE', 'float', true],
+          ['NAME', 'String', true],
+          ['ORIGIN', 'Vector2', true],
+          ['SIDE', '', undefined],
+          ['ALONG', '', undefined],
+          ['MASK', 'int', true],
+          ['TYPED', 'int', undefined],
+          ['count', 'int', true],
+          ['loose', '', undefined],
+          ['items', 'Array', true],
+          ['label', 'String', true],
+          ['flag', 'bool', true],
+        ],
+        JSON.stringify(inferred),
       );
 
       // A native base declares nothing in a file, so the walk has nothing to do and says so with an
@@ -21750,6 +21807,22 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
       assert.match(kept, /^compress\/mode=1$/m, `the import should keep the option it was given:\n${kept}`);
       const current = await call({ op: 'status', resourcePath: 'good.png' });
       assert.equal(get(current, 'resources', 0, 'status'), 'up_to_date', JSON.stringify(current));
+      // The same value again changes nothing, and was answered as updated and reimported.
+      const again = await call({
+        op: 'set_options',
+        resourcePath: 'good.png',
+        options: { 'compress/mode': 1 },
+      });
+      assert.deepEqual(
+        [get(again, 'updated_options'), get(again, 'unchanged_options'), get(again, 'reimport')],
+        [[], ['compress/mode'], undefined],
+        JSON.stringify(again),
+      );
+      assert.equal(
+        get(again, 'note'),
+        'Not reimported: every option given already held that value, so the import file was not written.',
+      );
+      assert.equal(readFileSync(join(project, 'good.png.import'), 'utf8'), kept);
 
       // A name the importer has no option for is said to be one, after the reimport that left it
       // out: a probe gave a texture `filter`, was told it was updated, and the texture filtered as
@@ -24656,6 +24729,21 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
       const padded = await call('runtime_input', { op: 'joypad_button', button: 'a', holdFrames: 9 });
       assert.match(padded, /"held_frames": 9/, padded);
       assert.equal(await read('pad_held'), 9, `the pad button was down for the 9 frames asked: ${padded}`);
+      // Each hold says how long it lasted by the clock and in physics ticks, which keep to sixty a
+      // second whatever the process frames do: thirty held in a headless game, which runs them as
+      // fast as it can, moved a body for twelve ticks.
+      for (const [answer, frames] of [
+        [clicked, 30],
+        [keyed, 12],
+        [acted, 7],
+        [padded, 9],
+      ] as const) {
+        const held = get(JSON.parse(answer), 'held_for');
+        const seconds = Number(get(held, 'seconds'));
+        const ticks = Number(get(held, 'physics_frames'));
+        assert.ok(seconds >= (frames - 2) / 60 && seconds < 5, answer);
+        assert.ok(Number.isInteger(ticks) && Math.abs(ticks - seconds * 60) <= 4, answer);
+      }
 
       const both = await call('runtime_input', { op: 'key', keycode: 'Space', pressed: true, holdFrames: 5 });
       assert.match(
@@ -38962,8 +39050,8 @@ function testEveryToolNamedInProseIsATool(): void {
   // bridge sends the addon, the autoload the runtime installs, a section of project.godot, the
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
-  // export_presets.cfg, the directory a self-contained editor keeps its data in and the file the
-  // editor caches its class reference in. Named one
+  // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
+  // editor caches its class reference in and the name every resource stores. Named one
   // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
   // and called a tool or called vocabulary.
   const notTools = new Set([
@@ -38990,6 +39078,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'script_export_mode',
     'editor_data',
     'editor_doc_cache',
+    'resource_name',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
@@ -39385,7 +39474,8 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     join(project, 'item_data.gd'),
     'class_name ItemData\nextends Resource\n\nenum Kind { SWORD, SHIELD, POTION }\n\n' +
       '@export var title: String = ""\n@export var kind: Kind = Kind.SWORD\n@export var tags: Array[String] = []\n' +
-      '@export var icon: Texture2D\n@export_range(0, 10) var rarity: int = 0\n@export_range(0, 10, 1, "or_greater") var level: int = 0\n',
+      '@export var icon: Texture2D\n@export_range(0, 10) var rarity: int = 0\n@export_range(0, 10, 1, "or_greater") var level: int = 0\n' +
+      '@export var growth: Curve\n',
   );
   writeFileSync(
     join(project, 'icon.svg'),
@@ -39619,13 +39709,58 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     assert.ok(parseTextContent(lit) !== null, textOf(lit) ?? JSON.stringify(lit));
     assert.match(readFileSync(join(project, 'glow.tres'), 'utf8'), /^shader_parameter\/glow_power = 1\.5$/m);
 
+    // A resource built into a file is a new object each time the file loads, and the check that a
+    // save kept what was set compared objects, so every one written into a resource file was
+    // refused as a property the file does not keep.
+    await written({ growth: { _type: 'Curve', max_value: 50 } });
+    assert.match(file(), /^growth = SubResource\("[^"]+"\)$/m);
+    assert.match(file(), /^_limits = \[0\.0, 50\.0, 0\.0, 1\.0\]$/m);
+    const grown = parseTextContent(
+      await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' }),
+    );
+    assert.deepEqual(get(grown, 'properties', 'growth'), { _type: 'Curve', _limits: [0, 50, 0, 1] });
+    await written({ growth: get(grown, 'properties', 'growth') });
+    // Comparing built-in resources by what they hold meets one that holds itself, and has to end.
+    // The check after the save compares the one set with the one the file loads, two objects that
+    // each hold themselves, which only a script can make: this one's setter links the ring to
+    // itself.
+    writeFileSync(join(project, 'link.gd'), 'extends Resource\n\n@export var next: Resource\n');
+    writeFileSync(
+      join(project, 'ring.gd'),
+      'extends Resource\n\n@export var label: String = "":\n\tset(value):\n\t\tlabel = value\n\t\tnext = self\n' +
+        '@export var next: Resource\n',
+    );
+    writeFileSync(
+      join(project, 'chain.tres'),
+      '[gd_resource type="Resource" load_steps=2 format=3]\n\n' +
+        '[ext_resource type="Script" path="res://link.gd" id="1_link"]\n\n' +
+        '[resource]\nscript = ExtResource("1_link")\n',
+    );
+    const ringed = await request('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://chain.tres',
+      properties: { next: { _type: 'Resource', script: 'res://ring.gd', label: 'ring' } },
+    });
+    assert.ok(parseTextContent(ringed) !== null, textOf(ringed) ?? JSON.stringify(ringed));
+    const chain = readFileSync(join(project, 'chain.tres'), 'utf8');
+    const ring = /^\[sub_resource type="Resource" id="([^"]+)"\]$/m.exec(chain)?.[1];
+    assert.ok(ring, chain);
+    assert.equal(chain.split(`next = SubResource("${ring}")`).length, 3, chain);
+
+    // Only a file resource with a script that declares a class names one; ItemData is below.
+    assert.deepEqual(get(grown, 'properties', 'icon'), {
+      path: 'res://icon.svg',
+      class: 'CompressedTexture2D',
+      _type: 'Resource',
+    });
+
     // A refused value on a node whose script declares a class_name says only what was wrong with
     // the value. The check for a script that does not compile compiled a copy of it, and a copy of
     // a script with a class_name hides the global class the original declares, so every such
     // script was said not to compile.
     writeFileSync(
       join(project, 'player.gd'),
-      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n',
+      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n@export var item: Resource\n',
     );
     writeFileSync(
       join(project, 'hero.tscn'),
@@ -39646,6 +39781,34 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     const fast = await request('scene_node', { ...hero, properties: { speed: 300 } });
     assert.ok(parseTextContent(fast) !== null, textOf(fast) ?? JSON.stringify(fast));
     assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^speed = 300\.0$/m);
+
+    // An engine enum is written in scripts by its class's constant, which the hint does not give.
+    const floating = await request('scene_node', {
+      ...hero,
+      properties: { motion_mode: 'MOTION_MODE_FLOATING' },
+    });
+    assert.ok(parseTextContent(floating) !== null, textOf(floating) ?? JSON.stringify(floating));
+    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^motion_mode = 1$/m);
+    const glowing = await request('scene_node', {
+      ...hero,
+      properties: { material: { _type: 'CanvasItemMaterial', blend_mode: 'BLEND_MODE_ADD' } },
+    });
+    assert.ok(parseTextContent(glowing) !== null, textOf(glowing) ?? JSON.stringify(glowing));
+    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^blend_mode = 1$/m);
+    assert.equal(
+      textOf(await request('scene_node', { ...hero, properties: { motion_mode: 'MOTION_MODE_FLYING' } })),
+      "Player.motion_mode is an enum, and MOTION_MODE_FLYING is none of its values: send Grounded (0), Floating (1) by name, by number or by the engine's constant, such as MOTION_MODE_GROUNDED. The nearest are MOTION_MODE_FLOATING, MOTION_MODE_GROUNDED.",
+    );
+    // A file resource says the class its script declares, which its own class, Resource, does not.
+    const held = parseTextContent(
+      await request('scene_node', { ...hero, properties: { item: 'res://sword.tres' } }),
+    );
+    assert.deepEqual(get(held, 'properties', 'item'), {
+      path: 'res://sword.tres',
+      class: 'Resource',
+      _type: 'Resource',
+      scriptClass: 'ItemData',
+    });
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
@@ -44448,6 +44611,25 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       ]),
     ),
     'calm.tscn': '[gd_scene format=3]\n\n[node name="Calm" type="Node2D"]\nposition = Vector2(3, 4)\n',
+    'shapes.tscn':
+      '[gd_scene format=3]\n\n[node name="Shapes" type="Node2D"]\n\n[node name="One" type="CollisionShape2D" parent="."]\n\n' +
+      '[node name="Two" type="CollisionShape2D" parent="."]\n',
+    'loop.gd': 'extends Resource\n\n@export var next: Resource\n',
+    'loop.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://loop.gd" id="1_loop"]\n\n' +
+      '[sub_resource type="Resource" id="Resource_loop"]\nscript = ExtResource("1_loop")\nnext = SubResource("Resource_loop")\n\n' +
+      '[node name="Loop" type="Node"]\nmetadata/loop = SubResource("Resource_loop")\n',
+    'wired.gd':
+      'extends Node2D\n\nsignal died(points: int)\n\n\nfunc take(amount: int) -> void:\n\tprint(amount)\n\n\n' +
+      'func take_node(node: Node2D) -> void:\n\tprint(node)\n',
+    // One connection with an argument bound and one with an argument unbound, which fit only once
+    // the bound one is added and the unbound one dropped.
+    'wires.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://wired.gd" id="1_wired"]\n\n' +
+      '[node name="Wires" type="Node2D"]\n\n[node name="Emitter" type="Node2D" parent="."]\nscript = ExtResource("1_wired")\n\n' +
+      '[node name="Taker" type="Node2D" parent="."]\nscript = ExtResource("1_wired")\n\n' +
+      '[connection signal="visibility_changed" from="Emitter" to="Taker" method="take" binds= [5]]\n' +
+      '[connection signal="child_entered_tree" from="Emitter" to="Taker" method="queue_free" unbinds=1]\n',
     // Does not compile, so the engine instances the scene without it, where the editor keeps it.
     'broken.gd': 'extends Node\n\n\nfunc _init() -> void:\n\tnot_declared_anywhere()\n',
     'broken.tscn':
@@ -44578,8 +44760,14 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       `a read answers what the file holds, not what the scripts set: ${JSON.stringify(read)}`,
     );
     assert.deepEqual(
-      [get(read, 'nodeType'), get(read, 'nodePath'), get(read, 'scriptClass')],
-      ['Node2D', 'Busy', undefined],
+      [
+        get(read, 'nodeType'),
+        get(read, 'nodePath'),
+        get(read, 'scriptClass'),
+        get(read, 'setHere'),
+        get(read, 'valuesFrom'),
+      ],
+      ['Node2D', 'Busy', undefined, ['script', 'size'], undefined],
       `a read names the node's class, and no declared class for a script without one: ${JSON.stringify(read)}`,
     );
     assert.equal(get(read, 'unsavedInEditor'), undefined, 'only an editor can say what it holds unsaved');
@@ -44615,6 +44803,90 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       JSON.stringify(connections),
     );
     assert.equal(get(connections, 'unsavedInEditor'), undefined, JSON.stringify(connections));
+
+    // A connection is written whether or not what the signal passes can reach the method, and the
+    // answer says when it cannot.
+    const wire = async (signalName: string, methodName: string, flags?: number): Promise<unknown> =>
+      await written('scene_signal', {
+        op: 'connect',
+        scenePath: 'wires.tscn',
+        sourceNodePath: 'Emitter',
+        signalName,
+        targetNodePath: 'Taker',
+        methodName,
+        ...(flags === undefined ? {} : { flags }),
+      });
+    const fails = ', so every emission fails to call it.';
+    for (const [signalName, methodName, flags, misfit] of [
+      ['died', 'take', undefined, undefined],
+      ['child_entered_tree', 'take_node', undefined, undefined],
+      ['visibility_changed', 'take_node', 16, undefined],
+      [
+        'child_entered_tree',
+        'take',
+        undefined,
+        `child_entered_tree passes argument 1 as Node, and take takes it as amount: int${fails}`,
+      ],
+      [
+        'visibility_changed',
+        'set_scale',
+        undefined,
+        `visibility_changed passes no arguments, and set_scale needs 1${fails}`,
+      ],
+      [
+        'child_entered_tree',
+        'hide',
+        undefined,
+        `child_entered_tree passes 1 argument, and hide takes none${fails}`,
+      ],
+      [
+        'child_entered_tree',
+        'set_material',
+        undefined,
+        `child_entered_tree passes argument 1 as Node, and set_material takes it as material: Material${fails}`,
+      ],
+    ] as const) {
+      const made = await wire(signalName, methodName, flags);
+      assert.deepEqual(
+        [get(made, 'methodFound'), get(made, 'argumentsFit'), get(made, 'misfit')],
+        [true, misfit === undefined, misfit],
+        `${signalName} to ${methodName}: ${JSON.stringify(made)}`,
+      );
+      assert.ok(
+        fileOf('wires.tscn').includes(
+          `[connection signal="${signalName}" from="Emitter" to="Taker" method="${methodName}"`,
+        ),
+        `and the connection is written all the same:\n${fileOf('wires.tscn')}`,
+      );
+    }
+    const unwritten = await wire('died', 'not_yet_written');
+    assert.deepEqual(
+      [get(unwritten, 'methodFound'), get(unwritten, 'argumentsFit'), get(unwritten, 'misfit')],
+      [false, undefined, undefined],
+      `a method not there is not judged: ${JSON.stringify(unwritten)}`,
+    );
+    const wires = parseTextContent(await call('scene_signal', { op: 'list', scenePath: 'wires.tscn' }));
+    const listedFit = Object.fromEntries(
+      asArray(get(wires, 'connections')).map((one) => [
+        `${text(get(one, 'signalName'))} ${text(get(one, 'methodName'))}`,
+        [get(one, 'methodFound'), get(one, 'misfit') ?? 'fits'],
+      ]),
+    );
+    assert.deepEqual(
+      [
+        listedFit['visibility_changed take'],
+        listedFit['child_entered_tree queue_free'],
+        listedFit['child_entered_tree take'],
+        listedFit['died not_yet_written'],
+      ],
+      [
+        [true, 'fits'],
+        [true, 'fits'],
+        [true, `child_entered_tree passes argument 1 as Node, and take takes it as amount: int${fails}`],
+        [false, 'fits'],
+      ],
+      `a list judges a bound and an unbound argument as the call meets them: ${JSON.stringify(wires)}`,
+    );
 
     await written('scene_create', {
       op: 'create',
@@ -44821,6 +45093,91 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       sets('holder.tscn', '[sub_resource type="Resource"'),
       ['script = ExtResource', 'max_hp = 20', tags],
       'an embedded resource keeps what its file held',
+    );
+    const holderRead = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'holder.tscn', nodePath: '.' }),
+    );
+    const heldStats = get(holderRead, 'properties', 'stats');
+    assert.deepEqual(
+      [get(heldStats, '_type'), get(heldStats, 'script', 'path'), get(heldStats, 'max_hp')],
+      ['Resource', 'res://stats.gd', 20],
+      `a resource built into the scene is read with what it holds: ${JSON.stringify(holderRead)}`,
+    );
+    assert.deepEqual(
+      Object.keys(asObject(heldStats)).sort(),
+      ['_type', 'hp', 'max_hp', 'script'],
+      `and only what it holds away from its script's defaults: ${JSON.stringify(heldStats)}`,
+    );
+    // A scripted resource tagged Resource is built from the read, not taken as the empty reference.
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'holder.tscn',
+      nodePath: '.',
+      properties: { stats: heldStats },
+    });
+    assert.deepEqual(
+      sets('holder.tscn', '[sub_resource type="Resource"'),
+      ['script = ExtResource', 'max_hp = 20', 'hp = 20', tags],
+      'what a read gave of a scripted resource writes back as the resource it was',
+    );
+
+    // Read in the form a write builds one from, so what a read gives can be written to another node.
+    const shaped = await written('scene_node', {
+      op: 'set',
+      scenePath: 'shapes.tscn',
+      nodePath: 'One',
+      properties: { shape: { _type: 'CircleShape2D', radius: 8 } },
+    });
+    assert.deepEqual(
+      get(shaped, 'properties', 'shape'),
+      { _type: 'CircleShape2D', radius: 8 },
+      JSON.stringify(shaped),
+    );
+    // A resource's name is what it holds, unlike the rest of its resource_ properties.
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'shapes.tscn',
+      nodeName: 'Named',
+      nodeType: 'CollisionShape2D',
+    });
+    const named = await written('scene_node', {
+      op: 'set',
+      scenePath: 'shapes.tscn',
+      nodePath: 'Named',
+      properties: { shape: { _type: 'CircleShape2D', radius: 2, resource_name: 'Hit circle' } },
+    });
+    assert.deepEqual(
+      get(named, 'properties', 'shape'),
+      { _type: 'CircleShape2D', radius: 2, resource_name: 'Hit circle' },
+      JSON.stringify(named),
+    );
+    const shapeRead = get(
+      parseTextContent(await call('scene_node', { op: 'get', scenePath: 'shapes.tscn', nodePath: 'One' })),
+      'properties',
+      'shape',
+    );
+    assert.deepEqual(shapeRead, { _type: 'CircleShape2D', radius: 8 }, JSON.stringify(shapeRead));
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'shapes.tscn',
+      nodePath: 'Two',
+      properties: { shape: shapeRead },
+    });
+    assert.equal(
+      fileOf('shapes.tscn').match(/\[sub_resource type="CircleShape2D" id="[^"]+"\]\nradius = 8\.0\n/g)
+        ?.length,
+      2,
+      fileOf('shapes.tscn'),
+    );
+    const looped = get(
+      parseTextContent(await call('scene_node', { op: 'get', scenePath: 'loop.tscn', nodePath: '.' })),
+      'properties',
+      'metadata/loop',
+    );
+    assert.deepEqual(
+      [get(looped, '_type'), get(looped, 'next')],
+      ['Resource', { class: 'Resource', _type: 'Resource' }],
+      `a resource holding itself is read once, and named by its class where it recurs: ${JSON.stringify(looped)}`,
     );
 
     // A whole number past 2^53 goes into the file as the digits sent, and sent as a number it is
@@ -45325,9 +45682,55 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     const bare = textOf(await call({ op: 'read_states', animTreePath: 'Bare' })) ?? '';
     assert.match(
       bare,
-      /^The AnimationTree has no tree_root\. Make one with resource_edit create of an AnimationNodeStateMachine, then give its res:\/\/ path to tree_root with scene_node set\./,
+      /^The AnimationTree has no tree_root\. Give it one with scene_node set: tree_root \{"_type": "AnimationNodeStateMachine"\} builds one into the scene, and the res:\/\/ path of one made with resource_edit create keeps it in a file of its own\./,
       bare,
     );
+    // The first remedy the refusal offers, taken as it is written.
+    const rooted = await server.request(
+      'tools/call',
+      {
+        name: 'scene_node',
+        arguments: {
+          projectPath: project,
+          scenePath: 'moves.tscn',
+          nodePath: 'Bare',
+          op: 'set',
+          properties: { tree_root: { _type: 'AnimationNodeStateMachine' } },
+        },
+      },
+      240_000,
+    );
+    assert.ok(parseTextContent(rooted) !== null, textOf(rooted) ?? JSON.stringify(rooted));
+    const lone = await written({
+      op: 'add_state',
+      animTreePath: 'Bare',
+      stateName: 'Lone',
+      animationName: 'moves/idle',
+    });
+    assert.deepEqual([get(lone, 'animationFound'), get(lone, 'animationMissing')], [false, undefined]);
+
+    // A state whose animation the player lacks is written, as the editor writes one, and says so.
+    const early = await written({
+      op: 'add_state',
+      animTreePath: 'Tree',
+      stateName: 'Early',
+      animationName: 'moves/idel',
+    });
+    assert.equal(get(early, 'animationFound'), false, JSON.stringify(early));
+    assert.equal(
+      get(early, 'animationMissing'),
+      'The AnimationPlayer at Player has no animation moves/idel yet, so the state plays nothing until it has one. The nearest it has are moves/idle, moves/leap.',
+    );
+    const laidOut = parseTextContent(await call({ op: 'read_states', animTreePath: 'Tree' }));
+    assert.match(JSON.stringify(laidOut), /"Early"/, JSON.stringify(laidOut));
+    const found = await written({
+      op: 'add_state',
+      animTreePath: 'Tree',
+      stateName: 'Rest',
+      animationName: 'moves/idle',
+    });
+    assert.deepEqual([get(found, 'animationFound'), get(found, 'animationMissing')], [true, undefined]);
+    assert.match(readFileSync(join(project, 'moves.tscn'), 'utf8'), /^states\/Lone\/node = SubResource\(/m);
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
@@ -45366,6 +45769,12 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       '[node name="Crate" type="StaticBody2D"]\nscript = ExtResource("1_crate")\n\n' +
       '[node name="Look" type="Sprite2D" parent="."]\n\n[node name="Hit" type="CollisionShape2D" parent="."]\n\n' +
       '[node name="Bolt" parent="." instance=ExtResource("2_bolt")]\n',
+    // A node with no visible to hide it by, in a scene another inherits.
+    'parts/tally.tscn':
+      '[gd_scene format=3]\n\n[node name="Tally" type="Node"]\n\n[node name="Count" type="Node" parent="."]\n',
+    'parts/tally_kin.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/tally.tscn" id="1_tally"]\n\n' +
+      '[node name="Tally" instance=ExtResource("1_tally")]\n',
     'parts/bolt.tscn':
       '[gd_scene format=3]\n\n[node name="Bolt" type="Node2D"]\n\n[node name="Head" type="Sprite2D" parent="."]\n',
     'gloss.tres': '[gd_resource type="AnimationNodeStateMachine" format=3]\n\n[resource]\n',
@@ -45502,8 +45911,27 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       textOf(
         await call('scene_node', { op: 'delete', scenePath: 'parts/bigger_crate.tscn', nodePath: 'Look' }),
       ),
-      'Look is made by res://parts/crate.tscn, a scene res://parts/bigger_crate.tscn inherits, which creates it again on load. Edit that scene instead.',
+      'Look is made by res://parts/crate.tscn, a scene res://parts/bigger_crate.tscn inherits, which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in res://parts/crate.tscn, which removes it from every scene using that one.',
       'the refusal names the scene that makes the node, past the base that only sets values on it',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_node', { op: 'delete', scenePath: 'parts/tally_kin.tscn', nodePath: 'Count' }),
+      ),
+      'Count is made by res://parts/tally.tscn, a scene res://parts/tally_kin.tscn inherits, which creates it again on load. No scene can delete a node another scene makes: delete it in res://parts/tally.tscn, which removes it from every scene using that one.',
+      'a node with nothing to hide it by is offered only the delete in its own scene',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_node', {
+          op: 'set',
+          scenePath: 'parts/bigger_crate.tscn',
+          nodePath: 'Look',
+          properties: { name: 'Peek' },
+        }),
+      ),
+      'Look is made by res://parts/crate.tscn, a scene res://parts/bigger_crate.tscn inherits, which creates it again on load. Edit that scene instead.',
+      'a rename, which the scene that makes the node can do, is sent there',
     );
 
     const scripted = await written('scene_create', {
@@ -45567,6 +45995,18 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     assert.match(kept, /\[node name="Look" parent="Crate2"[^\]]*\]\nscale = Vector2\(3, 3\)\n/, kept);
     assert.doesNotMatch(kept, /parent="Crate1"/, 'the other instance keeps nothing of its own');
     assert.doesNotMatch(kept, /modulate/, 'and nothing the root script set is saved');
+    const lookRead = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'main.tscn', nodePath: 'Crate2/Look' }),
+    );
+    assert.deepEqual(
+      [get(lookRead, 'setHere'), get(lookRead, 'valuesFrom')],
+      [['scale'], 'res://parts/crate.tscn'],
+      `a read says what this scene sets and where the rest comes from: ${JSON.stringify(lookRead)}`,
+    );
+    assert.equal(
+      textOf(await call('scene_node', { op: 'delete', scenePath: 'main.tscn', nodePath: 'Crate2/Look' })),
+      'Crate2/Look is inside an instanced scene, which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in res://parts/crate.tscn, which removes it from every scene using that one.',
+    );
 
     const head = { ...inside, nodePath: 'Crate2/Bolt/Head', properties: { scale: [4, 4] } };
     assert.equal(

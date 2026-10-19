@@ -224,18 +224,29 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	if not refused.is_empty():
 		return _log.failure("Nothing was written: " + "; ".join(refused))
 
+	# One already holding the value given changes nothing, and listing it as updated said it had.
 	var updated_keys: Array[String] = []
+	var unchanged_keys: Array[String] = []
 	for name: String in fitted_values:
-		config.set_value("params", name, fitted_values[name])
+		var held: Variant = config.get_value("params", name, null)
+		var value: Variant = fitted_values[name]
+		if held != null and typeof(held) == typeof(value) and held == value:
+			unchanged_keys.append(name)
+			continue
+		config.set_value("params", name, value)
 		updated_keys.append(name)
-		_log.debug("Set " + name + " = " + str(fitted_values[name]))
+		_log.debug("Set " + name + " = " + str(value))
 
-	err = config.save(import_file_path)
-	if err != OK:
-		return _log.failure("Failed to save import file: " + str(err))
+	if not updated_keys.is_empty():
+		err = config.save(import_file_path)
+		if err != OK:
+			return _log.failure("Failed to save import file: " + str(err))
 
 	# The reimport that applies them is the server's, through the editor or the engine's import.
-	return {"resource_path": resource_path, "updated_options": updated_keys}
+	var answer: Dictionary = {"resource_path": resource_path, "updated_options": updated_keys}
+	if not unchanged_keys.is_empty():
+		answer["unchanged_options"] = unchanged_keys
+	return answer
 
 
 ## [param given] as the option holds it. Every JSON number arrives as a float, and an enum option
