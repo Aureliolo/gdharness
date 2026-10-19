@@ -189,6 +189,21 @@ static func offered(said: String, word: String, names: Array) -> String:
 	return "%s; the nearest it has %s %s" % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
 
 
+## [param said], the refusal for [param property], which [param target] does not declare, with the
+## names it declares nearest it when any are, as a misspelt one is usually one of them. Unlike
+## [method offered], nothing is listed when none is near, since an object declares a hundred.
+static func near_property(said: String, target: Object, property: String) -> String:
+	var headings: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP
+	var names: Array[String] = []
+	for declared: Dictionary in target.get_property_list():
+		if not as_int(declared.get("usage", 0)) & headings:
+			names.append(str(declared.get("name", "")))
+	var close: PackedStringArray = nearest(property, PackedStringArray(names))
+	if close.is_empty():
+		return said
+	return "%s; the nearest it has %s %s" % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+
+
 ## The signals [param object] has that a caller can connect, its own class's first: the engine
 ## lists them from Object down, which puts a Button's pressed after thirty a Control has, and names
 ## starting with an underscore are the engine's own.

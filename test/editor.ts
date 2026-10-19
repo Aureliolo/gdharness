@@ -2753,7 +2753,7 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
 
   assert.match(
     await refusal('scene_node', set('.', { Visibility: false })),
-    /Node2D has no property Visibility/,
+    /: Node2D has no property Visibility; the nearest it has are visibility_layer, visible\.$/,
   );
   await call('scene_node', { ...scene, op: 'add', nodeType: 'AudioStreamPlayer', nodeName: 'Speaker' });
   assert.match(

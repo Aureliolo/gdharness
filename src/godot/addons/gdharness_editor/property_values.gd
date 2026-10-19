@@ -205,7 +205,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		if declared.is_empty() and target is ShaderMaterial and property.begins_with("shader_parameter/"):
 			return _no_uniform(target as ShaderMaterial, property) + unwritten
 		if declared.is_empty():
-			return "%s has no property %s." % [class_called(target), property] + unwritten
+			return no_property(target, property) + unwritten
 		var value: Array = value_for(target, declared, properties[key])
 		if not value[0]:
 			return str(value[1]) + unwritten
@@ -373,9 +373,9 @@ func _write(target: Object, key: String, value: Variant) -> void:
 ## {"refused": why} for the first step that is not there.
 func _component_slot(target: Object, path: String) -> Dictionary:
 	var steps: PackedStringArray = path.split(":")
-	var owner: String = target.get_class()
+	var owner: String = class_called(target)
 	if declaration(target, steps[0]).is_empty():
-		return {"refused": "%s has no property %s" % [owner, steps[0]]}
+		return {"refused": no_property(target, steps[0])}
 	var value: Variant = target.get(steps[0])
 	var walked: String = steps[0]
 	for index: int in range(1, steps.size()):
@@ -396,7 +396,7 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 		if not step in has:
 			return {
 				"refused":
-				"%s.%s is %s, so it has no %s; it has %s" % [owner, walked, sort, step, ", ".join(has)]
+				"%s.%s is %s, so it has no %s; it has %s." % [owner, walked, sort, step, ", ".join(has)]
 			}
 		value = value[step]
 		walked += ":" + step
@@ -622,6 +622,15 @@ static func class_called(target: Object) -> String:
 		if not str(script.get_global_name()).is_empty():
 			return str(script.get_global_name())
 	return target.get_class()
+
+
+## The refusal for [param property], which [param target] does not declare, naming the declared
+## ones nearest it: "StyleBoxFlat has no property shadow_sizee" left the caller nothing to send.
+static func no_property(target: Object, property: String) -> String:
+	return (
+		GdhRead.near_property("%s has no property %s" % [class_called(target), property], target, property)
+		+ "."
+	)
 
 
 ## The resource [param path] names, as [found, resource or why not].
