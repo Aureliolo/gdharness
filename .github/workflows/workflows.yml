@@ -75,7 +75,7 @@ jobs:
         # No version input: the action runs zizmor from a container image whose digest is written
         # into the action at the commit pinned here, so the zizmor version is fixed by that pin
         # and moves with it. A version named here could only ever lag or repeat that.
-        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:
           persona: pedantic
           advanced-security: false
