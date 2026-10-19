@@ -10,6 +10,7 @@ const GdhPaths = preload("scene_paths.gd")
 const GdhPlacing = preload("scene_placing.gd")
 const GdhPropertyValues = preload("../property_values.gd")
 const GdhResourceTools = preload("resource_tools.gd")
+const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSerialisation = preload("../serialisation.gd")
 
@@ -22,54 +23,10 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
 
 
-func _ensure_res_path(path: String) -> String:
-	if not path.begins_with("res://"):
-		return "res://" + path
-	return path
-
-
-func _to_scene_res_path(project_path: String, scene_path: String) -> String:
-	var p: String = scene_path.strip_edges()
-	if p.begins_with("res://"):
-		return p
-
-	if project_path.strip_edges() != "":
-		var normalized_project: String = project_path.replace("\\", "/")
-		var normalized_scene: String = p.replace("\\", "/")
-		if normalized_scene.begins_with(normalized_project):
-			var rel: String = normalized_scene.substr(normalized_project.length())
-			if rel.begins_with("/"):
-				rel = rel.substr(1)
-			return _ensure_res_path(rel)
-
-	return _ensure_res_path(p)
-
-
 ## [param scene_path] opened for a tool, as [scene, refusal]: the refusal is {} when it opened.
 func _open(scene_path: String, for_writing: bool) -> Array:
 	var scene: GdhSceneFile = GdhSceneFile.new()
 	return [scene, scene.open(scene_path, for_writing)]
-
-
-func _find_node(root: Node, path: String) -> Node:
-	if path == "." or path.is_empty():
-		return root
-	return root.get_node_or_null(path)
-
-
-## Why the property or signal [param missing] could not be found on [param node], adding the one
-## cause the name alone does not show: a script that does not compile leaves the editor holding a
-## placeholder with no properties or signals at all, and the refusal named the property instead.
-## Such a script has no engine class beneath it. Compiling a copy of the source to find out failed on
-## every script with a class_name, since the copy hides the global class the original declares.
-func _missing_on(node: Node, missing: String) -> String:
-	var script: Script = node.get_script()
-	if script == null or not str(script.get_instance_base_type()).is_empty():
-		return missing
-	return (
-		"%s. Its script, %s, does not compile, so none of what it declares is known here."
-		% [missing.trim_suffix("."), script.resource_path]
-	)
 
 
 ## Whether each of [param names] reads the same off [param saved] as off [param node], answering
@@ -116,7 +73,7 @@ func _properties_of(node: Node, include_defaults: bool, set_here: Dictionary) ->
 				if scripted.has(property)
 				else ClassDB.class_get_property_default_value(node.get_class(), property)
 			)
-			if GdhPropertyValues.same(value, default):
+			if GdhSame.same(value, default):
 				continue
 		props[property] = _readable(node, value)
 	return props
@@ -145,27 +102,20 @@ func _parse_properties_arg(raw_properties: Variant) -> Dictionary:
 	return {}
 
 
-func _collect_nodes_recursive(node: Node, path: String, out_nodes: Array) -> void:
-	out_nodes.append({"path": path, "node": node})
-	for child: Node in node.get_children():
-		var child_path: String = str(child.name) if path == "." else path + "/" + str(child.name)
-		_collect_nodes_recursive(child, child_path, out_nodes)
-
-
 func _inherited(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
 	var script_path: String = str(args.get("script", ""))
 	return GdhKin.inherited(
 		args,
 		_new_scene_path(args),
-		_to_scene_res_path(project_path, str(args.get("inherits", ""))),
-		"" if script_path.is_empty() else _to_scene_res_path(project_path, script_path)
+		GdhSceneFile.res_path(project_path, str(args.get("inherits", ""))),
+		"" if script_path.is_empty() else GdhSceneFile.res_path(project_path, script_path)
 	)
 
 
 ## The res:// path a create in [param args] writes, given .tscn when it has no extension, or "".
 func _new_scene_path(args: Dictionary) -> String:
-	var scene_path: String = _to_scene_res_path(
+	var scene_path: String = GdhSceneFile.res_path(
 		str(args.get("projectPath", "")), str(args.get("scenePath", ""))
 	)
 	if scene_path == "res://":
@@ -191,7 +141,7 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 	var asked_type: String = root_node_type
 	var made: Dictionary = GdhSceneFile.made_as(
 		root_node_type,
-		"" if script_path.is_empty() else _to_scene_res_path(project_path, script_path),
+		"" if script_path.is_empty() else GdhSceneFile.res_path(project_path, script_path),
 		"Node",
 		"rootNodeType"
 	)
@@ -219,7 +169,7 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 	scene.asked(root, ["script"])
 
 	if not script_path.is_empty():
-		var full_script_path: String = _to_scene_res_path(project_path, script_path)
+		var full_script_path: String = GdhSceneFile.res_path(project_path, script_path)
 		var script: Script = load(full_script_path) as Script
 		if script == null:
 			root.free()
@@ -260,7 +210,7 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 
 func list_scene_nodes(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	var depth: int = GdhRead.as_int(args.get("depth", -1), -1)
 	var include_properties: bool = GdhRead.as_bool(args.get("includeProperties", false))
 
@@ -274,7 +224,7 @@ func list_scene_nodes(args: Dictionary) -> Dictionary:
 
 func add_node(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	var node_type: String = str(args.get("nodeType", ""))
 	var instance_path: String = str(args.get("instancePath", ""))
 	var node_name: String = str(args.get("nodeName", ""))
@@ -305,7 +255,7 @@ func add_node(args: Dictionary) -> Dictionary:
 		return refused
 
 	var root: Node = scene.root
-	var parent: Node = _find_node(root, parent_node_path)
+	var parent: Node = GdhSceneFile.node_at(root, parent_node_path)
 	if not parent:
 		return scene.refuse(scene.not_found("Parent node not found: " + parent_node_path, parent_node_path))
 	var foreign: String = scene.foreign(parent)
@@ -362,7 +312,7 @@ func add_node(args: Dictionary) -> Dictionary:
 
 func delete_node(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 
 	if node_path.is_empty() or node_path == ".":
@@ -381,10 +331,10 @@ func delete_node(args: Dictionary) -> Dictionary:
 	if not refused.is_empty():
 		return refused
 
-	var node: Node = _find_node(scene.root, node_path)
+	var node: Node = GdhSceneFile.node_at(scene.root, node_path)
 	if not node:
 		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
-	var fixed: String = scene.fixed(node)
+	var fixed: String = scene.fixed(node, true)
 	if not fixed.is_empty():
 		return scene.refuse(fixed)
 
@@ -410,7 +360,7 @@ func delete_node(args: Dictionary) -> Dictionary:
 
 func duplicate_node(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 	var new_name: String = str(args.get("newName", ""))
 	var parent_path: String = str(args.get("parentNodePath", ""))
@@ -425,7 +375,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 		return refused
 
 	var root: Node = scene.root
-	var source: Node = _find_node(root, node_path)
+	var source: Node = GdhSceneFile.node_at(root, node_path)
 	if not source:
 		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
 	if source == root:
@@ -436,7 +386,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 
 	var target_parent: Node = source.get_parent()
 	if not parent_path.is_empty():
-		target_parent = _find_node(root, parent_path)
+		target_parent = GdhSceneFile.node_at(root, parent_path)
 	if not target_parent:
 		return scene.refuse(scene.not_found("Parent not found: " + parent_path, parent_path))
 	foreign = scene.foreign(target_parent)
@@ -480,7 +430,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 
 func reparent_node(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 	var new_parent_path: String = str(args.get("newParentPath", ""))
 
@@ -496,8 +446,8 @@ func reparent_node(args: Dictionary) -> Dictionary:
 		return refused
 
 	var root: Node = scene.root
-	var node: Node = _find_node(root, node_path)
-	var new_parent: Node = _find_node(root, new_parent_path)
+	var node: Node = GdhSceneFile.node_at(root, node_path)
+	var new_parent: Node = GdhSceneFile.node_at(root, new_parent_path)
 	if not node:
 		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
 	if not new_parent:
@@ -564,7 +514,7 @@ func reparent_node(args: Dictionary) -> Dictionary:
 
 func set_node_properties(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", "."))
 	var properties: Dictionary = _parse_properties_arg(args.get("properties", {}))
 	var editable: Variant = args.get("editableChildren")
@@ -577,7 +527,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	if not refused.is_empty():
 		return refused
 
-	var node: Node = _find_node(scene.root, node_path)
+	var node: Node = GdhSceneFile.node_at(scene.root, node_path)
 	if not node:
 		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
 	var foreign: String = scene.foreign(node)
@@ -603,7 +553,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
 	if not refused_property.is_empty():
-		return scene.refuse(_missing_on(node, refused_property))
+		return scene.refuse(GdhSceneFile.missing_on(node, refused_property))
 
 	var held: Dictionary = {}
 	for key: Variant in properties:
@@ -639,7 +589,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 
 func get_node_properties(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", "."))
 	var include_defaults: bool = GdhRead.as_bool(args.get("includeDefaults", false))
 
@@ -649,7 +599,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	if not refused.is_empty():
 		return refused
 
-	var node: Node = _find_node(scene.root, node_path)
+	var node: Node = GdhSceneFile.node_at(scene.root, node_path)
 	if not node:
 		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
 
@@ -657,10 +607,17 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	# declares, the class's for the rest. Compared with a bare instance of the class, every exported
 	# variable read as changed; and a value this scene sets back to the default was hidden, so the
 	# names this scene's file sets are always answered.
-	var props: Dictionary = _properties_of(node, include_defaults, scene.set_here(node))
+	var set_here: Dictionary = scene.set_here(node)
+	var props: Dictionary = _properties_of(node, include_defaults, set_here)
 	var cells: Dictionary = GdhResourceTools.cells_of(node)
-	var answer: Dictionary = {"ok": true, "nodePath": scene.path_of(node), "properties": props}
+	var at: String = scene.path_of(node)
+	var here: Array = set_here.keys()
+	here.sort()
+	var answer: Dictionary = {"ok": true, "nodePath": at, "properties": props, "setHere": here}
 	answer.merge(GdhSceneFile.class_of(node))
+	var from: String = scene.values_from(node, at)
+	if not from.is_empty():
+		answer["valuesFrom"] = from
 	if node != scene.root and node.owner != null and not node.scene_file_path.is_empty():
 		answer["instanceOf"] = node.scene_file_path
 		answer["editableChildren"] = scene.root.is_editable_instance(node)
@@ -680,11 +637,11 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 
 func save_scene(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	var new_path_raw: String = str(args.get("newPath", ""))
 	var target_path: String = scene_path
 	if not new_path_raw.is_empty():
-		target_path = _to_scene_res_path(project_path, new_path_raw)
+		target_path = GdhSceneFile.res_path(project_path, new_path_raw)
 
 	if target_path != scene_path:
 		var unsaved: String = GdhSceneFile.unsaved_in_editor(target_path)
@@ -752,249 +709,3 @@ func _save_open_scene(scene_path: String) -> Dictionary:
 		"from": "editor",
 		"unsavedInEditor": GdhSceneFile.unsaved(scene_path)
 	}
-
-
-func connect_signal(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
-	var source_node_path: String = str(args.get("sourceNodePath", ""))
-	var signal_name: String = str(args.get("signalName", ""))
-	var target_node_path: String = str(args.get("targetNodePath", ""))
-	var method_name: String = str(args.get("methodName", ""))
-	# A connection without CONNECT_PERSIST is a runtime one, and PackedScene.pack drops those on
-	# the way out: without this the scene saves unchanged and this answers success over nothing.
-	var flags: int = GdhRead.as_int(args.get("flags", 0)) | Object.CONNECT_PERSIST
-
-	if (
-		source_node_path.is_empty()
-		or signal_name.is_empty()
-		or target_node_path.is_empty()
-		or method_name.is_empty()
-	):
-		return {"ok": false, "error": "Missing required signal connection arguments"}
-
-	var opened: Array = _open(scene_path, true)
-	var scene: GdhSceneFile = opened[0]
-	var refused: Dictionary = opened[1]
-	if not refused.is_empty():
-		return refused
-
-	var ends: Array = _connection_ends(scene, source_node_path, signal_name, target_node_path)
-	if ends[0] == null:
-		return scene.refuse(str(ends[1]))
-	var source: Node = ends[0]
-	var target: Node = ends[1]
-
-	# Reconnected rather than left alone when the flags differ, so the connection saved is the one
-	# asked for. Left alone, the answer gave the flags asked for and the file kept the old ones.
-	var callable: Callable = Callable(target, method_name)
-	var method_found: bool = target.has_method(method_name)
-	var flags_before: int = -1
-	for connection: Dictionary in source.get_signal_connection_list(signal_name):
-		if connection.get("callable") == callable:
-			flags_before = GdhRead.as_int(connection.get("flags", 0))
-	if source.is_connected(signal_name, callable):
-		source.disconnect(signal_name, callable)
-	var connect_result: Error = source.connect(signal_name, callable, flags)
-	if connect_result != OK:
-		return scene.refuse("Failed to connect signal: " + error_string(connect_result))
-
-	var from: String = scene.path_of(source)
-	var to: String = scene.path_of(target)
-	var saved_flags: Array = [-1]
-	var written: Dictionary = scene.write(
-		func(saved: Node) -> String:
-			saved_flags[0] = _connection_flags(saved, from, signal_name, to, method_name)
-			if saved_flags[0] < 0:
-				return "the connection would not be in the scene when it loads."
-			return ""
-	)
-	if not written.is_empty():
-		return written
-
-	var answer: Dictionary = {
-		"ok": true,
-		"sourceNodePath": from,
-		"signalName": signal_name,
-		"targetNodePath": to,
-		"methodName": method_name,
-		"flags": saved_flags[0],
-		"flagNames": GdhSceneFile.flag_names(GdhRead.as_int(saved_flags[0])),
-		# Connected either way, as the editor's own dialog allows, since the method may be written
-		# next; a caller told nothing learnt of a misspelt one only when the signal fired.
-		"methodFound": method_found
-	}
-	# A second connect of the same pair read exactly like the first, so a caller could not tell a
-	# connection made from one that was already there, and a list showing one where two were made
-	# looked like a lost write.
-	if flags_before >= 0:
-		answer["alreadyConnected"] = true
-		if flags_before != GdhRead.as_int(saved_flags[0]):
-			answer["flagsBefore"] = GdhSceneFile.flag_names(flags_before)
-	return answer
-
-
-## The two ends of a connection in [param scene], as [source, target], or [null, why not].
-func _connection_ends(
-	scene: GdhSceneFile, source_node_path: String, signal_name: String, target_node_path: String
-) -> Array:
-	var source: Node = _find_node(scene.root, source_node_path)
-	var target: Node = _find_node(scene.root, target_node_path)
-	if not source:
-		return [null, scene.not_found("Source node not found: " + source_node_path, source_node_path)]
-	if not target:
-		return [null, scene.not_found("Target node not found: " + target_node_path, target_node_path)]
-	# pack drops a connection with either end inside an instanced scene, and the answer said it was
-	# made or removed.
-	for end: Node in [source, target]:
-		var foreign: String = scene.foreign(end)
-		if not foreign.is_empty():
-			return [null, foreign]
-	if not source.has_signal(signal_name):
-		var said: String = "%s has no signal %s" % [source_node_path, signal_name]
-		return [null, _missing_on(source, GdhRead.offered(said, signal_name, GdhRead.signals_of(source)))]
-	return [source, target]
-
-
-## The flags of the persistent connection from [param from]'s [param signal_name] to
-## [param method] on [param to] in the tree under [param root], or -1 when there is none.
-func _connection_flags(root: Node, from: String, signal_name: String, to: String, method: String) -> int:
-	var source: Node = root.get_node_or_null(from)
-	var target: Node = root.get_node_or_null(to)
-	if source == null or target == null or not source.has_signal(signal_name):
-		return -1
-	for conn: Dictionary in source.get_signal_connection_list(signal_name):
-		var flags: int = GdhRead.as_int(conn.get("flags", 0))
-		var callable: Callable = conn.get("callable", Callable())
-		if (
-			flags & Object.CONNECT_PERSIST
-			and callable.get_object() == target
-			and str(callable.get_method()) == method
-		):
-			return flags
-	return -1
-
-
-func disconnect_signal(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
-	var source_node_path: String = str(args.get("sourceNodePath", ""))
-	var signal_name: String = str(args.get("signalName", ""))
-	var target_node_path: String = str(args.get("targetNodePath", ""))
-	var method_name: String = str(args.get("methodName", ""))
-
-	if (
-		source_node_path.is_empty()
-		or signal_name.is_empty()
-		or target_node_path.is_empty()
-		or method_name.is_empty()
-	):
-		return {"ok": false, "error": "Missing required signal disconnection arguments"}
-
-	var opened: Array = _open(scene_path, true)
-	var scene: GdhSceneFile = opened[0]
-	var refused: Dictionary = opened[1]
-	if not refused.is_empty():
-		return refused
-
-	var ends: Array = _connection_ends(scene, source_node_path, signal_name, target_node_path)
-	if ends[0] == null:
-		return scene.refuse(str(ends[1]))
-	var source: Node = ends[0]
-	var target: Node = ends[1]
-
-	var from: String = scene.path_of(source)
-	var to: String = scene.path_of(target)
-	# A connection that was never there saved the scene unchanged and answered as removed, so a
-	# typo in either name read as success.
-	if _connection_flags(scene.root, from, signal_name, to, method_name) < 0:
-		return scene.refuse(
-			"%s has no connection from %s.%s to %s.%s." % [scene_path, from, signal_name, to, method_name]
-		)
-	source.disconnect(signal_name, Callable(target, method_name))
-
-	var written: Dictionary = scene.write(
-		func(saved: Node) -> String:
-			if _connection_flags(saved, from, signal_name, to, method_name) >= 0:
-				return "the connection would still be in the scene when it loads."
-			return ""
-	)
-	if not written.is_empty():
-		return written
-
-	return {
-		"ok": true,
-		"removed": true,
-		"sourceNodePath": from,
-		"signalName": signal_name,
-		"targetNodePath": to,
-		"methodName": method_name
-	}
-
-
-func list_connections(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
-	var filter_path: String = str(args.get("nodePath", ""))
-
-	var opened: Array = _open(scene_path, false)
-	var scene: GdhSceneFile = opened[0]
-	var refused: Dictionary = opened[1]
-	if not refused.is_empty():
-		return refused
-
-	var root: Node = scene.root
-	var filtered: Node = null
-	if not filter_path.is_empty():
-		filtered = _find_node(root, filter_path)
-		if filtered == null:
-			return scene.refuse(scene.not_found("Node not found: " + filter_path, filter_path))
-	var nodes: Array = []
-	_collect_nodes_recursive(root, ".", nodes)
-
-	# Only persistent connections, which are the ones a scene file holds: a Container connects
-	# signals of each child to itself as the child is added, and those were answered as if the file
-	# held them. Matched on either end, since the filter is for connections involving the node.
-	var connections: Array = []
-	for entry: Dictionary in nodes:
-		var path: String = str(entry["path"])
-		var node: Node = entry["node"]
-		for signal_info: Dictionary in node.get_signal_list():
-			var signal_name: String = str(signal_info.get("name", ""))
-			if signal_name.is_empty():
-				continue
-			for conn: Dictionary in node.get_signal_connection_list(signal_name):
-				var flags: int = GdhRead.as_int(conn.get("flags", 0))
-				if not flags & Object.CONNECT_PERSIST:
-					continue
-				var callable: Callable = conn.get("callable", Callable())
-				var target_obj: Object = callable.get_object()
-				if filtered != null and node != filtered and target_obj != filtered:
-					continue
-				var target_path: String = ""
-				var editable: bool = scene.foreign(node).is_empty()
-				if target_obj is Node:
-					target_path = str(root.get_path_to(target_obj as Node))
-					editable = editable and scene.foreign(target_obj as Node).is_empty()
-				(
-					connections
-					. append(
-						{
-							"sourceNodePath": path,
-							"signalName": signal_name,
-							"targetNodePath": target_path,
-							"methodName": str(callable.get_method()),
-							"flags": flags,
-							"flagNames": GdhSceneFile.flag_names(flags),
-							# False for a connection an instanced scene makes inside itself, which only that
-							# scene can change.
-							"editable": editable
-						}
-					)
-				)
-
-	scene.close()
-	var listed: Dictionary = {"ok": true, "connections": connections}
-	if Engine.is_editor_hint():
-		listed["unsavedInEditor"] = GdhSceneFile.unsaved(scene_path)
-	return listed

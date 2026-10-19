@@ -164,8 +164,9 @@ static func state_machine(tree: AnimationTree, state_machine_path: String) -> An
 static func no_machine(tree: AnimationTree, state_machine_path: String) -> String:
 	if tree == null or tree.tree_root == null:
 		return (
-			"The AnimationTree has no tree_root. Make one with resource_edit create of an "
-			+ "AnimationNodeStateMachine, then give its res:// path to tree_root with scene_node set."
+			"The AnimationTree has no tree_root. Give it one with scene_node set: tree_root "
+			+ '{"_type": "AnimationNodeStateMachine"} builds one into the scene, and the res:// path '
+			+ "of one made with resource_edit create keeps it in a file of its own."
 		)
 	var current: AnimationNodeStateMachine = tree.tree_root as AnimationNodeStateMachine
 	if current == null:
