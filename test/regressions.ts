@@ -39813,12 +39813,16 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     // script was said not to compile.
     writeFileSync(
       join(project, 'player.gd'),
-      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n@export var item: Resource\n',
+      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n@export var item: Resource\n' +
+        '@export var pack: Array[ItemData]\n@export var named: Dictionary[String, ItemData]\n' +
+        '@export var mates: Array[Node]\n@export_enum("Day", "Night") var shift: String = "Day"\n' +
+        '@export var lives: int = 3:\n\tset(value):\n\t\tlives = clampi(value, 0, 9)\n',
     );
     writeFileSync(
       join(project, 'hero.tscn'),
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://player.gd" id="1_player"]\n\n' +
-        '[node name="Hero" type="CharacterBody2D"]\nscript = ExtResource("1_player")\n',
+        '[node name="Hero" type="CharacterBody2D"]\nscript = ExtResource("1_player")\n\n' +
+        '[node name="Buddy" type="Node2D" parent="."]\n',
     );
     const classes = await request('project_import', { op: 'refresh_classes' });
     assert.match(
@@ -39862,6 +39866,57 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       _type: 'Resource',
       scriptClass: 'ItemData',
     });
+
+    // A typed list or map of a script's class, and a list of nodes, on a node of a loaded scene,
+    // which holds an untyped list as empty. Each item may be a path, and a built one may name its
+    // script's class as its _type.
+    const packed = await request('scene_node', {
+      ...hero,
+      properties: {
+        pack: ['res://sword.tres', { _type: 'ItemData', title: 'Shield' }],
+        named: {
+          best: 'res://sword.tres',
+          spare: { _type: 'Resource', script: 'res://item_data.gd', title: 'Spare' },
+        },
+        mates: ['Buddy'],
+      },
+    });
+    assert.ok(parseTextContent(packed) !== null, textOf(packed) ?? JSON.stringify(packed));
+    const heroListed = readFileSync(join(project, 'hero.tscn'), 'utf8');
+    for (const line of [
+      /^pack = Array\[ExtResource\("[^"]+"\)\]\(\[ExtResource\("[^"]+"\), SubResource\("[^"]+"\)\]\)$/m,
+      /^named = Dictionary\[String, ExtResource\("[^"]+"\)\]\(\{\n"best": ExtResource\("[^"]+"\),\n"spare": SubResource\("[^"]+"\)\n\}\)$/m,
+      /^mates = \[NodePath\("Buddy"\)\]$/m,
+      /node_paths=PackedStringArray\("mates"\)/,
+      /^title = "Shield"$/m,
+      /^title = "Spare"$/m,
+    ]) {
+      assert.match(heroListed, line);
+    }
+    for (const [properties, refusal] of [
+      [{ pack: [{ _type: 'Curve' }] }, 'Player.pack holds ItemData, and item 0 of the list given is Curve.'],
+      [{ pack: ['res://nothing.tres'] }, 'No resource at res://nothing.tres for item 0 of pack'],
+      [{ named: { best: 'sword' } }, 'named["best"] takes a res:// or uid:// path, not sword'],
+      [{ mates: ['Nobody'] }, 'item 0 of mates names Nobody, and there is no node at that path from Hero.'],
+    ] as const) {
+      assert.equal(textOf(await request('scene_node', { ...hero, properties })), refusal);
+    }
+    assert.equal(
+      readFileSync(join(project, 'hero.tscn'), 'utf8'),
+      heroListed,
+      'and the refusals change nothing',
+    );
+    const night = parseTextContent(
+      await request('scene_node', { ...hero, properties: { shift: 'Evening' } }),
+    );
+    assert.deepEqual(get(night, 'outsideDeclared'), {
+      shift:
+        '"Evening" is none of the names shift lists: Day, Night, which the inspector holds it to; the engine stores it as given.',
+    });
+    assert.equal(
+      textOf(await request('scene_node', { ...hero, properties: { lives: 20 } })),
+      'Player.lives was given 20 and holds 9 after it was set: the engine changed or refused the value, so nothing was written.',
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
