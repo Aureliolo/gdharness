@@ -2909,7 +2909,35 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
   );
   const typo = await call('scene_signal', { ...ends, op: 'connect', methodName: 'queue_frees' });
   assert.equal(get(typo, 'methodFound'), false, 'a method the target lacks is said to be missing');
-  await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_frees' });
+  const removed = await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_frees' });
+  assert.equal(get(removed, 'removed'), true, `a disconnect says it removed one: ${JSON.stringify(removed)}`);
+
+  // A misspelt signal is offered the nearest the node has, and one nothing is near is offered
+  // every one, the node's own class's first, since those are the ones it was made for.
+  assert.match(
+    await refusal('scene_signal', { ...ends, signalName: 'presed', op: 'connect', methodName: 'queue_free' }),
+    /Go has no signal presed; the nearest it has (?:is|are) pressed\b/,
+  );
+  const every = await refusal('scene_signal', {
+    ...ends,
+    signalName: 'qwxz',
+    op: 'connect',
+    methodName: 'queue_free',
+  });
+  assert.match(every, /Go has no signal qwxz; it has /, every);
+  const offered = (every.split('; it has ')[1] ?? '').replace(/\.$/, '').split(', ');
+  assert.ok(
+    ['toggled', 'resized', 'tree_entered'].every((name) => offered.includes(name)),
+    `every signal is offered: ${every}`,
+  );
+  assert.ok(
+    offered.indexOf('toggled') < offered.indexOf('resized'),
+    `a BaseButton's signals come before a Control's: ${every}`,
+  );
+  assert.ok(
+    offered.indexOf('resized') < offered.indexOf('tree_entered'),
+    `and a Control's before a Node's: ${every}`,
+  );
 
   const involving = await call('scene_signal', { ...scene, op: 'list', nodePath: 'Sink' });
   const reaching = asArray(get(involving, 'connections'));
