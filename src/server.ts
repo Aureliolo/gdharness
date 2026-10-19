@@ -2650,6 +2650,7 @@ type Section = { operation: string; params: (args: OperationParams, detailed: bo
  */
 const PROJECT_INFO_SECTIONS: Readonly<Record<string, Section>> = dictionary<Section>({
   autoloads: { operation: 'list_autoloads', params: () => ({}) },
+  input_actions: { operation: 'list_input_actions', params: () => ({}) },
   plugins: { operation: 'list_plugins', params: () => ({}) },
   export_presets: { operation: 'list_export_presets', params: () => ({}) },
   audio_buses: { operation: 'get_audio_buses', params: () => ({}) },

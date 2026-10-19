@@ -1176,11 +1176,37 @@ function testOperations(godotPath: string, projectDir: string): void {
     }
   };
 
+  // A setting nothing declares has no type to fit a number to, and JSON sends every number as a
+  // float, so a whole one was written as 800.0; one named like a declared setting is said to be.
+  const beforeNew = readFileSync(projectFile, 'utf8');
+  const widht = operation('set_project_setting', {
+    setting: 'display/window/size/viewport_widht',
+    value: 800,
+  });
+  assert.match(
+    text(get(widht, 'note')),
+    /^No setting display\/window\/size\/viewport_widht existed, so this wrote a new one, which the engine reads only where something asks for it by that name\. The nearest settings? (is|are) display\/window\/size\/viewport_width[,.]/,
+    JSON.stringify(widht),
+  );
+  assert.match(readFileSync(projectFile, 'utf8'), /^window\/size\/viewport_widht=800$/m);
+  const own = operation('set_project_setting', { setting: 'fixture_game/tempo', value: 3 });
+  assert.equal(
+    get(own, 'note'),
+    undefined,
+    `a section nothing declares has nothing to be near: ${JSON.stringify(own)}`,
+  );
+  assert.match(readFileSync(projectFile, 'utf8'), /^\[fixture_game\]\n\ntempo=3$/m);
+  writeFileSync(projectFile, beforeNew);
+
   // Autoloads are written into project.godot by hand, so the round trip is the only proof.
   const beforeAutoload = readFileSync(projectFile, 'utf8');
   const added = operation('add_autoload', { name: 'Hero', path: 'made/hero.gd' });
   assert.equal(get(added, 'action'), 'added');
   keptWhole(beforeAutoload, readFileSync(projectFile, 'utf8'), 'adding an autoload');
+  const withHero = readFileSync(projectFile, 'utf8');
+  const again = operation('add_autoload', { name: 'Hero', path: 'made/hero.gd' });
+  assert.deepEqual([get(again, 'action'), get(again, 'saved')], ['unchanged', false], JSON.stringify(again));
+  assert.equal(readFileSync(projectFile, 'utf8'), withHero, 'and the file is left as it was');
   const hero = named(get(operation('list_autoloads', {}), 'autoloads'), 'Hero');
   assert.ok(hero, 'the autoload that was just added should be listed');
   assert.deepEqual(
@@ -1215,6 +1241,15 @@ function testOperations(godotPath: string, projectDir: string): void {
 
   // The main scene is a project setting with a file behind it, so both halves are checked.
   writeFixtureScene(projectDir);
+  const notAScene = runRefusedOperation(godotPath, projectDir, 'set_main_scene', {
+    scene_path: 'made/hero.gd',
+  });
+  assert.equal(notAScene.answer, null, JSON.stringify(notAScene.answer));
+  assert.match(
+    notAScene.stderr,
+    /res:\/\/made\/hero\.gd is a GDScript, not a scene, and the main scene has to be one\. .*res:\/\/fixture_scene\.tscn/,
+    notAScene.stderr,
+  );
   assert.equal(get(operation('set_main_scene', { scene_path: 'fixture_scene.tscn' }), 'saved'), true);
   assert.equal(
     get(operation('get_project_setting', { setting: 'application/run/main_scene' }), 'value'),
@@ -1812,6 +1847,26 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.ok(
     asArray(get(accept, 'old_events')).some((event) => String(get(event, 'text')).includes('Enter')),
     `the engine binds ui_accept to Enter: ${JSON.stringify(accept)}`,
+  );
+  // What project.godot holds, the project's own and an engine action it rebinds, and none of the
+  // engine's that it leaves alone.
+  const actions = asArray(get(operation('list_input_actions', {}), 'actions'));
+  const listedAction = (name: string): unknown => actions.find((entry) => get(entry, 'name') === name);
+  assert.deepEqual(
+    [
+      get(listedAction('fixture_jump'), 'deadzone'),
+      get(listedAction('fixture_jump'), 'events', 0, 'keycode'),
+      get(listedAction('fixture_jump'), 'engineAction'),
+      get(listedAction('ui_accept'), 'events', 0, 'keycode'),
+      get(listedAction('ui_accept'), 'engineAction'),
+    ],
+    [0.2, 87, false, 69, true],
+    JSON.stringify(actions),
+  );
+  assert.equal(
+    listedAction('ui_cancel'),
+    undefined,
+    `an engine action left alone is not listed: ${JSON.stringify(actions)}`,
   );
   writeFileSync(projectFile, beforeUi);
   // A name the Input Map would refuse, and a key no name reaches, are refused with what is taken.

@@ -95,6 +95,7 @@ export function effectsOf(spec: ToolSpec): Effect[] {
  */
 const PROJECT_INFO_SECTIONS = [
   'autoloads',
+  'input_actions',
   'plugins',
   'export_presets',
   'audio_buses',
@@ -385,7 +386,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'array',
         items: { type: 'string', enum: [...PROJECT_INFO_SECTIONS] },
         description:
-          'Extra sections: registered autoloads, addons and whether each is enabled, export presets, the audio bus layout, a health report, or export validation. health and validation compile every script of the project in headless engines and name each that fails with its first error, and each file a scene, resource or script refers to that does not exist.',
+          'Extra sections: registered autoloads, the input actions project.godot holds with their events (an engine ui_ action only when the project rebinds it, as engineAction), addons and whether each is enabled, export presets, the audio bus layout, a health report, or export validation. health and validation compile every script of the project in headless engines and name each that fails with its first error, and each file a scene, resource or script refers to that does not exist.',
       },
       preset: { type: 'string', description: 'For validation: the export preset to validate against.' },
       detail: {
@@ -425,7 +426,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         blank: true,
         ops: ['set'],
         description:
-          'The value to write, fitted to the type the setting is registered as, the way scene_node set fits a property. Engine types may be written as their fields, {"x": 1, "y": 2}, or tagged, {"_type": "Vector2", "x": 1, "y": 2}, and infinity as {"_type": "float", "value": "inf"}, the form a read answers with; one carrying a field its type has not is refused naming it, and a colour may also be its html code, "#ff8000". "" writes an empty string.',
+          'The value to write, fitted to the type the setting is registered as, the way scene_node set fits a property. Engine types may be written as their fields, {"x": 1, "y": 2}, or tagged, {"_type": "Vector2", "x": 1, "y": 2}, and infinity as {"_type": "float", "value": "inf"}, the form a read answers with; one carrying a field its type has not is refused naming it, and a colour may also be its html code, "#ff8000". "" writes an empty string. A setting the engine does not declare is written as given, a whole number as an int, and when one in its section is named like it, note names the nearest, as it may be a misspelt one.',
       },
       name: { type: 'string', ops: ['add_autoload', 'remove_autoload'], description: 'Autoload name.' },
       path: {
