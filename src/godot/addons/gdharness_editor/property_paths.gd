@@ -26,9 +26,10 @@ static func declared_on(target: Object, property: String) -> Dictionary:
 ## start with the name of one holding a resource built into it, then a slash and a key of that
 ## resource: "sources/0/0:0/0/probability" is the probability of tile 0:0 in the atlas source a
 ## TileSet keeps as sources/0. A colon path cannot reach it, since the tile's own name holds colons.
-## A resource kept in a file of its own is not reached, since writing it here would leave its file
-## as it was.
-static func holder_of(target: Object, key: String) -> Array:
+## A resource kept in a file of its own is not reached, nor, given the file [param home] that
+## [param target] is saved in, one built into another file, since writing it here would leave that
+## file as it was.
+static func holder_of(target: Object, key: String, home: String = "") -> Array:
 	var through: Array[Resource] = []
 	var holder: Object = target
 	var name: String = key
@@ -36,7 +37,7 @@ static func holder_of(target: Object, key: String) -> Array:
 		var reached: Resource = null
 		var at: int = name.find("/")
 		while at > 0:
-			var held: Resource = built_in_at(holder, name.left(at))
+			var held: Resource = built_in_at(holder, name.left(at), home)
 			if held != null:
 				reached = held
 				break
@@ -49,10 +50,28 @@ static func holder_of(target: Object, key: String) -> Array:
 	return [holder, name, through]
 
 
-## The resource [param target] holds under [param property] when it is built into it, or null.
-static func built_in_at(target: Object, property: String) -> Resource:
+## The resource [param target] holds under [param property] when it is built into a file, or null;
+## given [param home], only one built into that file or into none yet.
+static func built_in_at(target: Object, property: String, home: String = "") -> Resource:
 	var held: Resource = held_at(target, property)
-	return held if held != null and held.is_built_in() else null
+	if held == null or not held.is_built_in():
+		return null
+	var file: String = held.resource_path.get_slice("::", 0)
+	return held if home.is_empty() or file.is_empty() or file == home else null
+
+
+## The file [param target] is saved in: its scene's for a node, as the nodes of an instance are
+## saved in the scene holding it, and its own for a resource; "" when it has none yet.
+static func home_of(target: Object) -> String:
+	if target is Node:
+		var top: Node = target
+		while top.owner != null:
+			top = top.owner
+		return top.scene_file_path
+	if target is Resource:
+		var resource: Resource = target
+		return resource.resource_path.get_slice("::", 0)
+	return ""
 
 
 ## The resource [param target] holds under [param property], built in or kept in a file, or null.

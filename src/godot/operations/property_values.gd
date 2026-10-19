@@ -186,13 +186,17 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	if order.has("script"):
 		order.erase("script")
 		order.push_front("script")
+	var home: String = GdhPropertyPaths.home_of(target)
 	for key: Variant in order:
 		var property: String = str(key)
-		var place: Array = GdhPropertyPaths.holder_of(target, property)
+		var place: Array = GdhPropertyPaths.holder_of(target, property, home)
 		var holder: Object = place[0]
 		var name: String = place[1]
 		var declared: Dictionary = declaration(holder, name)
 		if declared.is_empty():
+			var elsewhere: String = _held_elsewhere(holder, name, home)
+			if not elsewhere.is_empty():
+				return elsewhere + unwritten
 			var ungrown: String = GdhPropertyPaths.grow(holder, name, class_called(holder))
 			if not ungrown.is_empty():
 				return ungrown + unwritten
@@ -204,7 +208,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		if declared.is_empty() and holder is ShaderMaterial and name.begins_with("shader_parameter/"):
 			return _no_uniform(holder as ShaderMaterial, name) + unwritten
 		if declared.is_empty():
-			return _in_its_own_file(holder, name) + unwritten
+			return no_property(holder, name) + unwritten
 		var value: Array = value_for(holder, declared, properties[key])
 		if not value[0]:
 			return str(value[1]) + unwritten
@@ -696,23 +700,53 @@ func declaration(target: Object, property: String) -> Dictionary:
 	return declared
 
 
-## The refusal for [param name], which [param target] does not declare. One that starts with a
-## property holding a resource kept in a file of its own names that file, since the write belongs
-## there: through a TileMapLayer's tile_set the layer's scene would be saved and the TileSet's file
-## left as it was.
-static func _in_its_own_file(target: Object, name: String) -> String:
+## The refusal for [param name], which [param target] does not declare, when it runs through a
+## resource saved in a file other than [param home], the one [param target] is saved in; or "". The
+## write belongs in that file, since this one would be saved and that one left as it was: through a
+## TileMapLayer's tile_set kept in a file of its own, or through the mesh of an instance's editable
+## child, which is built into the scene the instance comes from.
+static func _held_elsewhere(target: Object, name: String, home: String) -> String:
 	var at: int = name.find("/")
 	while at > 0:
 		var head: String = name.left(at)
+		var rest: String = name.substr(at + 1)
 		var held: Resource = GdhPropertyPaths.held_at(target, head)
+		var file: String = "" if held == null else held.resource_path.get_slice("::", 0)
 		if held != null and not held.is_built_in():
-			var file: String = held.resource_path
 			return (
 				"%s.%s is %s, a file of its own, so %s is written there, with resource_edit modify on %s."
-				% [class_called(target), head, file, name.substr(at + 1), file]
+				% [class_called(target), head, file, rest, file]
 			)
+		if held != null and not file.is_empty() and not home.is_empty() and file != home:
+			return _built_in_elsewhere(target, head, rest, held, file)
 		at = name.find("/", at + 1)
-	return no_property(target, name)
+	return ""
+
+
+## The refusal for writing [param rest] into [param held], which [param target] holds under
+## [param head] and which is built into [param file], the scene an instance in this one comes from.
+static func _built_in_elsewhere(
+	target: Object, head: String, rest: String, held: Resource, file: String
+) -> String:
+	var node: String = ""
+	if target is Node:
+		var placed: Node = target
+		var from: Node = placed
+		while from != null and from.scene_file_path != file:
+			from = from.owner
+		if from != null:
+			node = " on %s" % from.get_path_to(placed)
+	var text: String = (
+		(
+			"%s.%s is built into %s, so %s is written there, with scene_node set%s in %s, which changes "
+			+ "it wherever that scene is used. To change it here alone, give %s a %s of its own: a "
+			+ 'value with "_type" set to its class and its properties beside it.'
+		)
+		% [class_called(target), head, file, rest, node, file, head, held.get_class()]
+	)
+	if target is GeometryInstance3D and (held is Material or rest.contains("material")):
+		text += " A material for this instance alone goes in material_override."
+	return text
 
 
 ## The entry a Theme would declare for [param property] once it held that item, or {} when the name
