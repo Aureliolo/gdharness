@@ -982,7 +982,9 @@ then anything still holding something other than what was sent is refused with w
 stored properties the call was not given are read before and after it, and those a setter moved
 come back under `alsoChanged`: a `Gradient` given a third colour gives the new point an offset of 0,
 and a `Control` given a size keeps it as offsets, so the answer names what the file will hold beyond
-what was asked. A list is copied before the write, since a setter can add to one in place. The
+what was asked. A list is copied before the write, since a setter can add to one in place. A
+value past an export range, or a number none of an enum's values has, is stored as the engine
+stores it and named under `outsideDeclared`, since the inspector would not have let it be entered. The
 element types of a typed `Array` or `Dictionary` export come from the property's declaration, since
 in the editor a script's exports sit behind a placeholder that stores whatever it is given.
 

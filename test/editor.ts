@@ -2255,7 +2255,7 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
       nodePath: 'Map',
       cells: [{ coords: { x: 5, y: 5 }, sourceId: 7, atlasCoords: { x: 0, y: 0 } }],
     }),
-    /has no source 7/,
+    /names source 7, and the TileSet has source 0; sourceId -1 erases a cell\. Nothing was placed\./,
     'a cell from a source the tile set has not should be refused',
   );
 
@@ -3165,8 +3165,8 @@ async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Pr
   });
   assert.deepEqual(
     get(made, 'sources'),
-    [{ sourceId: 0, texture: 'res://tiles/atlas.png', tiles: 1 }],
-    'one tile, for the one cell of the atlas that is not clear',
+    [{ sourceId: 0, texture: 'res://tiles/atlas.png', tiles: 1, leftBlank: [{ x: 1, y: 0 }] }],
+    'one tile, for the one cell of the atlas that is not clear, and that cell named',
   );
   assert.match(
     await refusal('resource_edit', {
@@ -3211,7 +3211,7 @@ async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Pr
   assert.match(nodeBody(fileText(project, 'tiles/map.tscn'), 'Ground'), /tile_map_data = PackedByteArray/);
   assert.match(
     await refusal('scene_node', cell({ x: 1, y: 0 })),
-    /cells\[0\]: source 0 has no tile at \(1, 0\); it has tiles at \(0, 0\)\. Nothing was placed\./,
+    /cells\[0\] at \(0, 0\): source 0 has no tile at \(1, 0\); it has tiles at \(0, 0\)\. Nothing was placed\./,
   );
   // The cells read back as cells, in the form set_tilemap_cells takes, rather than as the packed
   // bytes the scene stores them in.

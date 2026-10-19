@@ -410,6 +410,10 @@ func fitted(value: Variant, type: int) -> Variant:
 	var simple: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING]
 	if not simple.has(type) or not simple.has(typeof(rebuilt)):
 		return rebuilt
+	# A number or a truth value stays as sent where text is wanted, for the refusal to name. Converted,
+	# 1 arrived as the double it is in JSON and was saved as "1.0", which is not the text anyone sends.
+	if type == TYPE_STRING and not rebuilt is String:
+		return rebuilt
 
 	# Digits are read as digits, since read as JSON they become a double and one past 2^53 a
 	# neighbour of the number written.

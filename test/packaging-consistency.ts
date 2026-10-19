@@ -75,6 +75,7 @@ const operationsModules = [
   'audio_buses.gd',
   'class_cache.gd',
   'classdb_queries.gd',
+  'declared_values.gd',
   'dependencies.gd',
   'editor_tools.gd',
   'export_presets.gd',
