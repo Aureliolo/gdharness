@@ -21807,6 +21807,22 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
       assert.match(kept, /^compress\/mode=1$/m, `the import should keep the option it was given:\n${kept}`);
       const current = await call({ op: 'status', resourcePath: 'good.png' });
       assert.equal(get(current, 'resources', 0, 'status'), 'up_to_date', JSON.stringify(current));
+      // The same value again changes nothing, and was answered as updated and reimported.
+      const again = await call({
+        op: 'set_options',
+        resourcePath: 'good.png',
+        options: { 'compress/mode': 1 },
+      });
+      assert.deepEqual(
+        [get(again, 'updated_options'), get(again, 'unchanged_options'), get(again, 'reimport')],
+        [[], ['compress/mode'], undefined],
+        JSON.stringify(again),
+      );
+      assert.equal(
+        get(again, 'note'),
+        'Not reimported: every option given already held that value, so the import file was not written.',
+      );
+      assert.equal(readFileSync(join(project, 'good.png.import'), 'utf8'), kept);
 
       // A name the importer has no option for is said to be one, after the reimport that left it
       // out: a probe gave a texture `filter`, was told it was updated, and the texture filtered as

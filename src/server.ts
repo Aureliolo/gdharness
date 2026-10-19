@@ -5711,6 +5711,16 @@ class GodotServer {
       ...params
     } = contained.value;
     const written = await this.operation('set_import_options', params, project.value.path);
+    const changed: unknown = written.ok ? written.payload['updated_options'] : null;
+    if (written.ok && Array.isArray(changed) && changed.length === 0) {
+      return this.answer({
+        ...written,
+        payload: {
+          ...written.payload,
+          note: 'Not reimported: every option given already held that value, so the import file was not written.',
+        },
+      });
+    }
     if (!written.ok || args['reimport'] === false) {
       return this.answer(
         written.ok
