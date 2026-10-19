@@ -7472,7 +7472,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 135;
+const READ_IN_WORDS = 138;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -45304,6 +45304,296 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
 }
 
 /**
+ * scene_node's groups, copies, moves and deletes with no editor, through the server and a real
+ * engine. A group the instanced coin.tscn puts its root in is read on every instance and can be
+ * taken out only there; one this scene adds is saved in its file and read back from it. A copy goes
+ * right after the original, as the editor's Duplicate puts it. A move keeps the node where it is
+ * drawn, worked out through a scaled parent, a Control keeping only its position, a parent that is
+ * no CanvasItem and so places nothing, top-level nodes left alone, and in 3D; keepGlobalTransform
+ * false leaves the transform as it was. A delete names the nodes of this scene that went with it,
+ * and not those inside its instances.
+ */
+async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('node groups and places regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-node-place-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-node-place-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Places"\n',
+    'coin.tscn':
+      '[gd_scene format=3]\n\n[node name="Coin" type="Area2D" groups=["coins"]]\n\n' +
+      '[node name="Look" type="Sprite2D" parent="."]\n',
+    'level.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://coin.tscn" id="1_coin"]\n\n' +
+      '[node name="Level" type="Node2D"]\n\n' +
+      '[node name="Items" type="Node2D" parent="."]\nposition = Vector2(100, 50)\nscale = Vector2(2, 2)\n\n' +
+      '[node name="Coin1" parent="Items" instance=ExtResource("1_coin")]\nposition = Vector2(10, 0)\n\n' +
+      '[node name="Coin2" parent="Items" instance=ExtResource("1_coin")]\nposition = Vector2(20, 0)\n\n' +
+      '[node name="Mark" type="Node2D" parent="Items"]\nposition = Vector2(5, 5)\n\n' +
+      '[node name="Dot" type="Node2D" parent="Items/Mark"]\n\n' +
+      '[node name="Box" type="Control" parent="Items"]\nlayout_mode = 3\noffset_left = 4.0\noffset_top = 4.0\n' +
+      'offset_right = 44.0\noffset_bottom = 44.0\n\n' +
+      '[node name="Free" type="Node2D" parent="Items"]\ntop_level = true\nposition = Vector2(7, 7)\n\n' +
+      '[node name="Raised" type="Node2D" parent="Items"]\ntop_level = true\nposition = Vector2(50, 0)\n\n' +
+      '[node name="Tip" type="Node2D" parent="Items/Raised"]\nposition = Vector2(1, 0)\n\n' +
+      '[node name="Holder" type="Node" parent="."]\n\n' +
+      '[node name="Pin" type="Node2D" parent="Holder"]\nposition = Vector2(3, 3)\n',
+    'world.tscn':
+      '[gd_scene format=3]\n\n[node name="World" type="Node3D"]\n\n' +
+      '[node name="Arm" type="Node3D" parent="."]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 2, 3)\n\n' +
+      '[node name="Hand" type="Node3D" parent="Arm"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)\n\n' +
+      '[node name="Loose" type="Node3D" parent="Arm"]\ntop_level = true\n' +
+      'transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)\n\n' +
+      '[node name="Lifted" type="Node3D" parent="Arm"]\ntop_level = true\n' +
+      'transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 5)\n\n' +
+      '[node name="Finger" type="Node3D" parent="Arm/Lifted"]\n' +
+      'transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)\n',
+    'twice.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://coin.tscn" id="1_coin"]\n\n' +
+      '[node name="Twice" type="Node2D"]\n\n' +
+      '[node name="Coin" parent="." groups=["coins"] instance=ExtResource("1_coin")]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (tool: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: tool, arguments: { projectPath: project, scenePath: 'level.tscn', ...args } },
+      240_000,
+    );
+  const node = async (args: Record<string, unknown>): Promise<unknown> => {
+    const answer = await call('scene_node', args);
+    const payload = parseTextContent(answer);
+    assert.notEqual(
+      get(answer, 'result', 'isError'),
+      true,
+      `${String(args['op'])}: ${textOf(answer) ?? JSON.stringify(answer)}`,
+    );
+    return payload;
+  };
+  const refusal = async (args: Record<string, unknown>): Promise<string> =>
+    textOf(await call('scene_node', args)) ?? '';
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const at = (entry: unknown, path: string): unknown =>
+    get(entry, 'path') === path
+      ? entry
+      : asArray(get(entry, 'children'))
+          .map((child) => at(child, path))
+          .find((found) => found !== undefined);
+  const flat = (x: number, y: number) => ({ _type: 'Vector2', x, y });
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('regression-test');
+
+    const coin = parseTextContent(await call('scene_tree', { scenePath: 'coin.tscn' }));
+    assert.deepEqual(get(coin, 'tree', 'groups'), ['coins'], JSON.stringify(coin));
+    const twice = parseTextContent(await call('scene_tree', { scenePath: 'twice.tscn' }));
+    assert.deepEqual(get(at(get(twice, 'tree'), 'Coin'), 'groups'), ['coins'], JSON.stringify(twice));
+    const grouped = await node({ op: 'set', nodePath: 'Items/Coin1', addGroups: ['pickups'] });
+    assert.deepEqual(get(grouped, 'groups'), ['coins', 'pickups'], JSON.stringify(grouped));
+    assert.match(fileOf('level.tscn'), /\[node name="Coin1"[^\]]*groups=\["pickups"\]/, fileOf('level.tscn'));
+    const read = await node({ op: 'get', nodePath: 'Items/Coin1' });
+    assert.deepEqual(
+      [get(read, 'groups'), get(read, 'groupsHere')],
+      [['coins', 'pickups'], ['pickups']],
+      JSON.stringify(read),
+    );
+    const level = parseTextContent(await call('scene_tree', {}));
+    assert.deepEqual(
+      [
+        get(at(get(level, 'tree'), 'Items/Coin1'), 'groups'),
+        get(at(get(level, 'tree'), 'Items/Coin2'), 'groups'),
+      ],
+      [['coins', 'pickups'], ['coins']],
+      JSON.stringify(level),
+    );
+    assert.equal(get(at(get(level, 'tree'), 'Items'), 'groups'), undefined, JSON.stringify(level));
+    assert.equal(
+      await refusal({ op: 'set', nodePath: 'Items/Coin1', removeGroups: ['coins'] }),
+      'Coin1 is in coins because res://coin.tscn puts it there, and no scene using that one can take it out: ' +
+        'remove the group in res://coin.tscn, which takes it out in every scene using that one.',
+    );
+    assert.equal(
+      await refusal({ op: 'set', nodePath: 'Items/Coin1', removeGroups: ['loot'] }),
+      'Coin1 is in no group loot; it is in coins, pickups.',
+    );
+    assert.equal(
+      await refusal({ op: 'set', nodePath: 'Items/Coin1', addGroups: ['loot'], removeGroups: ['loot'] }),
+      'loot is in both addGroups and removeGroups.',
+    );
+    assert.equal(
+      await refusal({ op: 'set', nodePath: 'Items/Coin1', addGroups: 'loot' }),
+      'scene_node takes addGroups as array, not a string.',
+    );
+    assert.equal(
+      await refusal({ op: 'set', nodePath: 'Items/Coin1', addGroups: ['loot', ' '] }),
+      `" " names no group: a group's name has something in it besides spaces.`,
+    );
+    assert.match(fileOf('level.tscn'), /groups=\["pickups"\]/, 'a refused change wrote nothing');
+    const ungrouped = await node({ op: 'set', nodePath: 'Items/Coin1', removeGroups: ['pickups'] });
+    assert.deepEqual(get(ungrouped, 'groups'), ['coins'], JSON.stringify(ungrouped));
+    assert.doesNotMatch(fileOf('level.tscn'), /groups=/, fileOf('level.tscn'));
+    const spawn = await node({ op: 'add', nodeName: 'Spawn', nodeType: 'Marker2D', addGroups: ['spawns'] });
+    assert.deepEqual(get(spawn, 'groups'), ['spawns'], JSON.stringify(spawn));
+    assert.match(fileOf('level.tscn'), /\[node name="Spawn"[^\]]*groups=\["spawns"\]/, fileOf('level.tscn'));
+
+    assert.equal(
+      await refusal({ op: 'duplicate', nodePath: 'Items/Coin1', newName: 'Far', index: 9 }),
+      'index 9 is not a place among the 6 other children of Items: give 0 to 6, 0 for first.',
+    );
+    const beside = await node({ op: 'duplicate', nodePath: 'Items/Coin1', newName: 'Coin1b' });
+    assert.equal(get(beside, 'index'), 1, JSON.stringify(beside));
+    const first = await node({ op: 'duplicate', nodePath: 'Items/Coin2', newName: 'Coin2b', index: 0 });
+    assert.equal(get(first, 'index'), 0, JSON.stringify(first));
+    const elsewhere = await node({
+      op: 'duplicate',
+      nodePath: 'Items/Coin1',
+      newName: 'Spare',
+      parentNodePath: '.',
+    });
+    assert.equal(get(elsewhere, 'index'), 3, JSON.stringify(elsewhere));
+    const order = [...fileOf('level.tscn').matchAll(/\[node name="(\w+)"[^\]]*parent="Items"/g)].map(
+      (m) => m[1],
+    );
+    assert.deepEqual(
+      order,
+      ['Coin2b', 'Coin1', 'Coin1b', 'Coin2', 'Mark', 'Box', 'Free', 'Raised'],
+      fileOf('level.tscn'),
+    );
+
+    const mark = await node({ op: 'reparent', nodePath: 'Items/Mark', newParentPath: '.' });
+    assert.deepEqual(
+      get(mark, 'alsoChanged'),
+      { position: { was: flat(5, 5), now: flat(110, 60) }, scale: { was: flat(1, 1), now: flat(2, 2) } },
+      JSON.stringify(mark),
+    );
+    assert.match(
+      fileOf('level.tscn'),
+      /\[node name="Mark" type="Node2D" parent="\."[^\]]*\]\nposition = Vector2\(110, 60\)\nscale = Vector2\(2, 2\)\n/,
+      fileOf('level.tscn'),
+    );
+    assert.match(fileOf('level.tscn'), /\[node name="Dot" type="Node2D" parent="Mark"/, fileOf('level.tscn'));
+    const box = await node({ op: 'reparent', nodePath: 'Items/Box', newParentPath: '.' });
+    assert.deepEqual(
+      get(box, 'alsoChanged'),
+      { position: { was: flat(4, 4), now: flat(108, 58) } },
+      JSON.stringify(box),
+    );
+    const free = await node({ op: 'reparent', nodePath: 'Items/Free', newParentPath: '.' });
+    assert.deepEqual(
+      [get(free, 'newNodePath'), get(free, 'alsoChanged')],
+      ['Free', undefined],
+      JSON.stringify(free),
+    );
+    const tip = await node({ op: 'reparent', nodePath: 'Items/Raised/Tip', newParentPath: '.' });
+    assert.deepEqual(
+      get(tip, 'alsoChanged'),
+      { position: { was: flat(1, 0), now: flat(51, 0) } },
+      `a top-level parent places its children by itself: ${JSON.stringify(tip)}`,
+    );
+    const carried = await node({
+      op: 'reparent',
+      nodePath: 'Items/Coin2',
+      newParentPath: '.',
+      keepGlobalTransform: false,
+    });
+    assert.deepEqual(
+      [get(carried, 'newNodePath'), get(carried, 'alsoChanged')],
+      ['Coin2', undefined],
+      JSON.stringify(carried),
+    );
+    assert.match(
+      fileOf('level.tscn'),
+      /\[node name="Coin2" parent="\."[^\]]*\]\nposition = Vector2\(20, 0\)\n/,
+    );
+    const pin = await node({ op: 'reparent', nodePath: 'Holder/Pin', newParentPath: 'Items' });
+    assert.deepEqual(
+      get(pin, 'alsoChanged'),
+      {
+        position: { was: flat(3, 3), now: flat(-48.5, -23.5) },
+        scale: { was: flat(1, 1), now: flat(0.5, 0.5) },
+      },
+      JSON.stringify(pin),
+    );
+    const among = await node({ op: 'reparent', nodePath: 'Items/Coin1b', newParentPath: 'Items', index: 0 });
+    assert.deepEqual([get(among, 'index'), get(among, 'alsoChanged')], [0, undefined], JSON.stringify(among));
+    const hand = await node({
+      op: 'reparent',
+      scenePath: 'world.tscn',
+      nodePath: 'Arm/Hand',
+      newParentPath: '.',
+    });
+    assert.deepEqual(
+      get(hand, 'alsoChanged'),
+      {
+        position: {
+          was: { _type: 'Vector3', x: 0, y: 1, z: 0 },
+          now: { _type: 'Vector3', x: 1, y: 3, z: 3 },
+        },
+      },
+      JSON.stringify(hand),
+    );
+    assert.match(
+      fileOf('world.tscn'),
+      /\[node name="Hand" type="Node3D" parent="\."[^\]]*\]\ntransform = Transform3D\(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 3, 3\)\n/,
+    );
+    const loose = await node({
+      op: 'reparent',
+      scenePath: 'world.tscn',
+      nodePath: 'Arm/Loose',
+      newParentPath: '.',
+    });
+    assert.equal(get(loose, 'alsoChanged'), undefined, JSON.stringify(loose));
+    const finger = await node({
+      op: 'reparent',
+      scenePath: 'world.tscn',
+      nodePath: 'Arm/Lifted/Finger',
+      newParentPath: '.',
+    });
+    assert.deepEqual(
+      get(finger, 'alsoChanged'),
+      {
+        position: {
+          was: { _type: 'Vector3', x: 0, y: 1, z: 0 },
+          now: { _type: 'Vector3', x: 0, y: 1, z: 5 },
+        },
+      },
+      `a top-level parent places its children by itself: ${JSON.stringify(finger)}`,
+    );
+
+    const gone = await node({ op: 'delete', nodePath: 'Items' });
+    assert.deepEqual(
+      get(gone, 'deletedWithIt'),
+      ['Items/Coin1b', 'Items/Coin2b', 'Items/Coin1', 'Items/Raised', 'Items/Pin'],
+      JSON.stringify(gone),
+    );
+    const lone = await node({ op: 'delete', nodePath: 'Spawn' });
+    assert.deepEqual([get(lone, 'deletedNodePath'), get(lone, 'deletedWithIt')], ['Spawn', undefined]);
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * scene_animation's writes with no editor, through the server and a real engine, as the other scene
  * tools write: each op lands in the file that keeps it, root.gd's _init (position) is not saved by
  * a write that never asked for it, and a library in its own file whose animation carries a script
@@ -46142,7 +46432,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     }
     assert.equal(
       textOf(await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath: 'Crate1' })),
-      'set takes properties, editableChildren, or both.',
+      'set takes properties, editableChildren, addGroups or removeGroups.',
     );
 
     const shallow = get(
@@ -47500,6 +47790,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAReadWithNoEditorAnswersFromTheFile,
   testAWriteWithNoEditorGoesThroughAHeadlessEngine,
   testAnAnimationIsWrittenWithNoEditor,
+  testANodeKeepsItsGroupsAndItsPlace,
   testAThemeAndATilesetWithNoEditor,
   testASceneKeepsItsOwnValuesForAnotherScenesNodes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,

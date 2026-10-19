@@ -519,6 +519,17 @@ func values_from(node: Node, at: String) -> String:
 	return str(_base_paths.get(at, ""))
 
 
+## The groups this scene's own file puts the node at [param at] in.
+func groups_at(at: String) -> PackedStringArray:
+	var named: PackedStringArray = []
+	if _state == null:
+		return named
+	for index: int in _state.get_node_count():
+		if _relative(str(_state.get_node_path(index))) == at:
+			named.append_array(_state.get_node_groups(index))
+	return named
+
+
 ## The names of the properties this scene's own file sets on the node at [param at].
 func set_at(at: String) -> Dictionary:
 	var names: Dictionary = {}

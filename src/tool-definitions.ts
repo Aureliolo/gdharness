@@ -804,7 +804,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Scene tree',
     effect: 'read',
     description:
-      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. A node that instances another scene names that file under instanceOf, and the nodes listed under it come from that file rather than this one; its editableChildren says whether this scene, or a scene it inherits, keeps values of its own for them (scene_node set editableChildren). Needs no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without making its nodes, so no script of theirs runs (autoloads still start once it has answered, as in every headless call). For the nodes of a game that is running, runtime_inspect tree.',
+      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. A node that instances another scene names that file under instanceOf, and the nodes listed under it come from that file rather than this one; its editableChildren says whether this scene, or a scene it inherits, keeps values of its own for them (scene_node set editableChildren). A node in any group answers groups, sorted, from this file and every scene it comes from. Needs no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without making its nodes, so no script of theirs runs (autoloads still start once it has answered, as in every headless call). For the nodes of a game that is running, runtime_inspect tree.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -822,7 +822,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Scene nodes',
     description: `One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type or script class can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties, and another scene is instanced by an add with instancePath. A set with properties {"name": "Boss"} renames a node, and answers nodePath as its new path. A rename or a reparent carries the node paths naming the node, as the editor's rename does: NodePath values on nodes (in arrays, dictionaries, built-in resources, %unique paths) and the tracks its players' animations hold, saving a library kept in a .tres of its own, and answers each rewrite under retargeted and each path it left under notRetargeted. The move is followed into every other .tscn that instances or inherits this scene at any depth: the editable children, values, added nodes and connections named by the old path are rewritten, since Godot finds a moved node's values by unique_id but editable children only by path and drops the values kept below them on the next save, and that scene's node paths and tracks are carried as above. A delete rewrites no path, and answers under stillNaming what named the deleted node and now names nothing. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene. A node this scene inherits takes values of this scene's own, and so does a node inside an instance of another scene once that instance's editableChildren is true; neither can be moved, renamed, copied or deleted, since the other scene makes it again on load. ${WITHOUT_AN_EDITOR}`,
     answer:
-      "get answers nodeType, the node's engine class, with scriptClass when its script declares a class_name; nodePath, its path from the root however it was named; setHere, the properties this scene's own file sets on it; and valuesFrom, the scene every other value comes from, when another scene makes the node. retargeted lists each path a rename or a reparent rewrote, as {scenePath, nodePath, property or animation and track, from, to}, and notRetargeted each it left, with a reason: a track kept in another scene or an imported file, or a value another scene gives that the move left naming nothing. followed names the other scenes a move rewrote, and notFollowed any left as they were, with why. stillNaming lists each node path and track, here and in the scenes instancing or inheriting this one, that named a deleted node. Each of these lists is answered only when it names anything. alsoChanged gives the other properties the engine changed in step with a set, as a Control's offsets with its size, as {was, now}.",
+      "get answers nodeType, the node's engine class, with scriptClass when its script declares a class_name; nodePath, its path from the root however it was named; setHere, the properties this scene's own file sets on it; and valuesFrom, the scene every other value comes from, when another scene makes the node. retargeted lists each path a rename or a reparent rewrote, as {scenePath, nodePath, property or animation and track, from, to}, and notRetargeted each it left, with a reason: a track kept in another scene or an imported file, or a value another scene gives that the move left naming nothing. followed names the other scenes a move rewrote, and notFollowed any left as they were, with why. stillNaming lists each node path and track, here and in the scenes instancing or inheriting this one, that named a deleted node, and deletedWithIt each node of this scene's own that went with it, the nodes inside an instance going with the instance. groups lists, sorted, every group a node is in, on a get, an add that gave addGroups and every set that changes them; get adds groupsHere, the groups this file puts it in, when another scene puts it in others. Each of these lists is answered only when it names anything. alsoChanged gives the other properties the engine changed in step with a set, as a Control's offsets with its size, and those a reparent changed to keep the node where it is drawn, as {was, now}.",
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -852,6 +852,20 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           "set: on an instance of another scene, whether its children are editable here, as the editor's Editable Children makes them. True lets scene_node set give the nodes inside that instance values of this scene's own, which no other instance shares. An instance nested inside another takes it once the one around it has editable children. False drops every value this scene keeps for them, and every node it added below one of them. The answer names the nodes whose values went under droppedValues (they stay, with the instance's own values) and the added nodes that went under droppedNodes; a node added straight under the instance stays. The answer says editableChildren as the file now holds it.",
       },
+      addGroups: {
+        type: 'array',
+        items: { type: 'string' },
+        ops: ['add', 'set'],
+        description:
+          "add and set: groups to put the node in, saved in this scene's file as the editor's Groups dock saves them. One it is in already is kept as it is.",
+      },
+      removeGroups: {
+        type: 'array',
+        items: { type: 'string' },
+        ops: ['set'],
+        description:
+          'set: groups to take the node out of. One it is not in is refused, and so is one another scene puts it in (the scene that makes it, instances it or is inherited here), which only that scene can take it out of.',
+      },
       newName: { type: 'string', ops: ['duplicate'], description: "duplicate: the copy's name." },
       newParentPath: {
         type: 'string',
@@ -859,12 +873,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           "reparent: the new parent, which may be the one it has, to move it among its siblings. In the scenes the move is followed into, the parent_id_path, from_uid_path and to_uid_path saved beside each rewritten path are dropped, since their ids ran through the old parent; the node's own unique_id is kept, and the next save writes the dropped ones again.",
       },
+      keepGlobalTransform: {
+        type: 'boolean',
+        ops: ['reparent'],
+        description:
+          "reparent: whether the node stays where it is drawn, its transform worked out again under the new parent, as the editor's reparent and Node.reparent keep it. A Control keeps its position only. Default true; false keeps its own transform, so it moves with the new parent.",
+      },
       index: {
         type: 'integer',
         minimum: 0,
-        ops: ['add', 'reparent'],
+        ops: ['add', 'duplicate', 'reparent'],
         description:
-          "add and reparent: where the node goes among the parent's children, 0 for first. Default last. Child order is draw order in a CanvasItem and layout order in a Container.",
+          "add, duplicate and reparent: where the node goes among the parent's children, 0 for first. Default last, except for a copy under the original's own parent, which goes right after it. Child order is draw order in a CanvasItem and layout order in a Container.",
       },
       includeDefaults: {
         type: 'boolean',
@@ -894,18 +914,19 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       set: {
         effect: 'destructive',
         summary:
-          'set properties on a node, or make the children of an instance editable; give either or both',
+          'set properties on a node, make the children of an instance editable, or put it in groups or take it out of them; give any of them together',
         requires: ['nodePath'],
       },
       duplicate: {
         effect: 'additive',
         summary:
-          "copy a node and its children, beside it or under parentNodePath, answering the copy's newNodePath, parentNodePath and index",
+          "copy a node and its children, right after it or under parentNodePath, answering the copy's newNodePath, parentNodePath and index",
         requires: ['nodePath', 'newName'],
       },
       reparent: {
         effect: 'destructive',
-        summary: 'move a node under another parent, or to another place among its siblings',
+        summary:
+          'move a node under another parent, keeping where it is drawn, or to another place among its siblings',
         requires: ['nodePath', 'newParentPath'],
       },
       delete: { effect: 'destructive', summary: 'remove a node and its children', requires: ['nodePath'] },

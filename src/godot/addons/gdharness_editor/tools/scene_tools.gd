@@ -5,6 +5,7 @@ extends Node
 
 const GdhFileReads = preload("../file_reads.gd")
 const GdhRead = preload("../reading.gd")
+const GdhGroups = preload("scene_groups.gd")
 const GdhKin = preload("scene_kin.gd")
 const GdhPaths = preload("scene_paths.gd")
 const GdhPlacing = preload("scene_placing.gd")
@@ -230,6 +231,7 @@ func add_node(args: Dictionary) -> Dictionary:
 	var node_name: String = str(args.get("nodeName", ""))
 	var parent_node_path: String = str(args.get("parentNodePath", "."))
 	var properties: Dictionary = _parse_properties_arg(args.get("properties", {}))
+	var adding: Array = GdhGroups.asked(args, "addGroups")
 
 	if node_name.is_empty():
 		return {"ok": false, "error": "Missing nodeName"}
@@ -282,9 +284,11 @@ func add_node(args: Dictionary) -> Dictionary:
 	if not unsettled.is_empty():
 		return scene.refuse("Nothing was written: " + unsettled)
 	scene.asked(new_node, properties.keys())
-	var refused_property: String = _properties.write_all(new_node, properties)
-	if not refused_property.is_empty():
-		return scene.refuse(refused_property)
+	var unwritten: String = _properties.write_all(new_node, properties)
+	if unwritten.is_empty():
+		unwritten = GdhGroups.change(scene, new_node, adding, [])
+	if not unwritten.is_empty():
+		return scene.refuse(unwritten)
 
 	var new_path: String = scene.path_of(new_node)
 	# Read before the write, which frees the scene it was added to.
@@ -296,11 +300,16 @@ func add_node(args: Dictionary) -> Dictionary:
 		"index": new_node.get_index(),
 	}
 	_properties.note_write(answer, new_node)
+	if not adding.is_empty():
+		answer.merge(GdhGroups.read(scene, new_node))
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
-			return _kept(
+			var unkept: String = _kept(
 				scene, saved, new_node, properties.keys() + (["script"] if class_script != null else [])
 			)
+			if unkept.is_empty() and saved.get_node_or_null(new_path) != null:
+				unkept = GdhGroups.unkept(saved.get_node(new_path), adding, [])
+			return unkept
 	)
 	if not written.is_empty():
 		return written
@@ -339,6 +348,10 @@ func delete_node(args: Dictionary) -> Dictionary:
 		return scene.refuse(fixed)
 
 	var at: String = scene.path_of(node)
+	var went: Array[String] = []
+	for under: Node in node.find_children("*", "", true, false):
+		if under.owner == scene.root:
+			went.append(scene.path_of(under))
 	node.get_parent().remove_child(node)
 	node.free()
 	var carried: GdhPaths = GdhPaths.new()
@@ -354,6 +367,8 @@ func delete_node(args: Dictionary) -> Dictionary:
 		return written
 
 	var answer: Dictionary = {"ok": true, "deletedNodePath": at}
+	if not went.is_empty():
+		answer["deletedWithIt"] = went
 	answer.merge(GdhKin.follow(scene_path, at, "", carried))
 	return answer
 
@@ -395,6 +410,13 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	var unusable: String = scene.unusable_name(target_parent, new_name)
 	if not unusable.is_empty():
 		return scene.refuse(unusable)
+	var place: Variant = args.get("index")
+	var unplaceable: String = GdhPlacing.unplaceable(target_parent, null, place)
+	if not unplaceable.is_empty():
+		return scene.refuse(unplaceable)
+	# The editor's Duplicate puts the copy right after the original.
+	if place == null and target_parent == source.get_parent():
+		place = source.get_index() + 1
 
 	var copies: Dictionary = {}
 	var duplicated_node: Node = GdhPlacing.copied(source, root, copies)
@@ -403,6 +425,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 
 	duplicated_node.name = new_name
 	target_parent.add_child(duplicated_node)
+	GdhPlacing.place(duplicated_node, place)
 	GdhPlacing.own(duplicated_node, root)
 	GdhPlacing.reconnect(copies, source)
 	scene.copied(copies)
@@ -411,8 +434,11 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	var placed: Array = [scene.path_of(target_parent), duplicated_node.get_index()]
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
-			if saved.get_node_or_null(new_path) == null:
+			var copy: Node = saved.get_node_or_null(new_path)
+			if copy == null:
 				return "the copy would not be in the scene when it loads."
+			if copy.get_index() != placed[1]:
+				return "%s would load at index %d, not %d." % [new_path, copy.get_index(), placed[1]]
 			return ""
 	)
 	if not written.is_empty():
@@ -473,13 +499,24 @@ func reparent_node(args: Dictionary) -> Dictionary:
 		return scene.refuse(unplaceable)
 
 	var old_path: String = scene.path_of(node)
+	var old_parent: Node = node.get_parent()
+	var drawn_at: Dictionary = {}
+	for property: String in GdhPlacing.placing(node):
+		drawn_at[property] = _properties.read_at(node, property)
 	# Unowned while it moves: a node taken out of the tree keeps its owner, and adding it under the new
 	# parent warned that the owner was not above it. Node.reparent warns the same way.
 	node.owner = null
-	node.get_parent().remove_child(node)
+	old_parent.remove_child(node)
 	new_parent.add_child(node)
 	GdhPlacing.place(node, place)
 	GdhPlacing.own(node, root)
+	if GdhRead.as_bool(args.get("keepGlobalTransform", true)):
+		GdhPlacing.keep_in_place(node, old_parent)
+	var also_changed: Dictionary = {}
+	for property: String in drawn_at:
+		var now: Variant = _properties.read_at(node, property)
+		if not GdhSame.same(now, drawn_at[property]):
+			also_changed[property] = {"was": _readable(node, drawn_at[property]), "now": _readable(node, now)}
 
 	var new_path: String = scene.path_of(node)
 	var index: int = node.get_index()
@@ -494,7 +531,7 @@ func reparent_node(args: Dictionary) -> Dictionary:
 				return "%s would still be in the scene as well when it loads." % old_path
 			if copy.get_index() != index:
 				return "%s would load at index %d, not %d." % [new_path, copy.get_index(), index]
-			return ""
+			return _kept(scene, saved, node, also_changed.keys())
 	)
 	if not written.is_empty():
 		carried.put_back(scene_path)
@@ -507,6 +544,8 @@ func reparent_node(args: Dictionary) -> Dictionary:
 		"newNodePath": new_path,
 		"index": index,
 	}
+	if not also_changed.is_empty():
+		answer["alsoChanged"] = also_changed
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
 	return answer
@@ -518,8 +557,10 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var node_path: String = str(args.get("nodePath", "."))
 	var properties: Dictionary = _parse_properties_arg(args.get("properties", {}))
 	var editable: Variant = args.get("editableChildren")
-	if properties.is_empty() and editable == null:
-		return {"ok": false, "error": "set takes properties, editableChildren, or both."}
+	var adding: Array = GdhGroups.asked(args, "addGroups")
+	var removing: Array = GdhGroups.asked(args, "removeGroups")
+	if properties.is_empty() and editable == null and adding.is_empty() and removing.is_empty():
+		return {"ok": false, "error": "set takes properties, editableChildren, addGroups or removeGroups."}
 
 	var opened: Array = _open(scene_path, true)
 	var scene: GdhSceneFile = opened[0]
@@ -554,6 +595,9 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var refused_property: String = _properties.write_all(node, properties)
 	if not refused_property.is_empty():
 		return scene.refuse(GdhSceneFile.missing_on(node, refused_property))
+	var ungrouped: String = GdhGroups.change(scene, node, adding, removing)
+	if not ungrouped.is_empty():
+		return scene.refuse(ungrouped)
 
 	var held: Dictionary = {}
 	for key: Variant in properties:
@@ -561,11 +605,15 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var new_path: String = scene.path_of(node)
 	var answer: Dictionary = {"ok": true, "nodePath": new_path, "properties": held}
 	_properties.note_write(answer, node)
+	if not adding.is_empty() or not removing.is_empty():
+		answer["groups"] = GdhGroups.read(scene, node).get("groups", [])
 	var carried: GdhPaths = GdhPaths.new()
 	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var unkept: String = _kept(scene, saved, node, properties.keys())
+			if unkept.is_empty():
+				unkept = GdhGroups.unkept(saved.get_node(new_path), adding, removing)
 			if unkept.is_empty() and editable != null:
 				if saved.is_editable_instance(saved.get_node(new_path)) != GdhRead.as_bool(editable):
 					return (
@@ -615,6 +663,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	here.sort()
 	var answer: Dictionary = {"ok": true, "nodePath": at, "properties": props, "setHere": here}
 	answer.merge(GdhSceneFile.class_of(node))
+	answer.merge(GdhGroups.read(scene, node))
 	var from: String = scene.values_from(node, at)
 	if not from.is_empty():
 		answer["valuesFrom"] = from
