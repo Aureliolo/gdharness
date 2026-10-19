@@ -706,6 +706,29 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   assert.ok(!existsSync(join(projectDir, 'made', 'doubled.gd')), 'and nothing is written');
 
+  // The first variable is set apart from the header above it, and the second sits with the first.
+  operation('create_script', {
+    script_path: 'made/bare.gd',
+    content: 'extends Node\nsignal hit\n\n\nfunc _ready() -> void:\n\thit.emit()\n',
+  });
+  const apart = operation('modify_script', {
+    script_path: 'made/bare.gd',
+    modifications: [
+      { type: 'add_variable', name: 'speed', varType: 'float', defaultValue: '1.0' },
+      { type: 'add_variable', name: 'lives', varType: 'int', defaultValue: '3' },
+    ],
+  });
+  assert.equal(
+    readFileSync(join(projectDir, 'made', 'bare.gd'), 'utf8'),
+    'extends Node\nsignal hit\n\nvar speed: float = 1.0\nvar lives: int = 3\n\n\nfunc _ready() -> void:\n\thit.emit()\n',
+  );
+  assert.deepEqual(
+    asArray(get(apart, 'modifications_applied')).map((applied) => get(applied, 'line')),
+    [4, 5],
+    `and the lines answered are the ones they are on: ${JSON.stringify(apart)}`,
+  );
+  rmSync(join(projectDir, 'made', 'bare.gd'));
+
   // What gets written has to parse where an untyped declaration is an error, which the
   // autoload check further down proves by booting the project with this script as one.
   const modified = operation('modify_script', {
@@ -1311,6 +1334,15 @@ function testOperations(godotPath: string, projectDir: string): void {
     /There is already an export preset named 'Desktop', for Windows Desktop, exporting to 'build\/game\.exe'\. project_export run exports with it; give another name to add a second\./,
     taken.stderr,
   );
+  const pathless = runRefusedOperation(godotPath, projectDir, 'add_export_preset', {
+    preset: 'Desktop Debug',
+    platform: 'Linux',
+  });
+  assert.match(
+    pathless.stderr,
+    /There is already an export preset named 'Desktop Debug', for Windows Desktop, with no export path set\. project_export run/,
+    pathless.stderr,
+  );
   const unknown = runRefusedOperation(godotPath, projectDir, 'add_export_preset', {
     preset: 'Other',
     platform: 'Windows',
@@ -1682,6 +1714,40 @@ function testOperations(godotPath: string, projectDir: string): void {
     `the engine binds ui_accept to Enter: ${JSON.stringify(accept)}`,
   );
   writeFileSync(projectFile, beforeUi);
+  // A name the Input Map would refuse, and a key no name reaches, are refused with what is taken.
+  const quoted = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
+    action_name: 'say "hi"',
+    events: [{ type: 'key', keycode: 'Space' }],
+  });
+  assert.match(
+    quoted.stderr,
+    /"say \\"hi\\"" is not an action name the engine's Input Map takes: a name cannot hold \/ : = \\ or a double quote, or a control character\. jump, move_left or ui_menu are names it takes\./,
+    quoted.stderr,
+  );
+  const unkeyed = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
+    action_name: 'fixture_dash',
+    events: [{ type: 'key', keycode: 'Spacebarr' }],
+  });
+  assert.match(
+    unkeyed.stderr,
+    /Unknown key: Spacebarr\. The nearest key names are [^.]*\bSpace\b[^.]*\. A key is named by its letter, its digit, F1 to F12, or one of: Space, Escape, Tab, [^.]*, Equal\./,
+    unkeyed.stderr,
+  );
+  const lone = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
+    action_name: 'fixture_dash',
+    events: [{ type: 'key', keycode: 'CapsLok' }],
+  });
+  assert.match(
+    lone.stderr,
+    /Unknown key: CapsLok\. The nearest key name is CapsLock\. A key is named by its letter/,
+    lone.stderr,
+  );
+  const farOff = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
+    action_name: 'fixture_dash',
+    events: [{ type: 'key', keycode: 'Qwxz' }],
+  });
+  assert.match(farOff.stderr, /Unknown key: Qwxz\. A key is named by its letter/, farOff.stderr);
+  assert.equal(readFileSync(projectFile, 'utf8'), beforeUi, 'and nothing is written for either');
 
   // Audio buses live in the AudioServer and only survive the run if the layout is saved. Before any
   // change there is no layout file, and the setting names its path all the same.

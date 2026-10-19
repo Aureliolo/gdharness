@@ -164,6 +164,43 @@ static func not_of_kind(
 	return told + " The scene's %ss are at %s." % [kind, shown]
 
 
+## Up to three of [param names] closest to [param word], closest first, ignoring case: the names a
+## refusal offers for one that is not there, as a typo usually is one of them.
+static func nearest(word: String, names: PackedStringArray) -> PackedStringArray:
+	var wanted: String = word.to_lower()
+	var close: Array[String] = []
+	for name: String in names:
+		if name.to_lower().similarity(wanted) >= 0.5:
+			close.append(name)
+	close.sort_custom(
+		func(a: String, b: String) -> bool:
+			return a.to_lower().similarity(wanted) > b.to_lower().similarity(wanted)
+	)
+	return PackedStringArray(close.slice(0, 3))
+
+
+## [param said], the refusal for [param word], which is not among [param names], with those nearest
+## it when any are, or else every one of them, so the caller has a name to send instead.
+static func offered(said: String, word: String, names: Array) -> String:
+	var every: PackedStringArray = PackedStringArray(names)
+	var close: PackedStringArray = nearest(word, every)
+	if close.is_empty():
+		return "%s; it has %s" % [said, ", ".join(every)]
+	return "%s; the nearest it has %s %s" % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+
+
+## The signals [param object] has that a caller can connect, its own class's first: the engine
+## lists them from Object down, which puts a Button's pressed after thirty a Control has, and names
+## starting with an underscore are the engine's own.
+static func signals_of(object: Object) -> Array:
+	var names: Array = []
+	for entry: Dictionary in object.get_signal_list():
+		var name: String = str(entry["name"])
+		if not name.begins_with("_"):
+			names.push_front(name)
+	return names
+
+
 ## [param word] after the article it takes, "an AnimationTree" or "a Node2D".
 static func with_article(word: String) -> String:
 	return ("an " if word.left(1).to_upper() in ["A", "E", "I", "O", "U"] else "a ") + word

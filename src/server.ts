@@ -4398,7 +4398,14 @@ class GodotServer {
     });
     if (missing.length > 0) {
       const where = op !== null ? `${spec.name} ${op}` : spec.name;
-      return { ok: false, response: this.createErrorResponse(`${where} needs ${missing.join(', ')}.`) };
+      // Said apart, since "needs actionName" to a caller who sent one reads as a field the server
+      // did not see, when what it refused was the empty value.
+      const blank = missing.filter((field) => typeof args[field] === 'string');
+      const named = missing.map((field) =>
+        blank.includes(field) ? `${field}, which was given empty` : field,
+      );
+      const joined = named.join(blank.length > 0 ? '; ' : ', ');
+      return { ok: false, response: this.createErrorResponse(`${where} needs ${joined}.`) };
     }
     return { ok: true, op };
   }

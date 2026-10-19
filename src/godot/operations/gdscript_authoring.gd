@@ -341,6 +341,11 @@ func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 		var_line += ": Variant"
 
 	var insert_line: int = _variable_insertion_point(lines)
+	# The first variable below the header or the signals is set apart from them by a blank line, as
+	# the style guide and gdformat lay a script out.
+	var above: String = lines[insert_line - 1].strip_edges() if insert_line > 0 else ""
+	if not above.is_empty() and not GdhPatterns.without_annotations(above).begins_with("var "):
+		return insert_line + 1 if _insert(lines, insert_line, ["", var_line], placed) else -1
 	return insert_line if _insert(lines, insert_line, [var_line], placed) else -1
 
 
