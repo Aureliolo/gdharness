@@ -24248,6 +24248,10 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
       assert.equal(await value('/root/Main', 'placed:origin:x'), 5, "a transform's origin");
       const noSuch = await read('/root/Main/Room', 'size:z');
       assert.match(noSuch, /size is a Vector2, so it has no z; it has x, y/, noSuch);
+      // A property the node lacks is offered the ones it has nearest it, as a misspelt one usually
+      // is among them.
+      const misspelt = await read('/root/Main/Room', 'sizee:x');
+      assert.equal(misspelt, '/root/Main/Room has no property sizee; the nearest it has is size');
       const called = await read('/root/Main/Room', 'size:length()');
       assert.match(
         called,
@@ -39282,6 +39286,41 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       /and "Drums" is none of them; the buses are Master, Music\. project_info/,
     );
 
+    // A property the resource lacks is refused with the ones it has nearest it, alone, beside
+    // another, and as the start of a path; and with no list when none is near, since a resource
+    // declares dozens.
+    const rarity = 'ItemData has no property rarety; the nearest it has is rarity.';
+    assert.equal(await refused({ rarety: 1 }), rarity);
+    assert.equal(
+      await refused({ title: 'Blade', rarety: 1 }),
+      `${rarity} None of the 2 properties given was written.`,
+    );
+    assert.equal(await refused({ 'rarety:x': 1 }), rarity);
+    assert.equal(await refused({ zzz: 1 }), 'ItemData has no property zzz.');
+    assert.equal(
+      await refused({ 'title:x': 1 }),
+      'ItemData.title is a String, which a path does not step into: a path reaches the components of a vector, a colour, a rectangle or a transform.',
+    );
+    const axis = async (properties: Record<string, unknown>): Promise<string> =>
+      textOf(
+        await request('scene_node', {
+          op: 'add',
+          scenePath: 'res://speaker.tscn',
+          parentNodePath: '.',
+          nodeType: 'Node2D',
+          nodeName: 'Spot',
+          properties,
+        }),
+      ) ?? '';
+    assert.equal(
+      await axis({ 'position:z': 1 }),
+      'Node2D.position is a Vector2, so it has no z; it has x, y.',
+    );
+    assert.equal(
+      await axis({ 'position:z': 1, visible: false }),
+      'Node2D.position is a Vector2, so it has no z; it has x, y. None of the 2 properties given was written.',
+    );
+
     // An enum by the name of a value, as written and in another case, and by its number.
     await written({ kind: 'POTION' });
     assert.match(file(), /^kind = 2$/m, file());
@@ -44837,6 +44876,13 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     assert.equal(
       textOf(await call(rotation([{ time: 0.5, value: 1 }]))),
       'Track 0 already animates Body:rotation and has a key at 0.5 s, which keyframes[0] would replace. Nothing was written.',
+    );
+    // A property the node lacks is refused with the ones it has nearest, as a misspelt one usually
+    // is among them.
+    const rotaton = rotation([{ time: 0.1, value: 1 }]);
+    assert.equal(
+      textOf(await call({ ...rotaton, track: { ...rotaton.track, property: 'rotaton' } })),
+      'Sprite2D has no property rotaton; the nearest it has are rotation, global_rotation.',
     );
 
     const shorter = await written({
