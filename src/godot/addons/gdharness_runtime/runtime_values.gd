@@ -71,8 +71,34 @@ static func node_at(root: Node, path: String) -> Dictionary:
 
 	var node: Node = root.get_node_or_null(path)
 	if node == null:
-		return {"type": "error", "message": "Node not found: " + path}
+		return {"type": "error", "message": _not_found(root, path)}
 	return {"node": node}
+
+
+## "Node not found" for [param path], with the deepest node of it the game has and the children that
+## node has instead, as a scene's refusal names them: a mistyped step was otherwise found by reading
+## the whole tree.
+static func _not_found(root: Node, path: String) -> String:
+	var said: String = "Node not found: " + path
+	var parts: PackedStringArray = path.split("/", false)
+	var at: Node = root
+	var step: int = 0
+	if path.begins_with("/"):
+		if parts.is_empty() or parts[0] != str(root.name):
+			return said
+		step = 1
+	while step < parts.size():
+		var below: Node = at.get_node_or_null(NodePath(parts[step]))
+		if below == null:
+			break
+		at = below
+		step += 1
+	if step >= parts.size():
+		return said
+	var names: PackedStringArray = []
+	for child: Node in at.get_children():
+		var _named: bool = names.append(str(child.name))
+	return GdhRead.missing_below(said, "", PackedStringArray([str(at.get_path())]), parts[step], names)
 
 
 ## How many process frames a whole press holds before its release, from `holdFrames`: one unless

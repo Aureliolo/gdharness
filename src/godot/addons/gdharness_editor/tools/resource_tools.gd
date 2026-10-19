@@ -252,7 +252,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 	if not folder.is_empty():
 		return {"ok": false, "error": folder}
 	var answer: Dictionary = {"ok": true, "resourcePath": res_path, "resourceType": asked_type}
-	_properties.note_also_changed(answer)
+	_properties.note_write(answer)
 	var failed: String = _save_checked(resource, res_path, properties.keys(), null)
 	if not failed.is_empty():
 		return {"ok": false, "error": failed}
@@ -290,7 +290,7 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	if not refused.is_empty():
 		return {"ok": false, "error": refused}
 	var answer: Dictionary = {"ok": true, "resourcePath": res_path}
-	_properties.note_also_changed(answer)
+	_properties.note_write(answer)
 	var previous: PackedByteArray = FileAccess.get_file_as_bytes(res_path)
 	var failed: String = _save_checked(resource, res_path, properties.keys(), previous)
 	if not failed.is_empty():
@@ -346,7 +346,19 @@ func create_tileset(args: Dictionary) -> Dictionary:
 	var tileset_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	if tileset_path == "res://":
 		return {"ok": false, "error": "resourcePath is required"}
-	var taken: String = _taken(tileset_path, "resource_edit op=create_tileset")
+	# modify sets properties and builds no atlas, so the other path is the only way on offered.
+	var taken: String = (
+		""
+		if not FileAccess.file_exists(tileset_path)
+		else (
+			(
+				"%s already exists, and create_tileset builds a whole new TileSet, which would replace "
+				+ "everything in it, the tiles a scene paints with among them. Give resourcePath a path "
+				+ "nothing is at."
+			)
+			% tileset_path
+		)
+	)
 	if not taken.is_empty():
 		return {"ok": false, "error": taken}
 
@@ -374,9 +386,16 @@ func create_tileset(args: Dictionary) -> Dictionary:
 				"ok": false,
 				"error": "The TileSet did not take the atlas for %s" % atlas.texture.resource_path
 			}
-		made.append(
-			{"sourceId": added, "texture": atlas.texture.resource_path, "tiles": atlas.get_tiles_count()}
-		)
+		var entry: Dictionary = {
+			"sourceId": added, "texture": atlas.texture.resource_path, "tiles": atlas.get_tiles_count()
+		}
+		var blank: Array = built[2]
+		if not blank.is_empty():
+			entry["leftBlank"] = blank
+		var spare: String = built[3]
+		if not spare.is_empty():
+			entry["notInAnyTile"] = spare
+		made.append(entry)
 
 	var folder: String = GdhSceneFile.make_folder_for(tileset_path)
 	if not folder.is_empty():
@@ -389,11 +408,14 @@ func create_tileset(args: Dictionary) -> Dictionary:
 	return {"ok": true, "tilesetPath": tileset_path, "sources": made}
 
 
-## One atlas source from its description, with its tiles made, as [true, source] or [false, why].
+## One atlas source from its description, with its tiles made, as [true, source, the grid cells left
+## without a tile for being wholly transparent, a sentence on the pixels no tile covers or ""] or
+## [false, why].
 ##
 ## Tiles are made in every cell of the grid that has a pixel that is not transparent, which is
 ## what the editor offers to do when an atlas gets a texture. Without them the atlas held no tiles,
-## and every cell painted from it drew nothing.
+## and every cell painted from it drew nothing. The cells passed over and the strip a tile size that
+## does not divide the picture leaves are said, since a count alone left a caller to work out which.
 func _atlas(entry: Variant, index: int) -> Array:
 	if not entry is Dictionary:
 		return [false, "sources[%d] must be an object with texture and tileSize" % index]
@@ -455,6 +477,7 @@ func _atlas(entry: Variant, index: int) -> Array:
 			)
 		]
 	var image: Image = texture.get_image()
+	var blank: Array = []
 	for y: int in grid.y:
 		for x: int in grid.x:
 			var cell: Vector2i = Vector2i(x, y)
@@ -464,9 +487,33 @@ func _atlas(entry: Variant, index: int) -> Array:
 				atlas.texture_region_size
 			)
 			if image != null and _blank(image, region):
+				blank.append({"x": x, "y": y})
 				continue
 			atlas.create_tile(cell)
-	return [true, atlas]
+	var covered: Vector2i = atlas.margins + grid * tile_size + (grid - Vector2i.ONE) * atlas.separation
+	var left: Vector2i = Vector2i(texture.get_size()) - covered
+	var sides: PackedStringArray = []
+	if left.x > 0:
+		var _right: bool = sides.append("%d px on the right" % left.x)
+	if left.y > 0:
+		var _bottom: bool = sides.append("%d px at the bottom" % left.y)
+	var spare: String = (
+		""
+		if sides.is_empty()
+		else (
+			"%s is %d by %d, so %s %s in no %d by %d tile."
+			% [
+				texture_path,
+				texture.get_width(),
+				texture.get_height(),
+				" and ".join(sides),
+				"is" if sides.size() == 1 else "are",
+				tile_size.x,
+				tile_size.y
+			]
+		)
+	)
+	return [true, atlas, blank, spare]
 
 
 func _blank(image: Image, region: Rect2i) -> bool:
@@ -475,12 +522,15 @@ func _blank(image: Image, region: Rect2i) -> bool:
 	return image.get_region(region).is_invisible()
 
 
-## The source ids a tile set holds, for saying what a cell could have named instead.
-func _source_ids(tile_set: TileSet) -> Array[int]:
-	var ids: Array[int] = []
+## The sources a tile set holds, as "source 0", "sources 0, 2" or "no sources", for saying what a
+## cell could have named instead.
+func _sources_of(tile_set: TileSet) -> String:
+	var ids: PackedStringArray = []
 	for index: int in tile_set.get_source_count():
-		ids.append(tile_set.get_source_id(index))
-	return ids
+		var _listed: bool = ids.append(str(tile_set.get_source_id(index)))
+	if ids.is_empty():
+		return "no sources"
+	return ("source " if ids.size() == 1 else "sources ") + ", ".join(ids)
 
 
 func set_tilemap_cells(args: Dictionary) -> Dictionary:
@@ -517,11 +567,20 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	var tile_set: TileSet = layered.tile_set if layered != null else single.tile_set
 
 	scene.asked(node, ["layer_%d/tile_data" % layer if layered != null else "tile_map_data"])
-	var wanted: Array = []
+	# Every cell is checked before any is placed, and every one refused is named: stopping at the first
+	# left a caller fixing one cell a call.
+	var checked: Array = []
+	var refusals: PackedStringArray = []
 	for index: int in placed.size():
 		var cell: Array = _cell(placed[index], index, tile_set)
 		if not cell[0]:
-			return scene.refuse(str(cell[1]))
+			var _named: bool = refusals.append(str(cell[1]))
+		checked.append(cell)
+	if not refusals.is_empty():
+		return scene.refuse("%s. Nothing was placed." % "; ".join(refusals))
+	var wanted: Array = []
+	var erased: int = 0
+	for cell: Array in checked:
 		var at: Vector2i = cell[1]
 		var source_id: int = cell[2]
 		var atlas_coords: Vector2i = cell[3]
@@ -531,6 +590,8 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 		else:
 			single.set_cell(at, source_id, atlas_coords, alternative)
 		wanted.append([at, source_id, atlas_coords, alternative])
+		if source_id == -1:
+			erased += 1
 
 	var at_path: String = scene.path_of(node)
 	var written: Dictionary = scene.write(
@@ -546,7 +607,13 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {"ok": true, "layer": layer, "placed": wanted.size(), "requested": placed.size()}
+	return {
+		"ok": true,
+		"layer": layer,
+		"placed": wanted.size() - erased,
+		"erased": erased,
+		"requested": placed.size()
+	}
 
 
 ## The node at [param node_path] cells are painted on, with a TileSet, as [node, why not].
@@ -575,40 +642,55 @@ func _tile_node(scene: GdhSceneFile, node_path: String, layer: int) -> Array:
 
 
 ## One cell from its description, checked against [param tile_set], as
-## [true, coords, source id, atlas coords, alternative] or [false, why].
+## [true, coords, source id, atlas coords, alternative] or [false, why]. A source of -1 erases the
+## cell, as set_cell takes it, and needs no atlasCoords.
 func _cell(entry: Variant, index: int, tile_set: TileSet) -> Array:
 	if not entry is Dictionary:
 		return [false, "cells[%d] must be an object with coords, sourceId and atlasCoords" % index]
 	var cell: Dictionary = entry
-	for field: String in ["coords", "sourceId", "atlasCoords"]:
+	for field: String in ["coords", "sourceId"]:
 		if not cell.has(field):
 			return [false, "cells[%d] has no %s" % [index, field]]
 	var at: Array = _xy(cell["coords"], "cells[%d].coords" % index)
 	if not at[0]:
 		return at
+	var coords: Vector2i = at[1]
+	var named: String = "cells[%d] at (%d, %d)" % [index, coords.x, coords.y]
+	var source_id: int = GdhRead.as_int(cell["sourceId"], -2)
+	if source_id == -1:
+		return [true, coords, -1, Vector2i(-1, -1), -1]
+	if not cell.has("atlasCoords"):
+		return [
+			false, "%s has no atlasCoords, which every cell but an erased one (sourceId -1) needs" % named
+		]
 	var atlas_at: Array = _xy(cell["atlasCoords"], "cells[%d].atlasCoords" % index)
 	if not atlas_at[0]:
 		return atlas_at
-	var source_id: int = GdhRead.as_int(cell["sourceId"], -1)
 	if not tile_set.has_source(source_id):
-		return [false, "The TileSet has no source %d; it has %s" % [source_id, _source_ids(tile_set)]]
+		return [
+			false,
+			(
+				"%s names source %d, and the TileSet has %s; sourceId -1 erases a cell"
+				% [named, source_id, _sources_of(tile_set)]
+			)
+		]
 	var source: TileSetSource = tile_set.get_source(source_id)
 	var atlas_coords: Vector2i = atlas_at[1]
 	var alternative: int = GdhRead.as_int(cell.get("alternativeTile", 0))
 	if not source.has_tile(atlas_coords):
 		return [
 			false,
-			(
-				"cells[%d]: source %d has no tile at %s; it has %s. Nothing was placed."
-				% [index, source_id, atlas_coords, _tiles_of(source)]
-			)
+			"%s: source %d has no tile at %s; it has %s" % [named, source_id, atlas_coords, _tiles_of(source)]
 		]
 	if not source.has_alternative_tile(atlas_coords, alternative):
 		return [
 			false,
-			"The tile at %s in source %d has no alternative %d" % [atlas_coords, source_id, alternative]
+			(
+				"%s: the tile at %s in source %d has no alternative %d"
+				% [named, atlas_coords, source_id, alternative]
+			)
 		]
-	return [true, at[1], source_id, atlas_coords, alternative]
+	return [true, coords, source_id, atlas_coords, alternative]
 
 
 ## The atlas coordinates [param source] has tiles at, the first twelve and how many more, or that it
@@ -722,13 +804,12 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 	if theme == null:
 		return {"ok": false, "error": "No Theme at %s. Create one there first." % theme_path}
 
-	var c: Dictionary = args.get("color", {})
-	var color: Color = Color(
-		GdhRead.as_float(c.get("r", 1.0), 1.0),
-		GdhRead.as_float(c.get("g", 1.0), 1.0),
-		GdhRead.as_float(c.get("b", 1.0), 1.0),
-		GdhRead.as_float(c.get("a", 1.0), 1.0)
-	)
+	# Read as a property write reads a colour, html code included, so a value scene_node takes for a
+	# Button's modulate is taken for its theme colour too; "#ff8000" was refused here alone.
+	var parsed: Array = _properties.colour_from(args.get("color", {}), "color")
+	if not parsed[0]:
+		return {"ok": false, "error": parsed[1]}
+	var color: Color = parsed[1]
 	theme.set_color(color_name, control_type, color)
 
 	var unsaved: String = _save_theme(theme, theme_path, "%s/colors/%s" % [control_type, color_name])
@@ -768,17 +849,18 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 	# Godot reads a size of 0 or less as unset and answers the theme's default, so -3 would be read
 	# back as 16.
 	var pixels: float = GdhRead.as_float(args.get("size"), 0.0)
-	if not is_finite(pixels) or pixels < 1 or pixels != floorf(pixels):
-		var shown: String = str(int(pixels)) if pixels == floorf(pixels) else str(pixels)
+	if not is_finite(pixels) or pixels != floorf(pixels):
+		return {"ok": false, "error": "size is a whole number of pixels, and %s is not one." % str(pixels)}
+	if pixels < 1:
 		return {
 			"ok": false,
 			"error":
 			(
 				(
-					"size must be a whole number of pixels, 1 or more, not %s: Godot reads 0 or less as no size "
-					% shown
+					"size must be 1 or more, not %d: the theme would hold it, and Godot reads a size of 0 or "
+					+ "less as unset and draws the default size instead."
 				)
-				+ "and uses the theme's default instead."
+				% int(pixels)
 			)
 		}
 	theme.set_font_size(font_size_name, control_type, int(pixels))
@@ -819,4 +901,16 @@ func _noting_variation(answer: Dictionary) -> Dictionary:
 		)
 		% [type, type]
 	)
+	# A variation is any name, so a misspelt class is written all the same, and the classes nearest
+	# it are what tells a caller which one was meant.
+	var themed: PackedStringArray = []
+	for known: String in ClassDB.get_class_list():
+		if ClassDB.is_parent_class(known, "Control") or ClassDB.is_parent_class(known, "Window"):
+			var _added: bool = themed.append(known)
+	var close: PackedStringArray = GdhRead.nearest(type, themed)
+	if not close.is_empty():
+		answer["note"] += (
+			" If a class was meant, the nearest %s %s."
+			% ["is" if close.size() == 1 else "are", ", ".join(close)]
+		)
 	return answer

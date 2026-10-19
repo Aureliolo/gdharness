@@ -329,7 +329,7 @@ import { greeting } from './support/greeting.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
 import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
-import { solidPng } from './support/png.js';
+import { pixelPng, solidPng } from './support/png.js';
 import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
 import {
   ENGINE_FIXTURES_SECONDS,
@@ -3184,7 +3184,7 @@ async function testTheLanguageServerOfAnotherProjectIsRefused(): Promise<void> {
           const said = textOf(refused) ?? '';
           assert.equal(get(refused.result, 'isError'), true, `another project's server is refused: ${said}`);
           assert.ok(
-            said.includes(`belongs to the editor of ${serving}, not ${ours}`),
+            said.includes(`belongs to the editor of ${serving}; no editor of ${ours} answers there.`),
             `naming the project it serves and the one asked about: ${said}`,
           );
           assert.match(said, /editor_launch opens this project's own editor/, `with what to do: ${said}`);
@@ -7017,7 +7017,7 @@ async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
       const unknownSection = await call('project_info', { projectPath: process.cwd(), include: [name] });
       assert.match(
         unknownSection,
-        /autoloads, plugins, export_presets, audio_buses, health, validation/,
+        /autoloads, input_actions, plugins, export_presets, audio_buses, health, validation/,
         `${name} must not resolve to a section`,
       );
     }
@@ -7843,6 +7843,11 @@ function testProjectPathsAreContained(): void {
     ...(onWindows
       ? ['C:\\Windows\\win.ini', 'C:/Windows/win.ini', 'D:\\other\\payload.gd', '\\\\server\\share\\x.gd']
       : []),
+    // An absolute path is taken only inside the project: not the project itself, not a sibling
+    // whose name begins with the project's, and not one that climbs out of it.
+    root,
+    `${root}-old${onWindows ? '\\' : '/'}player.gd`,
+    `${root}${onWindows ? '\\' : '/'}..${onWindows ? '\\' : '/'}outside.gd`,
   ];
 
   for (const candidate of refused) {
@@ -7876,6 +7881,10 @@ function testProjectPathsAreContained(): void {
     ['archive..old.gd', 'archive..old.gd'],
     ['..config/player.gd', '..config/player.gd'],
     ...(onWindows ? [['scenes\\main.tscn', 'scenes/main.tscn'] as [string, string]] : []),
+    // The file's absolute path, which a caller holding the project's path writes, in both
+    // separators where the platform has two.
+    [`${root}${onWindows ? '\\' : '/'}scenes${onWindows ? '\\' : '/'}main.tscn`, 'scenes/main.tscn'],
+    ...(onWindows ? [['C:/game/scenes/main.tscn', 'scenes/main.tscn'] as [string, string]] : []),
   ];
 
   for (const [candidate, expected] of accepted) {
@@ -8277,6 +8286,24 @@ function testASearchReadsWhatItSaysItReads(): void {
     assert.equal(exactly.summary.truncated, false, 'matches that come to the limit exactly are all of them');
     const cut = search('GameState', { maxResults: 1 });
     assert.equal(cut.summary.truncated, true, 'and one more than the limit is cut');
+
+    // The text found, as the line spells it, rather than the query: a search ignoring case
+    // answered "GameState" on a line holding "gamestate". Spelled unlike both the query and its
+    // lowered form, since the search compares the lowered one.
+    writeFileSync(join(sandbox, 'shouted.gd'), 'var label := "GAMESTATE ready"\n');
+    const spelled = search('GameState', { fileTypes: ['gd'] });
+    assert.deepEqual(
+      spelled.results.map((entry) => entry.matches.map((one) => [one.line, one.match])),
+      [[[1, 'GAMESTATE']]],
+      JSON.stringify(spelled),
+    );
+    assert.deepEqual(
+      search('GameState', { fileTypes: ['cs'], caseSensitive: true }).results.map(
+        (entry) => entry.matches[0]?.match,
+      ),
+      ['GameState'],
+      'a search heeding case finds the query itself',
+    );
   } finally {
     sweep(sandbox);
   }
@@ -15523,6 +15550,14 @@ async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
  * between looks. A probe session's start on such a game answered "nothing announced itself", beside
  * output saying the runtime was listening. The control is the same scene with the addon on disk but
  * not registered, which never comes up and is told nothing announced.
+ *
+ * Whether a start meets the real game listening or gone is a race, and both answers are right, so
+ * that start is held only to the one it gave. A Windows runner's first frame outlasted every look,
+ * and a game that killed itself instead was still alive to the operating system while Windows ended
+ * it, so neither ever reached the note. The note is held with a herald in place of the runtime: an
+ * autoload that prints the line the runtime prints once it is listening and quits without
+ * announcing, which is the state the note is for every time. The real run checks the line is the
+ * one the herald copies.
  */
 async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -15534,13 +15569,23 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
     return;
   }
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-came-and-went-rt-'));
-  const project = (registered: boolean): string => {
+  const LISTENING = '[gdharness] runtime listening on 127.0.0.1:1, announced at nowhere';
+  const project = (autoload: 'runtime' | 'herald' | 'none'): string => {
     const dir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-came-and-went-'));
+    const registered = {
+      runtime: `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n`,
+      herald: '\n[autoload]\n\nHerald="*res://herald.gd"\n',
+      none: '',
+    }[autoload];
     writeFileSync(
       join(dir, 'project.godot'),
       '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="CameAndWent"\n' +
         'run/main_scene="res://main.tscn"\n' +
-        (registered ? `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n` : ''),
+        registered,
+    );
+    writeFileSync(
+      join(dir, 'herald.gd'),
+      `extends Node\n\n\nfunc _ready() -> void:\n\tprint("${LISTENING}")\n\tget_tree().quit()\n`,
     );
     writeFileSync(join(dir, 'main.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tget_tree().quit()\n');
     writeFileSync(
@@ -15553,8 +15598,9 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
     });
     return dir;
   };
-  const cameUp = project(true);
-  const neverUp = project(false);
+  const cameUp = project('runtime');
+  const heralded = project('herald');
+  const neverUp = project('none');
   try {
     await withStdioServer(
       async (call) => {
@@ -15566,33 +15612,26 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
               ENGINE_CALL_TIMEOUT_MS,
             ),
           );
-        // A race by its nature: the announcement lasts a frame, and a start that looks during it has
-        // caught a runtime that was listening, which is a right answer of its own. A Windows runner
-        // whose frame outlasted the wait's look did that, so several starts are made, each one that
-        // missed is held to the note, and at least one has to have missed.
-        const outcomes: string[] = [];
-        let missed = 0;
-        for (let attempt = 0; attempt < 8 && missed === 0; attempt += 1) {
-          const went = await started(cameUp);
-          const said = JSON.stringify(went);
-          const output = await call('editor_output', { contains: 'runtime listening on' });
-          assert.match(output, /\[gdharness\] runtime listening on/, `the runtime did come up: ${output}`);
-          if (get(went, 'runtime', 'listening') === true) {
-            outcomes.push('caught listening');
-            continue;
-          }
-          missed += 1;
-          assert.equal(get(went, 'runtime', 'mayYetAnnounce'), false, said);
-          assert.match(
-            text(get(went, 'runtime', 'note')),
-            /^the game's runtime came up and the game quit before this start could reach it/,
-            `and the start says so: ${said}`,
-          );
-        }
-        assert.ok(
-          missed > 0,
-          `no start missed the announcement, so the note was never read: ${outcomes.join(', ')}`,
+        const cameAndWent = /^the game's runtime came up and the game quit before this start could reach it/;
+        const real = await started(cameUp);
+        const output = await call('editor_output', { contains: 'runtime listening on' });
+        assert.match(
+          output,
+          /\[gdharness\] runtime listening on [\d.]+:\d+, announced at /,
+          `the runtime did come up, and printed the line the herald copies: ${output}`,
         );
+        if (get(real, 'runtime', 'listening') !== true) {
+          assert.match(text(get(real, 'runtime', 'note')), cameAndWent, JSON.stringify(real));
+        }
+
+        const went = await started(heralded);
+        const said = JSON.stringify(went);
+        assert.deepEqual(
+          [get(went, 'runtime', 'listening'), get(went, 'runtime', 'mayYetAnnounce')],
+          [false, false],
+          said,
+        );
+        assert.match(text(get(went, 'runtime', 'note')), cameAndWent, `and the start says so: ${said}`);
 
         const never = await started(neverUp);
         assert.match(
@@ -15605,6 +15644,7 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
     );
   } finally {
     sweep(cameUp);
+    sweep(heralded);
     sweep(neverUp);
     sweep(runtimeDir);
   }
@@ -17135,12 +17175,29 @@ async function testParametersReachTheEngine(): Promise<void> {
           ),
         );
         assert.equal(get(quieter, 'bus', 'name'), 'Music', JSON.stringify(quieter));
+        const jump = await call(
+          'project_settings',
+          {
+            projectPath: projectDir,
+            op: 'add_input_action',
+            actionName: 'jump',
+            events: [{ type: 'key', keycode: 'Space' }],
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.equal(get(JSON.parse(jump), 'events_count'), 1, jump);
         const listed: unknown = JSON.parse(
           await call(
             'project_info',
-            { projectPath: projectDir, include: ['audio_buses'] },
+            { projectPath: projectDir, include: ['audio_buses', 'input_actions'] },
             ENGINE_CALL_TIMEOUT_MS,
           ),
+        );
+        const actions = asArray(get(listed, 'input_actions', 'actions'));
+        assert.deepEqual(
+          actions.map((entry) => [get(entry, 'name'), get(entry, 'events', 0, 'keycode')]),
+          [['jump', 32]],
+          `the action a fresh process reads is the one written, and no engine action is left at its default:\n${JSON.stringify(listed, null, 2)}`,
         );
         const music = asArray(get(listed, 'audio_buses', 'buses')).find(
           (entry) => get(entry, 'name') === 'Music',
@@ -18563,6 +18620,14 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     'extends Node\n\nconst Broken = preload("res://checked/broken.gd")\n',
   );
   writeFileSync(join(project, 'checked', 'fine.gd'), 'extends Node\n');
+  // The project has never been opened, so no class cache lists the class it declares, which is
+  // the state a fresh clone is in.
+  writeFileSync(join(project, 'checked', 'stash.gd'), 'class_name FixtureStash\nextends Node\n');
+  writeFileSync(join(project, 'checked', 'holder.gd'), 'extends Node\n\nvar held: FixtureStash\n');
+  writeFileSync(
+    join(project, 'stage.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Texture2D" path="res://gone.png" id="1_gone"]\n\n[node name="Stage" type="Sprite2D"]\ntexture = ExtResource("1_gone")\n',
+  );
   const server = new ServerProcess({
     env: {
       GODOT_PATH: engine,
@@ -18624,12 +18689,12 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(all, 'nothingReported'),
         get(all, 'checkedBy'),
       ],
-      [false, 3, 3, null, ['checked/fine.gd'], 'engine'],
-      `a folder compiled whole, an engine past each failure, the clean script named apart: ${said}`,
+      [false, 5, 4, null, ['checked/fine.gd', 'checked/stash.gd'], 'engine'],
+      `a folder compiled whole, an engine past each failure, the clean scripts named apart: ${said}`,
     );
-    const dependent = asArray(get(all, 'scripts')).find(
-      (entry) => get(entry, 'scriptPath') === 'checked/dependent.gd',
-    );
+    const entryFor = (scriptPath: string): unknown =>
+      asArray(get(all, 'scripts')).find((entry) => get(entry, 'scriptPath') === scriptPath);
+    const dependent = entryFor('checked/dependent.gd');
     assert.deepEqual(
       [get(dependent, 'diagnostics'), get(dependent, 'dependenciesWithErrors')],
       [
@@ -18637,6 +18702,99 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         ['res://checked/broken.gd'],
       ],
       `a script failing for what it loads says which, without a line of its own: ${said}`,
+    );
+    // A class the project declares and the cache lacks is named as the cache's fault, and a script
+    // failing for anything else is told nothing of the cache.
+    const holder = entryFor('checked/holder.gd');
+    assert.deepEqual(
+      get(holder, 'typesMissingFromTheClassCache'),
+      [{ type: 'FixtureStash', declaredIn: 'res://checked/stash.gd' }],
+      said,
+    );
+    assert.match(
+      text(get(holder, 'staleAnalysis')),
+      /^FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project, but the engine that compiled these scripts resolves a class name from \.godot\/global_script_class_cache\.cfg, which has not been written yet, .* project_import refresh_classes writes the cache from the declarations on disk;/,
+      said,
+    );
+    assert.deepEqual(
+      [get(dependent, 'typesMissingFromTheClassCache'), get(entryFor('checked/broken.gd'), 'staleAnalysis')],
+      [undefined, undefined],
+      said,
+    );
+
+    // A script that is not there is named by its res:// path with the nearest the project holds,
+    // and one outside the project is told how to name one inside it.
+    assert.equal(
+      textOf(await diagnose('checked/brokn.gd')),
+      'Script file does not exist: res://checked/brokn.gd. The nearest .gd file is res://checked/broken.gd.',
+    );
+    const outside = textOf(await diagnose(join(tmpdir(), 'elsewhere.gd'))) ?? '';
+    assert.match(outside, /is absolute and outside the project; give a path inside it/, outside);
+    assert.match(outside, /Possible solutions:\n- Give the path relative to the project/, outside);
+    const info = await server.request(
+      'tools/call',
+      { name: 'script_info', arguments: { projectPath: project, scriptPath: 'checked/holdr.gd' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    assert.match(
+      textOf(info) ?? '',
+      /Script file does not exist: res:\/\/checked\/holdr\.gd\. The nearest \.gd file is res:\/\/checked\/holder\.gd\./,
+      textOf(info) ?? '',
+    );
+
+    // The health and validation sections compile what script_diagnostics does and follow every
+    // reference, where the health check had read only comments and called the scripts passed.
+    const projectInfo = await server.request(
+      'tools/call',
+      { name: 'project_info', arguments: { projectPath: project, include: ['health', 'validation'] } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const judged = parseTextContent(projectInfo);
+    const shownInfo = textOf(projectInfo) ?? '';
+    const scriptsCheck = get(judged, 'health', 'checks', 'scripts');
+    assert.deepEqual(
+      [
+        get(scriptsCheck, 'passed'),
+        get(scriptsCheck, 'compiled'),
+        asArray(get(scriptsCheck, 'details')).length,
+      ],
+      [false, 5, 3],
+      `every script compiled, each failure a detail: ${shownInfo}`,
+    );
+    assert.ok(
+      asArray(get(scriptsCheck, 'details')).includes(
+        'res://checked/broken.gd does not compile: line 5, Parse Error: Function "rage()" not found in base self. (and 1 more)',
+      ),
+      shownInfo,
+    );
+    assert.ok(
+      asArray(get(scriptsCheck, 'details')).some((detail) =>
+        /^res:\/\/checked\/holder\.gd does not compile: line 3, .*FixtureStash.* FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project, but /.test(
+          String(detail),
+        ),
+      ),
+      `a failure for the cache says so where it is listed: ${shownInfo}`,
+    );
+    assert.deepEqual(
+      get(judged, 'health', 'checks', 'references', 'details'),
+      ['res://gone.png does not exist, and res://stage.tscn refers to it'],
+      shownInfo,
+    );
+    assert.deepEqual(
+      asArray(get(judged, 'validation', 'issues')).map((issue) => get(issue, 'check')),
+      ['main_scene', 'compiles', 'compiles', 'compiles', 'references'],
+      shownInfo,
+    );
+    assert.equal(get(judged, 'validation', 'valid'), false, shownInfo);
+
+    // Once a cache exists and lacks the class, the note says the cache is behind the files.
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'list=[]\n');
+    const behind = parseTextContent(await diagnose('checked/holder.gd'));
+    assert.match(
+      text(get(behind, 'staleAnalysis')),
+      /^FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project and missing from \.godot\/global_script_class_cache\.cfg, which is where the engine that compiled these scripts resolves a class name from, so the error is the cache being behind the files/,
+      JSON.stringify(behind),
     );
   } finally {
     await server.stop();
@@ -27555,6 +27713,42 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
   let started = false;
   try {
     await server.initialize('regression-test');
+    // A line past the end of the script, or a script that is not there, is held and kept in the
+    // project's set without ever stopping anything, so it is refused. The last line is a line, and
+    // a breakpoint on a script that has gone can still be taken off.
+    const beyond = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 12,
+    });
+    assert.equal(beyond.said, 'res://main.gd has 11 lines, so there is no line 12 to stop on.');
+    const nowhere = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'set',
+      scriptPath: 'mian.gd',
+      line: 5,
+    });
+    assert.equal(
+      nowhere.said,
+      "Script file does not exist: res://mian.gd. The project's .gd files are res://main.gd.",
+    );
+    const last = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 11,
+    });
+    assert.deepEqual(get(last.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [11] }], last.said);
+    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 11 });
+    const gone = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'remove',
+      scriptPath: 'mian.gd',
+      line: 5,
+    });
+    assert.equal(get(gone.answer, 'removed'), true, gone.said);
+
     const set = await call('debug_breakpoint', {
       projectPath: project,
       op: 'set',
@@ -29354,7 +29548,14 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         ],
         ['count', /^\/root\/Main\.wear argument 1: \/root\/Main:count holds int, not an object$/],
         ['spare', /^\/root\/Main\.wear argument 1: spare is RefCounted, not a Gear$/],
-        ['/root/Nope:wares:0', /^\/root\/Main\.wear argument 1: Node not found: \/root\/Nope$/],
+        [
+          '/root/Nope:wares:0',
+          /^\/root\/Main\.wear argument 1: Node not found: \/root\/Nope\. \/root has no Nope; its children are GdharnessRuntime, Main\.$/,
+        ],
+        [
+          '/root/Main/Shelf:wares:0',
+          /^\/root\/Main\.wear argument 1: Node not found: \/root\/Main\/Shelf\. \/root\/Main has no Shelf; it has no children\.$/,
+        ],
         [{ _type: 'Object', class: 'RefCounted', id: 1 }, /argument 1: an object is named by its path/],
       ];
       for (const [given, expected] of refusals) {
@@ -38967,6 +39168,341 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
 }
 
 /**
+ * A write reads what the property declares. A probe of a project resource found the declaration
+ * unread four ways: an enum refused its value's name as text that could not become an int, 1 and 2
+ * for an Array[String] were saved as "1.0" and "2.0" and answered as written, 12 went past
+ * @export_range(0, 10) without a word, and a picture never imported was "No resource at" a path
+ * that held one.
+ */
+async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('declared values regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-declared-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-declared-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Declared"\n',
+  );
+  writeFileSync(
+    join(project, 'item_data.gd'),
+    'class_name ItemData\nextends Resource\n\nenum Kind { SWORD, SHIELD, POTION }\n\n' +
+      '@export var title: String = ""\n@export var kind: Kind = Kind.SWORD\n@export var tags: Array[String] = []\n' +
+      '@export var icon: Texture2D\n@export_range(0, 10) var rarity: int = 0\n@export_range(0, 10, 1, "or_greater") var level: int = 0\n',
+  );
+  writeFileSync(
+    join(project, 'icon.svg'),
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#3366ff"/></svg>\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const request = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  const modify = async (properties: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await request('resource_edit', { op: 'modify', resourcePath: 'res://sword.tres', properties });
+  const written = async (properties: Record<string, unknown>): Promise<unknown> => {
+    const response = await modify(properties);
+    const answer = parseTextContent(response);
+    assert.ok(
+      answer !== null,
+      `${JSON.stringify(properties)}: ${textOf(response) ?? JSON.stringify(response)}`,
+    );
+    return answer;
+  };
+  const refused = async (properties: Record<string, unknown>): Promise<string> => {
+    const response = await modify(properties);
+    assert.equal(get(response, 'result', 'isError'), true, `${JSON.stringify(properties)} is refused`);
+    return textOf(response) ?? '';
+  };
+  const file = (): string => readFileSync(join(project, 'sword.tres'), 'utf8');
+  try {
+    await server.initialize('regression-test');
+    const made = parseTextContent(
+      await request('resource_edit', {
+        op: 'create',
+        resourcePath: 'res://sword.tres',
+        resourceType: 'Resource',
+        script: 'res://item_data.gd',
+      }),
+    );
+    assert.equal(get(made, 'resourcePath'), 'res://sword.tres', JSON.stringify(made));
+
+    // An enum by the name of a value, as written and in another case, and by its number.
+    await written({ kind: 'POTION' });
+    assert.match(file(), /^kind = 2$/m, file());
+    await written({ kind: 'shield' });
+    assert.match(file(), /^kind = 1$/m, file());
+    const unknown = await refused({ kind: 'AXE' });
+    assert.match(
+      unknown,
+      /ItemData\.kind is an enum, and AXE is none of its values: send SWORD \(0\), SHIELD \(1\), POTION \(2\) by name or by number\.$/m,
+      unknown,
+    );
+    const misspelt = await refused({ kind: 'SHIELDS' });
+    assert.match(misspelt, /by name or by number\. The nearest is SHIELD\./, misspelt);
+    assert.match(file(), /^kind = 1$/m, 'a refused name leaves the file as it was');
+    const beyond = await written({ kind: 7 });
+    assert.deepEqual(
+      get(beyond, 'outsideDeclared'),
+      { kind: '7 is none of the values kind declares: SWORD (0), SHIELD (1), POTION (2).' },
+      JSON.stringify(beyond),
+    );
+    assert.match(file(), /^kind = 7$/m, 'a number outside the enum is still written as given');
+
+    // A number for text is refused rather than saved as the text of a double.
+    const listed = await refused({ tags: [1, 2] });
+    assert.match(
+      listed,
+      /ItemData\.tags is Array and item 0 of the list given is float, not String\. Text is sent in quotes, as "1"\. Setting it would save a different value/,
+      listed,
+    );
+    const titled = await refused({ title: 5 });
+    assert.match(
+      titled,
+      /ItemData\.title is String and the value given is float, which cannot become one\. Text is sent in quotes, as "5"\./,
+      titled,
+    );
+    await written({ tags: ['1', '2'] });
+    assert.match(file(), /^tags = Array\[String\]\(\["1", "2"\]\)$/m, file());
+
+    // A refusal of one of several says the others were not written either, and they were not.
+    const together = await refused({ title: 'Sword', kind: 'AXE' });
+    assert.match(together, / None of the 2 properties given was written\.$/m, together);
+    assert.doesNotMatch(file(), /^title = /m, file());
+    assert.doesNotMatch(
+      await refused({ kind: 'AXE' }),
+      /None of the/,
+      'one property refused alone says nothing of others',
+    );
+
+    // Past a range closed on that side is named; past one open on it, or inside it, is not.
+    const ranged = await written({ rarity: 12, level: 40 });
+    assert.deepEqual(
+      get(ranged, 'outsideDeclared'),
+      {
+        rarity:
+          '12 is outside the range rarity declares, 0 to 10, which the inspector holds it to; the engine stores it as given.',
+      },
+      JSON.stringify(ranged),
+    );
+    assert.match(file(), /^rarity = 12$/m, file());
+    assert.equal(get(await written({ rarity: 4 }), 'outsideDeclared'), undefined);
+
+    // A picture that is there and never imported is told apart from one that is not there, and the
+    // remedy given makes the write go through.
+    const raw = await refused({ icon: 'res://icon.svg' });
+    assert.match(
+      raw,
+      /res:\/\/icon\.svg is there, but it has never been imported, so the engine has no resource to load from it for icon\. project_import reimport with resourcePath res:\/\/icon\.svg imports it\./,
+      raw,
+    );
+    assert.match(
+      await refused({ icon: 'res://nowhere.svg' }),
+      /No resource at res:\/\/nowhere\.svg for icon/,
+    );
+    const imported = await request('project_import', { op: 'reimport', resourcePath: 'res://icon.svg' });
+    assert.ok(existsSync(join(project, 'icon.svg.import')), textOf(imported) ?? JSON.stringify(imported));
+    await written({ icon: 'res://icon.svg' });
+    assert.match(file(), /path="res:\/\/icon\.svg"/, file());
+
+    const read = parseTextContent(
+      await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' }),
+    );
+    assert.deepEqual(
+      [get(read, 'resourceType'), get(read, 'scriptClass'), get(read, 'script')],
+      ['Resource', 'ItemData', 'res://item_data.gd'],
+      JSON.stringify(read),
+    );
+
+    // A ShaderMaterial's parameters are its shader's uniforms, so a name the shader does not
+    // declare is the shader's lack, and the refusal had said the material had no such property.
+    writeFileSync(
+      join(project, 'glow.gdshader'),
+      'shader_type canvas_item;\n\nuniform float glow_power : hint_range(0.0, 2.0) = 1.0;\nuniform vec4 tint : source_color;\n',
+    );
+    const material = async (
+      resourcePath: string,
+      properties: Record<string, unknown>,
+    ): Promise<JsonRpcMessage> => await request('resource_edit', { op: 'modify', resourcePath, properties });
+    for (const [resourcePath, shader] of [
+      ['res://glow.tres', { shader: 'res://glow.gdshader' }],
+      ['res://bare.tres', {}],
+    ] as const) {
+      const created = await request('resource_edit', {
+        op: 'create',
+        resourcePath,
+        resourceType: 'ShaderMaterial',
+        properties: shader,
+      });
+      assert.ok(parseTextContent(created) !== null, textOf(created) ?? JSON.stringify(created));
+    }
+    assert.equal(
+      textOf(await material('res://glow.tres', { 'shader_parameter/glow_powr': 1.5 })),
+      'res://glow.gdshader declares no uniform glow_powr, which shader_parameter/glow_powr would set; the nearest it has is glow_power.',
+    );
+    assert.equal(
+      textOf(await material('res://glow.tres', { 'shader_parameter/speed': 1.5 })),
+      'res://glow.gdshader declares no uniform speed, which shader_parameter/speed would set; it has glow_power, tint.',
+    );
+    assert.equal(
+      textOf(await material('res://bare.tres', { 'shader_parameter/glow_power': 1.5 })),
+      'The ShaderMaterial has no shader, so it has no parameter glow_power yet; set shader first.',
+    );
+    const lit = await material('res://glow.tres', { 'shader_parameter/glow_power': 1.5 });
+    assert.ok(parseTextContent(lit) !== null, textOf(lit) ?? JSON.stringify(lit));
+    assert.match(readFileSync(join(project, 'glow.tres'), 'utf8'), /^shader_parameter\/glow_power = 1\.5$/m);
+
+    // A refused value on a node whose script declares a class_name says only what was wrong with
+    // the value. The check for a script that does not compile compiled a copy of it, and a copy of
+    // a script with a class_name hides the global class the original declares, so every such
+    // script was said not to compile.
+    writeFileSync(
+      join(project, 'player.gd'),
+      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n',
+    );
+    writeFileSync(
+      join(project, 'hero.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://player.gd" id="1_player"]\n\n' +
+        '[node name="Hero" type="CharacterBody2D"]\nscript = ExtResource("1_player")\n',
+    );
+    const classes = await request('project_import', { op: 'refresh_classes' });
+    assert.match(
+      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+      /"class": &"Player"/,
+      textOf(classes) ?? JSON.stringify(classes),
+    );
+    const hero = { scenePath: 'res://hero.tscn', nodePath: '.', op: 'set' };
+    assert.equal(
+      textOf(await request('scene_node', { ...hero, properties: { speed: 'fast' } })),
+      'Player.speed is float and the value given is String, which cannot become one. Setting it would save a different value than the one asked for.',
+    );
+    const fast = await request('scene_node', { ...hero, properties: { speed: 300 } });
+    assert.ok(parseTextContent(fast) !== null, textOf(fast) ?? JSON.stringify(fast));
+    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^speed = 300\.0$/m);
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A run of named cases. gdUnit4 takes suites and leaves cases out, so a probe that wanted one case
+ * ran its suite with every other case under ignore, by names it had to read off the file first.
+ */
+async function testATestRunTakesTheCasesNamed(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('named cases regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-named-cases-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="NamedCases"\n',
+    );
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(project, 'test', 'more'), { recursive: true });
+    const suite = (cases: Record<string, boolean>): string =>
+      `extends GdUnitTestSuite\n${Object.entries(cases)
+        .map(([name, passes]) => `\n\nfunc ${name}() -> void:\n\tassert_bool(${String(passes)}).is_true()\n`)
+        .join('')}`;
+    writeFileSync(
+      join(project, 'test', 'math_test.gd'),
+      suite({ test_adds: true, test_doubles: false, test_halves: true }),
+    );
+    writeFileSync(
+      join(project, 'test', 'more', 'math_extra_test.gd'),
+      suite({ test_doubles: true, test_adds: true }),
+    );
+    // A test_ function in a script gdUnit4 does not run, which the selection reads as a case all the same.
+    writeFileSync(
+      join(project, 'test', 'helper.gd'),
+      'extends RefCounted\n\n\nfunc test_fixture() -> void:\n\tpass\n',
+    );
+    await withStdioServer(async (_call, request) => {
+      const run = async (args: Record<string, unknown>): Promise<{ text: string; answer: unknown }> => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project, path: 'res://test', ...args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        return {
+          text: blocks.join('\n'),
+          answer: JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown,
+        };
+      };
+      const failedIn = (answer: unknown): string[] =>
+        asArray(get(answer, 'failed')).map((one) => `${text(get(one, 'path'))}:${text(get(one, 'name'))}`);
+
+      // A bare name takes the case from every suite declaring it, and nothing else.
+      const doubles = await run({ tests: ['test_doubles'] });
+      assert.deepEqual(
+        [get(doubles.answer, 'tests'), get(doubles.answer, 'failures'), failedIn(doubles.answer)],
+        [2, 1, ['res://test/math_test.gd:test_doubles']],
+        doubles.text,
+      );
+      // A suite by its file name or its path narrows it to that suite.
+      const one = await run({
+        tests: ['math_extra_test:test_doubles', 'res://test/math_test.gd:test_halves'],
+      });
+      assert.deepEqual(
+        [get(one.answer, 'tests'), get(one.answer, 'failures'), get(one.answer, 'passed')],
+        [2, 0, true],
+        one.text,
+      );
+      // A name no suite declares is refused before an engine starts, with the nearest names.
+      const misspelt = await run({ tests: ['test_dobles'] });
+      assert.match(
+        misspelt.text,
+        /^No suite under res:\/\/test has a case test_dobles\. The nearest are test_doubles, /m,
+        misspelt.text,
+      );
+      const elsewhere = await run({ tests: ['math_extra_test:test_halves'] });
+      assert.match(
+        elsewhere.text,
+        /^No suite under res:\/\/test has a case math_extra_test:test_halves\. The nearest /m,
+        elsewhere.text,
+      );
+      // A case read off a file gdUnit4 never ran is named, and the run is not called passed.
+      const unrun = await run({ tests: ['test_fixture', 'math_test:test_adds'] });
+      assert.deepEqual(
+        [
+          get(unrun.answer, 'tests'),
+          get(unrun.answer, 'testsNotRun'),
+          get(unrun.answer, 'passed'),
+          get(unrun.answer, 'verdict'),
+        ],
+        [1, ['helper:test_fixture'], false, 'passed; not run: helper:test_fixture'],
+        unrun.text,
+      );
+      assert.match(
+        text(get(unrun.answer, 'note')),
+        /helper:test_fixture was asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite/,
+        unrun.text,
+      );
+    });
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * A project setting takes a value the way a property write does.
  *
  * Settings were built from the value alone, so a vector written as its fields without a tag was a
@@ -45556,16 +46092,18 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
 
     await call('resource_edit', { ...theme, op: 'create', resourceType: 'Theme' });
     assert.equal(get(parseTextContent(await fontSize(12)), 'size'), 12);
-    for (const [size, shown] of [
-      [-3, '-3'],
-      [0, '0'],
-      [12.5, '12.5'],
+    for (const [size, said] of [
+      [
+        -3,
+        'size must be 1 or more, not -3: the theme would hold it, and Godot reads a size of 0 or less as unset and draws the default size instead.',
+      ],
+      [
+        0,
+        'size must be 1 or more, not 0: the theme would hold it, and Godot reads a size of 0 or less as unset and draws the default size instead.',
+      ],
+      [12.5, 'size is a whole number of pixels, and 12.5 is not one.'],
     ] as const) {
-      assert.equal(
-        textOf(await fontSize(size)),
-        `size must be a whole number of pixels, 1 or more, not ${shown}: Godot reads 0 or less as no size and uses the theme's default instead.`,
-        `size ${JSON.stringify(size)}`,
-      );
+      assert.equal(textOf(await fontSize(size)), said, `size ${JSON.stringify(size)}`);
     }
     assert.match(fileOf('theme.tres'), /\nLabel\/font_sizes\/font_size = 12\n/, 'and the size set is kept');
 
@@ -45575,12 +46113,43 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       assert.equal(get(set, 'note'), undefined, `${kind} is a class a theme styles: ${JSON.stringify(set)}`);
     }
     const variation = await colour('Buton');
-    assert.equal(
-      get(variation, 'note'),
-      'Buton is not a Control or Window class, so this is a type variation: it styles only a control whose theme_type_variation is Buton.',
+    assert.match(
+      text(get(variation, 'note')),
+      /^Buton is not a Control or Window class, so this is a type variation: it styles only a control whose theme_type_variation is Buton\. If a class was meant, the nearest (?:is|are) Button[,.]/,
       JSON.stringify(variation),
     );
     assert.match(fileOf('theme.tres'), /\nButon\/colors\/font_color = Color\(1, 0, 0, 1\)\n/);
+    // A colour as its html code, as scene_node takes one, and a word that is neither form.
+    const coded = parseTextContent(
+      await call('resource_edit', {
+        ...theme,
+        op: 'set_theme_color',
+        controlType: 'Label',
+        colorName: 'font_color',
+        color: '#ff8000',
+      }),
+    );
+    assert.deepEqual(
+      [
+        get(coded, 'color', 'r'),
+        Math.round(Number(get(coded, 'color', 'g')) * 255),
+        get(coded, 'color', 'b'),
+      ],
+      [1, 128, 0],
+      JSON.stringify(coded),
+    );
+    assert.equal(
+      textOf(
+        await call('resource_edit', {
+          ...theme,
+          op: 'set_theme_color',
+          controlType: 'Label',
+          colorName: 'font_color',
+          color: 'orange',
+        }),
+      ),
+      'color is {"r": .., "g": .., "b": .., "a": ..} from 0 to 1, a optional, or an html code such as "#ff8000" or "#ff800080"; "orange" is neither.',
+    );
 
     writeFileSync(join(project, 'late.png'), solidPng(200, 60, 60));
     const tileset = {
@@ -45598,6 +46167,73 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     const made = parseTextContent(await call('resource_edit', tileset));
     assert.equal(asArray(get(made, 'sources')).length, 1, JSON.stringify(made));
     assert.match(fileOf('set.tres'), /\[gd_resource type="TileSet"/);
+    assert.equal(
+      textOf(await call('resource_edit', tileset)),
+      'res://set.tres already exists, and create_tileset builds a whole new TileSet, which would replace everything in it, the tiles a scene paints with among them. Give resourcePath a path nothing is at.',
+    );
+
+    // A cell wholly transparent gets no tile, and a strip the tile size does not reach is in none,
+    // and the answer names both rather than leaving a count to be worked back.
+    writeFileSync(
+      join(project, 'atlas.png'),
+      pixelPng(10, 4, (x) => (x >= 4 && x < 8 ? [0, 0, 0, 0] : [200, 40, 40, 255])),
+    );
+    await call('project_import', { op: 'reimport', resourcePath: 'res://atlas.png' });
+    const spaced = parseTextContent(
+      await call('resource_edit', {
+        op: 'create_tileset',
+        resourcePath: 'res://spaced.tres',
+        sources: [{ texture: 'res://atlas.png', tileSize: { x: 4, y: 4 } }],
+      }),
+    );
+    assert.deepEqual(
+      get(spaced, 'sources', 0),
+      {
+        sourceId: 0,
+        texture: 'res://atlas.png',
+        tiles: 1,
+        leftBlank: [{ x: 1, y: 0 }],
+        notInAnyTile: 'res://atlas.png is 10 by 4, so 2 px on the right is in no 4 by 4 tile.',
+      },
+      JSON.stringify(spaced),
+    );
+    assert.equal(get(made, 'sources', 0, 'leftBlank'), undefined, 'a picture with no blank cell names none');
+    assert.equal(get(made, 'sources', 0, 'notInAnyTile'), undefined, 'and one the tiles divide has no strip');
+
+    // Every cell refused is named by where it is, and -1 erases one, as set_cell takes it.
+    writeFileSync(
+      join(project, 'map.tscn'),
+      '[gd_scene format=3]\n\n[node name="Map" type="Node2D"]\n\n[node name="Ground" type="TileMapLayer" parent="."]\n',
+    );
+    const map = { scenePath: 'res://map.tscn', nodePath: 'Ground' };
+    await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://set.tres' } });
+    const paint = async (cells: unknown[]): Promise<JsonRpcMessage> =>
+      await call('scene_node', { ...map, op: 'set_tilemap_cells', cells });
+    assert.equal(
+      textOf(
+        await paint([
+          { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+          { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 5, y: 5 } },
+          { coords: { x: 2, y: -1 }, sourceId: 3, atlasCoords: { x: 0, y: 0 } },
+        ]),
+      ),
+      'cells[1] at (1, 0): source 0 has no tile at (5, 5); it has tiles at (0, 0), (0, 1), (1, 0), (1, 1); cells[2] at (2, -1) names source 3, and the TileSet has source 0; sourceId -1 erases a cell. Nothing was placed.',
+    );
+    const painted = parseTextContent(
+      await paint([
+        { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+        { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
+      ]),
+    );
+    assert.deepEqual([get(painted, 'placed'), get(painted, 'erased')], [2, 0], JSON.stringify(painted));
+    const erased = parseTextContent(await paint([{ coords: { x: 0, y: 0 }, sourceId: -1 }]));
+    assert.deepEqual([get(erased, 'placed'), get(erased, 'erased')], [0, 1], JSON.stringify(erased));
+    const ground = parseTextContent(await call('scene_node', { ...map, op: 'get' }));
+    assert.deepEqual(
+      get(ground, 'cells'),
+      [{ coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 }, alternativeTile: 0 }],
+      JSON.stringify(ground),
+    );
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
@@ -45960,6 +46596,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASettingTakesWhatAPropertyTakes,
   testAnElementIsToldWhatItsTypeTakes,
   testAWriteSaysWhatElseItChanged,
+  testAWriteReadsWhatThePropertyDeclares,
+  testATestRunTakesTheCasesNamed,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,

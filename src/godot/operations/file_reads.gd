@@ -427,6 +427,11 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	}
 	if script != null:
 		answer["script"] = script.resource_path
+		# resourceType is the engine class under the script, which for a class the project declares
+		# is Resource whatever create was given.
+		var declared_class: String = str(script.get_global_name())
+		if not declared_class.is_empty():
+			answer["scriptClass"] = declared_class
 	return answer
 
 
