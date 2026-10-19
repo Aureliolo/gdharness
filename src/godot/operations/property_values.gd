@@ -14,6 +14,7 @@ extends RefCounted
 ## write accepts. What is here on top of it is the part only a property knows: the type wanted, so a
 ## dictionary shaped like a vector or a bare pair of numbers can be read as one.
 
+const GdhDeclared = preload("declared_values.gd")
 const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhShapes = preload("value_shapes.gd")
@@ -205,7 +206,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		var value: Array = value_for(target, declared, properties[key])
 		if not value[0]:
 			return str(value[1]) + unwritten
-		var outside: String = _outside(target, declared, value[1])
+		var outside: String = GdhDeclared.outside(target, declared, value[1], shown(value[1]))
 		if not outside.is_empty():
 			_outside_declared[property] = outside
 		_write(target, property, value[1])
@@ -344,14 +345,15 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 	# An enum is written by the name of a value as well as its number, since the name is what the
 	# script and the inspector show and the number is only where the value happens to sit.
 	if expected_type == TYPE_INT and hint == PROPERTY_HINT_ENUM and typeof(raw) == TYPE_STRING:
-		var choices: Dictionary = _enum_of(target, declared)
-		var chosen: Variant = _enum_named(choices, str(raw))
+		var choices: Dictionary = GdhDeclared.enum_of(target, declared)
+		var chosen: Variant = GdhDeclared.enum_named(choices, str(raw))
 		if chosen == null:
-			chosen = _enum_named(enum_values(str(declared.get("hint_string", ""))), str(raw))
+			var hinted: Dictionary = GdhDeclared.enum_values(str(declared.get("hint_string", "")))
+			chosen = GdhDeclared.enum_named(hinted, str(raw))
 		if chosen != null:
 			return [true, chosen]
 		if not str(raw).strip_edges().is_valid_int():
-			return [false, _enum_refusal(class_called(target), property, str(raw), choices)]
+			return [false, GdhDeclared.enum_refusal(class_called(target), property, str(raw), choices)]
 
 	# A resource-valued property takes the path of one, which is how a caller names a TileSet,
 	# a material or a theme: there is no other way to hand a tool a Resource.
@@ -521,6 +523,27 @@ func _fraction_refusal(target: Object, property: String, raw: Variant) -> String
 	)
 
 
+## [param raw] as a colour, read as a property write reads one, as [true, Color] or [false, why]:
+## fields from 0 to 1 with a optional, or an html code. [param named] is what the refusal calls it.
+func colour_from(raw: Variant, named: String) -> Array:
+	_refused = ""
+	var value: Variant = parse(raw, TYPE_COLOR)
+	if not _refused.is_empty():
+		return [false, _refused]
+	if value is Color:
+		return [true, value]
+	return [
+		false,
+		(
+			(
+				'%s is {"r": .., "g": .., "b": .., "a": ..} from 0 to 1, a optional, or an html code such as '
+				+ '"#ff8000" or "#ff800080"; %s is neither.'
+			)
+			% [named, JSON.stringify(raw)]
+		)
+	]
+
+
 ## What [param target] is called in a refusal: the class_name its script declares, or else its
 ## engine class. A resource made as a project class is a Resource to the engine, and "Resource.kind"
 ## named a property no Resource has.
@@ -531,114 +554,6 @@ static func class_called(target: Object) -> String:
 		if not str(script.get_global_name()).is_empty():
 			return str(script.get_global_name())
 	return target.get_class()
-
-
-## The values an enum hint names, by name, from its hint string: "SWORD:0,SHIELD:1" as a script
-## declares one, or "Add,Subtract" as an engine property does, each name then taking the number
-## after the one before it.
-static func enum_values(hint_string: String) -> Dictionary:
-	var values: Dictionary = {}
-	var next: int = 0
-	for entry: String in hint_string.split(",", false):
-		var name: String = entry.get_slice(":", 0).strip_edges()
-		var number: String = entry.get_slice(":", 1).strip_edges() if ":" in entry else ""
-		var value: int = number.to_int() if number.is_valid_int() else next
-		values[name] = value
-		next = value + 1
-	return values
-
-
-## The values of the enum [param declared] declares, by name, spelt as the script of [param target]
-## spells them when it declares that enum. The engine's hint capitalises each name, "SWORD" as
-## "Sword", and a refusal listing those named values the script never spells.
-static func _enum_of(target: Object, declared: Dictionary) -> Dictionary:
-	var hinted: Dictionary = enum_values(str(declared.get("hint_string", "")))
-	var attached: Variant = target.get_script()
-	if not attached is Script:
-		return hinted
-	var script: Script = attached
-	for constant: Variant in script.get_script_constant_map().values():
-		if not constant is Dictionary:
-			continue
-		var values: Dictionary = constant
-		if values.size() != hinted.size():
-			continue
-		var spelt: Dictionary = {}
-		for name: Variant in values:
-			if hinted.get(str(name).capitalize()) == values[name]:
-				spelt[str(name)] = values[name]
-		if spelt.size() == hinted.size():
-			return spelt
-	return hinted
-
-
-## The number [param word] names among [param choices], matched as written and then ignoring case,
-## or null when it names none.
-static func _enum_named(choices: Dictionary, word: String) -> Variant:
-	var wanted: String = word.strip_edges()
-	if choices.has(wanted):
-		return choices[wanted]
-	for name: String in choices:
-		if name.to_lower() == wanted.to_lower():
-			return choices[name]
-	return null
-
-
-static func _enum_listed(choices: Dictionary) -> String:
-	var listed: PackedStringArray = []
-	for name: String in choices:
-		var _added: bool = listed.append("%s (%d)" % [name, choices[name]])
-	return ", ".join(listed)
-
-
-static func _enum_refusal(holder: String, property: String, word: String, choices: Dictionary) -> String:
-	var said: String = (
-		"%s.%s is an enum, and %s is none of its values: send %s by name or by number"
-		% [holder, property, word, _enum_listed(choices)]
-	)
-	var close: PackedStringArray = GdhRead.nearest(word, PackedStringArray(choices.keys()))
-	if close.is_empty():
-		return said + "."
-	return said + ". The nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
-
-
-## Why [param value] lies outside what [param declared] allows, an export range or an enum's values,
-## or "" when it does not. A range marked or_greater or or_less is open on that side.
-func _outside(target: Object, declared: Dictionary, value: Variant) -> String:
-	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
-	var hint_string: String = str(declared.get("hint_string", ""))
-	var property: String = str(declared.get("name", ""))
-	if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
-		return ""
-	var number: float = GdhRead.as_float(value)
-	if hint == PROPERTY_HINT_ENUM and typeof(value) == TYPE_INT:
-		var choices: Dictionary = _enum_of(target, declared)
-		if choices.is_empty() or choices.values().has(value):
-			return ""
-		return "%d is none of the values %s declares: %s." % [value, property, _enum_listed(choices)]
-	if hint != PROPERTY_HINT_RANGE:
-		return ""
-	var parts: PackedStringArray = []
-	for part: String in hint_string.split(","):
-		var _added: bool = parts.append(part.strip_edges())
-	if parts.size() < 2 or not parts[0].is_valid_float() or not parts[1].is_valid_float():
-		return ""
-	var low: float = parts[0].to_float()
-	var high: float = parts[1].to_float()
-	if (number <= high or parts.has("or_greater")) and (number >= low or parts.has("or_less")):
-		return ""
-	return (
-		(
-			"%s is outside the range %s declares, %s to %s, which the inspector holds it to; the "
-			+ "engine stores it as given."
-		)
-		% [shown(value), property, _bound(low), _bound(high)]
-	)
-
-
-## A range's end as the script wrote it: the engine's hint gives @export_range(0, 10) as 0.0 and 10.0.
-static func _bound(end: float) -> String:
-	return str(int(end)) if end == floorf(end) and absf(end) < 1e15 else str(end)
 
 
 ## The resource [param path] names, as [found, resource or why not].

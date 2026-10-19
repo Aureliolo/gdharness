@@ -70,7 +70,7 @@ func _missing_on(node: Node, missing: String) -> String:
 		return missing
 	return (
 		"%s. Its script, %s, does not compile, so none of what it declares is known here."
-		% [missing, script.resource_path]
+		% [missing.trim_suffix("."), script.resource_path]
 	)
 
 

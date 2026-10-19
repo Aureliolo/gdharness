@@ -329,7 +329,7 @@ import { greeting } from './support/greeting.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
 import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
-import { solidPng } from './support/png.js';
+import { pixelPng, solidPng } from './support/png.js';
 import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
 import {
   ENGINE_FIXTURES_SECONDS,
@@ -45953,16 +45953,18 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
 
     await call('resource_edit', { ...theme, op: 'create', resourceType: 'Theme' });
     assert.equal(get(parseTextContent(await fontSize(12)), 'size'), 12);
-    for (const [size, shown] of [
-      [-3, '-3'],
-      [0, '0'],
-      [12.5, '12.5'],
+    for (const [size, said] of [
+      [
+        -3,
+        'size must be 1 or more, not -3: the theme would hold it, and Godot reads a size of 0 or less as unset and draws the default size instead.',
+      ],
+      [
+        0,
+        'size must be 1 or more, not 0: the theme would hold it, and Godot reads a size of 0 or less as unset and draws the default size instead.',
+      ],
+      [12.5, 'size is a whole number of pixels, and 12.5 is not one.'],
     ] as const) {
-      assert.equal(
-        textOf(await fontSize(size)),
-        `size must be a whole number of pixels, 1 or more, not ${shown}: Godot reads 0 or less as no size and uses the theme's default instead.`,
-        `size ${JSON.stringify(size)}`,
-      );
+      assert.equal(textOf(await fontSize(size)), said, `size ${JSON.stringify(size)}`);
     }
     assert.match(fileOf('theme.tres'), /\nLabel\/font_sizes\/font_size = 12\n/, 'and the size set is kept');
 
@@ -45972,12 +45974,43 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       assert.equal(get(set, 'note'), undefined, `${kind} is a class a theme styles: ${JSON.stringify(set)}`);
     }
     const variation = await colour('Buton');
-    assert.equal(
-      get(variation, 'note'),
-      'Buton is not a Control or Window class, so this is a type variation: it styles only a control whose theme_type_variation is Buton.',
+    assert.match(
+      text(get(variation, 'note')),
+      /^Buton is not a Control or Window class, so this is a type variation: it styles only a control whose theme_type_variation is Buton\. If a class was meant, the nearest (?:is|are) Button[,.]/,
       JSON.stringify(variation),
     );
     assert.match(fileOf('theme.tres'), /\nButon\/colors\/font_color = Color\(1, 0, 0, 1\)\n/);
+    // A colour as its html code, as scene_node takes one, and a word that is neither form.
+    const coded = parseTextContent(
+      await call('resource_edit', {
+        ...theme,
+        op: 'set_theme_color',
+        controlType: 'Label',
+        colorName: 'font_color',
+        color: '#ff8000',
+      }),
+    );
+    assert.deepEqual(
+      [
+        get(coded, 'color', 'r'),
+        Math.round(Number(get(coded, 'color', 'g')) * 255),
+        get(coded, 'color', 'b'),
+      ],
+      [1, 128, 0],
+      JSON.stringify(coded),
+    );
+    assert.equal(
+      textOf(
+        await call('resource_edit', {
+          ...theme,
+          op: 'set_theme_color',
+          controlType: 'Label',
+          colorName: 'font_color',
+          color: 'orange',
+        }),
+      ),
+      'color is {"r": .., "g": .., "b": .., "a": ..} from 0 to 1, a optional, or an html code such as "#ff8000" or "#ff800080"; "orange" is neither.',
+    );
 
     writeFileSync(join(project, 'late.png'), solidPng(200, 60, 60));
     const tileset = {
@@ -45995,6 +46028,73 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     const made = parseTextContent(await call('resource_edit', tileset));
     assert.equal(asArray(get(made, 'sources')).length, 1, JSON.stringify(made));
     assert.match(fileOf('set.tres'), /\[gd_resource type="TileSet"/);
+    assert.equal(
+      textOf(await call('resource_edit', tileset)),
+      'res://set.tres already exists, and create_tileset builds a whole new TileSet, which would replace everything in it, the tiles a scene paints with among them. Give resourcePath a path nothing is at.',
+    );
+
+    // A cell wholly transparent gets no tile, and a strip the tile size does not reach is in none,
+    // and the answer names both rather than leaving a count to be worked back.
+    writeFileSync(
+      join(project, 'atlas.png'),
+      pixelPng(10, 4, (x) => (x >= 4 && x < 8 ? [0, 0, 0, 0] : [200, 40, 40, 255])),
+    );
+    await call('project_import', { op: 'reimport', resourcePath: 'res://atlas.png' });
+    const spaced = parseTextContent(
+      await call('resource_edit', {
+        op: 'create_tileset',
+        resourcePath: 'res://spaced.tres',
+        sources: [{ texture: 'res://atlas.png', tileSize: { x: 4, y: 4 } }],
+      }),
+    );
+    assert.deepEqual(
+      get(spaced, 'sources', 0),
+      {
+        sourceId: 0,
+        texture: 'res://atlas.png',
+        tiles: 1,
+        leftBlank: [{ x: 1, y: 0 }],
+        notInAnyTile: 'res://atlas.png is 10 by 4, so 2 px on the right is in no 4 by 4 tile.',
+      },
+      JSON.stringify(spaced),
+    );
+    assert.equal(get(made, 'sources', 0, 'leftBlank'), undefined, 'a picture with no blank cell names none');
+    assert.equal(get(made, 'sources', 0, 'notInAnyTile'), undefined, 'and one the tiles divide has no strip');
+
+    // Every cell refused is named by where it is, and -1 erases one, as set_cell takes it.
+    writeFileSync(
+      join(project, 'map.tscn'),
+      '[gd_scene format=3]\n\n[node name="Map" type="Node2D"]\n\n[node name="Ground" type="TileMapLayer" parent="."]\n',
+    );
+    const map = { scenePath: 'res://map.tscn', nodePath: 'Ground' };
+    await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://set.tres' } });
+    const paint = async (cells: unknown[]): Promise<JsonRpcMessage> =>
+      await call('scene_node', { ...map, op: 'set_tilemap_cells', cells });
+    assert.equal(
+      textOf(
+        await paint([
+          { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+          { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 5, y: 5 } },
+          { coords: { x: 2, y: -1 }, sourceId: 3, atlasCoords: { x: 0, y: 0 } },
+        ]),
+      ),
+      'cells[1] at (1, 0): source 0 has no tile at (5, 5); it has tiles at (0, 0), (0, 1), (1, 0), (1, 1); cells[2] at (2, -1) names source 3, and the TileSet has source 0; sourceId -1 erases a cell. Nothing was placed.',
+    );
+    const painted = parseTextContent(
+      await paint([
+        { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+        { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
+      ]),
+    );
+    assert.deepEqual([get(painted, 'placed'), get(painted, 'erased')], [2, 0], JSON.stringify(painted));
+    const erased = parseTextContent(await paint([{ coords: { x: 0, y: 0 }, sourceId: -1 }]));
+    assert.deepEqual([get(erased, 'placed'), get(erased, 'erased')], [0, 1], JSON.stringify(erased));
+    const ground = parseTextContent(await call('scene_node', { ...map, op: 'get' }));
+    assert.deepEqual(
+      get(ground, 'cells'),
+      [{ coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 }, alternativeTile: 0 }],
+      JSON.stringify(ground),
+    );
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });

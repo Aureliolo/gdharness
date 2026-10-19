@@ -329,7 +329,8 @@ const INPUT_EVENTS: JsonSchema = {
 
 const TILESET_SOURCES: JsonSchema = {
   type: 'array',
-  description: 'Atlas sources, one per texture.',
+  description:
+    'Atlas sources, one per texture. A wholly transparent cell gets no tile, and the answer lists those cells as leftBlank; a strip at the right or bottom that no whole tile reaches is described in notInAnyTile. A path that already exists is refused, as create_tileset would replace the whole TileSet.',
   items: {
     type: 'object',
     properties: {
@@ -350,18 +351,19 @@ const TILEMAP_CELLS: JsonSchema = {
     type: 'object',
     properties: {
       coords: XY,
-      sourceId: { type: 'number', description: 'TileSet source index.' },
-      atlasCoords: XY,
+      sourceId: { type: 'number', description: 'TileSet source id, or -1 to erase the cell.' },
+      atlasCoords: { ...XY, description: 'The tile in the source. Needed by every cell but an erased one.' },
       alternativeTile: { type: 'number' },
     },
-    required: ['coords', 'sourceId', 'atlasCoords'],
+    required: ['coords', 'sourceId'],
     additionalProperties: false,
   },
 };
 
 const COLOUR: JsonSchema = {
-  type: 'object',
-  description: 'set_theme_color: r, g and b from 0 to 1, with a optional and opaque by default.',
+  type: ['object', 'string'],
+  description:
+    'set_theme_color: r, g and b from 0 to 1, with a optional and opaque by default, or an html code such as "#ff8000" or "#ff800080".',
   properties: { r: { type: 'number' }, g: { type: 'number' }, b: { type: 'number' }, a: { type: 'number' } },
   required: ['r', 'g', 'b'],
   additionalProperties: false,
