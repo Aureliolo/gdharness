@@ -7017,7 +7017,7 @@ async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
       const unknownSection = await call('project_info', { projectPath: process.cwd(), include: [name] });
       assert.match(
         unknownSection,
-        /autoloads, plugins, export_presets, audio_buses, health, validation/,
+        /autoloads, input_actions, plugins, export_presets, audio_buses, health, validation/,
         `${name} must not resolve to a section`,
       );
     }
@@ -17175,12 +17175,29 @@ async function testParametersReachTheEngine(): Promise<void> {
           ),
         );
         assert.equal(get(quieter, 'bus', 'name'), 'Music', JSON.stringify(quieter));
+        const jump = await call(
+          'project_settings',
+          {
+            projectPath: projectDir,
+            op: 'add_input_action',
+            actionName: 'jump',
+            events: [{ type: 'key', keycode: 'Space' }],
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.equal(get(JSON.parse(jump), 'events_count'), 1, jump);
         const listed: unknown = JSON.parse(
           await call(
             'project_info',
-            { projectPath: projectDir, include: ['audio_buses'] },
+            { projectPath: projectDir, include: ['audio_buses', 'input_actions'] },
             ENGINE_CALL_TIMEOUT_MS,
           ),
+        );
+        const actions = asArray(get(listed, 'input_actions', 'actions'));
+        assert.deepEqual(
+          actions.map((entry) => [get(entry, 'name'), get(entry, 'events', 0, 'keycode')]),
+          [['jump', 32]],
+          `the action a fresh process reads is the one written, and no engine action is left at its default:\n${JSON.stringify(listed, null, 2)}`,
         );
         const music = asArray(get(listed, 'audio_buses', 'buses')).find(
           (entry) => get(entry, 'name') === 'Music',
