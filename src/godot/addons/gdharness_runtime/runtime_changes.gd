@@ -209,7 +209,7 @@ func _argument_for(
 			"type": "error",
 			"message":
 			(
-				"%s.%s takes a typed %s as argument %d: %s."
+				"%s.%s takes a typed %s as argument %d: %s"
 				% [called, named, _sort_of(container), index + 1, typed["message"]]
 			)
 		}
@@ -291,7 +291,7 @@ func _value_for(
 	if typed.has("message"):
 		return {
 			"type": "error",
-			"message": "%s.%s is a typed %s: %s." % [called, named, _sort_of(old_value), typed["message"]]
+			"message": "%s.%s is a typed %s: %s" % [called, named, _sort_of(old_value), typed["message"]]
 		}
 	return {"value": typed["value"]}
 

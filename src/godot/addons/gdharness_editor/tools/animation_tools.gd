@@ -48,9 +48,7 @@ func _open_at(scene_path: String, node_path: String, kind: String) -> Array:
 		return [scene, null, refused]
 	var node: Node = _find_node(scene.root, node_path)
 	if node == null or not node.is_class(kind):
-		return [
-			scene, null, scene.refuse(scene.not_found("%s not found at: %s" % [kind, node_path], node_path))
-		]
+		return [scene, null, _not_of_kind(scene, node, node_path, kind)]
 	var foreign: String = scene.foreign(node)
 	if not foreign.is_empty():
 		return [scene, null, scene.refuse(foreign)]
@@ -66,10 +64,23 @@ func _read_at(scene_path: String, node_path: String, kind: String) -> Array:
 		return [scene, null, refused]
 	var node: Node = _find_node(scene.root, node_path)
 	if node == null or not node.is_class(kind):
-		return [
-			scene, null, scene.refuse(scene.not_found("%s not found at: %s" % [kind, node_path], node_path))
-		]
+		return [scene, null, _not_of_kind(scene, node, node_path, kind)]
 	return [scene, node, {}]
+
+
+## The refusal for [param node_path] in [param scene], where [param node] is what the scene has
+## there, null or not a [param kind], with where the scene's nodes of that kind are.
+func _not_of_kind(scene: GdhSceneFile, node: Node, node_path: String, kind: String) -> Dictionary:
+	var said: String = "%s not found at: %s" % [kind, node_path]
+	if node == null:
+		said = scene.not_found(said, node_path)
+	var held: PackedStringArray = []
+	if scene.root.is_class(kind):
+		var _root_held: bool = held.append(".")
+	for found: Node in scene.root.find_children("*", kind, true, false):
+		var _held: bool = held.append(str(scene.root.get_path_to(found)))
+	var there: String = "" if node == null else node.get_class()
+	return scene.refuse(GdhRead.not_of_kind(said, node_path, there, kind, held))
 
 
 ## Writes [param scene] once [param check] passes, then the files of [param homes], answering

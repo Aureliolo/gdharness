@@ -139,3 +139,31 @@ static func missing_below(
 			"its children are " + shown if not children.is_empty() else "it has no children",
 		]
 	)
+
+
+## [param said], the refusal for a [param kind] the scene does not have at [param node_path], with
+## what is there when the scene has a node there, [param found] its class, and [param holders], the
+## paths of the nodes in the scene that are one, so the caller has the path to pass. Names up to
+## [constant NAMED_CHILDREN] of them.
+static func not_of_kind(
+	said: String, node_path: String, found: String, kind: String, holders: PackedStringArray
+) -> String:
+	var told: String = said + ("" if said.ends_with(".") else ".")
+	if not found.is_empty():
+		told += ' The node at "%s" is %s, not %s.' % [node_path, with_article(found), with_article(kind)]
+	if holders.is_empty():
+		return told + " The scene holds no %s." % kind
+	var quoted: PackedStringArray = []
+	for holder: String in holders.slice(0, NAMED_CHILDREN):
+		var _quoted: bool = quoted.append('"%s"' % holder)
+	var shown: String = ", ".join(quoted)
+	if holders.size() > NAMED_CHILDREN:
+		shown += " and %d more" % (holders.size() - NAMED_CHILDREN)
+	if holders.size() == 1:
+		return told + " The scene's %s is at %s." % [kind, shown]
+	return told + " The scene's %ss are at %s." % [kind, shown]
+
+
+## [param word] after the article it takes, "an AnimationTree" or "a Node2D".
+static func with_article(word: String) -> String:
+	return ("an " if word.left(1).to_upper() in ["A", "E", "I", "O", "U"] else "a ") + word

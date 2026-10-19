@@ -10719,8 +10719,8 @@ class GodotServer {
    * so. Compared against the project this server was told to serve, then against the one the
    * editor on the bridge has open.
    *
-   * With neither, the answer is no. It used to be yes, on the reasoning that a server which
-   * cannot name a project has nothing to compare against and the run was probably its own. That
+   * With neither, the answer is no. Yes would rest on the reasoning that a server which cannot
+   * name a project has nothing to compare against and the run is probably its own, which
    * reads "I do not know whose this is" as "it is mine", about a note whose whole purpose is to
    * let a server pick a run back up and end it. A regression suite, whose servers are started
    * with no project and no editor, adopted a bench belonging to another project on the same

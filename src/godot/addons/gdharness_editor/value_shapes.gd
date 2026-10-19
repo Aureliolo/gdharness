@@ -99,7 +99,13 @@ static func _unread(value: Variant, type: int) -> String:
 		return ""
 	lists.sort_custom(func(a: Array, b: Array) -> bool: return a.size() < b.size())
 	var left: Array = lists[0]
-	var note: String = " A %s has no %s, so the value is not read as one" % [tag, " or ".join(left)]
+	var named: PackedStringArray = []
+	for key: Variant in left:
+		var _named: bool = named.append('"%s"' % key)
+	var fields_called: String = "field called" if named.size() == 1 else "fields called"
+	var note: String = (
+		" A %s has no %s %s, so the value is not read as one" % [tag, fields_called, " or ".join(named)]
+	)
 	if left.has("type") and not fields.has("_type"):
 		return note + ': a value names its type under "_type".'
 	return note + "."

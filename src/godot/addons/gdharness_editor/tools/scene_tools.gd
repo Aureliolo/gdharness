@@ -343,6 +343,7 @@ func add_node(args: Dictionary) -> Dictionary:
 		"nodePath": new_path,
 		"index": new_node.get_index(),
 	}
+	_properties.note_also_changed(answer, new_node)
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			return _kept(
@@ -606,6 +607,8 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	for key: Variant in properties:
 		held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
 	var new_path: String = scene.path_of(node)
+	var answer: Dictionary = {"ok": true, "nodePath": new_path, "properties": held}
+	_properties.note_also_changed(answer, node)
 	var carried: GdhPaths = GdhPaths.new()
 	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
 	var written: Dictionary = scene.write(
@@ -622,7 +625,6 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		carried.put_back(scene_path)
 		return written
 
-	var answer: Dictionary = {"ok": true, "nodePath": new_path, "properties": held}
 	if editable != null:
 		answer["editableChildren"] = GdhRead.as_bool(editable)
 	if not dropped.is_empty():

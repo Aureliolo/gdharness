@@ -31,6 +31,8 @@ var spare: RefCounted = RefCounted.new()
 var spot: Vector2 = Vector2.ZERO
 var area: Rect2 = Rect2()
 var tint: Color = Color.WHITE
+var trail: Array[Vector2] = []
+var marks: Dictionary[String, Vector2] = {}
 
 
 func press(point: Vector2, forward: bool) -> bool:
@@ -295,18 +297,26 @@ func _check_a_value_given_by_its_fields() -> void:
 	var shape: String = 'A Vector2 is sent as {"x": ..., "y": ...}.'
 	var deep: Dictionary = await _write("spot", {"x": 7, "y": 8, "z": 9})
 	var deep_said: String = str(deep.get("message", ""))
-	if not deep_said.ends_with("A Vector2 has no z, so the value is not read as one. " + shape):
+	if not deep_said.ends_with(
+		'A Vector2 has no field called "z", so the value is not read as one. ' + shape
+	):
 		_fail("one carrying a field a Vector2 has not is refused naming it: %s" % JSON.stringify(deep))
+	var deeper: Dictionary = await _write("spot", {"x": 7, "y": 8, "z": 9, "w": 1})
+	if not str(deeper.get("message", "")).contains('A Vector2 has no fields called "z" or "w", so the value'):
+		_fail("and two of them both: %s" % JSON.stringify(deeper))
 	if holder.get("spot") != Vector2(1.5, -2):
 		_fail("and the slot keeps what it held: %s" % holder.get("spot"))
 	var named: Dictionary = await _write("spot", {"type": "Vector2", "x": 7, "y": 8})
 	var named_said: String = str(named.get("message", ""))
 	if not named_said.contains(
-		'A Vector2 has no type, so the value is not read as one: a value names its type under "_type". '
+		(
+			'A Vector2 has no field called "type", so the value is not read as one: a value names its '
+			+ 'type under "_type". '
+		)
 	):
 		_fail("a type named under type is refused saying where it goes: %s" % JSON.stringify(named))
 	var tagged: Dictionary = await _invoke("press", [{"_type": "Vector2", "x": 1, "y": 2, "w": 3}, true])
-	if not str(tagged.get("message", "")).contains("A Vector2 has no w, so the value is not read as one."):
+	if not str(tagged.get("message", "")).contains('A Vector2 has no field called "w", so the value is not'):
 		_fail("and an argument tagged as one: %s" % JSON.stringify(tagged))
 	var unshaped: Dictionary = await _write("spot", "east")
 	if not str(unshaped.get("message", "")).ends_with('A Vector2 is sent as {"x": ..., "y": ...}.'):
@@ -320,7 +330,7 @@ func _check_a_value_given_by_its_fields() -> void:
 	var alpha: Dictionary = await _write("tint", {"r": 1, "g": 0, "b": 0, "alpha": 0.5})
 	var colour_shape: String = 'A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code'
 	if not str(alpha.get("message", "")).contains(
-		"A Color has no alpha, so the value is not read as one. " + colour_shape
+		'A Color has no field called "alpha", so the value is not read as one. ' + colour_shape
 	):
 		_fail(
 			"one naming its alpha otherwise is refused with the key it goes under: %s" % JSON.stringify(alpha)
@@ -328,6 +338,25 @@ func _check_a_value_given_by_its_fields() -> void:
 	var uncoded: Dictionary = await _write("tint", "#00ff0")
 	if uncoded.get("type") != "error" or holder.get("tint") != Color.html("#00ff0080"):
 		_fail("and a word that is no html code is refused: %s" % JSON.stringify(uncoded))
+
+	# An element of a typed list or map is fitted as a single value is, so its refusal names the field
+	# too: item 0 below has the keys item 1 has but one, and is taken.
+	var unread: String = 'which cannot become Vector2. A Vector2 has no field called "z", so the value'
+	var listed: Dictionary = await _write("trail", [{"x": 1, "y": 2}, {"x": 3, "y": 4, "z": 5}])
+	var listed_said: String = str(listed.get("message", ""))
+	if not listed_said.contains("element 1 is ") or not listed_said.contains(unread):
+		_fail("an element of a typed list carrying a field it has not is told it: %s" % listed_said)
+	if not listed_said.ends_with(shape):
+		_fail("and ends on the shape, with one full stop: %s" % listed_said)
+	var keyed: Dictionary = await _write("marks", {"a": {"x": 3, "y": 4, "z": 5}})
+	var keyed_said: String = str(keyed.get("message", ""))
+	if not keyed_said.contains("the value under a is ") or not keyed_said.contains(unread):
+		_fail("and so is a value of a typed map: %s" % JSON.stringify(keyed))
+	var traced: Dictionary = await _write("trail", [{"x": 1, "y": 2}])
+	if traced.get("type") != "property_set" or holder.get("trail") != [Vector2(1, 2)]:
+		_fail(
+			"while a list of points is taken: %s, holding %s" % [JSON.stringify(traced), holder.get("trail")]
+		)
 
 
 ## A slot declared as Variant takes what it is given, as the engine does; one declared as a number

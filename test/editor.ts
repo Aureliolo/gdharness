@@ -1212,7 +1212,24 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
   assert.ok(existsSync(join(project, 'fixture.tscn')), 'scene_create should write the scene file');
 
   await call('scene_node', { ...scene, op: 'add', nodeType: 'Button', nodeName: 'Press' });
-  await call('scene_node', { ...scene, op: 'set', nodePath: 'Press', properties: { text: 'Go' } });
+  const worded = await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Press',
+    properties: { text: 'Go' },
+  });
+  assert.equal(get(worded, 'alsoChanged'), undefined, `a text moves nothing else: ${JSON.stringify(worded)}`);
+  const sized = await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Press',
+    properties: { size: { x: 120, y: 40 } },
+  });
+  assert.deepEqual(
+    get(sized, 'alsoChanged'),
+    { offset_right: { was: 0, now: 120 }, offset_bottom: { was: 0, now: 40 } },
+    `the editor names the offsets a size set: ${JSON.stringify(sized)}`,
+  );
 
   const read = await call('scene_node', { ...scene, op: 'get', nodePath: 'Press' });
   assert.equal(get(read, 'properties', 'text'), 'Go', 'the property should read back off the node');
@@ -1361,12 +1378,12 @@ async function testAValueTheSceneCannotHoldIsRefused({ call, refusal, project }:
   await call('scene_node', set({ position: { x: 4, y: 5 } }));
   assert.match(
     await refusal('scene_node', set({ position: { x: 1, y: 2, z: 3 } })),
-    /position is Vector2 and the value given is Dictionary, which cannot become one\. A Vector2 has no z, so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\. Setting it/,
+    /position is Vector2 and the value given is Dictionary, which cannot become one\. A Vector2 has no field called "z", so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\. Setting it/,
     'and a vector carrying a field it has not, rather than stored without it',
   );
   assert.match(
     await refusal('scene_node', set({ color: { r: 1, g: 0, b: 0, alpha: 0.5 } })),
-    /A Color has no alpha, so the value is not read as one\. A Color is sent as \{"r": \.\.\., "g": \.\.\., "b": \.\.\., "a": \.\.\.\} or as its html code, "#ff8000"\./,
+    /A Color has no field called "alpha", so the value is not read as one\. A Color is sent as \{"r": \.\.\., "g": \.\.\., "b": \.\.\., "a": \.\.\.\} or as its html code, "#ff8000"\./,
     'and a colour naming its alpha otherwise, with the key it goes under',
   );
   await call('scene_node', set({ color: '#00ff0080' }));
@@ -1384,8 +1401,21 @@ async function testAValueTheSceneCannotHoldIsRefused({ call, refusal, project }:
   // A list is a list whatever is in it, so the packed array is asked about its elements too.
   assert.match(
     await refusal('scene_node', set({ polygon: [{ x: 1, y: 2 }, { x: 3 }] })),
-    /item 1 of the list given is Dictionary, not Vector2/,
-    'an element that is not a point should be refused, naming which one',
+    /item 1 of the list given is Dictionary, not Vector2\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\. Setting it/,
+    'an element that is not a point should be refused, naming which one and the shape it takes',
+  );
+  assert.match(
+    await refusal(
+      'scene_node',
+      set({
+        polygon: [
+          { x: 1, y: 2 },
+          { x: 3, y: 4, z: 5 },
+        ],
+      }),
+    ),
+    /item 1 of the list given is Dictionary, not Vector2\. A Vector2 has no field called "z", so the value is not read as one\. A Vector2 is sent as/,
+    'and one carrying a field a point has not, naming that field',
   );
 
   // The file, not the tool. Every assertion above reads a refusal the tool handed back, and a
@@ -3789,7 +3819,7 @@ async function testAPresetAddedBesideTheEditorIsNoted({ call, project }: Editor)
  * `from: "editor"` exists because the two readings are not the same: the file is what a check with
  * nobody's window open can reproduce, and the editor is what it has been told. Asserting only that
  * the editor answers would be satisfied by a server that quietly read the file and called it the
- * editor's, which is exactly the ambiguity the argument was added to remove, so the file is changed
+ * editor's, which is exactly the ambiguity the argument exists to remove, so the file is changed
  * underneath the editor first, by hand rather than through a tool, and then both are asked. Whether
  * an editor ever picks a change up on its own is the engine's business; what is asserted is that
  * the two answers come from two places, and the editor's is the one it was holding.
@@ -3948,7 +3978,7 @@ async function testASettingReadFromTheEditor({ call, refusal, project }: Editor)
  *
  * Two projects hit this and neither could say which side was wrong: a declaration, the cache on
  * disk and a headless compile all agreeing a file was fine, against diagnostics reporting errors on
- * it. The answer now names the class under `typesTheEditorHasNotLoaded`, and this is what holds that
+ * it. The answer names the class under `typesTheEditorHasNotLoaded`, and this is what holds that
  * answer to the editor rather than to a reading of how the editor ought to behave.
  *
  * The idle waits are the load-bearing half and are not padding. The remedy takes time and so does
@@ -5881,7 +5911,7 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
  *
  * The note naming a played run's transcript stays after the play, and a server picking up a later
  * play opened it on the editor saying it was playing, which does not say which play: the later play
- * was given the earlier one's console and start time. The editor numbers its plays now. And a main
+ * was given the earlier one's console and start time; the editor's play number tells them apart. A main
  * scene that is not there got a dialog in the editor and no play, answered as `started: true`.
  */
 async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Editor): Promise<void> {

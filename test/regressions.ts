@@ -2602,7 +2602,7 @@ async function testALanguageServerStillStartingIsWaitedFor(): Promise<void> {
 }
 
 /**
- * #937: initialize is given a time of its own. Godot reads every script in the project before it
+ * Initialize is given a time of its own. Godot reads every script in the project before it
  * answers the first initialize after its editor starts: 7.3 s for 3000 small generated scripts on
  * 4.7.2, against 1 ms for the next one, so a larger project's first call after editor_launch ran
  * past the ten seconds every request was given, and the refusal sent the caller to the port.
@@ -8671,7 +8671,7 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
  * direction and the last one wrong in the other, and the middle one is every project between
  * installing an addon and committing it.
  *
- * Engine-free, like the doctor test above it: this is git and project.godot and nothing else.
+ * Engine-free, like the doctor cases: this is git and project.godot and nothing else.
  */
 function testAnAutoloadGitWillNotCarry(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
@@ -12016,7 +12016,7 @@ async function testACancelledCallEndsTheEngineItStarted(): Promise<void> {
 /**
  * A real editor writes its console where this server reads it, through the argv the server builds.
  *
- * The chain nothing else can check. The functions above are told what the file holds; this asks an
+ * The chain nothing else can check. The other console cases are told what the file holds; this asks an
  * engine to write one. `--log-file` on an editor is the whole mechanism, and it is a claim about
  * Godot rather than about this code: measured here so that an engine which stopped honouring it,
  * or an argv that stopped passing it, fails on the case built for it rather than as an empty
@@ -15389,11 +15389,10 @@ async function testACallBesideAnotherOnTheGameSaysSo(): Promise<void> {
 /**
  * A test server writes its run where no real run is, and is shown to have written one.
  *
- * The isolation this asserts was added after a suite run on a developer's machine ended another
- * project's bench, six times in fifty minutes, by adopting the note it found in the runtime
- * directory every gdharness on a machine shares. The fix was checked by running the suite and
- * seeing that directory not grow, which is the weakest kind of evidence there is: a suite that
- * stopped starting servers leaves it exactly as untouched.
+ * Without the isolation this asserts, a suite run on a developer's machine ended another project's
+ * bench, six times in fifty minutes, by adopting the note it found in the runtime directory every
+ * gdharness on a machine shares. Seeing that directory not grow during a suite is the weakest kind
+ * of evidence there is: a suite that stopped starting servers leaves it exactly as untouched.
  *
  * So both halves are asserted here, and the positive one first. The server must write a record
  * naming the run it started, which is the instrument reporting that it fired, and that record must
@@ -18631,7 +18630,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
 }
 
 /**
- * The same, asked of the server: `script_diagnostics` answers a stale enum member with the member
+ * testAStaleEnumMemberIsNamed asked of the server: `script_diagnostics` answers a stale enum member with the member
  * under contradictedByTheFile and the reload in staleAnalysis. The stand-in language server
  * publishes the two messages game-b's reproduction returned, the member and its follow-on, and
  * the class cache and declaring file are the project's own, so what is checked is the answer a
@@ -20839,7 +20838,7 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
 /**
  * Refreshing UIDs makes the missing sidecar and writes no scene.
  *
- * The op used to load every scene and resave it. Outside the editor that round trip rebuilds the
+ * The op must not load every scene and save it again. Outside the editor that round trip rebuilds the
  * header from what the engine could see, so `load_steps` went, and so did the scene's own `uid=`:
  * an op whose entire purpose is keeping UID references resolvable was deleting the UID that other
  * resources point at, in every scene in the project, on a call that named no scene at all. A project
@@ -22464,7 +22463,7 @@ async function testAStopTheEditorDidNotTakeIsNotAStop(): Promise<void> {
 /**
  * A run this server stopped is still the run it answers about.
  *
- * The stop used to drop the run, so editor_output afterwards fell through to the notes on disk,
+ * A stop that drops the run leaves editor_output afterwards to fall through to the notes on disk,
  * and those are shared by every project on the machine: a played run stopped before its game
  * announced was answered with another project's recorded run, refused as not this server's to
  * answer for, and what the stop had done was nowhere. Written with another project's note on disk,
@@ -23516,7 +23515,7 @@ function testTheScanNoteNamesWhatStarted(): void {
  * An engine run says how it ended, and a run that talks a lot is not ended for it.
  *
  * A timeout kills with a signal and leaves no code, and a program that never started has none
- * either; both were once answered as exit code -1, which is also a code a program can exit with.
+ * either, and answering either as exit code -1 names a code a program can exit with.
  * The output case is the one execFile got wrong: it killed a process printing past a mebibyte and
  * reported Node's reason as the process failing, which is what a healthy import pass over a large
  * project does. The processes are real ones, because how they end is what is being read.
@@ -31064,7 +31063,7 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
  * The note naming a played run's transcript stays on disk after the play, and it was opened on the
  * editor saying it was playing, which does not say which play: a later play picked up after a
  * reconnect was given the earlier play's console and start time, with the new lines appended to
- * the same file. The editor numbers its plays now, and a note about another play, or from another
+ * the same file. The editor numbers its plays, and a note about another play, or from another
  * editor, is left alone.
  */
 async function testANoteFromAnEarlierPlayIsNotThisOnes(): Promise<void> {
@@ -32266,8 +32265,8 @@ async function testARecordedEndingIsReadBack(): Promise<void> {
 /**
  * A run whose server went away is answered with what it printed, not with "No game is running".
  *
- * The MCP server reconnects on its own schedule. Everything about a run used to live in that
- * process, so a reconnect killed the game and took the log with it, and `editor_output`
+ * The MCP server reconnects on its own schedule. A run that lives in that process goes with it: a
+ * reconnect killed the game and took the log with it, and `editor_output`
  * afterwards said no game was running: true about the process, and silent about the forty
  * minutes of bench output that had just been dropped. A project lost two sweeps this way in one
  * session, a six-setting one after a single row and a nine-cell one after five cells.
@@ -37704,7 +37703,7 @@ function parametersOf(block: string): string[] {
  * Every tool is named by a fixture, which is the rule this repository is built to and the claim
  * the README makes about it.
  *
- * Nothing held it before now: the consistency checks prove a tool's dispatch name exists on both
+ * Nothing else holds it: the consistency checks prove a tool's dispatch name exists on both
  * sides and that its arguments are read, all of which a tool nobody ever calls would pass. A tool
  * added with no fixture is the one shape of change this project says it does not ship.
  */
@@ -37719,7 +37718,8 @@ function testEveryToolIsDrivenSomewhere(): void {
 /**
  * Every parameter a tool declares is read by something.
  *
- * The other half of the question above, and the one that reads as a working tool for longest:
+ * The other half of testEveryToolIsDrivenSomewhere's question, and the one that reads as a working
+ * tool for longest:
  * a declared argument nothing looks at is a setting a caller can pass, watch accepted, and
  * never see obeyed. `scene_node` had one, and there was nothing to notice it with.
  */
@@ -38726,6 +38726,232 @@ function testTheEditorIsOfferedWhereItCanAnswer(): void {
 }
 
 /**
+ * An element of a packed list, and a value of a typed map, is refused with how its type is sent and
+ * the field its type has not, as a single value is. A Gradient colour carrying a z was told only that
+ * it was a Dictionary and not a Color, beside an item 0 with the same keys but that one, which was
+ * taken.
+ */
+async function testAnElementIsToldWhatItsTypeTakes(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('element values regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-element-values-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-element-values-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Elements"\n',
+  );
+  writeFileSync(
+    join(project, 'bag.gd'),
+    'extends Resource\n\n@export var marks: Dictionary[String, Vector2] = {}\n',
+  );
+  writeFileSync(
+    join(project, 'bag.tres'),
+    '[gd_resource type="Resource" format=3]\n\n[ext_resource type="Script" path="res://bag.gd" id="1_bag"]\n\n' +
+      '[resource]\nscript = ExtResource("1_bag")\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const edit = async (args: Record<string, unknown>): Promise<{ answer: unknown; said: string }> => {
+    const response = await server.request(
+      'tools/call',
+      { name: 'resource_edit', arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    return { answer: parseTextContent(response), said: textOf(response) ?? JSON.stringify(response) };
+  };
+  const file = (name: string): string => readFileSync(join(project, name), 'utf8');
+  try {
+    await server.initialize('regression-test');
+    const made = await edit({ op: 'create', resourcePath: 'res://shade.tres', resourceType: 'Gradient' });
+    assert.ok(made.answer !== null, `the gradient is made: ${made.said}`);
+    const before = file('shade.tres');
+    const red = { r: 1, g: 0, b: 0, a: 1 };
+    const colours = await edit({
+      op: 'modify',
+      resourcePath: 'res://shade.tres',
+      properties: { colors: [red, { r: 0, g: 1, b: 0, a: 1, z: 3 }] },
+    });
+    assert.equal(
+      colours.said,
+      'Gradient.colors is PackedColorArray and item 1 of the list given is Dictionary, not Color. A Color has no field called "z", so the value is not read as one. A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code, "#ff8000". Setting it would save a different value than the one asked for.',
+    );
+    assert.equal(file('shade.tres'), before, 'and the file is as it was');
+    const taken = await edit({
+      op: 'modify',
+      resourcePath: 'res://shade.tres',
+      properties: { colors: [red, { r: 0, g: 1, b: 0, a: 1 }] },
+    });
+    assert.ok(taken.answer !== null, `while the list without it is written: ${taken.said}`);
+    assert.match(
+      file('shade.tres'),
+      /colors = PackedColorArray\(1, 0, 0, 1, 0, 1, 0, 1\)/,
+      file('shade.tres'),
+    );
+
+    const marks = await edit({
+      op: 'modify',
+      resourcePath: 'res://bag.tres',
+      properties: { marks: { home: { x: 1, y: 2, z: 3 } } },
+    });
+    assert.match(
+      marks.said,
+      /\.marks holds Vector2 values, and the one given for "home" is .*\. A Vector2 has no field called "z", so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\. Setting it would save/,
+      marks.said,
+    );
+    const marked = await edit({
+      op: 'modify',
+      resourcePath: 'res://bag.tres',
+      properties: { marks: { home: { x: 1, y: 2 } } },
+    });
+    assert.ok(marked.answer !== null, `while a map of points is written: ${marked.said}`);
+    assert.match(
+      file('bag.tres'),
+      /marks = Dictionary\[String, Vector2\]\(\{\s*"home": Vector2\(1, 2\)/,
+      file('bag.tres'),
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A write names what else the engine changed. A setter keeps other properties in step with the one
+ * it is given: a Gradient given a third colour gave that point an offset of 0, and the answer named
+ * only the colours, so the caller learnt of the offset by reading the file.
+ */
+async function testAWriteSaysWhatElseItChanged(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('side effects regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-side-effects-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-side-effects-rt-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Side"\n');
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n');
+  // A setter that adds to a list it holds rather than replacing it, so the list read before the write
+  // is the list read after it unless it was copied.
+  writeFileSync(
+    join(project, 'tally.gd'),
+    '@tool\nextends Resource\n\n@export var seen: Array[int] = []\n@export var level: int = 0:\n' +
+      '\tset(value):\n\t\tlevel = value\n\t\tseen.append(value)\n',
+  );
+  writeFileSync(
+    join(project, 'tally.tres'),
+    '[gd_resource type="Resource" format=3]\n\n[ext_resource type="Script" path="res://tally.gd" id="1_tally"]\n\n' +
+      '[resource]\nscript = ExtResource("1_tally")\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+    const response = await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answer = parseTextContent(response);
+    assert.ok(
+      answer !== null,
+      `${name} ${String(args['op'])}: ${textOf(response) ?? JSON.stringify(response)}`,
+    );
+    return answer;
+  };
+  const node = async (args: Record<string, unknown>): Promise<unknown> =>
+    await call('scene_node', { scenePath: 'res://main.tscn', ...args });
+  const colour = (value: number): Record<string, number> => ({ r: value, g: value, b: value, a: 1 });
+  try {
+    await server.initialize('regression-test');
+    await call('resource_edit', { op: 'create', resourcePath: 'res://shade.tres', resourceType: 'Gradient' });
+    const grown = await call('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://shade.tres',
+      properties: { colors: [colour(0), colour(0.5), colour(1)] },
+    });
+    assert.deepEqual(
+      get(grown, 'alsoChanged'),
+      { offsets: { was: [0, 1], now: [0, 1, 0] } },
+      `a third colour gives its point an offset, and the answer says so: ${JSON.stringify(grown)}`,
+    );
+    const placed = await call('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://shade.tres',
+      properties: { offsets: [0, 0.5, 1], colors: [colour(1), colour(0.5), colour(0)] },
+    });
+    assert.equal(
+      get(placed, 'alsoChanged'),
+      undefined,
+      `given both, nothing else moved: ${JSON.stringify(placed)}`,
+    );
+    assert.match(
+      readFileSync(join(project, 'shade.tres'), 'utf8'),
+      /offsets = PackedFloat32Array\(0, 0\.5, 1\)/,
+    );
+    const counted = await call('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://tally.tres',
+      properties: { level: 3 },
+    });
+    assert.deepEqual(
+      get(counted, 'alsoChanged'),
+      { seen: { was: [], now: [3] } },
+      `a list a setter adds to is named with what it held: ${JSON.stringify(counted)}`,
+    );
+
+    const sized = await node({
+      op: 'add',
+      nodeType: 'Control',
+      nodeName: 'Panel',
+      properties: { size: { x: 200, y: 40 } },
+    });
+    assert.deepEqual(
+      get(sized, 'alsoChanged'),
+      { offset_right: { was: 0, now: 200 }, offset_bottom: { was: 0, now: 40 } },
+      `a size is kept as offsets: ${JSON.stringify(sized)}`,
+    );
+    const filled = await node({ op: 'set', nodePath: 'Panel', properties: { anchors_preset: 15 } });
+    assert.deepEqual(
+      Object.keys(asObject(get(filled, 'alsoChanged'), 'alsoChanged')).sort(),
+      ['anchor_bottom', 'anchor_right', 'grow_horizontal', 'grow_vertical', 'offset_bottom', 'offset_right'],
+      `a preset sets the anchors, offsets and growth: ${JSON.stringify(filled)}`,
+    );
+    const moved = await node({
+      op: 'add',
+      nodeType: 'Node2D',
+      nodeName: 'Mover',
+      properties: { position: { x: 3, y: 4 }, rotation: 1.5 },
+    });
+    assert.equal(get(moved, 'nodePath'), 'Mover', JSON.stringify(moved));
+    assert.equal(
+      get(moved, 'alsoChanged'),
+      undefined,
+      `a position moves nothing else: ${JSON.stringify(moved)}`,
+    );
+    const nudged = await node({ op: 'set', nodePath: 'Mover', properties: { 'position:x': 9 } });
+    assert.deepEqual(get(nudged, 'properties', 'position:x'), 9, JSON.stringify(nudged));
+    assert.equal(
+      get(nudged, 'alsoChanged'),
+      undefined,
+      `one axis of a property given is that property, not another: ${JSON.stringify(nudged)}`,
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * A project setting takes a value the way a property write does.
  *
  * Settings were built from the value alone, so a vector written as its fields without a tag was a
@@ -38768,7 +38994,7 @@ async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
     const deep = await set(gravity, { x: 0, y: 3, z: 1 });
     assert.match(
       deep.said,
-      /declared as Vector2, .* cannot become one\. A Vector2 has no z, so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\./,
+      /declared as Vector2, .* cannot become one\. A Vector2 has no field called "z", so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\./,
       'one carrying a field it has not is refused naming it',
     );
     assert.match(
@@ -38790,7 +39016,7 @@ async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
     const alpha = await set(clear, { r: 1, g: 0, b: 0, alpha: 0.5 });
     assert.ok(
       alpha.said.includes(
-        'A Color has no alpha, so the value is not read as one. A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code, "#ff8000".',
+        'A Color has no field called "alpha", so the value is not read as one. A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code, "#ff8000".',
       ),
       `a colour naming its alpha otherwise is told the key it goes under: ${alpha.said}`,
     );
@@ -43863,6 +44089,11 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       '[sub_resource type="Animation" id="Animation_long"]\nscript = ExtResource("1_stretched")\nresource_name = "long"\n\n' +
       '[resource]\n_data = {\n&"long": SubResource("Animation_long")\n}\n',
     'stretched.tscn': `${player('stretched.tres')}\n[node name="Root" type="Node" parent="."]\n`,
+    'lone.tscn': '[gd_scene format=3]\n\n[node name="Lone" type="Node2D"]\n',
+    'warned.gd': 'extends Node2D\n',
+    'warned.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" uid="uid://kwuaqmq5q26f" path="res://warned.gd" id="1_warned"]\n\n' +
+      '[node name="Warned" type="Node2D"]\nscript = ExtResource("1_warned")\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -43963,7 +44194,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     // A path from the root's own name, as a tree lists the root, is answered with how paths are read:
     // by a write, by a read with no editor, and by the scene tools, which share the sentence.
     const fromRoot =
-      'AnimationPlayer not found at: Root/Player. Paths go from the root, Root, whose own path is ".", so this one is "Player".';
+      'AnimationPlayer not found at: Root/Player. Paths go from the root, Root, whose own path is ".", so this one is "Player". The scene\'s AnimationPlayer is at "Player".';
     for (const op of ['create', 'read']) {
       assert.equal(
         textOf(await call({ op, playerNodePath: 'Root/Player', animationName: 'more' })),
@@ -43973,7 +44204,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     }
     assert.equal(
       textOf(await call({ op: 'read', playerNodePath: 'Nowhere/Player' })),
-      'AnimationPlayer not found at: Nowhere/Player. The root, Root, has no Nowhere; its children are Body, Player, Tree, Bare.',
+      'AnimationPlayer not found at: Nowhere/Player. The root, Root, has no Nowhere; its children are Body, Player, Tree, Bare. The scene\'s AnimationPlayer is at "Player".',
       'and a path that is simply wrong is told where it leaves the scene, with no word of the root',
     );
     // A root with a child of its own name: there the path names that child, which has no player.
@@ -43987,10 +44218,49 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
             animationName: 'more',
           }),
         ),
-        'AnimationPlayer not found at: Root/Player. Root has no Player; it has no children.',
+        'AnimationPlayer not found at: Root/Player. Root has no Player; it has no children. The scene\'s AnimationPlayer is at "Player".',
         `${op} under a child named like the root`,
       );
     }
+    // A path that reaches a node of another class is told what is there and where the scene keeps
+    // the kind asked for, by a write and by a read with no editor, which find the node apart.
+    for (const op of ['create', 'read']) {
+      assert.equal(
+        textOf(await call({ op, playerNodePath: 'Body', animationName: 'more' })),
+        'AnimationPlayer not found at: Body. The node at "Body" is a Sprite2D, not an AnimationPlayer. The scene\'s AnimationPlayer is at "Player".',
+        `${op} at a node of another class`,
+      );
+      assert.equal(
+        textOf(await call({ op, scenePath: 'lone.tscn', playerNodePath: '.', animationName: 'more' })),
+        'AnimationPlayer not found at: . The node at "." is a Node2D, not an AnimationPlayer. The scene holds no AnimationPlayer.',
+        `${op} in a scene with no player`,
+      );
+    }
+    for (const args of [
+      { op: 'add_state', stateName: 'More', animationName: 'spin' },
+      { op: 'read_states' },
+    ]) {
+      const op = args.op;
+      assert.equal(
+        textOf(await call({ ...args, animTreePath: 'Player' })),
+        'AnimationTree not found at: Player. The node at "Player" is an AnimationPlayer, not an AnimationTree. The scene\'s AnimationTrees are at "Tree", "Bare".',
+        `${op} at a player, where a tree was asked for`,
+      );
+    }
+    // Each load of a scene prints the engine's warnings about the file again, so a read that loaded
+    // it four times repeated a stale uid four times beneath its answer.
+    const warned = await call({ op: 'read', scenePath: 'warned.tscn', playerNodePath: '.' });
+    const warnedContent = asArray(get(warned, 'result', 'content'));
+    assert.equal(
+      text(get(warnedContent[0], 'text')),
+      'AnimationPlayer not found at: . The node at "." is a Node2D, not an AnimationPlayer. The scene holds no AnimationPlayer.',
+      JSON.stringify(warned),
+    );
+    const extras: unknown = JSON.parse(text(get(warnedContent[1], 'text')));
+    const warnings = asArray(get(extras, 'engine_messages')).filter((entry) =>
+      text(get(entry, 'text')).includes('invalid UID: uid://kwuaqmq5q26f'),
+    );
+    assert.equal(warnings.length, 1, `the stale uid is told once: ${JSON.stringify(warnedContent)}`);
     const asParent = await server.request(
       'tools/call',
       {
@@ -45673,6 +45943,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowedRunWritesItsMovie,
   testTheEditorIsOfferedWhereItCanAnswer,
   testASettingTakesWhatAPropertyTakes,
+  testAnElementIsToldWhatItsTypeTakes,
+  testAWriteSaysWhatElseItChanged,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,

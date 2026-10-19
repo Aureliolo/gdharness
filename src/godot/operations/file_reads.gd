@@ -42,13 +42,43 @@ static func scene_node(scene_path: String, node_path: String) -> Dictionary:
 	return {"ok": true, "name": found["name"], "type": found["type"], "properties": found["properties"]}
 
 
-## [param said], the refusal for [param node_path], which [param scene_path] does not have, with
-## where the path leaves the scene as [method GdhRead.missing_below] says it.
-static func missing_from(said: String, scene_path: String, node_path: String) -> String:
+## The node at [param node_path] in [param scene_path] as [method scene_node] answers it, when it is
+## a [param kind]; otherwise a refusal saying what the scene has there and where its nodes of that
+## kind are, so the caller has the path to pass. The file is read once, because every load prints
+## the engine's warnings about it again.
+static func scene_node_of_kind(scene_path: String, node_path: String, kind: String) -> Dictionary:
 	var laid: Dictionary = _laid(scene_path)
 	if not laid.get("ok", false):
-		return said
+		return laid
 	var nodes: Dictionary = laid["nodes"]
+	var path: String = _joined(".", node_path)
+	var said: String = "%s not found at: %s" % [kind, node_path]
+	var found: String = ""
+	if nodes.has(path):
+		found = str(nodes[path]["type"])
+		if ClassDB.class_exists(found) and ClassDB.is_parent_class(found, kind):
+			return {
+				"ok": true,
+				"name": nodes[path]["name"],
+				"type": found,
+				"properties": nodes[path]["properties"]
+			}
+	else:
+		var hinted: String = said
+		if not nodes.has(_joined(".", node_path.get_slice("/", 0))):
+			hinted = GdhRead.from_the_root(said, node_path, str(nodes["."]["name"]))
+		said = hinted if hinted != said else _missing_in(nodes, said, node_path)
+	var held: PackedStringArray = []
+	for at: Variant in nodes:
+		var type: String = str(nodes[at]["type"])
+		if ClassDB.class_exists(type) and ClassDB.is_parent_class(type, kind):
+			var _held: bool = held.append(str(at))
+	return {"ok": false, "error": GdhRead.not_of_kind(said, node_path, found, kind, held)}
+
+
+## [param said], the refusal for [param node_path], which the scene laid as [param nodes] does not
+## have, with where the path leaves the scene as [method GdhRead.missing_below] says it.
+static func _missing_in(nodes: Dictionary, said: String, node_path: String) -> String:
 	var parts: PackedStringArray = node_path.trim_prefix("./").split("/", false)
 	var at: String = "."
 	var reached: PackedStringArray = []
@@ -77,15 +107,14 @@ static func _laid(scene_path: String) -> Dictionary:
 	if loaded == null:
 		return {"ok": false, "error": "Failed to load %s as a scene" % scene_path}
 	if not loaded is PackedScene:
-		var kind: String = loaded.get_class()
-		var sort: String = ("an " if kind.left(1).to_upper() in ["A", "E", "I", "O", "U"] else "a ") + kind
+		var sort: String = GdhRead.with_article(loaded.get_class())
 		return {
 			"ok": false,
 			"error": "%s is %s, not a scene: resource_edit read reads its properties." % [scene_path, sort]
 		}
 	var packed: PackedScene = loaded
 	var nodes: Dictionary = {}
-	var refused: String = _lay(packed.get_state(), ".", nodes, [scene_path])
+	var refused: String = _lay(packed.get_state(), ".", nodes, [scene_path], packed)
 	if not refused.is_empty():
 		return {"ok": false, "error": refused}
 	if not nodes.has("."):
@@ -99,8 +128,11 @@ static func _laid(scene_path: String) -> Dictionary:
 ##
 ## [param within] is the files being laid, outermost first, so a scene that instances one of them
 ## is refused rather than laid forever; the engine refuses to load such a scene, so this is only
-## reached through a state built some other way.
-static func _lay(state: SceneState, prefix: String, nodes: Dictionary, within: Array) -> String:
+## reached through a state built some other way. [param loaded] is the scene [param state] is read
+## from, when the caller has it loaded already.
+static func _lay(
+	state: SceneState, prefix: String, nodes: Dictionary, within: Array, loaded: PackedScene = null
+) -> String:
 	var base: SceneState = state.get_base_scene_state()
 	if base != null and not nodes.has(prefix):
 		var refused: String = _lay(base, prefix, nodes, within)
@@ -164,7 +196,7 @@ static func _lay(state: SceneState, prefix: String, nodes: Dictionary, within: A
 	# Only the scene being read and the scenes it inherits share its root, the owner whose editable
 	# instances a write here sets; a file instanced below makes its own owner's editable.
 	if prefix == ".":
-		for editable: String in _editable_in(state.get_path()):
+		for editable: String in _editable_in(state.get_path(), loaded):
 			var at: String = _joined(prefix, editable)
 			var marked: Dictionary = nodes.get(at, {})
 			if marked.has("editableChildren"):
@@ -173,10 +205,13 @@ static func _lay(state: SceneState, prefix: String, nodes: Dictionary, within: A
 
 
 ## The paths of the instances [param scene_path] gives editable children, from its root. SceneState
-## does not give them to a script, so they are read off the scene's bundle.
-static func _editable_in(scene_path: String) -> PackedStringArray:
+## does not give them to a script, so they are read off the scene's bundle: [param given_scene]'s,
+## when the caller has the file loaded, since loading it again prints its warnings again.
+static func _editable_in(scene_path: String, given_scene: PackedScene = null) -> PackedStringArray:
 	var found: PackedStringArray = []
-	var loaded: Resource = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	var loaded: Resource = given_scene
+	if loaded == null:
+		loaded = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_IGNORE)
 	if not loaded is PackedScene:
 		return found
 	var given: Variant = loaded.get("_bundled")
