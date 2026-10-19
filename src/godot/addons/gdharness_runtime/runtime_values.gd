@@ -415,7 +415,7 @@ func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 			built, template.get_typed_builtin(), template.get_typed_class_name(), template.get_typed_script()
 		)
 		if typed.size() != built.size():
-			return {"message": "the engine would not take its elements as what the list holds"}
+			return {"message": "the engine would not take its elements as what the list holds."}
 		return {"value": typed}
 	if like is Dictionary and given is Dictionary:
 		var map_like: Dictionary = like
@@ -453,13 +453,14 @@ func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 			map_like.get_typed_value_script()
 		)
 		if typed_map.size() != rebuilt.size():
-			return {"message": "the engine would not take its entries as what the map holds"}
+			return {"message": "the engine would not take its entries as what the map holds."}
 		return {"value": typed_map}
 	return {"value": given}
 
 
 ## One element fitted to a container's element type, as `{"value"}` or `{"message"}` saying what it
-## was and what goes there. The message is the part after "element N".
+## was and what goes there. The message is the part after "element N", whole sentences, since it
+## can end with how a value of that type is sent.
 ##
 ## An object element given as a record goes to [param resolve] as a path would, which says how an
 ## object is named, rather than being refused as a map that cannot become the class.
@@ -469,7 +470,7 @@ func _element(item: Variant, builtin: int, declared: String, script: Script, res
 	if builtin == TYPE_OBJECT and (item is String or item is Dictionary):
 		var named: Dictionary = resolve.call(item, declared, script)
 		if named.has("message"):
-			return {"message": str(named["message"])}
+			return {"message": str(named["message"]) + "."}
 		return {"value": named["object"]}
 	var fitted_item: Variant = fitted(item, builtin)
 	if not acceptable(fitted_item, builtin):
@@ -478,7 +479,6 @@ func _element(item: Variant, builtin: int, declared: String, script: Script, res
 		var wanted: String = type_string(builtin)
 		if builtin == TYPE_OBJECT:
 			wanted = declared if script == null else script_named(script)
-		return {
-			"message": "is %s, which cannot become %s" % [JSON.stringify(serialize(item), "", false), wanted]
-		}
+		var sent: String = JSON.stringify(serialize(item), "", false)
+		return {"message": "is %s, which cannot become %s.%s" % [sent, wanted, remedy(item, builtin)]}
 	return {"value": fitted_item}

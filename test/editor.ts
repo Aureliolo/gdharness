@@ -1361,12 +1361,12 @@ async function testAValueTheSceneCannotHoldIsRefused({ call, refusal, project }:
   await call('scene_node', set({ position: { x: 4, y: 5 } }));
   assert.match(
     await refusal('scene_node', set({ position: { x: 1, y: 2, z: 3 } })),
-    /position is Vector2 and the value given is Dictionary, which cannot become one\. A Vector2 has no z, so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\. Setting it/,
+    /position is Vector2 and the value given is Dictionary, which cannot become one\. A Vector2 has no field called "z", so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\. Setting it/,
     'and a vector carrying a field it has not, rather than stored without it',
   );
   assert.match(
     await refusal('scene_node', set({ color: { r: 1, g: 0, b: 0, alpha: 0.5 } })),
-    /A Color has no alpha, so the value is not read as one\. A Color is sent as \{"r": \.\.\., "g": \.\.\., "b": \.\.\., "a": \.\.\.\} or as its html code, "#ff8000"\./,
+    /A Color has no field called "alpha", so the value is not read as one\. A Color is sent as \{"r": \.\.\., "g": \.\.\., "b": \.\.\., "a": \.\.\.\} or as its html code, "#ff8000"\./,
     'and a colour naming its alpha otherwise, with the key it goes under',
   );
   await call('scene_node', set({ color: '#00ff0080' }));
@@ -1384,8 +1384,21 @@ async function testAValueTheSceneCannotHoldIsRefused({ call, refusal, project }:
   // A list is a list whatever is in it, so the packed array is asked about its elements too.
   assert.match(
     await refusal('scene_node', set({ polygon: [{ x: 1, y: 2 }, { x: 3 }] })),
-    /item 1 of the list given is Dictionary, not Vector2/,
-    'an element that is not a point should be refused, naming which one',
+    /item 1 of the list given is Dictionary, not Vector2\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\. Setting it/,
+    'an element that is not a point should be refused, naming which one and the shape it takes',
+  );
+  assert.match(
+    await refusal(
+      'scene_node',
+      set({
+        polygon: [
+          { x: 1, y: 2 },
+          { x: 3, y: 4, z: 5 },
+        ],
+      }),
+    ),
+    /item 1 of the list given is Dictionary, not Vector2\. A Vector2 has no field called "z", so the value is not read as one\. A Vector2 is sent as/,
+    'and one carrying a field a point has not, naming that field',
   );
 
   // The file, not the tool. Every assertion above reads a refusal the tool handed back, and a

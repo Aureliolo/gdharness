@@ -38726,6 +38726,103 @@ function testTheEditorIsOfferedWhereItCanAnswer(): void {
 }
 
 /**
+ * An element of a packed list, and a value of a typed map, is refused with how its type is sent and
+ * the field its type has not, as a single value is. A Gradient colour carrying a z was told only that
+ * it was a Dictionary and not a Color, beside an item 0 with the same keys but that one, which was
+ * taken.
+ */
+async function testAnElementIsToldWhatItsTypeTakes(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('element values regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-element-values-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-element-values-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Elements"\n',
+  );
+  writeFileSync(
+    join(project, 'bag.gd'),
+    'extends Resource\n\n@export var marks: Dictionary[String, Vector2] = {}\n',
+  );
+  writeFileSync(
+    join(project, 'bag.tres'),
+    '[gd_resource type="Resource" format=3]\n\n[ext_resource type="Script" path="res://bag.gd" id="1_bag"]\n\n' +
+      '[resource]\nscript = ExtResource("1_bag")\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const edit = async (args: Record<string, unknown>): Promise<{ answer: unknown; said: string }> => {
+    const response = await server.request(
+      'tools/call',
+      { name: 'resource_edit', arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    return { answer: parseTextContent(response), said: textOf(response) ?? JSON.stringify(response) };
+  };
+  const file = (name: string): string => readFileSync(join(project, name), 'utf8');
+  try {
+    await server.initialize('regression-test');
+    const made = await edit({ op: 'create', resourcePath: 'res://shade.tres', resourceType: 'Gradient' });
+    assert.ok(made.answer !== null, `the gradient is made: ${made.said}`);
+    const before = file('shade.tres');
+    const red = { r: 1, g: 0, b: 0, a: 1 };
+    const colours = await edit({
+      op: 'modify',
+      resourcePath: 'res://shade.tres',
+      properties: { colors: [red, { r: 0, g: 1, b: 0, a: 1, z: 3 }] },
+    });
+    assert.equal(
+      colours.said,
+      'Gradient.colors is PackedColorArray and item 1 of the list given is Dictionary, not Color. A Color has no field called "z", so the value is not read as one. A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code, "#ff8000". Setting it would save a different value than the one asked for.',
+    );
+    assert.equal(file('shade.tres'), before, 'and the file is as it was');
+    const taken = await edit({
+      op: 'modify',
+      resourcePath: 'res://shade.tres',
+      properties: { colors: [red, { r: 0, g: 1, b: 0, a: 1 }] },
+    });
+    assert.ok(taken.answer !== null, `while the list without it is written: ${taken.said}`);
+    assert.match(
+      file('shade.tres'),
+      /colors = PackedColorArray\(1, 0, 0, 1, 0, 1, 0, 1\)/,
+      file('shade.tres'),
+    );
+
+    const marks = await edit({
+      op: 'modify',
+      resourcePath: 'res://bag.tres',
+      properties: { marks: { home: { x: 1, y: 2, z: 3 } } },
+    });
+    assert.match(
+      marks.said,
+      /\.marks holds Vector2 values, and the one given for "home" is .*\. A Vector2 has no field called "z", so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\. Setting it would save/,
+      marks.said,
+    );
+    const marked = await edit({
+      op: 'modify',
+      resourcePath: 'res://bag.tres',
+      properties: { marks: { home: { x: 1, y: 2 } } },
+    });
+    assert.ok(marked.answer !== null, `while a map of points is written: ${marked.said}`);
+    assert.match(
+      file('bag.tres'),
+      /marks = Dictionary\[String, Vector2\]\(\{\s*"home": Vector2\(1, 2\)/,
+      file('bag.tres'),
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * A project setting takes a value the way a property write does.
  *
  * Settings were built from the value alone, so a vector written as its fields without a tag was a
@@ -38768,7 +38865,7 @@ async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
     const deep = await set(gravity, { x: 0, y: 3, z: 1 });
     assert.match(
       deep.said,
-      /declared as Vector2, .* cannot become one\. A Vector2 has no z, so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\./,
+      /declared as Vector2, .* cannot become one\. A Vector2 has no field called "z", so the value is not read as one\. A Vector2 is sent as \{"x": \.\.\., "y": \.\.\.\}\./,
       'one carrying a field it has not is refused naming it',
     );
     assert.match(
@@ -38790,7 +38887,7 @@ async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
     const alpha = await set(clear, { r: 1, g: 0, b: 0, alpha: 0.5 });
     assert.ok(
       alpha.said.includes(
-        'A Color has no alpha, so the value is not read as one. A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code, "#ff8000".',
+        'A Color has no field called "alpha", so the value is not read as one. A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code, "#ff8000".',
       ),
       `a colour naming its alpha otherwise is told the key it goes under: ${alpha.said}`,
     );
@@ -43863,6 +43960,11 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       '[sub_resource type="Animation" id="Animation_long"]\nscript = ExtResource("1_stretched")\nresource_name = "long"\n\n' +
       '[resource]\n_data = {\n&"long": SubResource("Animation_long")\n}\n',
     'stretched.tscn': `${player('stretched.tres')}\n[node name="Root" type="Node" parent="."]\n`,
+    'lone.tscn': '[gd_scene format=3]\n\n[node name="Lone" type="Node2D"]\n',
+    'warned.gd': 'extends Node2D\n',
+    'warned.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" uid="uid://kwuaqmq5q26f" path="res://warned.gd" id="1_warned"]\n\n' +
+      '[node name="Warned" type="Node2D"]\nscript = ExtResource("1_warned")\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -43963,7 +44065,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     // A path from the root's own name, as a tree lists the root, is answered with how paths are read:
     // by a write, by a read with no editor, and by the scene tools, which share the sentence.
     const fromRoot =
-      'AnimationPlayer not found at: Root/Player. Paths go from the root, Root, whose own path is ".", so this one is "Player".';
+      'AnimationPlayer not found at: Root/Player. Paths go from the root, Root, whose own path is ".", so this one is "Player". The scene\'s AnimationPlayer is at "Player".';
     for (const op of ['create', 'read']) {
       assert.equal(
         textOf(await call({ op, playerNodePath: 'Root/Player', animationName: 'more' })),
@@ -43973,7 +44075,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     }
     assert.equal(
       textOf(await call({ op: 'read', playerNodePath: 'Nowhere/Player' })),
-      'AnimationPlayer not found at: Nowhere/Player. The root, Root, has no Nowhere; its children are Body, Player, Tree, Bare.',
+      'AnimationPlayer not found at: Nowhere/Player. The root, Root, has no Nowhere; its children are Body, Player, Tree, Bare. The scene\'s AnimationPlayer is at "Player".',
       'and a path that is simply wrong is told where it leaves the scene, with no word of the root',
     );
     // A root with a child of its own name: there the path names that child, which has no player.
@@ -43987,10 +44089,49 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
             animationName: 'more',
           }),
         ),
-        'AnimationPlayer not found at: Root/Player. Root has no Player; it has no children.',
+        'AnimationPlayer not found at: Root/Player. Root has no Player; it has no children. The scene\'s AnimationPlayer is at "Player".',
         `${op} under a child named like the root`,
       );
     }
+    // A path that reaches a node of another class is told what is there and where the scene keeps
+    // the kind asked for, by a write and by a read with no editor, which find the node apart.
+    for (const op of ['create', 'read']) {
+      assert.equal(
+        textOf(await call({ op, playerNodePath: 'Body', animationName: 'more' })),
+        'AnimationPlayer not found at: Body. The node at "Body" is a Sprite2D, not an AnimationPlayer. The scene\'s AnimationPlayer is at "Player".',
+        `${op} at a node of another class`,
+      );
+      assert.equal(
+        textOf(await call({ op, scenePath: 'lone.tscn', playerNodePath: '.', animationName: 'more' })),
+        'AnimationPlayer not found at: . The node at "." is a Node2D, not an AnimationPlayer. The scene holds no AnimationPlayer.',
+        `${op} in a scene with no player`,
+      );
+    }
+    for (const args of [
+      { op: 'add_state', stateName: 'More', animationName: 'spin' },
+      { op: 'read_states' },
+    ]) {
+      const op = args.op;
+      assert.equal(
+        textOf(await call({ ...args, animTreePath: 'Player' })),
+        'AnimationTree not found at: Player. The node at "Player" is an AnimationPlayer, not an AnimationTree. The scene\'s AnimationTrees are at "Tree", "Bare".',
+        `${op} at a player, where a tree was asked for`,
+      );
+    }
+    // Each load of a scene prints the engine's warnings about the file again, so a read that loaded
+    // it four times repeated a stale uid four times beneath its answer.
+    const warned = await call({ op: 'read', scenePath: 'warned.tscn', playerNodePath: '.' });
+    const warnedContent = asArray(get(warned, 'result', 'content'));
+    assert.equal(
+      text(get(warnedContent[0], 'text')),
+      'AnimationPlayer not found at: . The node at "." is a Node2D, not an AnimationPlayer. The scene holds no AnimationPlayer.',
+      JSON.stringify(warned),
+    );
+    const extras: unknown = JSON.parse(text(get(warnedContent[1], 'text')));
+    const warnings = asArray(get(extras, 'engine_messages')).filter((entry) =>
+      text(get(entry, 'text')).includes('invalid UID: uid://kwuaqmq5q26f'),
+    );
+    assert.equal(warnings.length, 1, `the stale uid is told once: ${JSON.stringify(warnedContent)}`);
     const asParent = await server.request(
       'tools/call',
       {
@@ -45673,6 +45814,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowedRunWritesItsMovie,
   testTheEditorIsOfferedWhereItCanAnswer,
   testASettingTakesWhatAPropertyTakes,
+  testAnElementIsToldWhatItsTypeTakes,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,

@@ -133,7 +133,7 @@ func cannot_hold(
 				var named: Array = [
 					holder, property, held, index, type_string(typeof(items[index])), type_string(element)
 				]
-				return shape % named + cost
+				return shape % named + GdhShapes.remedy(items[index], element) + cost
 	if expected_type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
 		var entries: Dictionary = value
 		var key_type: int = GdhRead.as_int(elements[0], TYPE_NIL)
@@ -146,7 +146,7 @@ func cannot_hold(
 			if not GdhSerialisation.acceptable(entry, value_type):
 				var shape: String = "%s.%s holds %s values, and the one given for %s is %s."
 				var named: Array = [holder, property, type_string(value_type), shown(key), shown(entry)]
-				return shape % named + cost
+				return shape % named + GdhShapes.remedy(entry, value_type) + cost
 	return ""
 
 
@@ -231,8 +231,7 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 	for index: int in range(1, steps.size()):
 		var step: String = steps[index]
 		var has: PackedStringArray = GdhSerialisation.components_of(value)
-		var kind: String = type_string(typeof(value))
-		var sort: String = ("an " if kind.left(1).to_upper() in ["A", "E", "I", "O", "U"] else "a ") + kind
+		var sort: String = GdhRead.with_article(type_string(typeof(value)))
 		if has.is_empty():
 			return {
 				"refused":
