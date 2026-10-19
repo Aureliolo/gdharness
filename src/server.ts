@@ -164,7 +164,7 @@ import {
   LSPTimeout,
   normalizeLSPError,
 } from './lsp_client.js';
-import { withNearestFiles } from './nearest.js';
+import { nearest, withNearestFiles } from './nearest.js';
 import { launchOutsideTheTree } from './outside.js';
 import {
   exportedBuild,
@@ -1621,26 +1621,51 @@ function describeValue(value: unknown): string {
  *
  * A schema naming no type asks nothing, because some arguments genuinely have none: a value being
  * fitted to a property is whatever that property holds, and that is the engine's business.
+ *
+ * The walk follows the schema into the elements of a list and the fields of an object, as
+ * `unlistedValues` does, because that is where the same mistake hides: a modification's `params`
+ * sent as a list was written into the script as `signal changed([])`. A field a closed object does
+ * not name is refused there too, as an argument the tool does not name is at the top, since a
+ * misspelt `vartype` was otherwise dropped and the variable written as a Variant.
  */
 function wrongTypes(spec: ToolSpec, args: OperationParams): string[] {
-  const complaints: string[] = [];
-  for (const [name, value] of Object.entries(args)) {
-    if (value === undefined || value === null) {
-      continue;
-    }
-    const declared = spec.parameters[name]?.['type'];
-    const wanted =
-      typeof declared === 'string'
-        ? [declared]
-        : Array.isArray(declared)
-          ? declared.filter((kind) => typeof kind === 'string')
-          : [];
-    if (wanted.length === 0 || wanted.some((kind) => isOfType(value, kind))) {
-      continue;
-    }
-    complaints.push(`${name} as ${wanted.join(' or ')}, not ${describeValue(value)}`);
+  return Object.entries(args).flatMap(([name, value]) => misshapen(spec.parameters[name], value, name));
+}
+
+export function misshapen(schema: unknown, value: unknown, path: string): string[] {
+  if (!isPlainObject(schema) || value === undefined || value === null) {
+    return [];
   }
-  return complaints;
+  const declared = schema['type'];
+  const wanted =
+    typeof declared === 'string'
+      ? [declared]
+      : Array.isArray(declared)
+        ? declared.filter((kind): kind is string => typeof kind === 'string')
+        : [];
+  if (wanted.length > 0 && !wanted.some((kind) => isOfType(value, kind))) {
+    return [`${path} as ${wanted.join(' or ')}, not ${describeValue(value)}`];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((element, index) => misshapen(schema['items'], element, `${path}[${index}]`));
+  }
+  const properties = schema['properties'];
+  if (!isPlainObject(properties) || !isPlainObject(value)) {
+    return [];
+  }
+  return Object.entries(value).flatMap(([field, held]) => {
+    if (Object.hasOwn(properties, field)) {
+      return misshapen(properties[field], held, `${path}.${field}`);
+    }
+    if (schema['additionalProperties'] !== false) {
+      return [];
+    }
+    const fields = Object.keys(properties);
+    const close = nearest(field, fields);
+    return [
+      `${path} with only the fields ${fields.join(', ')}, and ${field} is none of them${close.length === 0 ? '' : ` (the nearest is ${close[0]})`}`,
+    ];
+  });
 }
 
 /**
