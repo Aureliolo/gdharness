@@ -7339,6 +7339,21 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
         `${tool} ${op} is being told which project, so it should ask for one`,
       );
     }
+    // Sent but empty is told apart from not sent, since "needs actionName" to a caller who sent
+    // one reads as a field the server never saw.
+    assert.equal(
+      await call('project_settings', {
+        op: 'add_input_action',
+        projectPath: '/p',
+        actionName: ' ',
+        events: [],
+      }),
+      'project_settings add_input_action needs actionName, which was given empty.',
+    );
+    assert.equal(
+      await call('project_settings', { op: 'add_input_action', actionName: '' }),
+      'project_settings add_input_action needs projectPath; actionName, which was given empty; events.',
+    );
 
     // The other half, or this passes against a server that refuses every op-specific argument.
     // Accepted means reaching the runtime and finding nothing there, which is one sentence; the
