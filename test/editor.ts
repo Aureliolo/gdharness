@@ -1212,7 +1212,24 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
   assert.ok(existsSync(join(project, 'fixture.tscn')), 'scene_create should write the scene file');
 
   await call('scene_node', { ...scene, op: 'add', nodeType: 'Button', nodeName: 'Press' });
-  await call('scene_node', { ...scene, op: 'set', nodePath: 'Press', properties: { text: 'Go' } });
+  const worded = await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Press',
+    properties: { text: 'Go' },
+  });
+  assert.equal(get(worded, 'alsoChanged'), undefined, `a text moves nothing else: ${JSON.stringify(worded)}`);
+  const sized = await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Press',
+    properties: { size: { x: 120, y: 40 } },
+  });
+  assert.deepEqual(
+    get(sized, 'alsoChanged'),
+    { offset_right: { was: 0, now: 120 }, offset_bottom: { was: 0, now: 40 } },
+    `the editor names the offsets a size set: ${JSON.stringify(sized)}`,
+  );
 
   const read = await call('scene_node', { ...scene, op: 'get', nodePath: 'Press' });
   assert.equal(get(read, 'properties', 'text'), 'Go', 'the property should read back off the node');

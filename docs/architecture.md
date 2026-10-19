@@ -979,6 +979,10 @@ only in the editor's log: a `Timer` given a `wait_time` of 0 holds 1, a `Sprite2
 for its texture holds nothing. Each property set in a call is set once more after the rest, so a
 `ProgressBar` given `value` before a larger `max_value` is not left clamped to the old maximum, and
 then anything still holding something other than what was sent is refused with what it holds. The
+stored properties the call was not given are read before and after it, and those a setter moved
+come back under `alsoChanged`: a `Gradient` given a third colour gives the new point an offset of 0,
+and a `Control` given a size keeps it as offsets, so the answer names what the file will hold beyond
+what was asked. A list is copied before the write, since a setter can add to one in place. The
 element types of a typed `Array` or `Dictionary` export come from the property's declaration, since
 in the editor a script's exports sit behind a placeholder that stores whatever it is given.
 

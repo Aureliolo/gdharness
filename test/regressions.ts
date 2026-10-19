@@ -38823,6 +38823,135 @@ async function testAnElementIsToldWhatItsTypeTakes(): Promise<void> {
 }
 
 /**
+ * A write names what else the engine changed. A setter keeps other properties in step with the one
+ * it is given: a Gradient given a third colour gave that point an offset of 0, and the answer named
+ * only the colours, so the caller learnt of the offset by reading the file.
+ */
+async function testAWriteSaysWhatElseItChanged(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('side effects regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-side-effects-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-side-effects-rt-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Side"\n');
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n');
+  // A setter that adds to a list it holds rather than replacing it, so the list read before the write
+  // is the list read after it unless it was copied.
+  writeFileSync(
+    join(project, 'tally.gd'),
+    '@tool\nextends Resource\n\n@export var seen: Array[int] = []\n@export var level: int = 0:\n' +
+      '\tset(value):\n\t\tlevel = value\n\t\tseen.append(value)\n',
+  );
+  writeFileSync(
+    join(project, 'tally.tres'),
+    '[gd_resource type="Resource" format=3]\n\n[ext_resource type="Script" path="res://tally.gd" id="1_tally"]\n\n' +
+      '[resource]\nscript = ExtResource("1_tally")\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+    const response = await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answer = parseTextContent(response);
+    assert.ok(
+      answer !== null,
+      `${name} ${String(args['op'])}: ${textOf(response) ?? JSON.stringify(response)}`,
+    );
+    return answer;
+  };
+  const node = async (args: Record<string, unknown>): Promise<unknown> =>
+    await call('scene_node', { scenePath: 'res://main.tscn', ...args });
+  const colour = (value: number): Record<string, number> => ({ r: value, g: value, b: value, a: 1 });
+  try {
+    await server.initialize('regression-test');
+    await call('resource_edit', { op: 'create', resourcePath: 'res://shade.tres', resourceType: 'Gradient' });
+    const grown = await call('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://shade.tres',
+      properties: { colors: [colour(0), colour(0.5), colour(1)] },
+    });
+    assert.deepEqual(
+      get(grown, 'alsoChanged'),
+      { offsets: { was: [0, 1], now: [0, 1, 0] } },
+      `a third colour gives its point an offset, and the answer says so: ${JSON.stringify(grown)}`,
+    );
+    const placed = await call('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://shade.tres',
+      properties: { offsets: [0, 0.5, 1], colors: [colour(1), colour(0.5), colour(0)] },
+    });
+    assert.equal(
+      get(placed, 'alsoChanged'),
+      undefined,
+      `given both, nothing else moved: ${JSON.stringify(placed)}`,
+    );
+    assert.match(
+      readFileSync(join(project, 'shade.tres'), 'utf8'),
+      /offsets = PackedFloat32Array\(0, 0\.5, 1\)/,
+    );
+    const counted = await call('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://tally.tres',
+      properties: { level: 3 },
+    });
+    assert.deepEqual(
+      get(counted, 'alsoChanged'),
+      { seen: { was: [], now: [3] } },
+      `a list a setter adds to is named with what it held: ${JSON.stringify(counted)}`,
+    );
+
+    const sized = await node({
+      op: 'add',
+      nodeType: 'Control',
+      nodeName: 'Panel',
+      properties: { size: { x: 200, y: 40 } },
+    });
+    assert.deepEqual(
+      get(sized, 'alsoChanged'),
+      { offset_right: { was: 0, now: 200 }, offset_bottom: { was: 0, now: 40 } },
+      `a size is kept as offsets: ${JSON.stringify(sized)}`,
+    );
+    const filled = await node({ op: 'set', nodePath: 'Panel', properties: { anchors_preset: 15 } });
+    assert.deepEqual(
+      Object.keys(asObject(get(filled, 'alsoChanged'), 'alsoChanged')).sort(),
+      ['anchor_bottom', 'anchor_right', 'grow_horizontal', 'grow_vertical', 'offset_bottom', 'offset_right'],
+      `a preset sets the anchors, offsets and growth: ${JSON.stringify(filled)}`,
+    );
+    const moved = await node({
+      op: 'add',
+      nodeType: 'Node2D',
+      nodeName: 'Mover',
+      properties: { position: { x: 3, y: 4 }, rotation: 1.5 },
+    });
+    assert.equal(get(moved, 'nodePath'), 'Mover', JSON.stringify(moved));
+    assert.equal(
+      get(moved, 'alsoChanged'),
+      undefined,
+      `a position moves nothing else: ${JSON.stringify(moved)}`,
+    );
+    const nudged = await node({ op: 'set', nodePath: 'Mover', properties: { 'position:x': 9 } });
+    assert.deepEqual(get(nudged, 'properties', 'position:x'), 9, JSON.stringify(nudged));
+    assert.equal(
+      get(nudged, 'alsoChanged'),
+      undefined,
+      `one axis of a property given is that property, not another: ${JSON.stringify(nudged)}`,
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * A project setting takes a value the way a property write does.
  *
  * Settings were built from the value alone, so a vector written as its fields without a tag was a
@@ -45815,6 +45944,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorIsOfferedWhereItCanAnswer,
   testASettingTakesWhatAPropertyTakes,
   testAnElementIsToldWhatItsTypeTakes,
+  testAWriteSaysWhatElseItChanged,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,

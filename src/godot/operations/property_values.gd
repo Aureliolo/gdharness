@@ -72,6 +72,12 @@ var _values: GdhSerialisation = GdhSerialisation.new()
 # built inside the parse and there is nowhere in a parsed value to put the reason it is wrong.
 var _refused: String = ""
 
+# The stored properties the last write_all changed without being given them, by name, as [what it
+# held before, what it holds now]. A setter keeps other properties in step with the one it is given:
+# a Gradient given a third colour gives that point an offset of 0, a Control given a size moves its
+# offsets. An answer naming only what was given leaves the caller to guess the rest.
+var _also_changed: Dictionary = {}
+
 
 ## Turns what arrived over the wire into the Godot value a property wants.
 ##
@@ -170,6 +176,11 @@ func cannot_hold(
 ## Nothing here saves, so a refusal partway leaves the change in memory and the file as it was. The
 ## caller returns the refusal instead of saving.
 func write_all(target: Object, properties: Dictionary) -> String:
+	_also_changed = {}
+	var named: Dictionary = {}
+	for key: Variant in properties:
+		named[str(key).get_slice(":", 0)] = true
+	var before: Dictionary = _stored(target, named)
 	var given: Dictionary = {}
 	for key: Variant in properties:
 		var property: String = str(key)
@@ -199,7 +210,60 @@ func write_all(target: Object, properties: Dictionary) -> String:
 				)
 				% [target.get_class(), property, shown(given[property]), shown(held)]
 			)
+	for property: String in before:
+		var now: Variant = target.get(property)
+		if not same(now, before[property]):
+			_also_changed[property] = [before[property], now]
 	return ""
+
+
+## Puts under alsoChanged in [param answer] each property the last [method write_all] changed
+## without being given it, as {was, now}, when there are any. A node is named by its path from
+## [param relative_to], as a scene answer names one. Called before the scene is written, since the
+## write frees the nodes these values can hold.
+func note_also_changed(answer: Dictionary, relative_to: Node = null) -> void:
+	if _also_changed.is_empty():
+		return
+	var noted: Dictionary = {}
+	for property: Variant in _also_changed:
+		var pair: Array = _also_changed[property]
+		noted[property] = {"was": _readable(pair[0], relative_to), "now": _readable(pair[1], relative_to)}
+	answer["alsoChanged"] = noted
+
+
+func _readable(value: Variant, relative_to: Node) -> Variant:
+	if value is Node and relative_to != null:
+		var target: Node = value
+		return _values.serialize_value(relative_to.get_path_to(target))
+	if value is Array:
+		var items: Array = value
+		return items.map(func(item: Variant) -> Variant: return _readable(item, relative_to))
+	return _values.serialize_value(value)
+
+
+## What [param target] stores, by name, but its script and the properties in [param leave]. A list
+## or a map is copied, since a setter can change the one it holds in place.
+func _stored(target: Object, leave: Dictionary) -> Dictionary:
+	var held: Dictionary = {}
+	for entry: Dictionary in target.get_property_list():
+		var name: String = str(entry["name"])
+		var usage: int = GdhRead.as_int(entry["usage"])
+		if (
+			usage & PROPERTY_USAGE_STORAGE == 0
+			or usage & HEADINGS != 0
+			or name == "script"
+			or leave.has(name)
+		):
+			continue
+		var value: Variant = target.get(name)
+		if value is Array:
+			var listed: Array = value
+			value = listed.duplicate(true)
+		elif value is Dictionary:
+			var mapped: Dictionary = value
+			value = mapped.duplicate(true)
+		held[name] = value
+	return held
 
 
 ## What [param target] holds under [param key], a property or a colon path into one's components.
