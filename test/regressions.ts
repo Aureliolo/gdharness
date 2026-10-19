@@ -45594,9 +45594,55 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     const bare = textOf(await call({ op: 'read_states', animTreePath: 'Bare' })) ?? '';
     assert.match(
       bare,
-      /^The AnimationTree has no tree_root\. Make one with resource_edit create of an AnimationNodeStateMachine, then give its res:\/\/ path to tree_root with scene_node set\./,
+      /^The AnimationTree has no tree_root\. Give it one with scene_node set: tree_root \{"_type": "AnimationNodeStateMachine"\} builds one into the scene, and the res:\/\/ path of one made with resource_edit create keeps it in a file of its own\./,
       bare,
     );
+    // The first remedy the refusal offers, taken as it is written.
+    const rooted = await server.request(
+      'tools/call',
+      {
+        name: 'scene_node',
+        arguments: {
+          projectPath: project,
+          scenePath: 'moves.tscn',
+          nodePath: 'Bare',
+          op: 'set',
+          properties: { tree_root: { _type: 'AnimationNodeStateMachine' } },
+        },
+      },
+      240_000,
+    );
+    assert.ok(parseTextContent(rooted) !== null, textOf(rooted) ?? JSON.stringify(rooted));
+    const lone = await written({
+      op: 'add_state',
+      animTreePath: 'Bare',
+      stateName: 'Lone',
+      animationName: 'moves/idle',
+    });
+    assert.deepEqual([get(lone, 'animationFound'), get(lone, 'animationMissing')], [false, undefined]);
+
+    // A state whose animation the player lacks is written, as the editor writes one, and says so.
+    const early = await written({
+      op: 'add_state',
+      animTreePath: 'Tree',
+      stateName: 'Early',
+      animationName: 'moves/idel',
+    });
+    assert.equal(get(early, 'animationFound'), false, JSON.stringify(early));
+    assert.equal(
+      get(early, 'animationMissing'),
+      'The AnimationPlayer at Player has no animation moves/idel yet, so the state plays nothing until it has one. The nearest it has are moves/idle, moves/leap.',
+    );
+    const laidOut = parseTextContent(await call({ op: 'read_states', animTreePath: 'Tree' }));
+    assert.match(JSON.stringify(laidOut), /"Early"/, JSON.stringify(laidOut));
+    const found = await written({
+      op: 'add_state',
+      animTreePath: 'Tree',
+      stateName: 'Rest',
+      animationName: 'moves/idle',
+    });
+    assert.deepEqual([get(found, 'animationFound'), get(found, 'animationMissing')], [true, undefined]);
+    assert.match(readFileSync(join(project, 'moves.tscn'), 'utf8'), /^states\/Lone\/node = SubResource\(/m);
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });

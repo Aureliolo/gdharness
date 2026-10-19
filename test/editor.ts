@@ -3206,16 +3206,18 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
     }),
     /No transition can leave End/,
   );
+  const lost = await call('scene_animation', {
+    projectPath: project,
+    scenePath: 'res://moves/treed.tscn',
+    animTreePath: 'Tree',
+    op: 'add_state',
+    stateName: 'Lost',
+    animationName: 'moves/missing',
+  });
+  assert.equal(get(lost, 'animationFound'), false, JSON.stringify(lost));
   assert.match(
-    await refusal('scene_animation', {
-      projectPath: project,
-      scenePath: 'res://moves/treed.tscn',
-      animTreePath: 'Tree',
-      op: 'add_state',
-      stateName: 'Lost',
-      animationName: 'moves/missing',
-    }),
-    /The AnimationPlayer at Body\/Player has no animation moves\/missing for the state to play\./,
+    String(get(lost, 'animationMissing')),
+    /^The AnimationPlayer at Body\/Player has no animation moves\/missing yet, so the state plays nothing until it has one\./,
   );
 
   // A resource kept inside a file, read through the editor by the path a read answers it with.

@@ -978,7 +978,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['read', 'create', 'add_track', 'set', 'rename', 'remove', 'add_state'],
         description:
-          'The animation in the player. read: the one to answer with whole, its tracks a list; without it, read lists them, each with the number of its tracks under tracks. add_state: the one that state plays.',
+          'The animation in the player. read: the one to answer with whole, its tracks a list; without it, read lists them, each with the number of its tracks under tracks. add_state: the one that state plays. One the player does not have yet is written all the same, answering animationFound false and why under animationMissing.',
       },
       newName: {
         type: 'string',

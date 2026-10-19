@@ -860,15 +860,7 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 	if sm.has_node(StringName(state_name)):
 		return scene.refuse("The state machine already has a state named %s." % state_name)
 	var player: AnimationPlayer = anim_tree.get_node_or_null(anim_tree.anim_player) as AnimationPlayer
-	if player != null and not player.has_animation(StringName(animation_name)):
-		# By its path from the scene root, as playerNodePath takes it; anim_player is relative to the
-		# tree ("../Anim"), which no argument takes.
-		return scene.refuse(
-			(
-				"The AnimationPlayer at %s has no animation %s for the state to play."
-				% [str(scene.root.get_path_to(player)), animation_name]
-			)
-		)
+	var found: bool = player != null and player.has_animation(StringName(animation_name))
 
 	var anim_node: AnimationNodeAnimation = AnimationNodeAnimation.new()
 	anim_node.animation = StringName(animation_name)
@@ -888,12 +880,35 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 		"ok": true,
 		"stateName": state_name,
 		"animationName": animation_name,
-		# False when the tree has no player to look the animation up in.
-		"animationFound": player != null,
+		# False when the tree has no player to look the animation up in, or its player has none of
+		# that name.
+		"animationFound": found,
 		"position": GdhSerialisation.new().serialize_value(position),
 	}
+	# Written all the same, as the editor writes one: a state machine is often laid out before its
+	# animations are made, and refusing it stopped a tree being built in that order.
+	if player != null and not found:
+		answer["animationMissing"] = _missing_animation(scene, player, animation_name)
 	var files: Dictionary = machine[1]
 	return _finish(scene, Callable(), files, answer)
+
+
+## Why the state playing [param animation_name] plays nothing yet. The player is named by its path
+## from the scene root, as playerNodePath takes it; anim_player is relative to the tree ("../Anim"),
+## which no argument takes.
+static func _missing_animation(
+	scene: GdhSceneFile, player: AnimationPlayer, animation_name: String
+) -> String:
+	var said: String = (
+		"The AnimationPlayer at %s has no animation %s yet, so the state plays nothing until it has one."
+		% [str(scene.root.get_path_to(player)), animation_name]
+	)
+	var close: PackedStringArray = GdhRead.nearest(animation_name, player.get_animation_list())
+	if close.is_empty():
+		return said
+	return (
+		said + " The nearest %s %s." % ["it has is" if close.size() == 1 else "it has are", ", ".join(close)]
+	)
 
 
 # =============================================================================
