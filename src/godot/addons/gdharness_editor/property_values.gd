@@ -15,6 +15,7 @@ extends RefCounted
 ## dictionary shaped like a vector or a bare pair of numbers can be read as one.
 
 const GdhDeclared = preload("declared_values.gd")
+const GdhPropertyPaths = preload("property_paths.gd")
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
@@ -187,19 +188,27 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		order.push_front("script")
 	for key: Variant in order:
 		var property: String = str(key)
-		var declared: Dictionary = declaration(target, property)
-		if declared.is_empty() and ":" in property:
-			declared = _component_slot(target, property)
+		var place: Array = GdhPropertyPaths.holder_of(target, property)
+		var holder: Object = place[0]
+		var name: String = place[1]
+		var declared: Dictionary = declaration(holder, name)
+		if declared.is_empty():
+			var ungrown: String = GdhPropertyPaths.grow(holder, name, class_called(holder))
+			if not ungrown.is_empty():
+				return ungrown + unwritten
+			declared = declaration(holder, name)
+		if declared.is_empty() and ":" in name:
+			declared = _component_slot(holder, name)
 			if declared.has("refused"):
 				return str(declared["refused"]) + unwritten
-		if declared.is_empty() and target is ShaderMaterial and property.begins_with("shader_parameter/"):
-			return _no_uniform(target as ShaderMaterial, property) + unwritten
+		if declared.is_empty() and holder is ShaderMaterial and name.begins_with("shader_parameter/"):
+			return _no_uniform(holder as ShaderMaterial, name) + unwritten
 		if declared.is_empty():
-			return no_property(target, property) + unwritten
-		var value: Array = value_for(target, declared, properties[key])
+			return _in_its_own_file(holder, name) + unwritten
+		var value: Array = value_for(holder, declared, properties[key])
 		if not value[0]:
 			return str(value[1]) + unwritten
-		var outside: String = GdhDeclared.outside(target, declared, value[1], shown(value[1]))
+		var outside: String = GdhDeclared.outside(holder, declared, value[1], shown(value[1]))
 		if not outside.is_empty():
 			_outside_declared[property] = outside
 		_write(target, property, value[1])
@@ -344,18 +353,24 @@ func _stored(target: Object, leave: Dictionary) -> Dictionary:
 
 ## What [param target] holds under [param key], a property or a colon path into one's components.
 func read_at(target: Object, key: String) -> Variant:
-	if ":" in key and declaration(target, key).is_empty():
-		return target.get_indexed(NodePath(key))
-	return target.get(key)
+	var place: Array = GdhPropertyPaths.holder_of(target, key)
+	var holder: Object = place[0]
+	var name: String = place[1]
+	if ":" in name and declaration(holder, name).is_empty():
+		return holder.get_indexed(NodePath(name))
+	return holder.get(name)
 
 
 ## Writes [param value] under [param key], putting a changed component back into the property it
 ## was read out of, and that one into the one above it.
 func _write(target: Object, key: String, value: Variant) -> void:
-	if ":" in key and declaration(target, key).is_empty():
-		target.set_indexed(NodePath(key), value)
+	var place: Array = GdhPropertyPaths.holder_of(target, key)
+	var holder: Object = place[0]
+	var name: String = place[1]
+	if ":" in name and declaration(holder, name).is_empty():
+		holder.set_indexed(NodePath(name), value)
 	else:
-		target.set(key, value)
+		holder.set(name, value)
 
 
 ## The declaration the last step of [param path] would have, typed as the component it reaches, so
@@ -675,15 +690,29 @@ func _resource_at(path: String, property: String) -> Array:
 ## its name, so without this a typo or a heading saved a file that had not changed and reported it
 ## as one that had.
 func declaration(target: Object, property: String) -> Dictionary:
-	for declared: Dictionary in target.get_property_list():
-		if str(declared.get("name", "")) != property:
-			continue
-		if GdhRead.as_int(declared.get("usage", 0)) & HEADINGS:
-			continue
-		return declared
-	if target is Theme:
+	var declared: Dictionary = GdhPropertyPaths.declared_on(target, property)
+	if declared.is_empty() and target is Theme:
 		return _theme_item(property)
-	return {}
+	return declared
+
+
+## The refusal for [param name], which [param target] does not declare. One that starts with a
+## property holding a resource kept in a file of its own names that file, since the write belongs
+## there: through a TileMapLayer's tile_set the layer's scene would be saved and the TileSet's file
+## left as it was.
+static func _in_its_own_file(target: Object, name: String) -> String:
+	var at: int = name.find("/")
+	while at > 0:
+		var head: String = name.left(at)
+		var held: Resource = GdhPropertyPaths.held_at(target, head)
+		if held != null and not held.is_built_in():
+			var file: String = held.resource_path
+			return (
+				"%s.%s is %s, a file of its own, so %s is written there, with resource_edit modify on %s."
+				% [class_called(target), head, file, name.substr(at + 1), file]
+			)
+		at = name.find("/", at + 1)
+	return no_property(target, name)
 
 
 ## The entry a Theme would declare for [param property] once it held that item, or {} when the name
