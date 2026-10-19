@@ -2742,7 +2742,7 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
 
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'Clock' }),
-    /\. already has a child named Clock/,
+    /: The root, \w+, already has a child named Clock\.$/m,
   );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'a.b' }),
@@ -3378,7 +3378,7 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
   );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Timer2', nodeName: 'Late' }),
-    /nodeType must be a node class, and Timer2 is not one/,
+    /nodeType must be a node class, and Timer2 is not one; the nearest (is|are) [^.]*\bTimer\b/,
   );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'duplicate', nodePath: '.', newName: 'Again' }),

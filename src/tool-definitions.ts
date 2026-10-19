@@ -761,7 +761,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_create',
     title: 'Create or save a scene',
-    description: `Creates a scene file where none is, saves one, or saves a copy under a new path. A save of a scene open in the editor saves the editor's copy, unsaved changes included. ${WITHOUT_AN_EDITOR}`,
+    description: `Creates a scene file where none is, saves one, or saves a copy under a new path. create makes a folder the path names that is not there, and names it under madeFolder. A save of a scene open in the editor saves the editor's copy, unsaved changes included. ${WITHOUT_AN_EDITOR}`,
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -987,7 +987,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'number',
         ops: ['create', 'set'],
         description:
-          'Seconds, more than 0. create: default 1. set: a key past the new end is kept, as the editor keeps it, and named under pastLength, since it never plays.',
+          'create and set: seconds, more than 0. create: default 1. set: a key past the new end is kept, as the editor keeps it, and named under pastLength, since it never plays.',
       },
       loopMode: {
         type: 'string',
@@ -998,7 +998,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       step: {
         type: 'number',
         ops: ['create', 'set'],
-        description: 'Keyframe snap in seconds, 0 or more. create: default 0.1.',
+        description: 'create and set: keyframe snap in seconds, 0 or more. create: default 0.1.',
       },
       track: { ...ANIMATION_TRACK, ops: ['add_track'] },
       animTreePath: {
@@ -1275,7 +1275,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       preview: {
         type: 'boolean',
         ops: ['move'],
-        description: 'move: answer with what would move and change, and write nothing. Default false.',
+        description:
+          'move: answer with what would move and change, and write nothing. A move that would be refused is refused here too, with the same reason. Default false.',
       },
       controlType: {
         type: 'string',

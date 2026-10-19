@@ -7429,7 +7429,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 134;
+const READ_IN_WORDS = 135;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -7517,7 +7517,7 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
 
     assert.equal(classOf('editor_status'), 'read', 'a status read changes nothing');
     assert.equal(classOf('runtime_inspect'), 'read', 'nor does inspecting the game');
-    assert.equal(classOf('scene_animation'), 'additive', 'an animation op adds and refuses a name in use');
+    assert.equal(classOf('scene_animation'), 'destructive', 'scene_animation can remove an animation');
     assert.equal(classOf('runtime_input'), 'additive', 'input is what a player could send');
     assert.equal(classOf('scene_node'), 'destructive', 'scene_node can delete a node');
     assert.equal(classOf('resource_edit'), 'destructive', 'resource_edit writes over a resource');
@@ -7529,7 +7529,7 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
     }
     assert.deepEqual(
       counts,
-      { read: 13, additive: 5, destructive: 12 },
+      { read: 13, additive: 4, destructive: 13 },
       'each class holds what the table holds',
     );
 
@@ -44401,6 +44401,44 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     });
     assert.equal(get(boss, 'nodeType'), 'Hero', JSON.stringify(boss));
     assert.deepEqual(sets('made.tscn', '[node name="Boss" type="Node2D"'), ['script = ExtResource']);
+    // The root by its name: its path is ".", and ". already has a child" read as a typo.
+    assert.equal(
+      textOf(
+        await call('scene_node', { op: 'add', scenePath: 'made.tscn', nodeName: 'Boss', nodeType: 'Node' }),
+      ),
+      'The root, Node2D, already has a child named Boss.',
+    );
+    // A scene that is not there is refused before anything loads it, so no engine error and
+    // backtrace lie beneath the refusal, and the nearest scenes are offered.
+    const orc = await call('scene_node', {
+      op: 'add',
+      scenePath: 'made.tscn',
+      nodeName: 'Orc',
+      instancePath: 'res://mad.tscn',
+    });
+    assert.equal(
+      textOf(orc),
+      'No scene at res://mad.tscn to instance. The nearest .tscn file is res://made.tscn.',
+    );
+    assert.equal(asArray(get(orc, 'result', 'content')).length, 1, JSON.stringify(orc));
+    assert.equal(
+      textOf(await call('scene_create', { op: 'create', scenePath: 'typo.tscn', rootNodeType: 'Node2DD' })),
+      'rootNodeType must be a node class, and Node2DD is not one; the nearest are Node2D, Node, Node3D.',
+    );
+    // A folder the path names is made, and said to be.
+    const mapped = await written('scene_create', {
+      op: 'create',
+      scenePath: 'maps/one.tscn',
+      rootNodeType: 'Node2D',
+    });
+    assert.equal(get(mapped, 'madeFolder'), 'res://maps', JSON.stringify(mapped));
+    assert.ok(existsSync(join(project, 'maps', 'one.tscn')));
+    const beside = await written('scene_create', {
+      op: 'create',
+      scenePath: 'maps/two.tscn',
+      rootNodeType: 'Node2D',
+    });
+    assert.equal(get(beside, 'madeFolder'), undefined, JSON.stringify(beside));
     const clash =
       textOf(
         await call('scene_create', {
