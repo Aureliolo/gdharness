@@ -437,7 +437,9 @@ func unusable_name(parent: Node, child_name: String, moving: Node = null) -> Str
 		return unfit
 	var taken: Node = parent.get_node_or_null(NodePath(child_name))
 	if taken != null and taken != moving and taken.get_parent() == parent:
-		return "%s already has a child named %s." % [path_of(parent), child_name]
+		# The root by its name, since its path is ".", and ". already has a child" read as a typo.
+		var holder: String = "The root, %s," % parent.name if parent == root else path_of(parent)
+		return "%s already has a child named %s." % [holder, child_name]
 	return ""
 
 

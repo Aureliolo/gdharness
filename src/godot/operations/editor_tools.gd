@@ -37,6 +37,9 @@ const RESOURCE_COMMANDS: Array[String] = [
 const ANIMATION_COMMANDS: Array[String] = [
 	"create_animation",
 	"add_animation_track",
+	"set_animation",
+	"rename_animation",
+	"remove_animation",
 	"add_animation_state",
 	"connect_animation_states",
 ]
