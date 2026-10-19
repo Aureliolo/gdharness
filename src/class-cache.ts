@@ -857,18 +857,22 @@ export function uncachedClassNote(types: readonly string[]): string {
  * file, so the remedy is the one that rewrites it, and the editor rescan offered beside an editor
  * has nothing to ask here.
  */
-export function uncachedForTheEngineNote(types: readonly UnloadedType[]): string {
+export function uncachedForTheEngineNote(projectPath: string, types: readonly UnloadedType[]): string {
   if (types.length === 0) {
     return '';
   }
   const one = types.length === 1;
   const named = types.map((type) => `${type.type} (${type.declaredIn})`).join(', ');
+  // A project never opened has no cache at all, and "missing from" a file that is not there sent
+  // a caller looking for a stale one.
+  const cacheExists = existsSync(join(projectPath, '.godot', 'global_script_class_cache.cfg'));
+  const state = cacheExists
+    ? `missing from .godot/global_script_class_cache.cfg, which is where the engine that compiled these scripts resolves a class name from, so the error is the cache being behind the files rather than the script.`
+    : `the engine that compiled these scripts resolves a class name from .godot/global_script_class_cache.cfg, which has not been written yet, as in a project no editor has opened, so the error is the missing cache rather than the script.`;
   return (
-    `${named} ${one ? 'is' : 'are'} declared in this project and missing from ` +
-    '.godot/global_script_class_cache.cfg, which is where the engine that compiled these scripts ' +
-    `resolves a class name from, so the error is the cache being behind the files rather than the script. ` +
-    'project_import refresh_classes rewrites the cache from the declarations on disk; editor_run start ' +
-    'rewrites it before a game, and an editor opening the project rewrites it when it scans.'
+    `${named} ${one ? 'is' : 'are'} declared in this project${cacheExists ? ' and' : ', but'} ${state} ` +
+    'project_import refresh_classes writes the cache from the declarations on disk; editor_run start ' +
+    'writes it before a game, and an editor opening the project writes it when it scans.'
   );
 }
 

@@ -913,6 +913,19 @@ function testOperations(godotPath: string, projectDir: string): void {
     'float',
     'the parser should read the type off the variable that was just added',
   );
+  // The newline ending the last line starts no line of its own, as an editor or wc counts them.
+  const countedPath = join(projectDir, 'made', 'counted.gd');
+  const counts = [
+    'extends Node\n\nvar a := 1\n',
+    'extends Node\r\n\r\nvar a := 1\r\n',
+    'extends Node\nvar a := 1',
+    '',
+  ].map((content) => {
+    writeFileSync(countedPath, content);
+    return get(operation('get_script_info', { script_path: 'made/counted.gd' }), 'line_count');
+  });
+  rmSync(countedPath);
+  assert.deepEqual(counts, [3, 3, 2, 0], 'a script counts the lines it holds');
 
   // Project settings, including the value serialisers on both the way in and the way out.
   const name = operation('get_project_setting', { setting: 'application/config/name' });
@@ -1446,7 +1459,14 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
 
   // The chain the dependency walk was pointed at is also what refers to leaf.gd, and each
-  // reference says how: middle.gd preloads it.
+  // reference says how: middle.gd preloads it. Written here as dependencyWalk writes them, so the
+  // case reads the same files when it runs on its own.
+  mkdirSync(join(projectDir, 'chain'), { recursive: true });
+  writeFileSync(join(projectDir, 'chain', 'leaf.gd'), 'extends Node\n');
+  writeFileSync(
+    join(projectDir, 'chain', 'middle.gd'),
+    'extends Node\n\nconst Leaf = preload("res://chain/leaf.gd")\n',
+  );
   const usages = operation('find_resource_usages', { resource_path: 'chain/leaf.gd' });
   const middle = asArray(get(usages, 'usages')).find(
     (entry) => get(entry, 'file') === 'res://chain/middle.gd',
@@ -2070,7 +2090,20 @@ function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _p
     assert.match(
       runRefusedOperation(godotPath, dir, 'find_resource_usages', { resource_path: 'res://glow.gdshader' })
         .stderr,
-      /Resource file does not exist: res:\/\/glow\.gdshader\. The project holds no \.gdshader file\./,
+      /Resource file does not exist: res:\/\/glow\.gdshader, and nothing in the project refers to it\. The project holds no \.gdshader file\./,
+    );
+    // A gone file something still refers to is searched for, since that is what is asked of one.
+    const gone = operation('find_resource_usages', { resource_path: 'res://gone.png' });
+    assert.deepEqual(
+      [
+        get(gone, 'exists'),
+        asArray(get(gone, 'usages')).map((usage) => [
+          get(usage, 'file'),
+          asArray(get(usage, 'references')).map((reference) => get(reference, 'kind')),
+        ]),
+      ],
+      [false, [['res://stage.tscn', ['ext_resource']]]],
+      JSON.stringify(gone),
     );
     // Every operation that reads a named file refuses one that is not there the same way. A script
     // named unlike the operations and addons this project carries, which are scripts of it too.

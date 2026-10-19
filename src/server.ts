@@ -6114,7 +6114,9 @@ class GodotServer {
       checked: checked.payload.checked.length,
       failures: failures.map((failure, at) => {
         const types = uncached[at] ?? [];
-        return types.length === 0 ? failure : { ...failure, note: uncachedForTheEngineNote(types) };
+        return types.length === 0
+          ? failure
+          : { ...failure, note: uncachedForTheEngineNote(projectPath, types) };
       }),
     };
   }
@@ -7119,7 +7121,7 @@ class GodotServer {
             ? {}
             : {
                 typesMissingFromTheClassCache: uncached.map(({ type, declaredIn }) => ({ type, declaredIn })),
-                staleAnalysis: uncachedForTheEngineNote(uncached),
+                staleAnalysis: uncachedForTheEngineNote(projectPath, uncached),
               }),
         };
       }),

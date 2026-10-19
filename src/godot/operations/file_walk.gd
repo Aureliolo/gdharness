@@ -40,6 +40,9 @@ func with_nearest_files(said: String, path: String) -> String:
 	if extension.is_empty():
 		return said
 	var files: Array[String] = find_files_with_extensions("res://", [extension])
+	# The walk lists a directory in the order the filesystem keeps it, which differs between
+	# platforms, so the same project was answered with its files in another order on Linux.
+	files.sort()
 	if files.is_empty():
 		return "%s. The project holds no .%s file." % [said, extension]
 	var names: PackedStringArray = []

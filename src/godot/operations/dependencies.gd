@@ -152,9 +152,15 @@ func missing_references() -> Array[Dictionary]:
 			var naming: Array = missing.get_or_add(path, [])
 			if not file in naming:
 				naming.append(file)
+	# Sorted, since the walk meets files in the order the filesystem lists them, which differs
+	# between platforms.
+	var paths: Array = missing.keys()
+	paths.sort()
 	var found: Array[Dictionary] = []
-	for path: String in missing:
-		found.append({"path": path, "referenced_by": missing[path]})
+	for path: String in paths:
+		var naming: Array = missing[path]
+		naming.sort()
+		found.append({"path": path, "referenced_by": naming})
 	return found
 
 
@@ -176,10 +182,10 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 
 	if not resource_path.begins_with("res://"):
 		resource_path = "res://" + resource_path
-	if not FileAccess.file_exists(resource_path):
-		return _log.failure(
-			_files.with_nearest_files("Resource file does not exist: " + resource_path, resource_path)
-		)
+	# A file that is gone is searched for all the same, since what still refers to it is what a
+	# caller asks about one, and the forward walk of a scene had just named it missing. Refused only
+	# when nothing refers to it either, which is a path written wrong.
+	var exists: bool = FileAccess.file_exists(resource_path)
 
 	_log.info("Finding usages of: " + resource_path)
 
@@ -188,7 +194,8 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 	if not class_name_declared.is_empty():
 		by_class = GdhPatterns.compiled("\\b" + _regex_escaped(class_name_declared) + "\\b")
 	var target: Dictionary = {
-		"path": resource_path, "uid": str(GdhResourceFiles.uid_of(resource_path).get("uid", ""))
+		"path": resource_path,
+		"uid": str(GdhResourceFiles.uid_of(resource_path).get("uid", "")) if exists else ""
 	}
 
 	var all_files: Array[String] = _usage_files(file_types)
@@ -252,11 +259,19 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 			usages.append({"file": file_path, "references": references})
 			total += references.size()
 
+	if not exists and usages.is_empty():
+		return _log.failure(
+			_files.with_nearest_files(
+				"Resource file does not exist: %s, and nothing in the project refers to it" % resource_path,
+				resource_path
+			)
+		)
 	var declared: Variant = null
 	if not class_name_declared.is_empty():
 		declared = class_name_declared
 	return {
 		"resource_path": resource_path,
+		"exists": exists,
 		"class_name": declared,
 		"usages": usages,
 		"summary":

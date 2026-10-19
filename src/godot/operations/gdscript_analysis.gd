@@ -188,7 +188,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		"dependencies": dependencies,
 		"classes_used": classes_used,
 		"autoloads_used": autoloads_used,
-		"line_count": lines.size()
+		"line_count": lines.size() - 1 if content.is_empty() or content.ends_with("\n") else lines.size()
 	}
 	if GdhRead.as_bool(params.get("include_inherited", false)):
 		_add_inherited(answer, [full_script_path])

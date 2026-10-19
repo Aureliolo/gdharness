@@ -109,7 +109,9 @@ class AnotherProjectsServer extends Refusal {
   readonly serves: string;
 
   constructor(port: number, serves: string, asked: string) {
-    super(`The language server on port ${port} belongs to the editor of ${serves}, not ${asked}.`);
+    super(
+      `The language server on port ${port} belongs to the editor of ${serves}; no editor of ${asked} answers there.`,
+    );
     this.serves = serves;
   }
 }

@@ -3184,7 +3184,7 @@ async function testTheLanguageServerOfAnotherProjectIsRefused(): Promise<void> {
           const said = textOf(refused) ?? '';
           assert.equal(get(refused.result, 'isError'), true, `another project's server is refused: ${said}`);
           assert.ok(
-            said.includes(`belongs to the editor of ${serving}, not ${ours}`),
+            said.includes(`belongs to the editor of ${serving}; no editor of ${ours} answers there.`),
             `naming the project it serves and the one asked about: ${said}`,
           );
           assert.match(said, /editor_launch opens this project's own editor/, `with what to do: ${said}`);
@@ -7843,6 +7843,11 @@ function testProjectPathsAreContained(): void {
     ...(onWindows
       ? ['C:\\Windows\\win.ini', 'C:/Windows/win.ini', 'D:\\other\\payload.gd', '\\\\server\\share\\x.gd']
       : []),
+    // An absolute path is taken only inside the project: not the project itself, not a sibling
+    // whose name begins with the project's, and not one that climbs out of it.
+    root,
+    `${root}-old${onWindows ? '\\' : '/'}player.gd`,
+    `${root}${onWindows ? '\\' : '/'}..${onWindows ? '\\' : '/'}outside.gd`,
   ];
 
   for (const candidate of refused) {
@@ -7876,6 +7881,10 @@ function testProjectPathsAreContained(): void {
     ['archive..old.gd', 'archive..old.gd'],
     ['..config/player.gd', '..config/player.gd'],
     ...(onWindows ? [['scenes\\main.tscn', 'scenes/main.tscn'] as [string, string]] : []),
+    // The file's absolute path, which a caller holding the project's path writes, in both
+    // separators where the platform has two.
+    [`${root}${onWindows ? '\\' : '/'}scenes${onWindows ? '\\' : '/'}main.tscn`, 'scenes/main.tscn'],
+    ...(onWindows ? [['C:/game/scenes/main.tscn', 'scenes/main.tscn'] as [string, string]] : []),
   ];
 
   for (const [candidate, expected] of accepted) {
@@ -8277,6 +8286,24 @@ function testASearchReadsWhatItSaysItReads(): void {
     assert.equal(exactly.summary.truncated, false, 'matches that come to the limit exactly are all of them');
     const cut = search('GameState', { maxResults: 1 });
     assert.equal(cut.summary.truncated, true, 'and one more than the limit is cut');
+
+    // The text found, as the line spells it, rather than the query: a search ignoring case
+    // answered "GameState" on a line holding "gamestate". Spelled unlike both the query and its
+    // lowered form, since the search compares the lowered one.
+    writeFileSync(join(sandbox, 'shouted.gd'), 'var label := "GAMESTATE ready"\n');
+    const spelled = search('GameState', { fileTypes: ['gd'] });
+    assert.deepEqual(
+      spelled.results.map((entry) => entry.matches.map((one) => [one.line, one.match])),
+      [[[1, 'GAMESTATE']]],
+      JSON.stringify(spelled),
+    );
+    assert.deepEqual(
+      search('GameState', { fileTypes: ['cs'], caseSensitive: true }).results.map(
+        (entry) => entry.matches[0]?.match,
+      ),
+      ['GameState'],
+      'a search heeding case finds the query itself',
+    );
   } finally {
     sweep(sandbox);
   }
@@ -18656,7 +18683,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     );
     assert.match(
       text(get(holder, 'staleAnalysis')),
-      /^FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project and missing from \.godot\/global_script_class_cache\.cfg, .* project_import refresh_classes rewrites the cache from the declarations on disk;/,
+      /^FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project, but the engine that compiled these scripts resolves a class name from \.godot\/global_script_class_cache\.cfg, which has not been written yet, .* project_import refresh_classes writes the cache from the declarations on disk;/,
       said,
     );
     assert.deepEqual(
@@ -18672,7 +18699,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       'Script file does not exist: res://checked/brokn.gd. The nearest .gd file is res://checked/broken.gd.',
     );
     const outside = textOf(await diagnose(join(tmpdir(), 'elsewhere.gd'))) ?? '';
-    assert.match(outside, /is absolute; give a path inside the project/, outside);
+    assert.match(outside, /is absolute and outside the project; give a path inside it/, outside);
     assert.match(outside, /Possible solutions:\n- Give the path relative to the project/, outside);
     const info = await server.request(
       'tools/call',
@@ -18712,7 +18739,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     );
     assert.ok(
       asArray(get(scriptsCheck, 'details')).some((detail) =>
-        /^res:\/\/checked\/holder\.gd does not compile: line 3, .*FixtureStash.* FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project and missing from/.test(
+        /^res:\/\/checked\/holder\.gd does not compile: line 3, .*FixtureStash.* FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project, but /.test(
           String(detail),
         ),
       ),
@@ -18729,6 +18756,16 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       shownInfo,
     );
     assert.equal(get(judged, 'validation', 'valid'), false, shownInfo);
+
+    // Once a cache exists and lacks the class, the note says the cache is behind the files.
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'list=[]\n');
+    const behind = parseTextContent(await diagnose('checked/holder.gd'));
+    assert.match(
+      text(get(behind, 'staleAnalysis')),
+      /^FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project and missing from \.godot\/global_script_class_cache\.cfg, which is where the engine that compiled these scripts resolves a class name from, so the error is the cache being behind the files/,
+      JSON.stringify(behind),
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
