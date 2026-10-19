@@ -793,8 +793,8 @@ function drawingCharactersIn(text: string): string[] {
  * Text that is not tab, newline or carriage return but is still below a space.
  *
  * Compared by code point rather than matched by a character class: writing that class means
- * putting escapes in a regular expression, and an escape in this file is exactly what got
- * mangled into a raw control byte last time.
+ * putting escapes in a regular expression, and an escape in this file is what an edit can turn
+ * into a raw control byte.
  */
 function controlCharactersIn(text: string): number[] {
   const found: number[] = [];

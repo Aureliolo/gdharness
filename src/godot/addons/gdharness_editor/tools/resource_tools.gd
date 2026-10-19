@@ -251,10 +251,12 @@ func create_resource(args: Dictionary) -> Dictionary:
 	var folder: String = GdhSceneFile.make_folder_for(res_path)
 	if not folder.is_empty():
 		return {"ok": false, "error": folder}
+	var answer: Dictionary = {"ok": true, "resourcePath": res_path, "resourceType": asked_type}
+	_properties.note_also_changed(answer)
 	var failed: String = _save_checked(resource, res_path, properties.keys(), null)
 	if not failed.is_empty():
 		return {"ok": false, "error": failed}
-	return {"ok": true, "resourcePath": res_path, "resourceType": asked_type}
+	return answer
 
 
 func modify_resource(args: Dictionary) -> Dictionary:
@@ -287,11 +289,13 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	var refused: String = _properties.write_all(resource, properties)
 	if not refused.is_empty():
 		return {"ok": false, "error": refused}
+	var answer: Dictionary = {"ok": true, "resourcePath": res_path}
+	_properties.note_also_changed(answer)
 	var previous: PackedByteArray = FileAccess.get_file_as_bytes(res_path)
 	var failed: String = _save_checked(resource, res_path, properties.keys(), previous)
 	if not failed.is_empty():
 		return {"ok": false, "error": failed}
-	return {"ok": true, "resourcePath": res_path}
+	return answer
 
 
 ## What a resource file holds, read as a headless engine reads it with no editor connected.
