@@ -20597,6 +20597,32 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         '',
       ].join('\n'),
     );
+    writeFileSync(
+      join(project, 'inferred.gd'),
+      [
+        'extends RefCounted',
+        '',
+        'const MAX := 99',
+        'const RATE = 0.5',
+        'const NAME := "Bag"',
+        'const ORIGIN := Vector2(1, 2)',
+        'const SIDE := Vector2(1, 2).x',
+        // Ends in the constructor's bracket and is not one constructor: the bracket closing the
+        // first ( is not the last character, and the value is a float.
+        'const ALONG := Vector2(1, 2).dot(Vector2(3, 4))',
+        'const MASK := 0xFF',
+        'const TYPED: int = 3',
+        '',
+        'var count := 3  # a note',
+        'var loose = 3',
+        'var items := []',
+        'var label := "":',
+        '\tset(value):',
+        '\t\tlabel = value',
+        'var flag := true',
+        '',
+      ].join('\n'),
+    );
     // Commas that are not separators, and a bracket that is not the end of the signature. Each of
     // these is ordinary Godot and each one used to add parameters the function does not have.
     writeFileSync(
@@ -21018,6 +21044,37 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         // The `#` inside the string is not a comment, and the one after it is.
         [['LABEL', '"hash # inside"']],
         `nor of a constant, and a hash inside a string is not a comment: ${JSON.stringify(bracketed)}`,
+      );
+
+      // The type GDScript takes from a value is answered and marked inferred: a constant always has
+      // its value's, a variable only with :=. One only the analyser knows is left empty, not guessed.
+      const inferred = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://inferred.gd',
+      });
+      assert.deepEqual(
+        [...asArray(get(inferred, 'constants')), ...asArray(get(inferred, 'variables'))].map((each) => [
+          get(each, 'name'),
+          get(each, 'type'),
+          get(each, 'inferred'),
+        ]),
+        [
+          ['MAX', 'int', true],
+          ['RATE', 'float', true],
+          ['NAME', 'String', true],
+          ['ORIGIN', 'Vector2', true],
+          ['SIDE', '', undefined],
+          ['ALONG', '', undefined],
+          ['MASK', 'int', true],
+          ['TYPED', 'int', undefined],
+          ['count', 'int', true],
+          ['loose', '', undefined],
+          ['items', 'Array', true],
+          ['label', 'String', true],
+          ['flag', 'bool', true],
+        ],
+        JSON.stringify(inferred),
       );
 
       // A native base declares nothing in a file, so the walk has nothing to do and says so with an
