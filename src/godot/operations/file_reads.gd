@@ -10,8 +10,8 @@ extends RefCounted
 ## without making a node. Loading the file still does what loading does in the game: static
 ## initialisers run, and a resource with a script is made with it.
 
-const GdhPropertyValues = preload("property_values.gd")
 const GdhRead = preload("reading.gd")
+const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
 
 
@@ -419,7 +419,7 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 				if scripted.has(property)
 				else ClassDB.class_get_property_default_value(loaded.get_class(), property)
 			)
-			if GdhPropertyValues.same(value, default):
+			if GdhSame.same(value, default):
 				continue
 		properties[property] = serialiser.serialize_value(value)
 	var answer: Dictionary = {

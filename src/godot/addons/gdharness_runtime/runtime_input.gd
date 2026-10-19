@@ -17,9 +17,6 @@ const GdhScreen = preload("runtime_screen.gd")
 const GdhTargets = preload("runtime_targets.gd")
 const GdhMouse = preload("runtime_mouse.gd")
 
-## The distance from a capital letter to its small one in Unicode. A keycode holds the capital.
-const TO_SMALL: int = 32
-
 ## Set, to the desktop's name, for a process gdharness started on a desktop of its own and for
 ## everything that process starts. Kept in step with `DESKTOP_VARIABLE` in src/desktop.ts.
 const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
@@ -161,10 +158,11 @@ func inject_action(params: Dictionary) -> Dictionary:
 	var frames: int = holding
 
 	_say_action(action, whole or held, strength)
+	var lasted: Variant = null
 	if whole:
 		# A frame between the halves at least, as a click has: a listener that acts on the press and
 		# a listener that acts on the release both get their own frame to do it in.
-		await _held(frames)
+		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		_say_action(action, false, strength)
 		await _host.get_tree().process_frame
 
@@ -175,13 +173,8 @@ func inject_action(params: Dictionary) -> Dictionary:
 		"pressed": held and not whole,
 		"whole": whole,
 		"held_frames": GdhValues.held_answer(whole, frames),
+		"held_for": lasted,
 	}
-
-
-## Waits out [param frames] process frames, which is how long a whole press is held down.
-func _held(frames: int) -> void:
-	for _frame: int in frames:
-		await _host.get_tree().process_frame
 
 
 func _say_action(action: String, down: bool, strength: float) -> void:
@@ -237,11 +230,12 @@ func inject_key(params: Dictionary) -> Dictionary:
 	# TextEdit insert `unicode` and never consult the keycode, so an injected key could press any
 	# action in the map and still type nothing into a search box. Godot's keycodes for printable
 	# keys are the code points themselves, which is what makes this a mapping and not a table.
-	event.unicode = _glyph_of(event.keycode, event.shift_pressed)
+	event.unicode = GdhValues.glyph_of(event.keycode, event.shift_pressed)
 
 	Input.parse_input_event(event)
+	var lasted: Variant = null
 	if whole:
-		await _held(frames)
+		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		var up: InputEventKey = event.duplicate()
 		up.pressed = false
 		Input.parse_input_event(up)
@@ -251,6 +245,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 		"type": "input_injected",
 		"input_type": "key",
 		"held_frames": GdhValues.held_answer(whole, frames),
+		"held_for": lasted,
 		"keycode": event.keycode,
 		"physical_keycode": event.physical_keycode,
 		"shift": event.shift_pressed,
@@ -260,19 +255,6 @@ func inject_key(params: Dictionary) -> Dictionary:
 		"pressed": held and not whole,
 		"whole": whole,
 	}
-
-
-## The character a key produces, or nothing for a key that produces none.
-##
-## Godot's keycodes below [constant KEY_SPECIAL] are the Unicode code points of the keys that
-## print something, so the mapping is the value itself. Letters are held as their capitals, which
-## is the one place the shift a caller asked for changes the answer rather than the key.
-func _glyph_of(keycode: Key, shifted: bool) -> int:
-	if keycode >= KEY_SPECIAL:
-		return 0
-	if keycode >= KEY_A and keycode <= KEY_Z and not shifted:
-		return keycode + TO_SMALL
-	return keycode
 
 
 ## Clicks a mouse button at a position, and lets go of it again unless asked to hold it.
@@ -314,12 +296,13 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var _moved: Vector2 = _arrive(position)
 	var supplied: bool = _follow_in_the_window(position)
 	Input.parse_input_event(_button(position, button, whole or held, double))
+	var lasted: Variant = null
 	if notch:
 		Input.parse_input_event(_button(position, button, false, false))
 	elif whole:
 		# A frame between the halves at least, as inject_action has, so a control that acts on the
 		# press and one that acts on the release each get a frame to do it in.
-		await _held(frames)
+		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		Input.parse_input_event(_button(position, button, false, false))
 		await _host.get_tree().process_frame
 
@@ -329,6 +312,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 				"type": "input_injected",
 				"input_type": "mouse_click",
 				"held_frames": GdhValues.held_answer(whole and not notch, frames),
+				"held_for": lasted,
 				"position": [position.x, position.y],
 				"button": button,
 				"pressed": held and not whole,

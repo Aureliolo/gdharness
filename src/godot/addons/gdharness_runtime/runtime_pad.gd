@@ -69,11 +69,11 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 	var frames: int = holding
 
 	Input.parse_input_event(_button(button, device, whole or held))
+	var lasted: Variant = null
 	if whole:
 		# A frame between the halves at least, as a key has, so a game that acts on the press and one
 		# that acts on the release each get a frame to do it in.
-		for _frame: int in frames:
-			await _host.get_tree().process_frame
+		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		Input.parse_input_event(_button(button, device, false))
 		await _host.get_tree().process_frame
 
@@ -81,6 +81,7 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 		"type": "input_injected",
 		"input_type": "joypad_button",
 		"held_frames": GdhValues.held_answer(whole, frames),
+		"held_for": lasted,
 		"button": button,
 		"button_name": _name_of(button, JOY_BUTTONS),
 		"device": device,

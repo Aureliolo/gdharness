@@ -7,6 +7,7 @@ const GdhFileReads = preload("../file_reads.gd")
 const GdhHeadlessCheck = preload("../headless_check.gd")
 const GdhPropertyValues = preload("../property_values.gd")
 const GdhRead = preload("../reading.gd")
+const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 
 # The minimal shader of a type: its declaration and the one function the engine calls for it.
@@ -136,7 +137,7 @@ func _save_checked(resource: Resource, path: String, names: Array, previous: Var
 		for key: Variant in names:
 			var property: String = str(key)
 			var read: Variant = _properties.read_at(loaded, property)
-			if not GdhPropertyValues.same(read, _properties.read_at(resource, property)):
+			if not GdhSame.same(read, _properties.read_at(resource, property)):
 				lost = (
 					(
 						"%s.%s would load from the file as %s: it is not a property the file keeps, so "

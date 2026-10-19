@@ -427,7 +427,67 @@ func _parse_constant(line: String, line_num: int) -> Dictionary:
 	else:
 		name = const_text
 
-	return {"name": name, "value": value, "type": type_hint, "line": line_num}
+	var constant: Dictionary = {"name": name, "value": value, "type": type_hint, "line": line_num}
+	# A constant has its value's type whether or not it is written with :=.
+	if type_hint.is_empty():
+		_infer(constant, value)
+	return constant
+
+
+## Gives [param declared] the type GDScript infers from [param value], marked inferred, when the
+## value is a literal or a built-in type's constructor: `const MAX_STACK := 99` read as having no
+## type though the engine holds an int. Any other expression is left without one, since only the
+## engine's analyser knows what it gives.
+static func _infer(declared: Dictionary, value: String) -> void:
+	# A variable with a setter or getter ends its line with the colon that opens them.
+	var text: String = value.strip_edges().trim_suffix(":").strip_edges()
+	var type: String = ""
+	if text == "true" or text == "false":
+		type = "bool"
+	elif text.is_valid_int() or text.is_valid_hex_number(true):
+		type = "int"
+	elif text.is_valid_float():
+		type = "float"
+	elif text.begins_with('&"') and text.ends_with('"'):
+		type = "StringName"
+	elif text.begins_with('^"') and text.ends_with('"'):
+		type = "NodePath"
+	elif text.length() > 1 and text[0] in ['"', "'"] and text.ends_with(text[0]):
+		type = "String"
+	elif _whole(text, "[", "]"):
+		type = "Array"
+	elif _whole(text, "{", "}"):
+		type = "Dictionary"
+	else:
+		var called: String = text.get_slice("(", 0).strip_edges()
+		if _whole(text.substr(called.length()), "(", ")") and _built_in_types().has(called):
+			type = called
+	if not type.is_empty():
+		declared["type"] = type
+		declared["inferred"] = true
+
+
+## Whether [param text] is one bracketed whole, its first [param opening] closed by its last
+## character, so `[1, 2]` is a list and `[1, 2].size()` is not.
+static func _whole(text: String, opening: String, closing: String) -> bool:
+	if not text.begins_with(opening) or not text.ends_with(closing):
+		return false
+	var depth: int = 0
+	for index: int in text.length():
+		if text[index] == opening:
+			depth += 1
+		elif text[index] == closing:
+			depth -= 1
+			if depth == 0:
+				return index == text.length() - 1
+	return false
+
+
+static func _built_in_types() -> Dictionary:
+	var names: Dictionary = {}
+	for type: int in TYPE_MAX:
+		names[type_string(type)] = true
+	return names
 
 
 func _parse_enum(line: String, line_num: int) -> Dictionary:
@@ -499,7 +559,7 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 	if "=" in var_text:
 		stated_default = default_value
 
-	return {
+	var variable: Dictionary = {
 		"name": name,
 		"type": type_hint,
 		"default_value": stated_default,
@@ -510,6 +570,11 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 		"is_static": GdhPatterns.without_annotations(line).begins_with("static "),
 		"line": line_num
 	}
+	# Only := types a variable by its value; one written with = alone holds any type.
+	var walrus: bool = "=" in var_text and var_text.split("=", true, 1)[0].strip_edges().ends_with(":")
+	if walrus and type_hint.is_empty():
+		_infer(variable, default_value)
+	return variable
 
 
 func _parse_function(line: String, line_num: int, annotated: String = "") -> Dictionary:

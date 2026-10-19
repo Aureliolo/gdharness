@@ -95,6 +95,7 @@ const operationsModules = [
   'reading.gd',
   'rename_checks.gd',
   'resource_files.gd',
+  'same_values.gd',
   'script_check.gd',
   'serialisation.gd',
   'value_shapes.gd',
