@@ -1478,6 +1478,20 @@ interface AfterWaiting {
   readonly runtimeCameUp?: boolean;
 }
 
+/**
+ * The refusal for a breakpoint on [param line] of the script at [param absolutePath] when the line
+ * is past the script's end, or null. Lines are counted as an editor counts them, without one for
+ * the newline that ends the last.
+ */
+function lineBeyondScript(absolutePath: string, relativePath: string, line: number): string | null {
+  const text = readFileSync(absolutePath, 'utf8');
+  const lines = text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+  if (line <= lines) {
+    return null;
+  }
+  return `res://${relativePath} has ${lines} line${lines === 1 ? '' : 's'}, so there is no line ${line} to stop on.`;
+}
+
 /** What the runtime addon prints once it is listening, which a run's output is read for. */
 const RUNTIME_LISTENING_LINE = '[gdharness] runtime listening on ';
 
@@ -4857,6 +4871,18 @@ class GodotServer {
         const line = readPositiveNumber(args, 'line');
         if (line === undefined) {
           return this.createErrorResponse('line is required: the one-based line to stop on.');
+        }
+        // Neither the adapter nor a game refuses a line nothing is on, and a breakpoint held there
+        // is kept in the project's set and never stops anything. Removing one is left alone, so a
+        // breakpoint on a script since deleted or shortened can still be taken off.
+        if (op === 'set') {
+          if (!existsSync(located.absolutePath)) {
+            return this.missingScript(project.value.path, located.relativePath);
+          }
+          const beyond = lineBeyondScript(located.absolutePath, located.relativePath, line);
+          if (beyond !== null) {
+            return this.createErrorResponse(beyond);
+          }
         }
         const editor = this.godotBridge.isConnected();
         let answer: Record<string, unknown>;
@@ -9287,11 +9313,7 @@ class GodotServer {
     // this server's own game found nothing under the run's. Only when it is this run's:
     // `announcedSince` excludes everything that was already announced before the start.
     const going = await this.currentRun();
-    // Asked again as the answer is made: the look that found a game that quits in its first frame
-    // could land just before it went, and the start answered listening for a game that was over,
-    // or said it came and went, as the timing fell.
-    const found = await this.theRunsAmong(going, fresh);
-    const endpoint = found !== null && alive(found.pid) ? found : null;
+    const endpoint = await this.theRunsAmong(going, fresh);
     if (endpoint !== null && going !== null && going.announcedPid === undefined) {
       this.tie(going, endpoint);
     }

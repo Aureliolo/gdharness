@@ -15551,10 +15551,13 @@ async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
  * output saying the runtime was listening. The control is the same scene with the addon on disk but
  * not registered, which never comes up and is told nothing announced.
  *
- * The scene here kills its own process in its first frame rather than quitting, so the game is gone
- * a moment after it announces however long the frame takes. Quitting ends the frame first, and a
- * Windows runner's first frame outlasted the look, so eight starts in a row found the game alive and
- * the case could not reach the state it was written for.
+ * Whether a start meets the real game listening or gone is a race, and both answers are right, so
+ * that start is held only to the one it gave. A Windows runner's first frame outlasted every look,
+ * and a game that killed itself instead was still alive to the operating system while Windows ended
+ * it, so neither ever reached the note. The note is held with a herald in place of the runtime: an
+ * autoload that prints the line the runtime prints once it is listening and quits without
+ * announcing, which is the state the note is for every time. The real run checks the line is the
+ * one the herald copies.
  */
 async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -15566,18 +15569,25 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
     return;
   }
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-came-and-went-rt-'));
-  const project = (registered: boolean): string => {
+  const LISTENING = '[gdharness] runtime listening on 127.0.0.1:1, announced at nowhere';
+  const project = (autoload: 'runtime' | 'herald' | 'none'): string => {
     const dir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-came-and-went-'));
+    const registered = {
+      runtime: `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n`,
+      herald: '\n[autoload]\n\nHerald="*res://herald.gd"\n',
+      none: '',
+    }[autoload];
     writeFileSync(
       join(dir, 'project.godot'),
       '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="CameAndWent"\n' +
         'run/main_scene="res://main.tscn"\n' +
-        (registered ? `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n` : ''),
+        registered,
     );
     writeFileSync(
-      join(dir, 'main.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tvar _gone: Error = OS.kill(OS.get_process_id())\n',
+      join(dir, 'herald.gd'),
+      `extends Node\n\n\nfunc _ready() -> void:\n\tprint("${LISTENING}")\n\tget_tree().quit()\n`,
     );
+    writeFileSync(join(dir, 'main.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tget_tree().quit()\n');
     writeFileSync(
       join(dir, 'main.tscn'),
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
@@ -15588,8 +15598,9 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
     });
     return dir;
   };
-  const cameUp = project(true);
-  const neverUp = project(false);
+  const cameUp = project('runtime');
+  const heralded = project('herald');
+  const neverUp = project('none');
   try {
     await withStdioServer(
       async (call) => {
@@ -15601,20 +15612,26 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
               ENGINE_CALL_TIMEOUT_MS,
             ),
           );
-        const went = await started(cameUp);
-        const said = JSON.stringify(went);
+        const cameAndWent = /^the game's runtime came up and the game quit before this start could reach it/;
+        const real = await started(cameUp);
         const output = await call('editor_output', { contains: 'runtime listening on' });
-        assert.match(output, /\[gdharness\] runtime listening on/, `the runtime did come up: ${output}`);
+        assert.match(
+          output,
+          /\[gdharness\] runtime listening on [\d.]+:\d+, announced at /,
+          `the runtime did come up, and printed the line the herald copies: ${output}`,
+        );
+        if (get(real, 'runtime', 'listening') !== true) {
+          assert.match(text(get(real, 'runtime', 'note')), cameAndWent, JSON.stringify(real));
+        }
+
+        const went = await started(heralded);
+        const said = JSON.stringify(went);
         assert.deepEqual(
           [get(went, 'runtime', 'listening'), get(went, 'runtime', 'mayYetAnnounce')],
           [false, false],
           said,
         );
-        assert.match(
-          text(get(went, 'runtime', 'note')),
-          /^the game's runtime came up and the game quit before this start could reach it/,
-          `and the start says so: ${said}`,
-        );
+        assert.match(text(get(went, 'runtime', 'note')), cameAndWent, `and the start says so: ${said}`);
 
         const never = await started(neverUp);
         assert.match(
@@ -15627,6 +15644,7 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
     );
   } finally {
     sweep(cameUp);
+    sweep(heralded);
     sweep(neverUp);
     sweep(runtimeDir);
   }
@@ -27678,6 +27696,42 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
   let started = false;
   try {
     await server.initialize('regression-test');
+    // A line past the end of the script, or a script that is not there, is held and kept in the
+    // project's set without ever stopping anything, so it is refused. The last line is a line, and
+    // a breakpoint on a script that has gone can still be taken off.
+    const beyond = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 12,
+    });
+    assert.equal(beyond.said, 'res://main.gd has 11 lines, so there is no line 12 to stop on.');
+    const nowhere = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'set',
+      scriptPath: 'mian.gd',
+      line: 5,
+    });
+    assert.equal(
+      nowhere.said,
+      "Script file does not exist: res://mian.gd. The project's .gd files are res://main.gd.",
+    );
+    const last = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 11,
+    });
+    assert.deepEqual(get(last.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [11] }], last.said);
+    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 11 });
+    const gone = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'remove',
+      scriptPath: 'mian.gd',
+      line: 5,
+    });
+    assert.equal(get(gone.answer, 'removed'), true, gone.said);
+
     const set = await call('debug_breakpoint', {
       projectPath: project,
       op: 'set',
@@ -29477,7 +29531,14 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         ],
         ['count', /^\/root\/Main\.wear argument 1: \/root\/Main:count holds int, not an object$/],
         ['spare', /^\/root\/Main\.wear argument 1: spare is RefCounted, not a Gear$/],
-        ['/root/Nope:wares:0', /^\/root\/Main\.wear argument 1: Node not found: \/root\/Nope$/],
+        [
+          '/root/Nope:wares:0',
+          /^\/root\/Main\.wear argument 1: Node not found: \/root\/Nope\. \/root has no Nope; its children are GdharnessRuntime, Main\.$/,
+        ],
+        [
+          '/root/Main/Shelf:wares:0',
+          /^\/root\/Main\.wear argument 1: Node not found: \/root\/Main\/Shelf\. \/root\/Main has no Shelf; it has no children\.$/,
+        ],
         [{ _type: 'Object', class: 'RefCounted', id: 1 }, /argument 1: an object is named by its path/],
       ];
       for (const [given, expected] of refusals) {
