@@ -8,11 +8,11 @@ extends SceneTree
 ## Everything sits in the 64 by 64 viewport a script run with no window has.
 
 const Checked = preload("checked.gd")
-const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
-const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
+const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 
 var failures: Array[String] = []
-var input: InputCommands = null
+var input: GdhInputCommands = null
 var _begun: bool = false
 
 
@@ -27,7 +27,7 @@ func _process(_delta: float) -> bool:
 func _everything() -> void:
 	var host: Node = Node.new()
 	root.add_child(host)
-	input = InputCommands.new(host, Values.new())
+	input = GdhInputCommands.new(host, GdhValues.new())
 
 	await _check_a_switch_both_ways()
 	await _check_a_switch_the_game_puts_back()

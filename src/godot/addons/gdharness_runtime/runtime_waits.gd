@@ -3,12 +3,12 @@ extends RefCounted
 ## The commands that take time: they let the game run and answer when what was waited for has
 ## happened, or when the time ran out, so the caller never sleeps for a guessed length.
 
-const Changes = preload("runtime_changes.gd")
-const Paths = preload("runtime_paths.gd")
-const Queries = preload("runtime_queries.gd")
-const Read = preload("reading.gd")
-const Says = preload("runtime_says.gd")
-const Values = preload("runtime_values.gd")
+const GdhChanges = preload("runtime_changes.gd")
+const GdhPaths = preload("runtime_paths.gd")
+const GdhQueries = preload("runtime_queries.gd")
+const GdhRead = preload("reading.gd")
+const GdhSays = preload("runtime_says.gd")
+const GdhValues = preload("runtime_values.gd")
 
 ## The longest one wait may last, whatever the request says: past this the server has long
 ## since given up on the reply.
@@ -30,12 +30,12 @@ const COMPARES: Array[String] = ["==", "!=", ">=", "<=", ">", "<"]
 const MOST_WATCHES: int = 16
 
 var _host: Node
-var _values: Values
-var _watches: Dictionary[int, Watch] = {}
+var _values: GdhValues
+var _watches: Dictionary[int, GdhWatch] = {}
 var _next_watch: int = 1
 
 
-func _init(host: Node, values: Values) -> void:
+func _init(host: Node, values: GdhValues) -> void:
 	_host = host
 	_values = values
 
@@ -52,7 +52,7 @@ static func _out_of_range(named: String, asked: int, least: int, most: int) -> D
 
 
 func wait_frames(params: Dictionary) -> Dictionary:
-	var frames: int = Read.as_int(params.get("frames", 1), 1)
+	var frames: int = GdhRead.as_int(params.get("frames", 1), 1)
 	if frames < 1 or frames > MOST_FRAMES:
 		return _out_of_range("frames", frames, 1, MOST_FRAMES)
 	var started: int = Time.get_ticks_msec()
@@ -66,22 +66,22 @@ func wait_frames(params: Dictionary) -> Dictionary:
 func wait_signal(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var signal_name: String = str(params.get("signal", ""))
-	var timeout_ms: int = Read.as_int(params.get("timeout_ms", 5000), 5000)
+	var timeout_ms: int = GdhRead.as_int(params.get("timeout_ms", 5000), 5000)
 	if timeout_ms < 1 or timeout_ms > CEILING_MSEC:
 		return _out_of_range("timeout_ms", timeout_ms, 1, CEILING_MSEC)
 	if params.has("watch"):
-		return await _collect(Read.as_int(params["watch"], 0), timeout_ms)
+		return await _collect(GdhRead.as_int(params["watch"], 0), timeout_ms)
 	if node_path.is_empty() or signal_name.is_empty():
 		return {"type": "error", "message": "Node path and signal name required"}
 
-	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
 	if not node.has_signal(signal_name):
 		return {"type": "error", "message": "%s has no signal %s" % [node_path, signal_name]}
 
-	var catcher: SignalCatcher = SignalCatcher.new()
+	var catcher: GdhSignalCatcher = GdhSignalCatcher.new()
 	var callable: Callable = catcher._on_fired
 	var listening: Error = node.connect(signal_name, callable, CONNECT_ONE_SHOT)
 	if listening != OK:
@@ -119,13 +119,13 @@ func watch_signal(params: Dictionary) -> Dictionary:
 	var signal_name: String = str(params.get("signal", ""))
 	if node_path.is_empty() or signal_name.is_empty():
 		return {"type": "error", "message": "Node path and signal name required"}
-	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
 	if not node.has_signal(signal_name):
 		return {"type": "error", "message": "%s has no signal %s" % [node_path, signal_name]}
-	var watch: Watch = Watch.new(node, node_path, signal_name)
+	var watch: GdhWatch = GdhWatch.new(node, node_path, signal_name)
 	var listening: Error = node.connect(signal_name, watch.catcher._on_fired)
 	if listening != OK:
 		return {"type": "error", "message": "Could not listen to signal: " + signal_name}
@@ -153,7 +153,7 @@ func _collect(id: int, timeout_ms: int) -> Dictionary:
 				% [id, MOST_WATCHES]
 			),
 		}
-	var watch: Watch = _watches[id]
+	var watch: GdhWatch = _watches[id]
 	var started: int = Time.get_ticks_msec()
 	var before: bool = watch.catcher.fired
 	while not watch.catcher.fired and Time.get_ticks_msec() - started < timeout_ms:
@@ -175,7 +175,7 @@ func _collect(id: int, timeout_ms: int) -> Dictionary:
 
 
 func _let_go(id: int) -> void:
-	var watch: Watch = _watches.get(id)
+	var watch: GdhWatch = _watches.get(id)
 	var _gone: bool = _watches.erase(id)
 	if watch == null:
 		return
@@ -192,12 +192,12 @@ func wait_until(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
 	var says: String = str(params.get("says", ""))
-	var timeout_ms: int = Read.as_int(params.get("timeout_ms", 5000), 5000)
+	var timeout_ms: int = GdhRead.as_int(params.get("timeout_ms", 5000), 5000)
 	if timeout_ms < 1 or timeout_ms > CEILING_MSEC:
 		return _out_of_range("timeout_ms", timeout_ms, 1, CEILING_MSEC)
 	if node_path.is_empty():
 		return {"type": "error", "message": "Node path required"}
-	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
 	# Two different questions, not two ways of asking one: says looks for words anywhere under the
@@ -220,7 +220,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 			)
 		}
 	if not says.is_empty():
-		var include_hidden: bool = Read.as_bool(params.get("include_hidden", false))
+		var include_hidden: bool = GdhRead.as_bool(params.get("include_hidden", false))
 		return await _wait_until_said(node_path, says, timeout_ms, include_hidden)
 	var unasked: String = _property_wait_unasked(property, params)
 	if not unasked.is_empty():
@@ -250,12 +250,12 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# two ops would disagree about one property, and the wait would run out on the text null.
 	var untyped_object: bool = declared == TYPE_NIL and (current == null or typeof(current) == TYPE_OBJECT)
 	var holds_objects: bool = declared == TYPE_OBJECT or untyped_object
-	if holds_objects and Changes.names_no_object(wanted):
+	if holds_objects and GdhChanges.names_no_object(wanted):
 		wanted = null
 	var refused: String = _not_comparable(current, wanted, node_path, property)
 	if refused.is_empty():
 		refused = _cut_to_fit(params["value"], typeof(current), node_path, property)
-	var rounded: String = Values.inexact(params["value"], typeof(current))
+	var rounded: String = GdhValues.inexact(params["value"], typeof(current))
 	if refused.is_empty() and not rounded.is_empty():
 		refused = "%s.%s holds int: %s." % [node_path, property, rounded]
 	var never_held: bool = typeof(wanted) != TYPE_NIL and typeof(wanted) != TYPE_OBJECT
@@ -279,8 +279,8 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# the wait ran out on a value the game had reached.
 	var differs: bool = compare == "!="
 	while (
-		Values.comparable(current, wanted)
-		and Changes.held_already(wanted, current) == differs
+		GdhValues.comparable(current, wanted)
+		and GdhChanges.held_already(wanted, current) == differs
 		and Time.get_ticks_msec() - started < timeout_ms
 	):
 		await _host.get_tree().process_frame
@@ -297,7 +297,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"path": node_path,
 		"property": property,
 		"compare": compare,
-		"met": Values.comparable(current, wanted) and Changes.held_already(wanted, current) != differs,
+		"met": GdhValues.comparable(current, wanted) and GdhChanges.held_already(wanted, current) != differs,
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 		"frames": frames,
@@ -334,7 +334,7 @@ func _wait_in_order(node: Node, params: Dictionary, current: Variant, timeout_ms
 	var number: Variant = given
 	if given is String:
 		var text: String = given
-		number = Read.json_or_null(text)
+		number = GdhRead.json_or_null(text)
 	if typeof(number) != TYPE_INT and typeof(number) != TYPE_FLOAT:
 		return {
 			"type": "error",
@@ -344,7 +344,7 @@ func _wait_in_order(node: Node, params: Dictionary, current: Variant, timeout_ms
 				% [compare, str(given)]
 			)
 		}
-	var limit: float = Read.as_float(number)
+	var limit: float = GdhRead.as_float(number)
 
 	var started: int = Time.get_ticks_msec()
 	var frames: int = 0
@@ -386,9 +386,9 @@ static func _no_order(current: Variant, node_path: String, property: String, com
 ## Whether [param current], a number, stands to [param limit] as [param compare] says. Level counts
 ## at the precision the property keeps, so a 32-bit float holding 0.30000001 is at least 0.3.
 static func _in_order(compare: String, limit: float, current: Variant) -> bool:
-	var reading: float = Read.as_float(current)
+	var reading: float = GdhRead.as_float(current)
 	var level: bool = (
-		reading == limit or (typeof(current) == TYPE_FLOAT and Changes.held_already(limit, current))
+		reading == limit or (typeof(current) == TYPE_FLOAT and GdhChanges.held_already(limit, current))
 	)
 	match compare:
 		">=":
@@ -407,14 +407,14 @@ static func _in_order(compare: String, limit: float, current: Variant) -> bool:
 ## conversion truncates: 3.5 waited on an int became 3 and 0.2 on a bool became true, and a property
 ## already holding that answered met at once, about a state nobody asked for.
 static func _cut_to_fit(given: Variant, type: int, node_path: String, property: String) -> String:
-	if not Values.cuts(given, type):
+	if not GdhValues.cuts(given, type):
 		return ""
 	return (
 		(
 			"%s.%s holds %s and the value to wait for is %s, which %s cannot hold without changing it:"
 			+ " waiting on it would answer about a state nobody asked for."
 		)
-		% [node_path, property, type_string(type), str(given), Values.cut_by(type)]
+		% [node_path, property, type_string(type), str(given), GdhValues.cut_by(type)]
 	)
 
 
@@ -436,7 +436,7 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 	# A value that cannot become what the property holds is said as that, which names the remedy,
 	# before the comparison it would also fail; an object on either side is said as the comparison.
 	var objects: bool = typeof(current) == TYPE_OBJECT or typeof(wanted) == TYPE_OBJECT
-	if not objects and not Values.acceptable(wanted, typeof(current)):
+	if not objects and not GdhValues.acceptable(wanted, typeof(current)):
 		return (
 			(
 				(
@@ -445,9 +445,9 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 				)
 				% types
 			)
-			+ Values.remedy(wanted, typeof(current))
+			+ GdhValues.remedy(wanted, typeof(current))
 		)
-	if not Values.comparable(current, wanted):
+	if not GdhValues.comparable(current, wanted):
 		return (
 			(
 				"%s.%s holds %s and the value to wait for is %s. Those cannot be compared, and"
@@ -455,7 +455,7 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 			)
 			% types
 		)
-	if not Values.acceptable(wanted, typeof(current)):
+	if not GdhValues.acceptable(wanted, typeof(current)):
 		return (
 			(
 				(
@@ -464,7 +464,7 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 				)
 				% types
 			)
-			+ Values.remedy(wanted, typeof(current))
+			+ GdhValues.remedy(wanted, typeof(current))
 		)
 	return ""
 
@@ -478,15 +478,15 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 ## its nodes hold: a run object built afresh each day would leave a wait watching the day before. A
 ## step that has gone in the meantime ends the wait with what went.
 static func _watched(node: Node, node_path: String, property: String) -> Dictionary:
-	var reached: Dictionary = Paths.walk_to(node, node_path, property)
+	var reached: Dictionary = GdhPaths.walk_to(node, node_path, property)
 	if reached.has("message"):
 		return reached
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
-	var missing: String = Paths.nothing_under(holder, named, str(reached["called"]))
+	var missing: String = GdhPaths.nothing_under(holder, named, str(reached["called"]))
 	if not missing.is_empty():
 		return {"type": "error", "message": missing}
-	return {"value": Paths.read_under(holder, named), "declared": _declared_type(holder, named)}
+	return {"value": GdhPaths.read_under(holder, named), "declared": _declared_type(holder, named)}
 
 
 ## The type [param named] is declared with on [param holder], read the way a set reads it, so the two
@@ -495,9 +495,9 @@ static func _watched(node: Node, node_path: String, property: String) -> Diction
 ## on it runs out the timeout while a set of 5 on it is refused at once. TYPE_NIL for anything
 ## declaring none, and for a call, whose answer nothing declares.
 static func _declared_type(holder: Variant, named: String) -> int:
-	if not Paths.method_of(named).is_empty():
+	if not GdhPaths.method_of(named).is_empty():
 		return TYPE_NIL
-	return Values.slot_declared(holder, named)["type"]
+	return GdhValues.slot_declared(holder, named)["type"]
 
 
 ## Waits until something under [param node_path] has [param said] written on it.
@@ -580,7 +580,7 @@ func _anything_says(node_path: String, said: String, include_hidden: bool) -> bo
 	var pending: Array[Node] = [root]
 	while not pending.is_empty():
 		var node: Node = pending.pop_back()
-		if Says.says(node, said) and (include_hidden or Queries.shown(node)):
+		if GdhSays.says(node, said) and (include_hidden or GdhQueries.shown(node)):
 			return true
 		pending.append_array(node.get_children(true))
 	return false
@@ -590,7 +590,7 @@ func _anything_says(node_path: String, said: String, include_hidden: bool) -> bo
 ## awaits the signal directly, so the wait can also give up. Takes any number of arguments: a
 ## handler of five fixed ones covered the engine's signals, and a game's own signal with six was
 ## never delivered to it, so the wait ran out and said the signal had not fired.
-class SignalCatcher:
+class GdhSignalCatcher:
 	extends RefCounted
 	var fired: bool = false
 	## How many times it fired; [member args] holds what the first carried.
@@ -605,12 +605,12 @@ class SignalCatcher:
 
 
 ## A signal recorded from when it was armed until it is collected.
-class Watch:
+class GdhWatch:
 	extends RefCounted
 	var node: WeakRef
 	var node_path: String
 	var signal_name: String
-	var catcher: SignalCatcher = SignalCatcher.new()
+	var catcher: GdhSignalCatcher = GdhSignalCatcher.new()
 
 	func _init(watched: Node, path: String, named: String) -> void:
 		node = weakref(watched)

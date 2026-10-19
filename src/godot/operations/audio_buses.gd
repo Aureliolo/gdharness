@@ -3,13 +3,13 @@ extends RefCounted
 # The bus layout is a project resource the engine loads at startup and this process holds in
 # memory, so every change is written back to that file or it is gone with the process.
 
-const Read = preload("reading.gd")
-const Log = preload("logger.gd")
+const GdhRead = preload("reading.gd")
+const GdhLog = preload("logger.gd")
 
-var _log: Log
+var _log: GdhLog
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -17,7 +17,7 @@ func create_audio_bus(params: Dictionary) -> Dictionary:
 	var bus_name: String = str(params.get("bus_name", ""))
 	if bus_name.is_empty():
 		return _log.failure("bus_name is required")
-	var parent_idx: int = Read.as_int(params.get("parent_bus_index", 0))
+	var parent_idx: int = GdhRead.as_int(params.get("parent_bus_index", 0))
 	if parent_idx < 0 or parent_idx >= AudioServer.bus_count:
 		return _log.failure("No bus at index " + str(parent_idx))
 	# Sends are by name, so a second bus with one would leave every send to it meaning either.
@@ -100,10 +100,10 @@ func get_audio_buses(_params: Dictionary) -> Dictionary:
 
 
 func set_audio_bus_effect(params: Dictionary) -> Dictionary:
-	var bus_idx: int = Read.as_int(params.get("bus_index", 0))
-	var effect_idx: int = Read.as_int(params.get("effect_index", 0))
+	var bus_idx: int = GdhRead.as_int(params.get("bus_index", 0))
+	var effect_idx: int = GdhRead.as_int(params.get("effect_index", 0))
 	var effect_type: String = str(params.get("effect_type", ""))
-	var enabled: bool = Read.as_bool(params.get("enabled", true), true)
+	var enabled: bool = GdhRead.as_bool(params.get("enabled", true), true)
 	if bus_idx < 0 or bus_idx >= AudioServer.bus_count:
 		return _log.failure("No bus at index " + str(bus_idx))
 
@@ -150,8 +150,8 @@ func set_audio_bus_effect(params: Dictionary) -> Dictionary:
 
 
 func set_audio_bus_volume(params: Dictionary) -> Dictionary:
-	var bus_idx: int = Read.as_int(params.get("bus_index", 0))
-	var volume_db: float = Read.as_float(params.get("volume_db", 0.0))
+	var bus_idx: int = GdhRead.as_int(params.get("bus_index", 0))
+	var volume_db: float = GdhRead.as_float(params.get("volume_db", 0.0))
 	if bus_idx < 0 or bus_idx >= AudioServer.bus_count:
 		return _log.failure("No bus at index " + str(bus_idx))
 

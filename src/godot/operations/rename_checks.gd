@@ -1,11 +1,11 @@
 extends RefCounted
 
-const Log = preload("logger.gd")
+const GdhLog = preload("logger.gd")
 
-var _log: Log
+var _log: GdhLog
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 

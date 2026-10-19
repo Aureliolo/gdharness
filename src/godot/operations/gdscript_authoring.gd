@@ -1,16 +1,16 @@
 extends RefCounted
 
-const Read = preload("reading.gd")
-const Log = preload("logger.gd")
-const Patterns = preload("patterns.gd")
+const GdhRead = preload("reading.gd")
+const GdhLog = preload("logger.gd")
+const GdhPatterns = preload("patterns.gd")
 
 const MODIFICATION_TYPES: Array[String] = ["add_constant", "add_variable", "add_signal", "add_function"]
 const BLANKS_AROUND_FUNCTIONS: int = 2
 
-var _log: Log
+var _log: GdhLog
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -231,14 +231,14 @@ static func _modification_problems(modifications: Array, declared: Dictionary) -
 # one: variables, constants, signals, functions, enums and inner classes, which share one namespace.
 static func _declared(lines: Array[String]) -> Dictionary:
 	var found: Dictionary = {}
-	var declaration: RegEx = Patterns.compiled(
+	var declaration: RegEx = GdhPatterns.compiled(
 		"^(?:static\\s+)?(var|const|signal|func|enum|class)\\s+([A-Za-z_][A-Za-z0-9_]*)"
 	)
 	for i: int in range(lines.size()):
 		var raw: String = lines[i]
 		if raw.is_empty() or raw[0] == "\t" or raw[0] == " ":
 			continue
-		var matched: RegExMatch = declaration.search(Patterns.without_annotations(raw))
+		var matched: RegExMatch = declaration.search(GdhPatterns.without_annotations(raw))
 		if matched != null and not found.has(matched.get_string(2)):
 			found[matched.get_string(2)] = {"kind": matched.get_string(1), "line": i + 1}
 	return found
@@ -286,7 +286,7 @@ func _add_constant(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	var const_line: String = "const %s: %s = %s" % [str(mod.get("name", "")), declared_type, value]
 	var after: int = 0
 	for i: int in range(lines.size()):
-		var line: String = Patterns.without_annotations(lines[i])
+		var line: String = GdhPatterns.without_annotations(lines[i])
 		if (
 			line.begins_with("extends ")
 			or line.begins_with("class_name ")
@@ -310,9 +310,9 @@ func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	var var_name: String = str(mod.get("name", ""))
 	var var_type: String = str(mod.get("varType", ""))
 	var default_value: String = str(mod.get("defaultValue", ""))
-	var is_export: bool = Read.as_bool(mod.get("isExport", false))
+	var is_export: bool = GdhRead.as_bool(mod.get("isExport", false))
 	var export_hint: String = str(mod.get("exportHint", ""))
-	var is_onready: bool = Read.as_bool(mod.get("isOnready", false))
+	var is_onready: bool = GdhRead.as_bool(mod.get("isOnready", false))
 
 	var var_line: String = ""
 
@@ -433,7 +433,7 @@ func _variable_insertion_point(lines: Array[String]) -> int:
 		# takes the new line above the `class_name`, where it does not parse; one that declares
 		# `extends` first takes it between the two, which does not parse either. Stripping also
 		# turns `@export var x` into `var x`, which is why the annotation names are gone below.
-		var line: String = Patterns.without_annotations(lines[i])
+		var line: String = GdhPatterns.without_annotations(lines[i])
 		if line.begins_with("extends ") or line.begins_with("class_name "):
 			after_header = i + 1
 		elif line.begins_with("signal "):
@@ -443,7 +443,7 @@ func _variable_insertion_point(lines: Array[String]) -> int:
 			break
 
 	for i: int in range(after_header, before_func):
-		if Patterns.without_annotations(lines[i]).begins_with("var "):
+		if GdhPatterns.without_annotations(lines[i]).begins_with("var "):
 			after_header = i + 1
 
 	return after_header
@@ -455,7 +455,7 @@ func _signal_insertion_point(lines: Array[String]) -> int:
 	for i: int in range(lines.size()):
 		# As above: the annotations come off before the line is read, so an abstract class has a
 		# header to find and `@export var x` reads as the var it is.
-		var line: String = Patterns.without_annotations(lines[i])
+		var line: String = GdhPatterns.without_annotations(lines[i])
 		if line.begins_with("extends ") or line.begins_with("class_name "):
 			after_header = i + 1
 		elif line.begins_with("signal "):
@@ -485,7 +485,7 @@ func _line_after_function(lines: Array[String], prefix: String) -> int:
 		# ends of this. An annotated `_ready` was never found, so `after_ready` placed the new
 		# function at the end of the file, and an annotated function after `_ready` was not the
 		# boundary it is, so the new one went in after whichever later function was plain.
-		var line: String = Patterns.without_annotations(lines[i])
+		var line: String = GdhPatterns.without_annotations(lines[i])
 		if line.begins_with(prefix):
 			inside = true
 		elif inside and (line.begins_with("func ") or line.begins_with("static func ")):
@@ -502,7 +502,9 @@ static func _start_of_declaration(lines: Array[String], at: int) -> int:
 	var start: int = at
 	while start > 0 and _indentation(lines[start - 1]) == indent:
 		var above: String = lines[start - 1].strip_edges()
-		var annotation_only: bool = above.begins_with("@") and Patterns.without_annotations(above).is_empty()
+		var annotation_only: bool = (
+			above.begins_with("@") and GdhPatterns.without_annotations(above).is_empty()
+		)
 		if not above.begins_with("#") and not annotation_only:
 			break
 		start -= 1

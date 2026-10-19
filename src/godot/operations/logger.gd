@@ -3,7 +3,7 @@ extends RefCounted
 # Everything printed is diagnostics; the answer goes to a file. The server reads `[ERROR]` lines as
 # the operation's own errors, and the prefixes let a human read the rest without parsing it.
 #
-# Every module preloads this as `Log`. `Logger` is a native class from Godot 4.5 on, and a
+# Every module preloads this as `GdhLog`. `Logger` is a native class from Godot 4.5 on, and a
 # constant of that name is a parse error rather than a shadowing warning.
 
 var debug_mode: bool = false

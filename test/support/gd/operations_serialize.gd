@@ -4,7 +4,7 @@ extends SceneTree
 ## JSON-safe dictionaries and back, and they are dispatch chains where a reordered branch
 ## silently changes the answer rather than failing, so the round trip is asserted value by value.
 
-const Serialisation = preload("res://operations/serialisation.gd")
+const GdhSerialisation = preload("res://operations/serialisation.gd")
 
 ## The types that are described rather than rebuilt, because nothing can send one back.
 const DESCRIBED: Array[int] = [TYPE_OBJECT, TYPE_CALLABLE, TYPE_SIGNAL]
@@ -12,7 +12,7 @@ const DESCRIBED: Array[int] = [TYPE_OBJECT, TYPE_CALLABLE, TYPE_SIGNAL]
 const EXACT: int = 9007199254740992
 
 var failures: Array[String] = []
-var values: Serialisation = Serialisation.new()
+var values: GdhSerialisation = GdhSerialisation.new()
 var samples: Dictionary = {}
 
 
@@ -339,9 +339,9 @@ func _check_exact_ints() -> void:
 	var digits: Variant = values.fitted(str((1 << 62) + 1), TYPE_INT)
 	if not digits is int or digits != (1 << 62) + 1:
 		_fail("digits fitted to an int came back %s" % var_to_str(digits))
-	if Serialisation.inexact(float(EXACT) + 2, TYPE_INT).is_empty():
+	if GdhSerialisation.inexact(float(EXACT) + 2, TYPE_INT).is_empty():
 		_fail("a number past 2^53 for an int was not refused")
-	if not Serialisation.inexact(float(EXACT) - 1, TYPE_INT).is_empty():
+	if not GdhSerialisation.inexact(float(EXACT) - 1, TYPE_INT).is_empty():
 		_fail("2^53 - 1 for an int was refused")
 
 

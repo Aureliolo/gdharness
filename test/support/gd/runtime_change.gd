@@ -6,7 +6,7 @@ extends SceneTree
 ## refusal is checked beside the write or call that works, so a check that refused everything fails.
 
 const Checked = preload("checked.gd")
-const Read = preload("res://addons/gdharness_runtime/reading.gd")
+const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const WALKER_SCRIPT: String = "res://change_walker.gd"
 const HOLDER_SOURCE: String = """extends Node
@@ -380,7 +380,7 @@ func _check_a_slot_that_takes_anything() -> void:
 	if (
 		turned.get("met") != false
 		or turned.get("value") != 3
-		or Read.as_int(turned.get("elapsed_ms"), 0) >= 3000
+		or GdhRead.as_int(turned.get("elapsed_ms"), 0) >= 3000
 	):
 		_fail("a wait on a slot that turns into a number ends there: %s" % JSON.stringify(turned))
 
@@ -449,7 +449,7 @@ func _check_a_key_holding_a_colon() -> void:
 	var met: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Holder", "property": 'stock:"base:dew"', "value": 2, "timeout_ms": 1000}
 	)
-	if met.get("met") != true or Read.as_int(met.get("elapsed_ms"), 1000) >= 1000:
+	if met.get("met") != true or GdhRead.as_int(met.get("elapsed_ms"), 1000) >= 1000:
 		_fail('a wait on stock:"base:dew" is met at once: %s' % JSON.stringify(met))
 	var split: Dictionary = await node._execute_command(
 		"get_property", {"path": "/root/Holder", "property": "stock:base:dew"}

@@ -8,8 +8,8 @@ extends RefCounted
 ## before: the same Vector2 came back three ways depending on which tool was asked, and a caller
 ## reading a property off the editor could not feed it back to the game.
 
-const Read = preload("reading.gd")
-const Shapes = preload("value_shapes.gd")
+const GdhRead = preload("reading.gd")
+const GdhShapes = preload("value_shapes.gd")
 
 # What the engine carries from one to another without complaint, which is what a value written to a
 # property or handed to a parameter may arrive as. Numbers include bool because the engine counts it
@@ -218,7 +218,7 @@ func deserialize_value(value: Variant) -> Variant:
 	# under the target project's warning levels, so one such project lost every headless call.
 	var tag: String = str(fields["_type"])
 	var builder: String = BUILDERS.get(tag, "")
-	var spare: Array = Shapes.spare(fields, tag)
+	var spare: Array = GdhShapes.spare(fields, tag)
 	if builder.is_empty() or not spare.any(func(left: Array) -> bool: return left.is_empty()):
 		return fields
 	if tag == "float" and str(fields["value"]) not in ["inf", "-inf", "nan"]:
@@ -418,7 +418,7 @@ func fitted(value: Variant, type: int) -> Variant:
 
 	if rebuilt is String and type != TYPE_STRING:
 		var text: String = rebuilt
-		var parsed: Variant = Read.json_or_null(text)
+		var parsed: Variant = GdhRead.json_or_null(text)
 		# A string that does not read as the type wanted is handed back as the string it is, so
 		# whoever asked can refuse it. type_convert answers 0 for "not an index" and true for any
 		# text at all, and a caller who sent a word got back a number they never sent: get_child
@@ -438,7 +438,7 @@ func fitted(value: Variant, type: int) -> Variant:
 static func inexact(given: Variant, type: int) -> String:
 	if type != TYPE_INT or (typeof(given) != TYPE_FLOAT and typeof(given) != TYPE_INT):
 		return ""
-	var number: float = Read.as_float(given)
+	var number: float = GdhRead.as_float(given)
 	if not is_finite(number) or absf(number) < EXACT:
 		return ""
 	return (
@@ -718,42 +718,44 @@ func _describe_object(value: Object) -> Dictionary:
 
 
 func _build_vector2(fields: Dictionary) -> Vector2:
-	return Vector2(Read.as_float(fields.get("x", 0)), Read.as_float(fields.get("y", 0)))
+	return Vector2(GdhRead.as_float(fields.get("x", 0)), GdhRead.as_float(fields.get("y", 0)))
 
 
 func _build_vector2i(fields: Dictionary) -> Vector2i:
-	return Vector2i(Read.as_int(fields.get("x", 0)), Read.as_int(fields.get("y", 0)))
+	return Vector2i(GdhRead.as_int(fields.get("x", 0)), GdhRead.as_int(fields.get("y", 0)))
 
 
 func _build_vector3(fields: Dictionary) -> Vector3:
 	return Vector3(
-		Read.as_float(fields.get("x", 0)),
-		Read.as_float(fields.get("y", 0)),
-		Read.as_float(fields.get("z", 0))
+		GdhRead.as_float(fields.get("x", 0)),
+		GdhRead.as_float(fields.get("y", 0)),
+		GdhRead.as_float(fields.get("z", 0))
 	)
 
 
 func _build_vector3i(fields: Dictionary) -> Vector3i:
 	return Vector3i(
-		Read.as_int(fields.get("x", 0)), Read.as_int(fields.get("y", 0)), Read.as_int(fields.get("z", 0))
+		GdhRead.as_int(fields.get("x", 0)),
+		GdhRead.as_int(fields.get("y", 0)),
+		GdhRead.as_int(fields.get("z", 0))
 	)
 
 
 func _build_vector4(fields: Dictionary) -> Vector4:
 	return Vector4(
-		Read.as_float(fields.get("x", 0)),
-		Read.as_float(fields.get("y", 0)),
-		Read.as_float(fields.get("z", 0)),
-		Read.as_float(fields.get("w", 0))
+		GdhRead.as_float(fields.get("x", 0)),
+		GdhRead.as_float(fields.get("y", 0)),
+		GdhRead.as_float(fields.get("z", 0)),
+		GdhRead.as_float(fields.get("w", 0))
 	)
 
 
 func _build_vector4i(fields: Dictionary) -> Vector4i:
 	return Vector4i(
-		Read.as_int(fields.get("x", 0)),
-		Read.as_int(fields.get("y", 0)),
-		Read.as_int(fields.get("z", 0)),
-		Read.as_int(fields.get("w", 0))
+		GdhRead.as_int(fields.get("x", 0)),
+		GdhRead.as_int(fields.get("y", 0)),
+		GdhRead.as_int(fields.get("z", 0)),
+		GdhRead.as_int(fields.get("w", 0))
 	)
 
 
@@ -762,10 +764,10 @@ func _build_vector4i(fields: Dictionary) -> Vector4i:
 func _build_rect2(fields: Dictionary) -> Rect2:
 	if not fields.has("position"):
 		return Rect2(
-			Read.as_float(fields.get("x", 0)),
-			Read.as_float(fields.get("y", 0)),
-			Read.as_float(fields.get("width", 0)),
-			Read.as_float(fields.get("height", 0))
+			GdhRead.as_float(fields.get("x", 0)),
+			GdhRead.as_float(fields.get("y", 0)),
+			GdhRead.as_float(fields.get("width", 0)),
+			GdhRead.as_float(fields.get("height", 0))
 		)
 	return Rect2(_vector2_at(fields, "position"), _vector2_at(fields, "size"))
 
@@ -773,24 +775,24 @@ func _build_rect2(fields: Dictionary) -> Rect2:
 func _build_rect2i(fields: Dictionary) -> Rect2i:
 	if not fields.has("position"):
 		return Rect2i(
-			Read.as_int(fields.get("x", 0)),
-			Read.as_int(fields.get("y", 0)),
-			Read.as_int(fields.get("width", 0)),
-			Read.as_int(fields.get("height", 0))
+			GdhRead.as_int(fields.get("x", 0)),
+			GdhRead.as_int(fields.get("y", 0)),
+			GdhRead.as_int(fields.get("width", 0)),
+			GdhRead.as_int(fields.get("height", 0))
 		)
 	return Rect2i(_vector2i_at(fields, "position"), _vector2i_at(fields, "size"))
 
 
 func _build_plane(fields: Dictionary) -> Plane:
-	return Plane(_vector3_at(fields, "normal"), Read.as_float(fields.get("d", 0)))
+	return Plane(_vector3_at(fields, "normal"), GdhRead.as_float(fields.get("d", 0)))
 
 
 func _build_quaternion(fields: Dictionary) -> Quaternion:
 	return Quaternion(
-		Read.as_float(fields.get("x", 0)),
-		Read.as_float(fields.get("y", 0)),
-		Read.as_float(fields.get("z", 0)),
-		Read.as_float(fields.get("w", 0))
+		GdhRead.as_float(fields.get("x", 0)),
+		GdhRead.as_float(fields.get("y", 0)),
+		GdhRead.as_float(fields.get("z", 0)),
+		GdhRead.as_float(fields.get("w", 0))
 	)
 
 
@@ -830,10 +832,10 @@ func _build_projection(fields: Dictionary) -> Projection:
 
 func _build_color(fields: Dictionary) -> Color:
 	return Color(
-		Read.as_float(fields.get("r", 0)),
-		Read.as_float(fields.get("g", 0)),
-		Read.as_float(fields.get("b", 0)),
-		Read.as_float(fields.get("a", 1), 1.0)
+		GdhRead.as_float(fields.get("r", 0)),
+		GdhRead.as_float(fields.get("g", 0)),
+		GdhRead.as_float(fields.get("b", 0)),
+		GdhRead.as_float(fields.get("a", 1), 1.0)
 	)
 
 
@@ -846,7 +848,7 @@ func _build_bytes(fields: Dictionary) -> PackedByteArray:
 
 
 func _build_float(fields: Dictionary) -> float:
-	return Read.as_float(fields)
+	return GdhRead.as_float(fields)
 
 
 func _build_int(fields: Dictionary) -> int:

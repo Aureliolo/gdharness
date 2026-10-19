@@ -6,8 +6,8 @@ extends SceneTree
 ## the game was handed. Then a stroke through a point between, and the drags that are refused, each
 ## beside a drag that is not, so a runtime refusing everything fails.
 
-const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
-const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
+const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 const Checked = preload("checked.gd")
 
 
@@ -57,7 +57,7 @@ func _run() -> void:
 	var stroke: Stroke = Stroke.new()
 	root.add_child(stroke)
 	await process_frame
-	var input: InputCommands = InputCommands.new(host, Values.new())
+	var input: GdhInputCommands = GdhInputCommands.new(host, GdhValues.new())
 
 	await _check_a_straight_stroke(input, stroke)
 	await _check_a_stroke_through_a_point(input, stroke)
@@ -73,7 +73,7 @@ func _run() -> void:
 	quit(1)
 
 
-func _check_a_straight_stroke(input: InputCommands, stroke: Stroke) -> void:
+func _check_a_straight_stroke(input: GdhInputCommands, stroke: Stroke) -> void:
 	var answer: Dictionary = await input.inject_mouse_drag(
 		{"x": 100, "y": 100, "toX": 300, "toY": 100, "frames": 20}
 	)
@@ -92,7 +92,7 @@ func _check_a_straight_stroke(input: InputCommands, stroke: Stroke) -> void:
 		_fail("a drag ends where it was sent, having moved that far: %s %s" % [stroke.last, stroke.travelled])
 
 
-func _check_a_stroke_through_a_point(input: InputCommands, stroke: Stroke) -> void:
+func _check_a_stroke_through_a_point(input: GdhInputCommands, stroke: Stroke) -> void:
 	stroke.clear()
 	var answer: Dictionary = await input.inject_mouse_drag(
 		{"x": 0, "y": 0, "via": [[10, 0]], "toX": 10, "toY": 10, "frames": 4}
@@ -112,7 +112,7 @@ func _check_a_stroke_through_a_point(input: InputCommands, stroke: Stroke) -> vo
 		_fail("a stroke ends exactly where it was sent: %s" % stroke.last)
 
 
-func _check_what_is_refused(input: InputCommands, stroke: Stroke) -> void:
+func _check_what_is_refused(input: GdhInputCommands, stroke: Stroke) -> void:
 	var refusals: Array[Dictionary] = [
 		{"x": 0, "y": 0, "toX": 10, "frames": 4},
 		{"x": 0, "y": 0, "toX": 10, "toY": 10, "frames": 0},

@@ -1,16 +1,16 @@
 extends RefCounted
 
-const Read = preload("reading.gd")
-const Log = preload("logger.gd")
-const ProjectFile = preload("project_file.gd")
-const Serialisation = preload("serialisation.gd")
-const Shapes = preload("value_shapes.gd")
+const GdhRead = preload("reading.gd")
+const GdhLog = preload("logger.gd")
+const GdhProjectFile = preload("project_file.gd")
+const GdhSerialisation = preload("serialisation.gd")
+const GdhShapes = preload("value_shapes.gd")
 
-var _log: Log
-var _values: Serialisation = Serialisation.new()
+var _log: GdhLog
+var _values: GdhSerialisation = GdhSerialisation.new()
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -77,7 +77,7 @@ func _settings_under(prefix: String) -> Dictionary:
 		var name: String = str(property.get("name", ""))
 		if not name.begins_with(prefix):
 			continue
-		var kind: int = Read.as_int(property.get("type", TYPE_NIL), TYPE_NIL)
+		var kind: int = GdhRead.as_int(property.get("type", TYPE_NIL), TYPE_NIL)
 		var value: Variant = ProjectSettings.get_setting(name)
 		var described: Dictionary = {
 			"setting": name,
@@ -115,8 +115,12 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	var was_default: bool = had_value and default_value != null and old_value == default_value
 
 	var wanted: int = _wanted_type(setting_path, old_value if had_value else null)
-	# Fitted as a property write fits it, so a value one of them takes the other takes too.
-	var final_value: Variant = _values.fitted(value, wanted)
+	# A value of fields or a colour's html code is fitted as a property write fits it, so a value one
+	# of them takes the other takes too. A number is left to the check below, which refuses one the
+	# setting would cut where fitting it would cut it.
+	var final_value: Variant = _values.deserialize_value(value)
+	if final_value is Dictionary or (wanted == TYPE_COLOR and final_value is String):
+		final_value = _values.fitted(value, wanted)
 	if wanted > TYPE_NIL and final_value != null and typeof(final_value) != wanted:
 		if not _converts_faithfully(final_value, wanted):
 			return _log.failure(_cannot_hold(setting_path, wanted, final_value))
@@ -138,7 +142,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		return answer
 
 	ProjectSettings.set_setting(setting_path, final_value)
-	var err: Error = ProjectFile.save()
+	var err: Error = GdhProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 	return answer
@@ -159,7 +163,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 func _wanted_type(setting_path: String, current: Variant) -> int:
 	for info: Dictionary in ProjectSettings.get_property_list():
 		if str(info.get("name", "")) == setting_path:
-			return Read.as_int(info.get("type", TYPE_NIL), TYPE_NIL)
+			return GdhRead.as_int(info.get("type", TYPE_NIL), TYPE_NIL)
 	return typeof(current)
 
 
@@ -183,7 +187,7 @@ static func _cannot_hold(setting_path: String, wanted: int, value: Variant) -> S
 	if wanted in numbers and typeof(value) in numbers:
 		return "%s, and %s is not the same number as one.%s" % [declared, str(value), cost]
 	var given: String = type_string(typeof(value))
-	var remedy: String = Shapes.remedy(value, wanted)
+	var remedy: String = GdhShapes.remedy(value, wanted)
 	return "%s, and %s (%s) cannot become one.%s" % [declared, JSON.stringify(value), given, remedy]
 
 
@@ -191,12 +195,12 @@ static func _cannot_hold(setting_path: String, wanted: int, value: Variant) -> S
 func add_autoload(params: Dictionary) -> Dictionary:
 	var name: String = str(params.get("name", ""))
 	var path: String = str(params.get("path", ""))
-	var global: bool = Read.as_bool(params.get("global", true), true)
+	var global: bool = GdhRead.as_bool(params.get("global", true), true)
 
 	# There is no disabled autoload in Godot 4: every entry in the list is loaded under the root at
 	# every start. `enabled: false` used to write the entry without its asterisk and answer that it
 	# was disabled, and the autoload ran all the same.
-	if not Read.as_bool(params.get("enabled", true), true):
+	if not GdhRead.as_bool(params.get("enabled", true), true):
 		return _log.failure(
 			(
 				"An autoload cannot be added disabled: Godot loads every autoload in the list at every"
@@ -222,7 +226,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	# "Global Variable" column. Without it the node still comes up under the root; only the name
 	# stops resolving.
 	ProjectSettings.set_setting(setting, ("*" if global else "") + path)
-	var err: Error = ProjectFile.save()
+	var err: Error = GdhProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
@@ -247,7 +251,7 @@ func remove_autoload(params: Dictionary) -> Dictionary:
 
 	var old_value: String = str(ProjectSettings.get_setting(setting))
 	ProjectSettings.set_setting(setting, null)
-	var err: Error = ProjectFile.save()
+	var err: Error = GdhProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
@@ -296,7 +300,7 @@ func set_main_scene(params: Dictionary) -> Dictionary:
 	var old_main_scene: String = str(ProjectSettings.get_setting("application/run/main_scene", ""))
 
 	ProjectSettings.set_setting("application/run/main_scene", scene_path)
-	var err: Error = ProjectFile.save()
+	var err: Error = GdhProjectFile.save()
 
 	if err != OK:
 		return _log.failure("Failed to save project settings: " + str(err))

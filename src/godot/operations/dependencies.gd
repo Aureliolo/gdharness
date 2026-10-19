@@ -1,10 +1,10 @@
 extends RefCounted
 
-const Patterns = preload("patterns.gd")
-const Read = preload("reading.gd")
-const FileWalk = preload("file_walk.gd")
-const Log = preload("logger.gd")
-const ResourceFiles = preload("resource_files.gd")
+const GdhPatterns = preload("patterns.gd")
+const GdhRead = preload("reading.gd")
+const GdhFileWalk = preload("file_walk.gd")
+const GdhLog = preload("logger.gd")
+const GdhResourceFiles = preload("resource_files.gd")
 
 ## What a reverse search reads unless told otherwise: the resource and code files, and the settings
 ## files that name resources, "godot" for project.godot, "cfg" for plugin.cfg and export_presets.cfg,
@@ -21,8 +21,8 @@ const REFERENCE_PATTERNS: Array[String] = [
 	'ext_resource.*path="([^"]+)"',
 ]
 
-var _log: Log
-var _files: FileWalk = FileWalk.new()
+var _log: GdhLog
+var _files: GdhFileWalk = GdhFileWalk.new()
 ## The project's class names and the scripts declaring them, read the first time a script is walked
 ## and kept for the call: walking every resource starts a walk per root, and each reading every
 ## script again made the whole-project answer quadratic in the number of scripts.
@@ -33,7 +33,7 @@ var _classes_read: bool = false
 # Everything one dependency walk carries: the settings it was started with, and the state it
 # accumulates as it recurses. Kept together so the recursion passes one object rather than
 # six positional arguments that have to stay in the same order at every call site.
-class DependencyWalk:
+class GdhDependencyWalk:
 	var max_depth: int
 	var include_built_in: bool
 	var visited: Dictionary = {}
@@ -46,7 +46,7 @@ class DependencyWalk:
 		circular_references = p_circular_references
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -54,9 +54,9 @@ func _init(p_log: Log) -> void:
 func get_dependencies(params: Dictionary) -> Dictionary:
 	var resource_path: String = str(params.get("resource_path", ""))
 	# No depth, or a depth of zero or less, means the whole chain; the walk stops at cycles.
-	var depth: int = Read.as_int(params.get("depth", 0))
+	var depth: int = GdhRead.as_int(params.get("depth", 0))
 	var max_depth: int = depth if depth > 0 else 1000
-	var include_built_in: bool = Read.as_bool(params.get("include_builtin", false))
+	var include_built_in: bool = GdhRead.as_bool(params.get("include_builtin", false))
 
 	_log.info(
 		(
@@ -77,7 +77,7 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 		if not FileAccess.file_exists(full_path):
 			return _log.failure("Resource file does not exist: " + full_path)
 
-		var walk: DependencyWalk = DependencyWalk.new(max_depth, include_built_in, circular_references)
+		var walk: GdhDependencyWalk = GdhDependencyWalk.new(max_depth, include_built_in, circular_references)
 		dependencies[full_path] = _analyze_resource(full_path, 0, walk)
 		total_resources = 1
 	else:
@@ -89,7 +89,9 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 		# Each root gets a fresh walk so a cycle is reported from every resource it passes
 		# through, rather than only from whichever one happened to be walked first.
 		for res_path: String in all_resources:
-			var walk: DependencyWalk = DependencyWalk.new(max_depth, include_built_in, circular_references)
+			var walk: GdhDependencyWalk = GdhDependencyWalk.new(
+				max_depth, include_built_in, circular_references
+			)
 			var deps: Array[Dictionary] = _analyze_resource(res_path, 0, walk)
 			if deps.size() > 0:
 				dependencies[res_path] = deps
@@ -136,9 +138,9 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 	var class_name_declared: String = _declared_class_name(resource_path)
 	var by_class: RegEx = null
 	if not class_name_declared.is_empty():
-		by_class = Patterns.compiled("\\b" + _regex_escaped(class_name_declared) + "\\b")
+		by_class = GdhPatterns.compiled("\\b" + _regex_escaped(class_name_declared) + "\\b")
 	var target: Dictionary = {
-		"path": resource_path, "uid": str(ResourceFiles.uid_of(resource_path).get("uid", ""))
+		"path": resource_path, "uid": str(GdhResourceFiles.uid_of(resource_path).get("uid", ""))
 	}
 
 	var all_files: Array[String] = _usage_files(file_types)
@@ -189,10 +191,12 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 				kind = _path_reference_kind(line, file_path)
 			else:
 				kind = (
-					"extends" if Patterns.without_annotations(line).begins_with("extends ") else "class_name"
+					"extends"
+					if GdhPatterns.without_annotations(line).begins_with("extends ")
+					else "class_name"
 				)
 			references.append({"line": i + 1, "kind": kind, "text": trimmed})
-			by_kind[kind] = Read.as_int(by_kind.get(kind, 0)) + 1
+			by_kind[kind] = GdhRead.as_int(by_kind.get(kind, 0)) + 1
 			if kind != "doc" and kind != "comment":
 				in_code += 1
 
@@ -229,7 +233,7 @@ func _declared_class_name(path: String) -> String:
 		return ""
 	while not file.eof_reached():
 		# Annotations first, since `@abstract class_name X` is one line and this read it as none.
-		var found: RegExMatch = Patterns.declared_class(Patterns.without_annotations(file.get_line()))
+		var found: RegExMatch = GdhPatterns.declared_class(GdhPatterns.without_annotations(file.get_line()))
 		if found != null:
 			file.close()
 			return found.get_string(1)
@@ -282,14 +286,14 @@ func _names_target(line: String, file_path: String, target: Dictionary) -> bool:
 # The contents of each string literal on [param line], of either quote.
 static func _string_literals(line: String) -> Array[String]:
 	var literals: Array[String] = []
-	for m: RegExMatch in Patterns.compiled(STRING_LITERAL).search_all(line):
+	for m: RegExMatch in GdhPatterns.compiled(STRING_LITERAL).search_all(line):
 		literals.append(m.get_string(1) if not m.get_string(1).is_empty() else m.get_string(2))
 	return literals
 
 
 # [param line] with its strings emptied and its comment taken off: the part a class can be used in.
 static func _code_of(line: String) -> String:
-	var bare: String = Patterns.compiled(STRING_LITERAL).sub(line, '""', true)
+	var bare: String = GdhPatterns.compiled(STRING_LITERAL).sub(line, '""', true)
 	var mark: int = bare.find("#")
 	return bare if mark == -1 else bare.substr(0, mark)
 
@@ -299,13 +303,13 @@ static func _code_of(line: String) -> String:
 static func _code_lines(content: String) -> String:
 	var kept: Array[String] = []
 	for line: String in content.split("\n"):
-		kept.append(Patterns.without_comment(line))
+		kept.append(GdhPatterns.without_comment(line))
 	return "\n".join(kept)
 
 
 # The comment on [param line], strings emptied first so a # inside one does not start it.
 static func _comment_of(line: String) -> String:
-	var bare: String = Patterns.compiled(STRING_LITERAL).sub(line, '""', true)
+	var bare: String = GdhPatterns.compiled(STRING_LITERAL).sub(line, '""', true)
 	var mark: int = bare.find("#")
 	return "" if mark == -1 else bare.substr(mark)
 
@@ -321,7 +325,7 @@ func _path_reference_kind(line: String, file_path: String) -> String:
 			return "export_preset"
 	if file_path.ends_with(".import"):
 		return "import"
-	var trimmed: String = Patterns.without_annotations(line)
+	var trimmed: String = GdhPatterns.without_annotations(line)
 	if trimmed.begins_with("extends "):
 		return "extends"
 	if trimmed.begins_with("[ext_resource"):
@@ -366,7 +370,7 @@ func _count_recursive(deps: Array[Dictionary]) -> int:
 	return count
 
 
-func _analyze_resource(path: String, current_depth: int, walk: DependencyWalk) -> Array[Dictionary]:
+func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk) -> Array[Dictionary]:
 	var deps: Array[Dictionary] = []
 
 	if current_depth >= walk.max_depth:
@@ -385,7 +389,7 @@ func _analyze_resource(path: String, current_depth: int, walk: DependencyWalk) -
 	var remaining: int = walk.max_depth - current_depth
 	if walk.visited.has(path):
 		var cached: Dictionary = walk.visited[path]
-		if Read.as_int(cached["remaining"]) == remaining:
+		if GdhRead.as_int(cached["remaining"]) == remaining:
 			var cached_deps: Array[Dictionary] = cached["deps"]
 			return cached_deps
 
@@ -402,7 +406,7 @@ func _analyze_resource(path: String, current_depth: int, walk: DependencyWalk) -
 			content = _code_lines(content)
 
 		for pattern: String in REFERENCE_PATTERNS:
-			var regex: RegEx = Patterns.compiled(pattern)
+			var regex: RegEx = GdhPatterns.compiled(pattern)
 			for m: RegExMatch in regex.search_all(content):
 				var dep_path: String = _resolved(_referenced_path(m.get_string()), path)
 
@@ -439,7 +443,7 @@ func _depend(
 	dep_path: String,
 	by_class: String,
 	current_depth: int,
-	walk: DependencyWalk
+	walk: GdhDependencyWalk
 ) -> void:
 	if dep_path == path:
 		return
@@ -474,7 +478,7 @@ static func classes_used_in(content: String, classes: Dictionary) -> Array[Strin
 	var used: Array[String] = []
 	if classes.is_empty():
 		return used
-	var word: RegEx = Patterns.compiled("[A-Za-z_][A-Za-z0-9_]*")
+	var word: RegEx = GdhPatterns.compiled("[A-Za-z_][A-Za-z0-9_]*")
 	for line: String in content.split("\n"):
 		for m: RegExMatch in word.search_all(_code_of(line)):
 			var name: String = m.get_string()
@@ -507,6 +511,6 @@ func _referenced_path(matched: String) -> String:
 		expression = 'path="([^"]+)"'
 	else:
 		return matched
-	var inner: RegEx = Patterns.compiled(expression)
+	var inner: RegEx = GdhPatterns.compiled(expression)
 	var inner_match: RegExMatch = inner.search(matched)
 	return inner_match.get_string(1) if inner_match else matched

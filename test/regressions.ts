@@ -19651,7 +19651,7 @@ function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
   // satisfy the line above while the sentence describes a setting with no effect.
   assert.match(
     addon,
-    /_script_run\(\)\s*and\s*not\s*Read\.as_bool\(ProjectSettings\.get_setting\(SCRIPT_RUNS_SETTING/,
+    /_script_run\(\)\s*and\s*not\s*GdhRead\.as_bool\(ProjectSettings\.get_setting\(SCRIPT_RUNS_SETTING/,
     'and the script-run refusal should be the thing that consults it',
   );
 
@@ -36867,7 +36867,7 @@ function testNoShippedScriptParsesJsonLoudly(): void {
       .split('\n')
       .some((line) => !line.trimStart().startsWith('#') && line.includes('JSON.parse_string(')),
   );
-  assert.deepEqual(loud, [], 'read JSON through Read.json_or_null, which fails without printing');
+  assert.deepEqual(loud, [], 'read JSON through GdhRead.json_or_null, which fails without printing');
 }
 
 /**

@@ -10,18 +10,18 @@ extends Node
 ## wanted. Both directions of the socket carry one JSON object per line. Every request names an
 ## id and the reply carries it back.
 
-const Accessibility = preload("runtime_accessibility.gd")
-const Capture = preload("runtime_capture.gd")
-const Changes = preload("runtime_changes.gd")
-const ErrorReport = preload("error_report.gd")
-const InputCommands = preload("runtime_input.gd")
-const Pad = preload("runtime_pad.gd")
-const Queries = preload("runtime_queries.gd")
-const Read = preload("reading.gd")
-const Targets = preload("runtime_targets.gd")
-const Typing = preload("runtime_typing.gd")
-const Values = preload("runtime_values.gd")
-const Waits = preload("runtime_waits.gd")
+const GdhAccessibility = preload("runtime_accessibility.gd")
+const GdhCapture = preload("runtime_capture.gd")
+const GdhChanges = preload("runtime_changes.gd")
+const GdhErrorReport = preload("error_report.gd")
+const GdhInputCommands = preload("runtime_input.gd")
+const GdhPad = preload("runtime_pad.gd")
+const GdhQueries = preload("runtime_queries.gd")
+const GdhRead = preload("reading.gd")
+const GdhTargets = preload("runtime_targets.gd")
+const GdhTyping = preload("runtime_typing.gd")
+const GdhValues = preload("runtime_values.gd")
+const GdhWaits = preload("runtime_waits.gd")
 
 const PROTOCOL: int = 3
 const DEFAULT_BIND_ADDRESS: String = "127.0.0.1"
@@ -83,19 +83,19 @@ const ERROR_REPORT_NAME: String = "runtime-%d.log"
 const VERSION_MARKER: String = "res://addons/gdharness_runtime/.gdharness-version"
 const DIGEST_MARKER: String = "res://addons/gdharness_runtime/.gdharness-digest"
 
-var values: Values = Values.new()
+var values: GdhValues = GdhValues.new()
 
 # The modules are members and not locals of _init, because a Callable holds its object by id
 # rather than by reference, and a module referenced only by the Callables in the command table
 # would be freed on the way out of _init, leaving every command "unknown".
-var _queries: Queries = Queries.new(self, values)
-var _changes: Changes = Changes.new(self, values)
-var _input: InputCommands = InputCommands.new(self, values)
-var _typing: Typing = Typing.new(self)
-var _pad: Pad = Pad.new(self)
-var _capture: Capture = Capture.new(self, values)
-var _waits: Waits = Waits.new(self, values)
-var _accessibility: Accessibility = Accessibility.new(self)
+var _queries: GdhQueries = GdhQueries.new(self, values)
+var _changes: GdhChanges = GdhChanges.new(self, values)
+var _input: GdhInputCommands = GdhInputCommands.new(self, values)
+var _typing: GdhTyping = GdhTyping.new(self)
+var _pad: GdhPad = GdhPad.new(self)
+var _capture: GdhCapture = GdhCapture.new(self, values)
+var _waits: GdhWaits = GdhWaits.new(self, values)
+var _accessibility: GdhAccessibility = GdhAccessibility.new(self)
 
 var _server: TCPServer
 var _clients: Array[StreamPeerTCP] = []
@@ -114,7 +114,7 @@ var _enabled: bool = true
 var _announcement: String = ""
 ## Held for as long as the game runs: a Logger the engine has is kept by reference, and one
 ## that goes away mid-run takes the report with it.
-var _errors: ErrorReport
+var _errors: GdhErrorReport
 ## Every command, by the name a request uses, as the module method that answers it.
 var _commands: Dictionary = {}
 ## The addon this game loaded, read once at start: an upgrade rewrites the markers under a running
@@ -174,7 +174,7 @@ func _size_a_windowless_game() -> void:
 	if DisplayServer.get_name() != "headless" or _script_run() or not OS.is_debug_build():
 		return
 	var root: Window = get_tree().root
-	if Vector2(root.size) != Targets.HEADLESS_VIEWPORT:
+	if Vector2(root.size) != GdhTargets.HEADLESS_VIEWPORT:
 		return
 	root.size = Vector2i(_window_dimension("width", 1152), _window_dimension("height", 648))
 
@@ -182,12 +182,12 @@ func _size_a_windowless_game() -> void:
 ## The window's [param axis] as the project opens it: the override when one is set, otherwise the
 ## viewport's size, whose engine default is [param fallback].
 static func _window_dimension(axis: String, fallback: int) -> int:
-	var override: int = Read.as_int(
+	var override: int = GdhRead.as_int(
 		ProjectSettings.get_setting("display/window/size/window_%s_override" % axis, 0)
 	)
 	if override > 0:
 		return override
-	return Read.as_int(
+	return GdhRead.as_int(
 		ProjectSettings.get_setting("display/window/size/viewport_%s" % axis, fallback), fallback
 	)
 
@@ -342,7 +342,7 @@ func _report_errors() -> void:
 	var made: Error = DirAccess.make_dir_recursive_absolute(directory)
 	if made != OK and made != ERR_ALREADY_EXISTS:
 		return
-	_errors = ErrorReport.new(directory.path_join(ERROR_REPORT_NAME % OS.get_process_id()))
+	_errors = GdhErrorReport.new(directory.path_join(ERROR_REPORT_NAME % OS.get_process_id()))
 	OS.add_logger(_errors)
 
 
@@ -404,7 +404,7 @@ func _drain(client: StreamPeerTCP) -> bool:
 	var sent: Array = client.put_partial_data(owed)
 	if sent[0] != OK:
 		return false
-	_outgoing[client] = owed.slice(Read.as_int(sent[1]))
+	_outgoing[client] = owed.slice(GdhRead.as_int(sent[1]))
 	return true
 
 
@@ -438,14 +438,14 @@ func _start_server() -> void:
 	# own path: a gate that starts sixteen engines at once announces sixteen games that are not
 	# games, and a client asking the runtime anything while they run can be answered by whichever
 	# of them replies first. Measured on two projects before it was written here.
-	if _script_run() and not Read.as_bool(ProjectSettings.get_setting(SCRIPT_RUNS_SETTING, false)):
+	if _script_run() and not GdhRead.as_bool(ProjectSettings.get_setting(SCRIPT_RUNS_SETTING, false)):
 		_enabled = false
 		return
 
 	_server = TCPServer.new()
 	# listen() defaults bind_address to "*", which exposes the game to the whole network.
 	var bind_address: String = str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
-	var wanted_port: int = Read.as_int(ProjectSettings.get_setting(PORT_SETTING, 0))
+	var wanted_port: int = GdhRead.as_int(ProjectSettings.get_setting(PORT_SETTING, 0))
 	var error: Error = _server.listen(wanted_port, bind_address)
 	if error != OK:
 		# A warning, not an error: callers treat any ERROR line on stderr as a failed

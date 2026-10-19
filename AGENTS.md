@@ -38,6 +38,12 @@ with the engine passed a runtime addon that failed to compile on the Linux engin
 in `test/support/gd` compile under those settings too: one tried in a scratch project with default
 warnings passed there and failed on the leg for discarding what `ItemList.add_item` returns.
 
+Every name a shipped script declares in a class's casing (a preloaded module, an inner class, an
+enum) starts with `Gdh`. Godot resolves a type as the project's global class or autoload before the
+script's own constant, so a game with `class_name Log` or an autoload called `Log` broke every module
+that preloads its logger as `Log`. The engine leg's `ourNames` case refuses a name without the
+prefix and compiles the shipped scripts beside a class and an autoload for each name.
+
 The modules listed in `scripts/sync-shared-gd.ts` (`reading.gd`, `serialisation.gd`,
 `value_shapes.gd`, `property_values.gd`, `file_reads.gd` and `animation_reads.gd`) are edited in
 `src/godot/operations/` only; `bun run sync:gd` writes the copies inside the addons, and a

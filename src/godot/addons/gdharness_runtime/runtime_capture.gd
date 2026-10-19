@@ -2,20 +2,20 @@ extends RefCounted
 
 ## A picture of the running game, as a PNG written where the server asked for it.
 
-const Read = preload("reading.gd")
-const Values = preload("runtime_values.gd")
-const Queries = preload("runtime_queries.gd")
-const Screen = preload("runtime_screen.gd")
+const GdhRead = preload("reading.gd")
+const GdhValues = preload("runtime_values.gd")
+const GdhQueries = preload("runtime_queries.gd")
+const GdhScreen = preload("runtime_screen.gd")
 
 ## How far zoom enlarges at most. Sixteen makes a 3-pixel ring 48 pixels across, past any need to
 ## see it, and a 200-pixel region 3200, past the size anybody reads a picture at.
 const ZOOM_MOST: int = 16
 
 var _host: Node
-var _values: Values
+var _values: GdhValues
 
 
-func _init(host: Node, values: Values) -> void:
+func _init(host: Node, values: GdhValues) -> void:
 	_host = host
 	_values = values
 
@@ -29,7 +29,7 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 	if viewport_path.is_empty():
 		return await capture_screenshot(params)
 
-	var standing: Dictionary = Values.node_at(_host.get_tree().root, viewport_path)
+	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, viewport_path)
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
@@ -136,8 +136,10 @@ static func scaled_to(drawn: Vector2i, width: int, height: int) -> Vector2i:
 func _cut_asked(params: Dictionary, in_window: bool) -> Dictionary:
 	var region_given: Variant = params.get("region")
 	var node_path: String = str(params.get("nodePath", ""))
-	var zoom: int = Read.as_int(params.get("zoom", 1), 1)
-	var sized: bool = Read.as_int(params.get("width", 0)) > 0 or Read.as_int(params.get("height", 0)) > 0
+	var zoom: int = GdhRead.as_int(params.get("zoom", 1), 1)
+	var sized: bool = (
+		GdhRead.as_int(params.get("width", 0)) > 0 or GdhRead.as_int(params.get("height", 0)) > 0
+	)
 	if region_given != null and not node_path.is_empty():
 		return _refused("region and nodePath each name the part to capture; give one of them")
 	if (region_given != null or not node_path.is_empty()) and not in_window:
@@ -178,7 +180,7 @@ static func _refused(message: String) -> Dictionary:
 ## The rectangle [param given] names: the four numbers x, y, width and height, or a rectangle as the
 ## runtime answers one, its two corners tagged with their type, passed back as it came. Null when it
 ## is neither or has no area.
-static func region_of(values: Values, given: Variant) -> Variant:
+static func region_of(values: GdhValues, given: Variant) -> Variant:
 	if not given is Dictionary:
 		return null
 	var fields: Dictionary = given
@@ -205,21 +207,21 @@ static func region_of(values: Values, given: Variant) -> Variant:
 static func drawn_rect_of(node: Node) -> Variant:
 	if node is Control:
 		var control: Control = node
-		return Screen.rect_in_window(
+		return GdhScreen.rect_in_window(
 			control.get_viewport(),
 			control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size)
 		)
 	if node is Node3D:
 		var spatial: Node3D = node
-		var found: Dictionary = Queries.in_frame(spatial)
+		var found: Dictionary = GdhQueries.in_frame(spatial)
 		if not found.has("rect"):
 			return "%s is not drawn by any current camera, so it covers nothing on screen" % node.get_path()
 		var covered: Rect2 = found["rect"]
-		return Screen.rect_in_window(spatial.get_viewport(), covered)
+		return GdhScreen.rect_in_window(spatial.get_viewport(), covered)
 	if node is Node2D and node.has_method("get_rect"):
 		var item: Node2D = node
 		var own: Rect2 = item.call("get_rect")
-		return Screen.rect_in_window(item.get_viewport(), item.get_global_transform_with_canvas() * own)
+		return GdhScreen.rect_in_window(item.get_viewport(), item.get_global_transform_with_canvas() * own)
 	var no_extent: String = (
 		"%s is a %s, which has a position on screen and no extent; give region around the point "
 		+ "runtime_inspect rect answers for it"
@@ -322,7 +324,7 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 	var region: Variant = asked.get("region")
 	if asked.has("node_path"):
 		var node_path: String = asked["node_path"]
-		var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+		var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 		if standing.has("message"):
 			return standing
 		var node: Node = standing["node"]
@@ -332,7 +334,7 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 			return _refused(why)
 		region = placed
 		# A hidden node's rectangle is still a place, and what is drawn there is whatever is behind it.
-		if not Queries.shown(node):
+		if not GdhQueries.shown(node):
 			described["note"] = (
 				"%s is hidden, so this is what is drawn where it would be rather than the node" % node_path
 			)
@@ -365,7 +367,7 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 	else:
 		var drawn: Vector2i = Vector2i(image.get_width(), image.get_height())
 		var target: Vector2i = scaled_to(
-			drawn, Read.as_int(params.get("width", 0)), Read.as_int(params.get("height", 0))
+			drawn, GdhRead.as_int(params.get("width", 0)), GdhRead.as_int(params.get("height", 0))
 		)
 		if target != drawn:
 			image.resize(target.x, target.y)

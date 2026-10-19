@@ -1,10 +1,10 @@
 extends RefCounted
 
-const ExportPresets = preload("export_presets.gd")
-const Read = preload("reading.gd")
-const Serialisation = preload("serialisation.gd")
-const FileWalk = preload("file_walk.gd")
-const Log = preload("logger.gd")
+const GdhExportPresets = preload("export_presets.gd")
+const GdhRead = preload("reading.gd")
+const GdhSerialisation = preload("serialisation.gd")
+const GdhFileWalk = preload("file_walk.gd")
+const GdhLog = preload("logger.gd")
 
 ## What the engine imports with no tool outside it, for finding what has not been imported yet;
 ## everything imported already is found by its sidecar whatever its extension.
@@ -53,20 +53,20 @@ const OPENTYPE_OPTIONS: Dictionary[String, Array] = {"font_data_dynamic": ["open
 const EDITOR_DIRECTORY: String = "res://.godot/editor"
 const EDITOR_CACHE_PREFIX: String = "filesystem_cache"
 
-var _log: Log
-var _files: FileWalk = FileWalk.new()
-var _values: Serialisation = Serialisation.new()
+var _log: GdhLog
+var _files: GdhFileWalk = GdhFileWalk.new()
+var _values: GdhSerialisation = GdhSerialisation.new()
 var _sidecar_md5s: Variant = null
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
 # Get import status for resources
 func get_import_status(params: Dictionary) -> Dictionary:
 	var resource_path: String = str(params.get("resource_path", ""))
-	var include_up_to_date: bool = Read.as_bool(params.get("include_up_to_date", false))
+	var include_up_to_date: bool = GdhRead.as_bool(params.get("include_up_to_date", false))
 
 	_log.info(
 		(
@@ -203,7 +203,7 @@ func set_import_options(params: Dictionary) -> Dictionary:
 			and (value is int or value is float)
 			and type_convert(value, typeof(given)) != given
 		)
-		if held != null and (lossy or not Serialisation.acceptable(value, typeof(held))):
+		if held != null and (lossy or not GdhSerialisation.acceptable(value, typeof(held))):
 			var held_type: String = type_string(typeof(held))
 			var article: String = "an" if held_type.to_lower()[0] in "aeiou" else "a"
 			refused.append(
@@ -323,7 +323,7 @@ static func _all_ints(held: Variant, keys: bool) -> bool:
 # Validate project for export
 func validate_project(params: Dictionary) -> Dictionary:
 	var preset_name: String = str(params.get("preset", ""))
-	var include_suggestions: bool = Read.as_bool(params.get("include_suggestions", true), true)
+	var include_suggestions: bool = GdhRead.as_bool(params.get("include_suggestions", true), true)
 
 	_log.info("Validating project" + (" for preset: " + preset_name if not preset_name.is_empty() else ""))
 
@@ -355,12 +355,12 @@ func validate_project(params: Dictionary) -> Dictionary:
 				include_suggestions
 			)
 		)
-	elif not FileWalk.missing_reason(main_scene).is_empty():
+	elif not GdhFileWalk.missing_reason(main_scene).is_empty():
 		issues.append(
 			_finding(
 				"error",
 				"main_scene",
-				"Main scene " + FileWalk.missing_reason(main_scene),
+				"Main scene " + GdhFileWalk.missing_reason(main_scene),
 				"Update the main scene setting or create the missing scene file",
 				include_suggestions
 			)
@@ -382,7 +382,7 @@ func validate_project(params: Dictionary) -> Dictionary:
 	# does not exist answered valid, as though it had been checked.
 	if not preset_name.is_empty():
 		checks_performed.append("export_preset")
-		var named: Array[String] = ExportPresets.names()
+		var named: Array[String] = GdhExportPresets.names()
 		if preset_name not in named:
 			issues.append(
 				_finding(
@@ -611,8 +611,8 @@ static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dic
 	# imported them again: every scene after an engine upgrade raised the importer's version, and
 	# every VRAM texture once the project asked for another compression format.
 	var importer: String = str(sidecar.get_value("remap", "importer", ""))
-	var version: int = Read.as_int(sidecar.get_value("remap", "importer_version", 0))
-	var current: int = Read.as_int(IMPORTER_VERSIONS.get(importer, 0))
+	var version: int = GdhRead.as_int(sidecar.get_value("remap", "importer_version", 0))
+	var current: int = GdhRead.as_int(IMPORTER_VERSIONS.get(importer, 0))
 	if current > version:
 		return _stale(
 			(
@@ -697,12 +697,12 @@ static func _vram_formats_lacking(metadata: Variant) -> Array[String]:
 	if not metadata is Dictionary:
 		return lacking
 	var meta: Dictionary = metadata
-	if not Read.as_bool(meta.get("vram_texture", false)):
+	if not GdhRead.as_bool(meta.get("vram_texture", false)):
 		return lacking
 	var written: Variant = meta.get("imported_formats", [])
 	var formats: Array = written if written is Array else []
 	for format: String in VRAM_FORMATS:
-		var asked: bool = Read.as_bool(
+		var asked: bool = GdhRead.as_bool(
 			ProjectSettings.get_setting("rendering/textures/vram_compression/import_" + format, false)
 		)
 		if asked and format not in formats:
@@ -850,7 +850,7 @@ static func _images_of(scene_path: String) -> Array[String]:
 				text = bytes.slice(20, mini(20 + length, bytes.size())).get_string_from_utf8()
 	if text.is_empty():
 		return images
-	var parsed: Variant = Read.json_or_null(text)
+	var parsed: Variant = GdhRead.json_or_null(text)
 	if not parsed is Dictionary:
 		return images
 	var document: Dictionary = parsed

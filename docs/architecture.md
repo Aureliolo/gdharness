@@ -1048,6 +1048,16 @@ answered and dropped. `test/engine-gdscript.ts` asks the engine for its own list
 than keeping one, turns all of them up, empties `directory_rules` so the addons are held to it too,
 and runs an operation from outside the project the way the server does.
 
+The project's names reach into the shipped scripts too. Godot resolves a type by looking for a
+global class and then an autoload before it looks at the script's own constants and inner classes,
+so in a project with `class_name Log`, or an autoload called `Log`, a module's `var logger: Log`
+names the project's `Log` and not the logger it preloads, and the script refuses to compile at any
+warning level. An inner class of the same name is refused outright as hiding the global one. Every
+name a shipped script declares in a class's casing, a preloaded module, an inner class, an enum,
+therefore starts with `Gdh`, which no project's own names do. The engine suite declares a class
+and an autoload for each such name, without the prefix, and compiles and runs the shipped scripts
+beside them, and refuses a declared name in a class's casing that lacks it.
+
 Not everything under `debug/gdscript/warnings/` is a warning level, which is the part worth knowing
 before writing anything that sets them. On 4.7.2 there are 52 settings there and 49 take a level:
 `enable` and `renamed_in_godot_4_hint` are booleans and `directory_rules` is a dictionary of path to

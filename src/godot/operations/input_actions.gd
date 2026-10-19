@@ -1,8 +1,8 @@
 extends RefCounted
 
-const Read = preload("reading.gd")
-const Log = preload("logger.gd")
-const ProjectFile = preload("project_file.gd")
+const GdhRead = preload("reading.gd")
+const GdhLog = preload("logger.gd")
+const GdhProjectFile = preload("project_file.gd")
 
 # The key names a caller may write, and what the engine calls them.
 const KEY_NAMES: Dictionary = {
@@ -97,10 +97,10 @@ const KEY_NAMES: Dictionary = {
 	"Equal": KEY_EQUAL,
 }
 
-var _log: Log
+var _log: GdhLog
 
 
-func _init(p_log: Log) -> void:
+func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
 
@@ -108,7 +108,7 @@ func _init(p_log: Log) -> void:
 func add_input_action(params: Dictionary) -> Dictionary:
 	var action_name: String = str(params.get("action_name", ""))
 	var events: Array = params.get("events", [])
-	var deadzone: float = Read.as_float(params.get("deadzone", 0.5), 0.5)
+	var deadzone: float = GdhRead.as_float(params.get("deadzone", 0.5), 0.5)
 
 	_log.info("Adding input action: " + action_name)
 	_log.debug("Events: " + JSON.stringify(events))
@@ -192,12 +192,12 @@ func add_input_action(params: Dictionary) -> Dictionary:
 					var bound: InputEvent = event
 					old_events.append(_shaped(bound))
 		answer["old_events"] = old_events
-		answer["old_deadzone"] = Read.as_float(old.get("deadzone", 0.5), 0.5)
+		answer["old_deadzone"] = GdhRead.as_float(old.get("deadzone", 0.5), 0.5)
 
 	# Through ProjectSettings so the file is saved the way the editor saves it, header and
 	# every other line kept; a ConfigFile of project.godot drops the comments on the way out.
 	ProjectSettings.set_setting(setting, action)
-	var err: Error = ProjectFile.save()
+	var err: Error = GdhProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
@@ -250,7 +250,7 @@ func remove_input_action(params: Dictionary) -> Dictionary:
 			)
 		)
 	ProjectSettings.set_setting(setting, null)
-	var err: Error = ProjectFile.save()
+	var err: Error = GdhProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 	return {"action_name": action_name, "removed": true}
@@ -273,29 +273,29 @@ func build_input_action(deadzone: float, events: Array) -> Dictionary:
 		match evt_class:
 			"InputEventKey":
 				var key: InputEventKey = InputEventKey.new()
-				key.keycode = Read.as_int(event.get("keycode", 0)) as Key
-				key.ctrl_pressed = Read.as_bool(event.get("ctrl_pressed", false))
-				key.alt_pressed = Read.as_bool(event.get("alt_pressed", false))
-				key.shift_pressed = Read.as_bool(event.get("shift_pressed", false))
+				key.keycode = GdhRead.as_int(event.get("keycode", 0)) as Key
+				key.ctrl_pressed = GdhRead.as_bool(event.get("ctrl_pressed", false))
+				key.alt_pressed = GdhRead.as_bool(event.get("alt_pressed", false))
+				key.shift_pressed = GdhRead.as_bool(event.get("shift_pressed", false))
 				built.append(key)
 
 			"InputEventMouseButton":
 				var mouse: InputEventMouseButton = InputEventMouseButton.new()
 				mouse.button_index = (
-					Read.as_int(event.get("button_index", MOUSE_BUTTON_LEFT), MOUSE_BUTTON_LEFT)
+					GdhRead.as_int(event.get("button_index", MOUSE_BUTTON_LEFT), MOUSE_BUTTON_LEFT)
 					as MouseButton
 				)
 				built.append(mouse)
 
 			"InputEventJoypadButton":
 				var pad: InputEventJoypadButton = InputEventJoypadButton.new()
-				pad.button_index = Read.as_int(event.get("button_index", 0)) as JoyButton
+				pad.button_index = GdhRead.as_int(event.get("button_index", 0)) as JoyButton
 				built.append(pad)
 
 			"InputEventJoypadMotion":
 				var motion: InputEventJoypadMotion = InputEventJoypadMotion.new()
-				motion.axis = Read.as_int(event.get("axis", 0)) as JoyAxis
-				motion.axis_value = Read.as_float(event.get("axis_value", 1.0), 1.0)
+				motion.axis = GdhRead.as_int(event.get("axis", 0)) as JoyAxis
+				motion.axis_value = GdhRead.as_float(event.get("axis_value", 1.0), 1.0)
 				built.append(motion)
 
 			_:

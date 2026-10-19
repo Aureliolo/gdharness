@@ -9,8 +9,8 @@ extends RefCounted
 ## its first question makes the engine build the tree, and what it reads is what a screen reader is
 ## told, names left empty included.
 
-const Read = preload("reading.gd")
-const Says = preload("runtime_says.gd")
+const GdhRead = preload("reading.gd")
+const GdhSays = preload("runtime_says.gd")
 
 ## How long the client keeps walking the tree for it to settle: the engine answers the first question
 ## with its windows alone and fills them in over the next frames.
@@ -260,7 +260,7 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var text: String = FileAccess.get_file_as_string(out)
 	# Not checked: a file that is not there was never written, which the answer below says.
 	var _removed: Error = DirAccess.remove_absolute(out)
-	var read: Variant = Read.json_or_null(text)
+	var read: Variant = GdhRead.json_or_null(text)
 	if not read is Dictionary:
 		return _refused("UI Automation answered nothing readable: %s" % text.left(500))
 	var answer: Dictionary = read
@@ -270,7 +270,7 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var windows: Array = answer.get("windows", [])
 	var made_by: Dictionary = {}
 	_note_elements(_host.get_tree().root, made_by)
-	var placing: Placing = Placing.new()
+	var placing: GdhPlacing = GdhPlacing.new()
 	var elements: int = 0
 	var unnamed: int = 0
 	for at: int in windows.size():
@@ -373,7 +373,7 @@ static func _narrow(result: Dictionary, params: Dictionary) -> void:
 			if window is Dictionary:
 				var holder: Dictionary = window
 				_keep_only(holder, fields)
-	var limit: int = Read.as_int(params.get("limit", 0), 0)
+	var limit: int = GdhRead.as_int(params.get("limit", 0), 0)
 	if limit > 0:
 		var left: Array[int] = [limit]
 		var omitted: Array[int] = [0]
@@ -401,7 +401,7 @@ static func _matches(element: Dictionary, under: String, said: String) -> bool:
 			return false
 	if not said.is_empty():
 		for field: String in ["name", "value", "value_text"]:
-			if element.has(field) and Says.matches(str(element[field]), said):
+			if element.has(field) and GdhSays.matches(str(element[field]), said):
 				return true
 		return false
 	return true
@@ -452,7 +452,7 @@ static func _cut(element: Dictionary, left: Array[int], omitted: Array[int]) -> 
 
 ## The project's accessibility mode, as the command line's --accessibility names them.
 static func _setting() -> String:
-	match Read.as_int(ProjectSettings.get_setting("accessibility/general/accessibility_support", 0), 0):
+	match GdhRead.as_int(ProjectSettings.get_setting("accessibility/general/accessibility_support", 0), 0):
 		1:
 			return "always"
 		2:
@@ -498,7 +498,7 @@ static func _window_with(node: Node, window_id: int) -> Window:
 ## UI Automation's runtime id for an element ends in the four halves of AccessKit's id for it, and
 ## Godot gives AccessKit the element's RID: measured on 4.7.2, /root/Main's element answered
 ## 114,1,0,0 with RID 114 << 32 | 1. Which pair holds it is not assumed, so both are tried.
-static func _match(element: Dictionary, made_by: Dictionary, placing: Placing) -> void:
+static func _match(element: Dictionary, made_by: Dictionary, placing: GdhPlacing) -> void:
 	var children: Array = element.get("children", [])
 	for child: Variant in children:
 		if not child is Dictionary:
@@ -530,14 +530,14 @@ static func _match(element: Dictionary, made_by: Dictionary, placing: Placing) -
 ## column of plain containers came out straight under the window. So the node is found where it
 ## must be: below the shown element's node, itself left out of the tree (a node that is shown would
 ## have the part under it), drawn around the part, and, for text, holding its words.
-static func _attribute(element: Dictionary, holder: Node, placing: Placing, is_window: bool) -> void:
+static func _attribute(element: Dictionary, holder: Node, placing: GdhPlacing, is_window: bool) -> void:
 	var children: Array = element.get("children", [])
 	for child: Variant in children:
 		if not child is Dictionary:
 			continue
 		var inner: Dictionary = child
 		if inner.has(NODE_ID):
-			var node: Node = instance_from_id(Read.as_int(inner[NODE_ID], 0))
+			var node: Node = instance_from_id(GdhRead.as_int(inner[NODE_ID], 0))
 			var _dropped: bool = inner.erase(NODE_ID)
 			_attribute(inner, node if node != null else holder, placing, false)
 			continue
@@ -561,16 +561,16 @@ static func _attribute(element: Dictionary, holder: Node, placing: Placing, is_w
 ## The nodes that may have made [param element], below [param holder]: the deepest ones drawn
 ## around it whose own elements are not shown, narrowed to those holding its words when that leaves
 ## any. [param holder] alone when none is drawn around it, or when it has no bounds to look by.
-static func _owners_of(element: Dictionary, holder: Node, placing: Placing) -> Array[Node]:
+static func _owners_of(element: Dictionary, holder: Node, placing: GdhPlacing) -> Array[Node]:
 	var bounds: Variant = element.get("bounds")
 	if not bounds is Dictionary:
 		return [holder]
 	var box: Dictionary = bounds
 	var drawn: Rect2 = Rect2(
-		Read.as_float(box.get("x", 0)),
-		Read.as_float(box.get("y", 0)),
-		Read.as_float(box.get("width", 0)),
-		Read.as_float(box.get("height", 0))
+		GdhRead.as_float(box.get("x", 0)),
+		GdhRead.as_float(box.get("y", 0)),
+		GdhRead.as_float(box.get("width", 0)),
+		GdhRead.as_float(box.get("height", 0))
 	)
 	var found: Array[Node] = []
 	_drawn_around(holder, drawn, placing, found)
@@ -590,7 +590,7 @@ static func _owners_of(element: Dictionary, holder: Node, placing: Placing) -> A
 
 ## Where a Control is drawn is read off its screen transform, which for a window that is not
 ## embedded is in that window's own pixels, as the bounds are.
-static func _drawn_around(node: Node, drawn: Rect2, placing: Placing, found: Array[Node]) -> void:
+static func _drawn_around(node: Node, drawn: Rect2, placing: GdhPlacing, found: Array[Node]) -> void:
 	for child: Node in node.get_children(true):
 		# A node that is shown has its parts under it, and so do the nodes below it.
 		if placing.shown.has(child.get_instance_id()):
@@ -632,7 +632,7 @@ static func _text_of(node: Node) -> String:
 static func _made(parts: Array, made_by: Dictionary) -> Node:
 	var halves: Array[int] = []
 	for part: Variant in parts:
-		halves.append(Read.as_int(part, 0) & 0xFFFFFFFF)
+		halves.append(GdhRead.as_int(part, 0) & 0xFFFFFFFF)
 	for at: int in [0, 2]:
 		var id: int = (halves[at] << 32) | halves[at + 1]
 		if made_by.has(id):
@@ -642,7 +642,7 @@ static func _made(parts: Array, made_by: Dictionary) -> Node:
 
 ## Counts kept while the elements are placed, and the nodes whose own elements UI Automation shows,
 ## by instance id.
-class Placing:
+class GdhPlacing:
 	extends RefCounted
 	var asked: int = 0
 	var placed: int = 0
