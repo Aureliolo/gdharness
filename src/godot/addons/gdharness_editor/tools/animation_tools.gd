@@ -553,7 +553,7 @@ func _key_values(target: Node, prop_name: String, keyframes: Array) -> Array:
 	var base: String = prop_name.get_slice(":", 0)
 	var declared: Dictionary = _properties.declaration(target, base)
 	if declared.is_empty():
-		return [false, "%s has no property %s" % [target.get_class(), base]]
+		return [false, GdhPropertyValues.no_property(target, base)]
 	var values: Array = []
 	for index: int in keyframes.size():
 		var keyframe: Dictionary = keyframes[index]
