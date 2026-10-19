@@ -111,6 +111,24 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	var deadzone: float = GdhRead.as_float(params.get("deadzone", 0.5), 0.5)
 
 	_log.info("Adding input action: " + action_name)
+	# The editor's Input Map refuses these, since project.godot keys an action by its name and
+	# the characters below are its own syntax there; a name holding one is written escaped and
+	# reads back as a name nobody typed.
+	for index: int in action_name.length():
+		var code: int = action_name.unicode_at(index)
+		if code < 32 or action_name[index] in ["/", ":", "=", "\\", '"']:
+			return (
+				_log
+				. failure(
+					(
+						(
+							"%s is not an action name the engine's Input Map takes: a name cannot hold / : = \\ "
+							+ "or a double quote, or a control character. jump, move_left or ui_menu are names it takes."
+						)
+						% JSON.stringify(action_name)
+					)
+				)
+			)
 	_log.debug("Events: " + JSON.stringify(events))
 	_log.debug("Deadzone: " + str(deadzone))
 
@@ -130,7 +148,7 @@ func add_input_action(params: Dictionary) -> Dictionary:
 					return _log.failure("A key event needs keycode")
 				var key_value: int = _keycode_value(keycode)
 				if key_value == KEY_NONE:
-					return _log.failure("Unknown key: " + keycode)
+					return _log.failure(_unknown_key(keycode))
 
 				var event_config: Dictionary = {"class_name": "InputEventKey", "keycode": key_value}
 				if fields.get("ctrl", false):
@@ -305,6 +323,24 @@ func build_input_action(deadzone: float, events: Array) -> Dictionary:
 
 
 # The keycode for a key name as the tool spells it, or KEY_NONE for a name the table lacks.
+## The refusal for [param key_name], which names no key: the names nearest it, then every name taken,
+## since a name the caller has to guess at is the same guess again.
+static func _unknown_key(key_name: String) -> String:
+	var every: PackedStringArray = []
+	var named: PackedStringArray = []
+	for name: String in KEY_NAMES:
+		var _every: bool = every.append(name)
+		if name.length() > 1 and not (name.begins_with("F") and name.substr(1).is_valid_int()):
+			var _named: bool = named.append(name)
+	var nearest: PackedStringArray = GdhRead.nearest(key_name, every)
+	var said: String = "Unknown key: %s." % key_name
+	if nearest.size() == 1:
+		said += " The nearest key name is %s." % nearest[0]
+	elif not nearest.is_empty():
+		said += " The nearest key names are %s." % ", ".join(nearest)
+	return said + " A key is named by its letter, its digit, F1 to F12, or one of: %s." % ", ".join(named)
+
+
 func _keycode_value(key_name: String) -> int:
 	var wanted: String = key_name.to_lower()
 	for name: String in KEY_NAMES:

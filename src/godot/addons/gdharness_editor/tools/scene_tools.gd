@@ -848,7 +848,8 @@ func _connection_ends(
 		if not foreign.is_empty():
 			return [null, foreign]
 	if not source.has_signal(signal_name):
-		return [null, _missing_on(source, "%s has no signal %s" % [source_node_path, signal_name])]
+		var said: String = "%s has no signal %s" % [source_node_path, signal_name]
+		return [null, _missing_on(source, GdhRead.offered(said, signal_name, GdhRead.signals_of(source)))]
 	return [source, target]
 
 
@@ -920,6 +921,7 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 
 	return {
 		"ok": true,
+		"removed": true,
 		"sourceNodePath": from,
 		"signalName": signal_name,
 		"targetNodePath": to,

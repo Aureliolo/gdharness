@@ -113,17 +113,15 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 	while config.has_section("preset." + str(index)):
 		var held: String = "preset." + str(index)
 		if str(config.get_value(held, "name", "")) == preset_name:
+			var path: String = str(config.get_value(held, "export_path", ""))
+			var to: String = "with no export path set" if path.is_empty() else "exporting to '%s'" % path
 			return _log.failure(
 				(
 					(
-						"There is already an export preset named '%s', for %s, exporting to '%s'. "
+						"There is already an export preset named '%s', for %s, %s. "
 						+ "project_export run exports with it; give another name to add a second."
 					)
-					% [
-						preset_name,
-						config.get_value(held, "platform", ""),
-						config.get_value(held, "export_path", "")
-					]
+					% [preset_name, config.get_value(held, "platform", ""), to]
 				)
 			)
 		index += 1
