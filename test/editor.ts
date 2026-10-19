@@ -6339,7 +6339,7 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, play, project
     const refused = await attempt('editor_run', { projectPath: project, args: [7] });
     assert.match(
       refused.text,
-      /list of strings/,
+      /editor_run takes args\[0\] as string, not 7\./,
       `arguments that are not strings should be refused: ${refused.text}`,
     );
   } finally {

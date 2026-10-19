@@ -251,6 +251,16 @@ func path_of(node: Node) -> String:
 	return str(root.get_path_to(node))
 
 
+## The class of [param node] as a read answers it: nodeType the engine class, and scriptClass the
+## class its script declares, when it declares one.
+static func class_of(node: Node) -> Dictionary:
+	var named: Dictionary = {"nodeType": node.get_class()}
+	var script: Script = node.get_script()
+	if script != null and not str(script.get_global_name()).is_empty():
+		named["scriptClass"] = str(script.get_global_name())
+	return named
+
+
 ## Why [param node]'s own properties and connections cannot be written, or "". A node inside an
 ## instanced scene belongs to that scene's file unless its children were made editable here.
 func foreign(node: Node) -> String:

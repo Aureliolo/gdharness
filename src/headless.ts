@@ -141,6 +141,29 @@ export const ANSWERED = '[gdharness] answered';
 export const WAITING = '[gdharness] waiting for the autoloads';
 export const BEGUN = '[gdharness] begun';
 
+/**
+ * What the operations script prints around engine output it provokes for a question of its own,
+ * such as whether a script parsed before a change. Those errors are about a file the answer does
+ * not describe, so they are left out of it. Kept in step with logger.gd.
+ */
+export const ASIDE = '[gdharness] aside';
+export const RESUMED = '[gdharness] resumed';
+
+/** [param entries] without the stretches between an `ASIDE` mark and the `RESUMED` after it. */
+function withoutAsides(entries: readonly LogEntry[]): LogEntry[] {
+  const kept: LogEntry[] = [];
+  let aside = false;
+  for (const entry of entries) {
+    const mark = entry.source === 'stderr' ? entry.text : '';
+    if (mark === ASIDE || mark === RESUMED) {
+      aside = mark === ASIDE;
+    } else if (!aside) {
+      kept.push(entry);
+    }
+  }
+  return kept;
+}
+
 /** At most this many of the newest problems ride on an answer; the rest are counted. */
 const MESSAGES_KEPT = 200;
 
@@ -419,7 +442,7 @@ export async function runOperation(
   } finally {
     discard(paramsDir);
   }
-  const everything = ran.log.everything();
+  const everything = withoutAsides(ran.log.everything());
   const marked = (text: string): number =>
     everything.findIndex((entry) => entry.source === 'stderr' && entry.text === text);
   const answered = marked(ANSWERED);
