@@ -44577,7 +44577,34 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       ['script', 'size'],
       `a read answers what the file holds, not what the scripts set: ${JSON.stringify(read)}`,
     );
+    assert.deepEqual(
+      [get(read, 'nodeType'), get(read, 'nodePath'), get(read, 'scriptClass')],
+      ['Node2D', 'Busy', undefined],
+      `a read names the node's class, and no declared class for a script without one: ${JSON.stringify(read)}`,
+    );
     assert.equal(get(read, 'unsavedInEditor'), undefined, 'only an editor can say what it holds unsaved');
+
+    // The script after a property only it declares, and a unique name to read the node back by.
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'main.tscn',
+      nodeName: 'Packed',
+      nodeType: 'Node',
+      properties: { items: ['a'], unique_name_in_owner: true, script: 'res://bag.gd' },
+    });
+    assert.deepEqual(
+      sets('main.tscn', '[node name="Packed"').sort(),
+      ['items = PackedStringArray("a")', 'script = ExtResource', 'unique_name_in_owner = true'],
+      fileOf('main.tscn'),
+    );
+    const packed = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'main.tscn', nodePath: '%Packed' }),
+    );
+    assert.deepEqual(
+      [get(packed, 'nodePath'), get(packed, 'nodeType'), get(packed, 'properties', 'items')],
+      ['Packed', 'Node', ['a']],
+      `a node read by its unique name answers the path it has: ${JSON.stringify(packed)}`,
+    );
     const connections = parseTextContent(await call('scene_signal', { op: 'list', scenePath: 'main.tscn' }));
     assert.deepEqual(
       asArray(get(connections, 'connections')).map(
@@ -44628,6 +44655,14 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     });
     assert.equal(get(boss, 'nodeType'), 'Hero', JSON.stringify(boss));
     assert.deepEqual(sets('made.tscn', '[node name="Boss" type="Node2D"'), ['script = ExtResource']);
+    const bossRead = parseTextContent(
+      await call('scene_node', { op: 'get', scenePath: 'made.tscn', nodePath: 'Boss' }),
+    );
+    assert.deepEqual(
+      [get(bossRead, 'nodeType'), get(bossRead, 'scriptClass')],
+      ['Node2D', 'Hero'],
+      `a read names the engine class and the class the script declares: ${JSON.stringify(bossRead)}`,
+    );
     // The root by its name: its path is ".", and ". already has a child" read as a typo.
     assert.equal(
       textOf(

@@ -5061,37 +5061,12 @@ class GodotServer {
     return { ok: true, value: { path, file } };
   }
 
-  /** What the game itself is to be handed, or the refusal saying why this list cannot be. */
-  private gameArguments(args: OperationParams): Checked<readonly string[]> {
-    if (args['args'] === undefined) {
-      return { ok: true, value: [] };
-    }
-    const given = readStringArray(args, 'args');
-    if (given === undefined) {
-      return {
-        ok: false,
-        response: this.createErrorResponse('args must be a list of strings.', [
-          'Pass the game\'s own flags, such as ["--level=2"]',
-        ]),
-      };
-    }
-    return { ok: true, value: given };
-  }
-
-  /** The engine's own flags a run is to be handed, or the refusal saying why these cannot be. */
+  /**
+   * The engine's own flags a run is to be handed, or the refusal saying why these cannot be. The
+   * schema has already refused a list holding anything but strings.
+   */
   private engineArguments(args: OperationParams): Checked<readonly string[]> {
-    if (args['engineArgs'] === undefined) {
-      return { ok: true, value: [] };
-    }
-    const given = readStringArray(args, 'engineArgs');
-    if (given === undefined) {
-      return {
-        ok: false,
-        response: this.createErrorResponse('engineArgs must be a list of strings.', [
-          'Pass engine flags, such as ["--verbose"] or ["--fixed-fps", "60"]',
-        ]),
-      };
-    }
+    const given = readStringArray(args, 'engineArgs') ?? [];
     const checked = engineFlags(given);
     if (!checked.ok) {
       return { ok: false, response: this.createErrorResponse(checked.reason) };
@@ -8988,10 +8963,7 @@ class GodotServer {
         'A profile is read through the debugger, and an exported build is started without one, since a release build quits when given --remote-debug. Profile the project without executable.',
       );
     }
-    const given = this.gameArguments(args);
-    if (!given.ok) {
-      return given.response;
-    }
+    const given = readStringArray(args, 'args') ?? [];
     const flags = this.engineArguments(args);
     if (!flags.ok) {
       return flags.response;
@@ -9048,7 +9020,7 @@ class GodotServer {
         project.value.path,
         sceneArgument,
         args,
-        given.value,
+        given,
         scanned,
         asked.value,
         flags.value,
@@ -9134,7 +9106,7 @@ class GodotServer {
       exported === null &&
       this.godotBridge.isConnected() &&
       editorWouldPlay &&
-      given.value.length === 0 &&
+      given.length === 0 &&
       flags.value.length === 0 &&
       !needsItsOwnProcess(asked.value) &&
       !silentOnlyHere
@@ -9155,7 +9127,7 @@ class GodotServer {
       projectPath: exported === null ? project.value.path : null,
       headless,
       scene: sceneArgument,
-      userArgs: given.value,
+      userArgs: given,
       engineArgs: flags.value,
       silent,
     });
@@ -9194,9 +9166,7 @@ class GodotServer {
     const spawnedInstead =
       exported !== null
         ? ' An exported build is started without a debugger, since a release build quits when given one, so breakpoints and debug_state do not reach it.'
-        : this.godotBridge.isConnected() &&
-            editorWouldPlay &&
-            (given.value.length > 0 || flags.value.length > 0)
+        : this.godotBridge.isConnected() && editorWouldPlay && (given.length > 0 || flags.value.length > 0)
           ? ` The editor cannot be handed arguments for a game it plays, so this one was started here.${OWN_DEBUGGER}`
           : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
             ? ` The editor plays a game with its own environment, so a run given one was started here.${OWN_DEBUGGER}`
@@ -9231,7 +9201,7 @@ class GodotServer {
             ? mainSceneOf(project.value.file)
             : `res://${sceneArgument}`,
       arguments: cmdArgs,
-      argsNote: engineFlagsNote(given.value),
+      argsNote: engineFlagsNote(given),
       // Named here rather than only by editor_output, because a caller who wants to watch the
       // file had to make a second call to learn it and a reconstructed name is worse than no
       // name: a tail on a path that does not exist reports nothing, which is exactly what a run
@@ -9259,7 +9229,7 @@ class GodotServer {
       runtime:
         exported !== null
           ? undefined
-          : await this.runtimeUp(project.value.path, alreadyPlaying, runtimeWaitMs, given.value.length > 0),
+          : await this.runtimeUp(project.value.path, alreadyPlaying, runtimeWaitMs, given.length > 0),
       message: `Use editor_output for what it prints and editor_run stop to end it.${started.keeper !== undefined && handed.length > 0 ? ' It stops at the lines under breakpoints, and debug_state stack reads where it is held.' : ''}${spawnedInstead}${endedForThis}${alsoRunning}`,
     });
   }

@@ -195,7 +195,13 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	var unwritten: String = (
 		"" if properties.size() < 2 else " None of the %d properties given was written." % properties.size()
 	)
-	for key: Variant in properties:
+	# The script first, wherever the caller put it, since the properties it declares exist only once
+	# it is attached.
+	var order: Array = properties.keys()
+	if order.has("script"):
+		order.erase("script")
+		order.push_front("script")
+	for key: Variant in order:
 		var property: String = str(key)
 		var declared: Dictionary = declaration(target, property)
 		if declared.is_empty() and ":" in property:
