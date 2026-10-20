@@ -156,6 +156,28 @@ static func glyph_of(keycode: Key, shifted: bool) -> int:
 	return keycode
 
 
+## The refusal for [param name], which no key is called, with the key names nearest it. Read from the
+## engine's own names, printable keys and the special ones above [constant KEY_SPECIAL], since the
+## game takes any name OS.find_keycode_from_string does.
+static func unknown_key(name: String) -> String:
+	var names: PackedStringArray = []
+	for code: int in range(32, 127) + range(KEY_SPECIAL + 1, KEY_SPECIAL + 0x100):
+		var spelled: String = OS.get_keycode_string(code as Key)
+		if not spelled.is_empty() and OS.find_keycode_from_string(spelled) == code:
+			var _named: bool = names.append(spelled)
+	var close: PackedStringArray = GdhRead.nearest(name, names)
+	var said: String = "No key is called %s." % name
+	if close.size() == 1:
+		said += " The nearest key name is %s." % close[0]
+	elif not close.is_empty():
+		said += " The nearest key names are %s." % ", ".join(close)
+	return (
+		said
+		+ ' A key is named as Godot names it, such as "Space", "Enter", "Escape", "A" or "F1",'
+		+ " or given by its keycode."
+	)
+
+
 ## What [param path] names: a node under [param root], as [method node_at] reads it, or an engine
 ## singleton by its name. Answers the object under "object", and under "node" the node that objects
 ## named in a value are found from, which for a singleton is [param root].
@@ -257,9 +279,11 @@ func parameter_class(object: Object, method: String, index: int) -> String:
 
 
 ## What the slot [param named] on [param holder] declares it holds, as `{"type": int, "class":
-## String, "script": Script or null}`: a property's declaration, or the element type of a typed list
-## or the value type of a typed map. TYPE_NIL when nothing is declared, which is also what a
-## property declared as Variant or left untyped reads as: either way it takes anything.
+## String, "script": Script or null, "declared": Dictionary}`: a property's declaration, or the
+## element type of a typed list or the value type of a typed map. TYPE_NIL when nothing is declared,
+## which is also what a property declared as Variant or left untyped reads as: either way it takes
+## anything. declared is the property's entry in the property list, which carries its enum or
+## range, and empty for anything that is not a property.
 ##
 ## Asked rather than read off the value in the slot, because an object slot can be empty: a
 ## property typed `Gear` holding null reads as TYPE_NIL, and anything written into it passed the
@@ -273,7 +297,7 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 	# form's an integer, a rectangle's size a vector of the same form.
 	if named in GdhSerialisation.components_of(holder):
 		var component: Variant = holder[named]
-		return {"type": typeof(component), "class": "", "script": null}
+		return {"type": typeof(component), "class": "", "script": null, "declared": {}}
 	if holder is Array:
 		var items: Array = holder
 		if items.is_typed():
@@ -281,6 +305,7 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 				"type": items.get_typed_builtin(),
 				"class": _typed_class(items.get_typed_script(), items.get_typed_class_name()),
 				"script": _script_or_null(items.get_typed_script()),
+				"declared": {},
 			}
 	elif holder is Dictionary:
 		var map: Dictionary = holder
@@ -289,6 +314,7 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 				"type": map.get_typed_value_builtin(),
 				"class": _typed_class(map.get_typed_value_script(), map.get_typed_value_class_name()),
 				"script": _script_or_null(map.get_typed_value_script()),
+				"declared": {},
 			}
 	elif holder is Object:
 		var object: Object = holder
@@ -298,8 +324,9 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 					"type": GdhRead.as_int(entry.get("type", TYPE_NIL), TYPE_NIL),
 					"class": str(entry.get("class_name", "")),
 					"script": null,
+					"declared": entry,
 				}
-	return {"type": TYPE_NIL, "class": "", "script": null}
+	return {"type": TYPE_NIL, "class": "", "script": null, "declared": {}}
 
 
 static func _script_or_null(typed: Variant) -> Script:

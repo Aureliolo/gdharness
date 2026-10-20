@@ -4,6 +4,9 @@ const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhSerialisation = preload("serialisation.gd")
 
+# How far below the closest name another may score and still be offered beside it.
+const CLOSE_TO_THE_BEST: float = 0.2
+
 # The base classes each category name stands for. Kept to the list the tool's schema offers, which
 # a case holds: the schema offered physics3d and ui, which this refused, and physics answered the 3D
 # bodies alone beside physics2d and physics3d.
@@ -114,20 +117,20 @@ func query_class_info(params: Dictionary) -> Dictionary:
 	)
 
 	if not ClassDB.class_exists(class_name_str):
-		return _not_found(class_name_str)
+		return _not_found(class_name_str, _declared_classes(params))
 
 	var member: String = str(params.get("member", ""))
 	if not member.is_empty():
 		return _member_of(class_name_str, member)
 
-	var methods: Array[Dictionary] = _methods_of(class_name_str, include_inherited)
-	var properties: Array[Dictionary] = _properties_of(class_name_str, include_inherited)
-	var signals: Array[Dictionary] = _signals_of(class_name_str, include_inherited)
+	var methods: Array[Dictionary] = _methods_of(class_name_str)
+	var properties: Array[Dictionary] = _properties_of(class_name_str)
+	var signals: Array[Dictionary] = _signals_of(class_name_str)
 
 	var enums: Dictionary = {}
-	for e: String in ClassDB.class_get_enum_list(class_name_str, not include_inherited):
+	for e: String in ClassDB.class_get_enum_list(class_name_str, true):
 		var enum_values: Dictionary = {}
-		for c: String in ClassDB.class_get_enum_constants(class_name_str, e, not include_inherited):
+		for c: String in ClassDB.class_get_enum_constants(class_name_str, e, true):
 			enum_values[c] = ClassDB.class_get_integer_constant(class_name_str, c)
 		enums[e] = enum_values
 
@@ -143,7 +146,7 @@ func query_class_info(params: Dictionary) -> Dictionary:
 		)
 	)
 
-	return {
+	var answer: Dictionary = {
 		"class_name": class_name_str,
 		"parent_class": ClassDB.get_parent_class(class_name_str),
 		"can_instantiate": ClassDB.can_instantiate(class_name_str),
@@ -156,43 +159,99 @@ func query_class_info(params: Dictionary) -> Dictionary:
 		"signals": signals,
 		"enums": enums
 	}
+	if include_inherited:
+		answer["inherited"] = _inherited_names(class_name_str)
+	return answer
 
 
-# One member of a class by name, wherever in its ancestry it is declared.
-#
-# The question a member is asked by name for is "does this engine have it, and what does it take":
-# the whole class in answer to that ran to seventy thousand characters for Control, and the member
-# is as often an ancestor's as the class's own, so the ancestry is walked without being asked. Each
-# match says which class declares it. Nothing found names the members whose names contain the one
-# asked for, since the usual miss is a spelling.
-## Why [param wanted] has no answer here. A class_name a project script declares is not in ClassDB,
-## and "Class not found" for one read as though the project had no such class.
-func _not_found(wanted: String) -> Dictionary:
-	for entry: Dictionary in ProjectSettings.get_global_class_list():
-		if str(entry.get("class", "")) == wanted:
-			return (
-				_log
-				. failure(
-					(
-						(
-							"%s is not an engine class: it is the class_name %s declares, and editor_classes reads "
-							+ "the engine's ClassDB only. script_info structure on that script, with "
-							+ "includeInherited, answers what it declares and what it inherits."
-						)
-						% [wanted, str(entry.get("path", ""))]
-					)
-				)
+# What [param class_name_str] inherits, by name under the ancestor declaring it, nearest first. In
+# full, CharacterBody2D's inherited members ran to two hundred thousand characters, more than a
+# client takes in one answer, and any one of them is read in full by asking for it as member.
+func _inherited_names(class_name_str: String) -> Array[Dictionary]:
+	var inherited: Array[Dictionary] = []
+	var current: String = ClassDB.get_parent_class(class_name_str)
+	while not current.is_empty():
+		(
+			inherited
+			. append(
+				{
+					"class": current,
+					"methods": _names(_methods_of(current)),
+					"properties": _names(_properties_of(current)),
+					"signals": _names(_signals_of(current)),
+					"enums": Array(ClassDB.class_get_enum_list(current, true)),
+				}
 			)
-	# The usual miss is a spelling, one letter off a class the engine has.
-	var close: PackedStringArray = GdhRead.nearest(wanted, ClassDB.get_class_list())
+		)
+		current = ClassDB.get_parent_class(current)
+	return inherited
+
+
+static func _names(members: Array[Dictionary]) -> Array[String]:
+	var names: Array[String] = []
+	for each: Dictionary in members:
+		names.append(str(each["name"]))
+	return names
+
+
+static func _declared_classes(params: Dictionary) -> Dictionary:
+	var given: Variant = params.get("project_classes", {})
+	if given is Dictionary:
+		var declared: Dictionary = given
+		return declared
+	return {}
+
+
+## Why [param wanted] has no answer here. A class_name a project script declares is not in ClassDB,
+## and "Class not found" for one read as though the project had no such class. [param declared] is
+## what the project's scripts declare on disk, class to path, rather than the engine's list, which is
+## the class cache: that lags the scripts, and a class written a moment ago was refused as declared
+## nowhere.
+func _not_found(wanted: String, declared: Dictionary) -> Dictionary:
+	if declared.has(wanted):
+		return _log.failure(
+			(
+				(
+					"%s is not an engine class: it is the class_name %s declares, and editor_classes reads "
+					+ "the engine's ClassDB only. script_info structure on that script, with "
+					+ "includeInherited, answers what it declares and what it inherits."
+				)
+				% [wanted, str(declared[wanted])]
+			)
+		)
+	# The usual miss is a spelling, one letter off a class the engine has or one the project declares.
+	# Ranked as one pool and kept near the best, since a project class a letter off came behind three
+	# engine classes that shared only "Texture" with it.
+	var pool: PackedStringArray = ClassDB.get_class_list()
+	pool.append_array(PackedStringArray(declared.keys()))
+	var close: PackedStringArray = GdhRead.nearest(wanted, pool)
+	var best: float = 0.0 if close.is_empty() else close[0].to_lower().similarity(wanted.to_lower())
+	var engine: Array[String] = []
+	var own: Array[String] = []
+	for name: String in close:
+		if name.to_lower().similarity(wanted.to_lower()) < best - CLOSE_TO_THE_BEST:
+			continue
+		if declared.has(name):
+			own.append(name)
+		else:
+			engine.append(name)
 	var offered: String = (
 		""
-		if close.is_empty()
+		if engine.is_empty()
 		else (
 			" The nearest engine %s %s."
-			% ["class is" if close.size() == 1 else "classes are", ", ".join(close)]
+			% ["class is" if engine.size() == 1 else "classes are", ", ".join(engine)]
 		)
 	)
+	if not own.is_empty():
+		offered += (
+			" The nearest %s a project script declares %s %s, which script_info structure reads."
+			% [
+				"class" if own.size() == 1 else "classes",
+				"is" if own.size() == 1 else "are",
+				", ".join(own),
+			]
+		)
 	return _log.failure(
 		(
 			(
@@ -204,17 +263,24 @@ func _not_found(wanted: String) -> Dictionary:
 	)
 
 
+# One member of a class by name, wherever in its ancestry it is declared.
+#
+# The question a member is asked by name for is "does this engine have it, and what does it take":
+# the whole class in answer to that ran to seventy thousand characters for Control, and the member
+# is as often an ancestor's as the class's own, so the ancestry is walked without being asked. Each
+# match says which class declares it. Nothing found names the members whose names contain the one
+# asked for, since the usual miss is a spelling.
 func _member_of(class_name_str: String, member: String) -> Dictionary:
 	var found: Array[Dictionary] = []
 	var current: String = class_name_str
 	while not current.is_empty():
-		for m: Dictionary in _methods_of(current, false):
+		for m: Dictionary in _methods_of(current):
 			if m["name"] == member:
 				found.append({"kind": "method", "declared_in": current, "member": m})
-		for p: Dictionary in _properties_of(current, false):
+		for p: Dictionary in _properties_of(current):
 			if p["name"] == member:
 				found.append({"kind": "property", "declared_in": current, "member": p})
-		for s: Dictionary in _signals_of(current, false):
+		for s: Dictionary in _signals_of(current):
 			if s["name"] == member:
 				found.append({"kind": "signal", "declared_in": current, "member": s})
 		for e: String in ClassDB.class_get_enum_list(current, true):
@@ -251,15 +317,15 @@ func _members_alike(class_name_str: String, member: String) -> Array[String]:
 	var wanted: String = member.to_lower()
 	var current: String = class_name_str
 	while not current.is_empty():
-		for m: Dictionary in _methods_of(current, false):
+		for m: Dictionary in _methods_of(current):
 			var name: String = m["name"]
 			if name.to_lower().contains(wanted) and not alike.has(name):
 				alike.append(name)
-		for p: Dictionary in _properties_of(current, false):
+		for p: Dictionary in _properties_of(current):
 			var name: String = p["name"]
 			if name.to_lower().contains(wanted) and not alike.has(name):
 				alike.append(name)
-		for s: Dictionary in _signals_of(current, false):
+		for s: Dictionary in _signals_of(current):
 			var name: String = s["name"]
 			if name.to_lower().contains(wanted) and not alike.has(name):
 				alike.append(name)
@@ -275,7 +341,7 @@ func inspect_inheritance(params: Dictionary) -> Dictionary:
 	_log.info("Inspecting inheritance for: " + class_name_str)
 
 	if not ClassDB.class_exists(class_name_str):
-		return _not_found(class_name_str)
+		return _not_found(class_name_str, _declared_classes(params))
 
 	var ancestors: Array[String] = []
 	var current: String = class_name_str
@@ -324,10 +390,10 @@ func inspect_inheritance(params: Dictionary) -> Dictionary:
 	}
 
 
-func _methods_of(class_name_str: String, include_inherited: bool) -> Array[Dictionary]:
+func _methods_of(class_name_str: String) -> Array[Dictionary]:
 	var methods: Array[Dictionary] = []
 
-	for m: Dictionary in ClassDB.class_get_method_list(class_name_str, not include_inherited):
+	for m: Dictionary in ClassDB.class_get_method_list(class_name_str, true):
 		var args: Array[Dictionary] = []
 		var declared_args: Array = m.get("args", [])
 		for a: Dictionary in declared_args:
@@ -389,10 +455,10 @@ static func _type_name(info: Dictionary, nil_name: String) -> String:
 	return type_string(type)
 
 
-func _properties_of(class_name_str: String, include_inherited: bool) -> Array[Dictionary]:
+func _properties_of(class_name_str: String) -> Array[Dictionary]:
 	var properties: Array[Dictionary] = []
 
-	for p: Dictionary in ClassDB.class_get_property_list(class_name_str, not include_inherited):
+	for p: Dictionary in ClassDB.class_get_property_list(class_name_str, true):
 		# A category, group or subgroup is an editor heading rather than a property.
 		var usage: int = GdhRead.as_int(p.get("usage", 0))
 		if usage & PROPERTY_USAGE_CATEGORY or usage & PROPERTY_USAGE_GROUP or usage & PROPERTY_USAGE_SUBGROUP:
@@ -412,10 +478,10 @@ func _properties_of(class_name_str: String, include_inherited: bool) -> Array[Di
 	return properties
 
 
-func _signals_of(class_name_str: String, include_inherited: bool) -> Array[Dictionary]:
+func _signals_of(class_name_str: String) -> Array[Dictionary]:
 	var signals: Array[Dictionary] = []
 
-	for s: Dictionary in ClassDB.class_get_signal_list(class_name_str, not include_inherited):
+	for s: Dictionary in ClassDB.class_get_signal_list(class_name_str, true):
 		var sig_args: Array[Dictionary] = []
 		var declared_args: Array = s.get("args", [])
 		for a: Dictionary in declared_args:
