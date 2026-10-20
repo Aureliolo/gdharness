@@ -70,6 +70,11 @@ const CASE_LINE = new RegExp(
 const STATISTICS = new RegExp(String.raw`^Statistics:.*\|\s*([A-Z]+)(?:\s+\(.*?\))?\s+(${TIME})\s*$`);
 const ERROR_LINE = /^\s*(?:SCRIPT |USER )?ERROR: (.*?)\s*$/;
 const EXECUTED = /^Executed test cases\s*:\s*\((\d+)\//;
+// Godot giving up on a rendering driver it could not start, and starting the next. The display
+// server is made before any script of the project runs, so every error printed before this line
+// is the engine probing a driver: a windowed engine on a machine without a Vulkan surface prints
+// two and then runs its cases on Direct3D 12 or OpenGL.
+const DRIVER_FALLBACK = /^\s*WARNING: Your video card drivers .*, switching to /;
 const LEAK =
   /ObjectDB instances (?:were )?leaked at exit|resources? still in use at exit|Pages in use exist at exit/;
 // The allocator's null, in its error line and the location under it, and an image decode the same
@@ -158,6 +163,10 @@ export function readRun(printed: string): RunPrinted {
     }
     if (LEAK.test(line)) {
       leaks.push(line.trim());
+      continue;
+    }
+    if (suites.size === 0 && DRIVER_FALLBACK.test(line)) {
+      errors.length = 0;
       continue;
     }
     const error = ERROR_LINE.exec(line);

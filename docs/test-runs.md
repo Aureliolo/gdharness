@@ -69,7 +69,10 @@ takes to keep each one busy for as long as the slowest unit or 5 seconds, whiche
 ## What fails a run
 
 - A case that failed, or that failed and then passed on a retry.
-- An engine error (`ERROR:`, `SCRIPT ERROR:` or `USER ERROR:`) that the suite did not declare.
+- An engine error (`ERROR:`, `SCRIPT ERROR:` or `USER ERROR:`) that the suite did not declare. The
+  errors before Godot's warning that it is switching to another rendering driver are left out: the
+  display server is made before any of the project's scripts run, so those are the engine trying a
+  driver the machine lacks, as a windowed engine does on a machine without a Vulkan surface.
 - An error a suite declares that it did not print.
 - A suite that never started, never finished, or finished without running every case it declares,
   and a case that ran without being planned.

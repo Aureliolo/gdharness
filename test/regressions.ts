@@ -36490,6 +36490,54 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     'an error nothing declared fails a passing case',
   );
 
+  // A windowed engine on a Windows runner without a Vulkan surface: Godot probes the driver, says
+  // so in two errors and a fallback, and runs its cases on the next one.
+  const probed = (fallback: boolean, after: readonly string[] = []): string =>
+    rows([1]).replace(
+      'https://godotengine.org',
+      [
+        'https://godotengine.org',
+        'ERROR: Required Vulkan instance extension VK_KHR_surface not found.',
+        '   at: _initialize_instance_extensions (drivers/vulkan/rendering_context_driver_vulkan.cpp:494)',
+        'ERROR: Condition "err != OK" is true. Returning: err',
+        '   at: initialize (drivers/vulkan/rendering_context_driver_vulkan.cpp:915)',
+        ...(fallback
+          ? [
+              'WARNING: Your video card drivers seem not to support Vulkan, switching to Direct3D 12.',
+              '     at: DisplayServerWindows (platform/windows/display_server_windows.cpp:7000)',
+            ]
+          : []),
+        ...after,
+      ].join('\n'),
+    );
+  assert.deepEqual(
+    judgeEngine(readRun(probed(true)), declaredRows, clean).faults,
+    [],
+    'a driver the engine probed and gave up on',
+  );
+  assert.deepEqual(
+    judgeEngine(readRun(probed(false)), declaredRows, clean).faults,
+    [
+      'an engine error outside every suite: Required Vulkan instance extension VK_KHR_surface not found.',
+      'an engine error outside every suite: Condition "err != OK" is true. Returning: err',
+    ],
+    'the same errors with no fallback after them',
+  );
+  assert.deepEqual(
+    judgeEngine(readRun(probed(true, ['ERROR: an autoload said this'])), declaredRows, clean).faults,
+    ['an engine error outside every suite: an autoload said this'],
+    "and an error after the fallback is the project's",
+  );
+  const lateNotice = rows([1]).replace(
+    'ERROR: row said',
+    'ERROR: row said\nWARNING: Your video card drivers seem not to support Vulkan, switching to Direct3D 12.',
+  );
+  assert.deepEqual(
+    judgeEngine(readRun(lateNotice), handed(['test_a', 'test_p']), clean).faults,
+    [`an engine error in ${S_TEST} > test_p:0 (1): row said`],
+    'a notice printed once the suites run excuses nothing',
+  );
+
   assert.deepEqual(
     judgeEngine(readRun(rows([1])), declaredRows, { code: 0xc0000005, signal: null, ended: null }).faults,
     ['the engine exited 0xC0000005 (STATUS_ACCESS_VIOLATION)'],
