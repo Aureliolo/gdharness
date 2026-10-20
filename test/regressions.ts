@@ -24909,12 +24909,28 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           'var pad_down: bool = false',
           'var pad_frames: int = 0',
           'var pad_held: int = -1',
+          'var ticks: Dictionary = {"mouse": 0, "key": 0, "action": 0, "pad": 0}',
+          'var ticks_held: Dictionary = {}',
+          '',
+          '',
+          'func _physics_process(_delta: float) -> void:',
+          '\tfor named: String in ["mouse", "key", "action", "pad"]:',
+          '\t\tif get(named + "_down"):',
+          '\t\t\tticks[named] += 1',
+          '',
+          '',
+          'func _pressed(named: String, down: bool) -> void:',
+          '\tif down:',
+          '\t\tticks[named] = 0',
+          '\telse:',
+          '\t\tticks_held[named] = ticks[named]',
           '',
           '',
           'func _input(event: InputEvent) -> void:',
           '\tvar acted: InputEventAction = event as InputEventAction',
           '\tif acted != null and acted.action == &"ui_accept":',
           '\t\taction_down = acted.pressed',
+          '\t\t_pressed("action", acted.pressed)',
           '\t\tif acted.pressed:',
           '\t\t\taction_frames = 0',
           '\t\telse:',
@@ -24922,6 +24938,7 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           '\tvar pad: InputEventJoypadButton = event as InputEventJoypadButton',
           '\tif pad != null and pad.button_index == JOY_BUTTON_A:',
           '\t\tpad_down = pad.pressed',
+          '\t\t_pressed("pad", pad.pressed)',
           '\t\tif pad.pressed:',
           '\t\t\tpad_frames = 0',
           '\t\telse:',
@@ -24929,6 +24946,7 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           '\tvar button: InputEventMouseButton = event as InputEventMouseButton',
           '\tif button != null and button.button_index == MOUSE_BUTTON_LEFT:',
           '\t\tmouse_down = button.pressed',
+          '\t\t_pressed("mouse", button.pressed)',
           '\t\tif button.pressed:',
           '\t\t\tmouse_frames = 0',
           '\t\telse:',
@@ -24936,6 +24954,7 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           '\tvar key: InputEventKey = event as InputEventKey',
           '\tif key != null and key.keycode == KEY_SPACE and not key.echo:',
           '\t\tkey_down = key.pressed',
+          '\t\t_pressed("key", key.pressed)',
           '\t\tif key.pressed:',
           '\t\t\tkey_frames = 0',
           '\t\telse:',
@@ -24989,20 +25008,27 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
       const padded = await call('runtime_input', { op: 'joypad_button', button: 'a', holdFrames: 9 });
       assert.match(padded, /"held_frames": 9/, padded);
       assert.equal(await read('pad_held'), 9, `the pad button was down for the 9 frames asked: ${padded}`);
-      // Each hold says how long it lasted by the clock and in physics ticks, which keep to sixty a
-      // second whatever the process frames do: thirty held in a headless game, which runs them as
-      // fast as it can, moved a body for twelve ticks.
-      for (const [answer, frames] of [
-        [clicked, 30],
-        [keyed, 12],
-        [acted, 7],
-        [padded, 9],
+      // Each hold says how long it lasted by the clock and in physics ticks: thirty held in a
+      // headless game, which runs them as fast as it can, moved a body for twelve ticks. The ticks
+      // are held to the ones the game itself ran while the input was down, not to the clock: the
+      // engine runs at most eight a process frame and drops the rest, so a loaded runner held a key
+      // for 0.8 seconds and the game ran 39 ticks, not 48. One either way for the frame the press and
+      // the release land in, since the hold counts from the call and the game from the event.
+      for (const [answer, frames, named] of [
+        [clicked, 30, 'mouse'],
+        [keyed, 12, 'key'],
+        [acted, 7, 'action'],
+        [padded, 9, 'pad'],
       ] as const) {
         const held = get(JSON.parse(answer), 'held_for');
         const seconds = Number(get(held, 'seconds'));
         const ticks = Number(get(held, 'physics_frames'));
+        const ran = Number(await read(`ticks_held:${named}`));
         assert.ok(seconds >= (frames - 2) / 60 && seconds < 5, answer);
-        assert.ok(Number.isInteger(ticks) && Math.abs(ticks - seconds * 60) <= 4, answer);
+        assert.ok(
+          Number.isInteger(ticks) && ran > 0 && Math.abs(ticks - ran) <= 1,
+          `the ${named} hold says ${ticks} ticks and the game ran ${ran} while it was down: ${answer}`,
+        );
       }
 
       const both = await call('runtime_input', { op: 'key', keycode: 'Space', pressed: true, holdFrames: 5 });
