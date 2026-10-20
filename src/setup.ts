@@ -162,6 +162,29 @@ export function shippedOperationsScript(): string {
   return join(dirname(fileURLToPath(import.meta.url)), 'godot', 'operations', 'godot_operations.gd');
 }
 
+/** The gdUnit4 runner over a file of suites, laid out the same way, which project_test and `test` start. */
+export function shippedListedRunner(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), 'godot', 'tests', 'listed.gd');
+}
+
+/** The gdUnit4 class the shipped runner extends, which gdUnit4 has had since 6.0. */
+const GDUNIT4_CI_RUNNER = 'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd';
+
+/** Why the gdUnit4 in [param projectPath] cannot run the shipped runner, or null when it can. */
+export function gdUnit4Unusable(projectPath: string): { missing: boolean; reason: string } | null {
+  const marker = 'addons/gdUnit4/plugin.cfg';
+  if (!existsSync(join(projectPath, ...marker.split('/')))) {
+    return { missing: true, reason: `gdUnit4 is not installed in this project: no ${marker}` };
+  }
+  if (!existsSync(join(projectPath, ...GDUNIT4_CI_RUNNER.split('/')))) {
+    return {
+      missing: false,
+      reason: `gdUnit4 in this project is older than 6.0, which the shipped runner needs: no ${GDUNIT4_CI_RUNNER}`,
+    };
+  }
+  return null;
+}
+
 export interface InstalledAddon {
   readonly name: string;
   readonly path: string;

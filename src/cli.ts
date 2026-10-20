@@ -8,6 +8,7 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { serverServing } from './bridge-announce.js';
+import { letWindowsReportCrashes } from './error-mode.js';
 import { Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
 import {
@@ -46,9 +47,11 @@ import {
   RUNTIME_AUTOLOAD,
   removeAddons,
   setRuntime,
+  shippedListedRunner,
   shippedOperationsScript,
 } from './setup.js';
 import { everySkillDirectory, removeSkill, skillDirectories, writeSkill } from './skill.js';
+import { runTestCommand, TestUsageError, testOptionsOf } from './suite-run.js';
 import { getLocalVersion } from './version.js';
 
 const args = process.argv.slice(2);
@@ -722,6 +725,17 @@ Usage:
   gdharness runtime on|off [project] Register or remove the runtime autoload, which reaches
                                      an export if it is left on
   gdharness classes [project]        Rebuild .godot/global_script_class_cache.cfg from disk
+  gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
+                 [--silence S] [--tests DIR] [--changed-only] [--reach-also PATH] [--import]
+                 [--order reversed|SEED] [--runner]
+                                     Run the project's gdUnit4 suites over several engines and
+                                     judge every line they print: exit 1 on a failing case, an
+                                     engine error no case declared, a case that never finished
+                                     or a leak at exit. A suite is a script, a directory, or
+                                     script.gd:test_case for one case. --changed-only leaves out
+                                     suites that passed with everything they reach unchanged; it
+                                     is for iterating, and no gate passes it. --runner prints the
+                                     shipped runner's path. docs/test-runs.md has the rest.
   gdharness version                  Show the installed version
   gdharness help                     Show this help
 
@@ -748,7 +762,24 @@ function checkFlags(): void {
   }
 }
 
+/** `gdharness test`, whose options are its own, read by {@link testOptionsOf} rather than {@link checkFlags}. */
+async function test(): Promise<void> {
+  const rest = args.slice(1);
+  if (rest.includes('--runner')) {
+    console.log(shippedListedRunner());
+    return;
+  }
+  const options = testOptionsOf(rest, process.cwd());
+  const { godotPath } = await engine(options.projectPath);
+  process.exitCode = await runTestCommand(options, godotPath);
+}
+
 async function main(): Promise<void> {
+  await letWindowsReportCrashes();
+  if (command === 'test') {
+    await test();
+    return;
+  }
   checkFlags();
   switch (command) {
     case undefined: {
@@ -796,7 +827,7 @@ async function main(): Promise<void> {
 await main().catch((error: unknown) => {
   if (error instanceof Refusal) {
     console.error('gdharness:', error.message);
-    process.exit(error instanceof UsageError ? 2 : 1);
+    process.exit(error instanceof UsageError || error instanceof TestUsageError ? 2 : 1);
   }
   // Nothing anticipated this, so the person in front of it is owed more than the exception's
   // message: what broke, that it is not theirs to fix, and what to do with it if they want to.
