@@ -303,6 +303,7 @@ import {
 import { skillFiles } from '../src/skill.js';
 import {
   type ChildProcess,
+  exitOf,
   runHidden,
   runSyncHidden,
   type SpawnSyncReturns,
@@ -434,10 +435,12 @@ function testStaleDisconnectRegression(): void {
   const second = new FakeSocket('second');
 
   connectFake(bridge, first);
+  saysHello(first, process.cwd());
   assert.equal(bridge.getStatus().connected, true, 'first socket should be connected');
 
   first.readyState = 3;
   connectFake(bridge, second);
+  saysHello(second, process.cwd());
   assert.equal(bridge.getStatus().connected, true, 'second socket should be connected');
 
   first.emit('close', 1000, Buffer.from('late close from stale socket'));
@@ -445,6 +448,51 @@ function testStaleDisconnectRegression(): void {
 
   second.emit('close', 1000, Buffer.from('active socket closed'));
   assert.equal(bridge.getStatus().connected, false, 'active socket close should disconnect bridge');
+}
+
+/**
+ * A connection nobody closed does not hold its process open. The bridge pings an open socket on a
+ * timer, and a failing case that left one connected kept the regression run alive for two and a half
+ * hours after it had printed its summary. A process holding a greeted fake editor ends on its own.
+ */
+async function testAnOpenConnectionDoesNotHoldItsProcess(): Promise<void> {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-held-open-'));
+  try {
+    const script = join(scratch, 'held.ts');
+    writeFileSync(
+      script,
+      [
+        `import { EventEmitter } from 'node:events';`,
+        `import { createBridge } from ${JSON.stringify(pathToFileURL(resolve('src', 'godot-bridge.ts')).href)};`,
+        `import { greeting } from ${JSON.stringify(pathToFileURL(resolve('test', 'support', 'greeting.ts')).href)};`,
+        `const socket = Object.assign(new EventEmitter(), { readyState: 1, send() {}, close() {}, terminate() {} });`,
+        `const bridge = createBridge(0, 1000, '127.0.0.1');`,
+        `(bridge as unknown as { handleConnection: (socket: unknown) => void }).handleConnection(socket);`,
+        `socket.emit('message', Buffer.from(JSON.stringify(greeting(process.cwd()))));`,
+        `console.log('connected', bridge.isConnected());`,
+      ].join('\n'),
+    );
+    const child = spawnHidden(process.execPath, [script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let printed = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      printed += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      printed += chunk.toString();
+    });
+    const ended = await Promise.race([exitOf(child), delay(15_000).then(() => null)]);
+    if (ended === null) {
+      child.kill();
+    }
+    assert.match(
+      printed,
+      /connected true/,
+      `the fake editor should be connected, or this proves nothing: ${printed}`,
+    );
+    assert.deepEqual(ended, { code: 0, signal: null }, `and the process should end on its own: ${printed}`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -2094,6 +2142,13 @@ async function turnedAwayAtTheBridge(
   const waiting = socket('waiting');
   connectFake(bridge, waiting);
   assert.equal(bridge.isArriving(), true, 'a socket that has not greeted is arriving');
+  // Not connected yet either, or editor_status saw connected go true, false and true again as the
+  // greeting started the lookup, and a fixture waiting on true met false on its next call.
+  assert.deepEqual(
+    [bridge.getStatus().connected, bridge.getStatus().identifying],
+    [false, true],
+    'and status reads it as being looked up, not connected',
+  );
   hello(waiting, 104);
   await settled();
   assert.equal(bridge.getStatus().connected, false, 'not counted while it is being looked up');
@@ -5781,11 +5836,11 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
 /**
  * A call made while an editor is still arriving waits for it to settle and is then served.
  *
- * Connected reads true from the moment the socket opens, and false again once an editor nobody's
- * server opened greets and its command line is read. On the macOS editor leg a test editor read as
- * connected had its first call refused as not connected, because that call landed in the second
- * window. Here a fake editor opens the socket, is read as connected, is asked for a scene while it
- * has not greeted, and greets without a server's mark half a second later: the call reaches it only
+ * An editor is arriving from its socket opening until it has greeted and, when nobody's server
+ * opened it, until its command line has been read. On the macOS editor leg a test editor read as
+ * connected in that span had its first call refused as not connected. Here a fake editor opens the
+ * socket, is read as arriving, is asked for a scene while it has not greeted, and greets without a
+ * server's mark half a second later: the call reaches it only
  * after the greeting and the lookup, and answers with what the editor said.
  */
 async function testACallWaitsForAnArrivingEditor(): Promise<void> {
@@ -5821,17 +5876,23 @@ async function testACallWaitsForAnArrivingEditor(): Promise<void> {
         );
       }
     });
-    let connected = false;
-    for (let waited = 0; waited < 10_000 && !connected; waited += 100) {
-      const now = parseTextContent(
-        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    let arriving: unknown = null;
+    for (let waited = 0; waited < 10_000 && arriving === null; waited += 100) {
+      const now = get(
+        parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+        'editor',
       );
-      connected = get(now, 'editor', 'connected') === true;
-      if (!connected) {
+      if (get(now, 'identifying') === true) {
+        arriving = now;
+      } else {
         await delay(100);
       }
     }
-    assert.ok(connected, 'the socket counts as connected before its greeting, which is the reading acted on');
+    assert.equal(
+      get(arriving, 'connected'),
+      false,
+      `the socket is arriving, and not connected, before its greeting: ${JSON.stringify(arriving)}`,
+    );
     const asked = server.request(
       'tools/call',
       { name: 'scene_tree', arguments: { projectPath: project, scenePath: 'res://main.tscn' } },
@@ -6011,13 +6072,14 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
         parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
         'editor',
       );
-      if (get(now, 'connected') === true) {
+      if (get(now, 'identifying') === true) {
         gap = now;
         break;
       }
       await delay(100);
     }
-    assert.ok(gap !== null, 'the socket should count as connected before any greeting');
+    assert.ok(gap !== null, 'the socket should be read as arriving before any greeting');
+    assert.equal(get(gap, 'connected'), false, `and not as connected: ${JSON.stringify(gap)}`);
     assert.match(text(get(gap, 'greeting')), /has not yet said who it is/, JSON.stringify(gap));
     assert.equal(
       get(gap, 'addonIsStale'),
@@ -6028,7 +6090,7 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
     assert.equal(get(gap, 'breakpointsAtRisk'), undefined, JSON.stringify(gap));
     assert.match(
       await call('editor_output', { op: 'editor' }),
-      /has connected and has not yet said who it is/,
+      /has opened the bridge and has not yet said who it is/,
       'the console is not refused as another',
     );
 
@@ -6090,15 +6152,15 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
         asked.push(message.tool);
       }
     });
-    let connected = false;
-    for (let waited = 0; waited < 10_000 && !connected; waited += 100) {
+    let arriving = false;
+    for (let waited = 0; waited < 10_000 && !arriving; waited += 100) {
       await delay(100);
       const now = parseTextContent(
         await silentServer.request('tools/call', { name: 'editor_status', arguments: {} }),
       );
-      connected = get(now, 'editor', 'connected') === true;
+      arriving = get(now, 'editor', 'identifying') === true;
     }
-    assert.ok(connected, 'the silent editor should count as connected');
+    assert.ok(arriving, 'the silent editor should be read as arriving');
     const refused =
       textOf(
         await silentServer
@@ -6674,13 +6736,17 @@ async function testAServerEndsWithAnEditorStillOnTheBridge(): Promise<void> {
       });
       opened.once('error', reject);
     });
+    opened.send(JSON.stringify(greeting(process.cwd(), { opened_by_a_server: true })));
 
-    const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
-    assert.equal(
-      get(parseTextContent(status), 'editor', 'connected'),
-      true,
-      'the fixture editor should be on the bridge, or this proves nothing',
-    );
+    let connected: unknown = false;
+    for (let waited = 0; waited < 10_000 && connected !== true; waited += 100) {
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      connected = get(parseTextContent(status), 'editor', 'connected');
+      if (connected !== true) {
+        await delay(100);
+      }
+    }
+    assert.equal(connected, true, 'the fixture editor should be on the bridge, or this proves nothing');
 
     server.child.stdin?.end();
 
@@ -8338,6 +8404,20 @@ function testASearchReadsWhatItSaysItReads(): void {
       ending.results.map((entry) => entry.file),
       ['res://crlf.gd'],
       `$ meets the end of a CRLF line: ${JSON.stringify(ending)}`,
+    );
+    // The runtime's own reason sits between the two, and Node and Bun word it differently.
+    assert.throws(
+      () => search('(', { regex: true }),
+      {
+        message:
+          /^'\(' is not a regular expression: [a-z][^.]*\. With regex true, a character such as \( \) \[ \] \{ \} \. \* \+ \? \| \^ \$ or \\ stands for itself only after a backslash, as in \\\(; or leave regex out to search for the text as written\.$/,
+      },
+      'a query that is not an expression is named as given, with the escape',
+    );
+    assert.deepEqual(
+      search('(', { fileTypes: ['gd'] }).results.map((entry) => entry.file),
+      ['res://crlf.gd'],
+      'and the same text without regex is searched as written',
     );
 
     const exactly = search('GameState', { maxResults: 2 });
@@ -11215,6 +11295,100 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
   } finally {
     sweep(scratch);
   }
+}
+
+/**
+ * A run on a desktop of its own that quits at once is seen to end, and its keeper ends with it.
+ *
+ * The helper that starts a game on another desktop writes the game's pid and waits for it, and the
+ * keeper reads that pid every 50ms. A game gone before the next read took the helper with it in
+ * between, and the keeper listened for an exit that had already been told: the run's note never
+ * gained its end, and the keeper stayed up holding nothing until the machine restarted. Thirty-eight
+ * of them were found on a development machine, some three days old.
+ *
+ * Whether a game lands in the gap is timing: `cmd /c exit 3` left the keeper up in about half of its
+ * runs, so it is run six times, and a keeper that misses the exit fails at least one of them nineteen
+ * times in twenty. testAnExitAlreadyToldIsStillSeen holds the same line without the timing.
+ */
+async function testARunThatQuitsAtOnceOnItsOwnDesktopEnds(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('quick desktop run regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-quick-desktop-'));
+  const runtime = join(scratch, 'runtime');
+  mkdirSync(runtime);
+  try {
+    for (let run = 0; run < 6; run += 1) {
+      await quitsAtOnceOnItsOwnDesktop(join(scratch, `run-${run}`), runtime);
+    }
+  } finally {
+    sweep(scratch);
+  }
+}
+
+async function quitsAtOnceOnItsOwnDesktop(project: string, runtime: string): Promise<void> {
+  mkdirSync(project);
+  const answer = join(project, 'answer.json');
+  const launcher = join(project, 'launch.mjs');
+  const spec = {
+    command: join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+    // `exit` passes over the debugger's arguments, which a run is given unless asked otherwise.
+    args: ['/c', 'exit', '3'],
+    run: { transcript: join(project, 'run.log'), startedAt: Date.now(), projectPath: project },
+    desktop: `${HIDDEN_DESKTOP}-${randomUUID().slice(0, 8)}`,
+  };
+  writeFileSync(
+    launcher,
+    [
+      `import { writeFileSync } from 'node:fs';`,
+      `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+      `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+      `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+    ].join('\n'),
+  );
+  const ran = spawnSyncHidden(process.execPath, [launcher], {
+    encoding: 'utf8',
+    env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+    timeout: 90_000,
+  });
+  const launched: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+  assert.equal(
+    typeof get(launched, 'pid'),
+    'number',
+    `the launch should answer the game's pid: ${JSON.stringify(launched)}: ${ran.stdout} ${ran.stderr}`,
+  );
+  const note = runRecordPath(project, runtime);
+  let record: unknown = null;
+  for (let waited = 0; waited < 20_000 && get(record, 'exitCode') === undefined; waited += 200) {
+    await delay(200);
+    record = existsSync(note) ? JSON.parse(readFileSync(note, 'utf8')) : null;
+  }
+  assert.equal(get(record, 'exitCode'), 3, `the note should gain the run's end: ${JSON.stringify(record)}`);
+  const keeper = text(get(record, 'keeper'));
+  assert.ok(keeper.length > 0, `and should name the keeper that wrote it: ${JSON.stringify(record)}`);
+  const asked = await askTheKeeperToStop(keeper, 2_000);
+  assert.ok(
+    typeof asked === 'object' && 'unreached' in asked,
+    `which has gone, since what it held has: ${JSON.stringify(asked)}`,
+  );
+}
+
+/**
+ * The end of a child that has already exited is still given. Node tells an exit once, to the
+ * listeners there at the time, and a keeper that listened late held an ended run for good.
+ */
+async function testAnExitAlreadyToldIsStillSeen(): Promise<void> {
+  const child = spawnHidden(process.execPath, ['-e', 'process.exit(4)'], { stdio: 'ignore' });
+  const running = exitOf(child);
+  await new Promise<void>((told) => {
+    child.once('exit', () => {
+      told();
+    });
+  });
+  const late = await Promise.race([exitOf(child), delay(5_000).then(() => 'not told')]);
+  assert.deepEqual(late, { code: 4, signal: null }, 'asked after the exit, the end is given');
+  assert.deepEqual(await running, { code: 4, signal: null }, 'as it is when asked before it');
 }
 
 /**
@@ -16284,38 +16458,31 @@ function testTheUncachedNoteSaysWhichRemedyStartsAnEngine(): void {
  * headless, a headless editor refuses to restart, and the refusal is what that case asserts.
  */
 function testARestartWaitsForTheEditorToSayWhoItIs(): void {
-  const startedAt = 1_000_000;
-  const newer = new Date(startedAt + 5_000);
-  const older = new Date(startedAt - 5_000);
+  const startedAt = Date.now() - 5_000;
+  assert.equal(
+    theEditorHasComeBack({ connected: true, connectedAt: new Date(startedAt - 5_000) }, startedAt),
+    false,
+    'the connection that was already there is the one being replaced',
+  );
 
+  const bridge = createBridge(0, 1000, '127.0.0.1');
+  const socket = new FakeSocket('back');
+  connectFake(bridge, socket);
+  const silent = bridge.getStatus();
   assert.equal(
-    theEditorHasComeBack({ connected: false, connectedAt: newer, addonVersion: '0.9.0' }, startedAt),
+    theEditorHasComeBack(silent, startedAt),
     false,
-    'nothing connected is not an editor that has come back',
+    'a socket that has said nothing is not an answer',
   );
-  assert.equal(
-    theEditorHasComeBack({ connected: true, connectedAt: older, addonVersion: '0.9.0' }, startedAt),
-    false,
-    'and the connection that was already there is the one being replaced',
-  );
-  // The branch nothing produced before: connected, newer, and not yet a word out of it.
-  assert.equal(
-    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: undefined }, startedAt),
-    false,
-    'a socket that has connected and said nothing yet is not an answer',
-  );
-  assert.equal(
-    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: '0.9.0' }, startedAt),
-    true,
-    'and one that has reported its version is',
-  );
-  // The empty string is an addon with no version marker, recorded when godot_ready lands. Waiting
-  // for a non-empty version would hang on a hand-copied addon.
-  assert.equal(
-    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: '' }, startedAt),
-    true,
-    'so is one with no version to report',
-  );
+  assert.equal(silent.identifying, true, `it is arriving: ${JSON.stringify(silent)}`);
+
+  // The empty string is an addon with no version marker. Waiting for a non-empty version would hang
+  // on a hand-copied addon.
+  socket.emit('message', Buffer.from(JSON.stringify(greeting(process.cwd(), { addon_version: '' }))));
+  const greeted = bridge.getStatus();
+  assert.equal(theEditorHasComeBack(greeted, startedAt), true, `the greeting is: ${JSON.stringify(greeted)}`);
+  assert.equal(greeted.addonVersion, '', 'with its version, or the lack of one, there to read');
+  socket.emit('close', 1000, Buffer.from('done'));
 }
 
 /**
@@ -39183,7 +39350,7 @@ function testEveryToolNamedInProseIsATool(): void {
   const names = new Set(TOOL_SPECS.map((spec) => spec.name));
   const families = [...new Set(TOOL_SPECS.map((spec) => spec.name.split('_')[0]))];
   // Words this project owns or reads that are shaped like a tool and are not one: the fields the
-  // bridge sends the addon, the autoload the runtime installs, a section of project.godot, the
+  // bridge sends the addon and the server sends a headless operation, the autoload the runtime installs, a section of project.godot, the
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
@@ -39192,6 +39359,7 @@ function testEveryToolNamedInProseIsATool(): void {
   // and called a tool or called vocabulary.
   const notTools = new Set([
     'project_path',
+    'project_classes',
     'scene_path',
     'resource_path',
     'script_path',
@@ -48162,6 +48330,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryToolParameterIsRead,
   testEveryToolIsDrivenSomewhere,
   testStaleDisconnectRegression,
+  testAnOpenConnectionDoesNotHoldItsProcess,
   testOneServerOneProjectRegression,
   testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
   testEngineEntriesFoldAndScriptErrorsAreKnown,
@@ -48188,6 +48357,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALaunchIsOutsideTheServersTree,
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
+  testARunThatQuitsAtOnceOnItsOwnDesktopEnds,
+  testAnExitAlreadyToldIsStillSeen,
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,

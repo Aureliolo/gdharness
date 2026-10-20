@@ -4445,6 +4445,20 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
     ['Kind', 'Kind.LONG', 'Kind.SHORT', 'ROUNDS'],
     `and the reload names its constants, the enum's values under the enum: ${JSON.stringify(held)}`,
   );
+  // A script extending Peal holds Peal's constants as it holds Peal's methods, and the lists say
+  // both: the engine's constant map is the script's own, so every inherited method was listed and
+  // none of the constants.
+  writeFileSync(join(project, 'clapper.gd'), 'extends Peal\n\nconst TONE: int = 3\n');
+  const inherits = await call('editor_rescan', {
+    projectPath: project,
+    reloadScript: 'res://clapper.gd',
+    listMembers: true,
+  });
+  assert.deepEqual(
+    [get(inherits, 'reloadedConstants'), asArray(get(inherits, 'reloadedMethods')).includes('count')],
+    [['Kind', 'Kind.LONG', 'Kind.SHORT', 'ROUNDS', 'TONE'], true],
+    `a script's constants include those it inherits, as its methods do: ${JSON.stringify(inherits)}`,
+  );
   const opened = await call('script_diagnostics', { projectPath: project, scriptPath: 'res://peal.gd' });
   assert.equal(get(opened, 'clean'), true, JSON.stringify(opened));
 

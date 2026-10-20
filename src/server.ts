@@ -109,7 +109,6 @@ import {
   BridgeTimeout,
   type GodotBridge,
   getDefaultBridge,
-  hasSaidWhoItIs,
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
@@ -4527,6 +4526,16 @@ class GodotServer {
       if (headless === 'modify_script') {
         return await this.handleModifyScript(answerable);
       }
+      if (tool === 'editor_classes') {
+        // A refusal names a class a script declares as the script's, and offers the nearest of them,
+        // from the scripts on disk: the engine knows them only from the class cache, which lags them.
+        const project = this.project(answerable);
+        if (!project.ok) {
+          return project.response;
+        }
+        const projectClasses = Object.fromEntries(declaredClasses(project.value.path));
+        return await this.headless(headless, { ...answerable, projectClasses });
+      }
       if (headless !== 'refresh_class_cache') {
         return await this.headless(headless, answerable);
       }
@@ -7912,7 +7921,7 @@ class GodotServer {
     // The addon an editor loaded at startup, against the one this server ships. An install
     // replaces the files under a running editor without changing what it is serving, and the
     // bridge asks such an editor nothing but to quit.
-    const greeted = hasSaidWhoItIs(status);
+    const greeted = status.connected;
     const staleNote = this.godotBridge.anotherRelease();
     const unfinished = this.restartLeftUnfinished(status.connected);
     // A project without the editor addon has no editor that can dial in, whatever the bridge's age
@@ -7925,8 +7934,8 @@ class GodotServer {
       serverVersion: SERVER_VERSION,
       addonIsStale: greeted ? staleNote !== undefined : undefined,
       greeting:
-        status.connected && !greeted
-          ? 'The editor has connected and has not yet said who it is: its project, pid, addon version and ports arrive with its greeting a moment after the socket opens, later while it imports. Ask again for them.'
+        status.identifying === true
+          ? "An editor has opened the bridge and has not yet said who it is: its project, pid, addon version and ports arrive with its greeting a moment after the socket opens, later while it imports, and one nobody's server opened is served once its command line has been read. Ask again for them."
           : undefined,
       bridgeAvailable: this.bridgeStartupError === null && status.port !== null,
       // Whether a `connected: false` is final. The editor dials in rather than being dialled, and
@@ -8362,19 +8371,19 @@ class GodotServer {
    */
   private async handleRestartEditor(args: OperationParams): Promise<ToolResponse> {
     const before = this.godotBridge.getStatus();
-    if (!before.connected) {
+    if (!before.connected && before.identifying !== true) {
       return this.createErrorResponse('No editor is connected, so there is nothing to restart.', [
         'editor_launch opens one on a project',
         'editor_status says whether the bridge is up and what has reached it',
       ]);
     }
-    if (!hasSaidWhoItIs(before)) {
+    if (!before.connected) {
       // Who opened it decides which way it is restarted, and that arrives with the greeting: read
       // before it, an editor a server opened was taken for one opened by hand and asked to restart
       // itself, which brings it back without its ports. The call has already waited for the
       // greeting on its way in, so one still silent is refused rather than restarted on a guess.
       return this.createErrorResponse(
-        `The editor has connected and has not said who it is within ${greetingWaitMs() / 1000}s, so whether this server or the editor itself restarts it cannot be told.`,
+        `An editor has opened the bridge and has not said who it is within ${greetingWaitMs() / 1000}s, so whether this server or the editor itself restarts it cannot be told.`,
         ['editor_status says when it has, under greeting while it has not', 'Then ask for the restart again'],
       );
     }
@@ -8464,7 +8473,7 @@ class GodotServer {
    */
   private async handleCloseEditor(): Promise<ToolResponse> {
     const before = this.godotBridge.getStatus();
-    if (!before.connected) {
+    if (!before.connected && before.identifying !== true) {
       const launched = this.launchedEditor;
       if (launched !== null && (await this.launchedEditorIsUp()) && !this.godotBridge.isConnected()) {
         return await this.stopTheLaunchedEditor(launched);
@@ -8473,9 +8482,9 @@ class GodotServer {
         'editor_status says whether the bridge is up and what has reached it',
       ]);
     }
-    if (!hasSaidWhoItIs(before) || before.editorPid === undefined) {
+    if (!before.connected || before.editorPid === undefined) {
       return this.createErrorResponse(
-        `The editor has connected and has not said who it is within ${greetingWaitMs() / 1000}s, so there is no process to wait on once it is asked to go.`,
+        `An editor has opened the bridge and has not said who it is within ${greetingWaitMs() / 1000}s, so there is no process to wait on once it is asked to go.`,
         ['editor_status says when it has, under greeting while it has not', 'Then ask for the close again'],
       );
     }
@@ -8566,7 +8575,7 @@ class GodotServer {
   private settleTheLaunchReading(): void {
     const watched = this.launchedFrom;
     const status = this.godotBridge.getStatus();
-    if (watched === null || !hasSaidWhoItIs(status)) {
+    if (watched === null || !status.connected) {
       return;
     }
     this.launchedFrom = null;
@@ -11455,11 +11464,11 @@ class GodotServer {
     // connecting was answered "not opened by gdharness" at exactly the moment its wall of parse
     // errors was going past. Once it has greeted, its own report of who opened it decides; before
     // the greeting counts as before connecting, since the pid and the opener arrive with it.
-    const greeted = hasSaidWhoItIs(status);
+    const greeted = status.connected;
     const launched = greeted ? null : (this.launchedEditor?.pid ?? null);
-    if (!greeted && launched === null && status.connected) {
+    if (launched === null && status.identifying === true) {
       return this.createErrorResponse(
-        'The editor has connected and has not yet said who it is, so whose console to read cannot be told yet.',
+        'An editor has opened the bridge and has not yet said who it is, so whose console to read cannot be told yet.',
         ['Ask again in a moment; editor_status shows greeting until it has'],
       );
     }
@@ -13494,7 +13503,7 @@ class GodotServer {
     if (launched !== null && (await this.launchedEditorIsUp())) {
       const began = Date.now();
       await this.waitForBridge(
-        () => hasSaidWhoItIs(this.godotBridge.getStatus()) || !alive(launched.pid),
+        () => this.godotBridge.isConnected() || !alive(launched.pid),
         began + editorRestartTimeoutMs(),
       );
       if (this.godotBridge.isConnected()) {

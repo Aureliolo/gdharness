@@ -291,35 +291,14 @@ export function mayYetConnect(listeningSince: Date | undefined, now: number = Da
 }
 
 /**
- * Whether the editor a restart asked for has come back *and* said who it is.
- *
- * A connection is not an answer. The socket connects first and the addon's version, the editor's
- * pid and its ports all arrive a moment later with `godot_ready`, so a wait that watched only for
- * the connection read that gap as the restart being finished: the answer came back with no version
- * and no pid, and `addonIsStale` compared undefined against the shipped version and said true. The
- * note then told the caller to restart a healthy editor, which costs them the language server and
- * the bridge for nothing. Reported downstream on a restart onto the current addon.
- *
- * An addon with no version marker is recorded as the empty string when `godot_ready` lands, so
- * waiting for the version to be *known* rather than non-empty terminates for those too.
+ * Whether the editor a restart asked for has come back: a connection newer than the restart, which
+ * counts only once the editor has greeted, so its version, pid and ports are there to be read.
  */
 export function theEditorHasComeBack(
-  status: { connected: boolean; connectedAt?: Date | undefined; addonVersion?: string | undefined },
+  status: { connected: boolean; connectedAt?: Date | undefined },
   startedAt: number,
 ): boolean {
-  return hasSaidWhoItIs(status) && (status.connectedAt?.getTime() ?? 0) > startedAt;
-}
-
-/**
- * Whether the connected editor has greeted, so what it reports about itself can be read.
- *
- * Until then its project, pid, version, ports and who opened it are all undefined, and each reads
- * as a wrong answer rather than no answer: an undefined version as a stale addon, an undefined
- * opener as an editor opened by hand. The gap is a frame on a busy editor and longer on one that
- * is importing or sits unfocused.
- */
-export function hasSaidWhoItIs(status: { connected: boolean; addonVersion?: string | undefined }): boolean {
-  return status.connected && status.addonVersion !== undefined;
+  return status.connected && (status.connectedAt?.getTime() ?? 0) > startedAt;
 }
 
 /**
@@ -614,16 +593,20 @@ export class GodotBridge extends EventEmitter {
     this.log('info', 'WebSocket bridge stopped');
   }
 
+  /**
+   * Whether the editor is served: it has greeted and been taken as the editor. A socket that has
+   * only opened is not, since its greeting can still start a lookup or turn it away, and editor_status
+   * read through that window saw connected go true, false and true again as the greeting arrived.
+   */
   public isConnected(): boolean {
-    return this.socket?.readyState === WebSocket.OPEN && this.connectionInfo?.identifying !== true;
+    const info = this.connectionInfo;
+    return this.socket?.readyState === WebSocket.OPEN && info?.greeted === true && info.identifying !== true;
   }
 
   /**
    * Whether a process has opened the socket and is not yet settled as the editor or turned away:
-   * it has not greeted, or its command line is still being read. Connected reads true before the
-   * greeting and false while the command line is read, so a caller acting on either reading in
-   * this window acted on a state that was about to change: a test editor read as connected had its
-   * first call refused as not connected a moment later, once its greeting started the lookup.
+   * it has not greeted, or its command line is still being read. A call waits this out rather than
+   * being refused as not connected while the editor is a moment from being served.
    */
   public isArriving(): boolean {
     const info = this.connectionInfo;
@@ -646,7 +629,7 @@ export class GodotBridge extends EventEmitter {
     // A process still being looked up is not yet the editor, so nothing it said about itself is
     // reported as the editor's: a project named before it is served read as an editor that had
     // that project open, and anything waiting on the name went on to act on it.
-    const identifying = this.connectionInfo?.identifying === true;
+    const identifying = this.isArriving();
     const editor = identifying ? null : this.connectionInfo;
     return {
       host: this.host,
@@ -1000,7 +983,8 @@ export class GodotBridge extends EventEmitter {
     this.stopKeepalive();
 
     this.pingInterval = setInterval(() => {
-      if (!this.isConnected()) {
+      // Every open socket, greeted or not, so one that goes quiet before greeting is still found.
+      if (this.socket?.readyState !== WebSocket.OPEN) {
         return;
       }
 
@@ -1011,6 +995,9 @@ export class GodotBridge extends EventEmitter {
         this.log('warn', `Failed to send ping: ${errorMessage(error)}`);
       }
     }, KEEPALIVE_INTERVAL_MS);
+    // The socket and the server hold the process for as long as either is open; a ping left behind
+    // by a connection nobody closed kept a finished test run alive for hours.
+    this.pingInterval.unref();
   }
 
   private stopKeepalive(): void {

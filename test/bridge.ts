@@ -525,6 +525,33 @@ async function main(): Promise<void> {
         `a name nothing declares is refused: ${nothing}`,
       );
       assert.match(nothing, /focus_mode/, `naming the members whose names contain it: ${nothing}`);
+
+      // A class a script declares, written a moment ago and in no class cache, is named as that
+      // script's: the engine knows the project's classes only from the cache, so the server hands
+      // the operation what the scripts declare on disk, and one this new was refused as declared
+      // nowhere. Its misspelling is offered it.
+      writeFileSync(join(projectPath, 'fresh_unscanned.gd'), 'class_name FreshUnscanned\nextends Node\n');
+      try {
+        const fresh =
+          textOf(await call('editor_classes', { projectPath, op: 'info', className: 'FreshUnscanned' })) ??
+          '';
+        assert.match(
+          fresh,
+          /FreshUnscanned is not an engine class: it is the class_name res:\/\/fresh_unscanned\.gd declares/,
+          fresh,
+        );
+        const misspelt =
+          textOf(
+            await call('editor_classes', { projectPath, op: 'inheritance', className: 'FreshUnscaned' }),
+          ) ?? '';
+        assert.match(
+          misspelt,
+          /The nearest class a project script declares is FreshUnscanned, which script_info structure reads\./,
+          misspelt,
+        );
+      } finally {
+        rmSync(join(projectPath, 'fresh_unscanned.gd'), { force: true });
+      }
     } else if (process.env['GDHARNESS_REQUIRE_GODOT']) {
       throw new Error('GDHARNESS_REQUIRE_GODOT is set and no executable Godot was found.');
     }
