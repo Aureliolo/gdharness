@@ -420,25 +420,12 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
 	if expected_type == TYPE_OBJECT and hint == PROPERTY_HINT_NODE_TYPE:
 		return _node_reference(target, property, raw)
-	# An enum is written by the name of a value as well as its number, since the name is what the
-	# script and the inspector show and the number is only where the value happens to sit.
 	if expected_type == TYPE_INT and hint == PROPERTY_HINT_ENUM and typeof(raw) == TYPE_STRING:
-		var choices: Dictionary = GdhDeclared.enum_of(target, declared)
-		var chosen: Variant = GdhDeclared.enum_named(choices, str(raw))
-		if chosen == null:
-			var hinted: Dictionary = GdhDeclared.enum_values(str(declared.get("hint_string", "")))
-			chosen = GdhDeclared.enum_named(hinted, str(raw))
-		var constants: Dictionary = {}
-		if chosen == null:
-			constants = GdhDeclared.engine_constants(target, property)
-			chosen = GdhDeclared.enum_named(constants, str(raw))
-		if chosen != null:
-			return [true, chosen]
-		if not str(raw).strip_edges().is_valid_int():
-			var why: String = GdhDeclared.enum_refusal(
-				GdhPropertyPaths.class_called(target), property, str(raw), choices, constants
-			)
-			return [false, why]
+		var by_name: Array = GdhDeclared.enum_by_name(
+			target, declared, str(raw), GdhPropertyPaths.class_called(target)
+		)
+		if by_name[0] or not str(by_name[1]).is_empty():
+			return by_name
 
 	# A resource-valued property takes the path of one, which is how a caller names a TileSet,
 	# a material or a theme: there is no other way to hand a tool a Resource.

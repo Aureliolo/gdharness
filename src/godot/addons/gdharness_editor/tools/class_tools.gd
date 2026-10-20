@@ -177,20 +177,28 @@ func _method_names(script: GDScript) -> Array[String]:
 	return names
 
 
-## The script's own constants, and the keys of each one that is a Dictionary as `Kind.SHORT`, which
-## is how the copy holds a named enum: a stale enum member is denied as a member of the enum rather
-## than of the class. A constant Dictionary that is not an enum is listed the same way, since the
-## map does not tell the two apart.
+## The script's constants, those of the scripts it extends included as its methods include theirs,
+## and the keys of each one that is a Dictionary as `Kind.SHORT`, which is how the copy holds a named
+## enum: a stale enum member is denied as a member of the enum rather than of the class. A constant
+## Dictionary that is not an enum is listed the same way, since the map does not tell the two apart.
+## The engine's map holds only the script's own, so a script extending a class_name listed every
+## method it inherited and none of the constants.
 func _constant_names(script: GDScript) -> Array[String]:
 	var names: Array[String] = []
-	var constants: Dictionary = script.get_script_constant_map()
-	for named: Variant in constants:
-		var value: Variant = constants[named]
-		names.append(str(named))
-		if value is Dictionary:
-			var values: Dictionary = value
-			for member: Variant in values:
-				names.append("%s.%s" % [named, member])
+	var holder: Script = script
+	while holder != null:
+		var constants: Dictionary = holder.get_script_constant_map()
+		for named: Variant in constants:
+			var value: Variant = constants[named]
+			if not names.has(str(named)):
+				names.append(str(named))
+			if value is Dictionary:
+				var values: Dictionary = value
+				for member: Variant in values:
+					var listed: String = "%s.%s" % [named, member]
+					if not names.has(listed):
+						names.append(listed)
+		holder = holder.get_base_script()
 	names.sort()
 	return names
 

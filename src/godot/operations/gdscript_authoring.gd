@@ -191,9 +191,13 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 
 	# All of them checked before any is made, so a call is made whole or not at all: one skipped for a
 	# missing name used to leave the rest written and the answer saying success over an empty list.
-	var problems: Array[String] = _modification_problems(modifications, _declared(lines))
+	var declared: Dictionary = _declared(lines)
+	var problems: Array[String] = _modification_problems(modifications, declared)
 	if not problems.is_empty():
-		return _log.failure("Nothing was changed: " + "; ".join(problems))
+		var refusal: String = "Nothing was changed: " + "; ".join(problems)
+		if _redeclares(modifications, declared):
+			refusal += ". modify only adds, so a member the script declares already is changed in the file itself"
+		return _log.failure(refusal)
 	# Each placed line as a zero-based index that moves down whenever a later insertion lands above
 	# it, so the numbers answered are where the lines are in the file written, not where each went
 	# at the moment it was placed.
@@ -412,6 +416,15 @@ static func _modification_problems(modifications: Array, declared: Dictionary) -
 		else:
 			added[mod_name] = index + 1
 	return problems
+
+
+static func _redeclares(modifications: Array, declared: Dictionary) -> bool:
+	for mod: Variant in modifications:
+		if mod is Dictionary:
+			var fields: Dictionary = mod
+			if declared.has(str(fields.get("name", ""))):
+				return true
+	return false
 
 
 # The members [param lines] declares at the top level, by name, as {"kind", "line"} counted from

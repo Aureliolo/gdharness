@@ -190,12 +190,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 	var keycode_raw: Variant = params.get("keycode", 0)
 	var held: bool = GdhRead.as_bool(params.get("pressed", true), true)
 	var whole: bool = not params.has("pressed")
-	var key_label: String = str(params.get("key_label", ""))
-
-	if keycode_raw is String:
-		var named: String = keycode_raw
-		if not named.is_empty() and key_label.is_empty():
-			key_label = named
+	var named: String = keycode_raw if keycode_raw is String else ""
 	var keycode: int = 0 if keycode_raw is String else GdhRead.as_int(keycode_raw)
 	var holding: Variant = GdhValues.held_for(params)
 	if holding is String:
@@ -205,14 +200,17 @@ func inject_key(params: Dictionary) -> Dictionary:
 	var event: InputEventKey = InputEventKey.new()
 	event.pressed = whole or held
 
-	if not key_label.is_empty():
-		event.keycode = OS.find_keycode_from_string(key_label)
+	if not named.is_empty():
+		event.keycode = OS.find_keycode_from_string(named)
 		if event.keycode == KEY_NONE:
-			return {"type": "error", "message": "Invalid key_label: " + key_label}
+			return {"type": "error", "message": GdhValues.unknown_key(named)}
 	elif keycode > 0:
 		event.keycode = keycode as Key
 	else:
-		return {"type": "error", "message": "keycode or key_label required"}
+		return {
+			"type": "error",
+			"message": 'keycode is required: a key name, such as "Space" or "A", or its Godot keycode.'
+		}
 
 	# A key event from a real keyboard carries all three, and InputMap consults whichever one
 	# the bound event declares: keycode first, then physical_keycode, then key_label. An
@@ -306,7 +304,8 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		Input.parse_input_event(_button(position, button, false, false))
 		await _host.get_tree().process_frame
 
-	return _pointer_noted(
+	var at: Array[Vector2] = [position]
+	var said: Dictionary = _pointer_noted(
 		_hover_noted(
 			{
 				"type": "input_injected",
@@ -322,6 +321,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 			supplied
 		)
 	)
+	return GdhMouse.outside_noted(said, _host.get_viewport(), at)
 
 
 ## Moves the pointer to a position, with the movement the event carries taken from where the
@@ -346,7 +346,8 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 	var supplied: bool = _follow_in_the_window(position)
 	Input.parse_input_event(_motion(position, relative))
 
-	return _pointer_noted(
+	var at: Array[Vector2] = [position]
+	var said: Dictionary = _pointer_noted(
 		_hover_noted(
 			{
 				"type": "input_injected",
@@ -357,6 +358,7 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 			supplied
 		)
 	)
+	return GdhMouse.outside_noted(said, _host.get_viewport(), at)
 
 
 ## Drags with a mouse button from one point to another, through any points between, as a hand does:
@@ -406,7 +408,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 	Input.parse_input_event(_button(end, button, false, false))
 	await _host.get_tree().process_frame
 
-	return _pointer_noted(
+	var said: Dictionary = _pointer_noted(
 		_hover_noted(
 			{
 				"type": "input_injected",
@@ -420,6 +422,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 			supplied
 		)
 	)
+	return GdhMouse.outside_noted(said, _host.get_viewport(), points)
 
 
 ## Whether [param centre] is somewhere a click can reach it: inside the viewport, and inside every

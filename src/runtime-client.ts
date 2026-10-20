@@ -19,7 +19,7 @@ import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
 import { envValue } from './launch.js';
-import { isSameDirectory, realPathOr } from './paths.js';
+import { isSameDirectory, realAsFarAsItExists } from './paths.js';
 import { startTimesOf } from './process-children.js';
 import { asParams, readNumber, readParams, readString } from './tool-args.js';
 
@@ -706,7 +706,7 @@ function theOneProject(endpoints: readonly RuntimeEndpoint[]): string | undefine
   if (endpoints.some((endpoint) => endpoint.project.path === '')) {
     return undefined;
   }
-  const paths = new Set(endpoints.map((endpoint) => realPathOr(resolve(endpoint.project.path))));
+  const paths = new Set(endpoints.map((endpoint) => realAsFarAsItExists(resolve(endpoint.project.path))));
   const only = [...paths][0];
   return paths.size === 1 ? only : undefined;
 }

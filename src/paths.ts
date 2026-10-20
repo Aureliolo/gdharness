@@ -1,5 +1,5 @@
 import { realpathSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * Paths that arrive as tool arguments and are then opened, written, or handed to Godot.
@@ -47,12 +47,30 @@ export type Containment =
     }
   | { readonly ok: false; readonly reason: string };
 
-/** The path with every symlink on it resolved, or the path itself when there is nothing there. */
-export function realPathOr(path: string): string {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return path;
+/**
+ * [param path] with the links in whatever part of it exists resolved, and the rest as written.
+ *
+ * Resolved only when the whole path exists, a key changes when a file comes or goes wherever the
+ * path runs through a link (a macOS temporary directory under `/var`, an 8.3 short name on
+ * Windows). A server creates its project's `.godot` as it starts, so a run note written for the
+ * project before that and one read after it named two files. And a breakpoint set on a script is
+ * held under the script's real path, so once the script was deleted a remove looked it up under
+ * the spelling given and answered that nothing was held while listing it as held.
+ */
+export function realAsFarAsItExists(path: string): string {
+  const missing: string[] = [];
+  let at = path;
+  for (;;) {
+    try {
+      return join(realpathSync.native(at), ...missing);
+    } catch {
+      const parent = dirname(at);
+      if (parent === at) {
+        return path;
+      }
+      missing.unshift(basename(at));
+      at = parent;
+    }
   }
 }
 
@@ -67,14 +85,14 @@ export function realPathOr(path: string): string {
  *
  * Symlinks are resolved first, unlike everywhere else in this file, because both sides name a
  * directory that exists: a macOS temporary directory is reached as `/var/folders` and reported by
- * the engine as `/private/var/folders`, and the two are one directory. A path with nothing there
- * is compared as written, which is the old arithmetic and the right answer for it.
+ * the engine as `/private/var/folders`, and the two are one directory. Whatever part of a path is
+ * not there is compared as written.
  *
  * Containment is the wrong question here. A project inside another project is a different project,
  * and this is asked where the answer decides whether two sides belong together.
  */
 export function isSameDirectory(onePath: string, otherPath: string): boolean {
-  return relative(realPathOr(resolve(onePath)), realPathOr(resolve(otherPath))) === '';
+  return relative(realAsFarAsItExists(resolve(onePath)), realAsFarAsItExists(resolve(otherPath))) === '';
 }
 
 /** Whether `candidatePath` is `rootPath` or sits underneath it. */
@@ -166,9 +184,13 @@ export function resolveWithinProject(
   // Refused here rather than left to the containment check below, which would accept a leading
   // separator on the platform where node:path does not read it as absolute.
   if (withoutScheme.startsWith('/') || withoutScheme.startsWith('\\') || isAbsolute(withoutScheme)) {
+    // The example is the end of the path given, so a build output is offered a build path and a
+    // scene a scene path; a fixed scene path was offered for an export's .exe.
+    const tail = withoutScheme.split(/[\\/]+/).filter((step) => step !== '' && !step.endsWith(':'));
+    const example = tail.slice(-2).join('/') || 'scenes/main.tscn';
     return {
       ok: false,
-      reason: `Path '${trimmed}' is absolute and outside the project; give a path inside it, such as 'scenes/main.tscn'.`,
+      reason: `Path '${trimmed}' is absolute and outside the project; give a path inside it, such as '${example}'.`,
     };
   }
 
@@ -223,7 +245,7 @@ export function exportedBuild(projectPath: string, candidatePath: string): Conta
       reason: `There is no ${found.relativePath} in the project to start: export the build first, with project_export run.`,
     };
   }
-  if (!isWithinRoot(realPathOr(projectPath), real)) {
+  if (!isWithinRoot(realAsFarAsItExists(projectPath), real)) {
     return {
       ok: false,
       reason: `${found.relativePath} leads outside the project, to ${real}, so it is not started.`,

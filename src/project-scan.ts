@@ -5,6 +5,7 @@
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { errorMessage } from './errors.js';
 
 /** Directories that are never part of a project's own files, and are not spelled with a dot. */
 const SKIPPED = new Set(['node_modules']);
@@ -364,6 +365,22 @@ function plainMatch(line: string, needle: string, caseSensitive: boolean): [stri
   return [lowered.length === line.length ? line.slice(at, at + needle.length) : needle];
 }
 
+/**
+ * [param query] as the regular expression it was given as. The engine's own refusal named the
+ * expression with flags it was never given, `/(/i: Unterminated group`, and nothing said that a
+ * bracket meant as itself wants a backslash in this mode.
+ */
+function compiledQuery(query: string, caseSensitive: boolean): RegExp {
+  try {
+    return new RegExp(query, caseSensitive ? '' : 'i');
+  } catch (error) {
+    const why = errorMessage(error).split(': ').at(-1) ?? '';
+    throw new Error(
+      `'${query}' is not a regular expression: ${why.charAt(0).toLowerCase()}${why.slice(1)}. With regex true, a character such as ( ) [ ] { } . * + ? | ^ $ or \\ stands for itself only after a backslash, as in \\(; or leave regex out to search for the text as written.`,
+    );
+  }
+}
+
 /** Where the query occurs in the project's text files, as res:// paths with line numbers. */
 export function searchProject(projectPath: string, options: SearchOptions): SearchResult {
   const extensions =
@@ -375,7 +392,7 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
     results: [],
     summary: { files_searched: 0, files_with_matches: 0, total_matches: 0, truncated: false },
   };
-  const regex = options.regex ? new RegExp(options.query, options.caseSensitive ? '' : 'i') : null;
+  const regex = options.regex ? compiledQuery(options.query, options.caseSensitive) : null;
   const needle = options.caseSensitive ? options.query : options.query.toLowerCase();
   // Truncated only once a match past the limit has been seen: a search whose matches came to the
   // limit exactly was called cut, and raising the limit gave the same list.

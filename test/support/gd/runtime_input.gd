@@ -131,16 +131,18 @@ func _check_keys(input: GdhInputCommands) -> void:
 	if by_number.get("keycode", 0) != KEY_B:
 		_fail("numeric keycode: %s" % JSON.stringify(by_number))
 
-	var bad_label: Dictionary = await input.inject_key({"key_label": "NoSuchKey"})
-	if bad_label.get("type", "") != "error":
-		_fail("an unknown key label should be refused: %s" % JSON.stringify(bad_label))
+	var bad_name: Dictionary = await input.inject_key({"keycode": "Escpe"})
+	if not str(bad_name.get("message", "")).begins_with("No key is called Escpe. The nearest key name"):
+		_fail("an unknown key name should be refused with the nearest: %s" % JSON.stringify(bad_name))
+	elif not str(bad_name.get("message", "")).contains("Escape"):
+		_fail("and the nearest should hold the key meant: %s" % JSON.stringify(bad_name))
 
 	var nothing: Dictionary = await input.inject_key({})
 	if nothing.get("type", "") != "error":
 		_fail("a key event needs a key: %s" % JSON.stringify(nothing))
 
 	var modified: Dictionary = await input.inject_key(
-		{"key_label": "Escape", "shift": true, "ctrl": true, "alt": true}
+		{"keycode": "Escape", "shift": true, "ctrl": true, "alt": true}
 	)
 	if not (modified.get("shift", false) and modified.get("ctrl", false) and modified.get("alt", false)):
 		_fail("modifiers should reach the event: %s" % JSON.stringify(modified))

@@ -67,6 +67,7 @@ import {
   unloadedTypes,
   unseenByEditor,
   withAddonClassesCounted,
+  withAddonPathsCounted,
 } from './class-cache.js';
 import { readClassNote, writeClassNote } from './class-note.js';
 import { configDisagrees } from './config-pin.js';
@@ -108,7 +109,6 @@ import {
   BridgeTimeout,
   type GodotBridge,
   getDefaultBridge,
-  hasSaidWhoItIs,
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
@@ -171,7 +171,7 @@ import {
   isSameDirectory,
   isWithinRoot,
   keptInside,
-  realPathOr,
+  realAsFarAsItExists,
   resolveWithinProject,
 } from './paths.js';
 import { acceptsConnections, notListeningNote } from './port-probe.js';
@@ -469,12 +469,14 @@ function writtenFileRefusal(
   if (!rule.extensions.includes(extname(path).toLowerCase())) {
     return `${named} ${path} does not end in ${rule.extensions.join(' or ')}, which is what ${what} is.`;
   }
-  const directory = realPathOr(dirname(path));
+  const directory = realAsFarAsItExists(dirname(path));
   if (!existsSync(directory)) {
     return `${named}'s directory ${dirname(path)} does not exist; ${what} creates no directories.`;
   }
   const where = join(directory, basename(path));
-  const inside = rule.projects.find((project) => project !== '' && isWithinRoot(realPathOr(project), where));
+  const inside = rule.projects.find(
+    (project) => project !== '' && isWithinRoot(realAsFarAsItExists(project), where),
+  );
   if (inside !== undefined) {
     return `${named} ${path} is inside the project at ${inside}; ${what} is saved outside it, so it never becomes part of the game.`;
   }
@@ -638,7 +640,7 @@ const OWN_DEBUGGER =
  * /private/var/folders, and the unresolved root would put its own files outside it.
  */
 function projectSpelling(projectPath: string, absolutePath: string): string {
-  return `res://${relative(realPathOr(projectPath), realPathOr(absolutePath)).replaceAll('\\', '/')}`;
+  return `res://${relative(realAsFarAsItExists(projectPath), realAsFarAsItExists(absolutePath)).replaceAll('\\', '/')}`;
 }
 
 /**
@@ -1850,18 +1852,24 @@ interface ImportedFirst {
  */
 function importedFirstAnswer(importedFirst: ImportedFirst | undefined): {
   importedFirst?: readonly string[];
+  importedInAddons?: Readonly<Record<string, number>>;
   notImportedFirst?: readonly unknown[];
   uidsWrittenFirst?: readonly string[];
+  uidsWrittenInAddons?: Readonly<Record<string, number>>;
   importTookMs?: number;
   importNote?: string;
 } {
   if (importedFirst === undefined) {
     return {};
   }
+  const imported = withAddonPathsCounted(importedFirst.imported);
+  const uids = withAddonPathsCounted(importedFirst.uidsWritten);
   return {
-    ...(importedFirst.imported.length === 0 ? {} : { importedFirst: importedFirst.imported }),
+    ...(imported.own.length === 0 ? {} : { importedFirst: imported.own }),
+    ...(Object.keys(imported.inAddons).length === 0 ? {} : { importedInAddons: imported.inAddons }),
     ...(importedFirst.notImported.length === 0 ? {} : { notImportedFirst: importedFirst.notImported }),
-    ...(importedFirst.uidsWritten.length === 0 ? {} : { uidsWrittenFirst: importedFirst.uidsWritten }),
+    ...(uids.own.length === 0 ? {} : { uidsWrittenFirst: uids.own }),
+    ...(Object.keys(uids.inAddons).length === 0 ? {} : { uidsWrittenInAddons: uids.inAddons }),
     importTookMs: importedFirst.tookMs,
     ...(importedFirst.note === undefined ? {} : { importNote: importedFirst.note }),
   };
@@ -2053,8 +2061,10 @@ export function scanWaitAnswer(
   waitedForEditorScanMs?: number;
   scanNote?: string | undefined;
   importedFirst?: readonly string[];
+  importedInAddons?: Readonly<Record<string, number>>;
   notImportedFirst?: readonly unknown[];
   uidsWrittenFirst?: readonly string[];
+  uidsWrittenInAddons?: Readonly<Record<string, number>>;
   importNote?: string;
 } {
   const imports = importedFirstAnswer(scanned.importedFirst);
@@ -4518,6 +4528,16 @@ class GodotServer {
       if (headless === 'modify_script') {
         return await this.handleModifyScript(answerable);
       }
+      if (tool === 'editor_classes') {
+        // A refusal names a class a script declares as the script's, and offers the nearest of them,
+        // from the scripts on disk: the engine knows them only from the class cache, which lags them.
+        const project = this.project(answerable);
+        if (!project.ok) {
+          return project.response;
+        }
+        const projectClasses = Object.fromEntries(declaredClasses(project.value.path));
+        return await this.headless(headless, { ...answerable, projectClasses });
+      }
       if (headless !== 'refresh_class_cache') {
         return await this.headless(headless, answerable);
       }
@@ -4891,6 +4911,22 @@ class GodotServer {
         if (!project.ok) {
           return project.response;
         }
+        if (op === 'list') {
+          const session = this.dapHoldingBreakpointsOf(project.value.path);
+          const editor = this.godotBridge.isConnected();
+          return this.jsonTextResponse({
+            held: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsHeld()),
+            ...(editor
+              ? {
+                  setInEditor: this.breakpointsAsProjectSpells(
+                    project.value.path,
+                    session.breakpointsInEditor(),
+                  ),
+                  ...this.breakpointsAtRisk(),
+                }
+              : {}),
+          });
+        }
         const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
         if (!located.ok) {
           return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
@@ -4899,7 +4935,7 @@ class GodotServer {
         // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
         // every /var/folders path is really /private/var/folders.
         const session = this.dapHoldingBreakpointsOf(project.value.path);
-        const scriptPath = realPathOr(located.absolutePath);
+        const scriptPath = realAsFarAsItExists(located.absolutePath);
         const line = readPositiveNumber(args, 'line');
         if (line === undefined) {
           return this.createErrorResponse('line is required: the one-based line to stop on.');
@@ -4935,10 +4971,15 @@ class GodotServer {
           // an editor that connects is given them before its first play.
           if (op === 'set') {
             session.holdBreakpoints([{ scriptPath, lines: [line] }]);
+            answer = { set: true };
           } else {
-            session.forgetBreakpoint(scriptPath, line);
+            answer = session.forgetBreakpoint(scriptPath, line)
+              ? { removed: true }
+              : {
+                  removed: false,
+                  why: `No breakpoint was held on line ${line} of res://${located.relativePath}, so there was nothing to remove; held lists the ones that are.`,
+                };
           }
-          answer = { [op === 'set' ? 'set' : 'removed']: true };
         }
         // Written after the adapter has taken it, so the note never claims a line the editor
         // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
@@ -4982,7 +5023,7 @@ class GodotServer {
                 }),
           note: editor
             ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
-            : 'No editor is connected, so the set under held is kept here: every game this server starts is handed it as it starts, an editor that connects is sent it before its first play, and it is kept in the project for the server after a reconnect.',
+            : 'No editor is connected, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.',
           ...(editor ? this.breakpointsAtRisk() : {}),
         });
       }
@@ -7903,7 +7944,7 @@ class GodotServer {
     // The addon an editor loaded at startup, against the one this server ships. An install
     // replaces the files under a running editor without changing what it is serving, and the
     // bridge asks such an editor nothing but to quit.
-    const greeted = hasSaidWhoItIs(status);
+    const greeted = status.connected;
     const staleNote = this.godotBridge.anotherRelease();
     const unfinished = this.restartLeftUnfinished(status.connected);
     // A project without the editor addon has no editor that can dial in, whatever the bridge's age
@@ -7916,8 +7957,8 @@ class GodotServer {
       serverVersion: SERVER_VERSION,
       addonIsStale: greeted ? staleNote !== undefined : undefined,
       greeting:
-        status.connected && !greeted
-          ? 'The editor has connected and has not yet said who it is: its project, pid, addon version and ports arrive with its greeting a moment after the socket opens, later while it imports. Ask again for them.'
+        status.identifying === true
+          ? "An editor has opened the bridge and has not yet said who it is: its project, pid, addon version and ports arrive with its greeting a moment after the socket opens, later while it imports, and one nobody's server opened is served once its command line has been read. Ask again for them."
           : undefined,
       bridgeAvailable: this.bridgeStartupError === null && status.port !== null,
       // Whether a `connected: false` is final. The editor dials in rather than being dialled, and
@@ -8353,19 +8394,19 @@ class GodotServer {
    */
   private async handleRestartEditor(args: OperationParams): Promise<ToolResponse> {
     const before = this.godotBridge.getStatus();
-    if (!before.connected) {
+    if (!before.connected && before.identifying !== true) {
       return this.createErrorResponse('No editor is connected, so there is nothing to restart.', [
         'editor_launch opens one on a project',
         'editor_status says whether the bridge is up and what has reached it',
       ]);
     }
-    if (!hasSaidWhoItIs(before)) {
+    if (!before.connected) {
       // Who opened it decides which way it is restarted, and that arrives with the greeting: read
       // before it, an editor a server opened was taken for one opened by hand and asked to restart
       // itself, which brings it back without its ports. The call has already waited for the
       // greeting on its way in, so one still silent is refused rather than restarted on a guess.
       return this.createErrorResponse(
-        `The editor has connected and has not said who it is within ${greetingWaitMs() / 1000}s, so whether this server or the editor itself restarts it cannot be told.`,
+        `An editor has opened the bridge and has not said who it is within ${greetingWaitMs() / 1000}s, so whether this server or the editor itself restarts it cannot be told.`,
         ['editor_status says when it has, under greeting while it has not', 'Then ask for the restart again'],
       );
     }
@@ -8455,7 +8496,7 @@ class GodotServer {
    */
   private async handleCloseEditor(): Promise<ToolResponse> {
     const before = this.godotBridge.getStatus();
-    if (!before.connected) {
+    if (!before.connected && before.identifying !== true) {
       const launched = this.launchedEditor;
       if (launched !== null && (await this.launchedEditorIsUp()) && !this.godotBridge.isConnected()) {
         return await this.stopTheLaunchedEditor(launched);
@@ -8464,9 +8505,9 @@ class GodotServer {
         'editor_status says whether the bridge is up and what has reached it',
       ]);
     }
-    if (!hasSaidWhoItIs(before) || before.editorPid === undefined) {
+    if (!before.connected || before.editorPid === undefined) {
       return this.createErrorResponse(
-        `The editor has connected and has not said who it is within ${greetingWaitMs() / 1000}s, so there is no process to wait on once it is asked to go.`,
+        `An editor has opened the bridge and has not said who it is within ${greetingWaitMs() / 1000}s, so there is no process to wait on once it is asked to go.`,
         ['editor_status says when it has, under greeting while it has not', 'Then ask for the close again'],
       );
     }
@@ -8557,7 +8598,7 @@ class GodotServer {
   private settleTheLaunchReading(): void {
     const watched = this.launchedFrom;
     const status = this.godotBridge.getStatus();
-    if (watched === null || !hasSaidWhoItIs(status)) {
+    if (watched === null || !status.connected) {
       return;
     }
     this.launchedFrom = null;
@@ -11446,11 +11487,11 @@ class GodotServer {
     // connecting was answered "not opened by gdharness" at exactly the moment its wall of parse
     // errors was going past. Once it has greeted, its own report of who opened it decides; before
     // the greeting counts as before connecting, since the pid and the opener arrive with it.
-    const greeted = hasSaidWhoItIs(status);
+    const greeted = status.connected;
     const launched = greeted ? null : (this.launchedEditor?.pid ?? null);
-    if (!greeted && launched === null && status.connected) {
+    if (launched === null && status.identifying === true) {
       return this.createErrorResponse(
-        'The editor has connected and has not yet said who it is, so whose console to read cannot be told yet.',
+        'An editor has opened the bridge and has not yet said who it is, so whose console to read cannot be told yet.',
         ['Ask again in a moment; editor_status shows greeting until it has'],
       );
     }
@@ -13485,7 +13526,7 @@ class GodotServer {
     if (launched !== null && (await this.launchedEditorIsUp())) {
       const began = Date.now();
       await this.waitForBridge(
-        () => hasSaidWhoItIs(this.godotBridge.getStatus()) || !alive(launched.pid),
+        () => this.godotBridge.isConnected() || !alive(launched.pid),
         began + editorRestartTimeoutMs(),
       );
       if (this.godotBridge.isConnected()) {

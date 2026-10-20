@@ -7,13 +7,14 @@
  * another, and a run that wrote no answer failed, with the reason in what it printed.
  */
 
-import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import type { GameLog, LogEntry } from './game-log.js';
 import { freeLibraryCopies } from './library-copies.js';
+import { realAsFarAsItExists } from './paths.js';
 import { forceNextImport } from './reimport.js';
 import { discard, scratchDirectory } from './scratch.js';
 import { notCompiledIn } from './script-origins.js';
@@ -240,7 +241,7 @@ function scriptFault(problems: readonly LogEntry[], script: string): LogEntry | 
   const spelled = (path: string): string => `(${path.replaceAll('\\', '/').toLowerCase()}/`;
   // Both spellings, because the engine may print the resolved one: a temporary directory on macOS
   // is reached through the /var link to /private/var.
-  const directories = [...new Set([spelled(dirname(script)), spelled(resolvedOr(dirname(script)))])];
+  const directories = [...new Set([spelled(dirname(script)), spelled(realAsFarAsItExists(dirname(script)))])];
   return problems.find((entry) => {
     const at = entry.detail
       .find((line) => line.startsWith('at: '))
@@ -252,14 +253,6 @@ function scriptFault(problems: readonly LogEntry[], script: string): LogEntry | 
       directories.some((directory) => at.includes(directory))
     );
   });
-}
-
-function resolvedOr(path: string): string {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return path;
-  }
 }
 
 /** One import pass's outcome, and the extension libraries a first pass could not load, if any. */

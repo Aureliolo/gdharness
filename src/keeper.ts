@@ -16,6 +16,7 @@ import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, wri
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { exitOf } from './alive.js';
 import { DESKTOP_VARIABLE, ensureHelperCompiled, throughHelper } from './desktop.js';
 import { GameDebugger } from './game-debugger.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
@@ -368,29 +369,8 @@ async function keep(): Promise<void> {
     // once would otherwise exit before any record held its pid, and the exit would have nowhere to go.
     writeNoteIfItCan(record);
   }
+  const exited = exitOf(child);
   let listening: KeeperListening | null = null;
-  // This process ends here, so nothing below runs for a game that has exited.
-  child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-    const finish = (): void => {
-      profiled?.finish();
-      // After the profile, so a server told the run ended reads the profile it ended with.
-      if (run !== undefined) {
-        recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
-      }
-      debuggerPeer?.close();
-      listening?.close();
-      if (own !== null) {
-        rmSync(own, { recursive: true, force: true });
-      }
-      process.exit(0);
-    };
-    // The profile is finished from everything the game sent, which is read after its exit is told.
-    if (debuggerPeer === null) {
-      finish();
-    } else {
-      void debuggerPeer.drained(DRAIN_MS).then(finish);
-    }
-  });
   if (record !== null) {
     // Through what this process holds rather than through the pid: the game's own handle, or the
     // helper's, which ends the game through the handle it holds. Neither can reach a later process
@@ -409,9 +389,30 @@ async function keep(): Promise<void> {
       writeNoteIfItCan({ ...record, keeper: listening.address });
     }
   }
-  process.stdout.write(`pid ${pid}\n`);
   // Nobody reads this once the launcher has gone, and a write to a pipe with no reader is an error.
-  process.stdout.end();
+  // Sent before the end is acted on, so a game that has already quit still has its pid answered.
+  await new Promise<void>((resolve) => {
+    process.stdout.once('error', () => {
+      resolve();
+    });
+    process.stdout.end(`pid ${pid}\n`, resolve);
+  });
+  const { code, signal } = await exited;
+  // The profile is finished from everything the game sent, which is read after its exit is told.
+  if (debuggerPeer !== null) {
+    await debuggerPeer.drained(DRAIN_MS);
+  }
+  profiled?.finish();
+  // After the profile, so a server told the run ended reads the profile it ended with.
+  if (run !== undefined) {
+    recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
+  }
+  debuggerPeer?.close();
+  listening?.close();
+  if (own !== null) {
+    rmSync(own, { recursive: true, force: true });
+  }
+  process.exit(0);
 }
 
 const mode = process.argv[2];

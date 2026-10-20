@@ -85,6 +85,30 @@ static func engine_constants(target: Object, property: String) -> Dictionary:
 	return values
 
 
+## [param word] as the number of the value the enum property [param declared] of [param target]
+## names by it, as [true, number], or [false, why] naming the values, with [param holder] naming the
+## target in the refusal. [false, ""] for a word that is a number, which converts as one.
+##
+## An enum is written by the name of a value as well as its number, since the name is what the script
+## and the inspector show and the number is only where the value happens to sit. Tried as the script
+## spells it, then as the hint does, then as the engine's constant.
+static func enum_by_name(target: Object, declared: Dictionary, word: String, holder: String) -> Array:
+	var property: String = str(declared.get("name", ""))
+	var choices: Dictionary = enum_of(target, declared)
+	var chosen: Variant = enum_named(choices, word)
+	if chosen == null:
+		chosen = enum_named(enum_values(str(declared.get("hint_string", ""))), word)
+	var constants: Dictionary = {}
+	if chosen == null:
+		constants = engine_constants(target, property)
+		chosen = enum_named(constants, word)
+	if chosen != null:
+		return [true, chosen]
+	if word.strip_edges().is_valid_int():
+		return [false, ""]
+	return [false, enum_refusal(holder, property, word, choices, constants)]
+
+
 static func enum_refusal(
 	holder: String, property: String, word: String, choices: Dictionary, constants: Dictionary = {}
 ) -> String:

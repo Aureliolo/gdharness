@@ -955,6 +955,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     /Nothing was changed: modification 2 has no name; modification 3 is named 'not a name', which GDScript does not accept as a name/,
     refused.stderr,
   );
+  assert.doesNotMatch(refused.stderr, /modify only adds/, 'nothing given was declared already');
   assert.equal(
     readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8'),
     modifiedSource,
@@ -977,7 +978,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.match(
     duplicated.stderr,
     new RegExp(
-      `Nothing was changed: modification 1 adds speed, and the script already declares var speed on line ${speedLine}; modification 3 adds fresh, which modification 2 adds too; modification 4 is a constant with no defaultValue, and a constant needs a value`,
+      `Nothing was changed: modification 1 adds speed, and the script already declares var speed on line ${speedLine}; modification 3 adds fresh, which modification 2 adds too; modification 4 is a constant with no defaultValue, and a constant needs a value\\. modify only adds, so a member the script declares already is changed in the file itself`,
     ),
     duplicated.stderr,
   );
@@ -2165,6 +2166,32 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.ok(asNumber(get(classInfo, 'methods_count')) > 0);
   assert.ok(named(get(classInfo, 'properties'), 'zoom'));
 
+  // What a class inherits comes by name under each ancestor, its own members in full: in full, the
+  // inherited members of CharacterBody2D ran to two hundred thousand characters, past what a client
+  // takes in one answer.
+  const withInherited = operation('query_class_info', {
+    class_name: 'CharacterBody2D',
+    include_inherited: true,
+  });
+  const ancestry = asArray(get(withInherited, 'inherited'));
+  assert.deepEqual(
+    ancestry.map((ancestor) => get(ancestor, 'class')),
+    ['PhysicsBody2D', 'CollisionObject2D', 'Node2D', 'CanvasItem', 'Node', 'Object'],
+    'every ancestor, nearest first',
+  );
+  const namedIn = (at: number, kind: string): unknown[] => asArray(get(ancestry[at], kind));
+  assert.ok(
+    namedIn(2, 'properties').includes('position') &&
+      namedIn(4, 'methods').includes('add_child') &&
+      namedIn(4, 'signals').includes('ready') &&
+      namedIn(4, 'enums').includes('ProcessMode'),
+    JSON.stringify(ancestry[4]),
+  );
+  assert.ok(named(get(withInherited, 'methods'), 'move_and_slide'), 'its own methods in full');
+  assert.ok(!named(get(withInherited, 'methods'), 'add_child'), 'and only its own there');
+  const inheritedSize = JSON.stringify(withInherited).length;
+  assert.ok(inheritedSize < 40_000, `and the whole answer stays small: ${inheritedSize} characters`);
+
   // Every type named as well as numbered: the number is the engine's enum, which reads as nothing to
   // somebody who has not got it to hand. One member for each way a name is arrived at.
   const memberOf = (className: string, member: string): unknown =>
@@ -2208,6 +2235,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   // though the project had no such class. The cache rebuilt above holds FixtureHero.
   const scripted = runRefusedOperation(godotPath, projectDir, 'query_class_info', {
     class_name: 'FixtureHero',
+    project_classes: { FixtureHero: 'res://made/hero.gd' },
   });
   assert.match(
     scripted.stderr,
@@ -2230,6 +2258,27 @@ function testOperations(godotPath: string, projectDir: string): void {
     misspelt.stderr,
     /Class not found: CharacterBody2\. The nearest engine classes are CharacterBody2D, CharacterBody3D[,.].* editor_classes reads the engine's ClassDB/,
     misspelt.stderr,
+  );
+  // The classes the scripts declare on disk are the ones judged, not the class cache, which lags
+  // them: a class written a moment ago was refused as declared nowhere, and a misspelt one was
+  // offered only engine classes.
+  const unscanned = runRefusedOperation(godotPath, projectDir, 'inspect_inheritance', {
+    class_name: 'FixtureLater',
+    project_classes: { FixtureHero: 'res://made/hero.gd', FixtureLater: 'res://made/later.gd' },
+  });
+  assert.match(
+    unscanned.stderr,
+    /FixtureLater is not an engine class: it is the class_name res:\/\/made\/later\.gd declares/,
+    unscanned.stderr,
+  );
+  const ownMisspelt = runRefusedOperation(godotPath, projectDir, 'query_class_info', {
+    class_name: 'FixtureHerp',
+    project_classes: { FixtureHero: 'res://made/hero.gd' },
+  });
+  assert.match(
+    ownMisspelt.stderr,
+    /Class not found: FixtureHerp\. The nearest class a project script declares is FixtureHero, which script_info structure reads\. editor_classes reads/,
+    ownMisspelt.stderr,
   );
 }
 

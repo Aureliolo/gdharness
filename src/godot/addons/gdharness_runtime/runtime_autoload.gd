@@ -360,6 +360,10 @@ func _process(_delta: float) -> void:
 			break
 		_clients.append(client)
 		_send_welcome(client)
+		# Out before the request that came with it is read: a request can hold the game in a
+		# breakpoint before the frame's drain, and the server, never welcomed, took a game held
+		# inside its call for one that had not taken it. A client gone already is dropped below.
+		var _welcomed: bool = _drain(client)
 
 	var gone: Array[StreamPeerTCP] = []
 	for client: StreamPeerTCP in _clients:

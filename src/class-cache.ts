@@ -132,6 +132,33 @@ export function cachedClasses(projectPath: string): Map<string, string> | null {
   return listed;
 }
 
+/** The folder under res://addons that [param path] is inside, or undefined for the project's own. */
+function addonOf(path: string): string | undefined {
+  return /^res:\/\/addons\/([^/]+)\//.exec(path)?.[1];
+}
+
+/**
+ * [param paths] with those inside an addon counted per addon rather than named, for the same reason
+ * as its classes: the first run after gdUnit4 is copied in imports its pictures and gives every one of
+ * its two hundred scripts a uid, and naming them buried the few lines the run had to say.
+ */
+export function withAddonPathsCounted(paths: readonly string[]): {
+  own: string[];
+  inAddons: Record<string, number>;
+} {
+  const own: string[] = [];
+  const inAddons: Record<string, number> = {};
+  for (const path of paths) {
+    const addon = addonOf(path);
+    if (addon === undefined) {
+      own.push(path);
+    } else {
+      inAddons[addon] = (inAddons[addon] ?? 0) + 1;
+    }
+  }
+  return { own, inAddons };
+}
+
 /**
  * [param rebuilt], a class cache rebuild's answer, with the classes an addon declares counted per
  * addon under `addedInAddons` and `changedInAddons` rather than named, and the project's own named
@@ -155,7 +182,7 @@ export function withAddonClassesCounted(
     const own: unknown[] = [];
     const perAddon: Record<string, number> = {};
     for (const name of names) {
-      const addon = /^res:\/\/addons\/([^/]+)\//.exec(listed.get(String(name)) ?? '')?.[1];
+      const addon = addonOf(listed.get(String(name)) ?? '');
       if (addon === undefined) {
         own.push(name);
       } else {
