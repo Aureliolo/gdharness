@@ -53,6 +53,13 @@ export const RUNTIME_AUTOLOAD = {
 export const SCRIPT_RUNS_SETTING = 'gdharness/runtime/serve_script_runs';
 
 /**
+ * The setting listing the `res://` folders of scenes that are not the game, such as a bench, whose
+ * runs the runtime does not serve. Named here for the skill, and held against the addon's constant
+ * as the one above is.
+ */
+export const QUIET_SCENES_SETTING = 'gdharness/runtime/quiet_scenes_under';
+
+/**
  * Where the runtime listens, which is the one setting with a security answer.
  *
  * The command set is unauthenticated, and Godot's `listen()` defaults to every interface rather

@@ -20,6 +20,9 @@ const SUITE_BASE = 'GdUnitTestSuite';
 const CASE_PREFIX = 'test_';
 /** A suite saying it needs a real window, declared as a constant so the runner can read it too. */
 const NEEDS_WINDOW = /^const\s+GDHARNESS_NEEDS_WINDOW\b[^=\n]*=\s*true\b/m;
+/** Where suites are looked for when none are named, by gdharness test and project_test alike. */
+export const TEST_DIRECTORIES = ['tests', 'test'];
+
 /** gdUnit4's scene runner, whose input events go nowhere in a headless engine. */
 const SCENE_RUNNER = /\bscene_runner\s*\(/;
 

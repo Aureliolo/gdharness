@@ -737,16 +737,22 @@ function reportsRoundTrip(): void {
             time: entry.time,
           })),
         })),
-        suites.map((suite) => ({
-          name: suite.name,
-          cases: suite.cases.map((entry) => ({
-            name: entry.name,
-            status: entry.status,
-            message: entry.status === 'passed' ? null : entry.message,
-            detail: entry.status === 'passed' || entry.detail === '' ? null : entry.detail,
-            time: entry.time,
+        // In order of path, which is the order a report is read in whatever order it was written.
+        [...suites]
+          .sort((a, b) => {
+            const [left, right] = [`res://test/${a.name}.gd`, `res://test/${b.name}.gd`];
+            return left < right ? -1 : left > right ? 1 : 0;
+          })
+          .map((suite) => ({
+            name: suite.name,
+            cases: suite.cases.map((entry) => ({
+              name: entry.name,
+              status: entry.status,
+              message: entry.status === 'passed' ? null : entry.message,
+              detail: entry.status === 'passed' || entry.detail === '' ? null : entry.detail,
+              time: entry.time,
+            })),
           })),
-        })),
       );
       assert.equal(
         report.tests,

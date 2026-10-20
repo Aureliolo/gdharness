@@ -67,6 +67,13 @@ const SCRIPT_FLAGS: PackedStringArray = ["-s", "--script"]
 ## Serve a script run anyway, for somebody driving a `-s` script rather than a game.
 const SCRIPT_RUNS_SETTING: String = "gdharness/runtime/serve_script_runs"
 
+## The `res://` folders of scenes that are not the game, such as a bench: a run started on one is
+## not served. Kept in step with `QUIET_SCENES_SETTING` in src/setup.ts.
+const QUIET_SCENES_SETTING: String = "gdharness/runtime/quiet_scenes_under"
+
+## What the engine takes a bare argument for as the scene to run, by its extension.
+const SCENE_EXTENSIONS: PackedStringArray = ["tscn", "scn", "escn", "res", "tres"]
+
 ## The variable the editor addon puts into its own environment, which every game the editor plays
 ## inherits: it says which editor played this game, so a server can tell the editor's game from
 ## another of the same project that some other server started. Kept in step with
@@ -123,6 +130,9 @@ var _commands: Dictionary = {}
 var _loaded_version: String = _read_marker(VERSION_MARKER)
 var _loaded_digest: String = _read_marker(DIGEST_MARKER)
 var _profile_received: bool = false
+## Whether whatever started this game asked for a profile from its start, read before the variable
+## is taken out of the environment.
+var _profiled_from_start: bool = false
 var _close_asked: bool = false
 var _close_frames: int = 0
 var _profiler_calibrated: bool = false
@@ -200,7 +210,9 @@ static func _window_dimension(axis: String, fallback: int) -> int:
 func _wait_for_the_profiler() -> void:
 	if OS.get_environment(PROFILE_FROM_START).is_empty():
 		return
-	# Read once: a process this game starts inherits its environment and must not wait as well.
+	_profiled_from_start = true
+	# Read once: a process this game starts inherits its environment and must not wait as well, nor
+	# be served as a profiled run where a quiet scene would not be, as a bench's workers are.
 	OS.unset_environment(PROFILE_FROM_START)
 	if not EngineDebugger.is_active():
 		return
@@ -446,6 +458,15 @@ func _start_server() -> void:
 		_enabled = false
 		return
 
+	# Nor a scene the project says is not the game. A bench is handed to the engine as a scene, the
+	# way a screen is, so it announced as the game for as long as it ran, and so did every worker
+	# engine it started, all under the project's own path. One started to be profiled from its start
+	# is served all the same, since only this addon hands the totals back as it quits.
+	var prefixes: Variant = ProjectSettings.get_setting(QUIET_SCENES_SETTING, PackedStringArray())
+	if not _profiled_from_start and not quiet_scene_in(OS.get_cmdline_args(), prefixes).is_empty():
+		_enabled = false
+		return
+
 	_server = TCPServer.new()
 	# listen() defaults bind_address to "*", which exposes the game to the whole network.
 	var bind_address: String = str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
@@ -472,6 +493,29 @@ func _start_server() -> void:
 		_errors.take_the_console(listening)
 	else:
 		print(listening)
+
+
+## The scene [param given] names for the engine to run, as a `res://` path, when it lies under one of
+## [param prefixes]; otherwise empty. The engine takes any bare argument ending in a scene's
+## extension for the scene, relative to the project or absolute, so each is read as it would.
+static func quiet_scene_in(given: PackedStringArray, prefixes: Variant) -> String:
+	# A PackedStringArray as project.godot writes one, or an Array of strings as a hand might.
+	var folders: PackedStringArray = []
+	if prefixes is PackedStringArray:
+		folders = prefixes
+	elif prefixes is Array:
+		var listed: Array = prefixes
+		for prefix: Variant in listed:
+			if prefix is String:
+				var _kept: bool = folders.append(str(prefix))
+	for argument: String in given:
+		if argument.begins_with("-") or not SCENE_EXTENSIONS.has(argument.get_extension().to_lower()):
+			continue
+		var scene: String = ProjectSettings.localize_path(argument)
+		for folder: String in folders:
+			if not folder.is_empty() and scene.begins_with(folder):
+				return scene
+	return ""
 
 
 ## Whether the engine was told to run a script rather than the game.

@@ -107,6 +107,21 @@ function testEntitiesAndShapes(): void {
   assert.equal(selfClosing.status, 'passed', 'a self-closing case passed');
 }
 
+/**
+ * Suites come back in the order of their paths, whatever order gdUnit4 wrote them in, which is the
+ * order the file system listed them: the same project's answer differed between Linux and Windows.
+ * A suite the report gives no directory for sorts by its name.
+ */
+function testSuitesComeInTheOrderOfTheirPaths(): void {
+  const report = parseJUnit(
+    '<testsuites><testsuite name="noisy_test" package="tests" tests="0"/><testsuite name="b_test" package="tests/deeper" tests="0"/><testsuite name="a_test" package="tests" tests="0"/><testsuite name="nameless" tests="0"/></testsuites>',
+  );
+  assert.deepEqual(
+    report.suites.map((suite) => suite.path ?? suite.name),
+    ['nameless', 'res://tests/a_test.gd', 'res://tests/deeper/b_test.gd', 'res://tests/noisy_test.gd'],
+  );
+}
+
 function testMalformedReportsAreRefused(): void {
   for (const broken of [
     '',
@@ -275,9 +290,9 @@ ${error('test_errors_then_fails', 'late_test', 6)}
   assert.deepEqual(
     report.suites.map((suite) => [suite.name, suite.failures, suite.errors]),
     [
+      ['late_test', 0, 1],
       ['probe_test', 1, 1],
       ['twice_test', 1, 0],
-      ['late_test', 0, 1],
     ],
   );
   const failed = failedCases(report, '');
@@ -289,6 +304,7 @@ ${error('test_errors_then_fails', 'late_test', 6)}
       entry.reports?.map((one) => [one.kind, one.message]),
     ]),
     [
+      ['test_errors_then_fails', 'error', 'ERROR: res://tests/late_test.gd:6', undefined],
       [
         'test_fails_then_errors',
         'error',
@@ -307,16 +323,15 @@ ${error('test_errors_then_fails', 'late_test', 6)}
           ['failure', 'FAILED: res://tests/twice_test.gd:6'],
         ],
       ],
-      ['test_errors_then_fails', 'error', 'ERROR: res://tests/late_test.gd:6', undefined],
     ],
     'each case leads with the first thing that went wrong in it, and lists every report when it has several',
   );
   assert.match(
-    failed[0]?.detail ?? '',
+    failed[1]?.detail ?? '',
     /^Expecting:\n 2\n but was\n 1\n\tat 'test_fails_then_errors' in res:\/\/tests\/probe_test\.gd:5$/,
-    `the failed assertion is the detail, not the error after it: ${failed[0]?.detail}`,
+    `the failed assertion is the detail, not the error after it: ${failed[1]?.detail}`,
   );
-  assert.equal(failed[2]?.path, 'res://tests/late_test.gd');
+  assert.equal(failed[0]?.path, 'res://tests/late_test.gd');
 
   // A case with one report answers as it always did, without a list of one.
   const single = failedCases(parseJUnit(GDUNIT_REPORT), '');
@@ -376,7 +391,7 @@ function testARunawayCaseIsFoldedAndBounded(): void {
       `<testcase name="test_many">${distinct}</testcase>`,
     )}${suite('long_test', `<testcase name="test_long">${long}</testcase>`)}</testsuites>`,
   );
-  const [loop, many, longest] = failedCases(report, '');
+  const [longest, loop, many] = failedCases(report, '');
 
   assert.deepEqual(
     loop?.reports?.map((one) => [one.message, one.times]),
@@ -391,7 +406,7 @@ function testARunawayCaseIsFoldedAndBounded(): void {
   assert.equal(many.reportsLeftOut, 10, 'and the rest are counted');
   assert.equal(many.reports[0]?.times, undefined, 'a report made once carries no count');
 
-  const whole = report.suites[2]?.cases[0]?.detail?.length ?? 0;
+  const whole = report.suites.find((one) => one.name === 'long_test')?.cases[0]?.detail?.length ?? 0;
   const marker = `\n[${whole - LONGEST_DETAIL} more characters left out]`;
   assert.ok(whole > LONGEST_DETAIL, `the long detail reached the reader whole: ${whole}`);
   assert.ok(
@@ -1020,6 +1035,7 @@ testARunawayCaseIsFoldedAndBounded();
 testAStringAfterAnArrayReadsItsOwnValue();
 testEveryShapeOfAStringEqualityReadsItsValue();
 testEntitiesAndShapes();
+testSuitesComeInTheOrderOfTheirPaths();
 testMalformedReportsAreRefused();
 testARunThatFoundNothingIsNotAPass();
 testARunThatSaidNothingOfTheSortIsLeftAlone();

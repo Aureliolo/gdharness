@@ -69,6 +69,14 @@ export interface DebugObserver {
 export const PAUSE_MS = 30_000;
 /** How long a step waits for the game to stop again, as the editor's adapter is given. */
 export const STEP_MS = 10_000;
+/**
+ * How long a pause that stopped in the runtime addon steps on looking for a line of the game's own
+ * script. A frame of the addon is a few dozen lines, so a game with any script of its own each frame
+ * gets there well inside it, and one with none would otherwise be stepped through frame after frame.
+ */
+const ADDON_STEP_MS = 5000;
+/** Where setup installs the runtime addon, whose scripts run in the game on gdharness's behalf. */
+export const RUNTIME_ADDON = 'res://addons/gdharness_runtime/';
 /** How long a read of a held game waits for its answer, which comes from the same thread at once. */
 export const READ_MS = 5000;
 /** The messages that answer a command, which wait in the inbox when no request is reading yet. */
@@ -543,9 +551,38 @@ export class GameDebugger {
         };
       }
     }
+    // The runtime addon is an autoload, so its _process runs first in every frame, and a pause taken
+    // every 2048 lines falls wherever they do: an idle game stopped in gdharness's code, not its own.
+    let frames = await this.stack();
+    const stepping = Date.now();
+    while (
+      frames !== null &&
+      this.held !== null &&
+      (frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false) &&
+      Date.now() - stepping < ADDON_STEP_MS
+    ) {
+      this.forget('debug_enter');
+      this.send('step', [], this.held.thread);
+      if ((await this.next(GameDebugger.named('debug_enter'), STEP_MS)) === null) {
+        return {
+          paused: false,
+          note: `The game stopped in gdharness's runtime addon and was stepped on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs; debug_state stack reads it then.`,
+        };
+      }
+      frames = await this.stack();
+    }
     this.stoppedBy('Paused');
-    const frames = await this.stack();
-    return { paused: true, held: this.heldState(), stack: frames ?? [] };
+    const stack = frames ?? [];
+    return {
+      paused: true,
+      held: this.heldState(),
+      stack,
+      ...(stack[0]?.script.startsWith(RUNTIME_ADDON) === true
+        ? {
+            note: `The game is held in gdharness's runtime addon, whose _process runs first in every frame: ${ADDON_STEP_MS / 1000}s of stepping reached no line of the game's own script, so it runs none from frame to frame. A breakpoint in the game's script stops it there.`,
+          }
+        : {}),
+    };
   }
 
   /**
@@ -579,7 +616,9 @@ export class GameDebugger {
         : { continued: true };
     }
     this.forget('debug_enter');
-    this.send(how, [], held.thread);
+    // Over and out count lines only at the depth they start from, which held where no script runs
+    // is none, so either would let the game run on for good; into stops at its next line.
+    this.send(held.hasStack ? how : 'step', [], held.thread);
     const entered = await this.next(GameDebugger.named('debug_enter'), STEP_MS);
     if (entered === null) {
       return {

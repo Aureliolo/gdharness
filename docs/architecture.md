@@ -168,7 +168,10 @@ under a second on a machine that has never run the server.
 `gdharness test` is the command a game's gate runs its gdUnit4 suites with, and
 [Test runs](test-runs.md) describes it, with the engine slots the games' own tools share. Each of
 its engines starts the shipped runner, `godot/tests/listed.gd`, from outside the project, which is
-the runner `project_test` starts as well.
+the runner `project_test` starts as well. Both read what the engine printed with `suite-judge.ts`,
+from one file holding both of its streams in order, so a suite the tool passes is one the gate
+passes: the tool looks in the same directories and judges engine errors against the same
+declarations.
 
 Every tool is declared in one table and dispatched from it, so a tool the server answers is a tool
 the documentation lists and a fixture drives. The reference on this site is rendered from that same
@@ -720,7 +723,10 @@ keeper is the one process that lives as long as the game. Every breakpoint the s
 handed to the game as it starts, and one set while it runs reaches it at once. This debugger also
 pauses a running game, which the editor's adapter cannot, and the engine takes the pause between
 lines of script as well as between frames, so a game spinning in a script loop on its first frame
-can be broken into and asked where it is. Errors do not stop such a game (`--ignore-error-breaks`),
+can be broken into and asked where it is. A pause that lands between frames, or in the runtime
+addon, whose `_process` runs first in every frame as an autoload's does, is stepped on to the next
+line of the game's own script, since gdharness's code is not what anybody pausing a game means to
+read. Errors do not stop such a game (`--ignore-error-breaks`),
 as they did not when it had no debugger. A profiled run's profiler reads the same connection. A
 mark (`editor_run profile` with `mark`) is the profile's totals at that moment, written beside the
 run's note rather than held in the server, so a server that replaces this one counts
@@ -772,7 +778,10 @@ A script run is not one of them. Autoloads come up for `godot -s` as well, so a 
 batch tool would bind a port and announce itself under the project's own path, and a client asking
 the runtime anything while sixteen of those run gets whichever answers first. The addon stays quiet
 there unless `gdharness/runtime/serve_script_runs` is true, which is for driving a `-s` script on
-purpose.
+purpose. A scene that is not the game, such as a bench and the worker engines it starts, is quiet
+the same way when the project lists its folder in `gdharness/runtime/quiet_scenes_under`, unless the
+run was started to be profiled from its start. The variable saying so is taken out of the
+environment as it is read, so the workers a profiled bench starts stay quiet.
 
 ## Headless operations
 

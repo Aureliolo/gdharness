@@ -30,6 +30,7 @@ func _init() -> void:
 	OS.set_environment("GDHARNESS_RUNTIME_DIR", directory)
 
 	_check_a_script_run_serves_nobody(directory)
+	_check_which_scenes_are_quiet()
 
 	ProjectSettings.set_setting(Runtime.SCRIPT_RUNS_SETTING, true)
 	var node: Runtime = Runtime.new()
@@ -208,6 +209,27 @@ func _check_a_script_run_serves_nobody(directory: String) -> void:
 
 	quiet._cleanup()
 	quiet.free()
+
+
+## Which command lines name a quiet scene: a scene argument under a listed folder, read from the
+## PackedStringArray project.godot writes or an Array a hand might, and nothing else. An empty folder
+## would match every scene, and a flag's value or a script is not the scene the engine runs.
+func _check_which_scenes_are_quiet() -> void:
+	var bench: String = "res://tests/bench_run.tscn"
+	var cases: Array[Array] = [
+		[["--headless", "--path", "/p", bench], PackedStringArray(["res://tests/"]), bench],
+		[[bench], ["res://tools/", "res://tests/"], bench],
+		[["res://ui/duel.tscn"], PackedStringArray(["res://tests/"]), ""],
+		[[bench], PackedStringArray([""]), ""],
+		[["-s", "res://tests/run.gd"], PackedStringArray(["res://tests/"]), ""],
+		[[bench], "res://tests/", ""],
+	]
+	for row: Array in cases:
+		var arguments: Array = row[0]
+		var given: PackedStringArray = PackedStringArray(arguments)
+		var found: String = Runtime.quiet_scene_in(given, row[1])
+		if found != str(row[2]):
+			_fail("%s under %s should find %s, not %s" % [given, row[1], row[2], found])
 
 
 ## A close request the game declines leaves the runtime up; one it accepts takes it down.

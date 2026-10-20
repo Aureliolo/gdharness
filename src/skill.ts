@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { Harness } from './harnesses.js';
-import { BIND_ADDRESS_SETTING, PORT_SETTING, SCRIPT_RUNS_SETTING } from './setup.js';
+import { BIND_ADDRESS_SETTING, PORT_SETTING, QUIET_SCENES_SETTING, SCRIPT_RUNS_SETTING } from './setup.js';
 import { projectPathSentence, TOOL_SPECS, theGamePicked } from './tool-definitions.js';
 import { renderToolsMarkdown } from './tool-reference.js';
 
@@ -132,6 +132,11 @@ autoload stays quiet there rather than announcing a test tier as the project: a 
 engines would otherwise announce sixteen games that are not games. Set \`${SCRIPT_RUNS_SETTING}\`
 true in \`project.godot\` to serve one anyway, which is for driving a \`-s\` script on purpose. Read
 that setting rather than assuming the quiet: it is a default and not a property of script runs.
+
+A scene that is not the game, such as a bench, is run as a scene and is served like the game unless
+the project lists its folder in \`${QUIET_SCENES_SETTING}\`, a \`PackedStringArray\` of \`res://\`
+prefixes, empty by default. A run started on a scene under one of them neither serves nor
+announces, nor do the engines it starts, unless it was started to be profiled from its start.
 
 The autoload reaches an export. \`gdharness runtime off\` in the project before shipping.
 

@@ -12,7 +12,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import type { DebugObserver } from './game-debugger.js';
+import { type DebugObserver, RUNTIME_ADDON } from './game-debugger.js';
 import {
   bodyCallsSuper,
   type CallSite,
@@ -374,9 +374,6 @@ export function profiledFunctions(
 const RUNTIME_SCRIPT = 'gdharness_runtime/runtime_autoload.gd';
 const PROFILER_PROBE = '_profiler_probe';
 const PROFILER_CALIBRATOR = '_calibrate_the_profiler';
-
-/** Where setup installs the runtime addon, whose scripts run in the game on gdharness's behalf. */
-const RUNTIME_ADDON = 'res://addons/gdharness_runtime/';
 
 function isRuntimeAddon(signature: string): boolean {
   return signatureParts(signature).script.startsWith(RUNTIME_ADDON);
