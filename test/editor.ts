@@ -6709,12 +6709,14 @@ async function testAnAdapterIsBoundAgainInPlace({ call, project, dapPort }: Edit
     [true, true, true],
     `the adapter is started again and listens: ${text(rebound)}`,
   );
+  // Only what the rebind makes Godot say: the editor's own start is gone from the panel once any
+  // fixture before this one has played a game, since Godot clears it on every play by default.
   const said = asArray(get(rebound, 'serversSaid'), 'serversSaid').map(String);
   const started = `--- Debug adapter server started on port ${dapPort} ---`;
   const stopped = said.lastIndexOf('--- Debug adapter server stopped ---');
   assert.ok(
-    stopped > said.indexOf(started) && said.includes(started) && said.lastIndexOf(started) > stopped,
-    `Godot says it started the adapter, stopped it and started it again on the same port: ${JSON.stringify(said)}`,
+    stopped >= 0 && said.lastIndexOf(started) > stopped,
+    `Godot says it stopped the adapter and started it again on the same port: ${JSON.stringify(said)}`,
   );
 
   const onlooker = new GodotDAPClient(dapPort);

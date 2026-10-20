@@ -521,8 +521,10 @@ async function runEngine(
     shippedListedRunner(),
     ...(plan.windowed ? [] : ['--ignoreHeadlessMode']),
     '-c',
+    // Named from res://, since gdUnit4 reads a path starting with a slash as one under res://: an
+    // absolute path on Linux or macOS would put the reports in a tree of their own in the project.
     '-rd',
-    join(directory, 'reports'),
+    `res://${relative(launch.projectPath, join(directory, 'reports')).split(sep).join('/')}`,
     '-rc',
     '1',
     '--',

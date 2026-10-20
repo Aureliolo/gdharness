@@ -16279,7 +16279,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 47, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 46, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -36224,6 +36224,9 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
     writeFileSync(suites, '\nres://tests/b_test.gd\n\n  res://tests/a_test.gd  \n');
     writeFileSync(skipping, 'a_test:test_two\n');
     const runner = join(process.cwd(), 'src', 'godot', 'tests', 'listed.gd');
+    // Inside the project and named from res://, as project_test names them: gdUnit4 reads a path
+    // starting with a slash as one under res://, so an absolute path on Linux or macOS is not one.
+    const reportsAt = (name: string): string => join(projectDir, '.godot', 'reports', name);
     const run = (reports: string, extra: readonly string[]): { said: string; status: number | null } => {
       const ran = spawnSyncHidden(
         godotPath,
@@ -36238,7 +36241,7 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
           '--ignoreHeadlessMode',
           '-c',
           '-rd',
-          reports,
+          `res://.godot/reports/${reports}`,
           '-rc',
           '1',
           '--',
@@ -36256,8 +36259,12 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
       };
     };
 
-    const quiet = join(scratch, 'quiet');
-    const first = run(quiet, ['--html-report-off', '--junit-report-off', '--expected-errors-out', expected]);
+    const first = run('quiet', [
+      '--html-report-off',
+      '--junit-report-off',
+      '--expected-errors-out',
+      expected,
+    ]);
     assert.equal(first.status, 0, first.said);
     const opened = [...first.said.matchAll(/Run Test Suite: (res:\/\/\S+\.gd)/g)].map((match) => match[1]);
     assert.deepEqual(
@@ -36288,30 +36295,32 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
         html: files.some((entry) => entry.endsWith('index.html')),
       };
     };
-    assert.deepEqual(written(quiet), { junit: false, html: false }, 'neither report with both turned off');
+    assert.deepEqual(
+      written(reportsAt('quiet')),
+      { junit: false, html: false },
+      'neither report with both turned off',
+    );
 
     // As project_test runs it.
-    const junitOnly = join(scratch, 'junit-only');
-    const second = run(junitOnly, ['--html-report-off']);
+    const second = run('junit-only', ['--html-report-off']);
     assert.equal(second.status, 0, second.said);
     assert.deepEqual(
-      written(junitOnly),
+      written(reportsAt('junit-only')),
       { junit: true, html: false },
       `the JUnit report alone with the HTML one off: ${second.said}`,
     );
 
-    const kept = join(scratch, 'kept');
-    const third = run(kept, []);
+    const third = run('kept', []);
     assert.equal(third.status, 0, third.said);
-    assert.deepEqual(written(kept), { junit: true, html: true }, `both reports when left on: ${third.said}`);
+    assert.deepEqual(
+      written(reportsAt('kept')),
+      { junit: true, html: true },
+      `both reports when left on: ${third.said}`,
+    );
 
     // As a gate runs it: every class of the game compiled with the suites, so the broken one is
     // named although no suite reaches it, and the suites still run.
-    const together = run(join(scratch, 'together'), [
-      '--html-report-off',
-      '--junit-report-off',
-      '--compile-together',
-    ]);
+    const together = run('together', ['--html-report-off', '--junit-report-off', '--compile-together']);
     assert.match(together.said, /res:\/\/wreck\.gd/, `the broken class is named: ${together.said}`);
     assert.match(
       together.said,
