@@ -7915,6 +7915,22 @@ function testProjectPathsAreContained(): void {
     assert.doesNotMatch(answer.reason, /somewhere other than this project/);
   }
 
+  // The example offered is the end of the path given, so an export's .exe is not offered a scene.
+  for (const [candidate, example] of [
+    ['/home/me/builds/game.exe', 'builds/game.exe'],
+    ['\\Windows\\win.ini', 'Windows/win.ini'],
+    ['/game.pck', 'game.pck'],
+    ['/', 'scenes/main.tscn'],
+    ...(onWindows ? [['C:\\Users\\me\\out\\game.exe', 'out/game.exe']] : []),
+  ]) {
+    const answer = resolveWithinProject(root, String(candidate));
+    assert.ok(!answer.ok, `${candidate} should not be contained`);
+    assert.equal(
+      answer.reason,
+      `Path '${candidate}' is absolute and outside the project; give a path inside it, such as '${example}'.`,
+    );
+  }
+
   // The other half, or the fixture above passes against a function that refuses everything.
   const accepted: [string, string][] = [
     ['scenes/main.tscn', 'scenes/main.tscn'],
@@ -18774,7 +18790,11 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       'Script file does not exist: res://checked/brokn.gd. The nearest .gd file is res://checked/broken.gd.',
     );
     const outside = textOf(await diagnose(join(tmpdir(), 'elsewhere.gd'))) ?? '';
-    assert.match(outside, /is absolute and outside the project; give a path inside it/, outside);
+    assert.match(
+      outside,
+      /is absolute and outside the project; give a path inside it, such as '[^'/]+\/elsewhere\.gd'\./,
+      outside,
+    );
     assert.match(outside, /Possible solutions:\n- Give the path relative to the project/, outside);
     const info = await server.request(
       'tools/call',
@@ -29769,7 +29789,9 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           '\treturn sum\n\n\n' +
           'func armour(pieces: Array[Gear]) -> String:\n\tvar labels: Array[String] = []\n' +
           '\tfor piece: Gear in pieces:\n\t\tlabels.append(piece.label)\n\treturn ", ".join(labels)\n\n\n' +
-          'func slow(ms: int) -> String:\n\tOS.delay_msec(ms)\n\tcount += 1\n\treturn "done after %d" % ms\n',
+          'func slow(ms: int) -> String:\n\tOS.delay_msec(ms)\n\tcount += 1\n\treturn "done after %d" % ms\n\n\n' +
+          'func later(ms: int) -> String:\n\tawait get_tree().create_timer(ms / 1000.0).timeout\n' +
+          '\tcount += 1\n\treturn "awaited %d" % ms\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -30003,6 +30025,54 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result')),
         before + 1,
         'the call ran once',
+      );
+
+      // A method that awaits hands its caller a function state at the first await, which was
+      // answered as the result. The answer is the value it returns once it ends, whether that comes
+      // inside the wait or is collected after it, and the frames go on drawing while it waits.
+      const awaited = await invokeWaiting({
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'later',
+        args: [300],
+      });
+      assert.equal(
+        get(awaited, 'result'),
+        'awaited 300',
+        `an awaiting method answers its value: ${JSON.stringify(awaited)}`,
+      );
+      assert.equal(get(awaited, 'awaited'), true, JSON.stringify(awaited));
+      assert.ok(
+        asNumber(get(awaited, 'elapsed_usec'), JSON.stringify(awaited)) > 250_000,
+        `and its time runs to its end, which a timer ends on a frame's boundary:${JSON.stringify(awaited)}`,
+      );
+      const awaitedLater = await invokeWaiting({
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'later',
+        args: [2000],
+        timeoutMs: 500,
+      });
+      assert.equal(
+        get(awaitedLater, 'pending'),
+        true,
+        `one that outlasts the wait is pending: ${JSON.stringify(awaitedLater)}`,
+      );
+      const laterId = asNumber(get(awaitedLater, 'requestId'), JSON.stringify(awaitedLater));
+      let laterCollected: unknown = awaitedLater;
+      for (let waited = 0; get(laterCollected, 'pending') === true && waited < 20_000; waited += 250) {
+        await delay(250);
+        laterCollected = await invokeWaiting({ op: 'result', requestId: laterId });
+      }
+      assert.equal(
+        get(laterCollected, 'result'),
+        'awaited 2000',
+        `and collected by its id: ${JSON.stringify(laterCollected)}`,
+      );
+      assert.equal(
+        asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result')),
+        before + 3,
+        'each awaiting call ran once',
       );
       assert.match(
         textOf(

@@ -433,8 +433,15 @@ func call_method(params: Dictionary) -> Dictionary:
 	OS.add_logger(caught)
 	var began: int = Time.get_ticks_usec()
 	var result: Variant = holder.callv(named, deserialized_args)
-	var elapsed: int = Time.get_ticks_usec() - began
 	OS.remove_logger(caught)
+	# A method that awaits hands back its state at the first await and its value only when it ends,
+	# so the answer waits for the value; one that takes longer than the server waits is collected by
+	# its requestId like any slow call.
+	var state: Object = result if result is Object else null
+	var awaited: bool = state != null and state.get_class() == "GDScriptFunctionState"
+	if awaited:
+		result = await Signal(state, &"completed")
+	var elapsed: int = Time.get_ticks_usec() - began
 
 	if not caught.refused.is_empty():
 		var message: String = (
@@ -463,6 +470,8 @@ func call_method(params: Dictionary) -> Dictionary:
 		"result": _values.serialize(result),
 		"elapsed_usec": elapsed
 	}
+	if awaited:
+		answer["awaited"] = true
 	_keep_reported(answer, "errors", caught.raised)
 	_keep_reported(answer, "warnings", caught.warned)
 	var asked: Variant = params.get("properties")

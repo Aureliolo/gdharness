@@ -166,9 +166,13 @@ export function resolveWithinProject(
   // Refused here rather than left to the containment check below, which would accept a leading
   // separator on the platform where node:path does not read it as absolute.
   if (withoutScheme.startsWith('/') || withoutScheme.startsWith('\\') || isAbsolute(withoutScheme)) {
+    // The example is the end of the path given, so a build output is offered a build path and a
+    // scene a scene path; a fixed scene path was offered for an export's .exe.
+    const tail = withoutScheme.split(/[\\/]+/).filter((step) => step !== '' && !step.endsWith(':'));
+    const example = tail.slice(-2).join('/') || 'scenes/main.tscn';
     return {
       ok: false,
-      reason: `Path '${trimmed}' is absolute and outside the project; give a path inside it, such as 'scenes/main.tscn'.`,
+      reason: `Path '${trimmed}' is absolute and outside the project; give a path inside it, such as '${example}'.`,
     };
   }
 
