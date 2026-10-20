@@ -17938,8 +17938,11 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
     writeFileSync(settings, 'config_version=5\n\n[debug]\n\ngdscript/warnings/unsafe_call_argument=2\n');
     editor.close();
     await delay(1100);
-    // The editor that comes back names its two servers, and its debug adapter starts listening a
-    // second after it greets, as a restarted editor's servers come up after its greeting.
+    // The editor that comes back names its two servers, and its language server starts listening a
+    // second after it greets. Godot binds the debug adapter as the editor is built, before the
+    // greeting, and the language server once the editor is ready, after it; the fixture had the two
+    // the other way round, which no editor does, and a restart now reads an adapter down beside a
+    // language server up as one that failed.
     const [lspPort, dapPort] = [await reservePort(), await reservePort()];
     const listen = async (on: number): Promise<Server> => {
       const made = createServer((socket) => {
@@ -17950,11 +17953,11 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
       });
       return made;
     };
-    servers.push(await listen(lspPort));
+    servers.push(await listen(dapPort));
     second = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     await greet(second, { lsp_port: lspPort, dap_port: dapPort });
     await delay(1000);
-    servers.push(await listen(dapPort));
+    servers.push(await listen(lspPort));
 
     const answer = parseTextContent(await restarting);
     const said = JSON.stringify(answer);
@@ -17980,6 +17983,130 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
       /writes only what differs from its own defaults/,
       `with the mechanism, since the key going is not the editor misbehaving: ${said}`,
     );
+  } finally {
+    editor?.terminate();
+    second?.terminate();
+    await server.stop();
+    for (const one of servers) {
+      one.close();
+    }
+    sweep(project);
+  }
+}
+
+/**
+ * A restart whose editor came back without its debug adapter binds it again in that editor, and says
+ * what Godot said about the port.
+ *
+ * Reported from fantasy-guild-manager: four restarts in a hundred and thirty came back with the
+ * language server up and nothing on the adapter's port, each cured by restarting again. Godot binds
+ * the adapter once, as the editor is built, so the fixture's editor greets with the language server
+ * listening and the adapter not, and binds the adapter only when asked to. Asked once: a second ask
+ * would mean the restart rebinds while the port is already taken, which is a bind that fails.
+ */
+async function testARestartBindsAnAdapterThatCameBackWithoutItsPort(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rebinding-'));
+  let editor: WebSocket | null = null;
+  let second: WebSocket | null = null;
+  const servers: Server[] = [];
+  const failed = '--- Failed to start Debug adapter server on port %d: Already in use ---';
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const [lspPort, dapPort] = [await reservePort(), await reservePort()];
+    const listen = async (on: number): Promise<Server> => {
+      const made = createServer((socket) => {
+        socket.destroy();
+      });
+      await new Promise<void>((resolve) => {
+        made.listen(on, '127.0.0.1', resolve);
+      });
+      return made;
+    };
+    const asked: unknown[] = [];
+    const greet = async (socket: WebSocket, saying: Record<string, unknown> = {}): Promise<void> => {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      socket.on('message', (raw: Buffer) => {
+        void (async (): Promise<void> => {
+          const message: unknown = JSON.parse(String(raw));
+          if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+            return;
+          }
+          let result: Record<string, unknown> = { ok: true };
+          if (message['tool'] === 'editor_servers') {
+            const args = message['args'];
+            asked.push(args);
+            const rebind = isRecord(args) && args['rebind'] === true;
+            if (rebind) {
+              servers.push(await listen(dapPort));
+            }
+            result = {
+              ok: true,
+              said: [
+                failed.replace('%d', String(dapPort)),
+                `--- GDScript language server started on port ${lspPort} ---`,
+              ],
+              rebound: rebind,
+              saidSince: rebind ? [`--- Debug adapter server started on port ${dapPort} ---`] : [],
+            };
+          }
+          socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+        })();
+      });
+      socket.send(JSON.stringify(greeting(project, saying)));
+    };
+
+    editor = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    await greet(editor);
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const restarting = server.request(
+      'tools/call',
+      { name: 'editor_launch', arguments: { op: 'restart' } },
+      60_000,
+    );
+    await delay(500);
+    editor.close();
+    await delay(1100);
+    servers.push(await listen(lspPort));
+    second = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    await greet(second, { lsp_port: lspPort, dap_port: dapPort });
+
+    const answer = parseTextContent(await restarting);
+    const said = JSON.stringify(answer);
+    assert.equal(get(answer, 'restarted'), true, said);
+    assert.deepEqual(
+      [get(answer, 'lspListening'), get(answer, 'dapListening'), get(answer, 'debugAdapterRebound')],
+      [true, true, true],
+      `the adapter is bound again in the editor that came back: ${said}`,
+    );
+    assert.equal(get(answer, 'serversNote'), undefined, `and nothing is left to do: ${said}`);
+    assert.deepEqual(
+      asArray(get(answer, 'serversSaid')),
+      [
+        failed.replace('%d', String(dapPort)),
+        `--- GDScript language server started on port ${lspPort} ---`,
+        `--- Debug adapter server started on port ${dapPort} ---`,
+      ],
+      `with what Godot said the first time and the second: ${said}`,
+    );
+    assert.deepEqual(asked, [{ rebind: true }], `asked to bind it once: ${said}`);
+    // The language server listening without the adapter is an adapter that has already failed, so
+    // the restart does not wait out the twenty seconds it gives servers that are still starting.
+    assert.ok(Number(get(answer, 'tookMs')) < 15_000, `without waiting for an adapter that failed: ${said}`);
   } finally {
     editor?.terminate();
     second?.terminate();
@@ -22475,7 +22602,7 @@ async function testAnEditorsServersAreAskedOfTheirPorts(): Promise<void> {
   assert.equal(notListeningNote({ lsp: up, dap: { port: 6006, listening: null } }, 60_000), undefined);
   assert.equal(
     notListeningNote({ lsp: up, dap: { port: 6006, listening: false } }, 60_000),
-    "The editor names its debug adapter on port 6006, and nothing accepts connections there. Godot binds each once, as the editor starts, and reports a failure only in the editor's own log panel; played runs and the debug tools need the debug adapter. editor_launch restart binds it again.",
+    "The editor names its debug adapter on port 6006, and nothing accepts connections there. Godot binds each once, as the editor starts, and reports a failure only in the editor's own log panel; played runs and the debug tools need the debug adapter. editor_launch rebind binds the debug adapter again in place.",
   );
   assert.match(
     String(
@@ -22484,11 +22611,11 @@ async function testAnEditorsServersAreAskedOfTheirPorts(): Promise<void> {
         60_000,
       ),
     ),
-    /^The editor names its language server on port 6005 and its debug adapter on port 6006, .*; diagnostics, symbols and renames need the language server, and played runs and the debug tools need the debug adapter\. editor_launch restart binds them again\.$/,
+    /^The editor names its language server on port 6005 and its debug adapter on port 6006, .*; diagnostics, symbols and renames need the language server, and played runs and the debug tools need the debug adapter\. editor_launch rebind binds the debug adapter again in place, and editor_launch restart binds the language server again\.$/,
   );
   assert.match(
     String(notListeningNote({ lsp: { port: 6005, listening: false }, dap: up }, 3_000)),
-    /binds it again\. The editor greeted 3s ago, so it may still be starting: ask again in a few seconds\.$/,
+    /editor_launch restart binds the language server again\. The editor greeted 3s ago, so it may still be starting: ask again in a few seconds\.$/,
   );
 
   const project = mkdtempSync(join(tmpdir(), 'gdharness-served-'));
@@ -22545,7 +22672,7 @@ async function testAnEditorsServersAreAskedOfTheirPorts(): Promise<void> {
     assert.match(
       text(get(seen, 'serversNote')),
       new RegExp(
-        `^The editor names its debug adapter on port ${dapPort}, and nothing accepts connections there\\..*editor_launch restart binds it again\\. The editor greeted \\d+s ago, so it may still be starting`,
+        `^The editor names its debug adapter on port ${dapPort}, and nothing accepts connections there\\..*editor_launch rebind binds the debug adapter again in place\\. The editor greeted \\d+s ago, so it may still be starting`,
       ),
       said,
     );
@@ -49206,6 +49333,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,
+  testARestartBindsAnAdapterThatCameBackWithoutItsPort,
   testWhatALaunchedEditorDroppedIsReadAsItArrives,
   testProjectDefaultsToTheWorkingDirectory,
   testAnEngineThatDoesNotAnswerIsNamed,

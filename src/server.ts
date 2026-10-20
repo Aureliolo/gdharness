@@ -2699,6 +2699,13 @@ const PROJECT_INFO_SECTIONS: Readonly<Record<string, Section>> = dictionary<Sect
 /** Where gdUnit4 lives, which is where a backtrace stops being about the game. */
 const RUNNER_DIRECTORY = 'addons/gdUnit4/';
 
+/** Whether the editor's language server and debug adapter accept connections, and what to do if not. */
+interface EditorServers {
+  lspListening?: boolean;
+  dapListening?: boolean;
+  serversNote?: string | undefined;
+}
+
 /** The gdUnit4 class the shipped runner extends, which gdUnit4 has had since 6.0. */
 const GDUNIT4_CI_RUNNER = 'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd';
 
@@ -4731,6 +4738,9 @@ class GodotServer {
       case 'editor_launch':
         if (op === 'close') {
           return await this.handleCloseEditor();
+        }
+        if (op === 'rebind') {
+          return await this.handleRebindEditorServers();
         }
         return op === 'restart' ? await this.handleRestartEditor(args) : await this.handleLaunchEditor(args);
       case 'editor_run':
@@ -8354,11 +8364,7 @@ class GodotServer {
    * Whether the connected editor's language server and debug adapter accept connections on the
    * ports it names, with what to do when one does not. Empty before the editor has named them.
    */
-  private async editorServersListening(): Promise<{
-    lspListening?: boolean;
-    dapListening?: boolean;
-    serversNote?: string | undefined;
-  }> {
+  private async editorServersListening(): Promise<EditorServers> {
     const status = this.godotBridge.getStatus();
     const { lspPort, dapPort } = status;
     if (!status.connected || lspPort === undefined || dapPort === undefined) {
@@ -8380,15 +8386,92 @@ class GodotServer {
    * The same, for an editor that has just come back from a restart: asked again until both listen
    * or the editor is past starting them, since its language server comes up seconds after it greets.
    */
-  private async editorServersOnceStarted(): Promise<Awaited<ReturnType<typeof this.editorServersListening>>> {
+  private async editorServersOnceStarted(): Promise<EditorServers> {
     const deadline = Date.now() + EDITOR_SERVERS_START_MS;
     for (;;) {
       const answer = await this.editorServersListening();
-      if (answer.serversNote === undefined || Date.now() >= deadline) {
+      // The debug adapter binds before the language server, so one listening without the other
+      // has already failed and waiting longer brings nothing.
+      const adapterFailed = answer.lspListening === true && answer.dapListening === false;
+      if (answer.serversNote === undefined || adapterFailed || Date.now() >= deadline) {
         return answer;
       }
       await delay(500);
     }
+  }
+
+  /**
+   * A restarted editor's debug adapter bound again in that editor when its port came up empty,
+   * with what the editor said about it, rather than left for a second restart.
+   *
+   * Godot tries the port once, as the editor starts and seconds before the language server, and
+   * says why it failed only in its log panel; a restart in four of a hundred and thirty downstream
+   * came back without it and was cured every time by restarting again, so the port was free soon
+   * after. The language server binds later, once the editor is ready, and only once, so it is
+   * reported and left. What Godot said trying each port goes with the answer, since its reason for
+   * a failed bind is written nowhere else.
+   */
+  private async rebindTheDebugAdapter(
+    servers: EditorServers,
+  ): Promise<{ servers: EditorServers; report: OperationParams }> {
+    if (servers.dapListening !== false && servers.lspListening !== false) {
+      return { servers, report: {} };
+    }
+    const { rebound, said } = await this.editorServersSaid(servers.dapListening === false);
+    const after = rebound ? await this.editorServersListening() : servers;
+    return {
+      servers: after,
+      report: {
+        ...(said.length === 0 ? {} : { serversSaid: said }),
+        ...(rebound ? { debugAdapterRebound: after.dapListening === true } : {}),
+      },
+    };
+  }
+
+  /**
+   * What the connected editor's log panel says about its servers, with the debug adapter started
+   * again first when [param rebind] asks: the lines from before and after, and whether it was.
+   */
+  private async editorServersSaid(rebind: boolean): Promise<{ rebound: boolean; said: string[] }> {
+    let answer: OperationParams = {};
+    try {
+      answer = asParams(await this.godotBridge.invokeTool('editor_servers', { rebind }, { counted: false }));
+    } catch (error) {
+      this.logDebug(`editor_servers did not answer: ${errorMessage(error)}`);
+    }
+    return {
+      rebound: readBoolean(answer, 'rebound') === true,
+      said: [...(readStringArray(answer, 'said') ?? []), ...(readStringArray(answer, 'saidSince') ?? [])],
+    };
+  }
+
+  /**
+   * editor_launch rebind: the connected editor's debug adapter stopped and started again in place.
+   *
+   * The cure for an adapter that did not bind as the editor started, without the restart that was
+   * the only one before: a restart takes seconds and saves, and an editor opened by hand cannot be
+   * brought back hidden or with the ports it was moved to.
+   */
+  private async handleRebindEditorServers(): Promise<ToolResponse> {
+    if (!this.godotBridge.getStatus().connected) {
+      return this.createErrorResponse('No editor is connected, so there is no debug adapter to bind.', [
+        'editor_launch opens one on a project',
+        'editor_status says whether the bridge is up and what has reached it',
+      ]);
+    }
+    const { rebound, said } = await this.editorServersSaid(true);
+    if (!rebound) {
+      return this.createErrorResponse(
+        'The editor has no debug adapter to bind again: no DebugAdapterServer is in its tree.',
+        ['editor_status says what the editor serves'],
+      );
+    }
+    const servers = await this.editorServersListening();
+    return this.jsonTextResponse({
+      rebound: true,
+      ...servers,
+      ...(said.length === 0 ? {} : { serversSaid: said }),
+    });
   }
 
   /**
@@ -8492,7 +8575,9 @@ class GodotServer {
       );
     }
 
-    const servers = await this.editorServersOnceStarted();
+    const { servers, report: rebinding } = await this.rebindTheDebugAdapter(
+      await this.editorServersOnceStarted(),
+    );
     const now = this.godotBridge.getStatus();
     const after = this.settingKeysOf(before.projectPath);
     // With the value each one had, because naming the key alone leaves the caller to go and find
@@ -8509,6 +8594,7 @@ class GodotServer {
       staleNote: this.godotBridge.anotherRelease(),
       ...this.whatTheEditorDropped(settingsBefore, after),
       ...servers,
+      ...rebinding,
       // One opened by hand restarts itself, with arguments the engine keeps to itself.
       ...(mine && this.launchedEditor !== null ? { arguments: this.launchedEditor.arguments } : {}),
       tookMs: Date.now() - began,
@@ -9545,7 +9631,7 @@ class GodotServer {
         `The editor is connected but its debug adapter is not: ${errorMessage(error)}`,
         [
           `This asked on port ${this.dap().port}, which is where the connected editor says it serves`,
-          "Godot binds its debug adapter once, as the editor starts, and reports a failure only in the editor's own log panel: editor_launch restart binds it again",
+          "Godot binds its debug adapter once, as the editor starts, and reports a failure only in the editor's own log panel: editor_launch rebind binds it again in place",
           'GDHARNESS_DAP_PORT points this server at another one',
         ],
       );
