@@ -140,7 +140,7 @@ gdharness
 |   |-- setup.ts          the addons, the editor plugins, the autoload
 |   |-- prompt.ts         the questions, and the silence when nobody can answer
 |   `-- suite-run.ts      test: a game's suites over engines, judged line by line
-|       |-- suite-plan.ts        which suites, what they cost, which engine runs what
+|       |-- suite-plan.ts        which suites, their cost, which engine runs what
 |       |-- suite-judge.ts       an engine's output read case by case
 |       |-- suite-fingerprint.ts what a suite reaches, for --changed-only
 |       `-- engine-slots.ts      the slots every tool starting an engine shares

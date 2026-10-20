@@ -48,7 +48,12 @@ What each case took is kept in `.godot/gdharness/suite-times.json`, in the main 
 project is a git worktree of one:
 
 ```json
-{ "res://tests/a_test.gd": { "seconds": 12.4, "cases": { "test_x": 5.1, "test_y": 7.0 } } }
+{
+  "res://tests/a_test.gd": {
+    "seconds": 12.4,
+    "cases": { "test_x": 5.1, "test_y": 7.0 }
+  }
+}
 ```
 
 `seconds` is the suite run whole, with its `before` and `after`; `cases` holds each function, with
