@@ -5996,7 +5996,7 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
   );
   assert.match(
     await refusal('runtime_input', { ...game, op: 'key', keycode: 'Ctrl-Alt-Nonsense' }),
-    /Invalid key_label/,
+    /^No key is called Ctrl-Alt-Nonsense\. .*such as "Space"/,
     'and so should a key name that is not one',
   );
 

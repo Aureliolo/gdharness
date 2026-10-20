@@ -51,6 +51,13 @@ static func _out_of_range(named: String, asked: int, least: int, most: int) -> D
 	}
 
 
+## The refusal for [param signal_name], which [param node] lacks, naming the nearest signals it has,
+## or every one when none is near: a name to send instead.
+static func _no_signal(node: Node, node_path: String, signal_name: String) -> Dictionary:
+	var said: String = "%s has no signal %s" % [node_path, signal_name]
+	return {"type": "error", "message": GdhRead.offered(said, signal_name, GdhRead.signals_of(node)) + "."}
+
+
 func wait_frames(params: Dictionary) -> Dictionary:
 	var frames: int = GdhRead.as_int(params.get("frames", 1), 1)
 	if frames < 1 or frames > MOST_FRAMES:
@@ -79,7 +86,7 @@ func wait_signal(params: Dictionary) -> Dictionary:
 		return standing
 	var node: Node = standing["node"]
 	if not node.has_signal(signal_name):
-		return {"type": "error", "message": "%s has no signal %s" % [node_path, signal_name]}
+		return _no_signal(node, node_path, signal_name)
 
 	var catcher: GdhSignalCatcher = GdhSignalCatcher.new()
 	var callable: Callable = catcher._on_fired
@@ -124,7 +131,7 @@ func watch_signal(params: Dictionary) -> Dictionary:
 		return standing
 	var node: Node = standing["node"]
 	if not node.has_signal(signal_name):
-		return {"type": "error", "message": "%s has no signal %s" % [node_path, signal_name]}
+		return _no_signal(node, node_path, signal_name)
 	var watch: GdhWatch = GdhWatch.new(node, node_path, signal_name)
 	var listening: Error = node.connect(signal_name, watch.catcher._on_fired)
 	if listening != OK:

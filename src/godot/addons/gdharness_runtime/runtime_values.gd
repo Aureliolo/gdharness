@@ -156,6 +156,28 @@ static func glyph_of(keycode: Key, shifted: bool) -> int:
 	return keycode
 
 
+## The refusal for [param name], which no key is called, with the key names nearest it. Read from the
+## engine's own names, printable keys and the special ones above [constant KEY_SPECIAL], since the
+## game takes any name OS.find_keycode_from_string does.
+static func unknown_key(name: String) -> String:
+	var names: PackedStringArray = []
+	for code: int in range(32, 127) + range(KEY_SPECIAL + 1, KEY_SPECIAL + 0x100):
+		var spelled: String = OS.get_keycode_string(code as Key)
+		if not spelled.is_empty() and OS.find_keycode_from_string(spelled) == code:
+			var _named: bool = names.append(spelled)
+	var close: PackedStringArray = GdhRead.nearest(name, names)
+	var said: String = "No key is called %s." % name
+	if close.size() == 1:
+		said += " The nearest key name is %s." % close[0]
+	elif not close.is_empty():
+		said += " The nearest key names are %s." % ", ".join(close)
+	return (
+		said
+		+ ' A key is named as Godot names it, such as "Space", "Enter", "Escape", "A" or "F1",'
+		+ " or given by its keycode."
+	)
+
+
 ## What [param path] names: a node under [param root], as [method node_at] reads it, or an engine
 ## singleton by its name. Answers the object under "object", and under "node" the node that objects
 ## named in a value are found from, which for a singleton is [param root].

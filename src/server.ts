@@ -171,7 +171,7 @@ import {
   isSameDirectory,
   isWithinRoot,
   keptInside,
-  realPathOr,
+  realAsFarAsItExists,
   resolveWithinProject,
 } from './paths.js';
 import { acceptsConnections, notListeningNote } from './port-probe.js';
@@ -469,12 +469,14 @@ function writtenFileRefusal(
   if (!rule.extensions.includes(extname(path).toLowerCase())) {
     return `${named} ${path} does not end in ${rule.extensions.join(' or ')}, which is what ${what} is.`;
   }
-  const directory = realPathOr(dirname(path));
+  const directory = realAsFarAsItExists(dirname(path));
   if (!existsSync(directory)) {
     return `${named}'s directory ${dirname(path)} does not exist; ${what} creates no directories.`;
   }
   const where = join(directory, basename(path));
-  const inside = rule.projects.find((project) => project !== '' && isWithinRoot(realPathOr(project), where));
+  const inside = rule.projects.find(
+    (project) => project !== '' && isWithinRoot(realAsFarAsItExists(project), where),
+  );
   if (inside !== undefined) {
     return `${named} ${path} is inside the project at ${inside}; ${what} is saved outside it, so it never becomes part of the game.`;
   }
@@ -638,7 +640,7 @@ const OWN_DEBUGGER =
  * /private/var/folders, and the unresolved root would put its own files outside it.
  */
 function projectSpelling(projectPath: string, absolutePath: string): string {
-  return `res://${relative(realPathOr(projectPath), realPathOr(absolutePath)).replaceAll('\\', '/')}`;
+  return `res://${relative(realAsFarAsItExists(projectPath), realAsFarAsItExists(absolutePath)).replaceAll('\\', '/')}`;
 }
 
 /**
@@ -4933,7 +4935,7 @@ class GodotServer {
         // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
         // every /var/folders path is really /private/var/folders.
         const session = this.dapHoldingBreakpointsOf(project.value.path);
-        const scriptPath = realPathOr(located.absolutePath);
+        const scriptPath = realAsFarAsItExists(located.absolutePath);
         const line = readPositiveNumber(args, 'line');
         if (line === undefined) {
           return this.createErrorResponse('line is required: the one-based line to stop on.');

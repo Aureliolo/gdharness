@@ -132,7 +132,13 @@ import {
   narrowedCompletions,
   typedBefore,
 } from '../src/lsp_client.js';
-import { exportedBuild, isSameDirectory, isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import {
+  exportedBuild,
+  isSameDirectory,
+  isWithinRoot,
+  realAsFarAsItExists,
+  resolveWithinProject,
+} from '../src/paths.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
 import {
@@ -28543,6 +28549,205 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
 }
 
 /**
+ * A breakpoint on a script since deleted is taken off, by the server that set it and by its successor.
+ *
+ * The breakpoint was held under the script's real path and looked up for the remove under the path
+ * resolved only when the whole of it existed, so once the script was gone the remove used the
+ * spelling given. Wherever the project sits behind a link, the two differ: the remove answered
+ * that nothing was held there while listing the breakpoint under held, on the macOS and Windows
+ * engine legs, whose temporary directories are reached through `/var` and an 8.3 short name. The
+ * project is reached through a link here so the case does not depend on where the machine keeps
+ * its temporary files.
+ */
+async function testABreakpointOnADeletedScriptIsTakenOff(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-breakpoint-'));
+  const linked = `${project}-linked`;
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-breakpoint-rt-'));
+  symlinkSync(project, linked, 'junction');
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Gone"\n');
+  writeFileSync(join(project, 'gone.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tpass\n');
+  const serve = (): ServerProcess =>
+    new ServerProcess({ env: { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: linked } });
+  const breakpoint = async (server: ServerProcess, op: string, line?: number): Promise<unknown> =>
+    parseTextContent(
+      await server.request('tools/call', {
+        name: 'debug_breakpoint',
+        arguments: {
+          projectPath: linked,
+          op,
+          ...(line === undefined ? {} : { scriptPath: 'gone.gd', line }),
+        },
+      }),
+    );
+  try {
+    const setter = serve();
+    try {
+      await setter.initialize('regression-test');
+      await breakpoint(setter, 'set', 1);
+      const set = await breakpoint(setter, 'set', 4);
+      assert.deepEqual(
+        get(set, 'held'),
+        [{ scriptPath: 'res://gone.gd', lines: [1, 4] }],
+        JSON.stringify(set),
+      );
+      rmSync(join(project, 'gone.gd'));
+      const removed = await breakpoint(setter, 'remove', 1);
+      assert.deepEqual(
+        [get(removed, 'removed'), get(removed, 'held')],
+        [true, [{ scriptPath: 'res://gone.gd', lines: [4] }]],
+        `the server that set it takes it off: ${JSON.stringify(removed)}`,
+      );
+    } finally {
+      await setter.stop();
+    }
+
+    // Spawned once the note is written, so it starts from what the first server left.
+    const successor = serve();
+    try {
+      await successor.initialize('regression-test');
+      const listed = await breakpoint(successor, 'list');
+      assert.deepEqual(
+        get(listed, 'held'),
+        [{ scriptPath: 'res://gone.gd', lines: [4] }],
+        `the successor holds what was left: ${JSON.stringify(listed)}`,
+      );
+      const removed = await breakpoint(successor, 'remove', 4);
+      assert.deepEqual(
+        [get(removed, 'removed'), get(removed, 'held')],
+        [true, []],
+        `and takes it off as well: ${JSON.stringify(removed)}`,
+      );
+    } finally {
+      await successor.stop();
+    }
+    assert.equal(
+      realAsFarAsItExists(join(linked, 'missing', 'gone.gd')),
+      join(realpathSync.native(project), 'missing', 'gone.gd'),
+      'the part of a path that exists is resolved, and the rest kept as written',
+    );
+  } finally {
+    // Not recursive, which would go through the link into the project it names.
+    rmSync(linked, { force: true });
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * Input that names nothing, or reaches nothing, says what would have worked.
+ *
+ * A misspelt key was refused as "Invalid key_label: Spaec", naming a field nobody passes and no key;
+ * a wait on a signal the node lacks named none of the ones it has; and a click outside the window
+ * answered exactly as one that landed. Found by probe 117.
+ */
+async function testInputThatReachesNothingSaysWhatWould(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('input refusal regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-input-refused-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-input-refused-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Input refused"\n' +
+      'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+      'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\nsignal reached(total: int)\n\nvar last_key: int = 0\n\n\n' +
+      'func _input(event: InputEvent) -> void:\n\tif event is InputEventKey and event.pressed:\n' +
+      '\t\tlast_key = (event as InputEventKey).keycode\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    const start = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    started = get(start.answer, 'started') === true;
+    assert.ok(started, start.said);
+
+    const space = await call('runtime_input', { op: 'key', keycode: 'Space' });
+    assert.ok(space.answer !== null, space.said);
+    const misspelt = await call('runtime_input', { op: 'key', keycode: 'Spaec' });
+    assert.equal(misspelt.answer, null, misspelt.said);
+    assert.match(
+      misspelt.said,
+      /^No key is called Spaec\. The nearest key names? (?:is|are) [^.]*\bSpace\b[^.]*\. A key is named as Godot names it/,
+      `a misspelt key is offered the key it was meant to be: ${misspelt.said}`,
+    );
+    const pressed = await call('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'get',
+      args: ['last_key'],
+    });
+    assert.equal(get(pressed.answer, 'result'), 32, `and only the key that was one arrived: ${pressed.said}`);
+
+    const unknown = await call('runtime_wait', {
+      op: 'signal',
+      nodePath: '/root/Main',
+      signal: 'reachd',
+      timeoutMs: 500,
+    });
+    assert.match(
+      unknown.said,
+      /\/root\/Main has no signal reachd; the nearest it has (?:is|are) reached\b/,
+      `a signal the node lacks is offered the nearest it has: ${unknown.said}`,
+    );
+
+    const inside = await call('runtime_input', { op: 'mouse_click', x: 10, y: 10 });
+    assert.equal(
+      get(inside.answer, 'outside_viewport'),
+      undefined,
+      `a click inside says nothing more: ${inside.said}`,
+    );
+    const outside = await call('runtime_input', { op: 'mouse_click', x: -40, y: 10 });
+    assert.match(
+      text(get(outside.answer, 'outside_viewport')),
+      /^\(-40(?:\.0)?, 10(?:\.0)?\) is outside the window's viewport, .*so no control there receives it/,
+      `a click outside the window says it reached no control: ${outside.said}`,
+    );
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * An operation that refuses answers with its refusal, once.
  *
  * It answered "set_import_options failed (exit code 1): " and then the sentence, and the same
@@ -32793,11 +32998,14 @@ async function testACommandLineNotGivenInTimeIsAskedAgain(): Promise<void> {
 function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
   const project = join(tmpdir(), 'gdharness-editor-vs-run');
   const engine = join(tmpdir(), 'engines', 'Godot_v4.5-stable_win64.exe');
+  // One moment for both: read twice, a millisecond could fall between them, and the slow launch's
+  // 13.5 seconds below, measured from the second, would round to 13.
+  const now = Date.now();
   const record = {
     pid: 4242,
     transcript: join(tmpdir(), 'none.log'),
-    startedAt: Date.now(),
-    startedBy: Date.now(),
+    startedAt: now,
+    startedBy: now,
     projectPath: project,
     arguments: ['--path', project],
     command: engine,
@@ -48591,6 +48799,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARefusalIsSaidOnce,
   testAGameThisServerStartedIsDebugged,
   testAGameHeldInACallHasTheCall,
+  testInputThatReachesNothingSaysWhatWould,
+  testABreakpointOnADeletedScriptIsTakenOff,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,
