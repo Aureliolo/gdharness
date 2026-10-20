@@ -111,7 +111,7 @@ import {
   theEditorHasComeBack,
   withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
-import { DebuggerStream, decodeVariant, framedCommand } from '../src/godot-variant.js';
+import { DebuggerStream, decodeVariant, framedCommand, type SentValue } from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
 import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
@@ -13686,6 +13686,118 @@ function testAKeptGamesStackAndValuesRead(): void {
     'a long list is cut, and says how much was left out',
   );
   assert.equal(shownValue(null), 'null');
+}
+
+/**
+ * A pause answers with the game's own script, and a step from where no script runs stops at the
+ * next line.
+ *
+ * The runtime addon is an autoload whose _process runs first in every frame, and the engine takes a
+ * pause every 2048 lines of script wherever they fall, so an idle game paused in gdharness's code.
+ * A Windows runner caught one in the addon's note_frame; the case wanting _process passed otherwise
+ * only because the addon's frame is called that too. And a game held where no script runs, as one
+ * is when it takes a pause asked for long before, ran on for good after a step over or out, which
+ * count lines only at the depth they start from.
+ */
+async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
+  const addon = 'res://addons/gdharness_runtime/runtime_autoload.gd';
+  const moved: string[] = [];
+  // The stacks the stand-in game stops at, one for each break or step, the last kept once they run
+  // out; and the stack it holds now, [0] where no script runs.
+  let stops: SentValue[][] = [];
+  let now: SentValue[] = [0];
+  let accepted: () => void = () => undefined;
+  const taken = new Promise<void>((resolve) => {
+    accepted = resolve;
+  });
+  const peer = await GameDebugger.open(
+    [],
+    [
+      {
+        connected: () => {
+          accepted();
+        },
+        message: () => undefined,
+      },
+    ],
+  );
+  const game = createConnection({ host: '127.0.0.1', port: peer.port });
+  try {
+    const stream = new DebuggerStream();
+    game.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        if (!('message' in received)) {
+          continue;
+        }
+        if (['break', 'step', 'next', 'out'].includes(received.message)) {
+          moved.push(received.message);
+          now = stops.shift() ?? now;
+          game.write(framedCommand('debug_enter', [true, '', now.length > 1]));
+        } else if (received.message === 'get_stack_dump') {
+          game.write(framedCommand('stack_dump', now));
+        } else if (received.message === 'continue') {
+          game.write(framedCommand('debug_exit', []));
+        }
+      }
+    });
+    await taken;
+    const top = (answer: unknown): string =>
+      `${text(get(answer, 'stack', 0, 'script'))}:${String(get(answer, 'stack', 0, 'line'))}`;
+
+    // Caught in the addon partway through its frame, then stepped through the rest of it.
+    stops = [
+      [6, addon, 677, 'note_frame', addon, 364, '_process'],
+      [3, addon, 365, '_process'],
+      [3, 'res://main.gd', 7, '_process'],
+    ];
+    const paused = await peer.ask({ op: 'pause' });
+    assert.equal(
+      top(paused),
+      'res://main.gd:7',
+      `the pause shows the game's own line: ${JSON.stringify(paused)}`,
+    );
+    assert.deepEqual(moved, ['break', 'step', 'step'], 'stepped on through the addon to get there');
+    assert.equal(get(paused, 'note'), undefined, JSON.stringify(paused));
+    await peer.ask({ op: 'resume', how: 'continue' });
+
+    // A game with no script of its own each frame is stepped through the addon until the budget goes.
+    moved.length = 0;
+    stops = [[3, addon, 362, '_process']];
+    const idle = await peer.ask({ op: 'pause' });
+    assert.equal(top(idle), `${addon}:362`, JSON.stringify(idle));
+    assert.match(
+      text(get(idle, 'note')),
+      /^The game is held in gdharness's runtime addon, whose _process runs first in every frame: 5s of stepping reached no line of the game's own script/,
+      JSON.stringify(idle),
+    );
+    assert.equal(get(idle, 'paused'), true, JSON.stringify(idle));
+    assert.ok(moved.length > 2 && moved.slice(1).every((one) => one === 'step'), moved.join(', '));
+    await peer.ask({ op: 'resume', how: 'continue' });
+
+    // Held where no script runs, by a pause the game took on its own time: a step over goes in.
+    moved.length = 0;
+    now = [0];
+    game.write(framedCommand('debug_enter', [true, '', false]));
+    for (
+      let waited = 0;
+      waited < 5000 && get(await peer.ask({ op: 'stack' }), 'held') === undefined;
+      waited += 50
+    ) {
+      await delay(50);
+    }
+    stops = [[3, 'res://main.gd', 7, '_process']];
+    const over = await peer.ask({ op: 'resume', how: 'next' });
+    assert.deepEqual(moved, ['step'], 'a step over from nowhere is sent as a step in');
+    assert.equal(top(over), 'res://main.gd:7', JSON.stringify(over));
+    // From a line, a step over is a step over.
+    stops = [[3, 'res://main.gd', 8, '_process']];
+    const again = await peer.ask({ op: 'resume', how: 'next' });
+    assert.deepEqual(moved, ['step', 'next'], 'held on a line, a step over is sent as asked');
+    assert.equal(top(again), 'res://main.gd:8', JSON.stringify(again));
+  } finally {
+    game.destroy();
+    peer.close();
+  }
 }
 
 /**
@@ -29031,7 +29143,8 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
  * And a pause that lands between frames, where no script runs, let the game go with a step over,
  * which counts lines only at the depth it began from: outside any script that is none, so an idle
  * game ran on and the pause answered paused false. Found by probe 116 on a game whose only script
- * work is a short _process.
+ * work is a short _process. The pause then stopped in the runtime addon's _process, which runs
+ * first, and passed here on the function's name until a Windows runner caught one in note_frame.
  */
 async function testAGameHeldInACallHasTheCall(): Promise<void> {
   const engine = resolveGodotPath();
@@ -29136,15 +29249,23 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       `and answered once let go: ${JSON.stringify(collected)}`,
     );
 
-    // Nearly all of an idle game's time is outside script, so this pause lands between frames.
-    const paused = await call('debug_control', { op: 'pause' });
-    assert.deepEqual(
-      [get(paused.answer, 'paused'), get(paused.answer, 'stack', 0, 'name')],
-      [true, '_process'],
-      `an idle game pauses in the next script it runs: ${paused.said}`,
-    );
-    const going = await call('debug_control', { op: 'continue' });
-    assert.equal(get(going.answer, 'continued'), true, going.said);
+    // Nearly all of an idle game's time is outside script, so a pause lands between frames, and the
+    // runtime addon's _process runs before the game's in each. Asked several times, so the odd pause
+    // taken partway through the addon's lines is met too.
+    for (let pause = 0; pause < 5; pause += 1) {
+      const paused = await call('debug_control', { op: 'pause' });
+      assert.deepEqual(
+        [
+          get(paused.answer, 'paused'),
+          get(paused.answer, 'stack', 0, 'script'),
+          get(paused.answer, 'stack', 0, 'line'),
+        ],
+        [true, 'res://main.gd', 7],
+        `an idle game pauses in the next line of its own script: ${paused.said}`,
+      );
+      const going = await call('debug_control', { op: 'continue' });
+      assert.equal(get(going.answer, 'continued'), true, going.said);
+    }
   } finally {
     if (started) {
       await server.request(
@@ -47584,6 +47705,22 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
     const notAResource =
       textOf(await call('resource_edit', { op: 'read', resourcePath: 'world.tscn' })) ?? '';
     assert.match(notAResource, /res:\/\/world\.tscn is a scene: scene_tree reads its nodes/, notAResource);
+    // A property given for a scene is one of its nodes', where the PackedScene has none to set.
+    const world = readFileSync(join(project, 'world.tscn'), 'utf8');
+    const notModified =
+      textOf(
+        await call('resource_edit', {
+          op: 'modify',
+          resourcePath: 'world.tscn',
+          properties: { visible: false },
+        }),
+      ) ?? '';
+    assert.equal(
+      notModified,
+      'res://world.tscn is a scene: scene_node set changes one node\'s properties, the root\'s at nodePath ".".',
+      notModified,
+    );
+    assert.equal(readFileSync(join(project, 'world.tscn'), 'utf8'), world, 'the scene is left as it was');
 
     // The player's own script would write init_ran.txt when made.
     const animations = parseTextContent(
@@ -49126,7 +49263,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       );
       assert.equal(
         textOf(await call({ op, scenePath: 'lone.tscn', playerNodePath: '.', animationName: 'more' })),
-        'AnimationPlayer not found at: . The node at "." is a Node2D, not an AnimationPlayer. The scene holds no AnimationPlayer.',
+        'AnimationPlayer not found at: . The node at "." is a Node2D, not an AnimationPlayer. The scene holds no AnimationPlayer; scene_node add with nodeType AnimationPlayer puts one in it.',
         `${op} in a scene with no player`,
       );
     }
@@ -49147,7 +49284,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     const warnedContent = asArray(get(warned, 'result', 'content'));
     assert.equal(
       text(get(warnedContent[0], 'text')),
-      'AnimationPlayer not found at: . The node at "." is a Node2D, not an AnimationPlayer. The scene holds no AnimationPlayer.',
+      'AnimationPlayer not found at: . The node at "." is a Node2D, not an AnimationPlayer. The scene holds no AnimationPlayer; scene_node add with nodeType AnimationPlayer puts one in it.',
       JSON.stringify(warned),
     );
     const extras: unknown = JSON.parse(text(get(warnedContent[1], 'text')));
@@ -51376,6 +51513,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheKeeperAnswersAStop,
   testTheKeeperAnswersItsDebuggersQuestions,
   testAKeptGamesStackAndValuesRead,
+  testAPauseAnswersWithTheGamesOwnScript,
   testAnExitedGamesLastMessagesAreRead,
   testAStopGoesThroughTheKeeper,
   testAStopAsksTheGameToCloseFirst,

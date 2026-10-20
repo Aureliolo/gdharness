@@ -723,7 +723,10 @@ keeper is the one process that lives as long as the game. Every breakpoint the s
 handed to the game as it starts, and one set while it runs reaches it at once. This debugger also
 pauses a running game, which the editor's adapter cannot, and the engine takes the pause between
 lines of script as well as between frames, so a game spinning in a script loop on its first frame
-can be broken into and asked where it is. Errors do not stop such a game (`--ignore-error-breaks`),
+can be broken into and asked where it is. A pause that lands between frames, or in the runtime
+addon, whose `_process` runs first in every frame as an autoload's does, is stepped on to the next
+line of the game's own script, since gdharness's code is not what anybody pausing a game means to
+read. Errors do not stop such a game (`--ignore-error-breaks`),
 as they did not when it had no debugger. A profiled run's profiler reads the same connection. A
 mark (`editor_run profile` with `mark`) is the profile's totals at that moment, written beside the
 run's note rather than held in the server, so a server that replaces this one counts

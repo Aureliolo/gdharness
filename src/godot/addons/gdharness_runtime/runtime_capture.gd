@@ -410,6 +410,6 @@ static func saved(image: Image, png_path: String) -> Dictionary:
 	}
 	if image.detect_alpha() == Image.ALPHA_NONE:
 		var jpeg_path: String = png_path.get_basename() + ".jpg"
-		if image.save_jpg(jpeg_path + ".x", JPEG_QUALITY) == OK:
+		if image.save_jpg(jpeg_path, JPEG_QUALITY) == OK:
 			answer["jpegPath"] = jpeg_path
 	return answer
