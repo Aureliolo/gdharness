@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 import { inflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
@@ -35987,6 +35988,129 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
 }
 
 /**
+ * The runner gdharness ships runs the suites a file lists, in its order, from outside the project.
+ *
+ * The games each carried this runner in their own tree, because gdUnit4 takes one `-a` a suite and a
+ * few hundred suites outgrow Windows' command line. It is started with `-s` and its own absolute path,
+ * which the engine reports with forward slashes, so finding its options after that path is what
+ * this case reaches first: started with the native spelling, a runner comparing the two as written
+ * hands gdUnit4 no options and it prints its help. The skipping file leaves one case out, the
+ * expected errors a suite declares are written where asked, and the reports nobody reads are written
+ * only when not turned off.
+ */
+async function testTheShippedRunnerRunsAFileOfSuites(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('shipped runner regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-listed-'));
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-listed-files-'));
+  const suite = (cases: readonly string[], extra = ''): string =>
+    [
+      'extends GdUnitTestSuite',
+      '',
+      extra,
+      ...cases.flatMap((name) => ['', `func ${name}() -> void:`, '\tassert_bool(true).is_true()', '']),
+    ].join('\n');
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Listed"\n',
+    );
+    cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(projectDir, 'tests'));
+    writeFileSync(join(projectDir, 'tests', 'a_test.gd'), suite(['test_one', 'test_two']));
+    writeFileSync(
+      join(projectDir, 'tests', 'b_test.gd'),
+      suite(
+        ['test_three'],
+        'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_three": ["the store is closed"]}\n',
+      ),
+    );
+    writeFileSync(join(projectDir, 'tests', 'c_test.gd'), suite(['test_never']));
+    const imported = spawnSyncHidden(godotPath, ['--headless', '--path', projectDir, '--import'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    assert.equal(imported.status, 0, `${imported.stdout}${imported.stderr}`);
+    const suites = join(scratch, 'suites.txt');
+    const skipping = join(scratch, 'skipping.txt');
+    const expected = join(scratch, 'expected.json');
+    writeFileSync(suites, '\nres://tests/b_test.gd\n\n  res://tests/a_test.gd  \n');
+    writeFileSync(skipping, 'a_test:test_two\n');
+    const runner = join(process.cwd(), 'src', 'godot', 'tests', 'listed.gd');
+    const run = (reports: string, extra: readonly string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        godotPath,
+        [
+          '--headless',
+          '--audio-driver',
+          'Dummy',
+          '--path',
+          projectDir,
+          '-s',
+          runner,
+          '--ignoreHeadlessMode',
+          '-c',
+          '-rd',
+          reports,
+          '-rc',
+          '1',
+          '--',
+          '--suites-in',
+          suites,
+          '--skipping-in',
+          skipping,
+          ...extra,
+        ],
+        { encoding: 'utf8', timeout: ENGINE_CALL_TIMEOUT_MS },
+      );
+      return {
+        said: stripVTControlCharacters(`${ran.stdout}${ran.stderr}`),
+        status: ran.status,
+      };
+    };
+
+    const quiet = join(scratch, 'quiet');
+    const first = run(quiet, ['--reports-off', '--expected-errors-out', expected]);
+    assert.equal(first.status, 0, first.said);
+    const opened = [...first.said.matchAll(/Run Test Suite: (res:\/\/\S+\.gd)/g)].map((match) => match[1]);
+    assert.deepEqual(
+      opened,
+      ['res://tests/b_test.gd', 'res://tests/a_test.gd'],
+      `the listed suites in the file's order, and no other: ${first.said}`,
+    );
+    assert.match(
+      first.said,
+      /Executed test cases\s*:\s*\(2\//,
+      `test_two left out by the skipping file: ${first.said}`,
+    );
+    assert.ok(existsSync(expected), 'the expected errors are written where asked');
+    assert.deepEqual(
+      JSON.parse(readFileSync(expected, 'utf8')) as unknown,
+      { 'res://tests/b_test.gd': { test_three: ['the store is closed'] } },
+      'the expected errors as the suite declares them',
+    );
+    const written = (reports: string): boolean =>
+      existsSync(reports) &&
+      readdirSync(reports, { recursive: true }).some((entry) => String(entry).endsWith('results.xml'));
+    assert.equal(written(quiet), false, 'no JUnit report with the reports turned off');
+
+    const kept = join(scratch, 'kept');
+    const second = run(kept, []);
+    assert.equal(second.status, 0, second.said);
+    assert.equal(written(kept), true, `the JUnit report when they are left on: ${second.said}`);
+  } finally {
+    sweep(projectDir, scratch);
+  }
+}
+
+/**
  * A run whose every case raises the same errors over and over answers a size a client can take.
  *
  * Issue #1142: nineteen suites on a project whose core had stopped compiling answered 18 MB on one
@@ -49101,6 +49225,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunOfAnotherProjectOutlivesItsServer,
   testTheResourcesReadOnlyTheProject,
   testGdUnitRunner,
+  testTheShippedRunnerRunsAFileOfSuites,
   testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testATestRunWhoseAutoloadDidNotCompileStops,
