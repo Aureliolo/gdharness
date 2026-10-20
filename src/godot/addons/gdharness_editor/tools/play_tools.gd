@@ -170,17 +170,18 @@ func restart_editor(_args: Dictionary) -> Dictionary:
 			)
 		}
 
-	var unsaved: Dictionary = _save_everything()
-	if not unsaved.is_empty():
-		return unsaved
+	var saving: Dictionary = _save_everything()
+	if not saving.has("saved"):
+		return saving
 
 	# Deferred so this answer is on its way out before the editor goes.
 	EditorInterface.restart_editor.call_deferred(true)
 
-	return {"ok": true, "restarting": true, "saved": true}
+	return {"ok": true, "restarting": true, "saved": saving["saved"]}
 
 
-## Saves every open scene, answering a refusal naming what is still unsaved, or {}.
+## Saves every open scene, answering a refusal naming what is still unsaved, or the scenes that had
+## changes and were saved, under `saved`.
 ##
 ## Read back rather than assumed: save_all_scenes answers nothing and passes over a scene that has
 ## never been saved, which has no path to go to, so an untitled scene was lost with the editor while
@@ -188,10 +189,11 @@ func restart_editor(_args: Dictionary) -> Dictionary:
 static func _save_everything() -> Dictionary:
 	if EditorInterface.is_playing_scene():
 		EditorInterface.stop_playing_scene()
+	var changed: PackedStringArray = EditorInterface.get_unsaved_scenes()
 	EditorInterface.save_all_scenes()
 	var left: PackedStringArray = EditorInterface.get_unsaved_scenes()
 	if left.is_empty():
-		return {}
+		return {"ok": true, "saved": changed}
 	var named: Array[String] = []
 	for scene: String in left:
 		named.append(scene if not scene.is_empty() else "a scene that has never been saved")
@@ -221,14 +223,14 @@ static func _save_everything() -> Dictionary:
 ## Saved first, exactly as the restart above saves. The editor is going either way, and unsaved
 ## scenes are not this tool's to lose.
 func quit_editor(_args: Dictionary) -> Dictionary:
-	var unsaved: Dictionary = _save_everything()
-	if not unsaved.is_empty():
-		return unsaved
+	var saving: Dictionary = _save_everything()
+	if not saving.has("saved"):
+		return saving
 
 	# Deferred so this answer is on its way out before the editor goes.
 	_leave.call_deferred()
 
-	return {"ok": true, "quitting": true, "saved": true}
+	return {"ok": true, "quitting": true, "saved": saving["saved"]}
 
 
 ## What the editor said as it started each of its servers, and the debug adapter started again when

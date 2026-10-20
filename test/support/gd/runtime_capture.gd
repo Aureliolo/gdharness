@@ -37,6 +37,7 @@ func _run() -> void:
 	await _check_what_is_asked(capture, output_path)
 	_check_regions()
 	_check_cutting()
+	_check_saving()
 	_check_where_nodes_are_drawn()
 
 	if failures.is_empty():
@@ -166,6 +167,43 @@ func _check_cutting() -> void:
 	for blue: Color in blues:
 		if not blue.is_equal_approx(Color.BLUE):
 			_fail("the blue pixel should stay blue from the seam: %s" % blue)
+
+
+## A capture saved as a PNG with a JPEG of the same picture beside it, and an image with transparency
+## as the PNG alone, since a JPEG would flatten it.
+func _check_saving() -> void:
+	var folder: String = OS.get_temp_dir().path_join("gdharness-capture-saving-%d" % OS.get_process_id())
+	Checked.done(DirAccess.make_dir_recursive_absolute(folder), "making %s" % folder)
+	var opaque: Image = Image.create(16, 8, false, Image.FORMAT_RGBA8)
+	opaque.fill(Color(0.2, 0.4, 0.8, 1.0))
+	var answer: Dictionary = CaptureCommands.saved(opaque, folder.path_join("opaque.png"))
+	var jpeg_path: String = str(answer.get("jpegPath", ""))
+	if jpeg_path != folder.path_join("opaque.jpg"):
+		_fail("an opaque capture should name the JPEG beside its PNG: %s" % JSON.stringify(answer))
+	else:
+		var jpeg: Image = Image.load_from_file(jpeg_path)
+		if jpeg == null or jpeg.get_size() != Vector2i(16, 8):
+			_fail("the JPEG at %s should be the same picture, 16x8" % jpeg_path)
+		else:
+			var middle: Color = jpeg.get_pixel(8, 4)
+			if absf(middle.r - 0.2) > 0.05 or absf(middle.g - 0.4) > 0.05 or absf(middle.b - 0.8) > 0.05:
+				_fail("and show what the PNG shows: %s" % middle)
+	if not FileAccess.file_exists(folder.path_join("opaque.png")):
+		_fail("the PNG is saved beside it: %s" % JSON.stringify(answer))
+
+	var clear: Image = Image.create(16, 8, false, Image.FORMAT_RGBA8)
+	clear.fill(Color(0.2, 0.4, 0.8, 0.5))
+	var see_through: Dictionary = CaptureCommands.saved(clear, folder.path_join("clear.png"))
+	if see_through.has("jpegPath") or FileAccess.file_exists(folder.path_join("clear.jpg")):
+		_fail("a capture with transparency should have no JPEG: %s" % JSON.stringify(see_through))
+	if see_through.get("path", "") != folder.path_join("clear.png"):
+		_fail("and still be saved as its PNG: %s" % JSON.stringify(see_through))
+
+	# Whatever is there, so a save that wrote a file it should not have is reported above rather
+	# than as a folder that would not go.
+	for name: String in DirAccess.get_files_at(folder):
+		Checked.done(DirAccess.remove_absolute(folder.path_join(name)), "removing %s" % name)
+	Checked.done(DirAccess.remove_absolute(folder), "removing %s" % folder)
 
 
 ## Where a node is drawn, as runtime_inspect rect answers it, and a refusal for a node with no extent.

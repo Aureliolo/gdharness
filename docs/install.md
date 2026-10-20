@@ -293,6 +293,13 @@ suite starts sixteen engines at once would otherwise announce sixteen games unde
 answer a `runtime_*` call from whichever replied first. Set
 `gdharness/runtime/serve_script_runs` to true in `project.godot` to drive a `-s` script on purpose.
 
+A scene that is not the game, such as a bench, is handed to the engine the way a screen is, so it
+is served like the game unless you list its folder. Set `gdharness/runtime/quiet_scenes_under` to
+the `res://` folders of such scenes, for example `PackedStringArray("res://tests/")`; a run started
+on a scene under one of them neither serves nor announces, and nor do the engines it starts. A run
+started to be profiled from its start is served all the same, since only the runtime hands its
+totals back as it quits.
+
 ```bash
 gdharness runtime on
 gdharness runtime off

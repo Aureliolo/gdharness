@@ -152,7 +152,7 @@ static func not_of_kind(
 	if not found.is_empty():
 		told += ' The node at "%s" is %s, not %s.' % [node_path, with_article(found), with_article(kind)]
 	if holders.is_empty():
-		return told + " The scene holds no %s." % kind
+		return told + " The scene holds no %s; scene_node add with nodeType %s puts one in it." % [kind, kind]
 	var quoted: PackedStringArray = []
 	for holder: String in holders.slice(0, NAMED_CHILDREN):
 		var _quoted: bool = quoted.append('"%s"' % holder)

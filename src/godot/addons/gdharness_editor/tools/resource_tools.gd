@@ -285,6 +285,17 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	var resource: Resource = ResourceLoader.load(res_path, "", ResourceLoader.CACHE_MODE_IGNORE)
 	if resource == null:
 		return {"ok": false, "error": "%s did not load as a resource." % res_path}
+	# A scene's own properties are its packed bundle, so a property named for a scene is one of its
+	# nodes', and "PackedScene has no property" left the caller looking for the tool that sets it.
+	if resource is PackedScene:
+		return {
+			"ok": false,
+			"error":
+			(
+				"%s is a scene: scene_node set changes one node's properties, the root's at nodePath \".\"."
+				% res_path
+			)
+		}
 
 	var properties: Dictionary = _parse_properties_dict(args.get("properties", ""))
 	var refused: String = _properties.write_all(resource, properties)

@@ -20,7 +20,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { availableParallelism, freemem } from 'node:os';
+import { availableParallelism, freemem, totalmem } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -38,7 +38,9 @@ import {
   type EngineEnd,
   type EngineVerdict,
   judgeEngine,
+  named,
   type RunPrinted,
+  readExpected,
   readRun,
 } from './suite-judge.js';
 import {
@@ -49,6 +51,8 @@ import {
   inOneEngine,
   ProjectScripts,
   readTimes,
+  SPLIT_PAST_SECONDS,
+  TEST_DIRECTORIES,
   timesAfter,
   type Unit,
   unitsOf,
@@ -168,7 +172,8 @@ function seedOf(value: string): number {
 
 /**
  * [param entry] as a `res://` path: as it is when it is one, else a path in the project, read from
- * the project when it is there and from [param cwd] otherwise. A `:test_case` after a script stays.
+ * [param cwd] only when it is there and not in the project, so a path that is nowhere is refused as
+ * missing from the project rather than as outside it. A `:test_case` after a script stays.
  */
 function resPathOf(entry: string, projectPath: string, cwd: string): string {
   if (entry.startsWith('res://')) {
@@ -177,7 +182,9 @@ function resPathOf(entry: string, projectPath: string, cwd: string): string {
   const caseAt = /^(.*\.gd):(\w+)$/.exec(entry);
   const file = caseAt?.[1] ?? entry;
   const fromProject = resolve(projectPath, file);
-  const absolute = isAbsolute(file) || !existsSync(fromProject) ? resolve(cwd, file) : fromProject;
+  const fromHere = resolve(cwd, file);
+  const absolute =
+    isAbsolute(file) || (!existsSync(fromProject) && existsSync(fromHere)) ? fromHere : fromProject;
   const inside = relative(projectPath, absolute);
   if (inside.startsWith('..') || isAbsolute(inside)) {
     throw new TestUsageError(`${entry} is not inside the project at ${projectPath}.`);
@@ -196,7 +203,9 @@ function selectedSuites(scripts: ProjectScripts, options: TestOptions): Declared
   const roots =
     options.roots.length > 0
       ? options.roots
-      : ['res://tests', 'res://test'].filter((root) => existsSync(join(options.projectPath, root.slice(6))));
+      : TEST_DIRECTORIES.filter((root) => existsSync(join(options.projectPath, root))).map(
+          (root) => `res://${root}`,
+        );
   if (options.selected.length === 0) {
     const found = scripts.suitesUnder(roots);
     if (found.length === 0) {
@@ -221,7 +230,7 @@ function selectedSuites(scripts: ProjectScripts, options: TestOptions): Declared
       throw new TestUsageError(
         existsSync(directory)
           ? `${path} holds no gdUnit4 suite: nothing there extends GdUnitTestSuite and declares a test_ function.`
-          : `Nothing at ${path}.`,
+          : `Nothing at ${path} in the project at ${options.projectPath}.`,
       );
     }
     for (const suite of suites) {
@@ -244,10 +253,53 @@ function selectedSuites(scripts: ProjectScripts, options: TestOptions): Declared
   }));
 }
 
-/** How many engines the machine has room for: its processors, and its free memory past what it keeps. */
-function roomFor(most: number): number {
-  const byMemory = Math.floor((freemem() - MEMORY_KEPT) / MEMORY_PER_ENGINE);
-  return Math.max(1, Math.min(most, availableParallelism(), byMemory));
+/**
+ * How many of the [param most] engines asked for the machine has room for, given its [param
+ * processors] and the memory [param available] past what it keeps, with what held it below
+ * [param most] when something did.
+ */
+export function roomFor(
+  most: number,
+  processors: number,
+  available: number,
+): { engines: number; held: string | undefined } {
+  const byMemory = Math.floor((available - MEMORY_KEPT) / MEMORY_PER_ENGINE);
+  const engines = Math.max(1, Math.min(most, processors, byMemory));
+  if (engines >= most) {
+    return { engines, held: undefined };
+  }
+  const gigabytes = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  return {
+    engines,
+    held:
+      byMemory < processors
+        ? `the machine has ${gigabytes(Math.max(0, available))} of memory free, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(MEMORY_PER_ENGINE)} taken for each engine`
+        : `the machine has ${plural(processors, 'processor')}`,
+  };
+}
+
+/**
+ * The memory the machine can give engines. freemem on macOS counts only the pages nobody holds,
+ * a few hundred megabytes on a Mac whose file cache would give way at once, so a run there was held
+ * to one engine whatever it asked for. The kernel's own share of memory it counts as free, the
+ * percentage memory_pressure prints, includes what it can take back.
+ */
+async function memoryAvailable(): Promise<number> {
+  const level = await macMemoryLevel();
+  return level === null ? freemem() : (totalmem() * level) / 100;
+}
+
+/** The percentage of memory macOS counts as free, or null off macOS or when it would not say. */
+export async function macMemoryLevel(): Promise<number | null> {
+  if (process.platform !== 'darwin') {
+    return null;
+  }
+  try {
+    const level = Number((await runHidden('sysctl', ['-n', 'kern.memorystatus_level'])).stdout.trim());
+    return Number.isFinite(level) && level > 0 && level <= 100 ? level : null;
+  } catch {
+    return null;
+  }
 }
 
 /** [param units] in the order [param order] asks: reversed by path, or shuffled by a seed. */
@@ -365,7 +417,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       suites = suites.filter((suite) => !unchanged.includes(suite));
       if (unchanged.length > 0) {
         console.log(
-          `${plural(unchanged.length, 'suite')} passed with everything ${unchanged.length === 1 ? 'it reaches' : 'they reach'} as it stands now, and ${unchanged.length === 1 ? 'is' : 'are'} not run.`,
+          `${plural(unchanged.length, 'suite')} passed with everything ${unchanged.length === 1 ? 'it reaches' : 'they reach'} as it stands now, and ${unchanged.length === 1 ? 'is' : 'are'} not run: ${named(unchanged.map((suite) => suite.path))}.`,
         );
       }
       if (suites.length === 0) {
@@ -376,14 +428,34 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     }
     const times = readTimes(timesFile);
     const units = unitsOf(suites, times);
+    const room = roomFor(options.engines, availableParallelism(), await memoryAvailable());
     const plans =
       options.order === null
-        ? dealt(units, declared, roomFor(options.engines))
+        ? dealt(units, declared, room.engines)
         : [inOneEngine(ordered(units, options.order), declared)];
     const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
+    // Said only when the room was the limit, rather than a run with fewer units than engines.
+    const held =
+      options.order === null && room.held !== undefined && plans.length === room.engines
+        ? `, of the ${String(options.engines)} asked for, since ${room.held}`
+        : '';
+    const how =
+      options.order === null
+        ? `${plans.some((plan) => plan.windowed) ? ', one of them windowed' : ''}${held}`
+        : options.order === 'reversed'
+          ? ', in reverse order of path'
+          : `, shuffled by ${String(options.order)}`;
     console.log(
-      `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${plans.some((plan) => plan.windowed) ? ', one of them windowed' : ''}.`,
+      `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.`,
     );
+    const split = [...new Set(units.map((unit) => unit.suite))].filter(
+      (path) => units.filter((unit) => unit.suite === path).length > 1,
+    );
+    if (plans.length > 1 && split.length > 0) {
+      console.log(
+        `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(split)}.`,
+      );
+    }
     let ran = await Promise.all(plans.map((plan, index) => runEngine(launch, plan, index, units)));
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
       console.log('An engine ran out of memory, so every engine that failed runs again, one at a time.');
@@ -562,15 +634,6 @@ async function runEngine(
   };
 }
 
-function readExpected(file: string): EngineAssignment['expected'] {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-    return typeof parsed === 'object' && parsed !== null ? (parsed as EngineAssignment['expected']) : {};
-  } catch {
-    return {};
-  }
-}
-
 /**
  * Starts the engine with [param args], both its streams into [param log] through one handle so
  * their lines stay in the order printed, and waits for it, ending it once it has printed nothing for
@@ -722,12 +785,15 @@ function report(ran: readonly EngineRan[], startedAt: number, runDirectory: stri
   const suites = new Set(ran.flatMap((engine) => engine.plan.suites.map((suite) => suite.path))).size;
   const longest = Math.max(0, ...ran.map((engine) => engine.seconds));
   const took = (Date.now() - startedAt) / 1000;
+  const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s; the longest engine took ${longest.toFixed(1)} s.`;
+  console.log('');
   if (failed.length === 0) {
     rmSync(runDirectory, { recursive: true, force: true });
+    console.log(`Passed: ${totals}`);
+    return 0;
   }
-  console.log('');
-  console.log(
-    `${failed.length === 0 ? 'Passed' : 'Failed'}: ${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s; the longest engine took ${longest.toFixed(1)} s.`,
-  );
-  return failed.length === 0 ? 0 : 1;
+  const problems = failed.reduce((sum, engine) => sum + engine.verdict.faults.length, 0);
+  console.log(`Failed: ${plural(problems, 'problem')}, listed above. Ran ${totals}`);
+  console.log(`Every engine's output is kept under ${runDirectory} until the next run.`);
+  return 1;
 }

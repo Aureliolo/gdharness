@@ -218,18 +218,40 @@ static func argument_after(args: PackedStringArray, flag: String) -> String:
 
 
 ## The errors each of [param suites] declares it expects, by suite path and then case name, read off
-## the compiled suite's constants so a declaration is whatever the engine made of it. A suite
-## declaring none is left out.
+## the compiled suite's constants so a declaration is whatever the engine made of it. A directory
+## listed is walked for its scripts, as gdUnit4 walks it for suites. Only a script whose source names
+## the constant is loaded: gdUnit4 stops on a suite that does not load only when its own load is the
+## one that fails, so a broken suite loaded here first let the rest of its directory run.
 static func expected_by_suite(suites: PackedStringArray) -> Dictionary:
 	var expected: Dictionary = {}
-	for path: String in suites:
-		if not path.ends_with(".gd") or not ResourceLoader.exists(path):
+	for path: String in scripts_in(suites):
+		if not FileAccess.file_exists(path) or not FileAccess.get_file_as_string(path).contains(EXPECTED):
 			continue
 		var suite: Script = load(path)
 		var declared: Variant = suite.get_script_constant_map().get(EXPECTED)
 		if declared is Dictionary:
 			expected[path] = declared
 	return expected
+
+
+## The scripts [param paths] names: each script, and every script under each directory.
+static func scripts_in(paths: PackedStringArray) -> PackedStringArray:
+	var found: PackedStringArray = []
+	var pending: PackedStringArray = []
+	for path: String in paths:
+		if path.ends_with(".gd"):
+			var _script: bool = found.append(path)
+		else:
+			var _directory: bool = pending.append(path.trim_suffix("/"))
+	while not pending.is_empty():
+		var directory: String = pending[pending.size() - 1]
+		pending.remove_at(pending.size() - 1)
+		for file: String in DirAccess.get_files_at(directory):
+			if file.ends_with(".gd"):
+				var _file: bool = found.append("%s/%s" % [directory, file])
+		for inner: String in DirAccess.get_directories_at(directory):
+			var _inner: bool = pending.append("%s/%s" % [directory, inner])
+	return found
 
 
 static func write_expected(path: String, suites: PackedStringArray) -> void:
