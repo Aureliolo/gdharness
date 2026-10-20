@@ -7,6 +7,7 @@ gitignored. The generator is `scripts/build-docs.ts`; the theme is `theme/`.
 | ----------------- | ---------------------------------------------------------------------- |
 | `install.md`      | Install, verify, configure, update                                     |
 | `architecture.md` | What an install writes, what connects to what, and every harness       |
+| `test-runs.md`    | `gdharness test`, what fails a run, and the engine slots it shares     |
 | `agent.md`        | The install written for an agent. Markdown only, not in the navigation |
 
 The front page and the tool reference have no file here. Both are rendered at build time, the

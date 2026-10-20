@@ -133,12 +133,17 @@ One npm package. It is the MCP server by default, and the CLI when given a comma
 
 ```text
 gdharness
-|-- cli.ts                setup, upgrade, uninstall, doctor, runtime, classes
+|-- cli.ts                setup, upgrade, uninstall, doctor, runtime, classes, test
 |   |-- harnesses.ts      every harness: its file, its shape, its skills dir
 |   |-- config-formats.ts TOML by table, YAML through a comment-keeping parser
 |   |-- skill.ts          the skill, and which directories get a copy
 |   |-- setup.ts          the addons, the editor plugins, the autoload
-|   `-- prompt.ts         the questions, and the silence when nobody can answer
+|   |-- prompt.ts         the questions, and the silence when nobody can answer
+|   `-- suite-run.ts      test: a game's suites over engines, judged line by line
+|       |-- suite-plan.ts        which suites, what they cost, which engine runs what
+|       |-- suite-judge.ts       an engine's output read case by case
+|       |-- suite-fingerprint.ts what a suite reaches, for --changed-only
+|       `-- engine-slots.ts      the slots every tool starting an engine shares
 |
 `-- server.ts             the MCP server: one call in, one answer out
     |-- tool-definitions  every tool, op and argument, in one table
@@ -159,6 +164,11 @@ addons, installed into your project
 The CLI half never loads the MCP SDK, and the server half never reads the harness table. They share
 the engine locator and the project parsers and nothing else, which is why `setup` starts in well
 under a second on a machine that has never run the server.
+
+`gdharness test` is the command a game's gate runs its gdUnit4 suites with, and
+[Test runs](test-runs.md) describes it, with the engine slots the games' own tools share. Each of
+its engines starts the shipped runner, `godot/tests/listed.gd`, from outside the project, which is
+the runner `project_test` starts as well.
 
 Every tool is declared in one table and dispatched from it, so a tool the server answers is a tool
 the documentation lists and a fixture drives. The reference on this site is rendered from that same
@@ -591,6 +601,19 @@ hide; the keeper starts it detached, so it gets no console either. Godot's own `
 and `OS.execute` open no console unless asked to, and the shipped scripts never ask. A regression
 walks the source for any other way of starting a process, and another reads back, from the process
 started, the show state each start named.
+
+On Windows an engine is started without SEM_NOGPFAULTERRORBOX in its error mode, so that Windows
+Error Reporting runs when it crashes and writes a dump where the machine keeps them. Node and Bun
+both set that bit in themselves as they start, and a process inherits its parent's mode, so every
+engine either started had it, and an engine dying of an access violation left neither a dump nor an
+Application Error event. Under Bun the server, the keeper and `gdharness test` clear the bit in
+themselves as they start. Node cannot call Windows itself, so under Node the keeper and
+`gdharness test` start their engines through the desktop helper, which sets the mode before it
+starts them. Either way SEM_FAILCRITICALERRORS and SEM_NOOPENFILEERRORBOX stay set, so a missing
+drive or file opens no box that nobody will answer. The headless operations a server runs itself
+start the engine as the server's child, which under Node still inherits the bit: a project that
+wants dumps from those runs gdharness under Bun. A regression reads each engine's mode from outside
+it, under both runtimes.
 
 The keeper writes the note once the game is up and its exit into the note when it ends, since it
 is the one process that can wait on the game; the server that started the run and any server that

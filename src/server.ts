@@ -291,10 +291,12 @@ import {
   sameCodeNote,
 } from './server-version.js';
 import {
+  gdUnit4Unusable,
   inspectProject,
   installedAddonVersion,
   installedRuntimeDigest,
   RUNTIME_AUTOLOAD,
+  shippedListedRunner,
   shippedRuntimeDigest,
 } from './setup.js';
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
@@ -2706,24 +2708,6 @@ interface EditorServers {
   serversNote?: string | undefined;
 }
 
-/** The gdUnit4 class the shipped runner extends, which gdUnit4 has had since 6.0. */
-const GDUNIT4_CI_RUNNER = 'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd';
-
-/** Why the gdUnit4 in [projectPath] cannot run the shipped runner, or null when it can. */
-function gdUnit4Unusable(projectPath: string): { missing: boolean; reason: string } | null {
-  const marker = 'addons/gdUnit4/plugin.cfg';
-  if (!existsSync(join(projectPath, ...marker.split('/')))) {
-    return { missing: true, reason: `gdUnit4 is not installed in this project: no ${marker}` };
-  }
-  if (!existsSync(join(projectPath, ...GDUNIT4_CI_RUNNER.split('/')))) {
-    return {
-      missing: false,
-      reason: `gdUnit4 in this project is older than 6.0, which project_test needs: no ${GDUNIT4_CI_RUNNER}`,
-    };
-  }
-  return null;
-}
-
 /**
  * One engine message with the runner's own frames taken off the bottom of its backtrace.
  *
@@ -3416,7 +3400,7 @@ class GodotServer {
   private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
   private readonly operationsScript = join(__dirname, 'godot', 'operations', 'godot_operations.gd');
-  private readonly listedRunner = join(__dirname, 'godot', 'tests', 'listed.gd');
+  private readonly listedRunner = shippedListedRunner();
   private readonly godotBridge: GodotBridge;
   private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
   private activeProcess: GodotProcess | null = null;

@@ -82,6 +82,14 @@ import {
   writeEditorLogNote,
 } from '../src/editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
+import {
+  EngineSlots,
+  holderOf,
+  lockIsFree,
+  ownStart,
+  START_TOLERANCE_MS,
+  UNWRITTEN_MS,
+} from '../src/engine-slots.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
@@ -317,6 +325,10 @@ import {
   spawnShown,
   spawnSyncHidden,
 } from '../src/spawn.js';
+import { SuiteFingerprints } from '../src/suite-fingerprint.js';
+import { exitNamed, funcOf, judgeEngine, readRun, secondsOf } from '../src/suite-judge.js';
+import { dealt, ProjectScripts, SPLIT_PAST_SECONDS, timesAfter, unitsOf } from '../src/suite-plan.js';
+import { TestUsageError, testOptionsOf } from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -6505,7 +6517,7 @@ async function testATestRunWithNothingToRunNamesTheRunnerToo(): Promise<void> {
     );
     writeFileSync(join(project, 'addons', 'gdUnit4', 'bin', 'GdUnitCmdTool.gd'), 'extends SceneTree\n');
     const older =
-      /gdUnit4 in this project is older than 6\.0, which project_test needs: no addons\/gdUnit4\/src\/core\/runners\/GdUnitTestCIRunner\.gd\./;
+      /gdUnit4 in this project is older than 6\.0, which the shipped runner needs: no addons\/gdUnit4\/src\/core\/runners\/GdUnitTestCIRunner\.gd\./;
     const nothingAndOld = await server.request('tools/call', {
       name: 'project_test',
       arguments: { projectPath: project },
@@ -36161,7 +36173,7 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
  * expected errors a suite declares are written where asked, and each report is written only when not
  * turned off.
  */
-async function testTheShippedRunnerRunsAFileOfSuites(): Promise<void> {
+function testTheShippedRunnerRunsAFileOfSuites(): void {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
@@ -36308,6 +36320,1202 @@ async function testTheShippedRunnerRunsAFileOfSuites(): Promise<void> {
     );
   } finally {
     sweep(projectDir, scratch);
+  }
+}
+
+const S_TEST = 'res://tests/s_test.gd';
+
+/** One case line as gdUnit4's console prints it, coloured the way it colours the path. */
+function caseLine(suite: string, name: string, verdict: string, time = ''): string {
+  return `  \u001b[38;2;250;235;215m${suite}\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m${name}\u001b[38;2;34;139;34m ${verdict}\u001b[0m${time === '' ? '' : `\u001b[38;2;100;149;237m ${time}\u001b[0m`}`;
+}
+
+/** A whole run's console around [param body], one suite's lines, closed with the given verdict. */
+function cannedRun(body: readonly string[], verdict = 'PASSED', executed = 4): string {
+  return [
+    'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+    `\u001b[38;2;0;206;209mRun Test Suite: \u001b[0m\u001b[38;2;250;235;215m${S_TEST}\u001b[0m`,
+    ...body,
+    `\u001b[38;2;30;144;255mStatistics:\u001b[0m 4 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | ${verdict} 1min 2s 30ms`,
+    '',
+    'Overall Summary: 4 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |',
+    'Executed test suites: (1/1)',
+    `Executed test cases : (${String(executed)}/${String(executed)})`,
+    'Total execution time: 1min 2s 30ms',
+    ' Exit code: 0',
+  ].join('\r\n');
+}
+
+/**
+ * An engine's console is read case by case, every error credited to what was running.
+ *
+ * The shapes are gdUnit4's own, captured from a real run: a parameterised row prints as
+ * `test_p:0 (1)`, times run past a minute as `1min 2s 30ms`, and both streams arrive in one file in
+ * the order printed. What a case leaves for a later frame prints after its verdict, so that counts
+ * as the case's own until the next case starts, and once the last one is done as `after`'s.
+ */
+function testAnEngineRunIsReadCaseByCase(): void {
+  const printed = readRun(
+    [
+      'ERROR: printed before any suite',
+      '   at: somewhere (core/a.cpp:1)',
+      `Run Test Suite: ${S_TEST}`,
+      'ERROR: said in before',
+      '   at: push_error (core/variant/variant_utility.cpp:1023)',
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      'ERROR: the store is closed',
+      caseLine(S_TEST, 'test_a', 'PASSED', '74ms'),
+      '',
+      caseLine(S_TEST, 'test_b', 'STARTED'),
+      caseLine(S_TEST, 'test_b', 'FAILED', '17ms'),
+      '  Report:',
+      "  Expecting: 2 but was 1\tat 'test_b' in res://tests/s_test.gd:13",
+      '',
+      'ERROR: left for a later frame',
+      caseLine(S_TEST, 'test_p:0 (1)', 'STARTED'),
+      'USER ERROR: row said',
+      caseLine(S_TEST, 'test_p:0 (1)', 'PASSED', '33ms'),
+      caseLine(S_TEST, 'test_p:1 (2)', 'STARTED'),
+      'SCRIPT ERROR: row said',
+      caseLine(S_TEST, 'test_p:1 (2)', 'FAILED (retry 2)', '1s 21ms'),
+      'ERROR: said in after',
+      'Statistics: 4 test cases | 0 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans | FAILED 1min 2s 30ms',
+      'Executed test cases : (4/4)',
+    ].join('\n'),
+  );
+  const suite = printed.suites.get(S_TEST);
+  assert.ok(suite !== undefined, 'the suite opened');
+  assert.deepEqual(
+    suite.cases.map((ran) => [ran.name, ran.func, ran.verdict, ran.seconds]),
+    [
+      ['test_a', 'test_a', 'PASSED', 0.074],
+      ['test_b', 'test_b', 'FAILED', 0.017],
+      ['test_p:0 (1)', 'test_p', 'PASSED', 0.033],
+      ['test_p:1 (2)', 'test_p', 'FAILED', 1.021],
+    ],
+    'every finished case, its function and its time',
+  );
+  const closed = suite.closed;
+  assert.ok(closed !== null, 'the statistics line closes the suite');
+  assert.equal(closed.verdict, 'FAILED', 'with its verdict');
+  assert.ok(Math.abs(closed.seconds - 62.03) < 1e-9, `a time past a minute: ${String(closed.seconds)}`);
+  assert.deepEqual(
+    [...printed.errors].sort((a, b) => a.at - b.at).map((error) => [error.text, error.suite, error.during]),
+    [
+      ['printed before any suite', null, null],
+      ['said in before', S_TEST, 'before'],
+      ['the store is closed', S_TEST, 'test_a'],
+      ['left for a later frame', S_TEST, 'test_b'],
+      ['row said', S_TEST, 'test_p:0 (1)'],
+      ['row said', S_TEST, 'test_p:1 (2)'],
+      ['said in after', S_TEST, 'after'],
+    ],
+    'each error credited to what was running as it printed',
+  );
+  assert.equal(printed.executed, 4, 'the summary count');
+  assert.equal(printed.stoppedIn, null, 'a closed run stopped in nothing');
+  assert.equal(secondsOf('1h 0min 3s 5ms'), 3603.005, 'hours as well');
+  assert.equal(funcOf('test_p:12 (a, b)'), 'test_p', 'a row is its function');
+
+  const cut = readRun([`Run Test Suite: ${S_TEST}`, caseLine(S_TEST, 'test_a', 'STARTED')].join('\n'));
+  assert.equal(cut.stoppedIn, `${S_TEST} > test_a`, 'a run cut short names the case it was in');
+  assert.equal(cut.suites.get(S_TEST)?.closed, null, 'and its suite never closed');
+  assert.equal(
+    readRun([`Run Test Suite: ${S_TEST}`, 'ERROR: x'].join('\n')).stoppedIn,
+    `${S_TEST}, in before`,
+    'or the hook',
+  );
+}
+
+/**
+ * An engine's run is judged on everything it printed, not its exit code.
+ *
+ * Each condition has passed a run another one let through: gdUnit4 exits 0 having run nothing, a
+ * suite that does not load is reported by none of its cases, a case printing an engine error passes,
+ * and a declared error that stopped printing means the case no longer reaches what it tests.
+ */
+function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
+  const clean = { code: 0, signal: null, ended: null };
+  const handed = (cases: readonly string[], expected: Record<string, readonly string[]> = {}) => ({
+    suites: [{ path: S_TEST, cases }],
+    expected: { [S_TEST]: expected },
+  });
+  const rows = (printedPerRow: readonly number[]): string =>
+    cannedRun([
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+      ...printedPerRow.flatMap((times, row) => [
+        caseLine(S_TEST, `test_p:${String(row)} (${String(row + 1)})`, 'STARTED'),
+        ...Array.from({ length: times }, () => 'ERROR: row said'),
+        caseLine(S_TEST, `test_p:${String(row)} (${String(row + 1)})`, 'PASSED', '3ms'),
+      ]),
+    ]);
+  const declaredRows = handed(['test_a', 'test_p'], { test_p: ['row said'] });
+
+  const passing = judgeEngine(readRun(rows([1, 1, 1])), declaredRows, clean);
+  assert.deepEqual(passing.faults, [], 'a declared error once a row passes');
+  assert.equal(passing.passed, true);
+  assert.deepEqual(passing.passedSuites, [S_TEST], 'and the suite passed whole');
+  assert.deepEqual(passing.shown, [], 'a passing run shows nothing');
+
+  const twice = judgeEngine(readRun(rows([1, 2, 1])), declaredRows, clean);
+  assert.deepEqual(
+    twice.faults,
+    [`an engine error in ${S_TEST} > test_p:1 (2): row said`],
+    'a row printing it once more than declared',
+  );
+  assert.deepEqual(twice.passedSuites, [], 'fails its suite');
+  assert.match(twice.shown.join('\n'), /^ERROR: row said$/m, 'and shows the line');
+
+  const silent = judgeEngine(readRun(rows([1, 0, 1])), declaredRows, clean);
+  assert.deepEqual(
+    silent.faults,
+    [`${S_TEST} > test_p:1 (2) declares the error "row said", which it never printed`],
+    'a row that stopped printing what it declares',
+  );
+
+  const undeclared = judgeEngine(readRun(rows([1])), handed(['test_a', 'test_p']), clean);
+  assert.deepEqual(
+    undeclared.faults,
+    [`an engine error in ${S_TEST} > test_p:0 (1): row said`],
+    'an error nothing declared fails a passing case',
+  );
+
+  assert.deepEqual(
+    judgeEngine(readRun(rows([1])), declaredRows, { code: 0xc0000005, signal: null, ended: null }).faults,
+    ['the engine exited 0xC0000005 (STATUS_ACCESS_VIOLATION)'],
+    "Windows' status by name",
+  );
+  assert.equal(exitNamed(-1073741819), '0xC0000005 (STATUS_ACCESS_VIOLATION)', 'signed as well');
+  assert.equal(
+    judgeEngine(readRun(rows([1])), declaredRows, { code: 0xc000012d, signal: null, ended: null }).starved,
+    true,
+    'the commit limit is the machine running out',
+  );
+  const starved = judgeEngine(
+    readRun(`${rows([1])}\nERROR: Parameter "mem" is null.\n   at: alloc_static (core/os/memory.cpp:75)`),
+    declaredRows,
+    clean,
+  );
+  assert.equal(starved.starved, true, "the allocator's null is too");
+  assert.ok(starved.faults.includes('the engine ran out of memory'), starved.faults.join('\n'));
+
+  const leaked = judgeEngine(
+    readRun(
+      `${rows([1])}\nWARNING: ObjectDB instances leaked at exit (run with --verbose for details).\nERROR: 2 resources still in use at exit (run with --verbose for details).`,
+    ),
+    declaredRows,
+    clean,
+  );
+  assert.deepEqual(
+    leaked.faults,
+    [
+      'the engine exited holding what it should have freed: WARNING: ObjectDB instances leaked at exit (run with --verbose for details).',
+      'the engine exited holding what it should have freed: ERROR: 2 resources still in use at exit (run with --verbose for details).',
+    ],
+    'leaks at exit, each once and not again as an engine error',
+  );
+
+  const shortOfCases = judgeEngine(readRun(rows([1])), handed(['test_a', 'test_c'], {}), clean);
+  assert.deepEqual(
+    shortOfCases.faults,
+    [
+      `${S_TEST} closed without running test_c`,
+      `${S_TEST} ran test_p, which gdharness did not read as cases of it to run here, so its plan of the cases was wrong`,
+      `an engine error in ${S_TEST} > test_p:0 (1): row said`,
+    ],
+    'a case planned and never run, and one run unplanned',
+  );
+
+  const elsewhere = judgeEngine(
+    readRun(rows([1])),
+    {
+      suites: [...declaredRows.suites, { path: 'res://tests/other_test.gd', cases: ['test_x'] }],
+      expected: declaredRows.expected,
+    },
+    clean,
+  );
+  assert.deepEqual(
+    elsewhere.faults,
+    ['res://tests/other_test.gd never started'],
+    'a suite handed over and never opened',
+  );
+  assert.deepEqual(elsewhere.passedSuites, [S_TEST], 'the other one still passed');
+
+  const hooked = judgeEngine(
+    readRun(
+      cannedRun(
+        [caseLine(S_TEST, 'test_a', 'STARTED'), caseLine(S_TEST, 'test_a', 'PASSED', '5ms')],
+        'FAILED',
+      ),
+    ),
+    handed(['test_a']),
+    clean,
+  );
+  assert.deepEqual(
+    hooked.faults,
+    [`${S_TEST} reported FAILED with every case passing, so a hook failed`],
+    'a failing before or after',
+  );
+
+  const flaky = judgeEngine(
+    readRun(
+      cannedRun([
+        caseLine(S_TEST, 'test_a', 'STARTED'),
+        caseLine(S_TEST, 'test_a', 'FLAKY (2 retries)', '5ms'),
+      ]),
+    ),
+    handed(['test_a']),
+    clean,
+  );
+  assert.deepEqual(
+    flaky.faults,
+    [`${S_TEST} > test_a failed before it passed on a retry`],
+    'flaky is failing',
+  );
+
+  const failing = judgeEngine(
+    readRun(
+      cannedRun(
+        [
+          caseLine(S_TEST, 'test_a', 'STARTED'),
+          caseLine(S_TEST, 'test_a', 'FAILED', '5ms'),
+          '  Report:',
+          '  Expecting: 2 but was 1',
+          '',
+          'an unrelated line',
+        ],
+        'FAILED',
+      ),
+    ),
+    handed(['test_a']),
+    { code: 100, signal: null, ended: null },
+  );
+  assert.deepEqual(failing.faults, ['the engine exited 100', `${S_TEST} > test_a failed`]);
+  assert.match(
+    failing.shown.join('\n'),
+    /test_a FAILED 5ms\n {2}Report:\n {2}Expecting: 2 but was 1/,
+    failing.shown.join('\n'),
+  );
+  assert.doesNotMatch(failing.shown.join('\n'), /unrelated|Godot Engine/, 'the failure, not the whole run');
+
+  const nothing = judgeEngine(readRun(cannedRun([], 'PASSED', 0)), { suites: [], expected: {} }, clean);
+  assert.deepEqual(nothing.faults, ['the run executed no test case at all, whatever it exited with']);
+
+  const unloadable = judgeEngine(
+    readRun(
+      [
+        'Script errors were detected during test discovery!',
+        '  Parse Error: Unexpected "}".',
+        '  at res://tests/bad_test.gd:3',
+        'Executed test cases : (0/0)',
+      ].join('\n'),
+    ),
+    { suites: [], expected: {} },
+    { code: 105, signal: null, ended: null },
+  );
+  assert.deepEqual(unloadable.faults, [
+    'the engine exited 105',
+    'gdUnit4 could not load res://tests/bad_test.gd:3: Parse Error: Unexpected "}"., so it ran nothing',
+    'the run executed no test case at all, whatever it exited with',
+  ]);
+
+  const ended = judgeEngine(
+    readRun([`Run Test Suite: ${S_TEST}`, caseLine(S_TEST, 'test_a', 'STARTED')].join('\n')),
+    handed(['test_a']),
+    { code: 1, signal: null, ended: 'the engine printed nothing for 300 s, so it was ended' },
+  );
+  assert.deepEqual(ended.faults, [
+    'the engine printed nothing for 300 s, so it was ended',
+    'the run never printed its summary',
+    `${S_TEST} never finished`,
+  ]);
+  assert.match(ended.shown.join('\n'), /test_a STARTED$/, 'a run cut short shows how it ended');
+}
+
+/**
+ * The slots are freed only once their holder has gone, and taken over by one taker at a time.
+ *
+ * A lock names its holder by pid and start time, since a pid alone is reissued: a live process with
+ * the pid and another start is a later one. Asked of the real platform, because every judging case
+ * hands the start in, and a platform that never answered would leave every such lock held.
+ */
+async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void> {
+  const now = 1_000_000;
+  const isAlive = (pid: number): boolean => pid === 10;
+  const startOf = (pid: number): number | undefined => (pid === 10 ? 5000 : undefined);
+  const lock = (pid: number, started: number): string => JSON.stringify({ pid, started });
+  assert.equal(lockIsFree(lock(11, 5000), now, now, isAlive, startOf), true, 'a pid nothing has');
+  assert.equal(lockIsFree(lock(10, 5000), now, now, isAlive, startOf), false, 'its holder still running');
+  assert.equal(
+    lockIsFree(lock(10, 5000 + START_TOLERANCE_MS), now, now, isAlive, startOf),
+    false,
+    'within the tolerance',
+  );
+  assert.equal(
+    lockIsFree(lock(10, 5000 + START_TOLERANCE_MS + 1), now, now, isAlive, startOf),
+    true,
+    'a later process',
+  );
+  assert.equal(
+    lockIsFree(lock(10, 1), now, now, isAlive, () => undefined),
+    false,
+    'an unknown start holds it',
+  );
+  assert.equal(lockIsFree('', now - UNWRITTEN_MS, now, isAlive, startOf), false, 'a lock being written');
+  assert.equal(
+    lockIsFree('{"pid": "x"}', now - UNWRITTEN_MS - 1, now, isAlive, startOf),
+    true,
+    'one never written',
+  );
+  assert.equal(holderOf('{"pid": 0, "started": 1}'), null, 'no pid 0');
+
+  const said = (await startTimesOf([process.pid])).get(process.pid);
+  assert.equal(typeof said, 'number', 'the platform says when this process started');
+  const started = await ownStart();
+  assert.equal(started, said, 'and a lock names what it says');
+
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
+  try {
+    const slots = new EngineSlots(directory, 2, { pid: process.pid, started });
+    const first = await slots.take();
+    const second = await slots.take();
+    assert.deepEqual(readdirSync(directory).sort(), ['0.lock', '1.lock'], 'one file a slot');
+    assert.deepEqual(
+      holderOf(readFileSync(first, 'utf8')),
+      { pid: process.pid, started },
+      'naming its holder',
+    );
+    await assert.rejects(
+      slots.take(AbortSignal.timeout(300)),
+      /timeout|abort/i,
+      'a third waits while both are held',
+    );
+    slots.release(first);
+    assert.equal(await slots.take(), first, 'and takes one once given back');
+
+    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await exitOf(gone);
+    writeFileSync(second, lock(gone.pid ?? 0, started));
+    assert.equal(await slots.take(AbortSignal.timeout(5000)), second, "a dead holder's slot is taken over");
+    assert.deepEqual(holderOf(readFileSync(second, 'utf8'))?.pid, process.pid, 'and named anew');
+
+    writeFileSync(second, lock(process.pid, started - 60_000));
+    assert.equal(
+      await slots.take(AbortSignal.timeout(5000)),
+      second,
+      'a live pid that started at another time',
+    );
+
+    writeFileSync(second, lock(gone.pid ?? 0, started));
+    writeFileSync(`${second}.steal`, '');
+    await assert.rejects(
+      slots.take(AbortSignal.timeout(300)),
+      /timeout|abort/i,
+      'another taker taking it over holds it',
+    );
+    const old = new Date(Date.now() - UNWRITTEN_MS - 5000);
+    utimesSync(`${second}.steal`, old, old);
+    assert.equal(
+      await slots.take(AbortSignal.timeout(5000)).catch(() => 'never taken'),
+      second,
+      'until it has been at it too long',
+    );
+    assert.equal(existsSync(`${second}.steal`), false, 'and its steal file is gone');
+
+    if (process.platform === 'win32') {
+      // The games' tools locked the slot file itself and left it in place, and Windows will not
+      // remove a file such a tool holds open: the slot is that tool's, not a fault of the run's.
+      writeFileSync(second, '');
+      utimesSync(second, old, old);
+      const holder = spawnHidden(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `$f = [IO.File]::Open('${second.replaceAll("'", "''")}', 'Open', 'ReadWrite', 'ReadWrite'); 'held'; Start-Sleep 30`,
+        ],
+        { stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      try {
+        await new Promise<void>((settle) => {
+          holder.stdout.once('data', () => {
+            settle();
+          });
+        });
+        await assert.rejects(
+          slots.take(AbortSignal.timeout(1000)),
+          /timeout|abort/i,
+          "a slot file another tool holds open is that tool's slot",
+        );
+        assert.equal(existsSync(`${second}.steal`), false, 'and the steal file is given up');
+      } finally {
+        holder.kill();
+        await exitOf(holder);
+      }
+    }
+
+    writeFileSync(first, lock(4, started));
+    slots.release(first);
+    assert.equal(existsSync(first), true, "giving back leaves another holder's lock");
+  } finally {
+    sweep(directory);
+  }
+}
+
+/** Writes [param files] under [param root], by path. */
+function writeTree(root: string, files: Readonly<Record<string, string>>): void {
+  for (const [path, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), text);
+  }
+}
+
+/**
+ * Suites are found from the scripts and dealt to engines by what their cases cost.
+ *
+ * A suite is a script whose chain of bases reaches gdUnit4's, by name, by path or relative path, and
+ * which declares a case or inherits one; gdUnit4 itself finds cases through the script's method
+ * list, which holds the inherited ones. A suite costing more than the split goes out case by case,
+ * except one needing a window, since those all share the one windowed engine.
+ */
+function testSuitesAreFoundAndDealtByWhatTheyCost(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-suites-'));
+  const cases = (...names: string[]): string =>
+    names.map((name) => `\nfunc ${name}() -> void:\n\tpass\n`).join('');
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'addons/gdUnit4/src/GdUnitTestSuite.gd': 'class_name GdUnitTestSuite\nextends Node\n',
+      'tests/a_test.gd': `extends GdUnitTestSuite\n${cases('test_b', 'test_a', 'helper', 'testing_helper')}`,
+      'tests/base_suite.gd': `class_name BaseSuite\nextends GdUnitTestSuite\n${cases('test_inherited')}`,
+      'tests/child_test.gd': `extends BaseSuite\n${cases('test_own')}`,
+      'tests/deep/path_test.gd': `extends "../base_suite.gd"\n${cases('test_by_path')}`,
+      'tests/res_test.gd': `extends "res://tests/base_suite.gd"\n${cases()}`,
+      'tests/helper.gd': `extends Node\n${cases('test_not_a_suite')}`,
+      'tests/empty_test.gd': 'extends GdUnitTestSuite\n',
+      'tests/window_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_NEEDS_WINDOW: bool = true\n${cases('test_w')}`,
+      'tests/scene_test.gd': `extends GdUnitTestSuite\n\nfunc test_s() -> void:\n\tvar r := scene_runner("res://x.tscn")\n`,
+      'tests/said_test.gd': `extends GdUnitTestSuite\n# scene_runner( in a comment\n${cases('test_q')}`,
+      'other/outside_test.gd': `extends GdUnitTestSuite\n${cases('test_elsewhere')}`,
+    });
+    const scripts = new ProjectScripts(project);
+    const found = scripts.suitesUnder(['res://tests']);
+    assert.deepEqual(
+      found.map((suite) => [suite.path, suite.cases, suite.windowed]),
+      [
+        ['res://tests/a_test.gd', ['test_a', 'test_b'], false],
+        ['res://tests/base_suite.gd', ['test_inherited'], false],
+        ['res://tests/child_test.gd', ['test_inherited', 'test_own'], false],
+        ['res://tests/deep/path_test.gd', ['test_by_path', 'test_inherited'], false],
+        ['res://tests/res_test.gd', ['test_inherited'], false],
+        ['res://tests/said_test.gd', ['test_q'], false],
+        ['res://tests/scene_test.gd', ['test_s'], true],
+        ['res://tests/window_test.gd', ['test_w'], true],
+      ],
+      'every suite under the root, its cases own and inherited, and which need a window',
+    );
+
+    const suite = (path: string, names: string[], windowed = false) => ({ path, cases: names, windowed });
+    const big = suite('res://tests/big_test.gd', ['test_x', 'test_y', 'test_z']);
+    const edge = suite('res://tests/edge_test.gd', ['test_e', 'test_f']);
+    const shown = suite('res://tests/shown_test.gd', ['test_m', 'test_n'], true);
+    const small = suite('res://tests/small_test.gd', ['test_s']);
+    const times = {
+      [big.path]: { seconds: 12, cases: { test_x: 5, test_y: 4, test_z: 2 } },
+      [edge.path]: { seconds: SPLIT_PAST_SECONDS, cases: { test_e: 5, test_f: 5 } },
+      [shown.path]: { seconds: 30, cases: { test_m: 15, test_n: 15 } },
+    };
+    const units = unitsOf([big, edge, shown, small], times);
+    assert.deepEqual(
+      units.map((unit) => [unit.suite, unit.cases, unit.cost]),
+      [
+        [big.path, ['test_x'], 6],
+        [big.path, ['test_y'], 5],
+        [big.path, ['test_z'], 3],
+        [edge.path, ['test_e', 'test_f'], 10],
+        [shown.path, ['test_m', 'test_n'], 30],
+        // Untimed: the median case, and no time around its cases, which is the median of the others.
+        [small.path, ['test_s'], 5],
+      ],
+      'past the split, case by case with the time around them; at it, whole; a windowed one whole',
+    );
+    const declared = new Map([big, edge, shown, small].map((s) => [s.path, s.cases]));
+    const plans = dealt(units, declared, 4);
+    // 29 s of headless units, the slowest 10 s, so three engines beside the windowed one; dealt
+    // slowest first to the lightest, a tie in cost going to the suite first by path.
+    assert.deepEqual(
+      plans.map((plan) => [
+        plan.windowed,
+        plan.cost,
+        plan.suites.map((s) => [s.path, s.cases]),
+        plan.skipping,
+      ]),
+      [
+        [true, 30, [[shown.path, ['test_m', 'test_n']]], []],
+        [false, 10, [[edge.path, ['test_e', 'test_f']]], []],
+        [false, 9, [[big.path, ['test_x', 'test_z']]], [`${big.path}:test_y`]],
+        [
+          false,
+          10,
+          [
+            [big.path, ['test_y']],
+            [small.path, ['test_s']],
+          ],
+          [`${big.path}:test_x`, `${big.path}:test_z`],
+        ],
+      ],
+      'the windowed engine first, and each engine holding part of a split suite skipping the rest of it',
+    );
+    const headless = plans.slice(1);
+    for (const plan of headless) {
+      const held = plan.suites.flatMap((s) => s.cases.map((c) => `${s.path}:${c}`));
+      assert.deepEqual(
+        held.filter((entry) => plan.skipping.includes(entry)),
+        [],
+        'and never a case it holds',
+      );
+    }
+    assert.equal(
+      dealt(unitsOf([small, suite('res://tests/t_test.gd', ['test_t'])], {}), declared, 4).length,
+      1,
+      'a few quick suites stay in one engine',
+    );
+    assert.equal(dealt(units, declared, 1).length, 2, 'one engine at most, and the windowed one beside it');
+    assert.equal(dealt(units, declared, 2).length, 2, 'the windowed engine counts toward the most');
+
+    const after = timesAfter(
+      times,
+      [big, small],
+      [
+        readRun(
+          [
+            `Run Test Suite: ${big.path}`,
+            caseLine(big.path, 'test_x', 'PASSED', '3s 0ms'),
+            `Statistics: 1 test cases | PASSED 4s 0ms`,
+          ].join('\n'),
+        ),
+        readRun(
+          [
+            `Run Test Suite: ${big.path}`,
+            caseLine(big.path, 'test_y', 'PASSED', '1s 0ms'),
+            caseLine(big.path, 'test_gone', 'PASSED', '1s 0ms'),
+            `Statistics: 2 test cases | PASSED 2s 500ms`,
+            `Run Test Suite: ${small.path}`,
+            caseLine(small.path, 'test_s:0 (1)', 'PASSED', '200ms'),
+            caseLine(small.path, 'test_s:1 (2)', 'PASSED', '300ms'),
+            `Statistics: 2 test cases | PASSED 600ms`,
+          ].join('\n'),
+        ),
+      ],
+    );
+    assert.deepEqual(
+      after[big.path],
+      { seconds: 7, cases: { test_x: 3, test_y: 1, test_z: 2 } },
+      'cases from each engine, an untimed one kept, one no longer declared dropped, and the most time around them',
+    );
+    assert.deepEqual(
+      after[small.path],
+      { seconds: 0.6, cases: { test_s: 0.5 } },
+      'the rows of a case together',
+    );
+    assert.deepEqual(after[edge.path], times[edge.path], 'a suite that did not run keeps its times');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A suite's fingerprint moves with what it reaches and nothing else, and a suite reaching what no
+ * file names has none, so it always runs.
+ */
+function testAFingerprintFollowsWhatASuiteReaches(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-prints-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[autoload]\n\nGame="*res://game.gd"\n',
+      'game.gd': 'extends Node\n',
+      'addons/gdUnit4/src/GdUnitTestSuite.gd':
+        'class_name GdUnitTestSuite\nextends Node\nfunc a() -> void:\n\tDirAccess.open("res://")\n',
+      'helper.gd': 'class_name Helper\nextends RefCounted\nconst TABLE = preload("res://data/table.tres")\n',
+      'data/table.tres':
+        '[gd_resource type="Resource" format=3]\n[ext_resource path="res://data/icon.png" type="Texture2D" id="1"]\n',
+      'data/icon.png': 'png',
+      'other.gd': 'class_name Other\nextends Node\n',
+      'tests/a_test.gd': 'extends GdUnitTestSuite\n\nfunc test_a() -> void:\n\tHelper.new()\n',
+      'tests/walk_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_w() -> void:\n\tDirAccess.get_files_at("res://data")\n',
+      'tests/load_test.gd': 'extends GdUnitTestSuite\n\nfunc test_l(id: String) -> void:\n\tload(id)\n',
+      'tests/placeholder_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_p(id: String) -> void:\n\tResourceLoader.exists("res://data/%s.tres" % id)\n',
+      '.godot/extension_list.cfg': 'res://ext/native.gdextension\n',
+      'ext/native.gdextension': '[configuration]\nentry_symbol = "init"\n',
+      'tests/literal_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_l() -> void:\n\tload("res://data/table.tres")\n',
+    });
+    const printOf = (path: string, always: readonly string[] = ['1']): string | null => {
+      const scripts = new ProjectScripts(project);
+      const suite = scripts.suite(path);
+      assert.ok(suite !== null, path);
+      return new SuiteFingerprints(scripts, always).of(suite);
+    };
+    const first = printOf('res://tests/a_test.gd');
+    assert.equal(typeof first, 'string', 'a suite reaching only files has one');
+    assert.equal(printOf('res://tests/a_test.gd'), first, 'the same files, the same print');
+    assert.equal(printOf('res://tests/walk_test.gd'), null, 'a directory walked has none');
+    assert.equal(printOf('res://tests/load_test.gd'), null, 'a computed load has none');
+    assert.equal(printOf('res://tests/placeholder_test.gd'), null, 'nor a path filled in at run time');
+    assert.equal(typeof printOf('res://tests/literal_test.gd'), 'string', 'a literal load does');
+    const changes = (path: string, text: string): boolean => {
+      const before = printOf('res://tests/a_test.gd');
+      writeFileSync(join(project, path), text);
+      return printOf('res://tests/a_test.gd') !== before;
+    };
+    assert.equal(
+      changes('other.gd', 'class_name Other\nextends Node2D\n'),
+      false,
+      'a script it never reaches',
+    );
+    assert.equal(
+      changes(
+        'helper.gd',
+        'class_name Helper\nextends RefCounted\nconst TABLE = preload("res://data/table.tres")\nvar x := 1\n',
+      ),
+      true,
+      'a class it names',
+    );
+    assert.equal(changes('data/icon.png', 'png2'), true, 'what a resource it preloads names');
+    assert.equal(changes('game.gd', 'extends Node2D\n'), true, 'an autoload, which runs beside every suite');
+    assert.equal(
+      changes('ext/native.gdextension', '[configuration]\nentry_symbol = "begin"\n'),
+      true,
+      'an extension the engine loads into every run',
+    );
+    assert.equal(
+      changes('addons/gdUnit4/plugin.cfg', '[plugin]\nversion="6.1"\n'),
+      true,
+      'its addon, read whole',
+    );
+    assert.equal(
+      changes('project.godot', 'config_version=5\n\n[autoload]\n\nGame="*res://game.gd"\n; edited\n'),
+      true,
+      'the project',
+    );
+    assert.notEqual(
+      printOf('res://tests/a_test.gd', ['2']),
+      printOf('res://tests/a_test.gd', ['1']),
+      'what every suite depends on',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/** `gdharness test` reads its own options, and refuses what it does not know before anything runs. */
+function testTheTestCommandReadsItsOwnOptions(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-options-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'tests/a_test.gd': 'extends Node\n' });
+    const read = testOptionsOf(
+      [
+        project,
+        'tests/a_test.gd:test_one',
+        'res://tests/b',
+        '--engines',
+        '2',
+        '--tests',
+        'tests',
+        '--order',
+        '7',
+        '--changed-only',
+      ],
+      tmpdir(),
+    );
+    assert.equal(read.projectPath, project, 'the project named first');
+    assert.deepEqual(
+      read.selected,
+      ['res://tests/a_test.gd:test_one', 'res://tests/b'],
+      'read from the project',
+    );
+    assert.deepEqual(
+      [read.engines, read.roots, read.order, read.changedOnly, read.importFirst, read.silenceSeconds],
+      [2, ['res://tests'], 7, true, false, 300],
+    );
+    assert.equal(testOptionsOf(['--order', 'reversed'], project).order, 'reversed');
+    assert.equal(testOptionsOf([], project).projectPath, project, 'the directory you are in');
+    for (const [args, said] of [
+      [['--bogus'], /Unknown option --bogus/],
+      [['--engines'], /--engines needs a value/],
+      [['--engines', '0'], /whole number above 0/],
+      [['--order', 'sideways'], /reversed or a whole number/],
+      [['../elsewhere.gd'], /is not inside the project/],
+    ] as const) {
+      assert.throws(
+        () => testOptionsOf(args, project),
+        (error: unknown) => error instanceof TestUsageError && said.test(String(error)),
+        String(args),
+      );
+    }
+    const refused = spawnSyncHidden(process.execPath, ['build/cli.js', 'test', '--bogus'], {
+      encoding: 'utf8',
+      cwd: process.cwd(),
+    });
+    assert.equal(refused.status, 2, `${refused.stdout}${refused.stderr}`);
+    assert.match(
+      refused.stderr,
+      /Unknown option --bogus for gdharness test/,
+      'refused by its own reading, not setup flags',
+    );
+    const runner = spawnSyncHidden(process.execPath, ['build/cli.js', 'test', '--runner'], {
+      encoding: 'utf8',
+    });
+    assert.equal(runner.status, 0, runner.stderr);
+    assert.ok(existsSync(runner.stdout.trim()) && runner.stdout.trim().endsWith('listed.gd'), runner.stdout);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * `gdharness test` runs a real project's suites and judges them, keeps the times and what passed,
+ * and leaves out what passed unchanged only when asked to.
+ */
+function testTheTestCommandRunsAndJudgesAProject(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('test command regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-command-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="TestCommand"\n',
+      'tests/ok_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_one() -> void:\n\tassert_int(1).is_equal(1)\n\n\nfunc test_two() -> void:\n\tawait get_tree().process_frame\n\tassert_int(2).is_equal(2)\n',
+      'tests/declared_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"before": ["said in before"], "test_rows": ["row said"]}',
+        '',
+        'func before() -> void:',
+        '\tpush_error("said in before")',
+        '',
+        '',
+        '@warning_ignore("unused_parameter")',
+        'func test_rows(value: int, test_parameters := [[1], [2]]) -> void:',
+        '\tpush_error("row said")',
+        '\tassert_int(value).is_greater(0)',
+        '',
+      ].join('\n'),
+      'tests/noisy_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_noisy() -> void:\n\tpush_error("nobody said this")\n\tassert_bool(true).is_true()\n',
+      'tests/hang_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_hangs() -> void:\n\tawait get_tree().create_timer(60.0).timeout\n',
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const env = { ...process.env, GODOT_PATH: godotPath };
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, ...args],
+        {
+          encoding: 'utf8',
+          env,
+          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+        },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const first = test('--import', 'tests/ok_test.gd', 'tests/declared_test.gd');
+    assert.equal(first.status, 0, first.said);
+    assert.match(first.said, /^Passed: 4 cases in 2 suites across 1 engine, /m, first.said);
+    const state = join(project, '.godot', 'gdharness');
+    const times = JSON.parse(readFileSync(join(state, 'suite-times.json'), 'utf8')) as Record<
+      string,
+      { cases: Record<string, number> }
+    >;
+    assert.deepEqual(
+      Object.keys(times).sort(),
+      ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
+      'both timed',
+    );
+    assert.deepEqual(Object.keys(times['res://tests/ok_test.gd']?.cases ?? {}).sort(), [
+      'test_one',
+      'test_two',
+    ]);
+    const passed = JSON.parse(readFileSync(join(state, 'suite-passed.json'), 'utf8')) as Record<
+      string,
+      string
+    >;
+    assert.deepEqual(
+      Object.keys(passed).sort(),
+      ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
+      'both passed',
+    );
+    assert.deepEqual(readdirSync(slots), [], 'every slot given back');
+    assert.equal(
+      existsSync(join(project, '.godot', 'gdharness', 'test-runs')) &&
+        readdirSync(join(project, '.godot', 'gdharness', 'test-runs')).length > 0,
+      false,
+      'a passing run keeps no logs',
+    );
+
+    const noisy = test('tests/ok_test.gd', 'tests/declared_test.gd', 'tests/noisy_test.gd', '--changed-only');
+    assert.equal(noisy.status, 1, noisy.said);
+    assert.match(
+      noisy.said,
+      /^2 suites passed with everything they reach as it stands now, and are not run\.$/m,
+      noisy.said,
+    );
+    assert.match(
+      noisy.said,
+      /^ {2}an engine error in res:\/\/tests\/noisy_test\.gd > test_noisy: nobody said this$/m,
+      noisy.said,
+    );
+    assert.match(noisy.said, /^everything it printed: .*engine\.log$/m, 'the log is kept and named');
+    assert.match(noisy.said, /^Failed: 1 case in 1 suite across 1 engine, /m, 'only the changed one ran');
+    const passedAfter = JSON.parse(readFileSync(join(state, 'suite-passed.json'), 'utf8')) as Record<
+      string,
+      string
+    >;
+    assert.deepEqual(
+      Object.keys(passedAfter).sort(),
+      ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
+      'a failing suite is not kept as passed, so the next run asks it again',
+    );
+
+    const everything = test('tests/ok_test.gd', 'tests/declared_test.gd');
+    assert.equal(everything.status, 0, everything.said);
+    assert.doesNotMatch(everything.said, /are not run/, 'without the flag, every suite runs');
+
+    const hung = test('tests/hang_test.gd', '--silence', '4');
+    assert.match(
+      hung.said,
+      /^ {2}the engine printed nothing for 4 s while running res:\/\/tests\/hang_test\.gd > test_hangs, so it was ended$/m,
+      hung.said,
+    );
+    assert.equal(hung.status, 1, hung.said);
+    assert.deepEqual(readdirSync(slots), [], 'its slot given back too');
+
+    // An autoload that cannot start makes every suite after it meaningless, so the run ends there
+    // rather than reporting cases that ran without it.
+    const godotFile = join(project, 'project.godot');
+    const projectText = readFileSync(godotFile, 'utf8');
+    writeTree(project, { 'broken.gd': 'extends RefCounted\n' });
+    writeFileSync(godotFile, `${projectText}\n[autoload]\n\nBroken="*res://broken.gd"\n`);
+    const noAutoload = test('tests/ok_test.gd');
+    writeFileSync(godotFile, projectText);
+    assert.match(
+      noAutoload.said,
+      /^ {2}an autoload did not start, so the suites were ended rather than run without it$/m,
+      noAutoload.said,
+    );
+    assert.equal(noAutoload.status, 1, noAutoload.said);
+
+    const windowed = windowedRunRefused();
+    if (windowed === null) {
+      writeTree(project, {
+        'tests/window_test.gd': [
+          'extends GdUnitTestSuite',
+          '',
+          'const GDHARNESS_NEEDS_WINDOW: bool = true',
+          '',
+          'func test_window() -> void:',
+          '\tassert_str(DisplayServer.get_name()).is_not_equal("headless")',
+          '\tassert_str(AudioServer.get_driver_name()).is_equal("Dummy")',
+          '',
+        ].join('\n'),
+      });
+      const shown = test('tests/window_test.gd', 'tests/ok_test.gd');
+      assert.equal(shown.status, 0, shown.said);
+      assert.match(shown.said, /over 2 engines, one of them windowed\./, shown.said);
+    } else {
+      console.log(`test command windowed case skipped: ${windowed}`);
+    }
+  } finally {
+    sweep(project, slots);
+  }
+}
+
+/** SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX and SEM_NOOPENFILEERRORBOX. */
+const FAIL_CRITICAL = 0x1;
+const NO_FAULT_BOX = 0x2;
+const NO_OPEN_FILE_BOX = 0x8000;
+
+/**
+ * Reads any process's Windows error mode from outside it, as GetErrorMode would answer inside it.
+ * The kernel keeps SEM_FAILCRITICALERRORS inverted in what it answers for the process, which
+ * GetErrorMode undoes; [method own] reads this process both ways so a reading that got it wrong
+ * shows.
+ */
+async function errorModes(): Promise<{
+  of: (pid: number) => number | null;
+  own: () => number;
+  set: (mode: number) => void;
+  close: () => void;
+}> {
+  const { dlopen, FFIType, ptr } = await import('bun:ffi');
+  const kernel32 = dlopen('kernel32.dll', {
+    GetErrorMode: { args: [], returns: FFIType.u32 },
+    SetErrorMode: { args: [FFIType.u32], returns: FFIType.u32 },
+    OpenProcess: { args: [FFIType.u32, FFIType.bool, FFIType.u32], returns: FFIType.ptr },
+    CloseHandle: { args: [FFIType.ptr], returns: FFIType.bool },
+  });
+  const ntdll = dlopen('ntdll.dll', {
+    NtQueryInformationProcess: {
+      args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr],
+      returns: FFIType.i32,
+    },
+  });
+  const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+  const PROCESS_DEFAULT_HARD_ERROR_MODE = 12;
+  return {
+    of: (pid) => {
+      const handle = kernel32.symbols.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+      if (handle === null) {
+        return null;
+      }
+      try {
+        const read = new Uint32Array(1);
+        const status = ntdll.symbols.NtQueryInformationProcess(
+          handle,
+          PROCESS_DEFAULT_HARD_ERROR_MODE,
+          ptr(read),
+          4,
+          null,
+        );
+        return status === 0 ? (read[0] ?? 0) ^ FAIL_CRITICAL : null;
+      } finally {
+        kernel32.symbols.CloseHandle(handle);
+      }
+    },
+    own: () => kernel32.symbols.GetErrorMode(),
+    set: (mode) => {
+      kernel32.symbols.SetErrorMode(mode);
+    },
+    close: () => {
+      kernel32.close();
+      ntdll.close();
+    },
+  };
+}
+
+/**
+ * Every engine gdharness starts on Windows can have its crash reported, under Bun and under Node.
+ *
+ * Node and Bun both set SEM_NOGPFAULTERRORBOX in themselves as they start, and every process
+ * inherits its parent's error mode, so each engine they started had it too. With that bit set
+ * Windows Error Reporting never runs when the process crashes: an engine that died of an access
+ * violation left no dump on a machine set to write one, and no Application Error event. The other
+ * two bits must stay, or a missing drive or file opens a box nobody will answer. Read from outside
+ * the engine, since what an engine starts to report it would be a Node or a Bun setting it again.
+ */
+async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('error mode regression skipped (the error mode is Windows only)');
+    return;
+  }
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('error mode regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const modes = await errorModes();
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-error-mode-'));
+  const project = join(scratch, 'project');
+  const runtime = join(scratch, 'runtime');
+  const started: number[] = [];
+  const children: ChildProcess[] = [];
+  const before = modes.own();
+  try {
+    // As a Claude Code session hands it to the server, which the server then has to undo.
+    modes.set(before | NO_FAULT_BOX | FAIL_CRITICAL | NO_OPEN_FILE_BOX);
+    assert.equal(modes.of(process.pid), modes.own(), 'the reading from outside agrees with GetErrorMode');
+    assert.equal(
+      (modes.of(process.pid) ?? 0) & NO_FAULT_BOX,
+      NO_FAULT_BOX,
+      'and sees the bit where it is set',
+    );
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ErrorMode"\n',
+      'wait.gd': [
+        'extends SceneTree',
+        '',
+        '',
+        'func _initialize() -> void:',
+        '\tvar ready := FileAccess.open(OS.get_environment("GDHARNESS_ERROR_MODE_READY"), FileAccess.WRITE)',
+        '\tready.store_string(str(OS.get_process_id()))',
+        '\tready.close()',
+        '\tcreate_timer(60.0).timeout.connect(quit)',
+        '',
+      ].join('\n'),
+      'tests/read_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_waits_to_be_read() -> void:',
+        '\tvar ready := FileAccess.open(OS.get_environment("GDHARNESS_ERROR_MODE_READY"), FileAccess.WRITE)',
+        '\tready.store_string(str(OS.get_process_id()))',
+        '\tready.close()',
+        '\tvar read := OS.get_environment("GDHARNESS_ERROR_MODE_READ")',
+        '\tvar until := Time.get_ticks_msec() + 60000',
+        '\twhile not FileAccess.file_exists(read) and Time.get_ticks_msec() < until:',
+        '\t\tawait get_tree().create_timer(0.1).timeout',
+        '\tassert_bool(FileAccess.file_exists(read)).is_true()',
+        '',
+      ].join('\n'),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(runtime, 'runs'), { recursive: true });
+    const readyPid = async (ready: string, what: string): Promise<number> => {
+      for (let waited = 0; waited < 4 * ENGINE_CALL_TIMEOUT_MS && !existsSync(ready); waited += 100) {
+        await delay(100);
+      }
+      const pid = existsSync(ready) ? Number(readFileSync(ready, 'utf8').trim()) : 0;
+      assert.ok(pid > 0, `${what}: the engine started and said its pid`);
+      started.push(pid);
+      return pid;
+    };
+    const assertReportable = (pid: number, what: string): void => {
+      const mode = modes.of(pid);
+      assert.ok(mode !== null, `${what}: the platform answers for pid ${String(pid)}`);
+      assert.equal(mode & NO_FAULT_BOX, 0, `${what}: a crash is reported (mode 0x${mode.toString(16)})`);
+      assert.equal(
+        mode & (FAIL_CRITICAL | NO_OPEN_FILE_BOX),
+        FAIL_CRITICAL | NO_OPEN_FILE_BOX,
+        `${what}: and no box can open (mode 0x${mode.toString(16)})`,
+      );
+    };
+    // Bun clears the bit in gdharness's own process and Node routes the start through the desktop
+    // helper, so each is held by its own route rather than by the other's.
+    const assertStartedBy = async (pid: number, parent: RegExp, what: string): Promise<void> => {
+      const tree = await processTree();
+      const parentPid = tree?.get(pid)?.parent;
+      const command = parentPid === undefined ? undefined : tree?.get(parentPid)?.command;
+      assert.match(
+        command ?? '',
+        parent,
+        `${what}: started by ${String(parentPid)} ${command ?? '(not listed)'}`,
+      );
+    };
+
+    for (const [runtimeName, interpreter] of [
+      ['Bun', process.execPath],
+      ['Node', 'node'],
+    ] as const) {
+      for (const kept of [true, false]) {
+        const what = `${runtimeName}, ${kept ? 'a run its keeper holds' : 'a launch nothing holds'}`;
+        const ready = join(scratch, `ready-${runtimeName}-${String(kept)}`);
+        const answer = join(scratch, `launched-${runtimeName}-${String(kept)}.json`);
+        const launcher = join(scratch, `launch-${runtimeName}-${String(kept)}.mjs`);
+        const spec = {
+          command: godotPath,
+          args: ['--headless', '--path', project, '-s', 'res://wait.gd'],
+          env: { ...process.env, GDHARNESS_ERROR_MODE_READY: ready },
+          ...(kept
+            ? {
+                run: {
+                  transcript: join(runtime, 'runs', `${runtimeName}.log`),
+                  startedAt: Date.now(),
+                  projectPath: project,
+                  debugged: false,
+                },
+              }
+            : {}),
+        };
+        writeFileSync(
+          launcher,
+          [
+            `import { writeFileSync } from 'node:fs';`,
+            `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+            `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+            `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+          ].join('\n'),
+        );
+        const ran = spawnSyncHidden(interpreter, [launcher], {
+          encoding: 'utf8',
+          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+          env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+        });
+        const said: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+        const pid = get(said, 'pid');
+        assert.ok(
+          typeof pid === 'number',
+          `${what}: launched ${JSON.stringify(said)} ${ran.stdout} ${ran.stderr}`,
+        );
+        started.push(pid);
+        assert.equal(await readyPid(ready, what), pid, `${what}: the engine is the process launched`);
+        assertReportable(pid, what);
+        if (kept) {
+          await assertStartedBy(pid, runtimeName === 'Bun' ? /keeper\.js"? keep/ : /powershell/i, what);
+        }
+      }
+
+      const what = `${runtimeName}, gdharness test`;
+      const ready = join(scratch, `ready-test-${runtimeName}`);
+      const read = join(scratch, `read-test-${runtimeName}`);
+      let printed = '';
+      const run = spawnHidden(
+        interpreter,
+        [
+          'build/cli.js',
+          'test',
+          project,
+          '--slots',
+          join(scratch, 'slots'),
+          '--silence',
+          '120',
+          ...(runtimeName === 'Bun' ? ['--import'] : []),
+        ],
+        {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            GODOT_PATH: godotPath,
+            GDHARNESS_ERROR_MODE_READY: ready,
+            GDHARNESS_ERROR_MODE_READ: read,
+          },
+        },
+      );
+      children.push(run);
+      run.stdout.on('data', (chunk: Buffer) => {
+        printed += chunk.toString();
+      });
+      run.stderr.on('data', (chunk: Buffer) => {
+        printed += chunk.toString();
+      });
+      const exited = exitOf(run);
+      const pid = await readyPid(ready, what);
+      assertReportable(pid, what);
+      await assertStartedBy(pid, runtimeName === 'Bun' ? /cli\.js"? test/ : /powershell/i, what);
+      writeFileSync(read, '');
+      const { code } = await exited;
+      assert.equal(code, 0, `${what}: the suite was let go and passed: ${printed}`);
+    }
+  } finally {
+    modes.set(before);
+    modes.close();
+    for (const pid of started) {
+      if (isAlive(pid)) {
+        process.kill(pid);
+      }
+    }
+    for (const child of children) {
+      child.kill();
+    }
+    sweep(scratch);
   }
 }
 
@@ -40177,10 +41385,10 @@ function testToolTextKeepsASpaceBetweenSentences(): void {
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
  * the same change and somebody confirms the removal was meant.
  */
-const TOOL_NAME_MENTIONS = 1039;
+const TOOL_NAME_MENTIONS = 1181;
 
 /** The same, for phrases naming a tool and one of its multi-word ops. */
-const TOOL_OP_MENTIONS = 42;
+const TOOL_OP_MENTIONS = 51;
 
 /**
  * Every tool this server names in something it says is a tool it has.
@@ -40206,7 +41414,8 @@ function testEveryToolNamedInProseIsATool(): void {
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
-  // editor caches its class reference in and the name every resource stores. Named one
+  // editor caches its class reference in, the name every resource stores, and the gdUnit4 call a
+  // suite that drives a scene makes, which is what puts it in the windowed engine. Named one
   // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
   // and called a tool or called vocabulary.
   const notTools = new Set([
@@ -40235,6 +41444,8 @@ function testEveryToolNamedInProseIsATool(): void {
     'editor_data',
     'editor_doc_cache',
     'resource_name',
+    'editor_servers',
+    'scene_runner',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
@@ -49428,6 +50639,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheResourcesReadOnlyTheProject,
   testGdUnitRunner,
   testTheShippedRunnerRunsAFileOfSuites,
+  testAnEngineRunIsReadCaseByCase,
+  testAnEngineRunIsJudgedOnEverythingItPrinted,
+  testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
+  testSuitesAreFoundAndDealtByWhatTheyCost,
+  testAFingerprintFollowsWhatASuiteReaches,
+  testTheTestCommandReadsItsOwnOptions,
+  testTheTestCommandRunsAndJudgesAProject,
+  testAnEngineGdharnessStartsCanHaveItsCrashReported,
   testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testATestRunWhoseAutoloadDidNotCompileStops,

@@ -6713,7 +6713,7 @@ async function testAnAdapterIsBoundAgainInPlace({ call, project, dapPort }: Edit
   const started = `--- Debug adapter server started on port ${dapPort} ---`;
   const stopped = said.lastIndexOf('--- Debug adapter server stopped ---');
   assert.ok(
-    stopped > said.indexOf(started) && said.indexOf(started) >= 0 && said.lastIndexOf(started) > stopped,
+    stopped > said.indexOf(started) && said.includes(started) && said.lastIndexOf(started) > stopped,
     `Godot says it started the adapter, stopped it and started it again on the same port: ${JSON.stringify(said)}`,
   );
 

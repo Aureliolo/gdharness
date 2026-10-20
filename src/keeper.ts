@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { exitOf } from './alive.js';
 import { DESKTOP_VARIABLE, ensureHelperCompiled, throughHelper } from './desktop.js';
+import { crashesReported, letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
 import {
@@ -98,7 +99,12 @@ async function startThroughHelper(
   const scratch = scratchDirectory('desktop');
   const pidFile = join(scratch, 'pid');
   const errorFile = join(scratch, 'error');
-  const where = spec.desktop === undefined ? 'without activation' : `on the ${spec.desktop} desktop`;
+  const where =
+    spec.desktop !== undefined
+      ? `on the ${spec.desktop} desktop`
+      : spec.noActivate === true
+        ? 'without activation'
+        : 'through the desktop helper';
   try {
     // Under its own budget, before the start's, so a slow compile is neither counted as a slow
     // start nor ended halfway by one.
@@ -241,17 +247,22 @@ async function startDetached(
     : await startDirectly(spec, output, hidden);
 }
 
+/**
+ * Also wherever this process could not clear the bit that keeps a crash from being reported, since
+ * the helper clears it in itself before it starts anything.
+ */
 function throughTheHelper(spec: SentSpec): boolean {
-  return process.platform === 'win32' && (spec.desktop !== undefined || spec.noActivate === true);
+  return needsItsHelperKept(spec) || (process.platform === 'win32' && !crashesReported());
 }
 
 /**
  * Whether [param spec] needs its helper kept for as long as it runs, which only a keeper does: one
  * on a desktop of its own, for the desktop's sake, and one started without activation, whose helper
- * holds the foreground while it starts.
+ * holds the foreground while it starts. A helper there only for the error mode may go once the
+ * target has started, which it outlives.
  */
 function needsItsHelperKept(spec: SentSpec): boolean {
-  return throughTheHelper(spec);
+  return process.platform === 'win32' && (spec.desktop !== undefined || spec.noActivate === true);
 }
 
 async function launch(): Promise<void> {
@@ -415,6 +426,7 @@ async function keep(): Promise<void> {
   process.exit(0);
 }
 
+await letWindowsReportCrashes();
 const mode = process.argv[2];
 if (mode === 'launch') {
   await launch();
