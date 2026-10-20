@@ -231,6 +231,54 @@ func quit_editor(_args: Dictionary) -> Dictionary:
 	return {"ok": true, "quitting": true, "saved": true}
 
 
+## What the editor said as it started each of its servers, and the debug adapter started again when
+## [param args] names it under `rebind`.
+##
+## Godot binds each server once and says whether it could only in the editor's log panel, as a line
+## like `--- Failed to start Debug adapter server on port 6006: Already in use ---`, so those lines
+## are the one account of why a port it names has nothing on it. They are read before anything is
+## started again, so the answer carries the first attempt's reason as well as the next one's.
+##
+## The debug adapter binds as its node enters the tree, which is early in the editor's start and
+## seconds before the language server, and does not try again; taking its node out of the tree and
+## putting it back runs that start once more. The language server starts on the editor's first
+## frame after it is ready and only once, so re-entering the tree would stop it for good, and it is
+## never touched here.
+func editor_servers(args: Dictionary) -> Dictionary:
+	var said: PackedStringArray = _servers_said()
+	var rebound: bool = false
+	if GdhRead.as_bool(args.get("rebind", false)):
+		var adapter: Node = _debug_adapter()
+		if adapter != null:
+			var parent: Node = adapter.get_parent()
+			var at: int = adapter.get_index()
+			parent.remove_child(adapter)
+			parent.add_child(adapter)
+			parent.move_child(adapter, at)
+			rebound = true
+	return {"ok": true, "said": said, "rebound": rebound, "saidSince": _servers_said().slice(said.size())}
+
+
+## The lines the editor's log panel holds about its language server and debug adapter, in order.
+static func _servers_said() -> PackedStringArray:
+	var lines: PackedStringArray = []
+	var root: Node = EditorInterface.get_base_control().get_tree().root
+	for panel: Node in root.find_children("*", "EditorLog", true, false):
+		for shown: Node in panel.find_children("*", "RichTextLabel", true, false):
+			for line: String in (shown as RichTextLabel).get_parsed_text().split("\n", false):
+				var stripped: String = line.strip_edges()
+				if stripped.begins_with("---") and stripped.contains(" server"):
+					var _kept: bool = lines.append(stripped)
+	return lines
+
+
+## The editor's debug adapter node, found by its engine class, or null in an editor without one.
+static func _debug_adapter() -> Node:
+	var root: Node = EditorInterface.get_base_control().get_tree().root
+	var found: Array[Node] = root.find_children("*", "DebugAdapterServer", true, false)
+	return found[0] if not found.is_empty() else null
+
+
 ## Asked of the tree the editor's own window is in, because this object is not in one.
 static func _leave() -> void:
 	var base: Control = EditorInterface.get_base_control()

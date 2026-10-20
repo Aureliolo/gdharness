@@ -74,5 +74,13 @@ export function notListeningNote(
     greetedAgoMs !== null && greetedAgoMs < STARTING_MS
       ? ` The editor greeted ${Math.round(greetedAgoMs / 1000)}s ago, so ${down.length === 1 ? 'it' : 'they'} may still be starting: ask again in a few seconds.`
       : '';
-  return `The editor names ${named}, and nothing accepts connections there. Godot binds each once, as the editor starts, and reports a failure only in the editor's own log panel; ${needs}. editor_launch restart binds ${down.length === 1 ? 'it' : 'them'} again.${starting}`;
+  // The adapter can be started again inside the editor; the language server starts once, on the
+  // editor's first frame after it is ready, and only a restart runs that again.
+  const cures = [
+    ...(servers.dap.listening === false
+      ? ['editor_launch rebind binds the debug adapter again in place']
+      : []),
+    ...(servers.lsp.listening === false ? ['editor_launch restart binds the language server again'] : []),
+  ].join(', and ');
+  return `The editor names ${named}, and nothing accepts connections there. Godot binds each once, as the editor starts, and reports a failure only in the editor's own log panel; ${needs}. ${cures}.${starting}`;
 }

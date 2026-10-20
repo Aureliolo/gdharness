@@ -130,8 +130,9 @@ whose executables are world-writable. Releases are cut by CI.
 .
 ├── src/
 │   ├── server.ts          # The MCP server: validation and dispatch of every tool
-│   ├── cli.ts             # CLI entry point: the server by default, setup, doctor, runtime, classes
+│   ├── cli.ts             # CLI entry point: the server by default, setup, doctor, runtime, classes, test
 │   ├── setup.ts           # What the CLI does to a project
+│   ├── suite-run.ts       # gdharness test: a game's suites over engines, judged by suite-judge.ts
 │   ├── tool-definitions.ts# Tool schemas
 │   ├── headless.ts        # Running one operation of the engine script
 │   ├── godot-path.ts      # Finding the engine
@@ -150,7 +151,8 @@ whose executables are world-writable. Releases are cut by CI.
 │   ├── dap_client.ts      # Godot debug adapter client
 │   └── godot/             # GDScript, copied verbatim into the bundle
 │       ├── addons/        # The Godot addons: editor, runtime, auto reload
-│       └── operations/    # Headless engine operations
+│       ├── operations/    # Headless engine operations
+│       └── tests/         # The gdUnit4 runner project_test and gdharness test start
 ├── test/
 │   └── support/           # Shared helpers, not suites
 ├── docs/                  # The public site's source

@@ -347,6 +347,73 @@ function testTypedGate(godotPath: string, projectDir: string): void {
     /has no static type/,
     `the reason should be the missing type:\n${refused.stderr.trim()}`,
   );
+  testTypedRunner(godotPath);
+}
+
+/**
+ * The gdUnit4 runner the package ships, parsed under the same warnings.
+ *
+ * Apart from the project above because it extends gdUnit4's classes, so it compiles only beside
+ * gdUnit4, and gdUnit4's own scripts do not pass every warning: they sit under res://addons, which
+ * the engine exempts unless told otherwise, as it is not told here. The runner is loaded from its
+ * own path outside the project, as the games start it, where no exemption reaches it.
+ */
+function testTypedRunner(godotPath: string): void {
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GDUNIT4_PATH names no gdUnit4.');
+    }
+    console.log('typed runner check skipped (GDUNIT4_PATH names no gdUnit4)');
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-typed-runner-'));
+  try {
+    cpSync(gdunit, join(dir, 'addons', 'gdUnit4'), { recursive: true });
+    writeFileSync(
+      join(dir, 'project.godot'),
+      [
+        '; Engine configuration file.',
+        'config_version=5',
+        '',
+        '[application]',
+        'config/name="GdharnessTypedRunner"',
+        '',
+        '[debug]',
+        ...everyWarning(godotPath).map((warning) => `gdscript/warnings/${warning}=2`),
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(dir, 'load_runner.gd'),
+      [
+        'extends SceneTree',
+        '',
+        '',
+        'func _init() -> void:',
+        '\tvar runner: Script = load(OS.get_cmdline_user_args()[0])',
+        '\tvar loaded: bool = runner != null and runner.can_instantiate()',
+        '\tprint(JSON.stringify({"ok": loaded}))',
+        '\tquit(0 if loaded else 1)',
+        '',
+      ].join('\n'),
+    );
+    const imported = spawnSyncHidden(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180000,
+    });
+    assert.equal(imported.status, 0, `${imported.stdout}${imported.stderr}`);
+    const runner = resolve(join('src', 'godot', 'tests', 'listed.gd'));
+    const loaded = runScript(godotPath, dir, join(dir, 'load_runner.gd'), ['--', runner]);
+    assert.equal(
+      loaded.status,
+      0,
+      `the shipped runner should compile with every warning an error:\n${loaded.stdout}${loaded.stderr}`,
+    );
+    assert.match(loaded.stdout, /"ok":true/, loaded.stdout);
+  } finally {
+    sweep(dir);
+  }
 }
 
 /**

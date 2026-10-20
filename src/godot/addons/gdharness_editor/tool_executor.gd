@@ -120,6 +120,7 @@ func _init_tools() -> void:
 		"play_scene": [_play_tools, "play_scene"],
 		"restart_editor": [_play_tools, "restart_editor"],
 		"quit_editor": [_play_tools, "quit_editor"],
+		"editor_servers": [_play_tools, "editor_servers"],
 		"stop_playing": [_play_tools, "stop_playing"],
 		"playing_status": [_play_tools, "playing_status"],
 		# The script profiler on a game the editor plays
