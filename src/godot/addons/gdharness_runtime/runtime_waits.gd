@@ -4,6 +4,7 @@ extends RefCounted
 ## happened, or when the time ran out, so the caller never sleeps for a guessed length.
 
 const GdhChanges = preload("runtime_changes.gd")
+const GdhDeclared = preload("declared_values.gd")
 const GdhPaths = preload("runtime_paths.gd")
 const GdhQueries = preload("runtime_queries.gd")
 const GdhRead = preload("reading.gd")
@@ -247,7 +248,9 @@ func wait_until(params: Dictionary) -> Dictionary:
 	var current: Variant = watched["value"]
 	if compare in [">=", "<=", ">", "<"]:
 		return await _wait_in_order(node, params, current, timeout_ms)
-	var wanted: Variant = _values.fitted(params["value"], typeof(current))
+	var by_name: Array = _enum_by_name(watched, params["value"], node_path)
+	var sent: Variant = by_name[1] if not by_name.is_empty() and by_name[0] else params["value"]
+	var wanted: Variant = _values.fitted(sent, typeof(current))
 	# Read against what the property is declared as, not only against what it holds this frame: an
 	# object property holding null holds nothing typed, so any value was taken as it came and compared
 	# with null until the time ran out. #772 waited a minute for "null" that way and answered met
@@ -259,10 +262,13 @@ func wait_until(params: Dictionary) -> Dictionary:
 	var holds_objects: bool = declared == TYPE_OBJECT or untyped_object
 	if holds_objects and GdhChanges.names_no_object(wanted):
 		wanted = null
-	var refused: String = _not_comparable(current, wanted, node_path, property)
+	# A word no value of an enum is called, refused naming the values before it is compared as text.
+	var refused: String = "" if by_name.is_empty() or by_name[0] else str(by_name[1])
 	if refused.is_empty():
-		refused = _cut_to_fit(params["value"], typeof(current), node_path, property)
-	var rounded: String = GdhValues.inexact(params["value"], typeof(current))
+		refused = _not_comparable(current, wanted, node_path, property)
+	if refused.is_empty():
+		refused = _cut_to_fit(sent, typeof(current), node_path, property)
+	var rounded: String = GdhValues.inexact(sent, typeof(current))
 	if refused.is_empty() and not rounded.is_empty():
 		refused = "%s.%s holds int: %s." % [node_path, property, rounded]
 	var never_held: bool = typeof(wanted) != TYPE_NIL and typeof(wanted) != TYPE_OBJECT
@@ -476,6 +482,20 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 	return ""
 
 
+## [param sent] as the number of the value an enum property names by it, as
+## [method GdhDeclared.enum_by_name] answers, for a word waited for on what [param watched] read; []
+## when the property is no enum or the value no word.
+static func _enum_by_name(watched: Dictionary, sent: Variant, node_path: String) -> Array:
+	var declaration: Dictionary = watched["declaration"]
+	var enum_hint: bool = GdhRead.as_int(declaration.get("hint", PROPERTY_HINT_NONE)) == PROPERTY_HINT_ENUM
+	if watched["declared"] != TYPE_INT or not enum_hint or not sent is String:
+		return []
+	if not watched["holder"] is Object:
+		return []
+	var owner: Object = watched["holder"]
+	return GdhDeclared.enum_by_name(owner, declaration, str(sent), node_path)
+
+
 ## What [param property] reads as on [param node] right now, under `value`, or a `message` saying
 ## why it cannot be read.
 ##
@@ -493,18 +513,24 @@ static func _watched(node: Node, node_path: String, property: String) -> Diction
 	var missing: String = GdhPaths.nothing_under(holder, named, str(reached["called"]))
 	if not missing.is_empty():
 		return {"type": "error", "message": missing}
-	return {"value": GdhPaths.read_under(holder, named), "declared": _declared_type(holder, named)}
+	var slot: Dictionary = _declared_slot(holder, named)
+	return {
+		"value": GdhPaths.read_under(holder, named),
+		"declared": slot["type"],
+		"declaration": slot["declared"],
+		"holder": holder,
+	}
 
 
-## The type [param named] is declared with on [param holder], read the way a set reads it, so the two
-## refuse the same values: a property's declaration, or a typed list's or map's element type. Read
-## off properties alone, an element of an Array[Node] holding null declares nothing, and a wait for 5
-## on it runs out the timeout while a set of 5 on it is refused at once. TYPE_NIL for anything
-## declaring none, and for a call, whose answer nothing declares.
-static func _declared_type(holder: Variant, named: String) -> int:
+## What [param named] is declared with on [param holder], as [method GdhValues.slot_declared] answers,
+## read the way a set reads it, so the two refuse the same values: a property's declaration, or a
+## typed list's or map's element type. Read off properties alone, an element of an Array[Node] holding
+## null declares nothing, and a wait for 5 on it runs out the timeout while a set of 5 on it is refused
+## at once. TYPE_NIL for anything declaring none, and for a call, whose answer nothing declares.
+static func _declared_slot(holder: Variant, named: String) -> Dictionary:
 	if not GdhPaths.method_of(named).is_empty():
-		return TYPE_NIL
-	return GdhValues.slot_declared(holder, named)["type"]
+		return {"type": TYPE_NIL, "class": "", "script": null, "declared": {}}
+	return GdhValues.slot_declared(holder, named)
 
 
 ## Waits until something under [param node_path] has [param said] written on it.

@@ -5,6 +5,7 @@ extends RefCounted
 ## back what the engine did rather than trusting that it did it.
 
 const GdhCallErrors = preload("call_errors.gd")
+const GdhDeclared = preload("declared_values.gd")
 const GdhPaths = preload("runtime_paths.gd")
 const GdhRead = preload("reading.gd")
 const GdhValues = preload("runtime_values.gd")
@@ -146,6 +147,15 @@ func set_property(params: Dictionary) -> Dictionary:
 	}
 	if already and unmoved:
 		answer["unchanged"] = true
+	# The engine stores a number past an export range, or one no enum value has, as given; only the
+	# inspector holds a property to them, so the game now holds a value its own script never expected.
+	if holder is Object:
+		var owner: Object = holder
+		var shown: String = JSON.stringify(_values.serialize(now), "", false)
+		var declaration: Dictionary = slot["declared"]
+		var outside: String = GdhDeclared.outside(owner, declaration, now, shown)
+		if not outside.is_empty():
+			answer["outside_declared"] = outside
 	return answer
 
 
@@ -240,6 +250,15 @@ func _value_for(
 	var declared: int = slot["type"]
 	var declared_script: Script = slot["script"]
 	var wanted: int = declared if declared != TYPE_NIL else typeof(old_value)
+	var declaration: Dictionary = slot["declared"]
+	var enum_hint: bool = GdhRead.as_int(declaration.get("hint", PROPERTY_HINT_NONE)) == PROPERTY_HINT_ENUM
+	if declared == TYPE_INT and enum_hint and value is String and reached["holder"] is Object:
+		var owner: Object = reached["holder"]
+		var by_name: Array = GdhDeclared.enum_by_name(owner, declaration, str(value), called)
+		if by_name[0]:
+			return {"value": by_name[1]}
+		if not str(by_name[1]).is_empty():
+			return {"type": "error", "message": by_name[1]}
 	var holds_objects: bool = (
 		declared == TYPE_OBJECT or (declared == TYPE_NIL and (old_value == null or old_value is Object))
 	)

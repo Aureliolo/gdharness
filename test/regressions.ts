@@ -12633,8 +12633,10 @@ function testAPidPicksOneOfSeveralGames(): void {
     assert.match(unasked, new RegExp(`pid ${worker.pid} on 127\\.0\\.0\\.1:${worker.port}`), unasked);
   }
   // Once in the sentence rather than beside every game: thirty-one workers of one project put
-  // three kilobytes of the same path into the answer a bench is the one reading.
-  assert.equal(unasked.split(resolve(project)).length - 1, 1, `the project is named once: ${unasked}`);
+  // three kilobytes of the same path into the answer a bench is the one reading. Counted by its own
+  // folder's name, since the path is said with its links resolved: an 8.3 short name in the
+  // temporary directory comes back long on a Windows runner.
+  assert.equal(unasked.split(basename(project)).length - 1, 1, `the project is named once: ${unasked}`);
 
   // A game whose announcement carried no project path is parsed as an empty one, and an empty
   // path resolves to wherever this server was started. Two of those agree on a directory neither
@@ -28628,6 +28630,132 @@ async function testABreakpointOnADeletedScriptIsTakenOff(): Promise<void> {
   } finally {
     // Not recursive, which would go through the link into the project it names.
     rmSync(linked, { force: true });
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A running game's enum property is set and waited for by name, and a value outside what the
+ * property declares is written with a note saying so.
+ *
+ * The runtime fitted a value to the property's type alone, so "ANGRY" into an enum was refused as a
+ * String that cannot become an int, with no word of the names, and 11 into a property exported with
+ * a range of 0 to 10 answered as any other write while the game held a value its script never
+ * expected. The headless and editor writes already took the names and said so. Found by probe 118.
+ */
+async function testARunningGamesEnumIsSetByName(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('running enum regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-running-enum-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-running-enum-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Running enum"\n' +
+      'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+      'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\nenum Mood { CALM, BUSY, ANGRY }\n\n@export var mood: Mood = Mood.CALM\n' +
+      '@export_range(0, 10) var level: int = 3\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  const set = (property: string, value: unknown): Promise<{ said: string; answer: unknown }> =>
+    call('runtime_invoke', { op: 'set', nodePath: '/root/Main', property, value });
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    const start = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    started = get(start.answer, 'started') === true;
+    assert.ok(started, start.said);
+
+    const angry = await set('mood', 'ANGRY');
+    assert.deepEqual(
+      [get(angry.answer, 'new_value'), get(angry.answer, 'outside_declared')],
+      [2, undefined],
+      `an enum takes the name of a value: ${angry.said}`,
+    );
+    const waited = await call('runtime_wait', {
+      op: 'until',
+      nodePath: '/root/Main',
+      property: 'mood',
+      value: 'angry',
+      timeoutMs: 2_000,
+    });
+    assert.equal(get(waited.answer, 'met'), true, `and is waited for by it: ${waited.said}`);
+    const furious = await set('mood', 'Furious');
+    assert.equal(furious.answer, null, furious.said);
+    assert.match(
+      furious.said,
+      /^\/root\/Main\.mood is an enum, and Furious is none of its values: send CALM \(0\), BUSY \(1\), ANGRY \(2\) by name or by number/,
+      `a name none of its values has is refused naming them: ${furious.said}`,
+    );
+    const unwaited = await call('runtime_wait', {
+      op: 'until',
+      nodePath: '/root/Main',
+      property: 'mood',
+      value: 'Furious',
+      timeoutMs: 500,
+    });
+    assert.match(unwaited.said, /Furious is none of its values: send CALM \(0\)/, unwaited.said);
+
+    const within = await set('level', 5);
+    assert.deepEqual(
+      [get(within.answer, 'new_value'), get(within.answer, 'outside_declared')],
+      [5, undefined],
+      `a value inside the range says nothing more: ${within.said}`,
+    );
+    const past = await set('level', 11);
+    assert.equal(get(past.answer, 'new_value'), 11, past.said);
+    assert.match(
+      text(get(past.answer, 'outside_declared')),
+      /^11 is outside the range level declares, 0 to 10, which the inspector holds it to; the engine stores it as given\.$/,
+      `a value past the range is written and said to be: ${past.said}`,
+    );
+    const unnamed = await set('mood', 7);
+    assert.match(
+      text(get(unnamed.answer, 'outside_declared')),
+      /^7 is none of the values mood declares: CALM \(0\), BUSY \(1\), ANGRY \(2\)\.$/,
+      `as is a number no value of the enum has: ${unnamed.said}`,
+    );
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
     sweep(project, runtimeDir);
   }
 }
@@ -48801,6 +48929,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameHeldInACallHasTheCall,
   testInputThatReachesNothingSaysWhatWould,
   testABreakpointOnADeletedScriptIsTakenOff,
+  testARunningGamesEnumIsSetByName,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,
