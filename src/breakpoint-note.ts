@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { HeldBreakpoint } from './dap_client.js';
 import { errorMessage } from './errors.js';
-import { realPathOr } from './paths.js';
+import { realAsFarAsItExists } from './paths.js';
 
 /**
  * The breakpoints set through this server, written down in the project.
@@ -36,9 +36,9 @@ export function writeBreakpointNote(projectPath: string, held: readonly HeldBrea
   // The project as the adapter's paths spell it, which is with every symlink resolved: on macOS
   // every /var/folders project is really under /private/var/folders, and a file compared against
   // the unresolved root reads as outside it.
-  const root = realPathOr(projectPath);
+  const root = realAsFarAsItExists(projectPath);
   const inside = held
-    .map((one) => ({ scriptPath: realPathOr(one.scriptPath), lines: one.lines }))
+    .map((one) => ({ scriptPath: realAsFarAsItExists(one.scriptPath), lines: one.lines }))
     .filter((one) => one.lines.length > 0 && withinProject(root, one.scriptPath));
   try {
     if (inside.length === 0) {
@@ -89,7 +89,7 @@ export function readBreakpointNote(projectPath: string): HeldBreakpoint[] {
       if (lines.length > 0) {
         // Resolved the way debug_breakpoint resolves what it is given, since the adapter refuses
         // a spelling of the file that is not the one it holds the project under.
-        held.push({ scriptPath: realPathOr(join(projectPath, script)), lines });
+        held.push({ scriptPath: realAsFarAsItExists(join(projectPath, script)), lines });
       }
     }
     return held;

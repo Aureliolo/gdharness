@@ -29,7 +29,7 @@ import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
-import { alive } from '../src/alive.js';
+import { alive, exitOf } from '../src/alive.js';
 import { answerJson } from '../src/answer-json.js';
 import { scriptsAutoloaded } from '../src/autoload-failure.js';
 import {
@@ -132,7 +132,13 @@ import {
   narrowedCompletions,
   typedBefore,
 } from '../src/lsp_client.js';
-import { exportedBuild, isSameDirectory, isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import {
+  exportedBuild,
+  isSameDirectory,
+  isWithinRoot,
+  realAsFarAsItExists,
+  resolveWithinProject,
+} from '../src/paths.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
 import {
@@ -434,10 +440,12 @@ function testStaleDisconnectRegression(): void {
   const second = new FakeSocket('second');
 
   connectFake(bridge, first);
+  saysHello(first, process.cwd());
   assert.equal(bridge.getStatus().connected, true, 'first socket should be connected');
 
   first.readyState = 3;
   connectFake(bridge, second);
+  saysHello(second, process.cwd());
   assert.equal(bridge.getStatus().connected, true, 'second socket should be connected');
 
   first.emit('close', 1000, Buffer.from('late close from stale socket'));
@@ -445,6 +453,51 @@ function testStaleDisconnectRegression(): void {
 
   second.emit('close', 1000, Buffer.from('active socket closed'));
   assert.equal(bridge.getStatus().connected, false, 'active socket close should disconnect bridge');
+}
+
+/**
+ * A connection nobody closed does not hold its process open. The bridge pings an open socket on a
+ * timer, and a failing case that left one connected kept the regression run alive for two and a half
+ * hours after it had printed its summary. A process holding a greeted fake editor ends on its own.
+ */
+async function testAnOpenConnectionDoesNotHoldItsProcess(): Promise<void> {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-held-open-'));
+  try {
+    const script = join(scratch, 'held.ts');
+    writeFileSync(
+      script,
+      [
+        `import { EventEmitter } from 'node:events';`,
+        `import { createBridge } from ${JSON.stringify(pathToFileURL(resolve('src', 'godot-bridge.ts')).href)};`,
+        `import { greeting } from ${JSON.stringify(pathToFileURL(resolve('test', 'support', 'greeting.ts')).href)};`,
+        `const socket = Object.assign(new EventEmitter(), { readyState: 1, send() {}, close() {}, terminate() {} });`,
+        `const bridge = createBridge(0, 1000, '127.0.0.1');`,
+        `(bridge as unknown as { handleConnection: (socket: unknown) => void }).handleConnection(socket);`,
+        `socket.emit('message', Buffer.from(JSON.stringify(greeting(process.cwd()))));`,
+        `console.log('connected', bridge.isConnected());`,
+      ].join('\n'),
+    );
+    const child = spawnHidden(process.execPath, [script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let printed = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      printed += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      printed += chunk.toString();
+    });
+    const ended = await Promise.race([exitOf(child), delay(15_000).then(() => null)]);
+    if (ended === null) {
+      child.kill();
+    }
+    assert.match(
+      printed,
+      /connected true/,
+      `the fake editor should be connected, or this proves nothing: ${printed}`,
+    );
+    assert.deepEqual(ended, { code: 0, signal: null }, `and the process should end on its own: ${printed}`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -2094,6 +2147,13 @@ async function turnedAwayAtTheBridge(
   const waiting = socket('waiting');
   connectFake(bridge, waiting);
   assert.equal(bridge.isArriving(), true, 'a socket that has not greeted is arriving');
+  // Not connected yet either, or editor_status saw connected go true, false and true again as the
+  // greeting started the lookup, and a fixture waiting on true met false on its next call.
+  assert.deepEqual(
+    [bridge.getStatus().connected, bridge.getStatus().identifying],
+    [false, true],
+    'and status reads it as being looked up, not connected',
+  );
   hello(waiting, 104);
   await settled();
   assert.equal(bridge.getStatus().connected, false, 'not counted while it is being looked up');
@@ -5781,11 +5841,11 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
 /**
  * A call made while an editor is still arriving waits for it to settle and is then served.
  *
- * Connected reads true from the moment the socket opens, and false again once an editor nobody's
- * server opened greets and its command line is read. On the macOS editor leg a test editor read as
- * connected had its first call refused as not connected, because that call landed in the second
- * window. Here a fake editor opens the socket, is read as connected, is asked for a scene while it
- * has not greeted, and greets without a server's mark half a second later: the call reaches it only
+ * An editor is arriving from its socket opening until it has greeted and, when nobody's server
+ * opened it, until its command line has been read. On the macOS editor leg a test editor read as
+ * connected in that span had its first call refused as not connected. Here a fake editor opens the
+ * socket, is read as arriving, is asked for a scene while it has not greeted, and greets without a
+ * server's mark half a second later: the call reaches it only
  * after the greeting and the lookup, and answers with what the editor said.
  */
 async function testACallWaitsForAnArrivingEditor(): Promise<void> {
@@ -5821,17 +5881,23 @@ async function testACallWaitsForAnArrivingEditor(): Promise<void> {
         );
       }
     });
-    let connected = false;
-    for (let waited = 0; waited < 10_000 && !connected; waited += 100) {
-      const now = parseTextContent(
-        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    let arriving: unknown = null;
+    for (let waited = 0; waited < 10_000 && arriving === null; waited += 100) {
+      const now = get(
+        parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+        'editor',
       );
-      connected = get(now, 'editor', 'connected') === true;
-      if (!connected) {
+      if (get(now, 'identifying') === true) {
+        arriving = now;
+      } else {
         await delay(100);
       }
     }
-    assert.ok(connected, 'the socket counts as connected before its greeting, which is the reading acted on');
+    assert.equal(
+      get(arriving, 'connected'),
+      false,
+      `the socket is arriving, and not connected, before its greeting: ${JSON.stringify(arriving)}`,
+    );
     const asked = server.request(
       'tools/call',
       { name: 'scene_tree', arguments: { projectPath: project, scenePath: 'res://main.tscn' } },
@@ -6011,13 +6077,14 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
         parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
         'editor',
       );
-      if (get(now, 'connected') === true) {
+      if (get(now, 'identifying') === true) {
         gap = now;
         break;
       }
       await delay(100);
     }
-    assert.ok(gap !== null, 'the socket should count as connected before any greeting');
+    assert.ok(gap !== null, 'the socket should be read as arriving before any greeting');
+    assert.equal(get(gap, 'connected'), false, `and not as connected: ${JSON.stringify(gap)}`);
     assert.match(text(get(gap, 'greeting')), /has not yet said who it is/, JSON.stringify(gap));
     assert.equal(
       get(gap, 'addonIsStale'),
@@ -6028,7 +6095,7 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
     assert.equal(get(gap, 'breakpointsAtRisk'), undefined, JSON.stringify(gap));
     assert.match(
       await call('editor_output', { op: 'editor' }),
-      /has connected and has not yet said who it is/,
+      /has opened the bridge and has not yet said who it is/,
       'the console is not refused as another',
     );
 
@@ -6090,15 +6157,15 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
         asked.push(message.tool);
       }
     });
-    let connected = false;
-    for (let waited = 0; waited < 10_000 && !connected; waited += 100) {
+    let arriving = false;
+    for (let waited = 0; waited < 10_000 && !arriving; waited += 100) {
       await delay(100);
       const now = parseTextContent(
         await silentServer.request('tools/call', { name: 'editor_status', arguments: {} }),
       );
-      connected = get(now, 'editor', 'connected') === true;
+      arriving = get(now, 'editor', 'identifying') === true;
     }
-    assert.ok(connected, 'the silent editor should count as connected');
+    assert.ok(arriving, 'the silent editor should be read as arriving');
     const refused =
       textOf(
         await silentServer
@@ -6674,13 +6741,17 @@ async function testAServerEndsWithAnEditorStillOnTheBridge(): Promise<void> {
       });
       opened.once('error', reject);
     });
+    opened.send(JSON.stringify(greeting(process.cwd(), { opened_by_a_server: true })));
 
-    const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
-    assert.equal(
-      get(parseTextContent(status), 'editor', 'connected'),
-      true,
-      'the fixture editor should be on the bridge, or this proves nothing',
-    );
+    let connected: unknown = false;
+    for (let waited = 0; waited < 10_000 && connected !== true; waited += 100) {
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      connected = get(parseTextContent(status), 'editor', 'connected');
+      if (connected !== true) {
+        await delay(100);
+      }
+    }
+    assert.equal(connected, true, 'the fixture editor should be on the bridge, or this proves nothing');
 
     server.child.stdin?.end();
 
@@ -7915,6 +7986,22 @@ function testProjectPathsAreContained(): void {
     assert.doesNotMatch(answer.reason, /somewhere other than this project/);
   }
 
+  // The example offered is the end of the path given, so an export's .exe is not offered a scene.
+  for (const [candidate, example] of [
+    ['/home/me/builds/game.exe', 'builds/game.exe'],
+    ['\\Windows\\win.ini', 'Windows/win.ini'],
+    ['/game.pck', 'game.pck'],
+    ['/', 'scenes/main.tscn'],
+    ...(onWindows ? [['C:\\Users\\me\\out\\game.exe', 'out/game.exe']] : []),
+  ]) {
+    const answer = resolveWithinProject(root, String(candidate));
+    assert.ok(!answer.ok, `${candidate} should not be contained`);
+    assert.equal(
+      answer.reason,
+      `Path '${candidate}' is absolute and outside the project; give a path inside it, such as '${example}'.`,
+    );
+  }
+
   // The other half, or the fixture above passes against a function that refuses everything.
   const accepted: [string, string][] = [
     ['scenes/main.tscn', 'scenes/main.tscn'],
@@ -8322,6 +8409,20 @@ function testASearchReadsWhatItSaysItReads(): void {
       ending.results.map((entry) => entry.file),
       ['res://crlf.gd'],
       `$ meets the end of a CRLF line: ${JSON.stringify(ending)}`,
+    );
+    // The runtime's own reason sits between the two, and Node and Bun word it differently.
+    assert.throws(
+      () => search('(', { regex: true }),
+      {
+        message:
+          /^'\(' is not a regular expression: [a-z][^.]*\. With regex true, a character such as \( \) \[ \] \{ \} \. \* \+ \? \| \^ \$ or \\ stands for itself only after a backslash, as in \\\(; or leave regex out to search for the text as written\.$/,
+      },
+      'a query that is not an expression is named as given, with the escape',
+    );
+    assert.deepEqual(
+      search('(', { fileTypes: ['gd'] }).results.map((entry) => entry.file),
+      ['res://crlf.gd'],
+      'and the same text without regex is searched as written',
     );
 
     const exactly = search('GameState', { maxResults: 2 });
@@ -11202,6 +11303,100 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
 }
 
 /**
+ * A run on a desktop of its own that quits at once is seen to end, and its keeper ends with it.
+ *
+ * The helper that starts a game on another desktop writes the game's pid and waits for it, and the
+ * keeper reads that pid every 50ms. A game gone before the next read took the helper with it in
+ * between, and the keeper listened for an exit that had already been told: the run's note never
+ * gained its end, and the keeper stayed up holding nothing until the machine restarted. Thirty-eight
+ * of them were found on a development machine, some three days old.
+ *
+ * Whether a game lands in the gap is timing: `cmd /c exit 3` left the keeper up in about half of its
+ * runs, so it is run six times, and a keeper that misses the exit fails at least one of them nineteen
+ * times in twenty. testAnExitAlreadyToldIsStillSeen holds the same line without the timing.
+ */
+async function testARunThatQuitsAtOnceOnItsOwnDesktopEnds(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('quick desktop run regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-quick-desktop-'));
+  const runtime = join(scratch, 'runtime');
+  mkdirSync(runtime);
+  try {
+    for (let run = 0; run < 6; run += 1) {
+      await quitsAtOnceOnItsOwnDesktop(join(scratch, `run-${run}`), runtime);
+    }
+  } finally {
+    sweep(scratch);
+  }
+}
+
+async function quitsAtOnceOnItsOwnDesktop(project: string, runtime: string): Promise<void> {
+  mkdirSync(project);
+  const answer = join(project, 'answer.json');
+  const launcher = join(project, 'launch.mjs');
+  const spec = {
+    command: join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+    // `exit` passes over the debugger's arguments, which a run is given unless asked otherwise.
+    args: ['/c', 'exit', '3'],
+    run: { transcript: join(project, 'run.log'), startedAt: Date.now(), projectPath: project },
+    desktop: `${HIDDEN_DESKTOP}-${randomUUID().slice(0, 8)}`,
+  };
+  writeFileSync(
+    launcher,
+    [
+      `import { writeFileSync } from 'node:fs';`,
+      `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+      `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+      `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+    ].join('\n'),
+  );
+  const ran = spawnSyncHidden(process.execPath, [launcher], {
+    encoding: 'utf8',
+    env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+    timeout: 90_000,
+  });
+  const launched: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+  assert.equal(
+    typeof get(launched, 'pid'),
+    'number',
+    `the launch should answer the game's pid: ${JSON.stringify(launched)}: ${ran.stdout} ${ran.stderr}`,
+  );
+  const note = runRecordPath(project, runtime);
+  let record: unknown = null;
+  for (let waited = 0; waited < 20_000 && get(record, 'exitCode') === undefined; waited += 200) {
+    await delay(200);
+    record = existsSync(note) ? JSON.parse(readFileSync(note, 'utf8')) : null;
+  }
+  assert.equal(get(record, 'exitCode'), 3, `the note should gain the run's end: ${JSON.stringify(record)}`);
+  const keeper = text(get(record, 'keeper'));
+  assert.ok(keeper.length > 0, `and should name the keeper that wrote it: ${JSON.stringify(record)}`);
+  const asked = await askTheKeeperToStop(keeper, 2_000);
+  assert.ok(
+    typeof asked === 'object' && 'unreached' in asked,
+    `which has gone, since what it held has: ${JSON.stringify(asked)}`,
+  );
+}
+
+/**
+ * The end of a child that has already exited is still given. Node tells an exit once, to the
+ * listeners there at the time, and a keeper that listened late held an ended run for good.
+ */
+async function testAnExitAlreadyToldIsStillSeen(): Promise<void> {
+  const child = spawnHidden(process.execPath, ['-e', 'process.exit(4)'], { stdio: 'ignore' });
+  const running = exitOf(child);
+  await new Promise<void>((told) => {
+    child.once('exit', () => {
+      told();
+    });
+  });
+  const late = await Promise.race([exitOf(child), delay(5_000).then(() => 'not told')]);
+  assert.deepEqual(late, { code: 4, signal: null }, 'asked after the exit, the end is given');
+  assert.deepEqual(await running, { code: 4, signal: null }, 'as it is when asked before it');
+}
+
+/**
  * The environment a run is started with goes to it without passing through any command line.
  *
  * The launcher and the keeper were handed their spec as a command-line argument, base64 JSON, and
@@ -12438,8 +12633,10 @@ function testAPidPicksOneOfSeveralGames(): void {
     assert.match(unasked, new RegExp(`pid ${worker.pid} on 127\\.0\\.0\\.1:${worker.port}`), unasked);
   }
   // Once in the sentence rather than beside every game: thirty-one workers of one project put
-  // three kilobytes of the same path into the answer a bench is the one reading.
-  assert.equal(unasked.split(resolve(project)).length - 1, 1, `the project is named once: ${unasked}`);
+  // three kilobytes of the same path into the answer a bench is the one reading. Counted by its own
+  // folder's name, since the path is said with its links resolved: an 8.3 short name in the
+  // temporary directory comes back long on a Windows runner.
+  assert.equal(unasked.split(basename(project)).length - 1, 1, `the project is named once: ${unasked}`);
 
   // A game whose announcement carried no project path is parsed as an empty one, and an empty
   // path resolves to wherever this server was started. Two of those agree on a directory neither
@@ -16268,38 +16465,31 @@ function testTheUncachedNoteSaysWhichRemedyStartsAnEngine(): void {
  * headless, a headless editor refuses to restart, and the refusal is what that case asserts.
  */
 function testARestartWaitsForTheEditorToSayWhoItIs(): void {
-  const startedAt = 1_000_000;
-  const newer = new Date(startedAt + 5_000);
-  const older = new Date(startedAt - 5_000);
+  const startedAt = Date.now() - 5_000;
+  assert.equal(
+    theEditorHasComeBack({ connected: true, connectedAt: new Date(startedAt - 5_000) }, startedAt),
+    false,
+    'the connection that was already there is the one being replaced',
+  );
 
+  const bridge = createBridge(0, 1000, '127.0.0.1');
+  const socket = new FakeSocket('back');
+  connectFake(bridge, socket);
+  const silent = bridge.getStatus();
   assert.equal(
-    theEditorHasComeBack({ connected: false, connectedAt: newer, addonVersion: '0.9.0' }, startedAt),
+    theEditorHasComeBack(silent, startedAt),
     false,
-    'nothing connected is not an editor that has come back',
+    'a socket that has said nothing is not an answer',
   );
-  assert.equal(
-    theEditorHasComeBack({ connected: true, connectedAt: older, addonVersion: '0.9.0' }, startedAt),
-    false,
-    'and the connection that was already there is the one being replaced',
-  );
-  // The branch nothing produced before: connected, newer, and not yet a word out of it.
-  assert.equal(
-    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: undefined }, startedAt),
-    false,
-    'a socket that has connected and said nothing yet is not an answer',
-  );
-  assert.equal(
-    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: '0.9.0' }, startedAt),
-    true,
-    'and one that has reported its version is',
-  );
-  // The empty string is an addon with no version marker, recorded when godot_ready lands. Waiting
-  // for a non-empty version would hang on a hand-copied addon.
-  assert.equal(
-    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: '' }, startedAt),
-    true,
-    'so is one with no version to report',
-  );
+  assert.equal(silent.identifying, true, `it is arriving: ${JSON.stringify(silent)}`);
+
+  // The empty string is an addon with no version marker. Waiting for a non-empty version would hang
+  // on a hand-copied addon.
+  socket.emit('message', Buffer.from(JSON.stringify(greeting(process.cwd(), { addon_version: '' }))));
+  const greeted = bridge.getStatus();
+  assert.equal(theEditorHasComeBack(greeted, startedAt), true, `the greeting is: ${JSON.stringify(greeted)}`);
+  assert.equal(greeted.addonVersion, '', 'with its version, or the lack of one, there to read');
+  socket.emit('close', 1000, Buffer.from('done'));
 }
 
 /**
@@ -18774,7 +18964,11 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       'Script file does not exist: res://checked/brokn.gd. The nearest .gd file is res://checked/broken.gd.',
     );
     const outside = textOf(await diagnose(join(tmpdir(), 'elsewhere.gd'))) ?? '';
-    assert.match(outside, /is absolute and outside the project; give a path inside it/, outside);
+    assert.match(
+      outside,
+      /is absolute and outside the project; give a path inside it, such as '[^'/]+\/elsewhere\.gd'\./,
+      outside,
+    );
     assert.match(outside, /Possible solutions:\n- Give the path relative to the project/, outside);
     const info = await server.request(
       'tools/call',
@@ -21634,6 +21828,10 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
         flagged,
         'the check and status name the same files, for the same reasons',
       );
+      // An addon's own files are counted rather than named: a first run after gdUnit4 was copied in
+      // named every one of its two hundred scripts.
+      writeFileSync(join(project, 'addons', 'gdUnit4', 'probe_icon.png'), solidPng(40, 160, 40));
+      writeFileSync(join(project, 'addons', 'gdUnit4', 'probe_extra.gd'), 'extends RefCounted\n');
 
       const checked = await answer('editor_run', { op: 'check' });
       assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
@@ -21641,6 +21839,15 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
         asArray(get(checked, 'importedFirst')).map(String).sort(),
         ['res://added.png', 'res://picture.png'],
         `the boot check imported both first: ${JSON.stringify(checked)}`,
+      );
+      assert.deepEqual(
+        [
+          get(checked, 'importedInAddons'),
+          get(checked, 'uidsWrittenInAddons'),
+          get(checked, 'uidsWrittenFirst'),
+        ],
+        [{ gdUnit4: 1 }, { gdUnit4: 1 }, undefined],
+        `and counted the addon's picture and script by addon: ${JSON.stringify(checked)}`,
       );
       // An engine's import pass takes seconds, and a reading of none would say the time was not taken.
       assert.ok(
@@ -24702,12 +24909,28 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           'var pad_down: bool = false',
           'var pad_frames: int = 0',
           'var pad_held: int = -1',
+          'var ticks: Dictionary = {"mouse": 0, "key": 0, "action": 0, "pad": 0}',
+          'var ticks_held: Dictionary = {}',
+          '',
+          '',
+          'func _physics_process(_delta: float) -> void:',
+          '\tfor named: String in ["mouse", "key", "action", "pad"]:',
+          '\t\tif get(named + "_down"):',
+          '\t\t\tticks[named] += 1',
+          '',
+          '',
+          'func _pressed(named: String, down: bool) -> void:',
+          '\tif down:',
+          '\t\tticks[named] = 0',
+          '\telse:',
+          '\t\tticks_held[named] = ticks[named]',
           '',
           '',
           'func _input(event: InputEvent) -> void:',
           '\tvar acted: InputEventAction = event as InputEventAction',
           '\tif acted != null and acted.action == &"ui_accept":',
           '\t\taction_down = acted.pressed',
+          '\t\t_pressed("action", acted.pressed)',
           '\t\tif acted.pressed:',
           '\t\t\taction_frames = 0',
           '\t\telse:',
@@ -24715,6 +24938,7 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           '\tvar pad: InputEventJoypadButton = event as InputEventJoypadButton',
           '\tif pad != null and pad.button_index == JOY_BUTTON_A:',
           '\t\tpad_down = pad.pressed',
+          '\t\t_pressed("pad", pad.pressed)',
           '\t\tif pad.pressed:',
           '\t\t\tpad_frames = 0',
           '\t\telse:',
@@ -24722,6 +24946,7 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           '\tvar button: InputEventMouseButton = event as InputEventMouseButton',
           '\tif button != null and button.button_index == MOUSE_BUTTON_LEFT:',
           '\t\tmouse_down = button.pressed',
+          '\t\t_pressed("mouse", button.pressed)',
           '\t\tif button.pressed:',
           '\t\t\tmouse_frames = 0',
           '\t\telse:',
@@ -24729,6 +24954,7 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           '\tvar key: InputEventKey = event as InputEventKey',
           '\tif key != null and key.keycode == KEY_SPACE and not key.echo:',
           '\t\tkey_down = key.pressed',
+          '\t\t_pressed("key", key.pressed)',
           '\t\tif key.pressed:',
           '\t\t\tkey_frames = 0',
           '\t\telse:',
@@ -24782,20 +25008,27 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
       const padded = await call('runtime_input', { op: 'joypad_button', button: 'a', holdFrames: 9 });
       assert.match(padded, /"held_frames": 9/, padded);
       assert.equal(await read('pad_held'), 9, `the pad button was down for the 9 frames asked: ${padded}`);
-      // Each hold says how long it lasted by the clock and in physics ticks, which keep to sixty a
-      // second whatever the process frames do: thirty held in a headless game, which runs them as
-      // fast as it can, moved a body for twelve ticks.
-      for (const [answer, frames] of [
-        [clicked, 30],
-        [keyed, 12],
-        [acted, 7],
-        [padded, 9],
+      // Each hold says how long it lasted by the clock and in physics ticks: thirty held in a
+      // headless game, which runs them as fast as it can, moved a body for twelve ticks. The ticks
+      // are held to the ones the game itself ran while the input was down, not to the clock: the
+      // engine runs at most eight a process frame and drops the rest, so a loaded runner held a key
+      // for 0.8 seconds and the game ran 39 ticks, not 48. One either way for the frame the press and
+      // the release land in, since the hold counts from the call and the game from the event.
+      for (const [answer, frames, named] of [
+        [clicked, 30, 'mouse'],
+        [keyed, 12, 'key'],
+        [acted, 7, 'action'],
+        [padded, 9, 'pad'],
       ] as const) {
         const held = get(JSON.parse(answer), 'held_for');
         const seconds = Number(get(held, 'seconds'));
         const ticks = Number(get(held, 'physics_frames'));
+        const ran = Number(await read(`ticks_held:${named}`));
         assert.ok(seconds >= (frames - 2) / 60 && seconds < 5, answer);
-        assert.ok(Number.isInteger(ticks) && Math.abs(ticks - seconds * 60) <= 4, answer);
+        assert.ok(
+          Number.isInteger(ticks) && ran > 0 && Math.abs(ticks - ran) <= 1,
+          `the ${named} hold says ${ticks} ticks and the game ran ${ran} while it was down: ${answer}`,
+        );
       }
 
       const both = await call('runtime_input', { op: 'key', keycode: 'Space', pressed: true, holdFrames: 5 });
@@ -28037,14 +28270,44 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       line: 11,
     });
     assert.deepEqual(get(last.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [11] }], last.said);
-    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 11 });
-    const gone = await call('debug_breakpoint', {
+    const listed = await call('debug_breakpoint', { projectPath: project, op: 'list' });
+    assert.deepEqual(
+      listed.answer,
+      { held: [{ scriptPath: 'res://main.gd', lines: [11] }] },
+      `a list reads the set without changing it: ${listed.said}`,
+    );
+    const taken = await call('debug_breakpoint', {
       projectPath: project,
       op: 'remove',
-      scriptPath: 'mian.gd',
-      line: 5,
+      scriptPath: 'main.gd',
+      line: 11,
     });
-    assert.equal(get(gone.answer, 'removed'), true, gone.said);
+    assert.deepEqual([get(taken.answer, 'removed'), get(taken.answer, 'held')], [true, []], taken.said);
+    const again = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'remove',
+      scriptPath: 'main.gd',
+      line: 11,
+    });
+    assert.deepEqual(
+      [get(again.answer, 'removed'), get(again.answer, 'why')],
+      [
+        false,
+        'No breakpoint was held on line 11 of res://main.gd, so there was nothing to remove; held lists the ones that are.',
+      ],
+      `a second remove is not a second success: ${again.said}`,
+    );
+    // A script deleted since its breakpoint was set can still have the breakpoint taken off.
+    writeFileSync(join(project, 'gone.gd'), 'extends Node\n');
+    await call('debug_breakpoint', { projectPath: project, op: 'set', scriptPath: 'gone.gd', line: 1 });
+    rmSync(join(project, 'gone.gd'));
+    const deleted = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'remove',
+      scriptPath: 'gone.gd',
+      line: 1,
+    });
+    assert.deepEqual([get(deleted.answer, 'removed'), get(deleted.answer, 'held')], [true, []], deleted.said);
 
     const set = await call('debug_breakpoint', {
       projectPath: project,
@@ -28055,7 +28318,7 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
     assert.deepEqual(get(set.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [8] }], set.said);
     assert.match(
       text(get(set.answer, 'note')),
-      /No editor is connected, so the set under held is kept here/,
+      /No editor is connected, so the breakpoints under held are kept here/,
       set.said,
     );
 
@@ -28163,6 +28426,467 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       free.said,
       /The game is running, not held/,
       `and removed, it lets the game run: ${free.said}`,
+    );
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A call held at a breakpoint is said to be with the game, and an idle game pauses in its next frame.
+ *
+ * The runtime queued its welcome when it took a connection and wrote it after reading the request
+ * that came with it, so a call that stopped on a breakpoint held the game with the welcome unsent,
+ * and the pending answer said the game had not taken the request while its stack showed the call.
+ * And a pause that lands between frames, where no script runs, let the game go with a step over,
+ * which counts lines only at the depth it began from: outside any script that is none, so an idle
+ * game ran on and the pause answered paused false. Found by probe 116 on a game whose only script
+ * work is a short _process.
+ */
+async function testAGameHeldInACallHasTheCall(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('held call regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-call-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-call-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Held call"\n' +
+      'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+      'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  // Line 7 is the only script line a frame runs, and line 11 the breakpoint inside add.
+  writeFileSync(
+    join(project, 'main.gd'),
+    [
+      'extends Node',
+      '',
+      'var frames: int = 0',
+      '',
+      '',
+      'func _process(_delta: float) -> void:',
+      '\tframes += 1',
+      '',
+      '',
+      'func add(amount: int) -> int:',
+      '\tvar doubled: int = amount * 2',
+      '\treturn frames + doubled',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    await call('debug_breakpoint', { projectPath: project, op: 'set', scriptPath: 'main.gd', line: 11 });
+    const start = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    started = get(start.answer, 'started') === true;
+    assert.ok(started, start.said);
+
+    const asked = await call('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'add',
+      args: [5],
+      timeoutMs: 2_000,
+    });
+    assert.equal(get(asked.answer, 'pending'), true, `the held call is pending: ${asked.said}`);
+    assert.match(
+      text(get(asked.answer, 'note')),
+      /has the request and did not answer 'call_method'/,
+      `with the game, which took it: ${asked.said}`,
+    );
+    const held = await call('debug_state', { op: 'stack' });
+    assert.deepEqual(
+      [get(held.answer, 'stack', 0, 'name'), get(held.answer, 'stack', 0, 'line')],
+      ['add', 11],
+      `held inside the call: ${held.said}`,
+    );
+    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 11 });
+    await call('debug_control', { op: 'continue' });
+    let collected: unknown = null;
+    for (let waited = 0; waited < 20_000; waited += 250) {
+      collected = (await call('runtime_invoke', { op: 'result', requestId: get(asked.answer, 'requestId') }))
+        .answer;
+      if (get(collected, 'pending') !== true) {
+        break;
+      }
+      await delay(250);
+    }
+    assert.ok(
+      Number(get(collected, 'result')) >= 10,
+      `and answered once let go: ${JSON.stringify(collected)}`,
+    );
+
+    // Nearly all of an idle game's time is outside script, so this pause lands between frames.
+    const paused = await call('debug_control', { op: 'pause' });
+    assert.deepEqual(
+      [get(paused.answer, 'paused'), get(paused.answer, 'stack', 0, 'name')],
+      [true, '_process'],
+      `an idle game pauses in the next script it runs: ${paused.said}`,
+    );
+    const going = await call('debug_control', { op: 'continue' });
+    assert.equal(get(going.answer, 'continued'), true, going.said);
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A breakpoint on a script since deleted is taken off, by the server that set it and by its successor.
+ *
+ * The breakpoint was held under the script's real path and looked up for the remove under the path
+ * resolved only when the whole of it existed, so once the script was gone the remove used the
+ * spelling given. Wherever the project sits behind a link, the two differ: the remove answered
+ * that nothing was held there while listing the breakpoint under held, on the macOS and Windows
+ * engine legs, whose temporary directories are reached through `/var` and an 8.3 short name. The
+ * project is reached through a link here so the case does not depend on where the machine keeps
+ * its temporary files.
+ */
+async function testABreakpointOnADeletedScriptIsTakenOff(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-breakpoint-'));
+  const linked = `${project}-linked`;
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-breakpoint-rt-'));
+  symlinkSync(project, linked, 'junction');
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Gone"\n');
+  writeFileSync(join(project, 'gone.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tpass\n');
+  const serve = (): ServerProcess =>
+    new ServerProcess({ env: { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: linked } });
+  const breakpoint = async (server: ServerProcess, op: string, line?: number): Promise<unknown> =>
+    parseTextContent(
+      await server.request('tools/call', {
+        name: 'debug_breakpoint',
+        arguments: {
+          projectPath: linked,
+          op,
+          ...(line === undefined ? {} : { scriptPath: 'gone.gd', line }),
+        },
+      }),
+    );
+  try {
+    const setter = serve();
+    try {
+      await setter.initialize('regression-test');
+      await breakpoint(setter, 'set', 1);
+      const set = await breakpoint(setter, 'set', 4);
+      assert.deepEqual(
+        get(set, 'held'),
+        [{ scriptPath: 'res://gone.gd', lines: [1, 4] }],
+        JSON.stringify(set),
+      );
+      rmSync(join(project, 'gone.gd'));
+      const removed = await breakpoint(setter, 'remove', 1);
+      assert.deepEqual(
+        [get(removed, 'removed'), get(removed, 'held')],
+        [true, [{ scriptPath: 'res://gone.gd', lines: [4] }]],
+        `the server that set it takes it off: ${JSON.stringify(removed)}`,
+      );
+    } finally {
+      await setter.stop();
+    }
+
+    // Spawned once the note is written, so it starts from what the first server left.
+    const successor = serve();
+    try {
+      await successor.initialize('regression-test');
+      const listed = await breakpoint(successor, 'list');
+      assert.deepEqual(
+        get(listed, 'held'),
+        [{ scriptPath: 'res://gone.gd', lines: [4] }],
+        `the successor holds what was left: ${JSON.stringify(listed)}`,
+      );
+      const removed = await breakpoint(successor, 'remove', 4);
+      assert.deepEqual(
+        [get(removed, 'removed'), get(removed, 'held')],
+        [true, []],
+        `and takes it off as well: ${JSON.stringify(removed)}`,
+      );
+    } finally {
+      await successor.stop();
+    }
+    assert.equal(
+      realAsFarAsItExists(join(linked, 'missing', 'gone.gd')),
+      join(realpathSync.native(project), 'missing', 'gone.gd'),
+      'the part of a path that exists is resolved, and the rest kept as written',
+    );
+  } finally {
+    // Not recursive, which would go through the link into the project it names.
+    rmSync(linked, { force: true });
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A running game's enum property is set and waited for by name, and a value outside what the
+ * property declares is written with a note saying so.
+ *
+ * The runtime fitted a value to the property's type alone, so "ANGRY" into an enum was refused as a
+ * String that cannot become an int, with no word of the names, and 11 into a property exported with
+ * a range of 0 to 10 answered as any other write while the game held a value its script never
+ * expected. The headless and editor writes already took the names and said so. Found by probe 118.
+ */
+async function testARunningGamesEnumIsSetByName(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('running enum regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-running-enum-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-running-enum-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Running enum"\n' +
+      'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+      'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\nenum Mood { CALM, BUSY, ANGRY }\n\n@export var mood: Mood = Mood.CALM\n' +
+      '@export_range(0, 10) var level: int = 3\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  const set = (property: string, value: unknown): Promise<{ said: string; answer: unknown }> =>
+    call('runtime_invoke', { op: 'set', nodePath: '/root/Main', property, value });
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    const start = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    started = get(start.answer, 'started') === true;
+    assert.ok(started, start.said);
+
+    const angry = await set('mood', 'ANGRY');
+    assert.deepEqual(
+      [get(angry.answer, 'new_value'), get(angry.answer, 'outside_declared')],
+      [2, undefined],
+      `an enum takes the name of a value: ${angry.said}`,
+    );
+    const waited = await call('runtime_wait', {
+      op: 'until',
+      nodePath: '/root/Main',
+      property: 'mood',
+      value: 'angry',
+      timeoutMs: 2_000,
+    });
+    assert.equal(get(waited.answer, 'met'), true, `and is waited for by it: ${waited.said}`);
+    const furious = await set('mood', 'Furious');
+    assert.equal(furious.answer, null, furious.said);
+    assert.match(
+      furious.said,
+      /^\/root\/Main\.mood is an enum, and Furious is none of its values: send CALM \(0\), BUSY \(1\), ANGRY \(2\) by name or by number/,
+      `a name none of its values has is refused naming them: ${furious.said}`,
+    );
+    const unwaited = await call('runtime_wait', {
+      op: 'until',
+      nodePath: '/root/Main',
+      property: 'mood',
+      value: 'Furious',
+      timeoutMs: 500,
+    });
+    assert.match(unwaited.said, /Furious is none of its values: send CALM \(0\)/, unwaited.said);
+
+    const within = await set('level', 5);
+    assert.deepEqual(
+      [get(within.answer, 'new_value'), get(within.answer, 'outside_declared')],
+      [5, undefined],
+      `a value inside the range says nothing more: ${within.said}`,
+    );
+    const past = await set('level', 11);
+    assert.equal(get(past.answer, 'new_value'), 11, past.said);
+    assert.match(
+      text(get(past.answer, 'outside_declared')),
+      /^11 is outside the range level declares, 0 to 10, which the inspector holds it to; the engine stores it as given\.$/,
+      `a value past the range is written and said to be: ${past.said}`,
+    );
+    const unnamed = await set('mood', 7);
+    assert.match(
+      text(get(unnamed.answer, 'outside_declared')),
+      /^7 is none of the values mood declares: CALM \(0\), BUSY \(1\), ANGRY \(2\)\.$/,
+      `as is a number no value of the enum has: ${unnamed.said}`,
+    );
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * Input that names nothing, or reaches nothing, says what would have worked.
+ *
+ * A misspelt key was refused as "Invalid key_label: Spaec", naming a field nobody passes and no key;
+ * a wait on a signal the node lacks named none of the ones it has; and a click outside the window
+ * answered exactly as one that landed. Found by probe 117.
+ */
+async function testInputThatReachesNothingSaysWhatWould(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('input refusal regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-input-refused-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-input-refused-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Input refused"\n' +
+      'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+      'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\nsignal reached(total: int)\n\nvar last_key: int = 0\n\n\n' +
+      'func _input(event: InputEvent) -> void:\n\tif event is InputEventKey and event.pressed:\n' +
+      '\t\tlast_key = (event as InputEventKey).keycode\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    const start = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    started = get(start.answer, 'started') === true;
+    assert.ok(started, start.said);
+
+    const space = await call('runtime_input', { op: 'key', keycode: 'Space' });
+    assert.ok(space.answer !== null, space.said);
+    const misspelt = await call('runtime_input', { op: 'key', keycode: 'Spaec' });
+    assert.equal(misspelt.answer, null, misspelt.said);
+    assert.match(
+      misspelt.said,
+      /^No key is called Spaec\. The nearest key names? (?:is|are) [^.]*\bSpace\b[^.]*\. A key is named as Godot names it/,
+      `a misspelt key is offered the key it was meant to be: ${misspelt.said}`,
+    );
+    const pressed = await call('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'get',
+      args: ['last_key'],
+    });
+    assert.equal(get(pressed.answer, 'result'), 32, `and only the key that was one arrived: ${pressed.said}`);
+
+    const unknown = await call('runtime_wait', {
+      op: 'signal',
+      nodePath: '/root/Main',
+      signal: 'reachd',
+      timeoutMs: 500,
+    });
+    assert.match(
+      unknown.said,
+      /\/root\/Main has no signal reachd; the nearest it has (?:is|are) reached\b/,
+      `a signal the node lacks is offered the nearest it has: ${unknown.said}`,
+    );
+
+    const inside = await call('runtime_input', { op: 'mouse_click', x: 10, y: 10 });
+    assert.equal(
+      get(inside.answer, 'outside_viewport'),
+      undefined,
+      `a click inside says nothing more: ${inside.said}`,
+    );
+    const outside = await call('runtime_input', { op: 'mouse_click', x: -40, y: 10 });
+    assert.match(
+      text(get(outside.answer, 'outside_viewport')),
+      /^\(-40(?:\.0)?, 10(?:\.0)?\) is outside the window's viewport, .*so no control there receives it/,
+      `a click outside the window says it reached no control: ${outside.said}`,
     );
   } finally {
     if (started) {
@@ -29769,7 +30493,9 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           '\treturn sum\n\n\n' +
           'func armour(pieces: Array[Gear]) -> String:\n\tvar labels: Array[String] = []\n' +
           '\tfor piece: Gear in pieces:\n\t\tlabels.append(piece.label)\n\treturn ", ".join(labels)\n\n\n' +
-          'func slow(ms: int) -> String:\n\tOS.delay_msec(ms)\n\tcount += 1\n\treturn "done after %d" % ms\n',
+          'func slow(ms: int) -> String:\n\tOS.delay_msec(ms)\n\tcount += 1\n\treturn "done after %d" % ms\n\n\n' +
+          'func later(ms: int) -> String:\n\tawait get_tree().create_timer(ms / 1000.0).timeout\n' +
+          '\tcount += 1\n\treturn "awaited %d" % ms\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -30003,6 +30729,54 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result')),
         before + 1,
         'the call ran once',
+      );
+
+      // A method that awaits hands its caller a function state at the first await, which was
+      // answered as the result. The answer is the value it returns once it ends, whether that comes
+      // inside the wait or is collected after it, and the frames go on drawing while it waits.
+      const awaited = await invokeWaiting({
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'later',
+        args: [300],
+      });
+      assert.equal(
+        get(awaited, 'result'),
+        'awaited 300',
+        `an awaiting method answers its value: ${JSON.stringify(awaited)}`,
+      );
+      assert.equal(get(awaited, 'awaited'), true, JSON.stringify(awaited));
+      assert.ok(
+        asNumber(get(awaited, 'elapsed_usec'), JSON.stringify(awaited)) > 250_000,
+        `and its time runs to its end, which a timer ends on a frame's boundary:${JSON.stringify(awaited)}`,
+      );
+      const awaitedLater = await invokeWaiting({
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'later',
+        args: [2000],
+        timeoutMs: 500,
+      });
+      assert.equal(
+        get(awaitedLater, 'pending'),
+        true,
+        `one that outlasts the wait is pending: ${JSON.stringify(awaitedLater)}`,
+      );
+      const laterId = asNumber(get(awaitedLater, 'requestId'), JSON.stringify(awaitedLater));
+      let laterCollected: unknown = awaitedLater;
+      for (let waited = 0; get(laterCollected, 'pending') === true && waited < 20_000; waited += 250) {
+        await delay(250);
+        laterCollected = await invokeWaiting({ op: 'result', requestId: laterId });
+      }
+      assert.equal(
+        get(laterCollected, 'result'),
+        'awaited 2000',
+        `and collected by its id: ${JSON.stringify(laterCollected)}`,
+      );
+      assert.equal(
+        asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result')),
+        before + 3,
+        'each awaiting call ran once',
       );
       assert.match(
         textOf(
@@ -32378,11 +33152,14 @@ async function testACommandLineNotGivenInTimeIsAskedAgain(): Promise<void> {
 function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
   const project = join(tmpdir(), 'gdharness-editor-vs-run');
   const engine = join(tmpdir(), 'engines', 'Godot_v4.5-stable_win64.exe');
+  // One moment for both: read twice, a millisecond could fall between them, and the slow launch's
+  // 13.5 seconds below, measured from the second, would round to 13.
+  const now = Date.now();
   const record = {
     pid: 4242,
     transcript: join(tmpdir(), 'none.log'),
-    startedAt: Date.now(),
-    startedBy: Date.now(),
+    startedAt: now,
+    startedBy: now,
     projectPath: project,
     arguments: ['--path', project],
     command: engine,
@@ -33607,7 +34384,7 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       const quickTook = Number(get(quick, 'tookMs'));
       // gdUnit4 is copied in unimported, so the first run imports its pictures, which the limit
       // does not cover and importTookMs counts.
-      const quickImport = get(quick, 'importedFirst') === undefined ? 0 : Number(get(quick, 'importTookMs'));
+      const quickImport = Number(get(quick, 'importTookMs') ?? 0);
       assert.ok(
         quickTook > 0 &&
           quickImport >= 0 &&
@@ -33806,7 +34583,7 @@ async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
       const took = Number(get(answer, 'tookMs'));
       // The import that comes first is outside the limit, and importTookMs says how much of the
       // call it was.
-      const imported = get(answer, 'importedFirst') === undefined ? 0 : Number(get(answer, 'importTookMs'));
+      const imported = Number(get(answer, 'importTookMs') ?? 0);
       assert.ok(
         took > 0 && imported >= 0 && imported < took && took - imported < 12_000,
         `tookMs is the whole call, and without its import under the limit it stopped short of: ${shown}`,
@@ -39100,7 +39877,7 @@ function testEveryToolNamedInProseIsATool(): void {
   const names = new Set(TOOL_SPECS.map((spec) => spec.name));
   const families = [...new Set(TOOL_SPECS.map((spec) => spec.name.split('_')[0]))];
   // Words this project owns or reads that are shaped like a tool and are not one: the fields the
-  // bridge sends the addon, the autoload the runtime installs, a section of project.godot, the
+  // bridge sends the addon and the server sends a headless operation, the autoload the runtime installs, a section of project.godot, the
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
@@ -39109,6 +39886,7 @@ function testEveryToolNamedInProseIsATool(): void {
   // and called a tool or called vocabulary.
   const notTools = new Set([
     'project_path',
+    'project_classes',
     'scene_path',
     'resource_path',
     'script_path',
@@ -48079,6 +48857,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryToolParameterIsRead,
   testEveryToolIsDrivenSomewhere,
   testStaleDisconnectRegression,
+  testAnOpenConnectionDoesNotHoldItsProcess,
   testOneServerOneProjectRegression,
   testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
   testEngineEntriesFoldAndScriptErrorsAreKnown,
@@ -48105,6 +48884,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALaunchIsOutsideTheServersTree,
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
+  testARunThatQuitsAtOnceOnItsOwnDesktopEnds,
+  testAnExitAlreadyToldIsStillSeen,
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,
@@ -48171,6 +48952,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhatTheGameTellsAScreenReaderIsRead,
   testARefusalIsSaidOnce,
   testAGameThisServerStartedIsDebugged,
+  testAGameHeldInACallHasTheCall,
+  testInputThatReachesNothingSaysWhatWould,
+  testABreakpointOnADeletedScriptIsTakenOff,
+  testARunningGamesEnumIsSetByName,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,

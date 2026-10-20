@@ -531,7 +531,10 @@ export class GameDebugger {
     }
     if (!held.hasStack) {
       this.forget('debug_enter');
-      this.send('next', [], held.thread);
+      // A step into, not over: over counts lines only at the depth it starts from, which outside any
+      // script is none, and every function the game runs after it is a level below, so an idle game
+      // let go that way ran on for good.
+      this.send('step', [], held.thread);
       const again = await this.next(GameDebugger.named('debug_enter'), STEP_MS);
       if (again === null) {
         return {

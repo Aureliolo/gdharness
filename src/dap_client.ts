@@ -772,19 +772,21 @@ export class GodotDAPClient {
 
   /**
    * Lets go of a held breakpoint without telling the editor, for a server with no editor connected:
-   * the editor that connects later is sent the set as it is then, before its first play.
+   * the editor that connects later is sent the set as it is then, before its first play. Says
+   * whether one was held there.
    */
-  forgetBreakpoint(scriptPath: string, line: number): void {
+  forgetBreakpoint(scriptPath: string, line: number): boolean {
     const key = fileKey(scriptPath);
     const lines = this.breakpoints.get(key);
     if (lines === undefined) {
-      return;
+      return false;
     }
-    lines.delete(line);
+    const held = lines.delete(line);
     if (lines.size === 0) {
       this.breakpoints.delete(key);
       this.spelled.delete(key);
     }
+    return held;
   }
 
   /**

@@ -23,10 +23,10 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { errorMessage } from './errors.js';
-import { isSameDirectory } from './paths.js';
+import { isSameDirectory, realAsFarAsItExists } from './paths.js';
 import { type CommandLineRead, readCommandLine } from './process-children.js';
 import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 import { runHidden } from './spawn.js';
@@ -92,31 +92,6 @@ export interface RunRecord {
 /** Where a run's note and its transcript are kept, beside the runtime's own announcements. */
 function runsDirectory(): string {
   return join(runtimeDirectory(), 'runs');
-}
-
-/**
- * [param path] with the links in whatever part of it exists resolved, and the rest as written.
- *
- * Resolved only when it exists, the key changed when the directory appeared: a server writes into
- * its project's `.godot` as it starts, which creates the directory, so a note written for the
- * project before that and one read after it named two files wherever the path runs through a link,
- * as a macOS temporary directory does through `/var`.
- */
-function realAsFarAsItExists(path: string): string {
-  const missing: string[] = [];
-  let at = path;
-  for (;;) {
-    try {
-      return join(realpathSync.native(at), ...missing);
-    } catch {
-      const parent = dirname(at);
-      if (parent === at) {
-        return path;
-      }
-      missing.unshift(basename(at));
-      at = parent;
-    }
-  }
 }
 
 /**

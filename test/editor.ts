@@ -4445,6 +4445,21 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
     ['Kind', 'Kind.LONG', 'Kind.SHORT', 'ROUNDS'],
     `and the reload names its constants, the enum's values under the enum: ${JSON.stringify(held)}`,
   );
+  // A script extending Peal holds Peal's constants as it holds Peal's methods, and the lists say
+  // both: the engine's constant map is the script's own, so every inherited method was listed and
+  // none of the constants. A file of its own: the fixture's clapper.gd declares Clapper, which later
+  // cases play.
+  writeFileSync(join(project, 'knocker.gd'), 'extends Peal\n\nconst TONE: int = 3\n');
+  const inherits = await call('editor_rescan', {
+    projectPath: project,
+    reloadScript: 'res://knocker.gd',
+    listMembers: true,
+  });
+  assert.deepEqual(
+    [get(inherits, 'reloadedConstants'), asArray(get(inherits, 'reloadedMethods')).includes('count')],
+    [['Kind', 'Kind.LONG', 'Kind.SHORT', 'ROUNDS', 'TONE'], true],
+    `a script's constants include those it inherits, as its methods do: ${JSON.stringify(inherits)}`,
+  );
   const opened = await call('script_diagnostics', { projectPath: project, scriptPath: 'res://peal.gd' });
   assert.equal(get(opened, 'clean'), true, JSON.stringify(opened));
 
@@ -5981,7 +5996,7 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
   );
   assert.match(
     await refusal('runtime_input', { ...game, op: 'key', keycode: 'Ctrl-Alt-Nonsense' }),
-    /Invalid key_label/,
+    /^No key is called Ctrl-Alt-Nonsense\. .*such as "Space"/,
     'and so should a key name that is not one',
   );
 
