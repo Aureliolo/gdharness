@@ -4447,11 +4447,12 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   );
   // A script extending Peal holds Peal's constants as it holds Peal's methods, and the lists say
   // both: the engine's constant map is the script's own, so every inherited method was listed and
-  // none of the constants.
-  writeFileSync(join(project, 'clapper.gd'), 'extends Peal\n\nconst TONE: int = 3\n');
+  // none of the constants. A file of its own: the fixture's clapper.gd declares Clapper, which later
+  // cases play.
+  writeFileSync(join(project, 'knocker.gd'), 'extends Peal\n\nconst TONE: int = 3\n');
   const inherits = await call('editor_rescan', {
     projectPath: project,
-    reloadScript: 'res://clapper.gd',
+    reloadScript: 'res://knocker.gd',
     listMembers: true,
   });
   assert.deepEqual(

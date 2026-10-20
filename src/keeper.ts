@@ -16,6 +16,7 @@ import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, wri
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { exitOf } from './alive.js';
 import { DESKTOP_VARIABLE, ensureHelperCompiled, throughHelper } from './desktop.js';
 import { GameDebugger } from './game-debugger.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
@@ -37,7 +38,7 @@ import {
   withEngineArguments,
   writeProfileFile,
 } from './script-profile.js';
-import { type ChildProcess, exitOf, spawnHidden, spawnShown } from './spawn.js';
+import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
 
 /**
  * The target started detached, so it is in no job object and no process group of this process;

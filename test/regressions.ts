@@ -29,7 +29,7 @@ import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
-import { alive } from '../src/alive.js';
+import { alive, exitOf } from '../src/alive.js';
 import { answerJson } from '../src/answer-json.js';
 import { scriptsAutoloaded } from '../src/autoload-failure.js';
 import {
@@ -303,7 +303,6 @@ import {
 import { skillFiles } from '../src/skill.js';
 import {
   type ChildProcess,
-  exitOf,
   runHidden,
   runSyncHidden,
   type SpawnSyncReturns,
@@ -28237,14 +28236,44 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       line: 11,
     });
     assert.deepEqual(get(last.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [11] }], last.said);
-    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 11 });
-    const gone = await call('debug_breakpoint', {
+    const listed = await call('debug_breakpoint', { projectPath: project, op: 'list' });
+    assert.deepEqual(
+      listed.answer,
+      { held: [{ scriptPath: 'res://main.gd', lines: [11] }] },
+      `a list reads the set without changing it: ${listed.said}`,
+    );
+    const taken = await call('debug_breakpoint', {
       projectPath: project,
       op: 'remove',
-      scriptPath: 'mian.gd',
-      line: 5,
+      scriptPath: 'main.gd',
+      line: 11,
     });
-    assert.equal(get(gone.answer, 'removed'), true, gone.said);
+    assert.deepEqual([get(taken.answer, 'removed'), get(taken.answer, 'held')], [true, []], taken.said);
+    const again = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'remove',
+      scriptPath: 'main.gd',
+      line: 11,
+    });
+    assert.deepEqual(
+      [get(again.answer, 'removed'), get(again.answer, 'why')],
+      [
+        false,
+        'No breakpoint was held on line 11 of res://main.gd, so there was nothing to remove; held lists the ones that are.',
+      ],
+      `a second remove is not a second success: ${again.said}`,
+    );
+    // A script deleted since its breakpoint was set can still have the breakpoint taken off.
+    writeFileSync(join(project, 'gone.gd'), 'extends Node\n');
+    await call('debug_breakpoint', { projectPath: project, op: 'set', scriptPath: 'gone.gd', line: 1 });
+    rmSync(join(project, 'gone.gd'));
+    const deleted = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'remove',
+      scriptPath: 'gone.gd',
+      line: 1,
+    });
+    assert.deepEqual([get(deleted.answer, 'removed'), get(deleted.answer, 'held')], [true, []], deleted.said);
 
     const set = await call('debug_breakpoint', {
       projectPath: project,
@@ -28255,7 +28284,7 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
     assert.deepEqual(get(set.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [8] }], set.said);
     assert.match(
       text(get(set.answer, 'note')),
-      /No editor is connected, so the set under held is kept here/,
+      /No editor is connected, so the breakpoints under held are kept here/,
       set.said,
     );
 
@@ -28364,6 +28393,142 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       /The game is running, not held/,
       `and removed, it lets the game run: ${free.said}`,
     );
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A call held at a breakpoint is said to be with the game, and an idle game pauses in its next frame.
+ *
+ * The runtime queued its welcome when it took a connection and wrote it after reading the request
+ * that came with it, so a call that stopped on a breakpoint held the game with the welcome unsent,
+ * and the pending answer said the game had not taken the request while its stack showed the call.
+ * And a pause that lands between frames, where no script runs, let the game go with a step over,
+ * which counts lines only at the depth it began from: outside any script that is none, so an idle
+ * game ran on and the pause answered paused false. Found by probe 116 on a game whose only script
+ * work is a short _process.
+ */
+async function testAGameHeldInACallHasTheCall(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('held call regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-call-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-call-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Held call"\n' +
+      'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+      'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  // Line 7 is the only script line a frame runs, and line 11 the breakpoint inside add.
+  writeFileSync(
+    join(project, 'main.gd'),
+    [
+      'extends Node',
+      '',
+      'var frames: int = 0',
+      '',
+      '',
+      'func _process(_delta: float) -> void:',
+      '\tframes += 1',
+      '',
+      '',
+      'func add(amount: int) -> int:',
+      '\tvar doubled: int = amount * 2',
+      '\treturn frames + doubled',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    await call('debug_breakpoint', { projectPath: project, op: 'set', scriptPath: 'main.gd', line: 11 });
+    const start = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    started = get(start.answer, 'started') === true;
+    assert.ok(started, start.said);
+
+    const asked = await call('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'add',
+      args: [5],
+      timeoutMs: 2_000,
+    });
+    assert.equal(get(asked.answer, 'pending'), true, `the held call is pending: ${asked.said}`);
+    assert.match(
+      text(get(asked.answer, 'note')),
+      /has the request and did not answer 'call_method'/,
+      `with the game, which took it: ${asked.said}`,
+    );
+    const held = await call('debug_state', { op: 'stack' });
+    assert.deepEqual(
+      [get(held.answer, 'stack', 0, 'name'), get(held.answer, 'stack', 0, 'line')],
+      ['add', 11],
+      `held inside the call: ${held.said}`,
+    );
+    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 11 });
+    await call('debug_control', { op: 'continue' });
+    let collected: unknown = null;
+    for (let waited = 0; waited < 20_000; waited += 250) {
+      collected = (await call('runtime_invoke', { op: 'result', requestId: get(asked.answer, 'requestId') }))
+        .answer;
+      if (get(collected, 'pending') !== true) {
+        break;
+      }
+      await delay(250);
+    }
+    assert.ok(
+      Number(get(collected, 'result')) >= 10,
+      `and answered once let go: ${JSON.stringify(collected)}`,
+    );
+
+    // Nearly all of an idle game's time is outside script, so this pause lands between frames.
+    const paused = await call('debug_control', { op: 'pause' });
+    assert.deepEqual(
+      [get(paused.answer, 'paused'), get(paused.answer, 'stack', 0, 'name')],
+      [true, '_process'],
+      `an idle game pauses in the next script it runs: ${paused.said}`,
+    );
+    const going = await call('debug_control', { op: 'continue' });
+    assert.equal(get(going.answer, 'continued'), true, going.said);
   } finally {
     if (started) {
       await server.request(
@@ -48425,6 +48590,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhatTheGameTellsAScreenReaderIsRead,
   testARefusalIsSaidOnce,
   testAGameThisServerStartedIsDebugged,
+  testAGameHeldInACallHasTheCall,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,

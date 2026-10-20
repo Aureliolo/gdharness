@@ -4909,6 +4909,22 @@ class GodotServer {
         if (!project.ok) {
           return project.response;
         }
+        if (op === 'list') {
+          const session = this.dapHoldingBreakpointsOf(project.value.path);
+          const editor = this.godotBridge.isConnected();
+          return this.jsonTextResponse({
+            held: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsHeld()),
+            ...(editor
+              ? {
+                  setInEditor: this.breakpointsAsProjectSpells(
+                    project.value.path,
+                    session.breakpointsInEditor(),
+                  ),
+                  ...this.breakpointsAtRisk(),
+                }
+              : {}),
+          });
+        }
         const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
         if (!located.ok) {
           return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
@@ -4953,10 +4969,15 @@ class GodotServer {
           // an editor that connects is given them before its first play.
           if (op === 'set') {
             session.holdBreakpoints([{ scriptPath, lines: [line] }]);
+            answer = { set: true };
           } else {
-            session.forgetBreakpoint(scriptPath, line);
+            answer = session.forgetBreakpoint(scriptPath, line)
+              ? { removed: true }
+              : {
+                  removed: false,
+                  why: `No breakpoint was held on line ${line} of res://${located.relativePath}, so there was nothing to remove; held lists the ones that are.`,
+                };
           }
-          answer = { [op === 'set' ? 'set' : 'removed']: true };
         }
         // Written after the adapter has taken it, so the note never claims a line the editor
         // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
@@ -5000,7 +5021,7 @@ class GodotServer {
                 }),
           note: editor
             ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
-            : 'No editor is connected, so the set under held is kept here: every game this server starts is handed it as it starts, an editor that connects is sent it before its first play, and it is kept in the project for the server after a reconnect.',
+            : 'No editor is connected, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.',
           ...(editor ? this.breakpointsAtRisk() : {}),
         });
       }
