@@ -21654,6 +21654,10 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
         flagged,
         'the check and status name the same files, for the same reasons',
       );
+      // An addon's own files are counted rather than named: a first run after gdUnit4 was copied in
+      // named every one of its two hundred scripts.
+      writeFileSync(join(project, 'addons', 'gdUnit4', 'probe_icon.png'), solidPng(40, 160, 40));
+      writeFileSync(join(project, 'addons', 'gdUnit4', 'probe_extra.gd'), 'extends RefCounted\n');
 
       const checked = await answer('editor_run', { op: 'check' });
       assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
@@ -21661,6 +21665,15 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
         asArray(get(checked, 'importedFirst')).map(String).sort(),
         ['res://added.png', 'res://picture.png'],
         `the boot check imported both first: ${JSON.stringify(checked)}`,
+      );
+      assert.deepEqual(
+        [
+          get(checked, 'importedInAddons'),
+          get(checked, 'uidsWrittenInAddons'),
+          get(checked, 'uidsWrittenFirst'),
+        ],
+        [{ gdUnit4: 1 }, { gdUnit4: 1 }, undefined],
+        `and counted the addon's picture and script by addon: ${JSON.stringify(checked)}`,
       );
       // An engine's import pass takes seconds, and a reading of none would say the time was not taken.
       assert.ok(
@@ -33677,7 +33690,7 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       const quickTook = Number(get(quick, 'tookMs'));
       // gdUnit4 is copied in unimported, so the first run imports its pictures, which the limit
       // does not cover and importTookMs counts.
-      const quickImport = get(quick, 'importedFirst') === undefined ? 0 : Number(get(quick, 'importTookMs'));
+      const quickImport = Number(get(quick, 'importTookMs') ?? 0);
       assert.ok(
         quickTook > 0 &&
           quickImport >= 0 &&
@@ -33876,7 +33889,7 @@ async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
       const took = Number(get(answer, 'tookMs'));
       // The import that comes first is outside the limit, and importTookMs says how much of the
       // call it was.
-      const imported = get(answer, 'importedFirst') === undefined ? 0 : Number(get(answer, 'importTookMs'));
+      const imported = Number(get(answer, 'importTookMs') ?? 0);
       assert.ok(
         took > 0 && imported >= 0 && imported < took && took - imported < 12_000,
         `tookMs is the whole call, and without its import under the limit it stopped short of: ${shown}`,

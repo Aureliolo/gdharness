@@ -67,6 +67,7 @@ import {
   unloadedTypes,
   unseenByEditor,
   withAddonClassesCounted,
+  withAddonPathsCounted,
 } from './class-cache.js';
 import { readClassNote, writeClassNote } from './class-note.js';
 import { configDisagrees } from './config-pin.js';
@@ -1850,18 +1851,24 @@ interface ImportedFirst {
  */
 function importedFirstAnswer(importedFirst: ImportedFirst | undefined): {
   importedFirst?: readonly string[];
+  importedInAddons?: Readonly<Record<string, number>>;
   notImportedFirst?: readonly unknown[];
   uidsWrittenFirst?: readonly string[];
+  uidsWrittenInAddons?: Readonly<Record<string, number>>;
   importTookMs?: number;
   importNote?: string;
 } {
   if (importedFirst === undefined) {
     return {};
   }
+  const imported = withAddonPathsCounted(importedFirst.imported);
+  const uids = withAddonPathsCounted(importedFirst.uidsWritten);
   return {
-    ...(importedFirst.imported.length === 0 ? {} : { importedFirst: importedFirst.imported }),
+    ...(imported.own.length === 0 ? {} : { importedFirst: imported.own }),
+    ...(Object.keys(imported.inAddons).length === 0 ? {} : { importedInAddons: imported.inAddons }),
     ...(importedFirst.notImported.length === 0 ? {} : { notImportedFirst: importedFirst.notImported }),
-    ...(importedFirst.uidsWritten.length === 0 ? {} : { uidsWrittenFirst: importedFirst.uidsWritten }),
+    ...(uids.own.length === 0 ? {} : { uidsWrittenFirst: uids.own }),
+    ...(Object.keys(uids.inAddons).length === 0 ? {} : { uidsWrittenInAddons: uids.inAddons }),
     importTookMs: importedFirst.tookMs,
     ...(importedFirst.note === undefined ? {} : { importNote: importedFirst.note }),
   };
@@ -2053,8 +2060,10 @@ export function scanWaitAnswer(
   waitedForEditorScanMs?: number;
   scanNote?: string | undefined;
   importedFirst?: readonly string[];
+  importedInAddons?: Readonly<Record<string, number>>;
   notImportedFirst?: readonly unknown[];
   uidsWrittenFirst?: readonly string[];
+  uidsWrittenInAddons?: Readonly<Record<string, number>>;
   importNote?: string;
 } {
   const imports = importedFirstAnswer(scanned.importedFirst);
