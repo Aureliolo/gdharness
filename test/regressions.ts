@@ -28,7 +28,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { inflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
-import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
+import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { alive, exitOf } from '../src/alive.js';
 import { answerJson } from '../src/answer-json.js';
@@ -9166,6 +9166,18 @@ function testChangelogReach(): void {
   assert.deepEqual(pullRequestNumbers(['A thing that happened (#274)', 'Another (#275)']), [274, 275]);
   assert.deepEqual(pullRequestNumbers(['Body lines mention (#99) but the subject does not\n\n(#98)']), []);
   assert.deepEqual(pullRequestNumbers([]), []);
+
+  // A release tag left on the history from before the rewrite is found again by its subject, the
+  // newest match when a subject repeats, and never by a line of some other commit's body.
+  const history = [
+    { sha: 'c3', message: 'Fix a thing (#1200)' },
+    { sha: 'c2', message: 'Release v1.3.6 (#1195)\n\nThe body.' },
+    { sha: 'c1', message: 'Release v1.3.6 (#1195)' },
+    { sha: 'c0', message: 'Unrelated\n\nRelease v1.3.6 (#1195)' },
+  ];
+  assert.equal(counterpart('Release v1.3.6 (#1195)', history), 'c2');
+  assert.equal(counterpart('Release v1.3.5 (#1190)', history), undefined);
+  assert.equal(counterpart('Release v1.3.6 (#1195)', history.slice(3)), undefined);
 }
 
 /**

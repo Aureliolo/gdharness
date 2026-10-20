@@ -100,6 +100,21 @@ export function pullRequestNumbers(subjects: readonly string[]): readonly number
   return [...seen];
 }
 
+/**
+ * The commit in `history` whose subject is `subject`, newest first, so a release's own commit can
+ * be found again on a history that was rewritten under it.
+ *
+ * The history from the fork on was rewritten after 1.3.6, and GitHub never moves the tag of an
+ * immutable release, so the tags up to that one point into a history no later tag descends from.
+ * Comparing across the two lists every commit since the fork. The rewrite kept every subject.
+ */
+export function counterpart(
+  subject: string,
+  history: readonly { readonly sha: string; readonly message: string }[],
+): string | undefined {
+  return history.find((entry) => entry.message.split('\n')[0] === subject)?.sha;
+}
+
 async function gh<T>(path: string): Promise<T> {
   const response = await fetch(`https://api.github.com/${path}`, {
     headers: {
@@ -141,9 +156,27 @@ async function main(): Promise<void> {
     throw new Error(`No release older than ${tag} to compare against.`);
   }
 
-  const compared = await gh<{ commits: { commit: { message: string } }[] }>(
-    `repos/${repository}/compare/${previous}...${tag}`,
-  );
+  type Compared = { status: string; commits: { commit: { message: string } }[] };
+  let from = previous;
+  let compared = await gh<Compared>(`repos/${repository}/compare/${previous}...${tag}`);
+  if (compared.status === 'diverged') {
+    const tagged = await gh<{ commit: { message: string } }>(`repos/${repository}/commits/${previous}`);
+    const subject = tagged.commit.message.split('\n')[0] ?? '';
+    const history = await gh<{ sha: string; commit: { message: string } }[]>(
+      `repos/${repository}/commits?sha=${tag}&per_page=100`,
+    );
+    const found = counterpart(
+      subject,
+      history.map((entry) => ({ sha: entry.sha, message: entry.commit.message })),
+    );
+    if (found === undefined) {
+      throw new Error(
+        `${tag} does not descend from ${previous}, and none of its last 100 commits is "${subject}".`,
+      );
+    }
+    from = found;
+    compared = await gh<Compared>(`repos/${repository}/compare/${from}...${tag}`);
+  }
   const numbers = pullRequestNumbers(compared.commits.map((entry) => entry.commit.message));
 
   const entries: Entry[] = [];
@@ -165,7 +198,7 @@ async function main(): Promise<void> {
     });
   }
 
-  process.stdout.write(renderNotes(entries, repository, previous, tag));
+  process.stdout.write(renderNotes(entries, repository, from, tag));
 }
 
 if (import.meta.main) {
