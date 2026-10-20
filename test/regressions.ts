@@ -6498,7 +6498,7 @@ async function testATestRunWithNothingToRunNamesTheRunnerToo(): Promise<void> {
     const said = textOf(answer) ?? '';
     assert.match(
       said,
-      /^No tests ran: nothing at res:\/\/test, and gdUnit4 is not installed in this project: no addons\/gdUnit4\/plugin\.cfg\./,
+      /^No tests ran: nothing at res:\/\/tests and res:\/\/test, and gdUnit4 is not installed in this project: no addons\/gdUnit4\/plugin\.cfg\./,
       said,
     );
     const content = get(answer, 'result', 'content');
@@ -6523,7 +6523,7 @@ async function testATestRunWithNothingToRunNamesTheRunnerToo(): Promise<void> {
       arguments: { projectPath: project },
     });
     const saidOld = textOf(nothingAndOld) ?? '';
-    assert.match(saidOld, /^No tests ran: nothing at res:\/\/test, and /, saidOld);
+    assert.match(saidOld, /^No tests ran: nothing at res:\/\/tests and res:\/\/test, and /, saidOld);
     assert.match(saidOld, older, saidOld);
     const oldJson: unknown = JSON.parse(
       String(get(asArray(get(nothingAndOld, 'result', 'content'), 'content')[1], 'text')),
@@ -30650,7 +30650,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         join(project, 'main.gd'),
         'extends Node\n\nvar wares: Array[Gear] = []\nvar worn: Gear = null\n' +
           'var by_name: Dictionary[String, Gear] = {"head": null}\n' +
-          'var spare: RefCounted = RefCounted.new()\nvar count: int = 3\n' +
+          'var spare: RefCounted = RefCounted.new()\nvar count: int = 3\nvar later_took: int = 0\n' +
           'var done_at: Array[int] = []\nvar tally: Dictionary[String, int] = {}\nvar board: Array[int] = []\n' +
           'var ledger: Dictionary = {"zeta": 1, "alpha": 2, "mid": 3}\n' +
           'var names: PackedStringArray = PackedStringArray(["Ada", "Bram"])\n' +
@@ -30670,8 +30670,9 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'func armour(pieces: Array[Gear]) -> String:\n\tvar labels: Array[String] = []\n' +
           '\tfor piece: Gear in pieces:\n\t\tlabels.append(piece.label)\n\treturn ", ".join(labels)\n\n\n' +
           'func slow(ms: int) -> String:\n\tOS.delay_msec(ms)\n\tcount += 1\n\treturn "done after %d" % ms\n\n\n' +
-          'func later(ms: int) -> String:\n\tawait get_tree().create_timer(ms / 1000.0).timeout\n' +
-          '\tcount += 1\n\treturn "awaited %d" % ms\n',
+          'func later(ms: int) -> String:\n\tvar began: int = Time.get_ticks_usec()\n' +
+          '\tawait get_tree().create_timer(ms / 1000.0).timeout\n' +
+          '\tlater_took = Time.get_ticks_usec() - began\n\tcount += 1\n\treturn "awaited %d" % ms\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -30922,9 +30923,13 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         `an awaiting method answers its value: ${JSON.stringify(awaited)}`,
       );
       assert.equal(get(awaited, 'awaited'), true, JSON.stringify(awaited));
+      // Held against the method's own reading rather than the timer's length: a timer counts whole
+      // frame steps, including the part of its first frame before it was made, so on a loaded macOS
+      // runner a 300 ms timer ended after 245 ms.
+      const took = asNumber(get(JSON.parse((await invoke('get', ['later_took'])).said), 'result'));
       assert.ok(
-        asNumber(get(awaited, 'elapsed_usec'), JSON.stringify(awaited)) > 250_000,
-        `and its time runs to its end, which a timer ends on a frame's boundary:${JSON.stringify(awaited)}`,
+        took > 0 && asNumber(get(awaited, 'elapsed_usec'), JSON.stringify(awaited)) >= took,
+        `and its time runs to its end, past the method's own ${String(took)} us: ${JSON.stringify(awaited)}`,
       );
       const awaitedLater = await invokeWaiting({
         op: 'call',
@@ -36467,10 +36472,12 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   assert.deepEqual(passing.passedSuites, [S_TEST], 'and the suite passed whole');
   assert.deepEqual(passing.shown, [], 'a passing run shows nothing');
 
+  // Under the function, which is what the constant is keyed by, and not the row that printed it.
+  const declareIt = `; if the suite prints it on purpose, list its text under "test_p" in the suite's GDHARNESS_EXPECTED_ERRORS`;
   const twice = judgeEngine(readRun(rows([1, 2, 1])), declaredRows, clean);
   assert.deepEqual(
     twice.faults,
-    [`an engine error in ${S_TEST} > test_p:1 (2): row said`],
+    [`an engine error in ${S_TEST} > test_p:1 (2): row said${declareIt}`],
     'a row printing it once more than declared',
   );
   assert.deepEqual(twice.passedSuites, [], 'fails its suite');
@@ -36486,7 +36493,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   const undeclared = judgeEngine(readRun(rows([1])), handed(['test_a', 'test_p']), clean);
   assert.deepEqual(
     undeclared.faults,
-    [`an engine error in ${S_TEST} > test_p:0 (1): row said`],
+    [`an engine error in ${S_TEST} > test_p:0 (1): row said${declareIt}`],
     'an error nothing declared fails a passing case',
   );
 
@@ -36534,7 +36541,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   );
   assert.deepEqual(
     judgeEngine(readRun(lateNotice), handed(['test_a', 'test_p']), clean).faults,
-    [`an engine error in ${S_TEST} > test_p:0 (1): row said`],
+    [`an engine error in ${S_TEST} > test_p:0 (1): row said${declareIt}`],
     'a notice printed once the suites run excuses nothing',
   );
 
@@ -36544,6 +36551,13 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     "Windows' status by name",
   );
   assert.equal(exitNamed(-1073741819), '0xC0000005 (STATUS_ACCESS_VIOLATION)', 'signed as well');
+  assert.deepEqual(
+    judgeEngine(readRun(rows([1])), declaredRows, { code: 100, signal: null, ended: null }).faults,
+    ["the engine exited 100 (gdUnit4's code for a case that failed or errored)"],
+    "gdUnit4's own code by its meaning, so it does not read as a crash",
+  );
+  assert.equal(exitNamed(101), "101 (gdUnit4's code for orphan nodes left behind)", 'orphans');
+  assert.equal(exitNamed(3), '3', 'a code nothing names stays a number');
   assert.equal(
     judgeEngine(readRun(rows([1])), declaredRows, { code: 0xc000012d, signal: null, ended: null }).starved,
     true,
@@ -36579,7 +36593,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     [
       `${S_TEST} closed without running test_c`,
       `${S_TEST} ran test_p, which gdharness did not read as cases of it to run here, so its plan of the cases was wrong`,
-      `an engine error in ${S_TEST} > test_p:0 (1): row said`,
+      `an engine error in ${S_TEST} > test_p:0 (1): row said${declareIt}`,
     ],
     'a case planned and never run, and one run unplanned',
   );
@@ -36648,7 +36662,11 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     handed(['test_a']),
     { code: 100, signal: null, ended: null },
   );
-  assert.deepEqual(failing.faults, ['the engine exited 100', `${S_TEST} > test_a failed`]);
+  assert.deepEqual(
+    failing.faults,
+    [`${S_TEST} > test_a failed`],
+    "gdUnit4's 100 beside a failed case says nothing the case's line does not",
+  );
   assert.match(
     failing.shown.join('\n'),
     /test_a FAILED 5ms\n {2}Report:\n {2}Expecting: 2 but was 1/,
@@ -36672,7 +36690,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     { code: 105, signal: null, ended: null },
   );
   assert.deepEqual(unloadable.faults, [
-    'the engine exited 105',
+    "the engine exited 105 (gdUnit4's code for scripts that did not compile)",
     'gdUnit4 could not load res://tests/bad_test.gd:3: Parse Error: Unexpected "}"., so it ran nothing',
     'the run executed no test case at all, whatever it exited with',
   ]);
@@ -37228,16 +37246,33 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     assert.equal(noisy.status, 1, noisy.said);
     assert.match(
       noisy.said,
-      /^2 suites passed with everything they reach as it stands now, and are not run\.$/m,
+      /^2 suites passed with everything they reach as it stands now, and are not run: res:\/\/tests\/ok_test\.gd, res:\/\/tests\/declared_test\.gd\.$/m,
       noisy.said,
     );
     assert.match(
       noisy.said,
-      /^ {2}an engine error in res:\/\/tests\/noisy_test\.gd > test_noisy: nobody said this$/m,
+      /^ {2}an engine error in res:\/\/tests\/noisy_test\.gd > test_noisy: nobody said this; if the suite prints it on purpose, list its text under "test_noisy" in the suite's GDHARNESS_EXPECTED_ERRORS$/m,
       noisy.said,
     );
     assert.match(noisy.said, /^everything it printed: .*engine\.log$/m, 'the log is kept and named');
-    assert.match(noisy.said, /^Failed: 1 case in 1 suite across 1 engine, /m, 'only the changed one ran');
+    assert.match(
+      noisy.said,
+      /^Failed: 1 problem, listed above\. Ran 1 case in 1 suite across 1 engine, /m,
+      'the problems counted, and only the changed one ran',
+    );
+    assert.match(
+      noisy.said,
+      /^Every engine's output is kept under .*test-runs[\\/]\d+-\d+ until the next run\.$/m,
+      noisy.said,
+    );
+
+    const nowhere = test('tests/nothing_test.gd');
+    assert.equal(nowhere.status, 2, nowhere.said);
+    assert.match(
+      nowhere.said,
+      /Nothing at res:\/\/tests\/nothing_test\.gd in the project at /,
+      'a path that is nowhere is missing from the project, not outside it',
+    );
     const passedAfter = JSON.parse(readFileSync(join(state, 'suite-passed.json'), 'utf8')) as Record<
       string,
       string
@@ -37251,6 +37286,33 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     const everything = test('tests/ok_test.gd', 'tests/declared_test.gd');
     assert.equal(everything.status, 0, everything.said);
     assert.doesNotMatch(everything.said, /are not run/, 'without the flag, every suite runs');
+    assert.doesNotMatch(everything.said, /Dealt out case by case/, 'nothing took long enough to split');
+
+    const reversed = test('tests/ok_test.gd', 'tests/declared_test.gd', '--order', 'reversed');
+    assert.match(reversed.said, /over 1 engine, in reverse order of path\.$/m, reversed.said);
+    const shuffled = test('tests/ok_test.gd', '--order', '7');
+    assert.match(
+      shuffled.said,
+      /over 1 engine, shuffled by 7\.$/m,
+      'the seed, so the order can be had again',
+    );
+
+    const timesFile = join(state, 'suite-times.json');
+    const timed = readFileSync(timesFile, 'utf8');
+    writeFileSync(
+      timesFile,
+      JSON.stringify({
+        ...(JSON.parse(timed) as object),
+        'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
+      }),
+    );
+    const split = test('tests/ok_test.gd', 'tests/declared_test.gd', '--engines', '2');
+    assert.equal(split.status, 0, split.said);
+    assert.match(
+      split.said,
+      /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than 10 s last time: res:\/\/tests\/ok_test\.gd\.$/m,
+      split.said,
+    );
 
     const hung = test('tests/hang_test.gd', '--silence', '4');
     assert.match(
@@ -37259,6 +37321,16 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       hung.said,
     );
     assert.equal(hung.status, 1, hung.said);
+    // Counted against the faults printed under the engine's heading, which a run cut short has
+    // several of from one engine.
+    const faultLines =
+      /^--- engine \d+:.*\n((?: {2}\S.*\n)+)/m.exec(hung.said)?.[1]?.trimEnd().split('\n') ?? [];
+    assert.ok(faultLines.length > 1, hung.said);
+    assert.match(
+      hung.said,
+      new RegExp(`^Failed: ${String(faultLines.length)} problems, listed above\\.`, 'm'),
+      hung.said,
+    );
     assert.deepEqual(readdirSync(slots), [], 'its slot given back too');
 
     // An autoload that cannot start makes every suite after it meaningless, so the run ends there
@@ -37298,6 +37370,160 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     }
   } finally {
     sweep(project, slots);
+  }
+}
+
+/**
+ * project_test judges the engine errors a run printed as `gdharness test` does, looks where it
+ * looks, and counts a case a suite inherits as run.
+ */
+async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('project_test judging regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-project-test-judged-'));
+  try {
+    writeTree(project, {
+      // File logging off, which the engine's own log file would otherwise follow.
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Judged"\n\n[debug]\n\nfile_logging/enable_file_logging=false\n',
+      'tests/base_suite.gd':
+        'class_name JudgedBaseSuite\nextends GdUnitTestSuite\n\n\nfunc test_shared() -> void:\n\tassert_bool(true).is_true()\n',
+      'tests/derived_test.gd':
+        'extends JudgedBaseSuite\n\n\nfunc test_own() -> void:\n\tassert_int(1).is_equal(1)\n',
+      'tests/noisy_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_meant": ["meant to say this"]}',
+        '',
+        '',
+        'func test_meant() -> void:',
+        '\tpush_error("meant to say this")',
+        '\tassert_bool(true).is_true()',
+        '',
+        '',
+        'func test_unmeant() -> void:',
+        '\tpush_error("nobody declared this")',
+        '\tassert_bool(true).is_true()',
+        '',
+      ].join('\n'),
+      'tests/promised_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_quiet": ["Could not parse broken.json"]}',
+        '',
+        '',
+        'func test_quiet() -> void:',
+        '\tassert_int(1).is_equal(1)',
+        '',
+      ].join('\n'),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    await withStdioServer(
+      async (call) => {
+        const said = await call('project_test', { projectPath: project }, ENGINE_CALL_TIMEOUT_MS * 3);
+        const answer = jsonOf(said, 'project_test');
+        assert.equal(get(answer, 'passed'), false, said);
+        assert.equal(get(answer, 'tests'), 6, `every suite under tests, where gdharness test looks: ${said}`);
+        assert.equal(
+          get(answer, 'notRun'),
+          undefined,
+          `the inherited case ran in the suite inheriting it: ${said}`,
+        );
+        assert.deepEqual(
+          get(answer, 'undeclaredErrors'),
+          [{ suite: 'res://tests/noisy_test.gd', case: 'test_unmeant', text: 'nobody declared this' }],
+          `the declared one is the run going as written: ${said}`,
+        );
+        assert.deepEqual(
+          get(answer, 'declaredNotPrinted'),
+          [
+            {
+              suite: 'res://tests/promised_test.gd',
+              case: 'test_quiet',
+              text: 'Could not parse broken.json',
+            },
+          ],
+          said,
+        );
+        assert.match(
+          text(get(answer, 'verdict')),
+          /one engine error no suite declared; one declared error never printed/,
+        );
+        assert.doesNotMatch(
+          text(get(answer, 'verdict')),
+          /^passed/,
+          'not called passed beside what failed it',
+        );
+        assert.match(
+          text(get(answer, 'note')),
+          /list its text under "test_unmeant" in the suite's GDHARNESS_EXPECTED_ERRORS/,
+          said,
+        );
+        assert.deepEqual(
+          asArray(get(answer, 'suites')).map((suite) => [
+            get(suite, 'path'),
+            get(suite, 'tests'),
+            get(suite, 'undeclaredErrors'),
+            get(suite, 'declaredNotPrinted'),
+          ]),
+          [
+            ['res://tests/noisy_test.gd', 2, 1, undefined],
+            ['res://tests/promised_test.gd', 1, undefined, 1],
+          ],
+          said,
+        );
+        assert.equal(get(answer, 'suitesPassed'), 2, said);
+        assert.equal(get(answer, 'engineErrors'), 1, `the declared error is not counted: ${said}`);
+
+        // One past the most an answer names, each its own text.
+        writeTree(project, {
+          'many/many_test.gd':
+            'extends GdUnitTestSuite\n\n\nfunc test_says_a_lot() -> void:\n\tfor at: int in 21:\n\t\tpush_error("said %d" % at)\n\tassert_bool(true).is_true()\n',
+        });
+        const many = jsonOf(
+          await call('project_test', { projectPath: project, path: 'many' }, ENGINE_CALL_TIMEOUT_MS * 3),
+          'many',
+        );
+        assert.deepEqual(
+          [asArray(get(many, 'undeclaredErrors')).length, get(many, 'undeclaredErrorsOmitted')],
+          [20, 1],
+          JSON.stringify(many),
+        );
+        assert.match(
+          text(get(many, 'verdict')),
+          /^21 engine errors no suite declared$/,
+          JSON.stringify(many),
+        );
+        rmSync(join(project, 'many'), { recursive: true, force: true });
+
+        // Each on its own, since either fails the run and the run above holds both.
+        for (const [path, verdict] of [
+          ['tests/noisy_test.gd', 'one engine error no suite declared'],
+          ['tests/promised_test.gd', 'one declared error never printed'],
+        ] as const) {
+          const alone = await call(
+            'project_test',
+            { projectPath: project, path },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          assert.deepEqual(
+            [get(jsonOf(alone, path), 'passed'), get(jsonOf(alone, path), 'verdict')],
+            [false, verdict],
+            alone,
+          );
+        }
+      },
+      { GODOT_PATH: godotPath },
+    );
+  } finally {
+    sweep(project);
   }
 }
 
@@ -37725,6 +37951,13 @@ async function testAStackOverflowIsNotAPass(): Promise<void> {
       [
         'extends GdUnitTestSuite',
         '',
+        // Declared as a gate requires, so the run passes on what is under test here: neither error
+        // is an uncaught one.
+        'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {',
+        '\t"test_expects_a_runtime_error": ["Out of bounds get index \'3\' (on base: \'Array\')"],',
+        '\t"test_pushes_an_error": ["an error this case means to print"],',
+        '}',
+        '',
         '',
         'func test_expects_a_runtime_error() -> void:',
         '\tawait assert_error(func() -> void:',
@@ -37758,7 +37991,17 @@ async function testAStackOverflowIsNotAPass(): Promise<void> {
       assert.equal(get(overflow, 'passed'), false, `a stack overflow is not a pass: ${shown}`);
       assert.match(
         String(get(overflow, 'verdict')),
-        /^(one script error|\d+ script errors) that failed no case$/,
+        /^(one script error|\d+ script errors) that failed no case; \d+ engine errors no suite declared$/,
+        shown,
+      );
+      // The engine's underflow after each frame, which no suite declared: once, counted, and not
+      // the overflow a second time, which uncaughtScriptErrors already names.
+      assert.deepEqual(
+        asArray(get(overflow, 'undeclaredErrors')).map((entry) => [
+          get(entry, 'text'),
+          Number(get(entry, 'times')) > 100,
+        ]),
+        [['Stack underflow! (Engine Bug)', true]],
         shown,
       );
       const uncaught = asArray(get(overflow, 'uncaughtScriptErrors'));
@@ -37809,7 +38052,12 @@ async function testAStackOverflowIsNotAPass(): Promise<void> {
       assert.equal(get(asked, 'passed'), true, `errors a test asked for are not uncaught: ${askedShown}`);
       assert.equal(get(asked, 'verdict'), 'passed', askedShown);
       assert.equal(get(asked, 'uncaughtScriptErrors'), undefined, askedShown);
-      assert.ok(Number(get(asked, 'engineErrors')) >= 2, `the engine printed both of them: ${askedShown}`);
+      assert.equal(get(asked, 'engineErrors'), 0, `both were declared: ${askedShown}`);
+      assert.ok(
+        asArray(get(asked, 'engineEntries')).filter((entry) => get(entry, 'severity') === 'error').length >=
+          2,
+        `and the engine printed both of them: ${askedShown}`,
+      );
 
       writeFileSync(
         join(projectDir, 'project.godot'),
@@ -37817,12 +38065,19 @@ async function testAStackOverflowIsNotAPass(): Promise<void> {
       );
       const allowed = await run('res://overflow');
       const allowedShown = JSON.stringify(allowed).slice(0, 4000);
-      assert.equal(
-        get(allowed, 'passed'),
-        true,
-        `a project that lets script errors pass is obeyed: ${allowedShown}`,
-      );
+      // gdUnit4's setting is a run-wide allow, which a gate has none of: it decides what gdUnit4
+      // fails a case on, and the errors still fail the run undeclared, as gdharness test fails it.
       assert.equal(get(allowed, 'uncaughtScriptErrors'), undefined, allowedShown);
+      assert.deepEqual(
+        [
+          get(allowed, 'passed'),
+          asArray(get(allowed, 'undeclaredErrors')).some(
+            (entry) => get(entry, 'text') === 'Stack overflow. Check for infinite recursion in your script.',
+          ),
+        ],
+        [false, true],
+        `the overflow is an engine error no suite declared: ${allowedShown}`,
+      );
     });
   } finally {
     sweep(projectDir);
@@ -38282,7 +38537,19 @@ async function testGdUnitRunner(): Promise<void> {
   // the project, overlaps dropped, and anything that is not a path refused by where it sits.
   const inProject = mkdtempSync(join(tmpdir(), 'gdharness-test-paths-'));
   try {
-    assert.deepEqual(testPathsIn(inProject, undefined), { ok: true, value: ['res://test'] });
+    assert.deepEqual(
+      testPathsIn(inProject, undefined),
+      { ok: true, value: ['res://tests', 'res://test'] },
+      'both, when neither is there, so the refusal names each',
+    );
+    mkdirSync(join(inProject, 'tests'));
+    assert.deepEqual(
+      testPathsIn(inProject, undefined),
+      { ok: true, value: ['res://tests'] },
+      'where gdharness test looks, and only what is there',
+    );
+    mkdirSync(join(inProject, 'test'));
+    assert.deepEqual(testPathsIn(inProject, ''), { ok: true, value: ['res://tests', 'res://test'] });
     assert.deepEqual(testPathsIn(inProject, 'tests/'), { ok: true, value: ['res://tests'] });
     assert.deepEqual(
       testPathsIn(inProject, ['tests/a_test.gd', 'res://tests/b_test.gd', 'tests/a_test.gd', 'other']),
@@ -38414,7 +38681,7 @@ async function testGdUnitRunner(): Promise<void> {
           await call('project_test', { projectPath: projectDir }, ENGINE_CALL_TIMEOUT_MS * 3),
         );
         assert.equal(get(run, 'passed'), false, JSON.stringify(run, null, 2));
-        assert.equal(get(run, 'verdict'), 'failures');
+        assert.equal(get(run, 'verdict'), 'failures; one engine error no suite declared');
         assert.deepEqual(
           {
             tests: get(run, 'tests'),
@@ -38511,6 +38778,8 @@ async function testGdUnitRunner(): Promise<void> {
               projectPath: projectDir,
               ignore: [
                 'sums_test:test_two_and_two_is_not_five',
+                // Its error is declared nowhere, which fails a run as the gate fails it.
+                'sums_test:test_the_game_said_something',
                 'summary_lies_test:test_the_summary_says_passed',
                 'summary_lies_test:test_and_says_it_again',
               ],
@@ -38519,7 +38788,7 @@ async function testGdUnitRunner(): Promise<void> {
           ),
         );
         assert.equal(get(only, 'passed'), true, JSON.stringify(only, null, 2));
-        assert.equal(get(only, 'tests'), 4);
+        assert.equal(get(only, 'tests'), 3);
         assert.equal(
           existsSync(join(projectDir, '.godot', 'gdharness-reports')),
           false,
@@ -50703,6 +50972,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
   testTheTestCommandRunsAndJudgesAProject,
+  testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,
   testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,

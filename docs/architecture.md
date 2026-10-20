@@ -168,7 +168,10 @@ under a second on a machine that has never run the server.
 `gdharness test` is the command a game's gate runs its gdUnit4 suites with, and
 [Test runs](test-runs.md) describes it, with the engine slots the games' own tools share. Each of
 its engines starts the shipped runner, `godot/tests/listed.gd`, from outside the project, which is
-the runner `project_test` starts as well.
+the runner `project_test` starts as well. Both read what the engine printed with `suite-judge.ts`,
+from one file holding both of its streams in order, so a suite the tool passes is one the gate
+passes: the tool looks in the same directories and judges engine errors against the same
+declarations.
 
 Every tool is declared in one table and dispatched from it, so a tool the server answers is a tool
 the documentation lists and a fixture drives. The reference on this site is rendered from that same

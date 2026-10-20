@@ -61,8 +61,9 @@ the rows of a parameterised one added together. A case never timed is taken to c
 the cases that have been, and 0.02 s when nothing has.
 
 A suite costing more than 10 seconds, with more than one case, is dealt out case by case, and an
-engine holding part of it skips the rest. Units are dealt slowest first, each to the engine with
-the least so far. A run starts no more engines than `--engines`, the machine's processors, or its
+engine holding part of it skips the rest; the run names each suite it dealt out that way. Units are
+dealt slowest first, each to the engine with the least so far. A run starts no more engines than
+`--engines`, the machine's processors, or its
 free memory allows once 4 GB is left for everything else at 1.5 GB an engine, and no more than it
 takes to keep each one busy for as long as the slowest unit or 5 seconds, whichever is longer.
 
@@ -79,14 +80,17 @@ takes to keep each one busy for as long as the slowest unit or 5 seconds, whiche
 - A suite that reports a failure while all its cases passed, which is a failing `before` or `after`.
 - A run that printed no summary or ran no case, or a script gdUnit4 could not load.
 - Objects, resources or memory pages still held as the engine exits.
-- An exit code other than 0. A Windows status is named, such as `0xC0000005 (STATUS_ACCESS_VIOLATION)`.
+- An exit code other than 0, named by its meaning: a Windows status such as
+  `0xC0000005 (STATUS_ACCESS_VIOLATION)`, or one of gdUnit4's, such as 101 for orphan nodes. gdUnit4's
+  100, which it exits with when a case failed, is left out beside that case's own line.
 - An engine ended for its silence, or because an autoload did not start.
 
 Each failure is printed with the lines that show it: a failing case's report, each unexpected error
 and the line after it, and the run's summary. When an engine was cut short and none of that explains
 it, its last 60 lines. The engine's whole output stays in
-`.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names. A run that
-passes leaves no logs, and the next run removes the logs of runs that have ended.
+`.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names, and the
+last lines count the problems and name the run's directory. A run that passes leaves no logs, and
+the next run removes the logs of runs that have ended.
 
 ## Errors a suite expects
 
@@ -103,7 +107,11 @@ The keys are case functions, or `before` and `after` for the suite's own hooks. 
 follows `ERROR:` and its space on the line. Each text listed accepts one such line, so a case
 printing it twice lists it twice, and a parameterised case declares what one row prints. A
 declared text the case does not print fails the run too, since the case no longer reaches what it
-was written to test. There is no way to accept errors across a whole run.
+was written to test. There is no way to accept errors across a whole run: gdUnit4's own
+`report/godot/script_error` setting decides only which errors fail a case, and an error a case meant
+to raise with `assert_error` is declared like any other. `project_test` judges a
+run's errors by the same declarations, and names what fails it under `undeclaredErrors` and
+`declaredNotPrinted`.
 
 An error counts as the case's that was running when it was printed. One printed after a case's
 verdict counts as that case's while another case follows, since what a case leaves for a later

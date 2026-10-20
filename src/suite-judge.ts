@@ -7,6 +7,7 @@
  * the engine's streams go into one file, so an error is read in order with the case lines around it.
  */
 
+import { readFileSync } from 'node:fs';
 import { stripVTControlCharacters } from 'node:util';
 import { scriptErrorsPrinted } from './junit.js';
 
@@ -211,6 +212,16 @@ export interface EngineAssignment {
   readonly expected: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
 }
 
+/** The errors each suite declares, as the runner's `--expected-errors-out` wrote them, or none. */
+export function readExpected(file: string): EngineAssignment['expected'] {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    return typeof parsed === 'object' && parsed !== null ? (parsed as EngineAssignment['expected']) : {};
+  } catch {
+    return {};
+  }
+}
+
 /** How the engine's process ended. */
 export interface EngineEnd {
   readonly code: number | null;
@@ -247,11 +258,28 @@ const WINDOWS_EXITS: ReadonlyMap<number, string> = new Map([
 ]);
 const MEMORY_EXITS = new Set([0xc0000017, 0xc000012d]);
 
-/** The exit code as a person reads it: a Windows status by name and in hex. */
+/**
+ * The codes gdUnit4's command-line runner quits with. Without its meaning, the 100 a run with a
+ * failing case ends on reads as the engine having crashed beside the failure.
+ */
+const GDUNIT_FAILED = 100;
+const GDUNIT_EXITS: ReadonlyMap<number, string> = new Map([
+  [GDUNIT_FAILED, "gdUnit4's code for a case that failed or errored"],
+  [101, "gdUnit4's code for orphan nodes left behind"],
+  [103, "gdUnit4's code for a suite that cannot run headless"],
+  [104, "gdUnit4's code for a Godot version it does not support"],
+  [105, "gdUnit4's code for scripts that did not compile"],
+]);
+
+/** The exit code as a person reads it: a Windows status by name and in hex, gdUnit4's by meaning. */
 export function exitNamed(code: number): string {
   const unsigned = code >>> 0;
-  const name = WINDOWS_EXITS.get(unsigned);
-  return name === undefined ? String(code) : `0x${unsigned.toString(16).toUpperCase()} (${name})`;
+  const status = WINDOWS_EXITS.get(unsigned);
+  if (status !== undefined) {
+    return `0x${unsigned.toString(16).toUpperCase()} (${status})`;
+  }
+  const gdunit = GDUNIT_EXITS.get(code);
+  return gdunit === undefined ? String(code) : `${String(code)} (${gdunit})`;
 }
 
 /** How many lines of a run's end are shown when nothing in it says what went wrong. */
@@ -259,7 +287,8 @@ const TAIL = 60;
 /** How many cases are named in one sentence before the rest are counted. */
 const MOST_NAMED = 8;
 
-function named(items: readonly string[]): string {
+/** [param items] joined, the first few by name and the rest counted. */
+export function named(items: readonly string[]): string {
   const shown = items.slice(0, MOST_NAMED).join(', ');
   return items.length > MOST_NAMED ? `${shown} and ${String(items.length - MOST_NAMED)} more` : shown;
 }
@@ -275,9 +304,13 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   const faults: string[] = [];
   const failing = new Set<string>();
   const shownAt = new Set<number>();
+  // gdUnit4's 100 beside a case that failed says only what that case's own line says.
+  const explained =
+    end.code === GDUNIT_FAILED &&
+    [...printed.suites.values()].some((suite) => suite.cases.some((ran) => ran.verdict === 'FAILED'));
   if (end.ended !== null) {
     faults.push(end.ended);
-  } else if (end.code !== 0) {
+  } else if (end.code !== 0 && !explained) {
     faults.push(
       end.code === null
         ? `the engine was ended by ${end.signal ?? 'a signal'}`
@@ -344,10 +377,17 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
       }
     }
   }
-  const unexpected = unexpectedErrors(printed, handed);
+  const unexpected = unexpectedErrors(
+    printed,
+    handed.expected,
+    handed.suites.map((suite) => suite.path),
+  );
   for (const error of unexpected.printed) {
-    const where = error.suite === null ? 'outside every suite' : `in ${error.suite} > ${error.during ?? ''}`;
-    faults.push(`an engine error ${where}: ${error.text}`);
+    faults.push(
+      error.suite === null
+        ? `an engine error outside every suite: ${error.text}`
+        : `an engine error in ${error.suite} > ${error.during ?? ''}: ${error.text}; ${declaringAdvice(error.during ?? '')}`,
+    );
     if (error.suite !== null) {
       failing.add(error.suite);
     }
@@ -418,6 +458,11 @@ function linesShown(lines: readonly string[], picked: ReadonlySet<number>, cutSh
   return shown;
 }
 
+/** What to do about an error printed during [param during] that its suite did not declare. */
+export function declaringAdvice(during: string): string {
+  return `if the suite prints it on purpose, list its text under "${funcOf(during)}" in the suite's GDHARNESS_EXPECTED_ERRORS`;
+}
+
 interface MissingError {
   readonly suite: string;
   readonly during: string;
@@ -425,17 +470,19 @@ interface MissingError {
 }
 
 /**
- * The errors printed that no suite declared, and the declared ones that were not printed. A case
- * declares each text once for every time it prints it, and a parameterised case each time per row.
+ * The errors printed that no suite declared, and the declared ones that were not printed, for the
+ * suites at [param paths]. A case declares each text once for every time it prints it, and a
+ * parameterised case each time per row.
  */
-function unexpectedErrors(
+export function unexpectedErrors(
   printed: RunPrinted,
-  handed: EngineAssignment,
+  expected: EngineAssignment['expected'],
+  paths: readonly string[],
 ): { printed: PrintedError[]; neverPrinted: MissingError[] } {
   const owed = new Map<string, { suite: string; during: string; texts: string[] }>();
-  for (const { path } of handed.suites) {
+  for (const path of paths) {
     const suite = printed.suites.get(path);
-    const declared = handed.expected[path];
+    const declared = expected[path];
     if (suite === undefined || declared === undefined) {
       continue;
     }

@@ -302,6 +302,8 @@ import {
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
 // array element, so a path full of backslashes, spaces or quotes is just a path.
 import { runHidden as run, spawnHidden } from './spawn.js';
+import { declaringAdvice, readExpected, readRun, unexpectedErrors } from './suite-judge.js';
+import { TEST_DIRECTORIES } from './suite-plan.js';
 import { selectTests } from './test-selection.js';
 import {
   asParams,
@@ -3091,6 +3093,8 @@ function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading[
 
 /** How many distinct engine entries a test run's answer carries, the newest kept. */
 const MOST_ENGINE_ENTRIES = 200;
+/** How many distinct undeclared engine errors a test run's answer names, the first kept. */
+const MOST_UNDECLARED_ERRORS = 20;
 
 /**
  * A run's errors and warnings as an answer carries them, or everything it printed from
@@ -3202,12 +3206,22 @@ export function testPathsIn(
   projectPath: string,
   given: unknown,
 ): { ok: true; value: string[] } | { ok: false; reason: string } {
-  const entries = given === undefined || given === null || given === '' ? ['test'] : given;
+  // The directories gdharness test looks in, so the tool and the gate run the same suites. Only
+  // those there, since a default directory a project does not have is not a path it asked for;
+  // both when neither is, so the refusal names each.
+  const defaults = TEST_DIRECTORIES.filter((directory) => existsSync(join(projectPath, directory)));
+  const entries =
+    given === undefined || given === null || given === ''
+      ? defaults.length > 0
+        ? defaults
+        : TEST_DIRECTORIES
+      : given;
   const listed: unknown[] = Array.isArray(entries) ? entries : [entries];
   if (listed.length === 0) {
     return {
       ok: false,
-      reason: 'path is an empty list: name a suite file or a directory, or leave path out for test.',
+      reason:
+        'path is an empty list: name a suite file or a directory, or leave path out for tests and test.',
     };
   }
   const resolved: string[] = [];
@@ -6593,6 +6607,10 @@ class GodotServer {
     const userData = scratchDirectory('tests');
     const suitesFile = join(userData, 'suites.txt');
     const skippingFile = join(userData, 'skipping.txt');
+    // Both of the engine's streams in the order printed, which two pipes do not keep: an error is
+    // judged as the case's that was running when it was printed, read as gdharness test reads it.
+    const engineLog = join(userData, 'engine.log');
+    const expectedFile = join(userData, 'expected.json');
     writeFileSync(suitesFile, `${(selection.value?.suites ?? asked).join('\n')}\n`);
     writeFileSync(skippingFile, `${[...ignored, ...(selection.value?.ignore ?? [])].join('\n')}\n`);
     const cmdArgs = [
@@ -6601,6 +6619,8 @@ class GodotServer {
       project.value.path,
       // Before the script, where the engine reads its own options rather than handing them on.
       ...flags.value,
+      '--log-file',
+      engineLog,
       '-s',
       this.listedRunner,
       '--ignoreHeadlessMode',
@@ -6615,6 +6635,8 @@ class GodotServer {
       '--skipping-in',
       skippingFile,
       '--html-report-off',
+      '--expected-errors-out',
+      expectedFile,
     ];
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 600000;
     this.logDebug(`Running tests: ${engine.value} ${cmdArgs.join(' ')}`);
@@ -6682,6 +6704,8 @@ class GodotServer {
     const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
     let reportProblem: string | null = null;
+    const casePrinted = readRun(existsSync(engineLog) ? readFileSync(engineLog, 'utf8') : '');
+    const declaredErrors = readExpected(expectedFile);
     try {
       const written =
         existsSync(reportsDir) && notCompiled === null
@@ -6904,6 +6928,53 @@ class GodotServer {
     // of them is most of the answer: a hundred and three clean suites came back as fifteen
     // kilobytes of names and timings around the one line saying it passed. Counted instead, so the
     // answer is the size of what went wrong.
+    // Judged as gdharness test judges them, so a suite the tool passes is one the gate passes: an
+    // engine error a suite did not declare fails it, and so does one it declared and never printed.
+    const judgedErrors = unexpectedErrors(casePrinted, declaredErrors, [...casePrinted.suites.keys()]);
+    // Less those already under uncaughtScriptErrors, and folded with how often each was printed: a
+    // stack overflow prints an error for every frame, and came back as a thousand entries.
+    const uncaughtTexts = new Set(uncaught.map((entry) => entry.text));
+    const undeclaredPrinted = judgedErrors.printed.filter((error) => !uncaughtTexts.has(error.text));
+    const undeclaredFolded = new Map<
+      string,
+      { suite: string | undefined; case: string | undefined; text: string; times: number }
+    >();
+    for (const error of undeclaredPrinted) {
+      const key = `${error.suite ?? ''}\n${error.during ?? ''}\n${error.text}`;
+      const seen = undeclaredFolded.get(key);
+      if (seen === undefined) {
+        undeclaredFolded.set(key, {
+          suite: error.suite ?? undefined,
+          case: error.during ?? undefined,
+          text: error.text,
+          times: 1,
+        });
+      } else {
+        seen.times += 1;
+      }
+    }
+    const undeclaredAll = [...undeclaredFolded.values()].map((error) => ({
+      ...error,
+      times: error.times > 1 ? error.times : undefined,
+    }));
+    const undeclaredErrors = undeclaredAll.slice(0, MOST_UNDECLARED_ERRORS);
+    const declaredNotPrinted = judgedErrors.neverPrinted.map((missing) => ({
+      suite: missing.suite,
+      case: missing.during,
+      text: missing.text,
+    }));
+    const erring = (path: string | null): { undeclared: number; notPrinted: number } => ({
+      undeclared: undeclaredPrinted.filter((error) => error.suite === path).length,
+      notPrinted: judgedErrors.neverPrinted.filter((missing) => missing.suite === path).length,
+    });
+    const declaredAndPrinted = casePrinted.errors.length - judgedErrors.printed.length;
+    // Read off the console, which prints a case a suite inherits under that suite: gdUnit4's report
+    // writes it under the suite declaring it, so the inheriting one read a case short of what it
+    // discovered, and that case was answered as never run beside a run that ran it.
+    const ranIn = (suite: TestReport['suites'][number]): number =>
+      suite.path === null ? suite.tests : (casePrinted.suites.get(suite.path)?.cases.length ?? suite.tests);
+    const notRunIn = (suite: TestReport['suites'][number]): number =>
+      Math.max(0, suite.discovered - ranIn(suite));
     const unclean = report.suites.filter(
       (suite) =>
         suite.failures > 0 ||
@@ -6911,7 +6982,8 @@ class GodotServer {
         suite.hookFailures > 0 ||
         suite.hookErrors > 0 ||
         suite.skipped > 0 ||
-        orphansIn(suite.path) > 0,
+        orphansIn(suite.path) > 0 ||
+        erring(suite.path).undeclared + erring(suite.path).notPrinted > 0,
     );
     // A hook that failed is counted on its suite and named nowhere in the report, so it is read off
     // what the run printed. It was answered as no failure at all, and the suite as passed.
@@ -6936,7 +7008,7 @@ class GodotServer {
     // neither passes nor failures. Unsaid, that reads as a tier where each run finds one more
     // fault than the last: a project fixing what was named and running again met the next case
     // along three times in one afternoon, and read its own suite as flaky.
-    const notRun = report.suites.reduce((sum, suite) => sum + Math.max(0, suite.discovered - suite.tests), 0);
+    const notRun = report.suites.reduce((sum, suite) => sum + notRunIn(suite), 0);
     // Folded the way engineEntries is, from a subset of the same entries, so each folded entry here
     // has the first index its counterpart there has.
     const uncaughtFolded = foldedRepeats(uncaught.map(aboveTheRunner));
@@ -6972,9 +7044,25 @@ class GodotServer {
         report.errors === 0 &&
         hookFailures.length === 0 &&
         uncaught.length === 0 &&
+        undeclaredPrinted.length === 0 &&
+        declaredNotPrinted.length === 0 &&
         missing.length === 0 &&
         testsNotRun.length === 0,
-      verdict: testsNotRun.length === 0 ? verdict : `${verdict}; not run: ${testsNotRun.join(', ')}`,
+      verdict: [
+        // gdUnit4's word for the exit, which is not the run's when something below fails it.
+        verdict === 'passed' && undeclaredPrinted.length + declaredNotPrinted.length > 0
+          ? undefined
+          : verdict,
+        undeclaredPrinted.length > 0
+          ? `${undeclaredPrinted.length === 1 ? 'one engine error' : `${String(undeclaredPrinted.length)} engine errors`} no suite declared`
+          : undefined,
+        declaredNotPrinted.length > 0
+          ? `${declaredNotPrinted.length === 1 ? 'one declared error' : `${String(declaredNotPrinted.length)} declared errors`} never printed`
+          : undefined,
+        testsNotRun.length > 0 ? `not run: ${testsNotRun.join(', ')}` : undefined,
+      ]
+        .filter((part) => part !== undefined)
+        .join('; '),
       ...(missing.length > 0 ? { missing } : {}),
       ...(testsNotRun.length > 0 ? { testsNotRun } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
@@ -6990,6 +7078,12 @@ class GodotServer {
       failedWithoutDetail: briefed > 0 ? briefed : undefined,
       hookFailures: hookFailures.length > 0 ? hookFailures : undefined,
       uncaughtScriptErrors: uncaughtFolded.length > 0 ? uncaughtFolded : undefined,
+      undeclaredErrors: undeclaredErrors.length > 0 ? undeclaredErrors : undefined,
+      undeclaredErrorsOmitted:
+        undeclaredAll.length > undeclaredErrors.length
+          ? undeclaredAll.length - undeclaredErrors.length
+          : undefined,
+      declaredNotPrinted: declaredNotPrinted.length > 0 ? declaredNotPrinted : undefined,
       // Alongside `failed` rather than folded into it: a suite that left nodes behind failed
       // nothing, and an agent reading `failed` for what to fix must not find a passing test in it.
       warnings: warnings.length > 0 ? warnings : undefined,
@@ -7013,6 +7107,12 @@ class GodotServer {
             ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
             : undefined,
           uncaughtNote(uncaught),
+          undeclaredErrors.length > 0
+            ? `An engine error a suite does not declare fails the run, as gdharness test judges it; ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name')}, once for each time it prints it.`
+            : undefined,
+          declaredNotPrinted.length > 0
+            ? 'A declared error the case did not print fails the run too, since the case no longer reaches what it was written to test.'
+            : undefined,
           ranAs.startsWith('warnings') && warnings.length === 0
             ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
             : notRunNote(notRun, readBoolean(args, 'failFast') === true),
@@ -7022,10 +7122,12 @@ class GodotServer {
       suites: unclean.map((suite) => ({
         name: suite.name,
         path: suite.path,
-        tests: suite.tests,
+        tests: ranIn(suite),
         // Only when they differ, and named rather than left to be inferred from the counts: a
         // suite that stopped has cases nobody ran, and they are neither passes nor failures.
-        notRun: suite.discovered > suite.tests ? suite.discovered - suite.tests : undefined,
+        notRun: notRunIn(suite) > 0 ? notRunIn(suite) : undefined,
+        undeclaredErrors: erring(suite.path).undeclared > 0 ? erring(suite.path).undeclared : undefined,
+        declaredNotPrinted: erring(suite.path).notPrinted > 0 ? erring(suite.path).notPrinted : undefined,
         failures: suite.failures,
         errors: suite.errors,
         hookFailures:
@@ -7035,7 +7137,8 @@ class GodotServer {
         time: suite.time,
       })),
       suitesPassed: report.suites.length - unclean.length,
-      engineErrors: run.log.count('error'),
+      // Less the ones a suite declared and printed, which are the run going as written.
+      engineErrors: Math.max(0, run.log.count('error') - declaredAndPrinted),
       engineWarnings: run.log.count('warning'),
       // An entry already under uncaughtScriptErrors is named here without its detail again: a stack
       // overflow's backtrace is most of an answer, and it was carried twice.
