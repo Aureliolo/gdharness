@@ -20,7 +20,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { availableParallelism, freemem } from 'node:os';
+import { availableParallelism, freemem, totalmem } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -253,10 +253,53 @@ function selectedSuites(scripts: ProjectScripts, options: TestOptions): Declared
   }));
 }
 
-/** How many engines the machine has room for: its processors, and its free memory past what it keeps. */
-function roomFor(most: number): number {
-  const byMemory = Math.floor((freemem() - MEMORY_KEPT) / MEMORY_PER_ENGINE);
-  return Math.max(1, Math.min(most, availableParallelism(), byMemory));
+/**
+ * How many of the [param most] engines asked for the machine has room for, given its [param
+ * processors] and the memory [param available] past what it keeps, with what held it below
+ * [param most] when something did.
+ */
+export function roomFor(
+  most: number,
+  processors: number,
+  available: number,
+): { engines: number; held: string | undefined } {
+  const byMemory = Math.floor((available - MEMORY_KEPT) / MEMORY_PER_ENGINE);
+  const engines = Math.max(1, Math.min(most, processors, byMemory));
+  if (engines >= most) {
+    return { engines, held: undefined };
+  }
+  const gigabytes = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  return {
+    engines,
+    held:
+      byMemory < processors
+        ? `the machine has ${gigabytes(Math.max(0, available))} of memory free, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(MEMORY_PER_ENGINE)} taken for each engine`
+        : `the machine has ${plural(processors, 'processor')}`,
+  };
+}
+
+/**
+ * The memory the machine can give engines. freemem on macOS counts only the pages nobody holds,
+ * a few hundred megabytes on a Mac whose file cache would give way at once, so a run there was held
+ * to one engine whatever it asked for. The kernel's own share of memory it counts as free, the
+ * percentage memory_pressure prints, includes what it can take back.
+ */
+async function memoryAvailable(): Promise<number> {
+  const level = await macMemoryLevel();
+  return level === null ? freemem() : (totalmem() * level) / 100;
+}
+
+/** The percentage of memory macOS counts as free, or null off macOS or when it would not say. */
+export async function macMemoryLevel(): Promise<number | null> {
+  if (process.platform !== 'darwin') {
+    return null;
+  }
+  try {
+    const level = Number((await runHidden('sysctl', ['-n', 'kern.memorystatus_level'])).stdout.trim());
+    return Number.isFinite(level) && level > 0 && level <= 100 ? level : null;
+  } catch {
+    return null;
+  }
 }
 
 /** [param units] in the order [param order] asks: reversed by path, or shuffled by a seed. */
@@ -385,16 +428,20 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     }
     const times = readTimes(timesFile);
     const units = unitsOf(suites, times);
+    const room = roomFor(options.engines, availableParallelism(), await memoryAvailable());
     const plans =
       options.order === null
-        ? dealt(units, declared, roomFor(options.engines))
+        ? dealt(units, declared, room.engines)
         : [inOneEngine(ordered(units, options.order), declared)];
     const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
+    // Said only when the room was the limit, rather than a run with fewer units than engines.
+    const held =
+      options.order === null && room.held !== undefined && plans.length === room.engines
+        ? `, of the ${String(options.engines)} asked for, since ${room.held}`
+        : '';
     const how =
       options.order === null
-        ? plans.some((plan) => plan.windowed)
-          ? ', one of them windowed'
-          : ''
+        ? `${plans.some((plan) => plan.windowed) ? ', one of them windowed' : ''}${held}`
         : options.order === 'reversed'
           ? ', in reverse order of path'
           : `, shuffled by ${String(options.order)}`;

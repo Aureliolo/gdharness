@@ -401,6 +401,45 @@ function greetingWaitMs(): number {
 }
 
 /**
+ * The picture a capture answers with: the JPEG the game wrote beside the PNG when it is the smaller,
+ * and the PNG otherwise. Every picture an answer carries stays in the caller's session for as long
+ * as the session lasts, and a week of PNG captures held hundreds of megabytes in one downstream
+ * session. Only the JPEG at the name beside the PNG is read, as only the PNG the server named is,
+ * so a game cannot point the reader at a file of its own choosing.
+ */
+function pictureToSend(
+  pngPath: string,
+  jpegPath: string | undefined,
+): { data: string; mimeType: 'image/png' | 'image/jpeg'; bytes: number; pngBytes: number } {
+  const png = readFileSync(pngPath);
+  const beside = pngPath.replace(/\.png$/, '.jpg');
+  const jpeg =
+    jpegPath !== undefined && normalize(jpegPath) === normalize(beside) && existsSync(beside)
+      ? readFileSync(beside)
+      : null;
+  const sent = jpeg !== null && jpeg.length < png.length ? jpeg : png;
+  return {
+    data: sent.toString('base64'),
+    mimeType: sent === png ? 'image/png' : 'image/jpeg',
+    bytes: sent.length,
+    pngBytes: png.length,
+  };
+}
+
+function kilobytes(bytes: number): string {
+  return `${String(Math.max(1, Math.round(bytes / 1024)))} KB`;
+}
+
+/**
+ * The scenes an editor said it saved on its way out, from its answer to being asked to go, under
+ * [param as].
+ */
+function savedScenesOf(asked: ToolResponse, as = 'savedScenes'): OperationParams {
+  const saved = readStringArray(asParams(JSON.parse(asked.content[0]?.text ?? '{}')), 'saved');
+  return saved === undefined ? {} : { [as]: saved };
+}
+
+/**
  * Whether the restart a note records can still be in progress.
  *
  * A note lasts from the quit to the launch, which is the exit wait and the few seconds a launch
@@ -8504,8 +8543,9 @@ class GodotServer {
     if (servers.dapListening !== false && servers.lspListening !== false) {
       return { servers, report: {} };
     }
-    const { rebound, said } = await this.editorServersSaid(servers.dapListening === false);
+    const { rebound, before, since } = await this.editorServersSaid(servers.dapListening === false);
     const after = rebound ? await this.editorServersListening() : servers;
+    const said = [...before, ...since];
     return {
       servers: after,
       report: {
@@ -8519,7 +8559,9 @@ class GodotServer {
    * What the connected editor's log panel says about its servers, with the debug adapter started
    * again first when [param rebind] asks: the lines from before and after, and whether it was.
    */
-  private async editorServersSaid(rebind: boolean): Promise<{ rebound: boolean; said: string[] }> {
+  private async editorServersSaid(
+    rebind: boolean,
+  ): Promise<{ rebound: boolean; before: string[]; since: string[] }> {
     let answer: OperationParams = {};
     try {
       answer = asParams(await this.godotBridge.invokeTool('editor_servers', { rebind }, { counted: false }));
@@ -8528,7 +8570,8 @@ class GodotServer {
     }
     return {
       rebound: readBoolean(answer, 'rebound') === true,
-      said: [...(readStringArray(answer, 'said') ?? []), ...(readStringArray(answer, 'saidSince') ?? [])],
+      before: readStringArray(answer, 'said') ?? [],
+      since: readStringArray(answer, 'saidSince') ?? [],
     };
   }
 
@@ -8541,12 +8584,14 @@ class GodotServer {
    */
   private async handleRebindEditorServers(): Promise<ToolResponse> {
     if (!this.godotBridge.getStatus().connected) {
-      return this.createErrorResponse('No editor is connected, so there is no debug adapter to bind.', [
-        'editor_launch opens one on a project',
-        'editor_status says whether the bridge is up and what has reached it',
-      ]);
+      const refused = await this.noEditorYet({}, []);
+      if (refused !== null) {
+        return refused;
+      }
     }
-    const { rebound, said } = await this.editorServersSaid(true);
+    // Only what this rebind made Godot say: the panel keeps every start and stop since the editor
+    // started or last played a game, and every rebind after the first handed back the ones before.
+    const { rebound, since: said } = await this.editorServersSaid(true);
     if (!rebound) {
       return this.createErrorResponse(
         'The editor has no debug adapter to bind again: no DebugAdapterServer is in its tree.',
@@ -8679,6 +8724,7 @@ class GodotServer {
       serverVersion: SERVER_VERSION,
       addonIsStale: this.godotBridge.anotherRelease() !== undefined,
       staleNote: this.godotBridge.anotherRelease(),
+      ...savedScenesOf(asked),
       ...this.whatTheEditorDropped(settingsBefore, after),
       ...servers,
       ...rebinding,
@@ -8737,6 +8783,7 @@ class GodotServer {
       closed: true,
       editorPid: pid,
       projectPath: before.projectPath,
+      ...savedScenesOf(asked),
       ...this.whatTheEditorDropped(settingsBefore, this.settingKeysOf(before.projectPath)),
       tookMs: Date.now() - began,
     });
@@ -8918,7 +8965,7 @@ class GodotServer {
         [`editor_launch opens one on ${projectPath}`],
       );
     }
-    return this.jsonTextResponse({ restarting: true, pid: opened.pid });
+    return this.jsonTextResponse({ restarting: true, pid: opened.pid, ...savedScenesOf(asked, 'saved') });
   }
 
   /** Polls until the bridge is in the state asked for, or until the deadline passes. */
@@ -9014,7 +9061,7 @@ class GodotServer {
           ? 'project.godot could not be read before this editor was opened, so nothing here will be able to say what the import saved away. Opening a project rewrites the file and drops any key sitting at its own default.'
           : before.size === 0
             ? undefined
-            : 'Opening a project imports it and saves project.godot, and Godot drops any key sitting at its own default. editor_status names anything lost under settingsDropped once this editor has connected.',
+            : 'Opening a project imports it and saves project.godot, and Godot drops any key sitting at its own default. editor_status names anything lost under settingsDropped once this editor has connected, and leaves settingsDropped out when nothing was.',
     });
   }
 
@@ -13753,6 +13800,16 @@ class GodotServer {
         ],
       );
     }
+    const closed = this.closedHere;
+    if (
+      closed !== null &&
+      (project === null || ((await this.editorsNotYetConnected(project)) ?? []).length === 0)
+    ) {
+      return this.createErrorResponse(
+        `Editor not connected: this server closed the editor, pid ${closed.editorPid}, on request at ${closed.at}, so nothing is coming until one is opened.`,
+        [...instead, 'editor_launch open starts one on the project'],
+      );
+    }
     return this.createErrorResponse(
       'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
       [
@@ -14043,7 +14100,9 @@ class GodotServer {
     asked: { tool: string; op: string; patience?: number },
   ): Promise<ToolResponse> {
     const timeoutMs = asked.patience ?? this.runtimeTimeoutMs();
-    const { op: _op, projectPath, pid, outputPath, ...params } = asParams(args);
+    const callArgs = asParams(args);
+    // inline is the server's to act on, so it is kept from the game with the rest of these.
+    const { op: _op, projectPath, pid, outputPath, inline: _inline, ...params } = callArgs;
     const waited =
       typeof pid === 'number'
         ? null
@@ -14124,6 +14183,16 @@ class GodotServer {
     const expectsScreenshot = command === 'capture_screenshot' || command === 'capture_viewport';
     // Checked before the game is asked, so a refused place costs no capture.
     const saveTo = expectsScreenshot && typeof outputPath === 'string' ? outputPath : null;
+    const sendsThePicture = readBoolean(callArgs, 'inline') !== false;
+    if (expectsScreenshot && !sendsThePicture && saveTo === null) {
+      return this.createErrorResponse(
+        'inline: false sends no picture back, so it needs outputPath to save one to; without it the capture would answer nothing to look at.',
+        [
+          'Pass outputPath, an absolute path ending in .png outside the project',
+          'Or leave inline out to have the picture sent',
+        ],
+      );
+    }
     if (saveTo !== null) {
       const refusal = captureDestinationRefusal(saveTo, [
         choice.endpoint.project.path,
@@ -14214,13 +14283,20 @@ class GodotServer {
         }
       }
       const ranWith = [...onGame.alongside];
+      const sent = sendsThePicture ? pictureToSend(screenshotPath, readString(payload, 'jpegPath')) : null;
+      const how =
+        sent === null
+          ? '. Not sent, as inline: false asked'
+          : sent.mimeType === 'image/jpeg'
+            ? `. Sent as JPEG, ${kilobytes(sent.bytes)} against the PNG's ${kilobytes(sent.pngBytes)}${saveTo === null ? '' : '; the saved PNG is lossless'}`
+            : '';
       return {
         content: [
           {
             type: 'text',
-            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${saveTo === null ? '' : `. Saved to ${saveTo}`}${ranWith.length === 0 ? '' : `\n\nRan alongside ${ranWith.join(', ')}. ${ALONGSIDE_NOTE}`}`,
+            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${saveTo === null ? '' : `. Saved to ${saveTo}`}${how}${ranWith.length === 0 ? '' : `\n\nRan alongside ${ranWith.join(', ')}. ${ALONGSIDE_NOTE}`}`,
           },
-          { type: 'image', data: readFileSync(screenshotPath).toString('base64'), mimeType: 'image/png' },
+          ...(sent === null ? [] : [{ type: 'image' as const, data: sent.data, mimeType: sent.mimeType }]),
         ],
       };
     } finally {

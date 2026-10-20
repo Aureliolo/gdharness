@@ -10,6 +10,9 @@ const GdhScreen = preload("runtime_screen.gd")
 ## How far zoom enlarges at most. Sixteen makes a 3-pixel ring 48 pixels across, past any need to
 ## see it, and a 200-pixel region 3200, past the size anybody reads a picture at.
 const ZOOM_MOST: int = 16
+## Measured on a downstream game's 1280x720 frame: its interface text and pixel art read as they do
+## in the PNG, at a fifth of the PNG's size.
+const JPEG_QUALITY: float = 0.8
 
 var _host: Node
 var _values: GdhValues
@@ -385,16 +388,28 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 				% screenshot_path.get_base_dir()
 			)
 		)
-	var save_error: Error = image.save_png(screenshot_path)
+	var answer: Dictionary = saved(image, screenshot_path)
+	answer.merge(described)
+	return answer
+
+
+## [param image] saved as a PNG at [param png_path], and as a JPEG beside it, which the server sends
+## instead when it is the smaller: a rendered frame is several times smaller as one, and every
+## picture sent stays in the caller's session. Not for a picture with transparency, which a JPEG
+## would flatten.
+static func saved(image: Image, png_path: String) -> Dictionary:
+	var save_error: Error = image.save_png(png_path)
 	if save_error != OK:
 		return {"type": "error", "message": "Failed to save screenshot as PNG: " + str(save_error)}
-
 	var answer: Dictionary = {
 		"type": "screenshot_file",
 		"format": "png",
 		"width": image.get_width(),
 		"height": image.get_height(),
-		"path": screenshot_path
+		"path": png_path
 	}
-	answer.merge(described)
+	if image.detect_alpha() == Image.ALPHA_NONE:
+		var jpeg_path: String = png_path.get_basename() + ".jpg"
+		if image.save_jpg(jpeg_path + ".x", JPEG_QUALITY) == OK:
+			answer["jpegPath"] = jpeg_path
 	return answer

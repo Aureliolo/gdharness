@@ -318,6 +318,10 @@ export function parseJUnit(xml: string): TestReport {
   }
   const suiteElements =
     top.name === 'testsuite' ? [top] : top.children.filter((child) => child.name === 'testsuite');
+  // Sorted by where each suite is, because gdUnit4 runs and writes them in the order the directory
+  // lists them, which is the file system's: one project gave the same suites in one order on
+  // Windows and the other on Linux.
+  const where = (suite: TestSuite): string => suite.path ?? suite.name;
   const suites = suiteElements.map((suite): TestSuite => {
     // Counted from the cases rather than read off the attributes, for the same reason the totals
     // below are. A suite's `tests` attribute is what it discovered; when gdUnit4 stops at a failing
@@ -355,6 +359,7 @@ export function parseJUnit(xml: string): TestReport {
       cases,
     };
   });
+  suites.sort((a, b) => (where(a) < where(b) ? -1 : where(a) > where(b) ? 1 : 0));
   // Counted from the cases rather than read off the top element: gdUnit4 leaves `errors` off
   // <testsuites> and writes `time` there as zero.
   const all = suites.flatMap((suite) => suite.cases);

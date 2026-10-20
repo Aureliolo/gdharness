@@ -65,7 +65,9 @@ engine holding part of it skips the rest; the run names each suite it dealt out 
 dealt slowest first, each to the engine with the least so far. A run starts no more engines than
 `--engines`, the machine's processors, or its
 free memory allows once 4 GB is left for everything else at 1.5 GB an engine, and no more than it
-takes to keep each one busy for as long as the slowest unit or 5 seconds, whichever is longer.
+takes to keep each one busy for as long as the slowest unit or 5 seconds, whichever is longer. A
+run held below `--engines` by processors or memory says which on its first line. On macOS the free
+memory is the share the system itself counts as free, which includes the cache it can give back.
 
 ## What fails a run
 

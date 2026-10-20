@@ -775,7 +775,10 @@ A script run is not one of them. Autoloads come up for `godot -s` as well, so a 
 batch tool would bind a port and announce itself under the project's own path, and a client asking
 the runtime anything while sixteen of those run gets whichever answers first. The addon stays quiet
 there unless `gdharness/runtime/serve_script_runs` is true, which is for driving a `-s` script on
-purpose.
+purpose. A scene that is not the game, such as a bench and the worker engines it starts, is quiet
+the same way when the project lists its folder in `gdharness/runtime/quiet_scenes_under`, unless the
+run was started to be profiled from its start. The variable saying so is taken out of the
+environment as it is read, so the workers a profiled bench starts stay quiet.
 
 ## Headless operations
 
