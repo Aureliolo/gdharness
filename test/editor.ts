@@ -6689,6 +6689,49 @@ async function ticksWithin(attempt: Editor['attempt'], project: string, what: st
 }
 
 /**
+ * The debug adapter is stopped and started again inside the editor, and serves sessions after.
+ *
+ * Reported from fantasy-guild-manager: a restarted editor came back with its language server up
+ * and nothing on the adapter's port, four times in a hundred and thirty, and only another restart
+ * cured it. Godot binds the adapter as its node enters the tree, so the rebind takes the node out
+ * and puts it back. Read here off what Godot itself says in the log panel, stopped and then started
+ * on the same port, and off a session opened on the adapter afterwards, from outside and through
+ * the server, whose own session the stop ended.
+ */
+async function testAnAdapterIsBoundAgainInPlace({ call, project, dapPort }: Editor): Promise<void> {
+  const main = { projectPath: project, scriptPath: 'res://main.gd' };
+  // Through the adapter, so the server holds a session on it when it is stopped.
+  await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+
+  const rebound = await call('editor_launch', { op: 'rebind' });
+  assert.deepEqual(
+    [get(rebound, 'rebound'), get(rebound, 'dapListening'), get(rebound, 'lspListening')],
+    [true, true, true],
+    `the adapter is started again and listens: ${text(rebound)}`,
+  );
+  // Only what the rebind makes Godot say: the editor's own start is gone from the panel once any
+  // fixture before this one has played a game, since Godot clears it on every play by default.
+  const said = asArray(get(rebound, 'serversSaid'), 'serversSaid').map(String);
+  const started = `--- Debug adapter server started on port ${dapPort} ---`;
+  const stopped = said.lastIndexOf('--- Debug adapter server stopped ---');
+  assert.ok(
+    stopped >= 0 && said.lastIndexOf(started) > stopped,
+    `Godot says it stopped the adapter and started it again on the same port: ${JSON.stringify(said)}`,
+  );
+
+  const onlooker = new GodotDAPClient(dapPort);
+  await onlooker.initialize();
+  await onlooker.abandon();
+  const again = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  assert.deepEqual(
+    get(again, 'held'),
+    [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }],
+    `and the server's next call goes through it: ${text(again)}`,
+  );
+  await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
+}
+
+/**
  * A breakpoint holds for every play started here, not only the next one.
  *
  * Measured on 4.7.2: a breakpoint set through the adapter stopped the play after it and not the
@@ -6963,6 +7006,7 @@ async function main(): Promise<void> {
     ['testTheGameIsHandedItsOwnArguments', testTheGameIsHandedItsOwnArguments],
     ['testAnErrorTheGameBrokeOnIsReported', testAnErrorTheGameBrokeOnIsReported],
     ['testABreakpointHoldsForEveryPlay', testABreakpointHoldsForEveryPlay],
+    ['testAnAdapterIsBoundAgainInPlace', testAnAdapterIsBoundAgainInPlace],
     ['testEditorRestart', testEditorRestart],
   ];
 

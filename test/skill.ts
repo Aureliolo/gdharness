@@ -91,7 +91,15 @@ function testTheReferenceIsTheServersOwnToolList(): void {
   const answered = TOOL_SPECS.filter((tool) => tool.answer !== undefined);
   assert.deepEqual(
     answered.map((tool) => tool.name),
-    ['project_test', 'scene_node', 'editor_run', 'editor_output', 'editor_status', 'runtime_input'],
+    [
+      'project_test',
+      'scene_node',
+      'editor_launch',
+      'editor_run',
+      'editor_output',
+      'editor_status',
+      'runtime_input',
+    ],
     'the tools whose answers are described apart from their description',
   );
   for (const tool of answered) {

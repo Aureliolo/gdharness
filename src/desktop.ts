@@ -87,6 +87,9 @@ public static class GdharnessDesktop {
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr handle, out uint code);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr handle, uint code);
+  [DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
+  const uint FailCriticalErrors = 0x1;
+  const uint NoOpenFileErrorBox = 0x8000;
 
   delegate bool EachWindow(IntPtr window, IntPtr unused);
   [DllImport("user32.dll")] static extern bool EnumWindows(EachWindow each, IntPtr unused);
@@ -160,6 +163,11 @@ public static class GdharnessDesktop {
     startup.output = GetStdHandle(-11);
     startup.error = startup.output;
     Started started;
+    // Inherited by what it starts: without SEM_NOGPFAULTERRORBOX, Windows Error Reporting runs when
+    // the target crashes and writes its dump, and with the other two no hard-error box can open.
+    // Set outright rather than cleared from this process's own: Windows PowerShell changes the mode
+    // it inherited as it starts, and was seen reading 0x1 here, without the open-file bit.
+    SetErrorMode(FailCriticalErrors | NoOpenFileErrorBox);
     if (noActivate) {
       LockSetForegroundWindow(LockForeground);
     }

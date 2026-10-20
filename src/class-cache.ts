@@ -51,12 +51,17 @@ export function isToolScript(source: string): boolean {
 export function declaredClasses(projectPath: string): Map<string, string> {
   const declared = new Map<string, string>();
   eachScript(projectPath, (script, source) => {
-    const found = DECLARATION.exec(source);
-    if (found?.[1]) {
-      declared.set(found[1], script);
+    const found = declaredClassOf(source);
+    if (found !== null) {
+      declared.set(found, script);
     }
   });
   return declared;
+}
+
+/** The `class_name` [param source] declares, or null. */
+export function declaredClassOf(source: string): string | null {
+  return DECLARATION.exec(source)?.[1] ?? null;
 }
 
 /**

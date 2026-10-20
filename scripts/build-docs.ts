@@ -369,6 +369,7 @@ function renderHomeText(): string {
     '- [Install](install.md): install, verify, update, uninstall.',
     '- [How it works](architecture.md): what an install writes, how it decides, and what talks to',
     '  what once it is running.',
+    '- [Test runs](test-runs.md): `gdharness test`, what fails a run, and the engine slots.',
     '- [Tools](tools.md): every tool, op and argument.',
     '',
     '## Project',
@@ -430,6 +431,13 @@ const PAGES: readonly Page[] = [
     text: 'architecture.md',
     title: 'How it works',
     summary: 'The parts, what connects to what, the ports, and which tools use which.',
+  },
+  {
+    source: 'test-runs.md',
+    path: 'test-runs.html',
+    text: 'test-runs.md',
+    title: 'Test runs',
+    summary: 'gdharness test: running and judging the suites of a game, and the engine slots it shares.',
   },
   {
     path: 'tools.html',
