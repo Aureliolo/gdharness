@@ -6466,7 +6466,8 @@ async function anAddonLackingAnOp(
 }
 
 /**
- * A test run in a project with neither tests nor gdUnit4 says both.
+ * A test run in a project with neither tests nor gdUnit4 says both, and so does one whose gdUnit4
+ * predates 6.0, with the upgrade where the other has the install.
  *
  * Found by driving the tools through a model: the answer named the missing folder alone, so writing
  * tests there would have met a second refusal for the runner. The case with gdUnit4 installed and
@@ -6485,7 +6486,7 @@ async function testATestRunWithNothingToRunNamesTheRunnerToo(): Promise<void> {
     const said = textOf(answer) ?? '';
     assert.match(
       said,
-      /^No tests ran: nothing at res:\/\/test, and gdUnit4 is not installed in this project: no addons\/gdUnit4\/bin\/GdUnitCmdTool\.gd\./,
+      /^No tests ran: nothing at res:\/\/test, and gdUnit4 is not installed in this project: no addons\/gdUnit4\/plugin\.cfg\./,
       said,
     );
     const content = get(answer, 'result', 'content');
@@ -6495,6 +6496,41 @@ async function testATestRunWithNothingToRunNamesTheRunnerToo(): Promise<void> {
       [false, 0, false],
       JSON.stringify(json),
     );
+
+    // A gdUnit4 from before 6.0 has no GdUnitTestCIRunner for the shipped runner to extend.
+    mkdirSync(join(project, 'addons', 'gdUnit4', 'bin'), { recursive: true });
+    writeFileSync(
+      join(project, 'addons', 'gdUnit4', 'plugin.cfg'),
+      '[plugin]\nname="gdUnit4"\nversion="5.1.0"\n',
+    );
+    writeFileSync(join(project, 'addons', 'gdUnit4', 'bin', 'GdUnitCmdTool.gd'), 'extends SceneTree\n');
+    const older =
+      /gdUnit4 in this project is older than 6\.0, which project_test needs: no addons\/gdUnit4\/src\/core\/runners\/GdUnitTestCIRunner\.gd\./;
+    const nothingAndOld = await server.request('tools/call', {
+      name: 'project_test',
+      arguments: { projectPath: project },
+    });
+    const saidOld = textOf(nothingAndOld) ?? '';
+    assert.match(saidOld, /^No tests ran: nothing at res:\/\/test, and /, saidOld);
+    assert.match(saidOld, older, saidOld);
+    const oldJson: unknown = JSON.parse(
+      String(get(asArray(get(nothingAndOld, 'result', 'content'), 'content')[1], 'text')),
+    );
+    assert.equal(
+      get(oldJson, 'gdUnit4Installed'),
+      undefined,
+      `installed, though too old: ${JSON.stringify(oldJson)}`,
+    );
+
+    mkdirSync(join(project, 'test'));
+    writeFileSync(join(project, 'test', 'a_test.gd'), 'extends GdUnitTestSuite\n');
+    const old = await server.request('tools/call', {
+      name: 'project_test',
+      arguments: { projectPath: project },
+    });
+    const refused = textOf(old) ?? '';
+    assert.match(refused, older, refused);
+    assert.match(refused, /Update gdUnit4 under addons\/gdUnit4/, refused);
   } finally {
     await server.stop();
     sweep(project);
@@ -35995,8 +36031,8 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
  * which the engine reports with forward slashes, so finding its options after that path is what
  * this case reaches first: started with the native spelling, a runner comparing the two as written
  * hands gdUnit4 no options and it prints its help. The skipping file leaves one case out, the
- * expected errors a suite declares are written where asked, and the reports nobody reads are written
- * only when not turned off.
+ * expected errors a suite declares are written where asked, and each report is written only when not
+ * turned off.
  */
 async function testTheShippedRunnerRunsAFileOfSuites(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -36033,6 +36069,11 @@ async function testTheShippedRunnerRunsAFileOfSuites(): Promise<void> {
       ),
     );
     writeFileSync(join(projectDir, 'tests', 'c_test.gd'), suite(['test_never']));
+    // A class of the game's that no suite reaches and that does not compile.
+    writeFileSync(
+      join(projectDir, 'wreck.gd'),
+      'class_name Wreck\nextends RefCounted\n\n\nfunc sink() -> void:\n\tnowhere_at_all()\n',
+    );
     const imported = spawnSyncHidden(godotPath, ['--headless', '--path', projectDir, '--import'], {
       encoding: 'utf8',
       timeout: ENGINE_CALL_TIMEOUT_MS,
@@ -36077,7 +36118,7 @@ async function testTheShippedRunnerRunsAFileOfSuites(): Promise<void> {
     };
 
     const quiet = join(scratch, 'quiet');
-    const first = run(quiet, ['--reports-off', '--expected-errors-out', expected]);
+    const first = run(quiet, ['--html-report-off', '--junit-report-off', '--expected-errors-out', expected]);
     assert.equal(first.status, 0, first.said);
     const opened = [...first.said.matchAll(/Run Test Suite: (res:\/\/\S+\.gd)/g)].map((match) => match[1]);
     assert.deepEqual(
@@ -36090,21 +36131,54 @@ async function testTheShippedRunnerRunsAFileOfSuites(): Promise<void> {
       /Executed test cases\s*:\s*\(2\//,
       `test_two left out by the skipping file: ${first.said}`,
     );
+    assert.doesNotMatch(
+      first.said,
+      /wreck\.gd/,
+      `a class no suite reaches is not compiled unasked: ${first.said}`,
+    );
     assert.ok(existsSync(expected), 'the expected errors are written where asked');
     assert.deepEqual(
       JSON.parse(readFileSync(expected, 'utf8')) as unknown,
       { 'res://tests/b_test.gd': { test_three: ['the store is closed'] } },
       'the expected errors as the suite declares them',
     );
-    const written = (reports: string): boolean =>
-      existsSync(reports) &&
-      readdirSync(reports, { recursive: true }).some((entry) => String(entry).endsWith('results.xml'));
-    assert.equal(written(quiet), false, 'no JUnit report with the reports turned off');
+    const written = (reports: string): { junit: boolean; html: boolean } => {
+      const files = existsSync(reports) ? readdirSync(reports, { recursive: true }).map(String) : [];
+      return {
+        junit: files.some((entry) => entry.endsWith('results.xml')),
+        html: files.some((entry) => entry.endsWith('index.html')),
+      };
+    };
+    assert.deepEqual(written(quiet), { junit: false, html: false }, 'neither report with both turned off');
+
+    // As project_test runs it.
+    const junitOnly = join(scratch, 'junit-only');
+    const second = run(junitOnly, ['--html-report-off']);
+    assert.equal(second.status, 0, second.said);
+    assert.deepEqual(
+      written(junitOnly),
+      { junit: true, html: false },
+      `the JUnit report alone with the HTML one off: ${second.said}`,
+    );
 
     const kept = join(scratch, 'kept');
-    const second = run(kept, []);
-    assert.equal(second.status, 0, second.said);
-    assert.equal(written(kept), true, `the JUnit report when they are left on: ${second.said}`);
+    const third = run(kept, []);
+    assert.equal(third.status, 0, third.said);
+    assert.deepEqual(written(kept), { junit: true, html: true }, `both reports when left on: ${third.said}`);
+
+    // As a gate runs it: every class of the game compiled with the suites, so the broken one is
+    // named although no suite reaches it, and the suites still run.
+    const together = run(join(scratch, 'together'), [
+      '--html-report-off',
+      '--junit-report-off',
+      '--compile-together',
+    ]);
+    assert.match(together.said, /res:\/\/wreck\.gd/, `the broken class is named: ${together.said}`);
+    assert.match(
+      together.said,
+      /Executed test cases\s*:\s*\(2\//,
+      `and the listed suites run beside it: ${together.said}`,
+    );
   } finally {
     sweep(projectDir, scratch);
   }

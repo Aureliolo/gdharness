@@ -8,17 +8,25 @@ extends SceneTree
 ##
 ## Started from outside the project, `-s` with this file's absolute path, so it declares no class of
 ## its own and reaches gdUnit4 through the project's global classes. Besides the file of suites it
-## finds each case by its id in a dictionary ([GdhIndexedSession]), compiles the suites together
-## before gdUnit4 loads them ([method compiled_together]), can turn off the reports nobody reads
-## ([constant REPORTS_OFF]), and writes the errors each suite declares it expects
+## finds each case by its id in a dictionary ([GdhIndexedSession]), can compile the suites together
+## before gdUnit4 loads them ([constant TOGETHER]), can turn off the reports the caller does
+## not read ([constant REPORTS_OFF]), and writes the errors each suite declares it expects
 ## ([constant EXPECTED_OUT]).
 
 const LISTED: String = "--suites-in"
 const SKIPPING: String = "--skipping-in"
-## Turns off the reports of [constant UNREAD]: a gate reads what a run prints, and each report finds
-## every case it hears of in the session to write them all out as the run ends. project_test reads
-## the JUnit one, so it is left on unless asked.
-const REPORTS_OFF: String = "--reports-off"
+## The flags turning off a report, with the gdUnit4 hook that writes it. A gate reads what a run
+## prints, and each report finds every case it hears of in the session to write them all out as the
+## run ends; project_test reads the JUnit one and turns off only the HTML one.
+const REPORTS_OFF: Dictionary[String, String] = {
+	"--html-report-off": "res://addons/gdUnit4/src/core/hooks/GdUnitHtmlReporterTestSessionHook.gd",
+	"--junit-report-off": "res://addons/gdUnit4/src/core/hooks/GdUnitXMLReporterTestSessionHook.gd",
+}
+## Compiles the suites together beside every class of the game ([method compiled_together]) before
+## gdUnit4 loads them. A gate asks for it, since it runs every suite and wants every script that
+## does not compile named. project_test does not: its answer is about the scripts its run reached,
+## and the compile names every broken script of the game, then once more as the one script it made.
+const TOGETHER: String = "--compile-together"
 ## The file to write the errors every suite declares it expects into, as JSON keyed by suite path and
 ## then case name.
 const EXPECTED_OUT: String = "--expected-errors-out"
@@ -26,10 +34,6 @@ const EXPECTED_OUT: String = "--expected-errors-out"
 const EXPECTED: String = "GDHARNESS_EXPECTED_ERRORS"
 ## The tool name gdUnit4 reads its options after.
 const TOOL: String = "GdUnitCmdTool.gd"
-const UNREAD: PackedStringArray = [
-	"res://addons/gdUnit4/src/core/hooks/GdUnitHtmlReporterTestSessionHook.gd",
-	"res://addons/gdUnit4/src/core/hooks/GdUnitXMLReporterTestSessionHook.gd",
-]
 ## How long a windowless engine sleeps after each frame. The engine's own default is the
 ## low-processor pause, 6.8 ms measured, which a run of suites awaiting frames spends thousands of
 ## times; zero makes a frame's delta round to nothing, and a tween then never moves.
@@ -108,10 +112,15 @@ class GdhIndexedSession:
 func _initialize() -> void:
 	OS.low_processor_usage_mode_sleep_usec = FRAME_SLEEP_USEC
 	var asked: PackedStringArray = OS.get_cmdline_user_args()
-	if asked.has(REPORTS_OFF):
-		var _off: PackedStringArray = unread_off(GdUnitTestSessionHookService.instance())
+	var unread: PackedStringArray = []
+	for flag: String in REPORTS_OFF:
+		if asked.has(flag):
+			var _unread: bool = unread.append(REPORTS_OFF[flag])
+	if not unread.is_empty():
+		var _off: PackedStringArray = unread_off(GdUnitTestSessionHookService.instance(), unread)
 	var suites: PackedStringArray = listed(asked, LISTED)
-	_together = compiled_together(suites)
+	if asked.has(TOGETHER):
+		_together = compiled_together(suites)
 	var expected_out: String = argument_after(asked, EXPECTED_OUT)
 	if not expected_out.is_empty():
 		write_expected(expected_out, suites)
@@ -122,18 +131,22 @@ func _initialize() -> void:
 	root.add_child(_runner)
 
 
+## As gdUnit4's own `GdUnitCmdTool.gd` ends, which names in a verbose run the nodes left orphaned.
 func _finalize() -> void:
 	queue_delete(_runner)
+	if OS.is_stdout_verbose():
+		print("Orphan nodes left as the run ends:")
+		Window.print_orphan_nodes()
 
 
-## Turns off the hooks of [constant UNREAD] among [param hooks], answering the scripts of those it
-## turned off. Through the mark gdUnit4's own `is_enabled` reads, rather than its `enable_hook`,
-## which writes the setting into `project.godot`: a run changes nothing in the tree.
-static func unread_off(hooks: GdUnitTestSessionHookService) -> PackedStringArray:
+## Turns off the hooks among [param hooks] whose scripts [param unread] names, answering the scripts
+## of those it turned off. Through the mark gdUnit4's own `is_enabled` reads, rather than its
+## `enable_hook`, which writes the setting into `project.godot`: a run changes nothing in the tree.
+static func unread_off(hooks: GdUnitTestSessionHookService, unread: PackedStringArray) -> PackedStringArray:
 	var off: PackedStringArray = []
 	for hook: GdUnitTestSessionHook in hooks.enigne_hooks:
 		var path: String = hook.get_script().resource_path
-		if UNREAD.has(path):
+		if unread.has(path):
 			hook.set_meta("enabled", false)
 			var _added: bool = off.append(path)
 	return off

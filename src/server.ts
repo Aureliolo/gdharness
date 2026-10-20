@@ -2699,6 +2699,24 @@ const PROJECT_INFO_SECTIONS: Readonly<Record<string, Section>> = dictionary<Sect
 /** Where gdUnit4 lives, which is where a backtrace stops being about the game. */
 const RUNNER_DIRECTORY = 'addons/gdUnit4/';
 
+/** The gdUnit4 class the shipped runner extends, which gdUnit4 has had since 6.0. */
+const GDUNIT4_CI_RUNNER = 'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd';
+
+/** Why the gdUnit4 in [projectPath] cannot run the shipped runner, or null when it can. */
+function gdUnit4Unusable(projectPath: string): { missing: boolean; reason: string } | null {
+  const marker = 'addons/gdUnit4/plugin.cfg';
+  if (!existsSync(join(projectPath, ...marker.split('/')))) {
+    return { missing: true, reason: `gdUnit4 is not installed in this project: no ${marker}` };
+  }
+  if (!existsSync(join(projectPath, ...GDUNIT4_CI_RUNNER.split('/')))) {
+    return {
+      missing: false,
+      reason: `gdUnit4 in this project is older than 6.0, which project_test needs: no ${GDUNIT4_CI_RUNNER}`,
+    };
+  }
+  return null;
+}
+
 /**
  * One engine message with the runner's own frames taken off the bottom of its backtrace.
  *
@@ -3391,6 +3409,7 @@ class GodotServer {
   private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
   private readonly operationsScript = join(__dirname, 'godot', 'operations', 'godot_operations.gd');
+  private readonly listedRunner = join(__dirname, 'godot', 'tests', 'listed.gd');
   private readonly godotBridge: GodotBridge;
   private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
   private activeProcess: GodotProcess | null = null;
@@ -6503,13 +6522,12 @@ class GodotServer {
       (path) => !existsSync(join(project.value.path, path.slice('res://'.length))),
     );
     const asked = paths.value.filter((path) => !missing.includes(path));
-    const runner = 'addons/gdUnit4/bin/GdUnitCmdTool.gd';
-    const noRunner = !existsSync(join(project.value.path, runner));
+    const unusable = gdUnit4Unusable(project.value.path);
     if (asked.length === 0) {
       const verdict = `nothing at ${missing.join(' and ')}`;
       // Both, when both: a project with neither tests nor gdUnit4 was told only about the folder,
       // and the caller who wrote tests into it next would have been refused again for the runner.
-      const andNoRunner = noRunner ? `, and gdUnit4 is not installed in this project: no ${runner}` : '';
+      const andNoRunner = unusable === null ? '' : `, and ${unusable.reason}`;
       return {
         content: [
           {
@@ -6522,16 +6540,16 @@ class GodotServer {
               passed: false,
               verdict,
               tests: 0,
-              ...(noRunner ? { gdUnit4Installed: false } : {}),
+              ...(unusable?.missing === true ? { gdUnit4Installed: false } : {}),
             }),
           },
         ],
         isError: true,
       };
     }
-    if (noRunner) {
-      return this.createErrorResponse(`gdUnit4 is not installed in this project: no ${runner}.`, [
-        'Install gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4',
+    if (unusable !== null) {
+      return this.createErrorResponse(`${unusable.reason}.`, [
+        `${unusable.missing ? 'Install' : 'Update'} gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4`,
       ]);
     }
     const selection = selectTests(project.value.path, asked, args['tests']);
@@ -6576,6 +6594,13 @@ class GodotServer {
     const ours = `gdharness-reports/${randomUUID()}`;
     const reports = `res://.godot/${ours}`;
     const ignored = readStringArray(args, 'ignore') ?? [];
+    // The engine's application data directory, beside the folder user:// is made in, so the
+    // lists are not among what a suite finds there.
+    const userData = scratchDirectory('tests');
+    const suitesFile = join(userData, 'suites.txt');
+    const skippingFile = join(userData, 'skipping.txt');
+    writeFileSync(suitesFile, `${(selection.value?.suites ?? asked).join('\n')}\n`);
+    writeFileSync(skippingFile, `${[...ignored, ...(selection.value?.ignore ?? [])].join('\n')}\n`);
     const cmdArgs = [
       '--headless',
       '--path',
@@ -6583,19 +6608,22 @@ class GodotServer {
       // Before the script, where the engine reads its own options rather than handing them on.
       ...flags.value,
       '-s',
-      `res://${runner}`,
+      this.listedRunner,
       '--ignoreHeadlessMode',
       ...(readBoolean(args, 'failFast') === true ? [] : ['-c']),
-      ...(selection.value?.suites ?? asked).flatMap((path) => ['-a', path]),
-      ...[...ignored, ...(selection.value?.ignore ?? [])].flatMap((entry) => ['-i', entry]),
       '-rd',
       reports,
       '-rc',
       '1',
+      '--',
+      '--suites-in',
+      suitesFile,
+      '--skipping-in',
+      skippingFile,
+      '--html-report-off',
     ];
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 600000;
     this.logDebug(`Running tests: ${engine.value} ${cmdArgs.join(' ')}`);
-    const userData = scratchDirectory('tests');
     const run = this.spawnGame(engine.value, cmdArgs, userDataIn(userData));
     // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
     // marks which characters of a failing string were there, and its report drops them.
