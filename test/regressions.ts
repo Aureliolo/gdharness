@@ -29279,7 +29279,8 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
       'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
   );
-  // Line 7 is the only script line a frame runs, and line 11 the breakpoint inside add.
+  // Line 7 is the only script line a frame runs, line 11 the breakpoint inside add, and line 17 the
+  // script error that ends explode.
   writeFileSync(
     join(project, 'main.gd'),
     [
@@ -29295,6 +29296,26 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       'func add(amount: int) -> int:',
       '\tvar doubled: int = amount * 2',
       '\treturn frames + doubled',
+      '',
+      '',
+      'func explode() -> int:',
+      '\tvar missing: Node = null',
+      '\treturn missing.get_child_count()',
+      '',
+      '',
+      'func survives() -> int:',
+      '\tvar counted: int = explode()',
+      '\treturn counted + 1',
+      '',
+      '',
+      'func noted() -> int:',
+      '\tpush_error("noted on the way")',
+      '\treturn 3',
+      '',
+      '',
+      'func load() -> int:',
+      '\tvar _gone: Resource = ResourceLoader.load("res://nope.tres")',
+      '\treturn 4',
       '',
     ].join('\n'),
   );
@@ -29338,16 +29359,33 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       timeoutMs: 2_000,
     });
     assert.equal(get(asked.answer, 'pending'), true, `the held call is pending: ${asked.said}`);
+    // The debugger holding it is this server's keeper, so where it is held is known, not guessed.
+    assert.equal(
+      get(asked.answer, 'heldAt'),
+      'held by its debugger at res://main.gd:11 in add (Breakpoint)',
+      asked.said,
+    );
     assert.match(
       text(get(asked.answer, 'note')),
-      /has the request and did not answer 'call_method'/,
-      `with the game, which took it: ${asked.said}`,
+      /^The game is held by its debugger at res:\/\/main\.gd:11 in add \(Breakpoint\), so it answers once it goes on: debug_control continue lets it go, and runtime_invoke op result with requestId \d+ then answers/,
+      asked.said,
     );
     const held = await call('debug_state', { op: 'stack' });
     assert.deepEqual(
       [get(held.answer, 'stack', 0, 'name'), get(held.answer, 'stack', 0, 'line')],
       ['add', 11],
       `held inside the call: ${held.said}`,
+    );
+    const beside = await call('runtime_inspect', {
+      op: 'property',
+      nodePath: '/root/Main',
+      property: 'frames',
+    });
+    assert.equal(beside.answer, null, beside.said);
+    assert.match(
+      beside.said,
+      /^The game \(pid \d+\) is held by its debugger at res:\/\/main\.gd:11 in add \(Breakpoint\), and answers no runtime call while it is\./,
+      `a call to the held game is refused at once rather than waiting out its timeout: ${beside.said}`,
     );
     await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 11 });
     await call('debug_control', { op: 'continue' });
@@ -29363,6 +29401,45 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
     assert.ok(
       Number(get(collected, 'result')) >= 10,
       `and answered once let go: ${JSON.stringify(collected)}`,
+    );
+
+    // A script error ends the function it is raised in, which returns its type's default: explode's
+    // 0 is not a count. survives goes on past the 0 explode gave it, so its own result is one it
+    // returned, beside the same error.
+    const exploded = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'explode' });
+    assert.deepEqual(
+      [get(exploded.answer, 'result'), get(exploded.answer, 'ended_by_error_at')],
+      [0, 'res://main.gd:17'],
+      exploded.said,
+    );
+    const survived = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'survives' });
+    assert.deepEqual(
+      [
+        get(survived.answer, 'result'),
+        get(survived.answer, 'ended_by_error_at'),
+        asArray(get(survived.answer, 'errors')).length,
+      ],
+      [1, undefined, 1],
+      survived.said,
+    );
+    // push_error reports and goes on, so the method that called it returned what it says.
+    const noted = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'noted' });
+    assert.deepEqual(
+      [get(noted.answer, 'result'), get(noted.answer, 'ended_by_error_at'), get(noted.answer, 'errors')],
+      [3, undefined, ['noted on the way']],
+      noted.said,
+    );
+    // An engine error is reported under the engine's function, and the loader's is load: a game's
+    // own load that met it went on and returned 4.
+    const loaded = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'load' });
+    assert.deepEqual(
+      [
+        get(loaded.answer, 'result'),
+        get(loaded.answer, 'ended_by_error_at'),
+        asArray(get(loaded.answer, 'errors')).length > 0,
+      ],
+      [4, undefined, true],
+      loaded.said,
     );
 
     // Nearly all of an idle game's time is outside script, so a pause lands between frames, and the
@@ -29382,6 +29459,40 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       const going = await call('debug_control', { op: 'continue' });
       assert.equal(get(going.answer, 'continued'), true, going.said);
     }
+
+    // Line 7 is _process's last, so a step into from it runs into the next thing the game does,
+    // which is the runtime addon's _process at the top of the next frame, and goes on to line 7
+    // there. The engine names that stop Breakpoint either way, so the answer says the line holds
+    // one, and says nothing once it is removed.
+    await call('debug_breakpoint', { projectPath: project, op: 'set', scriptPath: 'main.gd', line: 7 });
+    await call('debug_control', { op: 'pause' });
+    for (const [step, onBreakpoint] of [
+      ['first', true],
+      ['second', true],
+      ['removed', undefined],
+    ] as const) {
+      if (step === 'removed') {
+        await call('debug_breakpoint', {
+          projectPath: project,
+          op: 'remove',
+          scriptPath: 'main.gd',
+          line: 7,
+        });
+      }
+      const into = await call('debug_control', { op: 'step_into' });
+      assert.deepEqual(
+        [
+          get(into.answer, 'heldAgain'),
+          get(into.answer, 'stack', 0, 'script'),
+          get(into.answer, 'stack', 0, 'line'),
+          get(into.answer, 'held', 'reason'),
+          get(into.answer, 'held', 'onBreakpoint'),
+        ],
+        [true, 'res://main.gd', 7, 'Stepped', onBreakpoint],
+        `the ${step} step into from the last line of _process stops in the game's own script: ${into.said}`,
+      );
+    }
+    await call('debug_control', { op: 'continue' });
   } finally {
     if (started) {
       await server.request(
@@ -29674,6 +29785,15 @@ async function testInputThatReachesNothingSaysWhatWould(): Promise<void> {
       misspelt.said,
       /^No key is called Spaec\. The nearest key names? (?:is|are) [^.]*\bSpace\b[^.]*\. A key is named as Godot names it/,
       `a misspelt key is offered the key it was meant to be: ${misspelt.said}`,
+    );
+    // Finding those names asks the engine to spell every code, and it prints an error for each code
+    // that has no name: 136 of them, which on a loaded Windows runner took the refusal past its
+    // ten-second wait, and which the game's log counted as errors the game made.
+    const output = await call('editor_output', { op: 'run' });
+    assert.deepEqual(
+      [get(output.answer, 'errors'), /Unicode parsing error/.test(output.said)],
+      [0, false],
+      `the refusal leaves the game's log as it was: ${output.said}`,
     );
     const pressed = await call('runtime_invoke', {
       op: 'call',

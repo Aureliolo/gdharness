@@ -13953,6 +13953,36 @@ class GodotServer {
   }
 
   /**
+   * Where the game this server started is held by its keeper's debugger, when [param endpoint] is
+   * that game and it is held; null otherwise, and for a debugger that does not answer. The editor's
+   * session says this of its game before a call goes, and a kept game said nothing: a call that met
+   * a breakpoint waited out the whole runtime timeout, then said only that the game might be held.
+   */
+  private async keptHoldOn(endpoint: RuntimeEndpoint): Promise<string | null> {
+    const kept = this.keptRun();
+    if (kept === null || this.announcedPidOf(kept) !== endpoint.pid) {
+      return null;
+    }
+    const answered = await askTheKeepersDebugger(kept.keeper, { op: 'stack' }, KEEPER_DEBUG_MS);
+    if ('unreached' in answered || !Array.isArray(answered['stack'])) {
+      return null;
+    }
+    const top: unknown = answered['stack'][0];
+    const held: unknown = answered['held'];
+    const reason =
+      typeof held === 'object' &&
+      held !== null &&
+      typeof (held as Record<string, unknown>)['reason'] === 'string'
+        ? ` (${String((held as Record<string, unknown>)['reason'])})`
+        : '';
+    if (typeof top !== 'object' || top === null) {
+      return `held by its debugger between frames${reason}`;
+    }
+    const frame = top as Record<string, unknown>;
+    return `held by its debugger at ${String(frame['script'])}:${String(frame['line'])} in ${String(frame['name'])}${reason}`;
+  }
+
+  /**
    * Whether an editor-played run is held at a breakpoint, from the session when it knows and from
    * the runtime when it does not.
    *
@@ -14198,6 +14228,17 @@ class GodotServer {
         ],
       );
     }
+    const keptHeld = await this.keptHoldOn(choice.endpoint);
+    if (keptHeld !== null) {
+      return this.createErrorResponse(
+        `The game (pid ${choice.endpoint.pid}) is ${keptHeld}, and answers no runtime call while it is.`,
+        [
+          'debug_control continue lets it go, after which this call answers',
+          'debug_state stack reads where it is held, and debug_state variables what it is holding there',
+          'editor_run stop ends it',
+        ],
+      );
+    }
 
     const expectsScreenshot = command === 'capture_screenshot' || command === 'capture_viewport';
     // Checked before the game is asked, so a refused place costs no capture.
@@ -14262,12 +14303,18 @@ class GodotServer {
       // rather than as a failure: the call has not failed, and a caller told it had repeated calls
       // that had already run.
       if (!reply.ok && reply.requestId !== undefined) {
+        // The call itself can be what reached the breakpoint, which no check before it could see.
+        const heldSince = await this.keptHoldOn(choice.endpoint);
         return this.jsonTextResponse({
           pending: true,
           requestId: reply.requestId,
           command,
           waitedMs: timeoutMs,
-          note: `${reply.message} ${longerWaitNote(asked.tool, asked.op, timeoutMs)}`,
+          ...(heldSince === null ? {} : { heldAt: heldSince }),
+          note:
+            heldSince === null
+              ? `${reply.message} ${longerWaitNote(asked.tool, asked.op, timeoutMs)}`
+              : `The game is ${heldSince}, so it answers once it goes on: debug_control continue lets it go, and runtime_invoke op result with requestId ${reply.requestId} then answers with what the call returned.`,
           ...answeredBy,
           ...alongside(),
         });

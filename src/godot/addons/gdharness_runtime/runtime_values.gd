@@ -31,6 +31,9 @@ const SINGLETONS: Array[String] = [
 ## The most frames a press is held in one call, as many as a frames wait takes.
 const MOST_HELD: int = 600
 
+## Read by [method _key_names], once a game.
+static var _named_keys: PackedStringArray = []
+
 var _shared: GdhSerialisation = GdhSerialisation.new()
 
 
@@ -160,12 +163,7 @@ static func glyph_of(keycode: Key, shifted: bool) -> int:
 ## engine's own names, printable keys and the special ones above [constant KEY_SPECIAL], since the
 ## game takes any name OS.find_keycode_from_string does.
 static func unknown_key(name: String) -> String:
-	var names: PackedStringArray = []
-	for code: int in range(32, 127) + range(KEY_SPECIAL + 1, KEY_SPECIAL + 0x100):
-		var spelled: String = OS.get_keycode_string(code as Key)
-		if not spelled.is_empty() and OS.find_keycode_from_string(spelled) == code:
-			var _named: bool = names.append(spelled)
-	var close: PackedStringArray = GdhRead.nearest(name, names)
+	var close: PackedStringArray = GdhRead.nearest(name, _key_names())
 	var said: String = "No key is called %s." % name
 	if close.size() == 1:
 		said += " The nearest key name is %s." % close[0]
@@ -176,6 +174,24 @@ static func unknown_key(name: String) -> String:
 		+ ' A key is named as Godot names it, such as "Space", "Enter", "Escape", "A" or "F1",'
 		+ " or given by its keycode."
 	)
+
+
+## Every key name the engine takes, read once a game. The engine spells a code it has no name for as
+## the character it would be, and past the last code point that is an error it prints: 136 of them
+## for the special range, two seconds of console on a fast machine, more than a call's whole wait on
+## a loaded one, and each in the game's log as an error the game never made. So they are asked with
+## the engine's error printing off, which no other line of the main thread runs beside.
+static func _key_names() -> PackedStringArray:
+	if not _named_keys.is_empty():
+		return _named_keys
+	var printing: bool = Engine.print_error_messages
+	Engine.print_error_messages = false
+	for code: int in range(32, 127) + range(KEY_SPECIAL + 1, KEY_SPECIAL + 0x100):
+		var spelled: String = OS.get_keycode_string(code as Key)
+		if not spelled.is_empty() and OS.find_keycode_from_string(spelled) == code:
+			var _named: bool = _named_keys.append(spelled)
+	Engine.print_error_messages = printing
+	return _named_keys
 
 
 ## The refusal for [param action], which the input map lacks, with the nearest of the project's own
