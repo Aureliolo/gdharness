@@ -1263,7 +1263,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'script_info',
     title: 'Script info',
     description:
-      "What a script contains: its structure from the file, or symbols, completions and hover text from the editor's language server. It reads .gd files only, and answers what a script uses rather than what uses it: project_search finds where a class, a member or a signal is named.",
+      "What a script contains: its structure from the file, or symbols, completions and hover text from the editor's language server. It reads .gd files only, and answers what a script uses rather than what uses it: project_search finds where a class, a member or a signal is named. symbols, completion and hover name under unseenByEditor each class the project declares that the editor cannot see yet, with unseenNote: the language server reads such a class as nothing, so a completion after self. in a script extending one comes back empty. editor_rescan brings it in.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
