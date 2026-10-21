@@ -262,6 +262,48 @@ export function ignoredYetRan(report: TestReport, ignored: readonly string[]): I
 }
 
 /**
+ * What [param ignored] left out, read against the cases the suites under the run's paths declare,
+ * [param declared]: each case an entry names that the report does not hold, as `suite_name:test_name`,
+ * and each entry naming no case there at all. A run that left a case out was answered passed with
+ * nothing saying a case had not run, and an entry spelt wrong left out nothing and said nothing.
+ */
+export function ignoredLeftOut(
+  report: TestReport,
+  ignored: readonly string[],
+  declared: ReadonlyArray<{ readonly path: string; readonly cases: readonly string[] }>,
+): { leftOut: string[]; unmatched: string[] } {
+  const nameOf = (path: string): string => (path.split('/').at(-1) ?? path).replace(/\.gd$/, '');
+  const leftOut = new Set<string>();
+  const unmatched: string[] = [];
+  for (const entry of ignored) {
+    const bare = entry.replace('res://', '');
+    const at = bare.lastIndexOf(':');
+    const suiteNamed = at === -1 ? bare : bare.slice(0, at);
+    const testNamed = at === -1 ? null : bare.slice(at + 1);
+    const named = declared
+      .filter((suite) => nameOf(suite.path) === suiteNamed || suite.path.includes(suiteNamed))
+      .flatMap((suite) =>
+        suite.cases.filter((one) => testNamed === null || one === testNamed).map((test) => ({ suite, test })),
+      );
+    if (named.length === 0) {
+      unmatched.push(entry);
+      continue;
+    }
+    for (const { suite, test } of named) {
+      const reported = report.suites
+        .filter((ran) => ran.path === suite.path || (ran.path === null && ran.name === nameOf(suite.path)))
+        .some((ran) =>
+          ran.cases.some((one) => one.name === test || new RegExp(`^${test}\\W`).test(one.name)),
+        );
+      if (!reported) {
+        leftOut.add(`${nameOf(suite.path)}:${test}`);
+      }
+    }
+  }
+  return { leftOut: [...leftOut].sort(), unmatched };
+}
+
+/**
  * A case with every report gdUnit4 wrote for it.
  *
  * gdUnit4 goes on past a failed assertion and writes one child per report, so a case can carry

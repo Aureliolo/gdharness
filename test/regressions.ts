@@ -36774,6 +36774,19 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
         `the form given back leaves the case out: ${JSON.stringify(formed)}`,
       );
       assert.equal(get(formed, 'ignoreNotApplied'), undefined, JSON.stringify(formed));
+      assert.deepEqual(get(formed, 'ignored'), [form], `and the answer names it: ${JSON.stringify(formed)}`);
+      assert.equal(get(bare, 'ignored'), undefined, 'a list that left nothing out names nothing');
+      assert.equal(get(bare, 'ignoreUnmatched'), undefined, 'and a bare case name is answered once');
+
+      const misspelt = form.replace(/test_other$/, 'test_othr');
+      const typo = await run({ ignore: [misspelt] });
+      assert.equal(get(typo, 'tests'), 2, JSON.stringify(typo));
+      assert.deepEqual(get(typo, 'ignoreUnmatched'), [misspelt], JSON.stringify(typo));
+      assert.match(
+        text(get(typo, 'note')),
+        new RegExp(`${misspelt} names no suite or case under the paths run, so it left nothing out\\.`),
+        JSON.stringify(typo),
+      );
     });
   } finally {
     sweep(projectDir);
