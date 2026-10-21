@@ -1411,7 +1411,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       move: {
         effect: 'destructive',
         summary:
-          "move or rename a file or a directory, and every path in the project naming it. With no editor an import pass then rebuilds the project's uid cache, so a reference by uid leads to the new path, and uidTable says whether it ran",
+          "move or rename a file or a directory, and every path in the project naming it. With no editor an import pass then rebuilds the project's uid cache, so a reference by uid leads to the new path, uidTable says whether it ran, and writtenByImport names the .uid and .import files it gave to scripts and assets that had none. A directory's answer names each file moved",
         requires: ['newPath'],
       },
     },

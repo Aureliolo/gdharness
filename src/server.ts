@@ -2663,6 +2663,19 @@ const PATH_SOLUTIONS = [
   'Point projectPath at the project the file belongs to',
 ];
 
+/** The arguments naming where a file goes rather than one the project holds. */
+const DESTINATION_ARGUMENTS: ReadonlySet<string> = new Set(['newPath', 'newScriptPath']);
+
+/**
+ * What to tell a caller whose [key] lands outside the project. Pointing projectPath elsewhere
+ * cannot help, since the file being moved or copied is in this project.
+ */
+function destinationSolutions(key: string): string[] {
+  return [
+    `Give ${key} inside the project, relative to it, such as "scenes/main.tscn" or "res://scenes/main.tscn"; the file goes only where the project is, so copy it elsewhere by hand afterwards`,
+  ];
+}
+
 /** The same for an export's output, which is a file to write rather than one the project holds. */
 const OUTPUT_PATH_SOLUTIONS = [
   'Give outputPath inside the project, relative to it, such as "build/game.exe" or "res://build/game.exe"; copy the build elsewhere once it is exported',
@@ -5518,7 +5531,8 @@ class GodotServer {
       }
       const location = resolveWithinProject(projectPath, value);
       if (!location.ok) {
-        return { ok: false, response: this.createErrorResponse(location.reason, PATH_SOLUTIONS) };
+        const solutions = DESTINATION_ARGUMENTS.has(key) ? destinationSolutions(key) : PATH_SOLUTIONS;
+        return { ok: false, response: this.createErrorResponse(location.reason, solutions) };
       }
       contained[key] = `res://${location.relativePath}`;
     }
@@ -13614,7 +13628,16 @@ class GodotServer {
     let ok = true;
     if (asked.moved) {
       const engine = await this.engine();
+      // The pass gives a uid file to every script that had none, anywhere in the project, and
+      // those are files in the caller's tree that nothing asked for by name.
+      const sidecarsBefore = new Set(projectFiles(projectPath, ['.uid', '.import']));
       const imported = engine.ok ? await runImport(engine.value, projectPath) : null;
+      const writtenByImport = projectFiles(projectPath, ['.uid', '.import']).filter(
+        (file) => !sidecarsBefore.has(file),
+      );
+      if (writtenByImport.length > 0) {
+        report['writtenByImport'] = writtenByImport.map((file) => `res://${file}`);
+      }
       const problem =
         imported === null
           ? engine.ok

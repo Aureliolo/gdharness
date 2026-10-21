@@ -27183,6 +27183,10 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
     return game.pid;
   };
   let playing = false;
+  // When the stand-in took the play and when its announcement was written, since a loaded runner
+  // fires the timer seconds late and the note is rightly read from the write, not the schedule.
+  let playedAt = 0;
+  let announcedAt = 0;
   try {
     await withAPlayingEditor(
       ({ adapter, project, runtimeDir }) =>
@@ -27190,6 +27194,7 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
           if (tool === 'play_scene') {
             const pid = openGame();
             playing = true;
+            playedAt = Date.now();
             setTimeout(() => {
               writeFileSync(
                 join(runtimeDir, `runtime-${pid}.json`),
@@ -27205,6 +27210,7 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
                 }),
                 'utf8',
               );
+              announcedAt = Date.now();
             }, announcesAfterMs);
             return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
           }
@@ -27249,6 +27255,9 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
             ),
             'the game announces',
           );
+          // Tied well after the announcement, so a note taken when the tie is made reads seconds
+          // longer than one taken from the announcement's own time.
+          await delay(2_000);
           const seen = parseTextContent(
             await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000),
           );
@@ -27259,6 +27268,10 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
           );
         };
         const notedFor = (scene: string): number | null => readBootNote(project, scene);
+        // The run starts once the play is answered, after the stand-in took it, so the note is at
+        // most the time from the play to the write, and short of it by the answer's way back.
+        const fromThePlay = (took: number): boolean =>
+          took <= announcedAt - playedAt + 100 && took >= announcedAt - playedAt - 1_500;
 
         const first = await startWith({});
         assert.equal(
@@ -27275,8 +27288,8 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
         await tieTheLast();
         const took = notedFor(MAIN_SCENE) ?? -1;
         assert.ok(
-          took >= announcesAfterMs - 1_500 && took <= announcesAfterMs + 3_000,
-          `the boot noted is the announcement's time against the run's start: ${took}ms for a game announcing at ${announcesAfterMs}ms`,
+          fromThePlay(took),
+          `the boot noted is the announcement's time against the run's start: ${took}ms for a game announcing ${announcedAt - playedAt}ms after the play`,
         );
         await stop();
 
@@ -27304,8 +27317,8 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
         await tieTheLast();
         const otherTook = notedFor('other.tscn') ?? -1;
         assert.ok(
-          otherTook >= announcesAfterMs - 1_500 && otherTook <= announcesAfterMs + 3_000,
-          `the other scene's boot, under its own name: ${otherTook}ms`,
+          fromThePlay(otherTook),
+          `the other scene's boot, under its own name: ${otherTook}ms for a game announcing ${announcedAt - playedAt}ms after the play`,
         );
         assert.equal(notedFor(MAIN_SCENE), mainBefore, "and the main scene's is still its own");
       },
@@ -32073,6 +32086,7 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
             ENGINE_CALL_TIMEOUT_MS,
           ),
         );
+      const startAskedAt = Date.now();
       const startResponse = await server.request(
         'tools/call',
         {
@@ -32086,6 +32100,7 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
         },
         ENGINE_CALL_TIMEOUT_MS,
       );
+      const startAnsweredAt = Date.now();
       const started = parseTextContent(startResponse) ?? { refused: textOf(startResponse) };
       let workerPid = 0;
       let helperPid = 0;
@@ -32177,9 +32192,12 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
           readBootNote(project, MAIN_SCENE),
           `${shape}: the boot is noted for the main scene`,
         );
+        // The run starts between the start being asked and answered, and the second shape is tied
+        // seconds after the bench announced, so a note taken at the tie lands past this window.
+        const announcedAt = statSync(join(runtimeDir, `runtime-${benchGame}.json`)).mtimeMs;
         assert.ok(
-          bootMs > 0 && bootMs < 60_000,
-          `${shape}: the note is the announcement's time against the start: ${bootMs}ms`,
+          bootMs >= announcedAt - startAnsweredAt - 50 && bootMs <= announcedAt - startAskedAt + 50,
+          `${shape}: the note is the announcement's time against the start: ${bootMs}ms, for a bench announcing ${Math.round(announcedAt - startAnsweredAt)}ms to ${Math.round(announcedAt - startAskedAt)}ms after it`,
         );
         assert.doesNotMatch(JSON.stringify(inspected), /"Worker"/, `${shape}: not the worker's`);
 
@@ -47568,7 +47586,18 @@ function testAMovedDirectoryTakesEverythingInIt(): void {
       'spawner.gd',
       'spawner.gd.uid',
     ]);
-    assert.deepEqual(get(outcome.report, 'moved'), { from: 'res://scenes', to: 'res://levels', files: 5 });
+    assert.deepEqual(get(outcome.report, 'moved'), {
+      from: 'res://scenes',
+      to: 'res://levels',
+      files: 5,
+      paths: [
+        'res://levels/hero.tscn',
+        'res://levels/main.tscn',
+        'res://levels/old.scn',
+        'res://levels/spawner.gd',
+        'res://levels/spawner.gd.uid',
+      ],
+    });
     assert.match(read('project.godot'), /^run\/main_scene="res:\/\/levels\/main\.tscn"$/m);
     assert.match(read('levels/main.tscn'), /path="res:\/\/levels\/hero\.tscn"/);
     assert.equal(read('levels/spawner.gd'), MOVE_FIXTURE['scenes/spawner.gd']);
@@ -51879,14 +51908,28 @@ async function testAMoveWithNoEditorLeavesTheProjectLoading(): Promise<void> {
       await move({ resourcePath: 'res://lib', newPath: 'res://code/lib', preview: true }),
     );
     assert.equal(get(previewed, 'preview'), true, JSON.stringify(previewed));
-    assert.deepEqual(get(previewed, 'moved'), { from: 'res://lib', to: 'res://code/lib', files: 4 });
+    assert.deepEqual(get(previewed, 'moved'), {
+      from: 'res://lib',
+      to: 'res://code/lib',
+      files: 4,
+      paths: [
+        'res://code/lib/helper.gd',
+        'res://code/lib/helper.gd.uid',
+        'res://code/lib/told.gd',
+        'res://code/lib/told.gd.uid',
+      ],
+    });
     assert.ok(
       existsSync(join(project, 'lib', 'told.gd')) && !existsSync(join(project, 'code')),
       'a preview writes nothing',
     );
 
+    // A script with no uid yet gets one from the import pass, a file in the project nothing named.
+    writeFileSync(join(project, 'late.gd'), 'extends Node\n');
     const moved = parseTextContent(await move({ resourcePath: 'res://lib', newPath: 'res://code/lib' }));
     assert.equal(get(moved, 'ok'), true, `the move did not settle: ${JSON.stringify(moved)}`);
+    assert.ok(existsSync(join(project, 'late.gd.uid')), 'the import pass wrote one');
+    assert.deepEqual(get(moved, 'writtenByImport'), ['res://late.gd.uid'], JSON.stringify(moved));
     assert.equal(get(moved, 'written'), true);
     assert.deepEqual(get(moved, 'compiled', 'failed'), [], JSON.stringify(get(moved, 'compiled')));
     assert.equal(get(moved, 'uidTable'), 'rebuilt by an import pass');
@@ -51905,7 +51948,14 @@ async function testAMoveWithNoEditorLeavesTheProjectLoading(): Promise<void> {
     const outside =
       textOf(await move({ resourcePath: 'res://main.tscn', newPath: join(project, '..', 'main.tscn') })) ??
       '';
-    assert.match(outside, /outside the project|inside the project/, outside);
+    assert.match(outside, /outside the project/, outside);
+    // Pointing projectPath elsewhere cannot help a file of this project go outside it.
+    assert.match(
+      outside,
+      /Give newPath inside the project, relative to it, such as "scenes\/main\.tscn" or "res:\/\/scenes\/main\.tscn"; the file goes only where the project is, so copy it elsewhere by hand afterwards/,
+      outside,
+    );
+    assert.doesNotMatch(outside, /Point projectPath/, outside);
     assert.ok(existsSync(join(project, 'main.tscn')), 'and nothing was moved');
   } finally {
     await server.stop();

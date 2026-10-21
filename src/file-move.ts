@@ -315,7 +315,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
         from,
         to,
         ...(isDirectory
-          ? { files: moves.size }
+          ? { files: moves.size, paths: [...moves.keys()].map(afterwards).sort() }
           : { alongside: [...moves.keys()].filter((path) => path !== from).map(afterwards) }),
       },
       changed,
