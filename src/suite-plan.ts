@@ -18,20 +18,31 @@ import { writeWhole } from './whole-file.js';
 const SUITE_BASE = 'GdUnitTestSuite';
 /** What a case's function is called, as gdUnit4 finds them: `get_script_method_list` and the prefix. */
 const CASE_PREFIX = 'test_';
-/** A suite saying it needs a real window, declared as a constant so the runner can read it too. */
-const NEEDS_WINDOW = /^const\s+GDHARNESS_NEEDS_WINDOW\b[^=\n]*=\s*true\b/m;
+/** A suite saying whether it needs a real window, as a constant so the runner can read it too. */
+const NEEDS_WINDOW = /^const\s+GDHARNESS_NEEDS_WINDOW\b[^=\n]*=\s*(true|false)\b/m;
 /** Where suites are looked for when none are named, by gdharness test and project_test alike. */
 export const TEST_DIRECTORIES = ['tests', 'test'];
 
-/** gdUnit4's scene runner, whose input events go nowhere in a headless engine. */
+/**
+ * gdUnit4's scene runner, whose input events go nowhere in a headless engine. A guess, since many
+ * suites use it only to stand a scene up, so a suite's own declaration overrides it.
+ */
 const SCENE_RUNNER = /\bscene_runner\s*\(/;
 
 export interface DeclaredSuite {
   readonly path: string;
   /** Its case functions, its own and those of the project's scripts it extends, sorted. */
   readonly cases: readonly string[];
-  /** Whether it needs an engine with a window: it says so, or it drives a scene through gdUnit4. */
+  /**
+   * Whether it needs an engine with a window: it says so, or it drives a scene through gdUnit4 and
+   * says nothing either way.
+   */
   readonly windowed: boolean;
+  /**
+   * Whether it says it runs headless, which keeps it out of the windowed engine: a suite sizing the
+   * root viewport itself gets that size headless, and the window's own size with a window.
+   */
+  readonly headless: boolean;
 }
 
 /** One script as read for discovery. */
@@ -103,7 +114,10 @@ export class ProjectScripts {
   /** [param path] as a suite, or null when it does not extend gdUnit4's or declares no case. */
   suite(path: string): DeclaredSuite | null {
     const cases = new Set<string>();
-    let windowed = false;
+    // The nearest script in the chain to declare it decides, as the nearest declaration of a constant
+    // is the one GDScript reads.
+    let said: boolean | undefined;
+    let guessed = false;
     const seen = new Set<string>();
     let at = path;
     while (!seen.has(at)) {
@@ -115,14 +129,18 @@ export class ProjectScripts {
       for (const func of read.funcs.filter((name) => name.startsWith(CASE_PREFIX))) {
         cases.add(func);
       }
-      windowed ||= NEEDS_WINDOW.test(read.code) || SCENE_RUNNER.test(read.code);
+      const declared = NEEDS_WINDOW.exec(read.code)?.[1];
+      said ??= declared === undefined ? undefined : declared === 'true';
+      guessed ||= SCENE_RUNNER.test(read.code);
       const base = this.base(at);
       if (base === null) {
         return null;
       }
       // By name, or by the script declaring it: gdUnit4's own class is a global class of the project.
       if ('name' in base ? base.name === SUITE_BASE : base.path === this.classes.get(SUITE_BASE)) {
-        return cases.size > 0 ? { path, cases: [...cases].sort(), windowed } : null;
+        return cases.size > 0
+          ? { path, cases: [...cases].sort(), windowed: said ?? guessed, headless: said === false }
+          : null;
       }
       if ('name' in base) {
         return null;
@@ -235,6 +253,7 @@ export interface Unit {
   readonly cases: readonly string[];
   readonly cost: number;
   readonly windowed: boolean;
+  readonly headless: boolean;
 }
 
 function median(values: readonly number[]): number | undefined {
@@ -269,13 +288,22 @@ export function unitsOf(
         : Math.max(0, time.seconds - Object.values(time.cases).reduce((sum, s) => sum + s, 0));
     const whole = around + suite.cases.reduce((sum, func) => sum + costOf(func), 0);
     if (suite.windowed || whole <= splitPast || suite.cases.length < 2) {
-      return [{ suite: suite.path, cases: suite.cases, cost: whole, windowed: suite.windowed }];
+      return [
+        {
+          suite: suite.path,
+          cases: suite.cases,
+          cost: whole,
+          windowed: suite.windowed,
+          headless: suite.headless,
+        },
+      ];
     }
     return suite.cases.map((func) => ({
       suite: suite.path,
       cases: [func],
       cost: around + costOf(func),
       windowed: false,
+      headless: suite.headless,
     }));
   });
 }
@@ -297,7 +325,7 @@ export type CasesBySuite = ReadonlyMap<string, readonly string[]>;
  * so far, and no more engines than it takes to keep each one busy for as long as the slowest unit
  * takes. The windowed units all go to the first engine, which then takes headless units like the
  * others, since an engine holding a few quick windowed suites alone sits idle while the rest carry
- * the run.
+ * the run. A unit whose suite says it runs headless goes there only when it is the only engine.
  */
 export function dealt(units: readonly Unit[], declared: CasesBySuite, most: number): EnginePlan[] {
   const windowed = units.filter((unit) => unit.windowed);
@@ -316,8 +344,11 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
   const together = windowed.reduce((sum, unit) => sum + unit.cost, 0);
   const total = units.reduce((sum, unit) => sum + unit.cost, 0);
   const slowest = Math.max(together, headless[0]?.cost ?? 0);
+  // Two at least when a suite saying it runs headless would otherwise share the windowed engine,
+  // however little work the run holds, since there it would run with the window it said it did not need.
+  const apart = windowed.length > 0 && headless.some((unit) => unit.headless) ? 2 : 1;
   const count = Math.max(
-    1,
+    Math.min(apart, most),
     Math.min(
       most,
       headless.length + (windowed.length > 0 ? 1 : 0),
@@ -326,8 +357,11 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
   );
   const bins: Unit[][] = Array.from({ length: count }, (_, index) => (index === 0 ? [...windowed] : []));
   const loads = Array.from({ length: count }, (_, index) => (index === 0 ? together : 0));
+  const pastTheWindow = windowed.length > 0 && count > 1 ? 1 : 0;
   for (const unit of headless) {
-    const lightest = loads.indexOf(Math.min(...loads));
+    const from = unit.headless ? pastTheWindow : 0;
+    const open = loads.slice(from);
+    const lightest = from + open.indexOf(Math.min(...open));
     bins[lightest]?.push(unit);
     loads[lightest] = (loads[lightest] ?? 0) + unit.cost;
   }
@@ -340,6 +374,18 @@ export function windowedSaid(plans: readonly EnginePlan[]): string {
     return '';
   }
   return plans.length === 1 ? ', with a window' : ', one of them windowed';
+}
+
+/**
+ * The suites saying they run headless that a windowed engine holds, which happens only when the
+ * run is one engine and a suite in it needs a window.
+ */
+export function headlessInAWindow(plans: readonly EnginePlan[], units: readonly Unit[]): string[] {
+  const said = new Set(units.filter((unit) => unit.headless).map((unit) => unit.suite));
+  return plans
+    .filter((plan) => plan.windowed)
+    .flatMap((plan) => plan.suites.map((suite) => suite.path))
+    .filter((path) => said.has(path));
 }
 
 /** Every unit in one engine, in the order given. */

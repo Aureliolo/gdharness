@@ -330,6 +330,8 @@ import { SuiteFingerprints } from '../src/suite-fingerprint.js';
 import { exitNamed, funcOf, judgeEngine, readRun, secondsOf } from '../src/suite-judge.js';
 import {
   dealt,
+  headlessInAWindow,
+  inOneEngine,
   ProjectScripts,
   SPLIT_PAST_SECONDS,
   timesAfter,
@@ -7642,7 +7644,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 140;
+const READ_IN_WORDS = 142;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -37741,26 +37743,41 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'tests/window_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_NEEDS_WINDOW: bool = true\n${cases('test_w')}`,
       'tests/scene_test.gd': `extends GdUnitTestSuite\n\nfunc test_s() -> void:\n\tvar r := scene_runner("res://x.tscn")\n`,
       'tests/said_test.gd': `extends GdUnitTestSuite\n# scene_runner( in a comment\n${cases('test_q')}`,
+      // Most suites calling the scene runner only stand a scene up, so saying so overrides the guess:
+      // in the suite, in a base it extends, and over a guess made in a base.
+      'tests/stood_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n\nfunc test_up() -> void:\n\tvar r := scene_runner("res://x.tscn")\n`,
+      'tests/stood_child_test.gd': `extends "res://tests/stood_test.gd"\n\nfunc test_child() -> void:\n\tvar r := scene_runner("res://x.tscn")\n`,
+      'tests/scene_child_test.gd': `extends "res://tests/scene_test.gd"\nconst GDHARNESS_NEEDS_WINDOW := false\n${cases('test_c')}`,
+      'tests/quiet_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n${cases('test_h')}`,
       'other/outside_test.gd': `extends GdUnitTestSuite\n${cases('test_elsewhere')}`,
     });
     const scripts = new ProjectScripts(project);
     const found = scripts.suitesUnder(['res://tests']);
     assert.deepEqual(
-      found.map((suite) => [suite.path, suite.cases, suite.windowed]),
+      found.map((suite) => [suite.path, suite.cases, suite.windowed, suite.headless]),
       [
-        ['res://tests/a_test.gd', ['test_a', 'test_b'], false],
-        ['res://tests/base_suite.gd', ['test_inherited'], false],
-        ['res://tests/child_test.gd', ['test_inherited', 'test_own'], false],
-        ['res://tests/deep/path_test.gd', ['test_by_path', 'test_inherited'], false],
-        ['res://tests/res_test.gd', ['test_inherited'], false],
-        ['res://tests/said_test.gd', ['test_q'], false],
-        ['res://tests/scene_test.gd', ['test_s'], true],
-        ['res://tests/window_test.gd', ['test_w'], true],
+        ['res://tests/a_test.gd', ['test_a', 'test_b'], false, false],
+        ['res://tests/base_suite.gd', ['test_inherited'], false, false],
+        ['res://tests/child_test.gd', ['test_inherited', 'test_own'], false, false],
+        ['res://tests/deep/path_test.gd', ['test_by_path', 'test_inherited'], false, false],
+        ['res://tests/quiet_test.gd', ['test_h'], false, true],
+        ['res://tests/res_test.gd', ['test_inherited'], false, false],
+        ['res://tests/said_test.gd', ['test_q'], false, false],
+        ['res://tests/scene_child_test.gd', ['test_c', 'test_s'], false, true],
+        ['res://tests/scene_test.gd', ['test_s'], true, false],
+        ['res://tests/stood_child_test.gd', ['test_child', 'test_up'], false, true],
+        ['res://tests/stood_test.gd', ['test_up'], false, true],
+        ['res://tests/window_test.gd', ['test_w'], true, false],
       ],
-      'every suite under the root, its cases own and inherited, and which need a window',
+      'every suite under the root, its cases own and inherited, which need a window and which say they run headless',
     );
 
-    const suite = (path: string, names: string[], windowed = false) => ({ path, cases: names, windowed });
+    const suite = (path: string, names: string[], windowed = false, headless = false) => ({
+      path,
+      cases: names,
+      windowed,
+      headless,
+    });
     const big = suite('res://tests/big_test.gd', ['test_x', 'test_y', 'test_z']);
     const edge = suite('res://tests/edge_test.gd', ['test_e', 'test_f']);
     const shown = suite('res://tests/shown_test.gd', ['test_m', 'test_n'], true);
@@ -37849,11 +37866,12 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
 
     // A run whose one windowed suite is quick: kept to that suite alone, the windowed engine sat
     // idle for most of the run while three engines carried 1100 s. Over four it is about a quarter.
-    const unit = (name: string, cost: number, isWindowed = false): Unit => ({
+    const unit = (name: string, cost: number, isWindowed = false, isHeadless = false): Unit => ({
       suite: `res://tests/${name}_test.gd`,
       cases: [`test_${name}`],
       cost,
       windowed: isWindowed,
+      headless: isHeadless,
     });
     const quick = [
       unit('scene', 18, true),
@@ -37888,6 +37906,70 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         [false, 60],
       ],
       'two engines as busy as the windowed suite, rather than four with three of them waiting on it',
+    );
+    // A suite saying it runs headless stays out of the windowed engine, even when that engine is the
+    // lightest: a suite sizing the root viewport got the window's size there and failed.
+    const said = [
+      unit('scene', 18, true),
+      ...[227, 200, 180, 150, 120, 100, 60, 40, 23].map((cost, index) =>
+        unit(`d${String(index)}`, cost, false, true),
+      ),
+    ];
+    const kept = dealt(said, new Map(said.map((u) => [u.suite, u.cases])), 4);
+    assert.deepEqual(
+      kept.map((plan) => [plan.windowed, plan.suites.length]),
+      [
+        [true, 1],
+        [false, 3],
+        [false, 3],
+        [false, 3],
+      ],
+      'the windowed engine holding the windowed suite alone, and the declared ones dealt over the rest',
+    );
+    assert.deepEqual(
+      unitsOf(
+        [
+          suite(big.path, big.cases, false, true),
+          suite(small.path, small.cases, false, true),
+          suite(edge.path, edge.cases),
+        ],
+        times,
+      ).map((u) => [u.suite, u.cases.length, u.headless]),
+      [
+        [big.path, 1, true],
+        [big.path, 1, true],
+        [big.path, 1, true],
+        [small.path, 1, true],
+        [edge.path, 2, false],
+      ],
+      'saying it runs headless holds for a suite whole and for each case of one split',
+    );
+    const lone = [unit('menu', 1, true), unit('stood', 1, false, true), unit('plain', 1)];
+    const loneDeclared = new Map(lone.map((u) => [u.suite, u.cases]));
+    const apart = dealt(lone, loneDeclared, 4);
+    assert.deepEqual(
+      apart.map((plan) => [plan.windowed, plan.suites.map((s) => s.path)]),
+      [
+        [true, ['res://tests/menu_test.gd']],
+        [false, ['res://tests/plain_test.gd', 'res://tests/stood_test.gd']],
+      ],
+      'two engines for a few quick suites when one says it runs headless beside one needing a window',
+    );
+    assert.deepEqual(headlessInAWindow(apart, lone), [], 'and none of them is said to run with a window');
+    assert.deepEqual(
+      headlessInAWindow(dealt(lone, loneDeclared, 1), lone),
+      ['res://tests/stood_test.gd'],
+      'in one engine, the suite saying it runs headless is named as running with the window',
+    );
+    assert.deepEqual(
+      headlessInAWindow([inOneEngine(lone, loneDeclared)], lone),
+      ['res://tests/stood_test.gd'],
+      'and in an ordered run',
+    );
+    assert.deepEqual(
+      headlessInAWindow([inOneEngine(lone.slice(1), loneDeclared)], lone),
+      [],
+      'but not in an engine with no window',
     );
 
     // The room a run has, from the processors and the memory handed in: what is asked for when
@@ -38312,6 +38394,29 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     );
     assert.equal(noAutoload.status, 1, noAutoload.said);
 
+    // A suite standing a scene up through the scene runner and saying it runs headless is run
+    // headless, where the root viewport takes the size the suite gives it in the next frame.
+    writeTree(project, {
+      'stood.tscn': '[gd_scene format=3]\n\n[node name="Stood" type="Control"]\n',
+      'tests/stood_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        'const GDHARNESS_NEEDS_WINDOW: bool = false',
+        '',
+        'func test_sized() -> void:',
+        '\tvar runner: GdUnitSceneRunner = scene_runner("res://stood.tscn")',
+        '\tassert_object(runner.scene()).is_not_null()',
+        '\tget_tree().root.size = Vector2i(1680, 720)',
+        '\tawait get_tree().process_frame',
+        '\tassert_str(DisplayServer.get_name()).is_equal("headless")',
+        '\tassert_vector(get_viewport().get_visible_rect().size).is_equal(Vector2(1680, 720))',
+        '',
+      ].join('\n'),
+    });
+    const stood = test('tests/stood_test.gd');
+    assert.equal(stood.status, 0, stood.said);
+    assert.match(stood.said, /^1 test function in 1 suite over 1 engine\.$/m, stood.said);
+
     const windowed = windowedRunRefused();
     if (windowed === null) {
       writeTree(project, {
@@ -38332,6 +38437,24 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       assert.equal(shown.status, 0, shown.said);
       assert.match(shown.said, /in 2 suites over 1 engine, with a window\./, shown.said);
       assert.match(shown.said, /^Passed: \d+ cases in 2 suites across 1 engine/m, shown.said);
+      // Beside one needing a window, the suite saying it runs headless gets an engine of its own.
+      const beside = test('tests/window_test.gd', 'tests/stood_test.gd');
+      assert.equal(beside.status, 0, beside.said);
+      assert.match(beside.said, /in 2 suites over 2 engines, one of them windowed\./, beside.said);
+      assert.doesNotMatch(beside.said, /runs with a window here/, beside.said);
+      // In one engine it has to share the window, and the run says so before it starts.
+      for (const [args, why] of [
+        [['--engines', '1'], 'the run has one engine'],
+        [['--order', 'reversed'], 'an ordered run is one engine'],
+      ] as const) {
+        const shared = test(...args, 'tests/window_test.gd', 'tests/stood_test.gd');
+        assert.ok(
+          shared.said.includes(
+            `res://tests/stood_test.gd says it runs headless and runs with a window here, since ${why} and a suite in it needs a window. Run it without the windowed suites to run it headless.`,
+          ),
+          shared.said,
+        );
+      }
     } else {
       console.log(`test command windowed case skipped: ${windowed}`);
     }

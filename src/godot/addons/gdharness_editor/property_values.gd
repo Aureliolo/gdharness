@@ -301,8 +301,8 @@ func _not_held(
 		return (
 			(
 				"%s.bus takes the name of one of the project's audio buses, and %s is none of them, so it "
-				+ "would play on %s; %s. project_info include audio_buses lists them, and project_settings "
-				+ "add_audio_bus adds one. Nothing was written."
+				+ "would play on %s; %s. project_info include audio_buses lists them, and "
+				+ "project_settings add_audio_bus adds one. Nothing was written."
 			)
 			% [
 				GdhPropertyPaths.class_called(target),

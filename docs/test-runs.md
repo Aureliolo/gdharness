@@ -121,13 +121,19 @@ frame prints there, and as `after`'s once the last case is done.
 
 ## Suites that need a window
 
-A suite declaring `const GDHARNESS_NEEDS_WINDOW: bool = true`, or calling gdUnit4's `scene_runner`,
-runs in an engine with a window, since a headless engine delivers no input events. All of those go
-to one windowed engine, which starts first and counts toward `--engines`, and which is then dealt
-headless suites like the others, so a few quick windowed suites never leave it idle. A headless
-suite dealt there meets the real display server, so the screen size and scale and the display
-features it reports are the machine's rather than the headless server's; a suite that relies on the
-headless answers passes or fails by where it was dealt. It runs without
+A suite declaring `const GDHARNESS_NEEDS_WINDOW: bool = true` runs in an engine with a window, since
+a headless engine delivers no input events. So does one calling gdUnit4's `scene_runner` that
+declares nothing, which is a guess: a suite that uses the scene runner only to stand a scene up and
+read it declares `const GDHARNESS_NEEDS_WINDOW: bool = false` and runs headless. The declaration
+counts from the suite or any script it extends. All the windowed suites go to one windowed engine,
+which starts first and counts toward `--engines`, and which is then dealt the suites that declare
+nothing like the others, so a few quick windowed suites never leave it idle. A suite dealt there
+meets the real display server, so the screen size and scale and the display features it reports are
+the machine's rather than the headless server's, and setting the root viewport's size leaves it the
+window's. A suite declaring `false` is therefore never dealt there while another engine runs, and a
+run that has a windowed suite and one declaring `false` starts two engines at least. When the run is
+one engine (`--engines 1`, a machine with room for one, or `--order`), the run names each suite
+declaring `false` that runs with the window before it starts. The windowed engine runs without
 `--headless`, at the size `project.godot` gives its viewport, and with the Dummy audio driver like
 every other test engine. On Windows it runs on a desktop of its own, so its window never appears
 on the desktop in use or takes its focus. Elsewhere it uses the display there is; on a CI runner

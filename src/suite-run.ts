@@ -48,6 +48,7 @@ import {
   type DeclaredSuite,
   dealt,
   type EnginePlan,
+  headlessInAWindow,
   inOneEngine,
   ProjectScripts,
   readTimes,
@@ -449,6 +450,13 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     console.log(
       `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.`,
     );
+    const windowedAnyway = headlessInAWindow(plans, units);
+    if (windowedAnyway.length > 0) {
+      const one = windowedAnyway.length === 1;
+      console.log(
+        `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since ${options.order === null ? 'the run has one engine' : 'an ordered run is one engine'} and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
+      );
+    }
     const split = [...new Set(units.map((unit) => unit.suite))].filter(
       (path) => units.filter((unit) => unit.suite === path).length > 1,
     );
