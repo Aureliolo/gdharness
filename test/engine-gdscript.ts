@@ -1045,7 +1045,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.match(
     duplicated.stderr,
     new RegExp(
-      `Nothing was changed: modification 1 adds speed, and the script already declares var speed on line ${speedLine}; modification 3 adds fresh, which modification 2 adds too; modification 4 is a constant with no defaultValue, and a constant needs a value\\. modify only adds, so a member the script declares already is changed in the file itself`,
+      `Nothing was changed: modification 1 adds speed, and the script already declares var speed on line ${speedLine}; modification 3 adds fresh, which modification 2 adds too; modification 4 is a constant with no defaultValue, and a constant needs a value\\. modify only adds members; to change one the script declares already, edit its lines in the file`,
     ),
     duplicated.stderr,
   );
@@ -1143,6 +1143,20 @@ function testOperations(godotPath: string, projectDir: string): void {
     'float',
     'the parser should read the type off the variable that was just added',
   );
+  // Files walked a_ before z_ declare their classes the other way round, so the order is the sort's.
+  writeFileSync(join(projectDir, 'made', 'a_listed.gd'), 'class_name ZListed\nextends RefCounted\n');
+  writeFileSync(join(projectDir, 'made', 'z_listed.gd'), 'class_name AListed\nextends RefCounted\n');
+  const declared = asArray(get(operation('list_script_classes', {}), 'classes'));
+  rmSync(join(projectDir, 'made', 'a_listed.gd'));
+  rmSync(join(projectDir, 'made', 'z_listed.gd'));
+  const classNames = declared.map((entry) => String(get(entry, 'name')));
+  assert.ok(classNames.includes('AListed') && classNames.includes('ZListed'), JSON.stringify(declared));
+  assert.deepEqual(
+    declared.find((entry) => get(entry, 'name') === 'FixtureHero'),
+    { name: 'FixtureHero', path: 'res://made/hero.gd' },
+    JSON.stringify(declared),
+  );
+  assert.deepEqual(classNames, [...classNames].sort(), 'listed by name');
   // The newline ending the last line starts no line of its own, as an editor or wc counts them.
   const countedPath = join(projectDir, 'made', 'counted.gd');
   const counts = [
@@ -1156,6 +1170,66 @@ function testOperations(godotPath: string, projectDir: string): void {
   });
   rmSync(countedPath);
   assert.deepEqual(counts, [3, 3, 2, 0], 'a script counts the lines it holds');
+
+  // A `##` block documents the class above its class_name or extends line, or above a blank line
+  // before any member, and otherwise the member directly below it, past a line of annotations
+  // alone. A blank line in between leaves it documenting nothing, and one in a body is a comment.
+  const documentedPath = join(projectDir, 'made', 'documented.gd');
+  writeFileSync(
+    documentedPath,
+    [
+      '## The class.',
+      '## Second line.',
+      'class_name Documented',
+      'extends Node',
+      '',
+      '## How fast it runs.',
+      '@export var speed: float = 1.0',
+      '## Left behind by a blank line.',
+      '',
+      'signal undocumented',
+      '',
+      '## Its count.',
+      '@export',
+      'var count: int = 0',
+      '',
+      '## A part of it.',
+      'class Part:',
+      '\t## Its weight.',
+      '\tvar weight: int = 1',
+      '',
+      '## Takes one life.',
+      'func hurt() -> void:',
+      '\t## inside a body, documenting nothing',
+      '\tpass',
+      'var tail: int = 0',
+      '',
+    ].join('\n'),
+  );
+  const documented = operation('get_script_info', { script_path: 'made/documented.gd' });
+  const docs = (key: string): Record<string, unknown> =>
+    Object.fromEntries(
+      asArray(get(documented, key)).map((member): [string, unknown] => [
+        String(get(member, 'name')),
+        get(member, 'doc'),
+      ]),
+    );
+  assert.equal(get(documented, 'class_doc'), 'The class.\nSecond line.', JSON.stringify(documented));
+  assert.deepEqual(docs('variables'), { speed: 'How fast it runs.', count: 'Its count.', tail: undefined });
+  assert.deepEqual(docs('signals'), { undocumented: undefined });
+  assert.deepEqual(docs('functions'), { hurt: 'Takes one life.' });
+  const part = named(get(documented, 'inner_classes'), 'Part');
+  assert.equal(get(part, 'doc'), 'A part of it.');
+  assert.equal(get(named(get(part, 'variables'), 'weight'), 'doc'), 'Its weight.');
+  writeFileSync(documentedPath, 'extends Node\n## After the header.\n\nvar x := 1\n');
+  const after = operation('get_script_info', { script_path: 'made/documented.gd' });
+  assert.equal(
+    get(after, 'class_doc'),
+    'After the header.',
+    'a block under extends, set off by a blank line',
+  );
+  assert.equal(get(named(get(after, 'variables'), 'x'), 'doc'), undefined);
+  rmSync(documentedPath);
 
   // Project settings, including the value serialisers on both the way in and the way out.
   const name = operation('get_project_setting', { setting: 'application/config/name' });
@@ -1437,6 +1511,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     options: { 'compress/mode': 2 },
   });
   assert.deepEqual(get(options, 'updated_options'), ['compress/mode']);
+  assert.deepEqual(get(options, 'changed'), { 'compress/mode': { was: 0, now: 2 } }, JSON.stringify(options));
   assert.equal(
     get(operation('get_import_options', { resource_path: 'art.png' }), 'params', 'compress/mode'),
     2,
@@ -1530,6 +1605,32 @@ function testOperations(godotPath: string, projectDir: string): void {
     assert.match(
       String(statusOf('model.blend')[1]),
       /^no importer built into the engine takes \.blend files/,
+    );
+    const freshOptions = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
+      resource_path: 'fresh.png',
+    });
+    assert.match(
+      freshOptions.stderr,
+      /res:\/\/fresh\.png has not been imported yet, so it has no import file: project_import reimport imports it with the importer's defaults and writes that file/,
+      freshOptions.stderr,
+    );
+    // Named by health and validation both, the one under the .gdignore and the one the engine has
+    // no importer for left out.
+    const neverImported =
+      'res://fresh.png has never been imported, so nothing can load it until project_import reimport imports it';
+    const resources = get(
+      operation('get_project_health', { categories: ['resources'] }),
+      'checks',
+      'resources',
+    );
+    assert.deepEqual(get(resources, 'details'), [neverImported], JSON.stringify(resources));
+    const unimported = asArray(get(operation('validate_project', {}), 'warnings')).filter(
+      (warning) => get(warning, 'check') === 'imports',
+    );
+    assert.deepEqual(
+      unimported.map((warning) => get(warning, 'message')),
+      [neverImported],
+      JSON.stringify(unimported),
     );
   } finally {
     rmSync(join(projectDir, 'kept_out'), { recursive: true, force: true });
@@ -4241,6 +4342,68 @@ function testAFontsFeaturesAreWrittenAsTheEngineReadsThem(godotPath: string, _pr
   }
 }
 
+/**
+ * A script naming an autoload depends on the autoload's script, both ways round. Asked what used
+ * an autoload's script, the answer was its line in project.godot alone, beside the script calling
+ * it by name, and asked what that script depended on, the autoload was not there. An autoload
+ * that is not global is no name code can use, so a word spelling it is not a use.
+ */
+function testAnAutoloadIsUsedByItsName(godotPath: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  try {
+    writeFileSync(
+      join(dir, 'project.godot'),
+      `${readFileSync(join(dir, 'project.godot'), 'utf8')}\n[autoload]\n\nScore="*res://score.gd"\nQuiet="res://quiet.gd"\n`,
+    );
+    writeFileSync(
+      join(dir, 'score.gd'),
+      'extends Node\n\n\nfunc add(points: int) -> void:\n\tprint(points)\n',
+    );
+    writeFileSync(join(dir, 'quiet.gd'), 'extends Node\n');
+    writeFileSync(
+      join(dir, 'enemy.gd'),
+      'extends Node\n\n# Score is told below.\n\n\nfunc hit() -> void:\n\tScore.add(10)\n\tprint(Quiet)\n',
+    );
+
+    const forward = operation('get_dependencies', { resource_path: 'res://enemy.gd' });
+    assert.deepEqual(
+      asArray(get(forward, 'dependencies', 'res://enemy.gd')),
+      [{ path: 'res://score.gd', exists: true, by_autoload: 'Score' }],
+      JSON.stringify(forward),
+    );
+
+    const reverse = operation('find_resource_usages', { resource_path: 'res://score.gd' });
+    assert.equal(get(reverse, 'autoload'), 'Score', JSON.stringify(reverse));
+    const kinds = (file: string): unknown[] =>
+      asArray(
+        get(
+          asArray(get(reverse, 'usages')).find((usage) => get(usage, 'file') === file),
+          'references',
+        ) ?? [],
+      ).map((reference) => [get(reference, 'kind'), get(reference, 'line')]);
+    assert.deepEqual(kinds('res://enemy.gd'), [
+      ['comment', 3],
+      ['autoload', 7],
+    ]);
+    assert.deepEqual(
+      kinds('res://project.godot').map((entry) => asArray(entry)[0]),
+      ['setting'],
+      JSON.stringify(reverse),
+    );
+    assert.equal(get(reverse, 'summary', 'in_code'), 2, 'the call and the setting, the comment left out');
+    const quiet = operation('find_resource_usages', { resource_path: 'res://quiet.gd' });
+    assert.deepEqual(
+      asArray(get(quiet, 'usages')).map((usage) => get(usage, 'file')),
+      ['res://project.godot'],
+      `an autoload that is not global has no name in code: ${JSON.stringify(quiet)}`,
+    );
+    assert.equal(get(quiet, 'autoload'), undefined, JSON.stringify(quiet));
+  } finally {
+    sweep(dir);
+  }
+}
+
 /** The cases after the fixtures, in the order the leg runs them, by the name `case` takes. */
 const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => void | Promise<void>>> = {
   dependencyWalk: testDependencyWalk,
@@ -4248,6 +4411,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   gdignore: testAGdignoreStopsTheWalk,
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
   referencesMissing: testAReferenceIsMissingOnlyWhereTheEngineMissesIt,
+  autoloadUses: (godotPath) => {
+    testAnAutoloadIsUsedByItsName(godotPath);
+  },
   fontFeatures: testAFontsFeaturesAreWrittenAsTheEngineReadsThem,
   importerFirst: (godotPath) => {
     testTheImporterIsAskedFirst(godotPath);
@@ -4370,6 +4536,7 @@ async function main(): Promise<void> {
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
     runFixture(godotPath, projectDir, 'runtime_drag');
+    runFixture(godotPath, projectDir, 'runtime_offers');
     runFixture(godotPath, projectDir, 'runtime_pad');
     runFixture(godotPath, projectDir, 'runtime_accessibility');
     runFixture(godotPath, projectDir, 'runtime_query');
