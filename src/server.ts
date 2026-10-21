@@ -4715,6 +4715,8 @@ class GodotServer {
             return await editorOrEngine('create_animation', 'writes');
           case 'add_track':
             return await editorOrEngine('add_animation_track', 'writes');
+          case 'remove_track':
+            return await editorOrEngine('remove_animation_track', 'writes');
           case 'set':
             return await editorOrEngine('set_animation', 'writes');
           case 'rename':
@@ -4723,6 +4725,10 @@ class GodotServer {
             return await editorOrEngine('remove_animation', 'writes');
           case 'add_state':
             return await editorOrEngine('add_animation_state', 'writes');
+          case 'remove_state':
+            return await editorOrEngine('remove_animation_state', 'writes');
+          case 'disconnect_states':
+            return await editorOrEngine('disconnect_animation_states', 'writes');
           default:
             return await editorOrEngine('connect_animation_states', 'writes');
         }

@@ -240,9 +240,24 @@ const XY: JsonSchema = {
 
 const ANIMATION_TRACK: JsonSchema = {
   type: 'object',
-  description: 'The track to add.',
+  description:
+    'add_track: the track to add. remove_track: the track to take out, found by its type, nodePath and property as read answers them; its keyframes are not needed.',
   properties: {
-    type: { type: 'string', enum: ['property', 'method'] },
+    type: {
+      type: 'string',
+      enum: [
+        'property',
+        'method',
+        'position_3d',
+        'rotation_3d',
+        'scale_3d',
+        'blend_shape',
+        'bezier',
+        'audio',
+        'animation',
+      ],
+      description: 'add_track makes property and method tracks; remove_track takes any type read answers.',
+    },
     nodePath: { type: 'string', description: 'Target node, relative to the AnimationPlayer root.' },
     property: { type: 'string', description: 'For property tracks: the property to animate.' },
     method: {
@@ -252,6 +267,7 @@ const ANIMATION_TRACK: JsonSchema = {
     },
     keyframes: {
       type: 'array',
+      description: 'add_track: the keys to add, each at its own time.',
       items: {
         type: 'object',
         properties: {
@@ -264,7 +280,7 @@ const ANIMATION_TRACK: JsonSchema = {
       },
     },
   },
-  required: ['type', 'nodePath', 'keyframes'],
+  required: ['type', 'nodePath'],
   additionalProperties: false,
 };
 
@@ -987,18 +1003,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_animation',
     title: 'Animations',
     description:
-      "Animations in an AnimationPlayer and states in an AnimationTree state machine. The player and the tree are nodes, so scene_node add puts one in the scene first. read answers with every track of an animation in the shape add_track takes, so a track read off one animation can be added to another. add_track on a path the animation already has a track of that type for adds the keys to that track, as the editor keys a property it already animates, answering existingTrack true and keysAdded beside keys, the track's count; a key at a time that track already has a key at is refused. A key past the animation's end, where it never plays, is written and named under pastLength. remove clears the player's autoplay when it named the animation and names under statesPlayingNothing the states that played it. read and read_states need no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without running the scene's scripts. The ops that write go through the editor when one serves the project; with none, a headless engine runs the editor's own tool and the answer says so under writtenBy. That engine runs every script of the file, where the editor runs only tool scripts, so what a script changes as the file loads is put back before anything is saved, and a file where that cannot be done, such as a scene whose script does not compile, is refused and nothing is written. An editor of the project that is running and has not reached this server is waited for rather than written around.",
+      "Animations in an AnimationPlayer and states in an AnimationTree state machine. The player and the tree are nodes, so scene_node add puts one in the scene first. read answers with every track of an animation in the shape add_track takes, so a track read off one animation can be added to another. add_track on a path the animation already has a track of that type for adds the keys to that track, as the editor keys a property it already animates, answering existingTrack true and keysAdded beside keys, the track's count; a key at a time that track already has a key at is refused. A key past the animation's end, where it never plays, is written and named under pastLength. remove_track takes out every track of the type, nodePath and property given, with its keys. remove clears the player's autoplay when it named the animation and names under statesPlayingNothing the states that played it, which stay in their trees playing nothing until remove_state takes them out. Every state machine has Start and End, which cannot be added or removed; a transition from Start sets the state it begins in. read and read_states need no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without running the scene's scripts. The ops that write go through the editor when one serves the project; with none, a headless engine runs the editor's own tool and the answer says so under writtenBy. That engine runs every script of the file, where the editor runs only tool scripts, so what a script changes as the file loads is put back before anything is saved, and a file where that cannot be done, such as a scene whose script does not compile, is refused and nothing is written. An editor of the project that is running and has not reached this server is waited for rather than written around.",
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
       playerNodePath: {
         type: 'string',
-        ops: ['read', 'create', 'add_track', 'set', 'rename', 'remove'],
+        ops: ['read', 'create', 'add_track', 'remove_track', 'set', 'rename', 'remove'],
         description: 'The AnimationPlayer node.',
       },
       animationName: {
         type: 'string',
-        ops: ['read', 'create', 'add_track', 'set', 'rename', 'remove', 'add_state'],
+        ops: ['read', 'create', 'add_track', 'remove_track', 'set', 'rename', 'remove', 'add_state'],
         description:
           'The animation in the player. read: the one to answer with whole, its tracks a list; without it, read lists them, each with the number of its tracks under tracks. add_state: the one that state plays. One the player does not have yet is written all the same, answering animationFound false and why under animationMissing.',
       },
@@ -1025,32 +1041,32 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['create', 'set'],
         description: 'create and set: keyframe snap in seconds, 0 or more. create: default 0.1.',
       },
-      track: { ...ANIMATION_TRACK, ops: ['add_track'] },
+      track: { ...ANIMATION_TRACK, ops: ['add_track', 'remove_track'] },
       animTreePath: {
         type: 'string',
-        ops: ['read_states', 'add_state', 'connect_states'],
+        ops: ['read_states', 'add_state', 'remove_state', 'connect_states', 'disconnect_states'],
         description: 'The AnimationTree node.',
       },
       stateName: {
         type: 'string',
-        ops: ['add_state'],
+        ops: ['add_state', 'remove_state'],
         description:
-          "add_state: the state to add. It goes right of the rightmost state in the editor's graph, answered under position.",
+          "add_state: the state to add. It goes right of the rightmost state in the editor's graph, answered under position. remove_state: the state to take out, with every transition leaving or reaching it, named under transitionsRemoved.",
       },
       stateMachinePath: {
         type: 'string',
-        ops: ['read_states', 'add_state', 'connect_states'],
+        ops: ['read_states', 'add_state', 'remove_state', 'connect_states', 'disconnect_states'],
         description: 'A nested state machine, by the names of the states that lead to it. Default the root.',
       },
       fromState: {
         type: 'string',
-        ops: ['connect_states'],
-        description: 'connect_states: the state the transition leaves.',
+        ops: ['connect_states', 'disconnect_states'],
+        description: 'connect_states and disconnect_states: the state the transition leaves.',
       },
       toState: {
         type: 'string',
-        ops: ['connect_states'],
-        description: 'connect_states: the state it arrives at.',
+        ops: ['connect_states', 'disconnect_states'],
+        description: 'connect_states and disconnect_states: the state it arrives at.',
       },
       transitionType: {
         type: 'string',
@@ -1086,6 +1102,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         summary: 'a property or method track with keyframes',
         requires: ['playerNodePath', 'animationName', 'track'],
       },
+      remove_track: {
+        effect: 'destructive',
+        summary: 'a track and its keys from an animation',
+        requires: ['playerNodePath', 'animationName', 'track'],
+      },
       set: {
         effect: 'destructive',
         summary: "an animation's length, loop mode or step",
@@ -1106,9 +1127,19 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         summary: 'a state playing an animation, in an AnimationTree',
         requires: ['animTreePath', 'stateName', 'animationName'],
       },
+      remove_state: {
+        effect: 'destructive',
+        summary: 'a state and its transitions from an AnimationTree',
+        requires: ['animTreePath', 'stateName'],
+      },
       connect_states: {
         effect: 'additive',
         summary: 'a transition between two states',
+        requires: ['animTreePath', 'fromState', 'toState'],
+      },
+      disconnect_states: {
+        effect: 'destructive',
+        summary: 'the transition from one state to another',
         requires: ['animTreePath', 'fromState', 'toState'],
       },
     },

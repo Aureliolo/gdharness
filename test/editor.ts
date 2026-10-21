@@ -3135,6 +3135,22 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
     await refusal('scene_animation', { ...scene, op: 'read', animationName: 'moves/run' }),
     /has no animation moves\/run\. It has: .*moves\/walk/,
   );
+  const untracked = await call('scene_animation', {
+    ...scene,
+    op: 'remove_track',
+    animationName: 'moves/idle',
+    track: tracks[1],
+  });
+  assert.deepEqual(
+    [get(untracked, 'removed'), get(untracked, 'keysRemoved'), get(untracked, 'tracks')],
+    [{ type: 'method', nodePath: 'Sprite' }, 1, 1],
+    JSON.stringify(untracked),
+  );
+  assert.deepEqual(
+    get(await call('scene_animation', { ...scene, op: 'read', animationName: 'moves/idle' }), 'tracks'),
+    [tracks[0]],
+    "and the track goes from the editor's scene",
+  );
 
   // Through the editor, into the library file: a key on a path walk animates goes in that track,
   // a shorter length names what it leaves past the end, and a rename and a removal are saved there.
@@ -3177,7 +3193,7 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
   assert.match(
     await refusal('scene_animation', {
       ...track([]),
-      track: { type: 'property', nodePath: 'Nowhere', property: 'position' },
+      track: { type: 'property', nodePath: 'Nowhere', property: 'position', keyframes: [] },
     }),
     /No node at Nowhere from the player's root node/,
   );
@@ -3220,6 +3236,22 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
       toState: 'Waiting',
     }),
     /No transition can leave End/,
+  );
+  await call('scene_animation', { ...states, op: 'connect_states', fromState: 'Start', toState: 'Waiting' });
+  assert.equal(
+    await refusal('scene_animation', {
+      ...states,
+      op: 'disconnect_states',
+      fromState: 'Start',
+      toState: 'End',
+    }),
+    'The editor answered scene_animation disconnect_states with an error: There is no transition from Start to End; the ones leaving Start go to Waiting.',
+  );
+  const dropped = await call('scene_animation', { ...states, op: 'remove_state', stateName: 'Waiting' });
+  assert.deepEqual(
+    [get(dropped, 'removed'), get(dropped, 'transitionsRemoved')],
+    ['Waiting', [{ from: 'Start', to: 'Waiting' }]],
+    JSON.stringify(dropped),
   );
   const lost = await call('scene_animation', {
     projectPath: project,

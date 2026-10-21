@@ -11,9 +11,6 @@ const GdhRead = preload("../reading.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSerialisation = preload("../serialisation.gd")
 
-## How far right of the rightmost state a new one goes in the editor's graph, wider than a state's
-## box there.
-const STATE_SPACING: float = 200.0
 const LOOP_MODES: Dictionary = {
 	"none": Animation.LOOP_NONE, "linear": Animation.LOOP_LINEAR, "pingpong": Animation.LOOP_PINGPONG
 }
@@ -335,6 +332,10 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 	var track: Dictionary = given_track if given_track is Dictionary else {}
 	if track.is_empty():
 		return {"ok": false, "error": "Missing track"}
+	# The schema leaves keyframes out of what track requires, since remove_track finds a track without
+	# them.
+	if not track.has("keyframes"):
+		return {"ok": false, "error": "Missing track.keyframes"}
 	var keyed: Array = _keyframes(track)
 	if not keyed[0]:
 		return {"ok": false, "error": keyed[1]}
@@ -439,7 +440,15 @@ func _add_track(
 		method_found = target.has_method(method_name)
 		kind = Animation.TYPE_METHOD
 	else:
-		return [-1, "Unsupported track.type: " + track_type, null, false]
+		return [
+			-1,
+			(
+				"add_track makes property and method tracks, and track.type is %s; remove_track takes any."
+				% track_type
+			),
+			null,
+			false
+		]
 
 	var track_idx: int = anim.find_track(path, kind)
 	var existing: bool = track_idx >= 0
@@ -470,6 +479,98 @@ func _add_track(
 		if anim.track_insert_key(track_idx, GdhRead.as_float(keyframe["time"]), keys[index]) < 0:
 			return [-1, "Keyframe %d could not be inserted." % index, null, false]
 	return [track_idx, "", method_found, existing]
+
+
+## Takes out the track [code]track[/code] names by its type, nodePath and property as read answers
+## them, so a track read back can be passed as it stands; its keyframes are not looked at. Every
+## track of that shape goes, since the editor can make two for one path and both play.
+func remove_animation_track(args: Dictionary) -> Dictionary:
+	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var player_node_path: String = str(args.get("playerNodePath", "."))
+	var animation_name: String = str(args.get("animationName", ""))
+	var given_track: Variant = args.get("track", {})
+	if scene_path.strip_edges() == "res://":
+		return {"ok": false, "error": "Missing scenePath"}
+	if animation_name.strip_edges().is_empty():
+		return {"ok": false, "error": "Missing animationName"}
+	var track: Dictionary = given_track if given_track is Dictionary else {}
+	if track.is_empty():
+		return {"ok": false, "error": "Missing track"}
+	var track_type: String = str(track.get("type", ""))
+	if not track_type in GdhAnimationReads.TRACK_TYPE_NAMES.values():
+		return {"ok": false, "error": "Unsupported track.type: " + track_type}
+	var node_path: String = str(track.get("nodePath", ""))
+	var property: String = str(track.get("property", ""))
+	var shape: Array = [track_type, node_path, property]
+
+	var found: Array = _animation_at(scene_path, player_node_path, animation_name)
+	if found[1] == null:
+		return found[2]
+	var scene: GdhSceneFile = found[0]
+	var player: AnimationPlayer = found[1]
+	var anim: Animation = player.get_animation(StringName(animation_name))
+	var homes: Array = _homes(
+		scene, [[_library_of(player, animation_name), "animation library"], [anim, "animation"]]
+	)
+	if not homes[0]:
+		return scene.refuse(str(homes[1]))
+	var matching: Array[int] = []
+	var held: PackedStringArray = []
+	for index: int in anim.get_track_count():
+		var of: Array = _track_shape(anim, index)
+		if of == shape:
+			matching.append(index)
+		var _listed: bool = held.append("%s (%s)" % [str(anim.track_get_path(index)), of[0]])
+	if matching.is_empty():
+		var said: String = (
+			"%s has no %s track on %s"
+			% [
+				animation_name,
+				track_type,
+				node_path if property.is_empty() else "%s:%s" % [node_path, property]
+			]
+		)
+		if held.is_empty():
+			return scene.refuse("%s; it has no tracks." % said)
+		return scene.refuse("%s; its tracks are %s." % [said, ", ".join(held)])
+	var keys: int = 0
+	matching.reverse()
+	for index: int in matching:
+		keys += anim.track_get_key_count(index)
+		anim.remove_track(index)
+
+	var at: String = scene.path_of(player)
+	var left: int = anim.get_track_count()
+	var check: Callable = func(saved: Node) -> String:
+		var copy: AnimationPlayer = saved.get_node_or_null(at) as AnimationPlayer
+		if copy == null or not copy.has_animation(StringName(animation_name)):
+			return "%s would not be in the scene when it loads." % animation_name
+		if copy.get_animation(StringName(animation_name)).get_track_count() != left:
+			return "the track would still be in %s when the scene loads." % animation_name
+		return ""
+	var removed: Dictionary = {"type": track_type, "nodePath": node_path}
+	if not property.is_empty():
+		removed["property"] = property
+	var answer: Dictionary = {
+		"ok": true,
+		"animationName": animation_name,
+		"removed": removed,
+		"tracksRemoved": matching.size(),
+		"keysRemoved": keys,
+		"tracks": left,
+	}
+	var files: Dictionary = homes[1]
+	return _finish(scene, check, files, answer)
+
+
+## Track [param index] of [param anim] as [type, nodePath, property], named as read names them.
+static func _track_shape(anim: Animation, index: int) -> Array:
+	var path: NodePath = anim.track_get_path(index)
+	return [
+		GdhAnimationReads.TRACK_TYPE_NAMES.get(anim.track_get_type(index), str(anim.track_get_type(index))),
+		str(path.get_concatenated_names()),
+		str(path.get_concatenated_subnames()),
+	]
 
 
 ## The keys of [param anim], called [param animation_name], that lie past its end, where they never
@@ -826,156 +927,3 @@ static func _collect_playing(
 	for step: String in children:
 		var child: AnimationNode = children[step]
 		_collect_playing(child, step if at.is_empty() else at + "/" + step, tree_path, animation_name, found)
-
-
-# =============================================================================
-# add_animation_state
-# =============================================================================
-func add_animation_state(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
-	var anim_tree_path: String = str(args.get("animTreePath", ""))
-	var state_name: String = str(args.get("stateName", ""))
-	var animation_name: String = str(args.get("animationName", ""))
-	var state_machine_path: String = str(args.get("stateMachinePath", ""))
-
-	if scene_path.strip_edges() == "res://":
-		return {"ok": false, "error": "Missing scenePath"}
-	for required: Array in [
-		[anim_tree_path, "animTreePath"], [state_name, "stateName"], [animation_name, "animationName"]
-	]:
-		if str(required[0]).is_empty():
-			return {"ok": false, "error": "Missing " + str(required[1])}
-
-	var opened: Array = _open_at(scene_path, anim_tree_path, "AnimationTree")
-	var scene: GdhSceneFile = opened[0]
-	if opened[1] == null:
-		return opened[2]
-	var anim_tree: AnimationTree = opened[1]
-	var machine: Array = _machine(scene, anim_tree, state_machine_path)
-	if machine[0] == null:
-		return scene.refuse(str(machine[2]))
-	var sm: AnimationNodeStateMachine = machine[0]
-	# add_node fails with nothing but a line in the editor's log on a name in use, and Start and End
-	# are in use in every state machine.
-	if sm.has_node(StringName(state_name)):
-		return scene.refuse("The state machine already has a state named %s." % state_name)
-	var player: AnimationPlayer = anim_tree.get_node_or_null(anim_tree.anim_player) as AnimationPlayer
-	var found: bool = player != null and player.has_animation(StringName(animation_name))
-
-	var anim_node: AnimationNodeAnimation = AnimationNodeAnimation.new()
-	anim_node.animation = StringName(animation_name)
-	# Beside the rightmost state: add_node puts a state at the origin, where the editor's graph
-	# draws it over whatever is already there, Start included.
-	var rightmost: Vector2 = Vector2.ZERO
-	for state: StringName in sm.get_node_list():
-		var held: Vector2 = sm.get_node_position(state)
-		if held.x > rightmost.x:
-			rightmost = held
-	var position: Vector2 = rightmost + Vector2(STATE_SPACING, 0)
-	sm.add_node(StringName(state_name), anim_node, position)
-	if not sm.has_node(StringName(state_name)):
-		return scene.refuse("The state machine did not take the state %s." % state_name)
-
-	var answer: Dictionary = {
-		"ok": true,
-		"stateName": state_name,
-		"animationName": animation_name,
-		# False when the tree has no player to look the animation up in, or its player has none of
-		# that name.
-		"animationFound": found,
-		"position": GdhSerialisation.new().serialize_value(position),
-	}
-	# Written all the same, as the editor writes one: a state machine is often laid out before its
-	# animations are made, and refusing it stopped a tree being built in that order.
-	if player != null and not found:
-		answer["animationMissing"] = _missing_animation(scene, player, animation_name)
-	var files: Dictionary = machine[1]
-	return _finish(scene, Callable(), files, answer)
-
-
-## Why the state playing [param animation_name] plays nothing yet. The player is named by its path
-## from the scene root, as playerNodePath takes it; anim_player is relative to the tree ("../Anim"),
-## which no argument takes.
-static func _missing_animation(
-	scene: GdhSceneFile, player: AnimationPlayer, animation_name: String
-) -> String:
-	var said: String = (
-		"The AnimationPlayer at %s has no animation %s yet, so the state plays nothing until it has one."
-		% [str(scene.root.get_path_to(player)), animation_name]
-	)
-	var close: PackedStringArray = GdhRead.nearest(animation_name, player.get_animation_list())
-	if close.is_empty():
-		return said
-	return (
-		said + " The nearest %s %s." % ["it has is" if close.size() == 1 else "it has are", ", ".join(close)]
-	)
-
-
-# =============================================================================
-# connect_animation_states
-# =============================================================================
-func connect_animation_states(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
-	var anim_tree_path: String = str(args.get("animTreePath", ""))
-	var from_state: String = str(args.get("fromState", ""))
-	var to_state: String = str(args.get("toState", ""))
-	var transition_type: String = str(args.get("transitionType", "immediate"))
-	var state_machine_path: String = str(args.get("stateMachinePath", ""))
-	var advance_condition: String = str(args.get("advanceCondition", ""))
-
-	if scene_path.strip_edges() == "res://":
-		return {"ok": false, "error": "Missing scenePath"}
-	if anim_tree_path.is_empty():
-		return {"ok": false, "error": "Missing animTreePath"}
-	if from_state.is_empty() or to_state.is_empty():
-		return {"ok": false, "error": "Missing fromState or toState"}
-	var modes: Dictionary = {
-		"sync": AnimationNodeStateMachineTransition.SWITCH_MODE_SYNC,
-		"at_end": AnimationNodeStateMachineTransition.SWITCH_MODE_AT_END,
-		"immediate": AnimationNodeStateMachineTransition.SWITCH_MODE_IMMEDIATE,
-	}
-	if not modes.has(transition_type):
-		return {"ok": false, "error": "Unsupported transitionType: " + transition_type}
-	var transition: AnimationNodeStateMachineTransition = AnimationNodeStateMachineTransition.new()
-	transition.switch_mode = (
-		GdhRead.as_int(modes[transition_type]) as AnimationNodeStateMachineTransition.SwitchMode
-	)
-	if not advance_condition.is_empty():
-		transition.advance_condition = StringName(advance_condition)
-
-	var opened: Array = _open_at(scene_path, anim_tree_path, "AnimationTree")
-	var scene: GdhSceneFile = opened[0]
-	if opened[1] == null:
-		return opened[2]
-	var anim_tree: AnimationTree = opened[1]
-	var machine: Array = _machine(scene, anim_tree, state_machine_path)
-	if machine[0] == null:
-		return scene.refuse(str(machine[2]))
-	var sm: AnimationNodeStateMachine = machine[0]
-	var problem: String = _transition_problem(sm, from_state, to_state)
-	if not problem.is_empty():
-		return scene.refuse(problem)
-
-	sm.add_transition(StringName(from_state), StringName(to_state), transition)
-	if not sm.has_transition(StringName(from_state), StringName(to_state)):
-		return scene.refuse("The state machine did not take the transition.")
-	var files: Dictionary = machine[1]
-	return _finish(scene, Callable(), files, {"ok": true, "from": from_state, "to": to_state})
-
-
-## Why [param sm] cannot take a transition from [param from_state] to [param to_state], or "".
-## Each is a condition add_transition fails on with only a line in the editor's log, and the
-## transition was answered as made.
-func _transition_problem(sm: AnimationNodeStateMachine, from_state: String, to_state: String) -> String:
-	for state: String in [from_state, to_state]:
-		if not sm.has_node(StringName(state)):
-			return "The state machine has no state named %s." % state
-	if from_state == to_state:
-		return "A transition needs two different states."
-	if from_state == "End":
-		return "No transition can leave End."
-	if to_state == "Start":
-		return "No transition can arrive at Start."
-	if sm.has_transition(StringName(from_state), StringName(to_state)):
-		return "There is already a transition from %s to %s." % [from_state, to_state]
-	return ""

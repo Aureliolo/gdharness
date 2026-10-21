@@ -49610,6 +49610,178 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     });
     assert.deepEqual([get(found, 'animationFound'), get(found, 'animationMissing')], [true, undefined]);
     assert.match(readFileSync(join(project, 'moves.tscn'), 'utf8'), /^states\/Lone\/node = SubResource\(/m);
+
+    // A transition and a state come out as they went in, a state with every transition leaving or
+    // reaching it, which the engine drops with it and the answer names.
+    for (const [fromState, toState] of [
+      ['Idle', 'Rest'],
+      ['Rest', 'Idle'],
+      ['Start', 'Rest'],
+    ]) {
+      await written({ op: 'connect_states', animTreePath: 'Tree', fromState, toState });
+    }
+    for (const [args, refusal] of [
+      [
+        { op: 'disconnect_states', fromState: 'Idle', toState: 'Early' },
+        'There is no transition from Idle to Early; the ones leaving Idle go to Rest.',
+      ],
+      [
+        { op: 'disconnect_states', fromState: 'Early', toState: 'Idle' },
+        'There is no transition from Early to Idle; none leaves Early.',
+      ],
+      [
+        { op: 'remove_state', stateName: 'Start' },
+        'Start is part of every state machine, so it cannot be removed.',
+      ],
+      [
+        { op: 'remove_state', stateName: 'End' },
+        'End is part of every state machine, so it cannot be removed.',
+      ],
+      [
+        { op: 'remove_state', stateName: 'Rets' },
+        'The state machine has no state named Rets; its states are Early, End, Idle, Rest, Spin, Start.',
+      ],
+    ] as const) {
+      assert.equal(textOf(await call({ ...args, animTreePath: 'Tree' })), refusal, JSON.stringify(args));
+    }
+    const disconnected = await written({
+      op: 'disconnect_states',
+      animTreePath: 'Tree',
+      fromState: 'Spin',
+      toState: 'Idle',
+    });
+    assert.deepEqual(
+      get(disconnected, 'removed'),
+      { from: 'Spin', to: 'Idle' },
+      JSON.stringify(disconnected),
+    );
+    assert.doesNotMatch(fileOf('moves.tscn'), /"Spin", "Idle"/, fileOf('moves.tscn'));
+    assert.match(fileOf('moves.tscn'), /"Idle", "Rest"/, 'and the transitions not named stay');
+    const gone = await written({ op: 'remove_state', animTreePath: 'Tree', stateName: 'Rest' });
+    assert.deepEqual(
+      [get(gone, 'removed'), get(gone, 'transitionsRemoved')],
+      [
+        'Rest',
+        [
+          { from: 'Idle', to: 'Rest' },
+          { from: 'Rest', to: 'Idle' },
+          { from: 'Start', to: 'Rest' },
+        ],
+      ],
+      JSON.stringify(gone),
+    );
+    assert.doesNotMatch(fileOf('moves.tscn'), /"Rest"|states\/Rest\//, fileOf('moves.tscn'));
+    const left = parseTextContent(await call({ op: 'read_states', animTreePath: 'Tree' }));
+    assert.deepEqual(
+      [
+        asArray(get(left, 'states'))
+          .map((state) => get(state, 'stateName'))
+          .includes('Rest'),
+        asArray(get(left, 'transitions')).length,
+      ],
+      [false, 0],
+      JSON.stringify(left),
+    );
+    assert.ok(
+      asArray(get(left, 'states'))
+        .map((state) => get(state, 'stateName'))
+        .includes('Spin'),
+      'and the states not named stay',
+    );
+
+    // A track comes out by its type, node and property as read gives them, so a track read back is
+    // passed as it stands; the others stay.
+    await written({ op: 'create', playerNodePath: 'Player', animationName: 'sway' });
+    for (const [property, keyframes] of [
+      [
+        'rotation',
+        [
+          { time: 0, value: 0 },
+          { time: 0.5, value: 1 },
+        ],
+      ],
+      ['position', [{ time: 0, value: { x: 1, y: 2 } }]],
+    ] as const) {
+      await written({
+        op: 'add_track',
+        playerNodePath: 'Player',
+        animationName: 'sway',
+        track: { type: 'property', nodePath: 'Body', property, keyframes },
+      });
+    }
+    assert.equal(
+      textOf(
+        await call({
+          op: 'add_track',
+          playerNodePath: 'Player',
+          animationName: 'sway',
+          track: { type: 'property', nodePath: 'Body', property: 'scale' },
+        }),
+      ),
+      'Missing track.keyframes',
+    );
+    assert.equal(
+      textOf(
+        await call({
+          op: 'add_track',
+          playerNodePath: 'Player',
+          animationName: 'sway',
+          track: { type: 'bezier', nodePath: 'Body', keyframes: [{ time: 0, value: 1 }] },
+        }),
+      ),
+      'add_track makes property and method tracks, and track.type is bezier; remove_track takes any.',
+    );
+    const sway = parseTextContent(
+      await call({ op: 'read', playerNodePath: 'Player', animationName: 'sway' }),
+    );
+    const turning = asArray(get(sway, 'tracks'))[0];
+    assert.equal(get(turning, 'property'), 'rotation', JSON.stringify(sway));
+    const untracked = await written({
+      op: 'remove_track',
+      playerNodePath: 'Player',
+      animationName: 'sway',
+      track: turning,
+    });
+    assert.deepEqual(
+      [
+        get(untracked, 'removed'),
+        get(untracked, 'tracksRemoved'),
+        get(untracked, 'keysRemoved'),
+        get(untracked, 'tracks'),
+      ],
+      [{ type: 'property', nodePath: 'Body', property: 'rotation' }, 1, 2, 1],
+      JSON.stringify(untracked),
+    );
+    assert.doesNotMatch(fileOf('moves.tscn'), /NodePath\("Body:rotation"\)/, fileOf('moves.tscn'));
+    assert.match(fileOf('moves.tscn'), /NodePath\("Body:position"\)/, 'and the other track stays');
+    for (const [track, refusal] of [
+      [turning, 'sway has no property track on Body:rotation; its tracks are Body:position (property).'],
+      [
+        { type: 'method', nodePath: 'Body' },
+        'sway has no method track on Body; its tracks are Body:position (property).',
+      ],
+      [
+        { type: 'colour', nodePath: 'Body' },
+        'scene_animation takes track.type as one of property, method, position_3d, rotation_3d, scale_3d, blend_shape, bezier, audio, animation, not "colour".',
+      ],
+    ] as const) {
+      assert.equal(
+        textOf(await call({ op: 'remove_track', playerNodePath: 'Player', animationName: 'sway', track })),
+        refusal,
+        JSON.stringify(track),
+      );
+    }
+    assert.equal(
+      textOf(
+        await call({
+          op: 'remove_track',
+          playerNodePath: 'Player',
+          animationName: 'moves/idle',
+          track: { type: 'property', nodePath: 'Body', property: 'rotation' },
+        }),
+      ),
+      'moves/idle has no property track on Body:rotation; it has no tracks.',
+    );
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
