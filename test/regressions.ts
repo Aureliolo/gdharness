@@ -51499,6 +51499,113 @@ async function testAHandWrittenValueIsNoChangeOfAScripts(): Promise<void> {
  * variation it is and said to be one; and an image written since the import is named as not yet
  * imported, with the call that imports it, which this then makes and follows.
  */
+/**
+ * A control is laid out as the editor lays it out. An anchor preset on a control in Position mode
+ * was refused as a value the engine would not hold, since Godot applies one only in Anchors mode,
+ * which picking a preset in the editor switches to. A container's child was refused its position
+ * as a property no scene keeps, with nothing naming the container that places it. A size flag
+ * with bits no flag has was written without a word.
+ */
+async function testAControlIsLaidOutAsTheEditorLaysItOut(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('control layout regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-layout-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-layout-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Layout"\n',
+  );
+  writeFileSync(
+    join(project, 'hud.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://spell.gd" id="1_spell"]\n\n' +
+      '[node name="Hud" type="Control"]\nlayout_mode = 3\nanchors_preset = 15\n' +
+      'anchor_right = 1.0\nanchor_bottom = 1.0\n\n[node name="Margin" type="MarginContainer" parent="."]\n\n' +
+      '[node name="Column" type="VBoxContainer" parent="Margin"]\nlayout_mode = 2\n\n' +
+      '[node name="Score" type="Label" parent="Margin/Column"]\nlayout_mode = 2\n\n' +
+      '[node name="Corner" type="Panel" parent="."]\n\n[node name="Spell" type="Node" parent="."]\n' +
+      'script = ExtResource("1_spell")\n',
+  );
+  // Flags named without their values take the bit of their place.
+  writeFileSync(
+    join(project, 'spell.gd'),
+    'extends Node\n\n@export_flags("Fire", "Water") var elements: int = 0\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const node = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: 'scene_node', arguments: { projectPath: project, scenePath: 'res://hud.tscn', ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  const set = async (nodePath: string, properties: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await node({ op: 'set', nodePath, properties });
+  const hud = (): string => readFileSync(join(project, 'hud.tscn'), 'utf8');
+  try {
+    await server.initialize('regression-test');
+
+    const filled = await set('Margin', { anchors_preset: 15 });
+    assert.deepEqual(
+      get(parseTextContent(filled), 'alsoChanged', 'layout_mode'),
+      { was: 0, now: 1 },
+      textOf(filled) ?? '',
+    );
+    assert.match(
+      hud(),
+      /\[node name="Margin"[^\n]*\]\nlayout_mode = 1\nanchors_preset = 15\nanchor_right = 1\.0\n/,
+      hud(),
+    );
+
+    // Anchors written one by one put the control in Anchors mode too, where they read as a preset.
+    await set('Corner', { anchor_left: 1, anchor_top: 1, anchor_right: 1, anchor_bottom: 1 });
+    const corner = parseTextContent(await node({ op: 'get', nodePath: 'Corner' }));
+    assert.equal(get(corner, 'properties', 'anchors_preset'), 3, JSON.stringify(corner));
+
+    assert.equal(
+      textOf(await set('Margin/Column/Score', { position: { x: 40, y: 30 } })),
+      "Score's parent, Column, is a VBoxContainer, which places and sizes it, so its position is the container's to set and the scene keeps none of it. A child of a container is laid out with size_flags_horizontal, size_flags_vertical and custom_minimum_size.",
+    );
+    assert.match(
+      textOf(await set('Margin/Column', { anchors_preset: 15 })) ?? '',
+      /^Column's parent, Margin, is a MarginContainer, which places and sizes it, so its anchors_preset is the container's to set/,
+    );
+    assert.doesNotMatch(hud(), /\[node name="Column"[^\n]*\]\nlayout_mode = 2\nanchor/, hud());
+
+    const flagged = parseTextContent(await set('Margin/Column/Score', { size_flags_horizontal: 99 }));
+    assert.deepEqual(
+      get(flagged, 'outsideDeclared'),
+      {
+        size_flags_horizontal:
+          '99 holds bits no flag of size_flags_horizontal has (96): its flags are Fill (1), Expand (2), Shrink Center (4), Shrink End (8); the engine stores it as given.',
+      },
+      JSON.stringify(flagged),
+    );
+    const flags = parseTextContent(await set('Margin/Column/Score', { size_flags_horizontal: 8 }));
+    assert.equal(get(flags, 'outsideDeclared'), undefined, JSON.stringify(flags));
+    assert.match(hud(), /\[node name="Score"[^\n]*\]\nlayout_mode = 2\nsize_flags_horizontal = 8\n/, hud());
+    const spelled = parseTextContent(await set('Spell', { elements: 4 }));
+    assert.deepEqual(
+      get(spelled, 'outsideDeclared'),
+      {
+        elements:
+          '4 holds bits no flag of elements has (4): its flags are Fire (1), Water (2); the engine stores it as given.',
+      },
+      JSON.stringify(spelled),
+    );
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
 async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -52200,6 +52307,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAnimationIsWrittenWithNoEditor,
   testANodeKeepsItsGroupsAndItsPlace,
   testAThemeAndATilesetWithNoEditor,
+  testAControlIsLaidOutAsTheEditorLaysItOut,
   testASceneKeepsItsOwnValuesForAnotherScenesNodes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,

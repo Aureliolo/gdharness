@@ -51,6 +51,11 @@ const PACKED_ELEMENTS: Dictionary = {
 # Entries in a property list that only head a section of the inspector. Object.set ignores their
 # names, so a write to "Visibility" or "Transform" changed nothing and was answered as made.
 const HEADINGS: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP
+## Control's layout_mode values, which the engine does not expose as constants.
+const LAYOUT_MODE_POSITION: int = 0
+const LAYOUT_MODE_ANCHORS: int = 1
+## What a container sets on each child it lays out, beside the anchors and offsets.
+const PLACED_BY_A_CONTAINER: Array[String] = ["position", "size", "global_position"]
 
 var _values: GdhSerialisation = GdhSerialisation.new()
 
@@ -210,6 +215,10 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			return _no_uniform(holder as ShaderMaterial, name) + unwritten
 		if declared.is_empty():
 			return no_property(holder, name) + unwritten
+		if holder is Control:
+			var unplaced: String = _laid_out(holder as Control, name)
+			if not unplaced.is_empty():
+				return unplaced + unwritten
 		var value: Array = value_for(holder, declared, properties[key])
 		if not value[0]:
 			return str(value[1]) + unwritten
@@ -232,6 +241,29 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		var now: Variant = target.get(property)
 		if not GdhSame.same(now, before[property]):
 			_also_changed[property] = [before[property], now]
+	return ""
+
+
+## Why [param name] cannot be written on [param control], or "" once it can. A container places and
+## sizes its children and the scene keeps none of that for them, so their anchors, offsets, position
+## and size are refused with what a child does set. A control in Position mode ignores an anchor
+## preset, and the inspector offers anchors only in Anchors mode, so writing one puts it there first,
+## as picking a preset in the editor does; alsoChanged then names layout_mode.
+func _laid_out(control: Control, name: String) -> String:
+	var base: String = name.get_slice(":", 0)
+	var anchoring: bool = base == "anchors_preset" or base.begins_with("anchor_")
+	var parent: Node = control.get_parent()
+	if parent is Container and (anchoring or base.begins_with("offset_") or base in PLACED_BY_A_CONTAINER):
+		return (
+			(
+				"%s's parent, %s, is a %s, which places and sizes it, so its %s is the container's to set "
+				+ "and the scene keeps none of it. A child of a container is laid out with "
+				+ "size_flags_horizontal, size_flags_vertical and custom_minimum_size."
+			)
+			% [control.name, parent.name, parent.get_class(), base]
+		)
+	if anchoring and GdhRead.as_int(control.get("layout_mode")) == LAYOUT_MODE_POSITION:
+		control.set("layout_mode", LAYOUT_MODE_ANCHORS)
 	return ""
 
 

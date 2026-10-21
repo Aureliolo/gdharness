@@ -153,6 +153,19 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 		if choices.is_empty() or choices.values().has(value):
 			return ""
 		return "%d is none of the values %s declares: %s." % [value, property, _listed(choices)]
+	if hint == PROPERTY_HINT_FLAGS and typeof(value) == TYPE_INT:
+		var flags: Dictionary = flags_of(hint_string)
+		var known: int = 0
+		for bit: int in flags.values():
+			known |= bit
+		var whole: int = value
+		var stray: int = whole & ~known
+		if flags.is_empty() or stray == 0:
+			return ""
+		return (
+			"%d holds bits no flag of %s has (%d): its flags are %s; the engine stores it as given."
+			% [whole, property, stray, _listed(flags)]
+		)
 	if hint != PROPERTY_HINT_RANGE:
 		return ""
 	var parts: PackedStringArray = []
@@ -171,6 +184,20 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 		)
 		% [shown, property, _bound(low), _bound(high)]
 	)
+
+
+## The flags a flags hint names, each with its bit: "Fill:1,Expand:2" gives its values, and a name
+## with none takes the bit of its place, as @export_flags("A", "B") does.
+static func flags_of(hint_string: String) -> Dictionary:
+	var flags: Dictionary = {}
+	var parts: PackedStringArray = hint_string.split(",", false)
+	for index: int in parts.size():
+		var part: String = parts[index].strip_edges()
+		if ":" in part:
+			flags[part.get_slice(":", 0)] = part.get_slice(":", 1).to_int()
+		else:
+			flags[part] = 1 << index
+	return flags
 
 
 static func _listed(choices: Dictionary) -> String:
