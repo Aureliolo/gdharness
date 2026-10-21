@@ -2235,7 +2235,56 @@ const AUDIO_BUS_OPS: ReadonlySet<string> = new Set([
   'remove_audio_bus',
   'set_audio_bus_effect',
   'set_audio_bus_volume',
+  'rename_audio_bus',
+  'set_audio_bus_send',
 ]);
+
+/**
+ * The scenes and resources giving a node the bus [from], rewritten to give it [to], with what was
+ * rewritten and the scripts naming [from] in a string. A player names its bus by name and plays on
+ * Master when the layout has none of that name, so one left on a renamed bus went quiet on its own
+ * bus with nothing saying so. Scripts are only named, since a string in code can mean anything.
+ */
+function rewriteBusNamed(
+  projectPath: string,
+  from: string,
+  to: string,
+): { report: Record<string, unknown>; changed: string[] } {
+  const quoted = (name: string): string => name.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+  const giving = [`bus = &"${quoted(from)}"`, `bus = "${quoted(from)}"`];
+  const rewritten: { file: string; lines: number[] }[] = [];
+  for (const file of projectFiles(projectPath, ['.tscn', '.tres'])) {
+    const absolute = join(projectPath, file);
+    const lines = readFileSync(absolute, 'utf8').split('\n');
+    const at: number[] = [];
+    const after = lines.map((line, index) => {
+      const ending = line.endsWith('\r') ? '\r' : '';
+      if (!giving.includes(line.slice(0, line.length - ending.length))) {
+        return line;
+      }
+      at.push(index + 1);
+      return `bus = &"${quoted(to)}"${ending}`;
+    });
+    if (at.length > 0) {
+      writeFileSync(absolute, after.join('\n'));
+      rewritten.push({ file: `res://${file}`, lines: at });
+    }
+  }
+  const namedInScripts: { file: string; line: number; text: string }[] = [];
+  for (const file of projectFiles(projectPath, ['.gd'])) {
+    readFileSync(join(projectPath, file), 'utf8')
+      .split('\n')
+      .forEach((line, index) => {
+        if (line.includes(`"${from}"`)) {
+          namedInScripts.push({ file: `res://${file}`, line: index + 1, text: line.trim() });
+        }
+      });
+  }
+  return {
+    report: { rewritten, ...(namedInScripts.length > 0 ? { namedInScripts } : {}) },
+    changed: rewritten.map((one) => one.file),
+  };
+}
 
 /**
  * The settings whose value differs between two readings of project.godot, added and removed ones
@@ -5741,12 +5790,50 @@ class GodotServer {
     const served = this.editorHasOpen(projectPath);
     const before = served ? this.settingKeysOf(projectPath) : null;
     const written = await this.headless(operation, args);
-    if (!served || written.isError === true) {
+    if (written.isError === true) {
       return written;
+    }
+    const renamed =
+      op === 'rename_audio_bus'
+        ? rewriteBusNamed(
+            projectPath,
+            readString(args, 'busName') ?? '',
+            readString(args, 'newBusName') ?? '',
+          )
+        : null;
+    if (!served) {
+      return renamed === null
+        ? written
+        : this.jsonTextResponse({
+            ...asParams(JSON.parse(written.content[0]?.text ?? '{}')),
+            ...renamed.report,
+          });
     }
     const answer = asParams(JSON.parse(written.content[0]?.text ?? '{}'));
     if (AUDIO_BUS_OPS.has(op)) {
-      return this.jsonTextResponse({ ...answer, ...(await this.editorTakes('adopt_audio_bus_layout', {})) });
+      const adopted = await this.editorTakes('adopt_audio_bus_layout', {});
+      if (renamed === null || renamed.changed.length === 0) {
+        return this.jsonTextResponse({ ...answer, ...renamed?.report, ...adopted });
+      }
+      // The scenes rewritten under the editor are read again there, or it saves the old bus back.
+      const told: OperationParams = {};
+      const reread = await this.editorTakes('files_moved', { moved: [], changed: renamed.changed }, told);
+      const unsavedScenes = (readArray(told, 'unsavedScenes') ?? []).map(String);
+      return this.jsonTextResponse({
+        ...answer,
+        ...renamed.report,
+        ...adopted,
+        ...reread,
+        editor: {
+          reloadedScenes: (readArray(told, 'reloadedScenes') ?? []).map(String),
+          ...(unsavedScenes.length > 0 ? { unsavedScenes } : {}),
+        },
+        ...(unsavedScenes.length > 0
+          ? {
+              note: `${unsavedScenes.join(', ')} ${unsavedScenes.length === 1 ? 'is' : 'are'} open in the editor with unsaved edits, so ${unsavedScenes.length === 1 ? 'it was' : 'they were'} not read again from the file and still ${unsavedScenes.length === 1 ? 'gives' : 'give'} the old bus; saving there writes it back.`,
+            }
+          : {}),
+      });
     }
     const diffed = changedSettings(before, this.settingKeysOf(projectPath));
     const changed = diffed === null ? null : [...new Set([...diffed, ...settingsNamedBy(op, args)])].sort();

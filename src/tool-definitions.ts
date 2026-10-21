@@ -424,7 +424,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_settings',
     title: 'Project settings',
     description:
-      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. project_info include lists the autoloads, input actions and audio buses as the project holds them. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, or one on another release's addon that was not asked, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events, and its deadzone when one is given, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. unset takes a setting's line out of project.godot, the way back from a set of a misspelt name, and answers removed, old_value and default_value, the value that holds now (null for a setting the engine does not declare); on one the file does not set it answers removed false and writes nothing. Every write keeps the sections and keys of project.godot in the order the file had them, so a change moves no other line; the save is the engine's, and like the editor's it writes Godot's header and config/features into a file that lacks them. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
+      "Reads or writes project.godot (settings, autoloads, the main scene, input actions and plugins) and the audio bus layout, default_bus_layout.tres unless audio/buses/default_bus_layout names another. project_info include lists the autoloads, input actions and audio buses as the project holds them. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, or one on another release's addon that was not asked, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events, and its deadzone when one is given, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. unset takes a setting's line out of project.godot, the way back from a set of a misspelt name, and answers removed, old_value and default_value, the value that holds now (null for a setting the engine does not declare); on one the file does not set it answers removed false and writes nothing. Every write keeps the sections and keys of project.godot in the order the file had them, so a change moves no other line; the save is the engine's, and like the editor's it writes Godot's header and config/features into a file that lacks them. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
     parameters: {
       projectPath: PROJECT_PATH,
       setting: {
@@ -489,7 +489,23 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['enable_plugin', 'disable_plugin'],
         description: 'Folder name under addons/.',
       },
-      busName: { type: 'string', ops: ['add_audio_bus', 'remove_audio_bus'], description: 'Audio bus name.' },
+      busName: {
+        type: 'string',
+        ops: ['add_audio_bus', 'remove_audio_bus', 'rename_audio_bus'],
+        description: 'Audio bus name.',
+      },
+      newBusName: {
+        type: 'string',
+        ops: ['rename_audio_bus'],
+        description:
+          'rename_audio_bus: the name the bus takes. Every bus sending to it is sent to the new name (named under resent), and every scene and resource line giving a node the old bus is rewritten (named under rewritten); a script naming the old bus in a string is named under namedInScripts and left as it is.',
+      },
+      sendTo: {
+        type: 'string',
+        ops: ['set_audio_bus_send'],
+        description:
+          'set_audio_bus_send: the name of the bus to send to, one before this bus, as the editor offers them; a later bus, the bus itself or a name the layout does not have is refused.',
+      },
       parentBusIndex: {
         type: 'number',
         ops: ['add_audio_bus'],
@@ -498,7 +514,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       busIndex: {
         type: 'number',
-        ops: ['set_audio_bus_effect', 'set_audio_bus_volume'],
+        ops: ['set_audio_bus_effect', 'set_audio_bus_volume', 'set_audio_bus_send'],
         description: 'Audio bus index.',
       },
       effectIndex: {
@@ -563,6 +579,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         effect: 'destructive',
         summary: 'set a bus volume',
         requires: ['busIndex', 'volumeDb'],
+      },
+      rename_audio_bus: {
+        effect: 'destructive',
+        summary: 'rename an audio bus, with the sends and scenes naming it',
+        requires: ['busName', 'newBusName'],
+      },
+      set_audio_bus_send: {
+        effect: 'destructive',
+        summary: 'choose the bus a bus sends to',
+        requires: ['busIndex', 'sendTo'],
       },
     },
   },

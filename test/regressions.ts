@@ -22435,9 +22435,16 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
     return;
   }
   const sent: { tool: string; args: Record<string, unknown> }[] = [];
-  const editor = { refuses: false, passOver: [] as string[] };
+  const editor = { refuses: false, passOver: [] as string[], unsaved: false };
   await withAPlayingEditor(
     () => (tool, args) => {
+      if (tool === 'files_moved') {
+        sent.push({ tool, args });
+        const changed = asArray(args['changed'] ?? []).map(String);
+        return editor.unsaved
+          ? { ok: true, reloadedScenes: [], unsavedScenes: changed }
+          : { ok: true, reloadedScenes: changed, unsavedScenes: [] };
+      }
       if (tool.startsWith('adopt_')) {
         sent.push({ tool, args });
         if (editor.refuses) {
@@ -22519,6 +22526,60 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
         sent.splice(0).map((one) => one.tool),
         ['adopt_audio_bus_layout'],
         'a bus layout is reloaded rather than read as settings',
+      );
+
+      // A rename rewrites the scenes naming the bus, and the editor reads them again, or saves the
+      // old bus back over them; one with unsaved edits is named instead.
+      writeFileSync(
+        join(project, 'choir.tscn'),
+        '[gd_scene format=3]\n\n[node name="Choir" type="AudioStreamPlayer"]\nbus = &"Voices"\n',
+      );
+      const renamed = await call({ op: 'rename_audio_bus', busName: 'Voices', newBusName: 'Choir' });
+      assert.deepEqual(
+        sent.splice(0),
+        [
+          { tool: 'adopt_audio_bus_layout', args: {} },
+          { tool: 'files_moved', args: { moved: [], changed: ['res://choir.tscn'] } },
+        ],
+        JSON.stringify(renamed),
+      );
+      assert.deepEqual(
+        get(renamed, 'editor'),
+        { reloadedScenes: ['res://choir.tscn'] },
+        JSON.stringify(renamed),
+      );
+      assert.equal(get(renamed, 'note'), undefined, JSON.stringify(renamed));
+      editor.unsaved = true;
+      const unsaved = await call({ op: 'rename_audio_bus', busName: 'Choir', newBusName: 'Chorus' });
+      sent.splice(0);
+      editor.unsaved = false;
+      assert.deepEqual(
+        get(unsaved, 'editor'),
+        { reloadedScenes: [], unsavedScenes: ['res://choir.tscn'] },
+        JSON.stringify(unsaved),
+      );
+      assert.equal(
+        get(unsaved, 'note'),
+        'res://choir.tscn is open in the editor with unsaved edits, so it was not read again from the file and still gives the old bus; saving there writes it back.',
+      );
+      writeFileSync(
+        join(project, 'hymn.tscn'),
+        '[gd_scene format=3]\n\n[node name="Hymn" type="AudioStreamPlayer"]\nbus = &"Chorus"\n',
+      );
+      editor.unsaved = true;
+      const both = await call({ op: 'rename_audio_bus', busName: 'Chorus', newBusName: 'Psalm' });
+      sent.splice(0);
+      editor.unsaved = false;
+      assert.equal(
+        get(both, 'note'),
+        'res://choir.tscn, res://hymn.tscn are open in the editor with unsaved edits, so they were not read again from the file and still give the old bus; saving there writes it back.',
+        JSON.stringify(both),
+      );
+      const resent = await call({ op: 'set_audio_bus_send', busIndex: 1, sendTo: 'Master' });
+      assert.deepEqual(
+        sent.splice(0).map((one) => one.tool),
+        ['adopt_audio_bus_layout'],
+        `a send is a change to the layout too: ${JSON.stringify(resent)}`,
       );
 
       editor.refuses = true;
@@ -43239,11 +43300,11 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     assert.match(readFileSync(join(project, 'speaker.tscn'), 'utf8'), /^bus = &"Music"$/m);
     assert.equal(
       textOf(await speaker('Musik')),
-      'AudioStreamPlayer.bus was given "Musik" and holds "Master" after it was set: it takes the name of one of the project\'s audio buses, and "Musik" is none of them; the nearest is Music. project_info include audio_buses lists them, and project_settings add_audio_bus adds one. Nothing was written.',
+      'AudioStreamPlayer.bus takes the name of one of the project\'s audio buses, and "Musik" is none of them, so it would play on Master; the nearest is Music. project_info include audio_buses lists them, and project_settings add_audio_bus adds one. Nothing was written.',
     );
     assert.match(
       textOf(await speaker('Drums')) ?? '',
-      /and "Drums" is none of them; the buses are Master, Music\. project_info/,
+      /and "Drums" is none of them, so it would play on Master; the buses are Master, Music\. project_info/,
     );
 
     // A property the resource lacks is refused with the ones it has nearest it, alone, beside
@@ -43568,6 +43629,103 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     assert.equal(
       textOf(await request('scene_node', { ...hero, properties: { lives: 20 } })),
       'Player.lives was given 20 and holds 9 after it was set: the engine changed or refused the value, so nothing was written.',
+    );
+
+    // A bus renamed takes its sends and the scenes naming it along, and a script naming it in a
+    // string is named; a player left on a bus the layout lacks says so instead of reading as Master.
+    const settings = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+      await request('project_settings', args);
+    writeFileSync(join(project, 'jukebox.gd'), 'extends Node\n\nconst BUS := "Music"\n');
+    // Written by hand on a checkout with Windows line ends, with the bus as a plain string, both of
+    // which a scene loads as it would the engine's own spelling.
+    writeFileSync(
+      join(project, 'crlf.tscn'),
+      '[gd_scene format=3]\r\n\r\n[node name="Hand" type="AudioStreamPlayer"]\r\nbus = "Music"\r\n',
+    );
+    await settings({ op: 'add_audio_bus', busName: 'Drums', parentBusIndex: 1 });
+    const renamed = parseTextContent(
+      await settings({ op: 'rename_audio_bus', busName: 'Music', newBusName: 'Score' }),
+    );
+    assert.deepEqual(get(renamed, 'renamed'), { from: 'Music', to: 'Score' }, JSON.stringify(renamed));
+    assert.deepEqual(get(renamed, 'resent'), ['Drums'], JSON.stringify(renamed));
+    assert.match(
+      readFileSync(join(project, 'default_bus_layout.tres'), 'utf8'),
+      /^bus\/2\/send = &"Score"$/m,
+    );
+    assert.deepEqual(
+      get(renamed, 'rewritten'),
+      [
+        { file: 'res://crlf.tscn', lines: [4] },
+        { file: 'res://speaker.tscn', lines: [6] },
+      ],
+      JSON.stringify(renamed),
+    );
+    assert.equal(
+      readFileSync(join(project, 'crlf.tscn'), 'utf8'),
+      '[gd_scene format=3]\r\n\r\n[node name="Hand" type="AudioStreamPlayer"]\r\nbus = &"Score"\r\n',
+    );
+    assert.deepEqual(
+      get(renamed, 'namedInScripts'),
+      [{ file: 'res://jukebox.gd', line: 3, text: 'const BUS := "Music"' }],
+      JSON.stringify(renamed),
+    );
+    assert.match(readFileSync(join(project, 'speaker.tscn'), 'utf8'), /^bus = &"Score"$/m);
+    assert.doesNotMatch(readFileSync(join(project, 'speaker.tscn'), 'utf8'), /&"Music"/);
+    assert.match(
+      readFileSync(join(project, 'default_bus_layout.tres'), 'utf8'),
+      /^bus\/1\/name = &"Score"$/m,
+    );
+    const kept = parseTextContent(
+      await request('scene_node', { op: 'get', scenePath: 'res://speaker.tscn', nodePath: 'BusMusic' }),
+    );
+    assert.equal(get(kept, 'properties', 'bus'), 'Score', JSON.stringify(kept));
+    assert.equal(get(kept, 'busNote'), undefined, JSON.stringify(kept));
+    for (const [args, said] of [
+      [
+        { busName: 'Master', newBusName: 'Main' },
+        'Master is the bus every other ends in, which the editor keeps under its name.',
+      ],
+      [{ busName: 'Score', newBusName: 'Master' }, 'A bus named Master already exists, at index 0'],
+      [{ busName: 'Musik', newBusName: 'Tunes' }, 'No bus named Musik. The buses are Master, Score, Drums.'],
+    ] as const) {
+      assert.equal(textOf(await settings({ op: 'rename_audio_bus', ...args })), said, JSON.stringify(args));
+    }
+
+    writeFileSync(
+      join(project, 'lost.tscn'),
+      '[gd_scene format=3]\n\n[node name="Lost" type="AudioStreamPlayer2D"]\nbus = &"Gone"\n',
+    );
+    const lost = parseTextContent(
+      await request('scene_node', { op: 'get', scenePath: 'res://lost.tscn', nodePath: '.' }),
+    );
+    assert.equal(get(lost, 'properties', 'bus'), 'Gone', JSON.stringify(lost));
+    assert.equal(
+      get(lost, 'busNote'),
+      "Lost names the bus Gone, which the project's bus layout does not have, so it plays on Master; the buses are Master, Score, Drums.",
+      JSON.stringify(lost),
+    );
+
+    // A send goes only to a bus before it.
+    const send = async (busIndex: number, sendTo: string): Promise<JsonRpcMessage> =>
+      await settings({ op: 'set_audio_bus_send', busIndex, sendTo });
+    for (const [busIndex, sendTo, said] of [
+      [
+        1,
+        'Drums',
+        'Score is bus 1 and Drums is bus 2: a bus sends only to one before it, which keeps sound from going round in a loop, so Score can send to Master.',
+      ],
+      [2, 'Drums', 'Drums cannot send to itself; it can send to Master, Score.'],
+      [2, 'Nope', 'No bus named Nope. The buses are Master, Score, Drums.'],
+      [0, 'Score', 'Master sends nowhere: it is the bus every other ends in.'],
+      [9, 'Master', 'No bus at index 9; the buses are 0 Master, 1 Score, 2 Drums.'],
+    ] as const) {
+      assert.equal(textOf(await send(busIndex, sendTo)), said, `${busIndex} to ${sendTo}`);
+    }
+    const sent = parseTextContent(await send(2, 'Master'));
+    assert.equal(get(sent, 'bus', 'send'), 'Master', JSON.stringify(sent));
+    assert.match(
+      readFileSync(join(project, 'default_bus_layout.tres'), 'utf8'),
+      /^bus\/2\/send = &"Master"$/m,
     );
   } finally {
     await server.stop();

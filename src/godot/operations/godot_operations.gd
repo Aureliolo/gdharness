@@ -295,6 +295,10 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = GdhAudioBuses.new(_log).set_audio_bus_effect(params)
 		"set_audio_bus_volume":
 			payload = GdhAudioBuses.new(_log).set_audio_bus_volume(params)
+		"rename_audio_bus":
+			payload = GdhAudioBuses.new(_log).rename_audio_bus(params)
+		"set_audio_bus_send":
+			payload = GdhAudioBuses.new(_log).set_audio_bus_send(params)
 
 		# ClassDB
 		"query_classes":

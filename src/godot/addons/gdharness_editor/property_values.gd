@@ -296,15 +296,18 @@ func _not_held(
 		"%s %s" % ["is" if close.size() == 1 else "are", ", ".join(close)] if not close.is_empty() else ""
 	)
 	if bus:
+		# Not "holds Master after it was set": the getter answers the first bus for any name the
+		# layout lacks, and nothing was kept.
 		return (
 			(
-				"%s: it takes the name of one of the project's audio buses, and %s is none of them; %s. "
-				+ "project_info include audio_buses lists them, and project_settings add_audio_bus adds "
-				+ "one. Nothing was written."
+				"%s.bus takes the name of one of the project's audio buses, and %s is none of them, so it "
+				+ "would play on %s; %s. project_info include audio_buses lists them, and project_settings "
+				+ "add_audio_bus adds one. Nothing was written."
 			)
 			% [
-				said,
+				GdhPropertyPaths.class_called(target),
 				shown(value),
+				AudioServer.get_bus_name(0),
 				"the buses are " + ", ".join(names) if nearest.is_empty() else "the nearest " + nearest
 			]
 		)

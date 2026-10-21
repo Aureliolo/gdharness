@@ -731,6 +731,22 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	var here: Array = set_here.keys()
 	here.sort()
 	var answer: Dictionary = {"ok": true, "nodePath": at, "properties": props, "setHere": here}
+	# A player's getter answers Master for a bus the layout does not have, while the file keeps the
+	# name, so a player left on a renamed or removed bus read as one put on Master.
+	var bus: String = str(set_here.get("bus", ""))
+	var plays: bool = node is AudioStreamPlayer or node is AudioStreamPlayer2D or node is AudioStreamPlayer3D
+	if plays and not bus.is_empty() and AudioServer.get_bus_index(bus) == -1:
+		props["bus"] = bus
+		var buses: PackedStringArray = []
+		for index: int in AudioServer.bus_count:
+			var _added: bool = buses.append(AudioServer.get_bus_name(index))
+		answer["busNote"] = (
+			(
+				"%s names the bus %s, which the project's bus layout does not have, so it plays on %s; "
+				+ "the buses are %s."
+			)
+			% [str(node.name) if at == "." else at, bus, AudioServer.get_bus_name(0), ", ".join(buses)]
+		)
 	answer.merge(GdhSceneFile.class_of(node))
 	answer.merge(GdhGroups.read(scene, node))
 	var from: String = scene.values_from(node, at)

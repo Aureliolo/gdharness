@@ -25,6 +25,8 @@ export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string
     remove_audio_bus: 'remove_audio_bus',
     set_audio_bus_effect: 'set_audio_bus_effect',
     set_audio_bus_volume: 'set_audio_bus_volume',
+    rename_audio_bus: 'rename_audio_bus',
+    set_audio_bus_send: 'set_audio_bus_send',
   }),
   project_import: dictionary({
     status: 'get_import_status',

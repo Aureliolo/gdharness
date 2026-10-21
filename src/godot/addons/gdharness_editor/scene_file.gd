@@ -518,7 +518,7 @@ func unusable_name(parent: Node, child_name: String, moving: Node = null) -> Str
 	return ""
 
 
-## The names of the properties this scene's own file sets on [param node], whatever their values.
+## The properties this scene's own file sets on [param node], each with the value the file gives it.
 func set_here(node: Node) -> Dictionary:
 	return set_at(path_of(node))
 
@@ -545,17 +545,17 @@ func groups_at(at: String) -> PackedStringArray:
 	return named
 
 
-## The names of the properties this scene's own file sets on the node at [param at].
+## The properties this scene's own file sets on the node at [param at], with the values it gives.
 func set_at(at: String) -> Dictionary:
-	var names: Dictionary = {}
+	var held: Dictionary = {}
 	if _state == null:
-		return names
+		return held
 	for index: int in _state.get_node_count():
 		if _relative(str(_state.get_node_path(index))) != at:
 			continue
-		for property: int in _state.get_node_property_count(index):
-			names[str(_state.get_node_property_name(index, property))] = true
-	return names
+		for p: int in _state.get_node_property_count(index):
+			held[str(_state.get_node_property_name(index, p))] = _state.get_node_property_value(index, p)
+	return held
 
 
 ## Whether [param loaded], read off [param saved] (a copy instantiated from the pack), is
