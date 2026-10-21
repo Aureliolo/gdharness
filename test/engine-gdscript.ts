@@ -4536,6 +4536,7 @@ async function main(): Promise<void> {
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
     runFixture(godotPath, projectDir, 'runtime_drag');
+    runFixture(godotPath, projectDir, 'runtime_offers');
     runFixture(godotPath, projectDir, 'runtime_pad');
     runFixture(godotPath, projectDir, 'runtime_accessibility');
     runFixture(godotPath, projectDir, 'runtime_query');

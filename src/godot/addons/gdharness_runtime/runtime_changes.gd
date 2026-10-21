@@ -524,7 +524,9 @@ static func _not_a_method_to_call(holder: Object, named: String, called: String)
 				% [called, named]
 			)
 		method = GdhPaths.method_of(named)
-	return "" if holder.has_method(method) else "%s has no method %s" % [called, method]
+	if holder.has_method(method):
+		return ""
+	return GdhPaths.with_methods_offered("%s has no method %s" % [called, method], holder, method)
 
 
 ## Whether a call's `properties` asks for its result to be read: true, or a list of names.
