@@ -10,6 +10,7 @@ import {
   failedCases,
   failedWithin,
   hookFailuresPrinted,
+  ignoredLeftOut,
   ignoredYetRan,
   LONGEST_DETAIL,
   MalformedReportError,
@@ -1000,9 +1001,13 @@ function testAnIgnoreThatLeftOutNothingIsNamed(): void {
       '<testsuite name="ledger_test" package="test/econ" tests="2" failures="0" errors="0" skipped="0" time="0.1">',
       '<testcase name="test_sum" classname="ledger_test" time="0.01"></testcase>',
       '<testcase name="test_tax" classname="ledger_test" time="0.01"></testcase>',
+      '<testcase name="test_rate:0" classname="ledger_test" time="0.01"></testcase>',
       '</testsuite>',
       '<testsuite name="inn_test" package="test" tests="1" failures="0" errors="0" skipped="0" time="0.1">',
       '<testcase name="test_sum" classname="inn_test" time="0.01"></testcase>',
+      '</testsuite>',
+      '<testsuite name="tap_test" tests="1" failures="0" errors="0" skipped="0" time="0.1">',
+      '<testcase name="test_pour" classname="tap_test" time="0.01"></testcase>',
       '</testsuite>',
       '</testsuites>',
     ].join('\n'),
@@ -1027,6 +1032,42 @@ function testAnIgnoreThatLeftOutNothingIsNamed(): void {
     { entry: 'test_sum', ran: 'ledger_test:test_sum' },
     { entry: 'test_sum', ran: 'inn_test:test_sum' },
   ]);
+
+  // What the list did leave out, read against what the suites declare: a case named with its suite
+  // or by its suite's path, once however many entries name it, every case of a suite named alone,
+  // and neither a case that ran, under its parameters or in a suite the report gives no path for,
+  // nor an entry naming nothing there.
+  assert.deepEqual(
+    ignoredLeftOut(
+      report,
+      [
+        'ledger_test:test_fee',
+        'res://test/econ/ledger_test.gd:test_fee',
+        'cellar_test',
+        'ledger_test:test_sum',
+        'ledger_test:test_rate',
+        'tap_test:test_pour',
+        'tap_test:test_drip',
+        'ledger_test:test_fea',
+        'test_tax',
+      ],
+      [
+        { path: 'res://test/econ/ledger_test.gd', cases: ['test_fee', 'test_rate', 'test_sum', 'test_tax'] },
+        { path: 'res://test/inn_test.gd', cases: ['test_sum'] },
+        { path: 'res://test/cellar_test.gd', cases: ['test_cask', 'test_tap'] },
+        { path: 'res://test/tap_test.gd', cases: ['test_drip', 'test_pour'] },
+      ],
+    ),
+    {
+      leftOut: [
+        'cellar_test:test_cask',
+        'cellar_test:test_tap',
+        'ledger_test:test_fee',
+        'tap_test:test_drip',
+      ],
+      unmatched: ['ledger_test:test_fea', 'test_tax'],
+    },
+  );
 }
 
 testASecondFailedAssertionIsNotAHook();

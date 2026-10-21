@@ -13,6 +13,7 @@ import { emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import type { GameLog, LogEntry } from './game-log.js';
+import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
 import { freeLibraryCopies } from './library-copies.js';
 import { realAsFarAsItExists } from './paths.js';
 import { forceNextImport } from './reimport.js';
@@ -73,8 +74,10 @@ export function engineExtras(
 ): Record<string, unknown> {
   const after = outcome.afterAnswerMessages ?? [];
   const before = outcome.beforeOperationMessages ?? [];
+  const notImported = notImportedNote(outcome.messages);
   return {
     ...(outcome.messages.length > 0 ? { engine_messages: outcome.messages } : {}),
+    ...(notImported === undefined ? {} : { engine_messages_note: notImported }),
     ...(before.length > 0
       ? {
           engine_messages_before_operation: before,
@@ -121,6 +124,28 @@ function withNotCompiled(note: string, entries: readonly LogEntry[]): string {
   return path === undefined
     ? note
     : `${note} ${path} did not compile, so every run of this project starts its autoloads without it until it is fixed; its errors are among these.`;
+}
+
+/**
+ * What "No loader found" means for a file the engine imports, which its own words hide. Such a file
+ * is loaded from its import rather than read as it is, so until it is first imported the engine has
+ * no loader for it, and a scene using it reports a non-existent resource that is there on disk.
+ */
+export function notImportedNote(entries: readonly LogEntry[]): string | undefined {
+  const paths = [
+    ...new Set(
+      entries.flatMap((entry) => {
+        const path = /^No loader found for resource: (res:\/\/\S+)/.exec(entry.text)?.[1];
+        const extension = path?.split('.').pop()?.toLowerCase() ?? '';
+        return path !== undefined && IMPORTABLE_EXTENSIONS.includes(extension) ? [path] : [];
+      }),
+    ),
+  ];
+  if (paths.length === 0) {
+    return undefined;
+  }
+  const one = paths.length === 1;
+  return `${paths.join(', ')} ${one ? 'has' : 'have'} no import the engine can load, which is how a file it imports stands before it is first imported, so what uses ${one ? 'it' : 'them'} reads ${one ? 'it' : 'them'} as missing although ${one ? 'it is' : 'they are'} on disk: project_import reimport imports ${one ? 'it' : 'them'}.`;
 }
 
 const BEFORE_OPERATION_NOTE =

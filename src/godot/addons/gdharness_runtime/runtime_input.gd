@@ -157,6 +157,7 @@ func inject_action(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": holding}
 	var frames: int = holding
 
+	var focused: String = _focus_owner()
 	_say_action(action, whole or held, strength)
 	var lasted: Variant = null
 	if whole:
@@ -166,15 +167,34 @@ func inject_action(params: Dictionary) -> Dictionary:
 		_say_action(action, false, strength)
 		await _host.get_tree().process_frame
 
-	return {
-		"type": "input_injected",
-		"input_type": "action",
-		"action": action,
-		"pressed": held and not whole,
-		"whole": whole,
-		"held_frames": GdhValues.held_answer(whole, frames),
-		"held_for": lasted,
-	}
+	return _focus_noted(
+		{
+			"type": "input_injected",
+			"input_type": "action",
+			"action": action,
+			"pressed": held and not whole,
+			"whole": whole,
+			"held_frames": GdhValues.held_answer(whole, frames),
+			"held_for": lasted,
+		},
+		focused
+	)
+
+
+## The path of the Control holding the keyboard focus, or "" when none does. Read before a key or an
+## action goes in, since pressing a focused button can move the focus.
+func _focus_owner() -> String:
+	var holding: Control = _host.get_viewport().gui_get_focus_owner()
+	return "" if holding == null else str(holding.get_path())
+
+
+## [param said] with [param focused], the Control that had the focus, under focused. A key or an action
+## reaches that Control before the game's _unhandled_input, so Space on a focused Button pressed it
+## and the game's own handler counted the key as well, with nothing in the answer saying why.
+static func _focus_noted(said: Dictionary, focused: String) -> Dictionary:
+	if not focused.is_empty():
+		said["focused"] = focused
+	return said
 
 
 func _say_action(action: String, down: bool, strength: float) -> void:
@@ -230,6 +250,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 	# keys are the code points themselves, which is what makes this a mapping and not a table.
 	event.unicode = GdhValues.glyph_of(event.keycode, event.shift_pressed)
 
+	var focused: String = _focus_owner()
 	Input.parse_input_event(event)
 	var lasted: Variant = null
 	if whole:
@@ -239,20 +260,23 @@ func inject_key(params: Dictionary) -> Dictionary:
 		Input.parse_input_event(up)
 		await _host.get_tree().process_frame
 
-	return {
-		"type": "input_injected",
-		"input_type": "key",
-		"held_frames": GdhValues.held_answer(whole, frames),
-		"held_for": lasted,
-		"keycode": event.keycode,
-		"physical_keycode": event.physical_keycode,
-		"shift": event.shift_pressed,
-		"ctrl": event.ctrl_pressed,
-		"alt": event.alt_pressed,
-		"unicode": event.unicode,
-		"pressed": held and not whole,
-		"whole": whole,
-	}
+	return _focus_noted(
+		{
+			"type": "input_injected",
+			"input_type": "key",
+			"held_frames": GdhValues.held_answer(whole, frames),
+			"held_for": lasted,
+			"keycode": event.keycode,
+			"physical_keycode": event.physical_keycode,
+			"shift": event.shift_pressed,
+			"ctrl": event.ctrl_pressed,
+			"alt": event.alt_pressed,
+			"unicode": event.unicode,
+			"pressed": held and not whole,
+			"whole": whole,
+		},
+		focused
+	)
 
 
 ## Clicks a mouse button at a position, and lets go of it again unless asked to hold it.

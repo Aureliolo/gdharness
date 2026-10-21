@@ -127,6 +127,7 @@ import {
   failedWithin,
   finishesASuite,
   hookFailuresPrinted,
+  ignoredLeftOut,
   ignoredYetRan,
   orphansPrinted,
   parseJUnit,
@@ -303,7 +304,7 @@ import {
 // array element, so a path full of backslashes, spaces or quotes is just a path.
 import { runHidden as run, spawnHidden } from './spawn.js';
 import { declaringAdvice, readExpected, readRun, unexpectedErrors } from './suite-judge.js';
-import { TEST_DIRECTORIES } from './suite-plan.js';
+import { ProjectScripts, TEST_DIRECTORIES } from './suite-plan.js';
 import { selectTests } from './test-selection.js';
 import {
   asParams,
@@ -2728,6 +2729,7 @@ type Section = { operation: string; params: (args: OperationParams, detailed: bo
  */
 const PROJECT_INFO_SECTIONS: Readonly<Record<string, Section>> = dictionary<Section>({
   autoloads: { operation: 'list_autoloads', params: () => ({}) },
+  classes: { operation: 'list_script_classes', params: () => ({}) },
   input_actions: { operation: 'list_input_actions', params: () => ({}) },
   plugins: { operation: 'list_plugins', params: () => ({}) },
   export_presets: { operation: 'list_export_presets', params: () => ({}) },
@@ -7053,6 +7055,20 @@ class GodotServer {
     const uncaughtFolded = foldedRepeats(uncaught.map(aboveTheRunner));
     const listedAsUncaught = new Set(uncaughtFolded.map((entry) => entry.index));
     const notApplied = ignoredYetRan(report, ignored);
+    const scripts = ignored.length === 0 ? null : new ProjectScripts(project.value.path);
+    const ignoreRead = ignoredLeftOut(
+      report,
+      ignored,
+      asked.flatMap((path) =>
+        scripts === null
+          ? []
+          : path.endsWith('.gd')
+            ? (scripts.suite(path) ?? [])
+            : scripts.suitesUnder([path]),
+      ),
+    );
+    // A bare case name is already answered under ignoreNotApplied, with the form that would work.
+    const unmatched = ignoreRead.unmatched.filter((entry) => !notApplied.some((one) => one.entry === entry));
     // A case read from its file that gdUnit4 never reported, which is a run of less than was asked
     // for. A parameterised case is reported under its name and its parameters.
     const testsNotRun = [
@@ -7129,6 +7145,8 @@ class GodotServer {
       orphans: orphans.total > 0 ? orphans.total : undefined,
       notRun: notRun > 0 ? notRun : undefined,
       ignoreNotApplied: notApplied.length > 0 ? notApplied : undefined,
+      ignored: ignoreRead.leftOut.length > 0 ? ignoreRead.leftOut : undefined,
+      ignoreUnmatched: unmatched.length > 0 ? unmatched : undefined,
       ...printedLines,
       savesNote,
       ...scanned,
@@ -7144,6 +7162,9 @@ class GodotServer {
             : undefined,
           notApplied.length > 0
             ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
+            : undefined,
+          unmatched.length > 0
+            ? `${unmatched.join(', ')} ${unmatched.length === 1 ? 'names' : 'name'} no suite or case under the paths run, so ${unmatched.length === 1 ? 'it' : 'they'} left nothing out.`
             : undefined,
           uncaughtNote(uncaught),
           undeclaredErrors.length > 0

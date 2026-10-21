@@ -113,7 +113,7 @@ import {
 } from '../src/godot-bridge.js';
 import { DebuggerStream, decodeVariant, framedCommand, type SentValue } from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
-import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
+import { type ImportOutcome, librariesNotCopied, notImportedNote, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { IMPORTABLE_EXTENSIONS, staleImports } from '../src/import-freshness.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
@@ -328,7 +328,15 @@ import {
 } from '../src/spawn.js';
 import { SuiteFingerprints } from '../src/suite-fingerprint.js';
 import { exitNamed, funcOf, judgeEngine, readRun, secondsOf } from '../src/suite-judge.js';
-import { dealt, ProjectScripts, SPLIT_PAST_SECONDS, timesAfter, unitsOf } from '../src/suite-plan.js';
+import {
+  dealt,
+  ProjectScripts,
+  SPLIT_PAST_SECONDS,
+  timesAfter,
+  type Unit,
+  unitsOf,
+  windowedSaid,
+} from '../src/suite-plan.js';
 import { macMemoryLevel, roomFor, TestUsageError, testOptionsOf } from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
@@ -7180,7 +7188,7 @@ async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
       const unknownSection = await call('project_info', { projectPath: process.cwd(), include: [name] });
       assert.match(
         unknownSection,
-        /autoloads, input_actions, plugins, export_presets, audio_buses, health, validation/,
+        /autoloads, classes, input_actions, plugins, export_presets, audio_buses, health, validation/,
         `${name} must not resolve to a section`,
       );
     }
@@ -8396,6 +8404,8 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     mkdirSync(join(sandbox, 'export'), { recursive: true });
     writeFileSync(join(sandbox, 'export', '.gdignore'), '');
     writeFileSync(join(sandbox, 'export', 'shipped.gd'), needle);
+    mkdirSync(join(sandbox, 'lib', 'vendor'), { recursive: true });
+    writeFileSync(join(sandbox, 'lib', 'vendor', '.gdignore'), '');
 
     // An addon gdharness installed, which nobody on the project wrote, beside the project's own
     // addon under a name the package also uses: only the marker setup writes tells them apart.
@@ -8424,6 +8434,21 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
       'the search should read the project and nothing standing beside it',
     );
     assert.equal(found.summary.files_searched, 2, 'and should not have opened the other three');
+    // Named, because an answer missing a copy the caller can see on disk reads as a search fault;
+    // a hidden directory and our own addon are not the project's to have marked.
+    assert.deepEqual(
+      [...(found.not_searched ?? [])].sort(),
+      ['res://export/', 'res://lib/vendor/'],
+      'the search should name every directory a .gdignore kept out',
+    );
+    const plain = searchProject(join(sandbox, 'scripts'), {
+      query: 'findable',
+      regex: false,
+      caseSensitive: false,
+      maxResults: 100,
+    });
+    assert.equal(plain.summary.files_with_matches, 1, 'a project with nothing kept out is still searched');
+    assert.equal(plain.not_searched, undefined, 'and says nothing was kept out');
     assert.equal(projectStructure(sandbox).scripts, 2, 'the count should agree with the search');
     assert.deepEqual(
       projectTexts(sandbox)
@@ -8441,13 +8466,24 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
 
     // What the structure counts as scenes and assets, which was text scenes and a short list of
     // images, fonts and sound: a project saving binary scenes had none, and its models were other.
-    for (const file of ['level.tscn', 'baked.scn', 'ship.glb', 'intro.ogv', 'water.gdshader', 'notes.txt']) {
+    // The .import and .uid files the engine writes beside a file are not files of their own, and
+    // counted as other, a project of a hundred imported images had a hundred others.
+    for (const file of [
+      'level.tscn',
+      'baked.scn',
+      'ship.glb',
+      'ship.glb.import',
+      'scripts/hero.gd.uid',
+      'intro.ogv',
+      'water.gdshader',
+      'notes.txt',
+    ]) {
       writeFileSync(join(sandbox, file), '');
     }
     assert.deepEqual(
       projectStructure(sandbox),
       { scenes: 2, scripts: 2, assets: 3, other: 1 },
-      'binary scenes are scenes, and models, video and shaders are assets',
+      'binary scenes are scenes, models, video and shaders are assets, and the sidecars are nothing',
     );
   } finally {
     sweep(sandbox);
@@ -9178,6 +9214,39 @@ function testChangelogReach(): void {
   assert.equal(counterpart('Release v1.3.6 (#1195)', history), 'c2');
   assert.equal(counterpart('Release v1.3.5 (#1190)', history), undefined);
   assert.equal(counterpart('Release v1.3.6 (#1195)', history.slice(3)), undefined);
+}
+
+/**
+ * The note beside a "No loader found" for a file the engine imports, which the engine's words
+ * leave reading as a file that is not there: a scene using an image never imported came back
+ * calling the image a non-existent resource while it sat on disk.
+ */
+function testANeverImportedFileIsSaidToBeOne(): void {
+  const entry = (text: string): LogEntry => ({
+    index: 0,
+    severity: 'error',
+    source: 'stderr',
+    text,
+    detail: [],
+  });
+  const image = 'No loader found for resource: res://art/hero.png (expected type: Texture2D)';
+  assert.equal(
+    notImportedNote([entry(image), entry(image)]),
+    'res://art/hero.png has no import the engine can load, which is how a file it imports stands before it is first imported, so what uses it reads it as missing although it is on disk: project_import reimport imports it.',
+  );
+  assert.equal(
+    notImportedNote([
+      entry(image),
+      entry('No loader found for resource: res://sound/step.ogg (expected type: AudioStream)'),
+    ]),
+    'res://art/hero.png, res://sound/step.ogg have no import the engine can load, which is how a file it imports stands before it is first imported, so what uses them reads them as missing although they are on disk: project_import reimport imports them.',
+  );
+  // A file the engine reads as it is has no import to be missing, so its missing loader is another fault.
+  assert.equal(
+    notImportedNote([entry('No loader found for resource: res://data/table.json (expected type: JSON)')]),
+    undefined,
+  );
+  assert.equal(notImportedNote([]), undefined);
 }
 
 /**
@@ -36705,6 +36774,19 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
         `the form given back leaves the case out: ${JSON.stringify(formed)}`,
       );
       assert.equal(get(formed, 'ignoreNotApplied'), undefined, JSON.stringify(formed));
+      assert.deepEqual(get(formed, 'ignored'), [form], `and the answer names it: ${JSON.stringify(formed)}`);
+      assert.equal(get(bare, 'ignored'), undefined, 'a list that left nothing out names nothing');
+      assert.equal(get(bare, 'ignoreUnmatched'), undefined, 'and a bare case name is answered once');
+
+      const misspelt = form.replace(/test_other$/, 'test_othr');
+      const typo = await run({ ignore: [misspelt] });
+      assert.equal(get(typo, 'tests'), 2, JSON.stringify(typo));
+      assert.deepEqual(get(typo, 'ignoreUnmatched'), [misspelt], JSON.stringify(typo));
+      assert.match(
+        text(get(typo, 'note')),
+        new RegExp(`${misspelt} names no suite or case under the paths run, so it left nothing out\\.`),
+        JSON.stringify(typo),
+      );
     });
   } finally {
     sweep(projectDir);
@@ -37444,7 +37526,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     const times = {
       [big.path]: { seconds: 12, cases: { test_x: 5, test_y: 4, test_z: 2 } },
       [edge.path]: { seconds: SPLIT_PAST_SECONDS, cases: { test_e: 5, test_f: 5 } },
-      [shown.path]: { seconds: 30, cases: { test_m: 15, test_n: 15 } },
+      [shown.path]: { seconds: 4, cases: { test_m: 2, test_n: 2 } },
     };
     const units = unitsOf([big, edge, shown, small], times);
     assert.deepEqual(
@@ -37454,16 +37536,17 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         [big.path, ['test_y'], 5],
         [big.path, ['test_z'], 3],
         [edge.path, ['test_e', 'test_f'], 10],
-        [shown.path, ['test_m', 'test_n'], 30],
+        [shown.path, ['test_m', 'test_n'], 4],
         // Untimed: the median case, and no time around its cases, which is the median of the others.
-        [small.path, ['test_s'], 5],
+        [small.path, ['test_s'], 4],
       ],
       'past the split, case by case with the time around them; at it, whole; a windowed one whole',
     );
     const declared = new Map([big, edge, shown, small].map((s) => [s.path, s.cases]));
     const plans = dealt(units, declared, 4);
-    // 29 s of headless units, the slowest 10 s, so three engines beside the windowed one; dealt
-    // slowest first to the lightest, a tie in cost going to the suite first by path.
+    // 32 s of units, the slowest 10 s, so four engines; the windowed units first in the first, then
+    // the rest slowest first to the lightest, a tie in cost going to the suite first by path. The
+    // windowed engine starts with 4 s, so it is the lightest when the fourth unit comes.
     assert.deepEqual(
       plans.map((plan) => [
         plan.windowed,
@@ -37472,23 +37555,22 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         plan.skipping,
       ]),
       [
-        [true, 30, [[shown.path, ['test_m', 'test_n']]], []],
-        [false, 10, [[edge.path, ['test_e', 'test_f']]], []],
-        [false, 9, [[big.path, ['test_x', 'test_z']]], [`${big.path}:test_y`]],
         [
-          false,
-          10,
+          true,
+          8,
           [
-            [big.path, ['test_y']],
+            [shown.path, ['test_m', 'test_n']],
             [small.path, ['test_s']],
           ],
-          [`${big.path}:test_x`, `${big.path}:test_z`],
+          [],
         ],
+        [false, 10, [[edge.path, ['test_e', 'test_f']]], []],
+        [false, 6, [[big.path, ['test_x']]], [`${big.path}:test_y`, `${big.path}:test_z`]],
+        [false, 8, [[big.path, ['test_y', 'test_z']]], [`${big.path}:test_x`]],
       ],
-      'the windowed engine first, and each engine holding part of a split suite skipping the rest of it',
+      'the windowed engine first, taking headless units too, and each engine holding part of a split suite skipping the rest of it',
     );
-    const headless = plans.slice(1);
-    for (const plan of headless) {
+    for (const plan of plans) {
       const held = plan.suites.flatMap((s) => s.cases.map((c) => `${s.path}:${c}`));
       assert.deepEqual(
         held.filter((entry) => plan.skipping.includes(entry)),
@@ -37496,13 +37578,75 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         'and never a case it holds',
       );
     }
-    assert.equal(
-      dealt(unitsOf([small, suite('res://tests/t_test.gd', ['test_t'])], {}), declared, 4).length,
-      1,
-      'a few quick suites stay in one engine',
+    assert.deepEqual(
+      dealt(unitsOf([small, suite('res://tests/t_test.gd', ['test_t'])], {}), declared, 4).map(
+        (plan) => plan.windowed,
+      ),
+      [false],
+      'a few quick suites stay in one engine, with no window when none needs one',
     );
-    assert.equal(dealt(units, declared, 1).length, 2, 'one engine at most, and the windowed one beside it');
+    assert.deepEqual(
+      dealt(units, declared, 1).map((plan) => [plan.windowed, plan.cost]),
+      [[true, 32]],
+      'one engine at most, the windowed one running everything',
+    );
     assert.equal(dealt(units, declared, 2).length, 2, 'the windowed engine counts toward the most');
+    assert.deepEqual(
+      [
+        plans,
+        dealt(units, declared, 1),
+        dealt(
+          units.filter((u) => !u.windowed),
+          declared,
+          4,
+        ),
+      ].map(windowedSaid),
+      [', one of them windowed', ', with a window', ''],
+      'the run line says which engine has the window, and of a lone engine that it has one',
+    );
+
+    // A run whose one windowed suite is quick: kept to that suite alone, the windowed engine sat
+    // idle for most of the run while three engines carried 1100 s. Over four it is about a quarter.
+    const unit = (name: string, cost: number, isWindowed = false): Unit => ({
+      suite: `res://tests/${name}_test.gd`,
+      cases: [`test_${name}`],
+      cost,
+      windowed: isWindowed,
+    });
+    const quick = [
+      unit('scene', 18, true),
+      ...[227, 200, 180, 150, 120, 100, 60, 40, 23].map((cost, index) => unit(`h${String(index)}`, cost)),
+    ];
+    const shared = dealt(quick, new Map(quick.map((u) => [u.suite, u.cases])), 4);
+    assert.equal(shared.length, 4, 'every engine asked for is used');
+    assert.ok(
+      Math.max(...shared.map((plan) => plan.cost)) < 300,
+      `no engine carries much more than a quarter: ${shared.map((plan) => plan.cost).join(', ')}`,
+    );
+    assert.deepEqual(
+      shared.map((plan) => plan.windowed),
+      [true, false, false, false],
+      'one windowed engine',
+    );
+    const inTheWindow = shared[0]?.suites.map((s) => s.path) ?? [];
+    assert.ok(
+      inTheWindow[0] === 'res://tests/scene_test.gd' && inTheWindow.length > 1,
+      `the windowed unit in the windowed engine, beside headless ones: ${JSON.stringify(inTheWindow)}`,
+    );
+    // The windowed units are never split, so when together they are the slowest, they set how many
+    // engines are worth starting.
+    const slow = [
+      unit('menu', 60, true),
+      ...[10, 10, 10, 10, 10, 10].map((cost, index) => unit(`s${String(index)}`, cost)),
+    ];
+    assert.deepEqual(
+      dealt(slow, new Map(slow.map((u) => [u.suite, u.cases])), 4).map((plan) => [plan.windowed, plan.cost]),
+      [
+        [true, 60],
+        [false, 60],
+      ],
+      'two engines as busy as the windowed suite, rather than four with three of them waiting on it',
+    );
 
     // The room a run has, from the processors and the memory handed in: what is asked for when
     // both have it, and otherwise fewer, with what held it.
@@ -37940,9 +38084,12 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
           '',
         ].join('\n'),
       });
-      const shown = test('tests/window_test.gd', 'tests/ok_test.gd');
+      // One engine, so the headless suite has to run in the windowed engine beside the one that
+      // needs the window.
+      const shown = test('--engines', '1', 'tests/window_test.gd', 'tests/ok_test.gd');
       assert.equal(shown.status, 0, shown.said);
-      assert.match(shown.said, /over 2 engines, one of them windowed\./, shown.said);
+      assert.match(shown.said, /in 2 suites over 1 engine, with a window\./, shown.said);
+      assert.match(shown.said, /^Passed: \d+ cases in 2 suites across 1 engine/m, shown.said);
     } else {
       console.log(`test command windowed case skipped: ${windowed}`);
     }
@@ -51475,6 +51622,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
   testChangelogReach,
+  testANeverImportedFileIsSaidToBeOne,
   testTheCureIsWrittenWhole,
   testEveryRemedyLeadsWithTheScan,
   testTheStaleNoteNamesTheCallThatRebuildsTheCopy,

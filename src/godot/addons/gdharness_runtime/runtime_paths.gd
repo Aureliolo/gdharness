@@ -416,7 +416,7 @@ static func _arity(object: Object, method: String) -> Dictionary:
 static func call_refused(object: Object, method: String, called_as: String, given: int = 0) -> String:
 	var arity: Dictionary = _arity(object, method)
 	if arity.is_empty():
-		return "%s has no method %s" % [called_as, method]
+		return with_methods_offered("%s has no method %s" % [called_as, method], object, method)
 	var least: int = arity["least"]
 	var most: int = arity["most"]
 	var any_more: bool = arity["any_more"]
@@ -452,6 +452,32 @@ static func call_refused(object: Object, method: String, called_as: String, give
 	if _native_flags(object, method) & METHOD_FLAG_CONST == 0:
 		return "%s.%s changes what it is called on rather than reading it%s" % [called_as, method, READS_ONLY]
 	return ""
+
+
+## [param said], a refusal for [param method], which [param object] lacks, with the methods it has
+## nearest the name, or else those its script declares. The engine's own run to hundreds on a node,
+## so they are offered only when one is near.
+static func with_methods_offered(said: String, object: Object, method: String) -> String:
+	var own: Array[String] = []
+	var attached: Variant = object.get_script()
+	if attached is Script:
+		var script: Script = attached
+		for entry: Dictionary in script.get_script_method_list():
+			var name: String = str(entry.get("name", ""))
+			if not name.is_empty() and not own.has(name):
+				own.append(name)
+	var every: Array[String] = own.duplicate()
+	for entry: Dictionary in object.get_method_list():
+		var name: String = str(entry.get("name", ""))
+		if not every.has(name):
+			every.append(name)
+	var close: PackedStringArray = GdhRead.nearest(method, PackedStringArray(every))
+	if not close.is_empty():
+		return "%s; the nearest it has %s %s" % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+	if own.is_empty():
+		return said
+	own.sort()
+	return "%s; its script declares %s" % [said, ", ".join(PackedStringArray(own))]
 
 
 ## The entry a script attached to [param object] declares for [param method], or an empty one when

@@ -50,14 +50,15 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			"res://", GdhImportPipeline.IMPORTABLE_EXTENSIONS
 		)
 
-		var missing_imports: int = 0
+		var missing_imports: Array[String] = []
 		for res: String in resources:
 			if not FileAccess.file_exists(res + ".import"):
-				missing_imports += 1
+				missing_imports.append(res)
 
-		if missing_imports > 0:
-			details.append(str(missing_imports) + " resources may need reimporting")
-			deductions += missing_imports
+		if not missing_imports.is_empty():
+			missing_imports.sort()
+			details.append(GdhImportPipeline.never_imported_line(missing_imports))
+			deductions += missing_imports.size()
 
 		checks["resources"] = {
 			"name": "Resources",

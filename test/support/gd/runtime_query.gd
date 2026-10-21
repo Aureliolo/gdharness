@@ -722,7 +722,7 @@ func _check_calling_through_a_path() -> void:
 		"call_method", {"path": "/root/Level/Hero", "method": "held:inner:shallow"}
 	)
 	var said: String = str(unknown.get("message", ""))
-	if unknown.get("type") != "error" or not said.contains("held:inner has no method shallow"):
+	if unknown.get("type") != "error" or not said.contains("held:inner has no method shallow; "):
 		_fail("and a method the holder has not got names the holder it looked on: %s" % str(unknown))
 
 
@@ -783,8 +783,8 @@ func _check_calling_a_step_along_the_path(hero: Node2D, button: Button) -> void:
 	var no_such: Dictionary = await node._execute_command(
 		"get_property", {"path": "/root/Level/Hero", "property": "nobody():called"}
 	)
-	if no_such.get("type") != "error" or not str(no_such.get("message", "")).contains("has no method nobody"):
-		_fail("a call to a method the holder has not got says so: %s" % str(no_such))
+	if no_such.get("type") != "error" or not str(no_such.get("message", "")).contains("nobody; its script"):
+		_fail("a call to a method the holder has not got says so, and what it has: %s" % str(no_such))
 
 	var written: Dictionary = await node._execute_command(
 		"set_property", {"path": "/root/Level/Hero", "property": "keeper():inner:depth", "value": was + 10}
