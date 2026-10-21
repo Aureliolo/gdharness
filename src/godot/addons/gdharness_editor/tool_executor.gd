@@ -101,6 +101,7 @@ func _init_tools() -> void:
 		"reparent_node": [_scene_tools, "reparent_node"],
 		"set_node_properties": [_scene_tools, "set_node_properties"],
 		"get_node_properties": [_scene_tools, "get_node_properties"],
+		"bake_navigation": [_scene_tools, "bake_navigation"],
 		"save_scene": [_scene_tools, "save_scene"],
 		"connect_signal": [_signal_tools, "connect_signal"],
 		"disconnect_signal": [_signal_tools, "disconnect_signal"],

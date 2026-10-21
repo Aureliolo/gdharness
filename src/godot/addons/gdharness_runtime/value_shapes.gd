@@ -33,6 +33,21 @@ const REQUIRED: Dictionary = {
 	"RID": [["id"]],
 	"Dictionary": [["entries"]],
 }
+## The fields each type reads as numbers. A builder reads a word there as 0, so {"x": 0, "y": "far"}
+## was written as (0, 0) and answered as written.
+const NUMBER_FIELDS: Dictionary = {
+	"Vector2": ["x", "y"],
+	"Vector2i": ["x", "y"],
+	"Vector3": ["x", "y", "z"],
+	"Vector3i": ["x", "y", "z"],
+	"Vector4": ["x", "y", "z", "w"],
+	"Vector4i": ["x", "y", "z", "w"],
+	"Rect2": ["x", "y", "width", "height"],
+	"Rect2i": ["x", "y", "width", "height"],
+	"Plane": ["d"],
+	"Quaternion": ["x", "y", "z", "w"],
+	"Color": ["r", "g", "b", "a"],
+}
 ## The fields a builder reads when they are there and does without when not.
 const OPTIONAL: Dictionary = {
 	"Color": ["a"],
@@ -77,6 +92,38 @@ static func spare(fields: Dictionary, tag: String) -> Array:
 	return lists
 
 
+## Whether a [param tag] built from [param fields] reads every one of them, and each it reads as a
+## number holds one.
+static func buildable(fields: Dictionary, tag: String) -> bool:
+	return (
+		spare(fields, tag).any(func(left: Array) -> bool: return left.is_empty())
+		and not_a_number(fields, tag).is_empty()
+	)
+
+
+## The first field of [param fields] that a [param tag] reads as a number and that holds no number,
+## or "" when there is none. Digits in quotes are a number, as a write takes them for a float.
+static func not_a_number(fields: Dictionary, tag: String) -> String:
+	for key: String in NUMBER_FIELDS.get(tag, []):
+		if not fields.has(key):
+			continue
+		var held: Variant = fields[key]
+		if held is int or held is float:
+			continue
+		if held is String and str(held).is_valid_float():
+			continue
+		return key
+	return ""
+
+
+## Whether every item of [param items] is a number, for a list read by its places as a vector.
+static func all_numbers(items: Array) -> bool:
+	return items.all(
+		func(item: Variant) -> bool:
+			return item is int or item is float or (item is String and str(item).is_valid_float())
+	)
+
+
 ## The sentences a refusal of [param value] where a [param type] goes ends with: which of its keys
 ## kept it from being read as one, and how one is written. Empty for a type not built from fields.
 ##
@@ -92,7 +139,23 @@ static func remedy(value: Variant, type: int) -> String:
 	var shape: String = written_as(type)
 	if shape.is_empty():
 		return ""
-	return _unread(value, type) + " A %s is sent as %s." % [type_string(type), shape]
+	return (
+		_unread(value, type) + _no_number(value, type) + " A %s is sent as %s." % [type_string(type), shape]
+	)
+
+
+static func _no_number(value: Variant, type: int) -> String:
+	var tag: String = type_string(type)
+	if value is Dictionary:
+		var fields: Dictionary = value
+		var key: String = not_a_number(fields, tag)
+		if not key.is_empty():
+			return " Its %s is %s, which is no number." % [key, JSON.stringify(fields[key])]
+	if value is Array and NUMBER_FIELDS.has(tag):
+		var items: Array = value
+		if not all_numbers(items):
+			return " Read by its places, each item is a number."
+	return ""
 
 
 static func _unread(value: Variant, type: int) -> String:

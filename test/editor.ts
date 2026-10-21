@@ -605,6 +605,52 @@ const SCENE_FILES: Record<string, string[]> = {
     '[node name="Ground" type="TileMapLayer" parent="."]',
     '',
   ],
+  // A region reading its obstacles from a group, and a scene open in the editor with a node of its
+  // own in that group, inside the region's outline.
+  'nav/outline.tres': [
+    '[gd_resource type="NavigationPolygon" format=3]',
+    '',
+    '[resource]',
+    'outlines = Array[PackedVector2Array]([PackedVector2Array(0, 0, 300, 0, 300, 300, 0, 300)])',
+    'source_geometry_mode = 1',
+    'source_geometry_group_name = &"walls"',
+    '',
+  ],
+  'nav/grouped.tscn': [
+    '[gd_scene load_steps=3 format=3]',
+    '',
+    '[ext_resource type="NavigationPolygon" path="res://nav/outline.tres" id="1_p"]',
+    '',
+    '[sub_resource type="CircleShape2D" id="CircleShape2D_c"]',
+    'radius = 30.0',
+    '',
+    '[node name="Level" type="Node2D"]',
+    '',
+    '[node name="Region" type="NavigationRegion2D" parent="."]',
+    'navigation_polygon = ExtResource("1_p")',
+    '',
+    '[node name="Pillar" type="StaticBody2D" parent="." groups=["walls"]]',
+    'position = Vector2(150, 150)',
+    '',
+    '[node name="Shape" type="CollisionShape2D" parent="Pillar"]',
+    'shape = SubResource("CircleShape2D_c")',
+    '',
+  ],
+  'nav/other.tscn': [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[sub_resource type="RectangleShape2D" id="RectangleShape2D_w"]',
+    'size = Vector2(40, 40)',
+    '',
+    '[node name="Other" type="Node2D"]',
+    '',
+    '[node name="Wall" type="StaticBody2D" parent="." groups=["walls"]]',
+    'position = Vector2(250, 50)',
+    '',
+    '[node name="Shape" type="CollisionShape2D" parent="Wall"]',
+    'shape = SubResource("RectangleShape2D_w")',
+    '',
+  ],
   // A variable that is not exported: set and read back like any property on a @tool script, and
   // kept by no file, which only reading the saved form can tell.
   'layers/tool_node.gd': ['@tool', 'extends Node', '', '@export var target: Node', 'var hidden: int = 0', ''],
@@ -3361,6 +3407,35 @@ async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Pr
     await refusal('scene_node', { ...cell({ x: 0, y: 0 }), layer: 1 }),
     /TileMapLayer, which is one layer/,
   );
+}
+
+/**
+ * A bake through the editor reads only the scene it bakes. The navigation servers read the nodes of a
+ * source group from the whole tree, and the editor's tree holds the scene being edited: a wall in
+ * the open scene's own copy of that group would be carved out of a region in another scene.
+ */
+async function testABakeReadsOnlyItsOwnScene({ call, project }: Editor): Promise<void> {
+  await hook(project, { op: 'open', path: 'res://nav/other.tscn' });
+  const baked = await call('scene_node', {
+    projectPath: project,
+    scenePath: 'res://nav/grouped.tscn',
+    op: 'bake_navigation',
+    nodePath: 'Region',
+  });
+  assert.equal(get(baked, 'savedTo'), 'res://nav/outline.tres', text(baked));
+  const saved = fileText(project, 'nav/outline.tres');
+  const listed = /^vertices = PackedVector2Array\(([^)]*)\)/m.exec(saved)?.[1] ?? '';
+  const numbers = listed.split(',').map(Number);
+  const points = numbers.flatMap((x, at) => (at % 2 === 0 ? [[x, numbers[at + 1] ?? NaN]] : []));
+  // The pillar in the baked scene's group is carved, with the agent's radius of 10 around it.
+  assert.ok(
+    points.some(([x = 0, y = 0]) => Math.hypot(x - 150, y - 150) <= 41),
+    `the scene's own pillar is carved out: ${listed}`,
+  );
+  // The open scene's wall covers 230 to 270 across and 30 to 70 down, so carving it puts points
+  // from 220 to 280 and 20 to 80.
+  const inOthers = points.filter(([x = 0, y = 0]) => x >= 219 && x <= 281 && y >= 19 && y <= 81);
+  assert.deepEqual(inOthers, [], `the open scene's wall is not carved: ${listed}`);
 }
 
 /**
@@ -7020,6 +7095,7 @@ async function main(): Promise<void> {
     ['testSignalsAreTheFilesOwn', testSignalsAreTheFilesOwn],
     ['testAnimationEditsLandWhereKept', testAnimationEditsLandWhereKept],
     ['testTilesDrawWhatTheyName', testTilesDrawWhatTheyName],
+    ['testABakeReadsOnlyItsOwnScene', testABakeReadsOnlyItsOwnScene],
     ['testACreateMakesWhatWasAsked', testACreateMakesWhatWasAsked],
     ['testEditorRescan', testEditorRescan],
     ['testAReimportGoesThroughTheEditor', testAReimportGoesThroughTheEditor],

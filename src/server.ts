@@ -4717,6 +4717,8 @@ class GodotServer {
             return await editorOrEngine('reparent_node', 'writes');
           case 'delete':
             return await editorOrEngine('delete_node', 'writes');
+          case 'bake_navigation':
+            return await editorOrEngine('bake_navigation', 'writes');
           default:
             return await editorOrEngine('set_tilemap_cells', 'writes');
         }

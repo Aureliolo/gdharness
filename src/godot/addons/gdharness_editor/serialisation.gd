@@ -223,8 +223,7 @@ func deserialize_value(value: Variant) -> Variant:
 	# under the target project's warning levels, so one such project lost every headless call.
 	var tag: String = str(fields["_type"])
 	var builder: String = BUILDERS.get(tag, "")
-	var spare: Array = GdhShapes.spare(fields, tag)
-	if builder.is_empty() or not spare.any(func(left: Array) -> bool: return left.is_empty()):
+	if builder.is_empty() or not GdhShapes.buildable(fields, tag):
 		return fields
 	if tag == "float" and str(fields["value"]) not in ["inf", "-inf", "nan"]:
 		return fields

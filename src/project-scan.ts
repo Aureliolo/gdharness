@@ -88,6 +88,7 @@ const ASSET_EXTENSIONS = new Set([
   'ogv',
   'gdshader',
   'shader',
+  'glsl',
 ]);
 
 export function projectStructure(projectPath: string): ProjectStructure {

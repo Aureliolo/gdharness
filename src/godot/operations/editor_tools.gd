@@ -23,6 +23,7 @@ const SCENE_COMMANDS: Array[String] = [
 	"duplicate_node",
 	"reparent_node",
 	"delete_node",
+	"bake_navigation",
 ]
 const SIGNAL_COMMANDS: Array[String] = ["connect_signal", "disconnect_signal", "list_connections"]
 const RESOURCE_COMMANDS: Array[String] = [

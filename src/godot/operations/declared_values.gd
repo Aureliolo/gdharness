@@ -348,3 +348,70 @@ static func is_a(value: Object, name: String) -> bool:
 			return true
 		script = script.get_base_script()
 	return false
+
+
+## Why [param property] of a [param holder], an [param engine_class], declared as [param declared],
+## holds [param held], as shown, after it was given [param given], the value and how it is shown. A
+## text property with a list of names holds only one of them, and its getter answers its default
+## for any other. A player's bus is one, though the engine fills its list only in the inspector, so
+## the buses are read from the AudioServer, which holds the project's layout; "the engine changed or
+## refused the value" left a caller to guess the bus did not exist.
+static func not_held(
+	holder: String, engine_class: String, property: String, declared: Dictionary, given: Array, held: String
+) -> String:
+	var value: Variant = given[0]
+	var said: String = "%s.%s was given %s and holds %s after it was set" % [holder, property, given[1], held]
+	var type: int = GdhRead.as_int(declared.get("type", TYPE_NIL))
+	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+	if hint in LAYER_NAMES and typeof(value) == TYPE_INT:
+		return (
+			(
+				"%s: it is a mask of the %s layers, one bit each from layer 1 (1) to layer %d (%d), so it "
+				+ "takes 0 to %d and the engine keeps only those bits. Nothing was written."
+			)
+			% [
+				said,
+				LAYER_NAMES[hint],
+				MASK_LAYERS,
+				1 << (MASK_LAYERS - 1),
+				(1 << MASK_LAYERS) - 1,
+			]
+		)
+	var names: PackedStringArray = []
+	if hint == PROPERTY_HINT_ENUM and (type == TYPE_STRING or type == TYPE_STRING_NAME):
+		names = PackedStringArray(enum_values(str(declared.get("hint_string", ""))).keys())
+	var bus: bool = property == "bus" and engine_class.begins_with("AudioStreamPlayer")
+	if bus:
+		names = []
+		for index: int in AudioServer.bus_count:
+			var _added: bool = names.append(AudioServer.get_bus_name(index))
+	if names.is_empty() or names.has(str(value)):
+		return said + ": the engine changed or refused the value, so nothing was written."
+	var close: PackedStringArray = GdhRead.nearest(str(value), names)
+	var nearest: String = (
+		"%s %s" % ["is" if close.size() == 1 else "are", ", ".join(close)] if not close.is_empty() else ""
+	)
+	if bus:
+		# Not "holds Master after it was set": the getter answers the first bus for any name the
+		# layout lacks, and nothing was kept.
+		return (
+			(
+				"%s.bus takes the name of one of the project's audio buses, and %s is none of them, so it "
+				+ "would play on %s; %s. project_info include audio_buses lists them, and "
+				+ "project_settings add_audio_bus adds one. Nothing was written."
+			)
+			% [
+				holder,
+				given[1],
+				AudioServer.get_bus_name(0),
+				"the buses are " + ", ".join(names) if nearest.is_empty() else "the nearest " + nearest
+			]
+		)
+	return (
+		"%s: it takes one of the names it lists, and %s is none of them; %s. Nothing was written."
+		% [
+			said,
+			given[1],
+			"it lists " + ", ".join(names) if nearest.is_empty() else "the nearest it lists " + nearest
+		]
+	)

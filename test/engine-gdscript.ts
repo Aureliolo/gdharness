@@ -1612,6 +1612,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   writeFileSync(join(projectDir, 'kept_out', 'raw.png'), '');
   writeFileSync(join(projectDir, 'fresh.png'), '');
   writeFileSync(join(projectDir, 'model.blend'), '');
+  writeFileSync(join(projectDir, 'layers.psd'), '');
   // A sidecar with no source beside it, once under the .gdignore and once where the engine looks.
   // The whole-project listing is what a reimport reads its missingSource from, and asking about one
   // path never walks: the first is not the engine's, and the second, listed, shows the walk ran.
@@ -1633,9 +1634,10 @@ function testOperations(godotPath: string, projectDir: string): void {
       'a .gdignore in res://kept_out keeps the engine from importing anything under it',
     ]);
     assert.deepEqual(statusOf('fresh.png'), ['needs_reimport', 'it has not been imported']);
+    assert.match(String(statusOf('layers.psd')[1]), /^no importer built into the engine takes \.psd files/);
     assert.match(
       String(statusOf('model.blend')[1]),
-      /^no importer built into the engine takes \.blend files/,
+      /^the engine imports \.blend files through Blender, which it finds through the editor setting filesystem\/import\/blender\/blender_path\./,
     );
     const freshOptions = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
       resource_path: 'fresh.png',
@@ -1645,8 +1647,8 @@ function testOperations(godotPath: string, projectDir: string): void {
       /res:\/\/fresh\.png has not been imported yet, so it has no import file: project_import reimport imports it with the importer's defaults and writes that file/,
       freshOptions.stderr,
     );
-    // Named by health and validation both, the one under the .gdignore and the one the engine has
-    // no importer for left out.
+    // Named by health and validation both, the one under the .gdignore, the one the engine has no
+    // importer for and the one only Blender imports left out.
     const neverImported =
       'res://fresh.png has never been imported, so nothing can load it until project_import reimport imports it';
     const resources = get(
@@ -1667,6 +1669,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     rmSync(join(projectDir, 'kept_out'), { recursive: true, force: true });
     rmSync(join(projectDir, 'fresh.png'), { force: true });
     rmSync(join(projectDir, 'model.blend'), { force: true });
+    rmSync(join(projectDir, 'layers.psd'), { force: true });
     rmSync(join(projectDir, 'stray.png.import'), { force: true });
   }
   const sceneOptions = runRefusedOperation(godotPath, projectDir, 'get_import_options', {

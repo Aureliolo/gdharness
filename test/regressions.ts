@@ -22743,6 +22743,16 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
       );
       assert.equal(get(mended, 'notImportedFirst'), undefined, JSON.stringify(mended));
 
+      // Translations, which the engine imports from a CSV as it does a picture, and alone: anything
+      // else changed would start the import pass that takes the CSV in with it.
+      writeFileSync(join(project, 'lines.csv'), 'keys,en\nHELLO,Hello\n');
+      const translated = await answer('project_test', { path: 'res://test' });
+      assert.deepEqual(
+        asArray(get(translated, 'importedFirst')).map(String),
+        ['res://lines.csv'],
+        `a new CSV is imported first: ${JSON.stringify(translated)}`,
+      );
+
       writeFileSync(join(project, 'picture.png'), solidPng(160, 160, 40));
       // A suite with no .uid yet, which the import gives it, as the editor's scan would.
       writeFileSync(
@@ -22775,7 +22785,7 @@ function testTheImportCheckKnowsWhatStatusImports(): void {
   const listed = /const IMPORTABLE_EXTENSIONS: Array\[String\] = \[([^\]]*)\]/.exec(source)?.[1];
   assert.ok(listed !== undefined, 'import_pipeline.gd should hold IMPORTABLE_EXTENSIONS');
   const extensions = [...listed.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(extensions.length, 29, `the list as it stands: ${extensions.join(', ')}`);
+  assert.equal(extensions.length, 31, `the list as it stands: ${extensions.join(', ')}`);
   assert.deepEqual([...IMPORTABLE_EXTENSIONS], extensions);
 }
 
@@ -52045,6 +52055,295 @@ async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> 
 }
 
 /**
+ * A navigation region baked with no editor, and the points it is given read as numbers, through
+ * the server and a real engine. A point whose field held a word was written as 0, in a vector and in
+ * a list of them; the outlines of a NavigationPolygon, a list holding lists, were refused whatever
+ * they held; a property of a NavigationAgent2D set on the body it serves was answered with the
+ * nearest physics layer; and a region could be baked only by the editor's Bake button.
+ */
+async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('navigation bake regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-bake-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-bake-rt-'));
+  const square = (side: number): string =>
+    `PackedVector2Array(0, 0, ${side}, 0, ${side}, ${side}, 0, ${side})`;
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Baked"\n',
+    // Run, it leaves a file behind. A bake puts the scene in the tree, which would run it.
+    'marker.gd':
+      'extends Node2D\n\n\nfunc _ready() -> void:\n\tFileAccess.open("res://ran.txt", FileAccess.WRITE).store_string("ran")\n',
+    'region.gd': 'extends NavigationRegion2D\n',
+    'walled.tscn': [
+      '[gd_scene format=3]\n',
+      '[ext_resource type="Script" path="res://marker.gd" id="1_m"]\n',
+      // A region with a script that is not a tool: what a headless write puts back unless the bake
+      // says it changed it.
+      '[ext_resource type="Script" path="res://region.gd" id="2_r"]\n',
+      `[sub_resource type="NavigationPolygon" id="NavigationPolygon_a"]\noutlines = Array[PackedVector2Array]([${square(512)}])\n`,
+      '[sub_resource type="RectangleShape2D" id="RectangleShape2D_b"]\nsize = Vector2(64, 64)\n',
+      // An obstacle wider than the outline leaves nothing to walk.
+      `[sub_resource type="NavigationPolygon" id="NavigationPolygon_c"]\noutlines = Array[PackedVector2Array]([${square(100)}])\n`,
+      '[sub_resource type="RectangleShape2D" id="RectangleShape2D_d"]\nsize = Vector2(400, 400)\n',
+      '[node name="Level" type="Node2D"]\nscript = ExtResource("1_m")\n',
+      '[node name="Region" type="NavigationRegion2D" parent="."]\nscript = ExtResource("2_r")\nnavigation_polygon = SubResource("NavigationPolygon_a")\n',
+      '[node name="Wall" type="StaticBody2D" parent="Region"]\nposition = Vector2(256, 256)\n',
+      '[node name="Shape" type="CollisionShape2D" parent="Region/Wall"]\nshape = SubResource("RectangleShape2D_b")\n',
+      '[node name="Covered" type="NavigationRegion2D" parent="."]\nnavigation_polygon = SubResource("NavigationPolygon_c")\n',
+      '[node name="Slab" type="StaticBody2D" parent="Covered"]\nposition = Vector2(50, 50)\n',
+      '[node name="Shape" type="CollisionShape2D" parent="Covered/Slab"]\nshape = SubResource("RectangleShape2D_d")\n',
+      '[node name="Bare" type="NavigationRegion2D" parent="."]\n',
+      '[node name="Blank" type="NavigationRegion2D" parent="."]\nscript = ExtResource("2_r")\n',
+      '[node name="Sparks" type="GPUParticles2D" parent="."]\n',
+      '[node name="Slider" type="HSlider" parent="."]\n',
+      '[node name="Walker" type="CharacterBody2D" parent="."]\n',
+      '[node name="Agent" type="NavigationAgent2D" parent="Walker"]\n',
+      '[node name="Pair" type="CharacterBody2D" parent="."]\n',
+      '[node name="Agent" type="NavigationAgent2D" parent="Pair"]\n',
+      '[node name="Link" type="NavigationLink2D" parent="Pair"]\n',
+    ].join('\n'),
+    // Its obstacles come from a group, and one is outside the region.
+    'outline.tres': `[gd_resource type="NavigationPolygon" format=3]\n\n[resource]\noutlines = Array[PackedVector2Array]([${square(300)}])\nsource_geometry_mode = 1\nsource_geometry_group_name = &"walls"\n`,
+    'grouped.tscn': [
+      '[gd_scene format=3]\n',
+      '[ext_resource type="NavigationPolygon" path="res://outline.tres" id="1_p"]\n',
+      '[sub_resource type="CircleShape2D" id="CircleShape2D_c"]\nradius = 30.0\n',
+      '[node name="Level" type="Node2D"]\n',
+      '[node name="Region" type="NavigationRegion2D" parent="."]\nnavigation_polygon = ExtResource("1_p")\n',
+      '[node name="Pillar" type="StaticBody2D" parent="." groups=["walls"]]\nposition = Vector2(150, 150)\n',
+      '[node name="Shape" type="CollisionShape2D" parent="Pillar"]\nshape = SubResource("CircleShape2D_c")\n',
+    ].join('\n'),
+    'room.tscn': [
+      '[gd_scene format=3]\n',
+      '[sub_resource type="NavigationMesh" id="NavigationMesh_a"]\n',
+      '[sub_resource type="PlaneMesh" id="PlaneMesh_b"]\nsize = Vector2(10, 10)\n',
+      '[sub_resource type="PlaneMesh" id="PlaneMesh_c"]\nsize = Vector2(0.2, 0.2)\n',
+      '[node name="Room" type="Node3D"]\n',
+      '[node name="Region" type="NavigationRegion3D" parent="."]\nnavigation_mesh = SubResource("NavigationMesh_a")\n',
+      '[node name="Floor" type="MeshInstance3D" parent="Region"]\nmesh = SubResource("PlaneMesh_b")\n',
+      '[node name="Ledge" type="NavigationRegion3D" parent="."]\n',
+      '[node name="Step" type="MeshInstance3D" parent="Ledge"]\nmesh = SubResource("PlaneMesh_c")\n',
+      '[node name="Empty" type="NavigationRegion3D" parent="."]\n',
+    ].join('\n'),
+    // The region and its polygon come from the scene this one inherits.
+    'inherits.tscn': [
+      '[gd_scene format=3]\n',
+      '[ext_resource type="PackedScene" path="res://walled.tscn" id="1_w"]\n',
+      '[node name="Level" instance=ExtResource("1_w")]\n',
+    ].join('\n'),
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const node = async (scenePath: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: 'scene_node', arguments: { projectPath: project, scenePath, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  const set = async (nodePath: string, properties: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await node('walled.tscn', { op: 'set', nodePath, properties });
+  const bake = async (scenePath: string, nodePath: string): Promise<JsonRpcMessage> =>
+    await node(scenePath, { op: 'bake_navigation', nodePath });
+  // The polygons a resource's text holds, counted as the file has them.
+  const polygonsIn = (text: string, after: string): number => {
+    const from = text.slice(text.indexOf(after));
+    const line = /^polygons = (.*)$/m.exec(from)?.[1] ?? '';
+    return line.split('PackedInt32Array(').length - 1;
+  };
+  const vector = 'A Vector2 is sent as {"x": ..., "y": ...}.';
+  const differs = 'Setting it would save a different value than the one asked for.';
+  try {
+    await server.initialize('regression-test');
+
+    const before = readFileSync(join(project, 'walled.tscn'), 'utf8');
+    assert.equal(
+      textOf(await set('Walker', { position: { x: 0, y: 'far' } })),
+      `CharacterBody2D.position is Vector2 and the value given is Dictionary, which cannot become one. Its y is "far", which is no number. ${vector} ${differs}`,
+    );
+    assert.equal(
+      textOf(await set('Walker', { position: ['a', 'b'] })),
+      `CharacterBody2D.position is Vector2 and the value given is Array, which cannot become one. Read by its places, each item is a number. ${vector} ${differs}`,
+    );
+    assert.equal(
+      textOf(await set('Region', { 'navigation_polygon/vertices': [{ x: 0, y: 'far' }] })),
+      `NavigationPolygon.vertices is PackedVector2Array and item 0 of the list given is Dictionary, not Vector2. Its y is "far", which is no number. ${vector} ${differs}`,
+    );
+    assert.equal(
+      textOf(
+        await set('Region', {
+          'navigation_polygon/outlines': [
+            [
+              [0, 0],
+              ['a', 0],
+              [3, 4],
+            ],
+          ],
+        }),
+      ),
+      `NavigationPolygon.outlines holds lists of Vector2, and item 1 of list 0 given is Array, not Vector2. Read by its places, each item is a number. ${vector} ${differs}`,
+    );
+    assert.equal(
+      textOf(await set('Region', { 'navigation_polygon/outlines': [[{ x: 0, y: 'far' }, [1, 2], [3, 4]]] })),
+      `NavigationPolygon.outlines holds lists of Vector2, and item 0 of list 0 given is Dictionary, not Vector2. Its y is "far", which is no number. ${vector} ${differs}`,
+    );
+    assert.equal(
+      textOf(await set('Walker', { navigation_layers: 3 })),
+      'CharacterBody2D has no property navigation_layers; the nearest it has is collision_layer. The node at Walker/Agent (a NavigationAgent2D) has it.',
+    );
+    assert.equal(
+      textOf(await set('Pair', { navigation_layers: 3 })),
+      'CharacterBody2D has no property navigation_layers; the nearest it has is collision_layer. The nodes at Pair/Agent (a NavigationAgent2D) and Pair/Link (a NavigationLink2D) have it.',
+    );
+    // The engine refuses the value and says so, once: written again to a node as the first write
+    // left it, it was refused again and said so twice.
+    const none = textOf(await set('Sparks', { amount: 0 })) ?? '';
+    assert.ok(
+      none.startsWith(
+        'GPUParticles2D.amount was given 0 and holds 8 after it was set: the engine changed or refused the value, so nothing was written.',
+      ),
+      none,
+    );
+    assert.equal(none.split('Amount of particles cannot be smaller than 1.').length - 1, 1, none);
+    assert.equal(readFileSync(join(project, 'walled.tscn'), 'utf8'), before, 'nothing refused was written');
+    // A value its range held down is written again once the range that follows it is wider.
+    const slid = await set('Slider', { value: 150, max_value: 200 });
+    assert.equal(get(parseTextContent(slid), 'properties', 'value'), 150, textOf(slid) ?? '');
+
+    // Digits in quotes are a number, as everywhere else a float is written.
+    const quoted = await set('Walker', { position: ['1', 2] });
+    assert.deepEqual(get(parseTextContent(quoted), 'properties', 'position'), {
+      x: 1,
+      y: 2,
+      _type: 'Vector2',
+    });
+    const spelled = await set('Walker', { position: { x: 3, y: '4' } });
+    assert.deepEqual(get(parseTextContent(spelled), 'properties', 'position'), {
+      x: 3,
+      y: 4,
+      _type: 'Vector2',
+    });
+
+    const walled = await bake('walled.tscn', 'Region');
+    const saved = readFileSync(join(project, 'walled.tscn'), 'utf8');
+    assert.equal(get(parseTextContent(walled), 'savedTo'), 'res://walled.tscn', textOf(walled) ?? '');
+    const polygons = get(parseTextContent(walled), 'polygons') as number;
+    // The square alone bakes to one polygon; the wall inside it splits that up.
+    assert.ok(polygons > 1, `the wall is carved out of the square: ${textOf(walled) ?? ''}`);
+    assert.equal(polygonsIn(saved, 'id="NavigationPolygon_a"'), polygons, 'the file holds what was answered');
+    assert.equal(existsSync(join(project, 'ran.txt')), false, "and the scene's script did not run for it");
+
+    // The outlines given as lists of places, which the property holds as a bare Array of typed ones.
+    const outlined = await set('Bare', { navigation_polygon: { _type: 'NavigationPolygon' } });
+    assert.equal(get(parseTextContent(outlined), 'nodePath'), 'Bare', textOf(outlined) ?? '');
+    const outlines = await set('Bare', {
+      'navigation_polygon/outlines': [
+        [
+          [0, 0],
+          [100, 0],
+          [100, 100],
+          [0, 100],
+        ],
+      ],
+    });
+    assert.deepEqual(
+      get(parseTextContent(outlines), 'properties', 'navigation_polygon/outlines', 0, 2),
+      { x: 100, y: 100, _type: 'Vector2' },
+      textOf(outlines) ?? '',
+    );
+    const plain = await bake('walled.tscn', 'Bare');
+    assert.deepEqual(
+      [get(parseTextContent(plain), 'polygons'), get(parseTextContent(plain), 'vertices')],
+      [1, 4],
+      textOf(plain) ?? '',
+    );
+
+    const covered = await bake('walled.tscn', 'Covered');
+    assert.equal(
+      get(parseTextContent(covered), 'note'),
+      "Nothing was left to walk inside the outlines once the obstacles read from the region's children (source mode root_node_children), and the agent_radius 10.0 kept from their edges, were taken out.",
+      textOf(covered) ?? '',
+    );
+
+    const grouped = await bake('grouped.tscn', 'Region');
+    assert.equal(get(parseTextContent(grouped), 'savedTo'), 'res://outline.tres', textOf(grouped) ?? '');
+    const kept = readFileSync(join(project, 'outline.tres'), 'utf8');
+    // A pillar in the group, outside the region, is carved out of it.
+    assert.ok((get(parseTextContent(grouped), 'polygons') as number) > 1, textOf(grouped) ?? '');
+    assert.equal(polygonsIn(kept, '[resource]'), get(parseTextContent(grouped), 'polygons'), kept);
+    assert.doesNotMatch(
+      readFileSync(join(project, 'grouped.tscn'), 'utf8'),
+      /polygons/,
+      'the scene names the file',
+    );
+
+    const room = await bake('room.tscn', 'Region');
+    assert.ok((get(parseTextContent(room), 'polygons') as number) > 0, textOf(room) ?? '');
+    assert.equal(
+      polygonsIn(readFileSync(join(project, 'room.tscn'), 'utf8'), 'id="NavigationMesh_a"'),
+      get(parseTextContent(room), 'polygons'),
+    );
+    const ledge = await bake('room.tscn', 'Ledge');
+    assert.deepEqual(
+      [get(parseTextContent(ledge), 'made'), get(parseTextContent(ledge), 'note')],
+      [
+        'Ledge held no navigation_mesh, so one was made and built into the scene, with the defaults.',
+        'The geometry read gave no floor an agent of agent_height 1.5 and agent_radius 0.5 can stand on.',
+      ],
+      textOf(ledge) ?? '',
+    );
+    const empty = await bake('room.tscn', 'Empty');
+    assert.equal(
+      get(parseTextContent(empty), 'note'),
+      "No geometry was read from the region's children (source mode root_node_children) with geometry_parsed_geometry_type both, so there was nothing to bake: mesh_instances reads MeshInstance3D nodes, static_colliders the shapes of physics bodies on geometry_collision_mask, and both reads both.",
+      textOf(empty) ?? '',
+    );
+    assert.match(
+      readFileSync(join(project, 'room.tscn'), 'utf8'),
+      /\[node name="Empty"[^[]*navigation_mesh = SubResource/,
+    );
+
+    const blank = await bake('walled.tscn', 'Blank');
+    assert.deepEqual(
+      [get(parseTextContent(blank), 'made'), get(parseTextContent(blank), 'note')],
+      [
+        'Blank held no navigation_polygon, so one was made and built into the scene, with the defaults.',
+        'The NavigationPolygon has no outlines, and a 2D bake fills only the area its outlines enclose, less what the obstacles inside take. Give it outlines with scene_node set, such as navigation_polygon/outlines [[[0, 0], [512, 0], [512, 512], [0, 512]]], then bake again.',
+      ],
+      textOf(blank) ?? '',
+    );
+    assert.equal(
+      textOf(await bake('walled.tscn', 'Walker')),
+      'Walker is a CharacterBody2D, not a NavigationRegion2D or a NavigationRegion3D.',
+    );
+    const inheriting = readFileSync(join(project, 'inherits.tscn'), 'utf8');
+    const base = readFileSync(join(project, 'walled.tscn'), 'utf8');
+    assert.equal(
+      textOf(await bake('inherits.tscn', 'Region')),
+      'The NavigationPolygon Region holds is built into res://walled.tscn, and a bake here cannot save that file. Bake the region there, or save the NavigationPolygon to a file of its own.',
+    );
+    assert.deepEqual(
+      [
+        readFileSync(join(project, 'inherits.tscn'), 'utf8'),
+        readFileSync(join(project, 'walled.tscn'), 'utf8'),
+      ],
+      [inheriting, base],
+      'neither scene was written',
+    );
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A theme and a tile set with no editor, through the server and a real engine. A font size Godot
  * would read back as the theme's default is refused; a theme type that is no class is set as the
  * variation it is and said to be one; and an image written since the import is named as not yet
@@ -52753,6 +53052,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAThemeAndATilesetWithNoEditor,
   testAControlIsLaidOutAsTheEditorLaysItOut,
   testAProjectsFilesAndLayersAreNamedWithNoEditor,
+  testANavigationRegionIsBakedWithNoEditor,
   testASceneKeepsItsOwnValuesForAnotherScenesNodes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,

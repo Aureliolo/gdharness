@@ -137,6 +137,24 @@ func cannot_hold(
 					holder, property, held, index, type_string(typeof(items[index])), type_string(element)
 				]
 				return shape % named + GdhShapes.remedy(items[index], element) + cost
+			# A list of polygons is a list of lists of points, and each point is read as one too.
+			var inner: int = GdhRead.as_int(PACKED_ELEMENTS.get(element, TYPE_NIL), TYPE_NIL)
+			if inner == TYPE_NIL or not items[index] is Array:
+				continue
+			var points: Array = items[index]
+			for at: int in points.size():
+				if not GdhSerialisation.acceptable(points[at], inner):
+					var nested: String = "%s.%s holds lists of %s, and item %d of list %d given is %s, not %s."
+					var said: Array = [
+						holder,
+						property,
+						type_string(inner),
+						at,
+						index,
+						type_string(typeof(points[at])),
+						type_string(inner)
+					]
+					return nested % said + GdhShapes.remedy(points[at], inner) + cost
 	if expected_type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
 		var entries: Dictionary = value
 		var key_type: int = GdhRead.as_int(elements[0], TYPE_NIL)
@@ -181,6 +199,11 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	var before: Dictionary = _stored(target, named)
 	var given: Dictionary = {}
 	var declarations: Dictionary = {}
+	# How many writes had been made when each property was last written. One written last is not
+	# written again: the node is as that write left it, so the engine refuses it the same way and
+	# says so a second time.
+	var written_at: Dictionary[String, int] = {}
+	var writes: int = 0
 	# A refusal of one of several leaves the others unwritten too, which a refusal naming only the
 	# one it refused left a caller to guess.
 	var unwritten: String = (
@@ -226,17 +249,28 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		if not outside.is_empty():
 			_outside_declared[property] = outside
 		_write(target, property, value[1])
+		writes += 1
+		written_at[property] = writes
 		given[property] = value[1]
 		declarations[property] = declared
 
 	for property: String in given:
-		if not GdhSame.same(read_at(target, property), given[property]):
+		if written_at[property] < writes and not GdhSame.same(read_at(target, property), given[property]):
 			_write(target, property, given[property])
+			writes += 1
+			written_at[property] = writes
 	for property: String in given:
 		var held: Variant = read_at(target, property)
 		if not GdhSame.same(held, given[property]):
 			var declared: Dictionary = declarations[property]
-			return _not_held(target, property, given[property], held, declared)
+			return GdhDeclared.not_held(
+				GdhPropertyPaths.class_called(target),
+				target.get_class(),
+				property,
+				declared,
+				[given[property], shown(given[property])],
+				shown(held)
+			)
 	for property: String in before:
 		var now: Variant = target.get(property)
 		if not GdhSame.same(now, before[property]):
@@ -265,74 +299,6 @@ func _laid_out(control: Control, name: String) -> String:
 	if anchoring and GdhRead.as_int(control.get("layout_mode")) == LAYOUT_MODE_POSITION:
 		control.set("layout_mode", LAYOUT_MODE_ANCHORS)
 	return ""
-
-
-## Why [param property] of [param target], declared as [param declared], holds [param held] after
-## it was given [param value]. A text property with a list of names holds only one of them, and its
-## getter answers its default for any other. A player's bus is one, though the engine fills its list
-## only in the inspector, so the buses are read from the AudioServer, which holds the project's
-## layout; "the engine changed or refused the value" left a caller to guess the bus did not exist.
-func _not_held(
-	target: Object, property: String, value: Variant, held: Variant, declared: Dictionary
-) -> String:
-	var said: String = (
-		"%s.%s was given %s and holds %s after it was set"
-		% [GdhPropertyPaths.class_called(target), property, shown(value), shown(held)]
-	)
-	var type: int = GdhRead.as_int(declared.get("type", TYPE_NIL))
-	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
-	if hint in GdhDeclared.LAYER_NAMES and typeof(value) == TYPE_INT:
-		return (
-			(
-				"%s: it is a mask of the %s layers, one bit each from layer 1 (1) to layer %d (%d), so it "
-				+ "takes 0 to %d and the engine keeps only those bits. Nothing was written."
-			)
-			% [
-				said,
-				GdhDeclared.LAYER_NAMES[hint],
-				GdhDeclared.MASK_LAYERS,
-				1 << (GdhDeclared.MASK_LAYERS - 1),
-				(1 << GdhDeclared.MASK_LAYERS) - 1,
-			]
-		)
-	var names: PackedStringArray = []
-	if hint == PROPERTY_HINT_ENUM and (type == TYPE_STRING or type == TYPE_STRING_NAME):
-		names = PackedStringArray(GdhDeclared.enum_values(str(declared.get("hint_string", ""))).keys())
-	var bus: bool = property == "bus" and target.get_class().begins_with("AudioStreamPlayer")
-	if bus:
-		names = []
-		for index: int in AudioServer.bus_count:
-			var _added: bool = names.append(AudioServer.get_bus_name(index))
-	if names.is_empty() or names.has(str(value)):
-		return said + ": the engine changed or refused the value, so nothing was written."
-	var close: PackedStringArray = GdhRead.nearest(str(value), names)
-	var nearest: String = (
-		"%s %s" % ["is" if close.size() == 1 else "are", ", ".join(close)] if not close.is_empty() else ""
-	)
-	if bus:
-		# Not "holds Master after it was set": the getter answers the first bus for any name the
-		# layout lacks, and nothing was kept.
-		return (
-			(
-				"%s.bus takes the name of one of the project's audio buses, and %s is none of them, so it "
-				+ "would play on %s; %s. project_info include audio_buses lists them, and "
-				+ "project_settings add_audio_bus adds one. Nothing was written."
-			)
-			% [
-				GdhPropertyPaths.class_called(target),
-				shown(value),
-				AudioServer.get_bus_name(0),
-				"the buses are " + ", ".join(names) if nearest.is_empty() else "the nearest " + nearest
-			]
-		)
-	return (
-		"%s: it takes one of the names it lists, and %s is none of them; %s. Nothing was written."
-		% [
-			said,
-			shown(value),
-			"it lists " + ", ".join(names) if nearest.is_empty() else "the nearest it lists " + nearest
-		]
-	)
 
 
 ## Why [param material] has no [param property]: a ShaderMaterial's parameters are its shader's
@@ -490,6 +456,15 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 		value = found[1]
 	else:
 		var elements: Array = GdhDeclared.elements_of(declared)
+		# Some engine properties declare a bare Array and hold a typed one: NavigationPolygon's
+		# outlines hold PackedVector2Arrays, and points written as {"x", "y"} inside them landed as
+		# zero vectors, since nothing said what the inner lists hold.
+		if elements.is_empty() and expected_type == TYPE_ARRAY:
+			var current: Variant = target.get(property)
+			if current is Array:
+				var typed: Array = current
+				if typed.is_typed() and typed.get_typed_builtin() != TYPE_OBJECT:
+					elements = [typed.get_typed_builtin()]
 		if _fraction(raw, expected_type, elements):
 			return [false, _fraction_refusal(target, property, raw)]
 		var rounded: String = GdhSerialisation.inexact(raw, expected_type)
@@ -725,12 +700,28 @@ func colour_from(raw: Variant, named: String) -> Array:
 ## The refusal for [param property], which [param target] does not declare, naming the declared
 ## ones nearest it: "StyleBoxFlat has no property shadow_sizee" left the caller nothing to send.
 static func no_property(target: Object, property: String) -> String:
-	return (
+	var said: String = (
 		GdhRead.near_property(
 			"%s has no property %s" % [GdhPropertyPaths.class_called(target), property], target, property
 		)
 		+ "."
 	)
+	# A property of a helper node set on the body it serves, as navigation_layers on the
+	# CharacterBody2D rather than its NavigationAgent2D: the nearest name it has was a physics layer.
+	if not target is Node:
+		return said
+	var node: Node = target
+	var root: Node = node.owner if node.owner != null else node
+	var holders: PackedStringArray = []
+	for child: Node in node.get_children():
+		if property in child:
+			var _added: bool = holders.append("%s (a %s)" % [root.get_path_to(child), child.get_class()])
+	if holders.is_empty():
+		return said
+	if holders.size() == 1:
+		return said + " The node at %s has it." % holders[0]
+	var last: String = holders[holders.size() - 1]
+	return said + " The nodes at %s and %s have it." % [", ".join(holders.slice(0, -1)), last]
 
 
 ## The resource [param path] names, as [found, resource or why not].
@@ -946,6 +937,9 @@ func _parse_array(value: Array, expected_type: int, elements: Array) -> Variant:
 		var element: int = GdhRead.as_int(PACKED_ELEMENTS[expected_type], TYPE_NIL)
 		return value.map(func(item: Variant) -> Variant: return parse(item, element))
 
+	# Read by its places, a word was read as 0 and ["a", "b"] written as (0, 0).
+	if GdhShapes.NUMBER_FIELDS.has(type_string(expected_type)) and not GdhShapes.all_numbers(value):
+		return value
 	match expected_type:
 		TYPE_VECTOR2:
 			if value.size() == 2:
@@ -986,5 +980,12 @@ func _parse_array(value: Array, expected_type: int, elements: Array) -> Variant:
 		return items
 	if not items.all(func(item: Variant) -> bool: return GdhSerialisation.acceptable(item, element_type)):
 		return items
+	# Converted, a list of points holding a word became a packed list of zeroes before anything read it.
+	var inner: int = GdhRead.as_int(PACKED_ELEMENTS.get(element_type, TYPE_NIL), TYPE_NIL)
+	if inner != TYPE_NIL:
+		for item: Variant in items:
+			var points: Array = item if item is Array else []
+			if not points.all(func(point: Variant) -> bool: return GdhSerialisation.acceptable(point, inner)):
+				return items
 	var fitted: Array = items.map(func(item: Variant) -> Variant: return type_convert(item, element_type))
 	return Array(fitted, element_type, &"", null)

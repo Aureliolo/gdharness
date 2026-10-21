@@ -8,6 +8,7 @@ const GdhFileReads = preload("../file_reads.gd")
 const GdhRead = preload("../reading.gd")
 const GdhGroups = preload("scene_groups.gd")
 const GdhKin = preload("scene_kin.gd")
+const GdhNavigationBake = preload("navigation_bake.gd")
 const GdhPaths = preload("scene_paths.gd")
 const GdhPlacing = preload("scene_placing.gd")
 const GdhPropertyValues = preload("../property_values.gd")
@@ -779,6 +780,24 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 			+ "includeDefaults: true lists them all."
 		)
 	return answer
+
+
+func bake_navigation(args: Dictionary) -> Dictionary:
+	var project_path: String = str(args.get("projectPath", ""))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var node_path: String = str(args.get("nodePath", "."))
+	var opened: Array = _open(scene_path, true)
+	var scene: GdhSceneFile = opened[0]
+	var refused: Dictionary = opened[1]
+	if not refused.is_empty():
+		return refused
+	var node: Node = GdhSceneFile.node_at(scene.root, node_path)
+	if not node:
+		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
+	var foreign: String = scene.foreign(node)
+	if not foreign.is_empty():
+		return scene.refuse(foreign)
+	return GdhNavigationBake.bake(scene, node)
 
 
 func save_scene(args: Dictionary) -> Dictionary:
