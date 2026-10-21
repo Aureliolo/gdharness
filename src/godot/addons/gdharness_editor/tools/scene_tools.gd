@@ -204,6 +204,8 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 	var answer: Dictionary = {
 		"ok": true, "scenePath": scene_path, "rootNodeType": asked_type, "rootNodeName": root_node_name
 	}
+	if not script_path.is_empty():
+		answer["script"] = script_path
 	if not had_folder:
 		answer["madeFolder"] = scene_path.get_base_dir()
 	return answer

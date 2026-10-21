@@ -762,7 +762,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_create',
     title: 'Create or save a scene',
-    description: `Creates a scene file where none is, saves one, or saves a copy under a new path. create makes a folder the path names that is not there, and names it under madeFolder. A save of a scene open in the editor saves the editor's copy, unsaved changes included. ${WITHOUT_AN_EDITOR}`,
+    description: `Creates a scene file where none is, saves one, or saves a copy under a new path. create makes a folder the path names that is not there, and names it under madeFolder; its answer names the root's type and name, and under script the script the root carries. A save of a scene open in the editor saves the editor's copy, unsaved changes included. ${WITHOUT_AN_EDITOR}`,
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,

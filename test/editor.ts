@@ -3001,6 +3001,21 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
     await refusal('scene_signal', { ...ends, op: 'disconnect', methodName: 'missing' }),
     /has no connection from Go\.pressed to Sink\.missing/,
   );
+  // The root is named, since its path, ".", ran into the method's dot.
+  assert.match(
+    await refusal('scene_signal', { ...ends, op: 'disconnect', targetNodePath: '.', methodName: 'missing' }),
+    /has no connection from Go\.pressed to [A-Za-z]\w*\.missing\.$/,
+  );
+  assert.match(
+    await refusal('scene_signal', {
+      ...ends,
+      op: 'disconnect',
+      sourceNodePath: '.',
+      signalName: 'resized',
+      methodName: 'missing',
+    }),
+    /has no connection from [A-Za-z]\w*\.resized to Sink\.missing\.$/,
+  );
   // A copy keeps the connections of what it copies.
   await call('scene_node', { ...scene, op: 'duplicate', nodePath: 'Go', newName: 'Again' });
   assert.match(
@@ -3347,6 +3362,11 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     script: 'res://layers/tool_node.gd',
   });
   assert.equal((made as { rootNodeName?: unknown }).rootNodeName, 'Arena', JSON.stringify(made));
+  assert.equal(
+    get(made, 'script'),
+    'res://layers/tool_node.gd',
+    `the answer names the script: ${JSON.stringify(made)}`,
+  );
   assert.match(
     nodeBody(fileText(project, 'arena.tscn'), 'Arena'),
     /script = ExtResource/,

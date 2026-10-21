@@ -24,6 +24,23 @@ extends RefCounted
 
 ## How many of a node's children a refusal for a path missing below it names.
 const NAMED_CHILDREN: int = 12
+## The types holding their floats as the engine's real numbers, 32-bit unless it was built for 64.
+const SHAPES_OF_REALS: Array[int] = [
+	TYPE_VECTOR2,
+	TYPE_VECTOR3,
+	TYPE_VECTOR4,
+	TYPE_RECT2,
+	TYPE_PLANE,
+	TYPE_QUATERNION,
+	TYPE_AABB,
+	TYPE_BASIS,
+	TYPE_TRANSFORM2D,
+	TYPE_TRANSFORM3D,
+	TYPE_PROJECTION,
+	TYPE_PACKED_VECTOR2_ARRAY,
+	TYPE_PACKED_VECTOR3_ARRAY,
+	TYPE_PACKED_VECTOR4_ARRAY,
+]
 
 
 static func as_int(value: Variant, fallback: int = 0) -> int:
@@ -227,3 +244,34 @@ static func signals_of(object: Object) -> Array:
 ## [param word] after the article it takes, "an AnimationTree" or "a Node2D".
 static func with_article(word: String) -> String:
 	return ("an " if word.left(1).to_upper() in ["A", "E", "I", "O", "U"] else "a ") + word
+
+
+## [param value], which the engine holds as a 32-bit float, as the shortest decimal that is still
+## that float. JSON carries a double, and the double a 32-bit 0.2 widens to is 0.200000002980232:
+## the same number, but not the one written or the one the file shows, so a caller comparing what it
+## set against what it read saw them differ. The shorter one, sent back, stores the same 32 bits. A
+## plain float is left alone by the serialiser, since nothing says whether the engine holds it in
+## 32 bits or 64.
+static func single(value: float) -> float:
+	if not is_finite(value) or value == 0.0:
+		return value
+	var held: float = PackedFloat32Array([value])[0]
+	var magnitude: int = floori(log(absf(held)) / log(10.0))
+	for digits: int in range(1, 10):
+		var shift: int = digits - 1 - magnitude
+		var tried: float = (
+			roundf(held * pow(10.0, shift)) / pow(10.0, shift)
+			if shift >= 0
+			else roundf(held / pow(10.0, -shift)) * pow(10.0, -shift)
+		)
+		if PackedFloat32Array([tried])[0] == held:
+			return tried
+	return held
+
+
+## Whether a value of [param type] holds its floats in 32 bits: a colour always, and the vectors and
+## the shapes built of them unless the engine was built for 64.
+static func holds_singles(type: int) -> bool:
+	if type in [TYPE_COLOR, TYPE_PACKED_COLOR_ARRAY, TYPE_PACKED_FLOAT32_ARRAY]:
+		return true
+	return not OS.has_feature("double") and type in SHAPES_OF_REALS

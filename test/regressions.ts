@@ -48395,12 +48395,17 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       `a list judges a bound and an unbound argument as the call meets them: ${JSON.stringify(wires)}`,
     );
 
-    await written('scene_create', {
+    const scripted = await written('scene_create', {
       op: 'create',
       scenePath: 'made.tscn',
       rootNodeType: 'Node2D',
-      script: 'res://busy.gd',
+      script: 'busy.gd',
     });
+    assert.equal(
+      get(scripted, 'script'),
+      'res://busy.gd',
+      `the answer names the script: ${JSON.stringify(scripted)}`,
+    );
     assert.deepEqual(sets('made.tscn', '[node name="Node2D"'), ['script = ExtResource']);
     assert.match(
       fileOf('made.tscn'),
@@ -49757,6 +49762,12 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       script: 'heavy.gd',
     });
     assert.equal(get(scripted, 'rootNodeName'), 'Heavy', JSON.stringify(scripted));
+    assert.equal(
+      get(scripted, 'script'),
+      'res://heavy.gd',
+      `the answer names the script: ${JSON.stringify(scripted)}`,
+    );
+    assert.equal(get(made, 'script'), undefined, `and none when none was given: ${JSON.stringify(made)}`);
     assert.match(
       fileOf('parts/heavy_crate.tscn'),
       /\[node name="Heavy" instance=ExtResource\("1_base"\)\]\nscript = ExtResource\("2_script"\)\n/,
