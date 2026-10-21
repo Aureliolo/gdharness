@@ -2434,8 +2434,10 @@ async function testAWriteKeepsWhatTheSceneComesFrom({ call, refusal, project }: 
     await refusal('scene_node', { ...inside, op: 'set', properties: { position: { x: 9, y: 9 } } }),
     foreign,
   );
-  assert.match(await refusal('scene_node', { ...inside, op: 'delete' }), foreign);
-  assert.match(await refusal('scene_node', { ...inside, op: 'reparent', newParentPath: '.' }), foreign);
+  const made =
+    /Part\/Inner is inside the scene instanced at Part \(res:\/\/layers\/part\.tscn\), which creates it again on load\./;
+  assert.match(await refusal('scene_node', { ...inside, op: 'delete' }), made);
+  assert.match(await refusal('scene_node', { ...inside, op: 'reparent', newParentPath: '.' }), made);
   assert.match(
     await refusal('scene_signal', {
       ...host,

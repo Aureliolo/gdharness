@@ -10936,14 +10936,17 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
     writeFileSync(
       server,
       [
-        `import { writeFileSync } from 'node:fs';`,
+        `import { renameSync, writeFileSync } from 'node:fs';`,
         `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
         `const launched = await launchOutsideTheTree(`,
         `  { command: process.execPath, args: ['-e', 'setTimeout(() => {}, 120000)'] },`,
         `  process.execPath,`,
         `  ${JSON.stringify(resolve('build', 'keeper.js'))},`,
         `);`,
-        `writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify(launched));`,
+        // Renamed into place, since the file exists before what is written into it, and the wait
+        // below is for the file: a macOS runner read it empty in between.
+        `writeFileSync(${JSON.stringify(`${pidFile}.part`)}, JSON.stringify(launched));`,
+        `renameSync(${JSON.stringify(`${pidFile}.part`)}, ${JSON.stringify(pidFile)});`,
         `setInterval(() => {}, 1000);`,
       ].join('\n'),
     );
@@ -24643,10 +24646,12 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
   }
   writeFileSync(
     script,
-    "const { writeFileSync } = require('node:fs');\n" +
+    "const { renameSync, writeFileSync } = require('node:fs');\n" +
       'const [, , saves, out] = process.argv;\n' +
       'const holding = Object.entries(process.env).filter(([, value]) => value.includes(saves)).map(([name]) => name);\n' +
-      'writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), holding }));\n' +
+      // Renamed into place, as the wait below is for the file and it exists before its content.
+      "writeFileSync(out + '.part', JSON.stringify({ argv: process.argv.slice(2), holding }));\n" +
+      "renameSync(out + '.part', out);\n" +
       'setInterval(() => {}, 1000);\n',
   );
   const server = new ServerProcess({
@@ -32047,9 +32052,12 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
           '\t\tOS.get_executable_path(),\n' +
           '\t\t["--headless", "--path", ProjectSettings.globalize_path("res://"), "res://worker.tscn", "--", "--leaf"]\n' +
           '\t)\n' +
-          '\tvar note := FileAccess.open(ProjectSettings.globalize_path("res://helper.pid"), FileAccess.WRITE)\n' +
+          // Renamed into place, since the wait below is for the file and it exists before its pid.
+          '\tvar noted := ProjectSettings.globalize_path("res://helper.pid")\n' +
+          '\tvar note := FileAccess.open(noted + ".part", FileAccess.WRITE)\n' +
           '\tnote.store_string(str(helper))\n' +
-          '\tnote.close()\n',
+          '\tnote.close()\n' +
+          '\tvar _moved := DirAccess.rename_absolute(noted + ".part", noted)\n',
       );
       writeFileSync(
         join(project, 'worker.tscn'),
@@ -38599,9 +38607,11 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
         '',
         '',
         'func _initialize() -> void:',
-        '\tvar ready := FileAccess.open(OS.get_environment("GDHARNESS_ERROR_MODE_READY"), FileAccess.WRITE)',
+        '\tvar at := OS.get_environment("GDHARNESS_ERROR_MODE_READY")',
+        '\tvar ready := FileAccess.open(at + ".part", FileAccess.WRITE)',
         '\tready.store_string(str(OS.get_process_id()))',
         '\tready.close()',
+        '\tvar _moved := DirAccess.rename_absolute(at + ".part", at)',
         '\tcreate_timer(60.0).timeout.connect(quit)',
         '',
       ].join('\n'),
@@ -38610,9 +38620,11 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
         '',
         '',
         'func test_waits_to_be_read() -> void:',
-        '\tvar ready := FileAccess.open(OS.get_environment("GDHARNESS_ERROR_MODE_READY"), FileAccess.WRITE)',
+        '\tvar at := OS.get_environment("GDHARNESS_ERROR_MODE_READY")',
+        '\tvar ready := FileAccess.open(at + ".part", FileAccess.WRITE)',
         '\tready.store_string(str(OS.get_process_id()))',
         '\tready.close()',
+        '\tvar _moved := DirAccess.rename_absolute(at + ".part", at)',
         '\tvar read := OS.get_environment("GDHARNESS_ERROR_MODE_READ")',
         '\tvar until := Time.get_ticks_msec() + 60000',
         '\twhile not FileAccess.file_exists(read) and Time.get_ticks_msec() < until:',
@@ -38623,6 +38635,7 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
     });
     cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
     mkdirSync(join(runtime, 'runs'), { recursive: true });
+    // Both scripts rename the file into place: the wait is for the file, which exists before its pid.
     const readyPid = async (ready: string, what: string): Promise<number> => {
       for (let waited = 0; waited < 4 * ENGINE_CALL_TIMEOUT_MS && !existsSync(ready); waited += 100) {
         await delay(100);
@@ -50323,7 +50336,16 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       nodePath: 'Crate2/Hit',
       properties: { shape: { _type: 'CircleShape2D', radius: 9 } },
     });
-    await written('scene_node', { ...inside, nodePath: 'Crate2/Hit', properties: { 'shape/radius': 11 } });
+    const radius = await written('scene_node', {
+      ...inside,
+      nodePath: 'Crate2/Hit',
+      properties: { 'shape/radius': 11 },
+    });
+    assert.equal(
+      get(radius, 'notStored'),
+      undefined,
+      `a write into a resource is no property of the node: ${JSON.stringify(radius)}`,
+    );
     const ownShape = fileOf('main.tscn');
     assert.match(
       ownShape,
@@ -50333,7 +50355,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     assert.equal(fileOf('parts/crate.tscn'), crateBefore, 'and crate.tscn keeps its own shape');
     assert.equal(
       textOf(await call('scene_node', { op: 'delete', scenePath: 'main.tscn', nodePath: 'Crate2/Look' })),
-      'Crate2/Look is inside an instanced scene, which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in res://parts/crate.tscn, which removes it from every scene using that one.',
+      'Crate2/Look is inside the scene instanced at Crate2 (res://parts/crate.tscn), which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in res://parts/crate.tscn, which removes it from every scene using that one.',
     );
 
     const head = { ...inside, nodePath: 'Crate2/Bolt/Head', properties: { scale: [4, 4] } };
@@ -50415,6 +50437,11 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       'Crate2/Spare is made by a script as the scene is instanced, and no scene file saves anything about it.',
     );
     assert.equal(
+      textOf(await call('scene_node', { op: 'delete', scenePath: 'main.tscn', nodePath: 'Crate2/Spare' })),
+      'Crate2/Spare is made by a script as the scene is instanced, and no scene file saves anything about it.',
+      'a delete says so too, with no scene to send it to',
+    );
+    assert.equal(
       textOf(await call('scene_node', { ...head, nodePath: 'Crate2/Spare/Head' })),
       'Crate2/Spare/Head belongs to the scene instanced at Crate2/Spare (res://parts/bolt.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it.',
       'no editable children reach an instance a script makes',
@@ -50487,6 +50514,139 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       `a node cut off by depth says how many children it has: ${JSON.stringify(shallow)}`,
     );
 
+    // Each node an inherited scene is given names the file that makes it, past a base that only
+    // sets values on it, and a node of the scene's own names none.
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'parts/big_crate.tscn',
+      nodeType: 'Node2D',
+      nodeName: 'Tag',
+    });
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'parts/bigger_crate.tscn',
+      nodeType: 'Node2D',
+      nodeName: 'Own',
+    });
+    const sources = (tree: unknown): unknown[] =>
+      asArray(get(tree, 'children')).map((child) => [
+        get(child, 'name'),
+        get(child, 'inheritedFrom') ?? null,
+      ]);
+    const biggerTree = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'parts/bigger_crate.tscn' })),
+      'tree',
+    );
+    assert.deepEqual(
+      [get(biggerTree, 'inherits'), get(biggerTree, 'inheritedFrom'), sources(biggerTree)],
+      [
+        'res://parts/big_crate.tscn',
+        undefined,
+        [
+          ['Look', 'res://parts/crate.tscn'],
+          ['Hit', 'res://parts/crate.tscn'],
+          ['Bolt', 'res://parts/crate.tscn'],
+          ['Mark', 'res://parts/crate.tscn'],
+          ['Tag', 'res://parts/big_crate.tscn'],
+          ['Own', null],
+        ],
+      ],
+      JSON.stringify(biggerTree),
+    );
+    const mainTree = get(parseTextContent(await call('scene_tree', { scenePath: 'main.tscn' })), 'tree');
+    assert.deepEqual(
+      [get(mainTree, 'inherits'), sources(mainTree)],
+      [
+        undefined,
+        [
+          ['Floor', null],
+          ['Crate1', null],
+          ['Crate2', null],
+        ],
+      ],
+      `a scene inheriting nothing says so by leaving both out: ${JSON.stringify(mainTree)}`,
+    );
+    assert.equal(
+      get(asArray(get(asArray(get(mainTree, 'children'))[1], 'children'))[0], 'inheritedFrom'),
+      undefined,
+      `and the nodes an instance brings are named by instanceOf alone: ${JSON.stringify(mainTree)}`,
+    );
+
+    // A node inside an instance is sent to the file that makes it, which for an inherited scene can
+    // be a scene it inherits; editable children would let this scene keep values and no more.
+    writeFileSync(
+      join(project, 'yard.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/bigger_crate.tscn" id="1_bigger"]\n\n' +
+        '[node name="Yard" type="Node2D"]\n\n' +
+        '[node name="Open" parent="." instance=ExtResource("1_bigger")]\n\n' +
+        '[node name="Shut" parent="." instance=ExtResource("1_bigger")]\n\n[editable path="Open"]\n',
+    );
+    const yard = { scenePath: 'yard.tscn' };
+    const deleting = [
+      ['Open/Look', 'Open', 'res://parts/crate.tscn'],
+      ['Open/Tag', 'Open', 'res://parts/big_crate.tscn'],
+      ['Open/Own', 'Open', 'res://parts/bigger_crate.tscn'],
+      ['Shut/Look', 'Shut', 'res://parts/crate.tscn'],
+    ] as const;
+    for (const [nodePath, instance, maker] of deleting) {
+      assert.equal(
+        textOf(await call('scene_node', { ...yard, op: 'delete', nodePath })),
+        `${nodePath} is inside the scene instanced at ${instance} (res://parts/bigger_crate.tscn), which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in ${maker}, which removes it from every scene using that one.`,
+      );
+    }
+    assert.equal(
+      textOf(
+        await call('scene_node', { ...yard, op: 'set', nodePath: 'Shut/Tag', properties: { name: 'Label' } }),
+      ),
+      'Shut/Tag is inside the scene instanced at Shut (res://parts/bigger_crate.tscn), which creates it again on load. Edit res://parts/big_crate.tscn instead.',
+      'a rename inside an instance whose children are not editable is not offered editable children',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_node', { ...yard, op: 'reparent', nodePath: 'Open/Bolt/Head', newParentPath: '.' }),
+      ),
+      'Open/Bolt/Head is inside the scene instanced at Open/Bolt (res://parts/bolt.tscn), which creates it again on load. Edit res://parts/bolt.tscn instead.',
+      'a node of an instance nested in one is sent to the nested scene',
+    );
+
+    // A value set back to what the node has without it is left out of the file, and the answer
+    // says so, with what the node follows from then on.
+    const moved = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2',
+      properties: { position: [7, 0] },
+    });
+    assert.equal(get(moved, 'notStored'), undefined, JSON.stringify(moved));
+    assert.match(fileOf('main.tscn'), /\[node name="Crate2"[^\]]*\]\nposition = Vector2\(7, 0\)\n/);
+    const back = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2',
+      properties: { position: [0, 0], 'scale:x': 1, 'scale:y': 1 },
+    });
+    assert.deepEqual(
+      [get(back, 'notStored'), get(back, 'notStoredNote')],
+      [
+        ['position', 'scale'],
+        'position, scale now hold what res://parts/crate.tscn gives this node, so the file does not store them, and a change there reaches this node.',
+      ],
+      JSON.stringify(back),
+    );
+    assert.doesNotMatch(fileOf('main.tscn'), /\[node name="Crate2"[^\]]*\]\n(?:[a-z_]+ = .*\n)*position = /);
+    const floor = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Floor',
+      properties: { rotation: 0, z_index: 2 },
+    });
+    assert.deepEqual(
+      [get(floor, 'notStored'), get(floor, 'notStoredNote')],
+      [['rotation'], 'rotation now holds the default, so the file does not store it.'],
+      `a node this scene makes follows its defaults, and a value kept is not named: ${JSON.stringify(floor)}`,
+    );
+    assert.match(fileOf('main.tscn'), /\[node name="Floor"[^\]]*\]\nz_index = 2\n/);
+
     // A scene copied whole carries the uid of the one it was copied from, so one of the two names a
     // uid the loader resolves to the other, whichever the import kept.
     writeFileSync(
@@ -50512,12 +50672,17 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
 
     // The engine finds a value entry whose node was renamed in the scene it comes from by its
     // unique_id, and so must a read of the file.
-    await written('scene_node', {
+    const renamed = await written('scene_node', {
       op: 'set',
       scenePath: 'parts/plank.tscn',
       nodePath: 'Grain',
       properties: { name: 'Knot' },
     });
+    assert.equal(
+      get(renamed, 'notStored'),
+      undefined,
+      `a name is no stored value: ${JSON.stringify(renamed)}`,
+    );
     assert.match(fileOf('parts/plank.tscn'), /\[node name="Knot" type="Sprite2D" parent="\." unique_id=12\]/);
     const wide = get(
       parseTextContent(await call('scene_tree', { scenePath: 'wide_plank.tscn', includeProperties: true })),
@@ -50531,6 +50696,11 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
         ['Knot', 2],
       ],
       `the renamed node keeps the scale wide_plank.tscn gives it: ${JSON.stringify(wide)}`,
+    );
+    assert.deepEqual(
+      [get(wide, 'inherits'), knot.map((child) => get(child, 'inheritedFrom'))],
+      ['res://parts/plank.tscn', ['res://parts/plank.tscn', 'res://parts/plank.tscn']],
+      `an inherited scene's tree says what it inherits and where its nodes come from: ${JSON.stringify(wide)}`,
     );
   } finally {
     await server.stop();

@@ -595,9 +595,8 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var node: Node = GdhSceneFile.node_at(scene.root, node_path)
 	if not node:
 		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
-	var foreign: String = scene.foreign(node)
-	if not foreign.is_empty():
-		return scene.refuse(foreign)
+	# A rename is refused for the scene that makes the node before anything else, since editable
+	# children would let this scene keep values on it and still never rename it.
 	if properties.has("name") and node != scene.root:
 		var fixed: String = scene.fixed(node)
 		if not fixed.is_empty():
@@ -605,6 +604,9 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		var unusable: String = scene.unusable_name(node.get_parent(), str(properties["name"]), node)
 		if not unusable.is_empty():
 			return scene.refuse(unusable)
+	var foreign: String = scene.foreign(node)
+	if not foreign.is_empty():
+		return scene.refuse(foreign)
 
 	var dropped: Dictionary = {}
 	if editable != null:
@@ -631,6 +633,12 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	_properties.note_write(answer, node)
 	if not adding.is_empty() or not removing.is_empty():
 		answer["groups"] = GdhGroups.read(scene, node).get("groups", [])
+	var named: Array[String] = []
+	for key: Variant in properties:
+		var property: String = str(key).get_slice(":", 0)
+		if property != "name" and property in node and not named.has(property):
+			named.append(property)
+	var source: String = scene.values_from(node, old_path)
 	var carried: GdhPaths = GdhPaths.new()
 	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
 	var written: Dictionary = scene.write(
@@ -654,9 +662,46 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	if not dropped.is_empty():
 		answer["droppedValues"] = dropped["values"]
 		answer["droppedNodes"] = dropped["nodes"]
+	_note_left_out(answer, scene.written_pack, new_path, named, source)
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
 	return answer
+
+
+## Notes under notStored each of [param named] the file saved from [param pack] does not set on the
+## node at [param at]: a set gave it the value the node has without it, so the packer leaves it out,
+## as the editor does, and it follows [param source], or its default, from then on.
+static func _note_left_out(
+	answer: Dictionary, pack: PackedScene, at: String, named: Array[String], source: String
+) -> void:
+	var stored: Dictionary = {}
+	var state: SceneState = pack.get_state()
+	for index: int in state.get_node_count():
+		if str(state.get_node_path(index)).trim_prefix("./") == at:
+			for property: int in state.get_node_property_count(index):
+				stored[str(state.get_node_property_name(index, property))] = true
+	var left: Array[String] = []
+	for asked: String in named:
+		if not stored.has(asked):
+			left.append(asked)
+	if left.is_empty():
+		return
+	answer["notStored"] = left
+	var names: String = ", ".join(left)
+	var verb: String = "holds" if left.size() == 1 else "hold"
+	var pronoun: String = "it" if left.size() == 1 else "them"
+	if source.is_empty():
+		answer["notStoredNote"] = (
+			"%s now %s the default, so the file does not store %s." % [names, verb, pronoun]
+		)
+	else:
+		answer["notStoredNote"] = (
+			(
+				"%s now %s what %s gives this node, so the file does not store %s, and a change there reaches "
+				+ "this node."
+			)
+			% [names, verb, source, pronoun]
+		)
 
 
 func get_node_properties(args: Dictionary) -> Dictionary:
