@@ -50,6 +50,8 @@ static var by_path: PackedStringArray = []
 
 var root: Node = null
 var path: String = ""
+## What the last write saved, for its answer to read what the file now stores.
+var written_pack: PackedScene = null
 ## The path of each node a scene this one inherits gives, with the file that makes it.
 var _base_paths: Dictionary = {}
 var _state: SceneState = null
@@ -91,18 +93,7 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 	if root == null:
 		return {"ok": false, "error": "Failed to instantiate " + path}
 	_state = packed.get_state()
-	var base: SceneState = _state.get_base_scene_state()
-	# Each node a base gives, with the file that makes it: the deepest base listing it as more than
-	# values set on a node from further down.
-	while base != null:
-		for index: int in base.get_node_count():
-			var given: String = _relative(str(base.get_node_path(index)))
-			var made: bool = (
-				base.get_node_instance(index) != null or not str(base.get_node_type(index)).is_empty()
-			)
-			if made or not _base_paths.has(given):
-				_base_paths[given] = base.get_path()
-		base = base.get_base_scene_state()
+	_base_paths = makers(_state)
 	# On a read as well, which would otherwise answer what the scripts set as what the file holds.
 	if not Engine.is_editor_hint():
 		if for_writing:
@@ -179,8 +170,7 @@ func refuse(error: String) -> Dictionary:
 	return {"ok": false, "error": error}
 
 
-## Each bit set in [param flags], a connection's, by name, and whatever bits are left unnamed as one
-## number.
+## Each bit set in [param flags], a connection's, by name, and any bits left unnamed as one number.
 static func flag_names(flags: int) -> Array[String]:
 	var names: Array[String] = []
 	var rest: int = flags
@@ -350,13 +340,20 @@ func _closed_around(node: Node) -> PackedStringArray:
 func fixed(node: Node, deleting: bool = false) -> String:
 	if node == root:
 		return "The root of %s cannot be moved, renamed, copied or deleted." % path
+	if node.owner == null:
+		return foreign(node)
 	if node.owner != root:
-		var why: String = foreign(node)
-		if why.is_empty():
-			why = "%s is inside an instanced scene, which creates it again on load." % path_of(node)
-			if deleting:
-				why += _deleted_elsewhere(node, node.owner.scene_file_path)
-		return why
+		# Editable children keep values here and no more; the scene instanced may have the node from
+		# a scene it inherits, which is the one to edit.
+		var instanced: String = node.owner.scene_file_path
+		var packed: PackedScene = load(instanced) as PackedScene
+		var made_by: Dictionary = makers(packed.get_state()) if packed != null else {}
+		var maker: String = str(made_by.get(str(node.owner.get_path_to(node)), instanced))
+		var inside: String = (
+			"%s is inside the scene instanced at %s (%s), which creates it again on load."
+			% [path_of(node), path_of(node.owner), instanced]
+		)
+		return inside + (_deleted_elsewhere(node, maker) if deleting else " Edit %s instead." % maker)
 	var at: String = path_of(node)
 	if _base_paths.has(at):
 		var maker: String = str(_base_paths[at])
@@ -365,6 +362,23 @@ func fixed(node: Node, deleting: bool = false) -> String:
 		)
 		return made + (_deleted_elsewhere(node, maker) if deleting else " Edit that scene instead.")
 	return ""
+
+
+## Each node the scenes [param state] inherits give it, by path, with the deepest file making it more
+## than values; a node [param state] makes itself is not in it.
+static func makers(state: SceneState) -> Dictionary:
+	var made_by: Dictionary = {}
+	var at: SceneState = state.get_base_scene_state()
+	while at != null:
+		for index: int in at.get_node_count():
+			var given: String = _relative(str(at.get_node_path(index)))
+			var made: bool = (
+				at.get_node_instance(index) != null or not str(at.get_node_type(index)).is_empty()
+			)
+			if made or not made_by.has(given):
+				made_by[given] = at.get_path()
+		at = at.get_base_scene_state()
+	return made_by
 
 
 ## What a caller can do with [param node], made by [param maker], instead of deleting it here.
@@ -583,19 +597,12 @@ func write(check: Callable = Callable()) -> Dictionary:
 			return refuse("Nothing was written: " + str(settled[1]))
 		packed = settled[0]
 		if not path.ends_with(".tscn") and _holds_scripted_embedded():
-			return refuse(
-				(
-					(
-						(
-							"Nothing was written: %s is a binary scene holding an embedded resource with a script "
-							+ "that is not a tool, and what that script changed when a headless engine loaded it "
-							+ "cannot be told apart from the file here. "
-						)
-						% path
-					)
-					+ GdhHeadlessCheck.REMEDY
-				)
+			var binary: String = (
+				"Nothing was written: %s is a binary scene holding an embedded resource with a script "
+				+ "that is not a tool, and what that script changed when a headless engine loaded it "
+				+ "cannot be told apart from the file here. "
 			)
+			return refuse(binary % path + GdhHeadlessCheck.REMEDY)
 	if check.is_valid():
 		var saved: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
 		if saved == null:
@@ -608,6 +615,7 @@ func write(check: Callable = Callable()) -> Dictionary:
 	var previous: Variant = null
 	if FileAccess.file_exists(path):
 		previous = FileAccess.get_file_as_bytes(path)
+	written_pack = packed
 	var written: Dictionary = save_packed(packed, path)
 	if not written.is_empty() or not headless or not path.ends_with(".tscn"):
 		return written
@@ -988,7 +996,5 @@ static func _stored_at(state: SceneState, index: int) -> Dictionary:
 	return stored
 
 
-func _relative(node_path: String) -> String:
-	if node_path == ".":
-		return node_path
+static func _relative(node_path: String) -> String:
 	return node_path.trim_prefix("./")

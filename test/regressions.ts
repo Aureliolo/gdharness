@@ -7642,7 +7642,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 138;
+const READ_IN_WORDS = 139;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -10936,14 +10936,17 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
     writeFileSync(
       server,
       [
-        `import { writeFileSync } from 'node:fs';`,
+        `import { renameSync, writeFileSync } from 'node:fs';`,
         `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
         `const launched = await launchOutsideTheTree(`,
         `  { command: process.execPath, args: ['-e', 'setTimeout(() => {}, 120000)'] },`,
         `  process.execPath,`,
         `  ${JSON.stringify(resolve('build', 'keeper.js'))},`,
         `);`,
-        `writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify(launched));`,
+        // Renamed into place, since the file exists before what is written into it, and the wait
+        // below is for the file: a macOS runner read it empty in between.
+        `writeFileSync(${JSON.stringify(`${pidFile}.part`)}, JSON.stringify(launched));`,
+        `renameSync(${JSON.stringify(`${pidFile}.part`)}, ${JSON.stringify(pidFile)});`,
         `setInterval(() => {}, 1000);`,
       ].join('\n'),
     );
@@ -19205,6 +19208,12 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     writeFileSync(join(project, 'scripts', 'ignored', '.gdignore'), '');
     writeFileSync(join(project, 'scripts', 'notes.txt'), 'not a script\n');
     mkdirSync(join(project, 'empty'));
+    // An addon gdharness installed is stepped over as every other walk steps over it, and read when
+    // it is the folder named.
+    script('addons/gdharness_editor/plugin.gd');
+    script('addons/gdharness_editor/tools/scene_tools.gd');
+    writeFileSync(join(project, 'addons', 'gdharness_editor', VERSION_MARKER), '1.0.0\n');
+    script('addons/theirs/thing.gd');
 
     // Which scripts a call names, without a language server.
     assert.deepEqual(
@@ -19222,7 +19231,13 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       value: ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd'],
     });
     // The project itself is a folder too, which is how a caller asks for every script in it.
-    const everyScript = ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd', 'ui/shop.gd'];
+    const everyScript = [
+      'addons/theirs/thing.gd',
+      'scripts/a.gd',
+      'scripts/quiet.gd',
+      'scripts/sub/b.gd',
+      'ui/shop.gd',
+    ];
     for (const root of ['res://', '.', ['res://']]) {
       assert.deepEqual(
         scriptsToDiagnose(project, root),
@@ -19230,6 +19245,14 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
         `${JSON.stringify(root)} names every script in the project`,
       );
     }
+    assert.deepEqual(
+      scriptsToDiagnose(project, 'addons/gdharness_editor'),
+      {
+        ok: true,
+        value: ['addons/gdharness_editor/plugin.gd', 'addons/gdharness_editor/tools/scene_tools.gd'],
+      },
+      'an installed addon named is read',
+    );
     assert.deepEqual(scriptsToDiagnose(project, ['ui', 'scripts/sub', 'ui/shop.gd', 'scripts/gone.gd']), {
       ok: true,
       value: ['ui/shop.gd', 'scripts/sub/b.gd', 'scripts/gone.gd'],
@@ -19239,6 +19262,7 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       [['ui', 5], /^scriptPath\[1\] is 5, not a script or a folder/],
       [['../elsewhere'], /outside the project/],
       [['empty'], /^No \.gd script is under empty\.$/],
+      [['scripts/ignored'], /^No \.gd script is under scripts\/ignored\.$/],
     ] as const) {
       const refused = scriptsToDiagnose(project, given);
       assert.ok(
@@ -19520,7 +19544,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     assert.match(text(get(answered, 'languageServer')), /^Godot LSP is unavailable on port \d+/, shown);
     assert.match(
       text(get(answered, 'note')),
-      /^No editor of this project is open to ask, so a headless engine compiled the scripts .* warnings is null rather than 0\. editor_launch with hidden: true/,
+      /^No editor of this project is open to ask, so a headless engine compiled the scripts .* warnings is null rather than 0\. editor_launch with hidden: true .* Until then clean says only that every script compiles\.$/,
       shown,
     );
 
@@ -24622,10 +24646,12 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
   }
   writeFileSync(
     script,
-    "const { writeFileSync } = require('node:fs');\n" +
+    "const { renameSync, writeFileSync } = require('node:fs');\n" +
       'const [, , saves, out] = process.argv;\n' +
       'const holding = Object.entries(process.env).filter(([, value]) => value.includes(saves)).map(([name]) => name);\n' +
-      'writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), holding }));\n' +
+      // Renamed into place, as the wait below is for the file and it exists before its content.
+      "writeFileSync(out + '.part', JSON.stringify({ argv: process.argv.slice(2), holding }));\n" +
+      "renameSync(out + '.part', out);\n" +
       'setInterval(() => {}, 1000);\n',
   );
   const server = new ServerProcess({
@@ -25374,10 +25400,24 @@ async function testTheFrameTimeIsTheFrame(): Promise<void> {
         asNumber(get(waited, 'elapsed_ms'), JSON.stringify(waited)) /
         asNumber(get(waited, 'frames'), JSON.stringify(waited)) /
         1000;
+      const counted = asNumber(
+        get(
+          await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'frames' }),
+          'value',
+        ),
+        'Main.frames',
+      );
       const metrics = await call('runtime_inspect', { op: 'metrics' });
       const read = (name: string): number => asNumber(get(metrics, 'data', name), JSON.stringify(metrics));
-      const shown = `${JSON.stringify(metrics)}, a frames wait measured ${measured}s a frame`;
+      const shown = `${JSON.stringify(metrics)}, a frames wait measured ${measured}s a frame, Main counted ${counted}`;
       assert.equal(read('frames_timed'), 120, `the window is full: ${shown}`);
+      // Headless, nothing is drawn, so the frames the game ran are counted by process_frames, which
+      // has to cover every frame Main's _process saw and not run far ahead of it.
+      assert.ok(
+        read('process_frames') >= counted && read('process_frames') < counted + 60,
+        `process_frames counts the frames the game ran: ${shown}`,
+      );
+      assert.ok(read('physics_frames') > 0, `physics_frames counts the physics steps: ${shown}`);
       assert.ok(
         read('frame_time') > measured / 2 && read('frame_time') < measured * 2,
         `frame_time is the frame the wait measured: ${shown}`,
@@ -29244,7 +29284,8 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
       'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
   );
-  // Line 7 is the only script line a frame runs, and line 11 the breakpoint inside add.
+  // Line 7 is the only script line a frame runs, line 11 the breakpoint inside add, and line 17 the
+  // script error that ends explode.
   writeFileSync(
     join(project, 'main.gd'),
     [
@@ -29260,6 +29301,26 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       'func add(amount: int) -> int:',
       '\tvar doubled: int = amount * 2',
       '\treturn frames + doubled',
+      '',
+      '',
+      'func explode() -> int:',
+      '\tvar missing: Node = null',
+      '\treturn missing.get_child_count()',
+      '',
+      '',
+      'func survives() -> int:',
+      '\tvar counted: int = explode()',
+      '\treturn counted + 1',
+      '',
+      '',
+      'func noted() -> int:',
+      '\tpush_error("noted on the way")',
+      '\treturn 3',
+      '',
+      '',
+      'func load() -> int:',
+      '\tvar _gone: Resource = ResourceLoader.load("res://nope.tres")',
+      '\treturn 4',
       '',
     ].join('\n'),
   );
@@ -29303,16 +29364,33 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       timeoutMs: 2_000,
     });
     assert.equal(get(asked.answer, 'pending'), true, `the held call is pending: ${asked.said}`);
+    // The debugger holding it is this server's keeper, so where it is held is known, not guessed.
+    assert.equal(
+      get(asked.answer, 'heldAt'),
+      'held by its debugger at res://main.gd:11 in add (Breakpoint)',
+      asked.said,
+    );
     assert.match(
       text(get(asked.answer, 'note')),
-      /has the request and did not answer 'call_method'/,
-      `with the game, which took it: ${asked.said}`,
+      /^The game is held by its debugger at res:\/\/main\.gd:11 in add \(Breakpoint\), so it answers once it goes on: debug_control continue lets it go, and runtime_invoke op result with requestId \d+ then answers/,
+      asked.said,
     );
     const held = await call('debug_state', { op: 'stack' });
     assert.deepEqual(
       [get(held.answer, 'stack', 0, 'name'), get(held.answer, 'stack', 0, 'line')],
       ['add', 11],
       `held inside the call: ${held.said}`,
+    );
+    const beside = await call('runtime_inspect', {
+      op: 'property',
+      nodePath: '/root/Main',
+      property: 'frames',
+    });
+    assert.equal(beside.answer, null, beside.said);
+    assert.match(
+      beside.said,
+      /^The game \(pid \d+\) is held by its debugger at res:\/\/main\.gd:11 in add \(Breakpoint\), and answers no runtime call while it is\./,
+      `a call to the held game is refused at once rather than waiting out its timeout: ${beside.said}`,
     );
     await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 11 });
     await call('debug_control', { op: 'continue' });
@@ -29328,6 +29406,45 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
     assert.ok(
       Number(get(collected, 'result')) >= 10,
       `and answered once let go: ${JSON.stringify(collected)}`,
+    );
+
+    // A script error ends the function it is raised in, which returns its type's default: explode's
+    // 0 is not a count. survives goes on past the 0 explode gave it, so its own result is one it
+    // returned, beside the same error.
+    const exploded = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'explode' });
+    assert.deepEqual(
+      [get(exploded.answer, 'result'), get(exploded.answer, 'ended_by_error_at')],
+      [0, 'res://main.gd:17'],
+      exploded.said,
+    );
+    const survived = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'survives' });
+    assert.deepEqual(
+      [
+        get(survived.answer, 'result'),
+        get(survived.answer, 'ended_by_error_at'),
+        asArray(get(survived.answer, 'errors')).length,
+      ],
+      [1, undefined, 1],
+      survived.said,
+    );
+    // push_error reports and goes on, so the method that called it returned what it says.
+    const noted = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'noted' });
+    assert.deepEqual(
+      [get(noted.answer, 'result'), get(noted.answer, 'ended_by_error_at'), get(noted.answer, 'errors')],
+      [3, undefined, ['noted on the way']],
+      noted.said,
+    );
+    // An engine error is reported under the engine's function, and the loader's is load: a game's
+    // own load that met it went on and returned 4.
+    const loaded = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'load' });
+    assert.deepEqual(
+      [
+        get(loaded.answer, 'result'),
+        get(loaded.answer, 'ended_by_error_at'),
+        asArray(get(loaded.answer, 'errors')).length > 0,
+      ],
+      [4, undefined, true],
+      loaded.said,
     );
 
     // Nearly all of an idle game's time is outside script, so a pause lands between frames, and the
@@ -29347,6 +29464,40 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       const going = await call('debug_control', { op: 'continue' });
       assert.equal(get(going.answer, 'continued'), true, going.said);
     }
+
+    // Line 7 is _process's last, so a step into from it runs into the next thing the game does,
+    // which is the runtime addon's _process at the top of the next frame, and goes on to line 7
+    // there. The engine names that stop Breakpoint either way, so the answer says the line holds
+    // one, and says nothing once it is removed.
+    await call('debug_breakpoint', { projectPath: project, op: 'set', scriptPath: 'main.gd', line: 7 });
+    await call('debug_control', { op: 'pause' });
+    for (const [step, onBreakpoint] of [
+      ['first', true],
+      ['second', true],
+      ['removed', undefined],
+    ] as const) {
+      if (step === 'removed') {
+        await call('debug_breakpoint', {
+          projectPath: project,
+          op: 'remove',
+          scriptPath: 'main.gd',
+          line: 7,
+        });
+      }
+      const into = await call('debug_control', { op: 'step_into' });
+      assert.deepEqual(
+        [
+          get(into.answer, 'heldAgain'),
+          get(into.answer, 'stack', 0, 'script'),
+          get(into.answer, 'stack', 0, 'line'),
+          get(into.answer, 'held', 'reason'),
+          get(into.answer, 'held', 'onBreakpoint'),
+        ],
+        [true, 'res://main.gd', 7, 'Stepped', onBreakpoint],
+        `the ${step} step into from the last line of _process stops in the game's own script: ${into.said}`,
+      );
+    }
+    await call('debug_control', { op: 'continue' });
   } finally {
     if (started) {
       await server.request(
@@ -29639,6 +29790,15 @@ async function testInputThatReachesNothingSaysWhatWould(): Promise<void> {
       misspelt.said,
       /^No key is called Spaec\. The nearest key names? (?:is|are) [^.]*\bSpace\b[^.]*\. A key is named as Godot names it/,
       `a misspelt key is offered the key it was meant to be: ${misspelt.said}`,
+    );
+    // Finding those names asks the engine to spell every code, and it prints an error for each code
+    // that has no name: 136 of them, which on a loaded Windows runner took the refusal past its
+    // ten-second wait, and which the game's log counted as errors the game made.
+    const output = await call('editor_output', { op: 'run' });
+    assert.deepEqual(
+      [get(output.answer, 'errors'), output.said.includes('Unicode parsing error')],
+      [0, false],
+      `the refusal leaves the game's log as it was: ${output.said}`,
     );
     const pressed = await call('runtime_invoke', {
       op: 'call',
@@ -31892,9 +32052,12 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
           '\t\tOS.get_executable_path(),\n' +
           '\t\t["--headless", "--path", ProjectSettings.globalize_path("res://"), "res://worker.tscn", "--", "--leaf"]\n' +
           '\t)\n' +
-          '\tvar note := FileAccess.open(ProjectSettings.globalize_path("res://helper.pid"), FileAccess.WRITE)\n' +
+          // Renamed into place, since the wait below is for the file and it exists before its pid.
+          '\tvar noted := ProjectSettings.globalize_path("res://helper.pid")\n' +
+          '\tvar note := FileAccess.open(noted + ".part", FileAccess.WRITE)\n' +
           '\tnote.store_string(str(helper))\n' +
-          '\tnote.close()\n',
+          '\tnote.close()\n' +
+          '\tvar _moved := DirAccess.rename_absolute(noted + ".part", noted)\n',
       );
       writeFileSync(
         join(project, 'worker.tscn'),
@@ -38228,6 +38391,87 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         );
         rmSync(join(project, 'many'), { recursive: true, force: true });
 
+        // A declared text matches the whole error, so the start of one is never printed. Only the
+        // case that declared it can have printed it instead: test_silent declares the same text
+        // beside test_near printing the longer error, and test_far prints one that does not hold it.
+        writeTree(project, {
+          'near/near_test.gd': [
+            'extends GdUnitTestSuite',
+            '',
+            'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {',
+            '\t"test_near": ["the amount was refused"],',
+            '\t"test_silent": ["the amount was refused"],',
+            '\t"test_far": ["never said at all"],',
+            '}',
+            '',
+            '',
+            'func test_near() -> void:',
+            '\tpush_error("the amount was refused, got -1")',
+            '\tassert_bool(true).is_true()',
+            '',
+            '',
+            'func test_silent() -> void:',
+            '\tassert_bool(true).is_true()',
+            '',
+            '',
+            'func test_far() -> void:',
+            '\tpush_error("the amount was refused, got -2")',
+            '\tassert_bool(true).is_true()',
+            '',
+          ].join('\n'),
+        });
+        const near = jsonOf(
+          await call('project_test', { projectPath: project, path: 'near' }, ENGINE_CALL_TIMEOUT_MS * 3),
+          'near',
+        );
+        assert.deepEqual(
+          Object.fromEntries(
+            asArray(get(near, 'declaredNotPrinted')).map((missing) => [
+              text(get(missing, 'case')),
+              get(missing, 'printedInstead'),
+            ]),
+          ),
+          { test_far: undefined, test_near: 'the amount was refused, got -1', test_silent: undefined },
+          JSON.stringify(near),
+        );
+        rmSync(join(project, 'near'), { recursive: true, force: true });
+
+        // Godot writes an error raised while it prints another straight to stderr, past the log
+        // file the run is read from. gdUnit4's loggers raise two as the engine exits after a stack
+        // overflow, and they were counted under engineErrors and judged nowhere.
+        writeTree(project, {
+          'deep/deep_test.gd': [
+            'extends GdUnitTestSuite',
+            '',
+            '',
+            'func deeper(n: int) -> int:',
+            '\treturn deeper(n + 1) if n < 100000 else n',
+            '',
+            '',
+            'func test_recurses() -> void:',
+            '\tassert_int(deeper(0)).is_greater(0)',
+            '',
+          ].join('\n'),
+        });
+        const deep = jsonOf(
+          await call('project_test', { projectPath: project, path: 'deep' }, ENGINE_CALL_TIMEOUT_MS * 3),
+          'deep',
+        );
+        const undeclared = asArray(get(deep, 'undeclaredErrors'));
+        assert.equal(
+          undeclared.reduce((sum: number, error) => sum + asNumber(get(error, 'times') ?? 1), 0),
+          get(deep, 'engineErrors'),
+          `every error the run printed is judged: ${JSON.stringify(deep)}`,
+        );
+        assert.ok(
+          undeclared.some(
+            (error) =>
+              get(error, 'suite') === undefined && text(get(error, 'text')).startsWith('Stack overflow'),
+          ),
+          `the overflows printed past the log file belong to no suite: ${JSON.stringify(deep)}`,
+        );
+        rmSync(join(project, 'deep'), { recursive: true, force: true });
+
         // Each on its own, since either fails the run and the run above holds both.
         for (const [path, verdict] of [
           ['tests/noisy_test.gd', 'one engine error no suite declared'],
@@ -38363,9 +38607,11 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
         '',
         '',
         'func _initialize() -> void:',
-        '\tvar ready := FileAccess.open(OS.get_environment("GDHARNESS_ERROR_MODE_READY"), FileAccess.WRITE)',
+        '\tvar at := OS.get_environment("GDHARNESS_ERROR_MODE_READY")',
+        '\tvar ready := FileAccess.open(at + ".part", FileAccess.WRITE)',
         '\tready.store_string(str(OS.get_process_id()))',
         '\tready.close()',
+        '\tvar _moved := DirAccess.rename_absolute(at + ".part", at)',
         '\tcreate_timer(60.0).timeout.connect(quit)',
         '',
       ].join('\n'),
@@ -38374,9 +38620,11 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
         '',
         '',
         'func test_waits_to_be_read() -> void:',
-        '\tvar ready := FileAccess.open(OS.get_environment("GDHARNESS_ERROR_MODE_READY"), FileAccess.WRITE)',
+        '\tvar at := OS.get_environment("GDHARNESS_ERROR_MODE_READY")',
+        '\tvar ready := FileAccess.open(at + ".part", FileAccess.WRITE)',
         '\tready.store_string(str(OS.get_process_id()))',
         '\tready.close()',
+        '\tvar _moved := DirAccess.rename_absolute(at + ".part", at)',
         '\tvar read := OS.get_environment("GDHARNESS_ERROR_MODE_READ")',
         '\tvar until := Time.get_ticks_msec() + 60000',
         '\twhile not FileAccess.file_exists(read) and Time.get_ticks_msec() < until:',
@@ -38387,6 +38635,7 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
     });
     cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
     mkdirSync(join(runtime, 'runs'), { recursive: true });
+    // Both scripts rename the file into place: the wait is for the file, which exists before its pid.
     const readyPid = async (ready: string, what: string): Promise<number> => {
       for (let waited = 0; waited < 4 * ENGINE_CALL_TIMEOUT_MS && !existsSync(ready); waited += 100) {
         await delay(100);
@@ -39669,7 +39918,7 @@ async function testGdUnitRunner(): Promise<void> {
         mkdirSync(join(projectDir, 'test', 'long'));
         writeFileSync(
           join(projectDir, 'test', 'long', 'a_leaves_test.gd'),
-          'extends GdUnitTestSuite\n\n\nfunc test_leaves_a_node() -> void:\n\tvar kept: Node = Node.new()\n\tassert_object(kept).is_not_null()\n',
+          'extends GdUnitTestSuite\n\n\nfunc test_leaves_a_node() -> void:\n\tvar kept: Node = Node.new()\n\tvar beside: Node = Node.new()\n\tassert_object(kept).is_not_null()\n\tassert_object(beside).is_not_null()\n',
         );
         writeFileSync(
           join(projectDir, 'test', 'long', 'z_talks_test.gd'),
@@ -39688,6 +39937,13 @@ async function testGdUnitRunner(): Promise<void> {
         assert.deepEqual(
           asArray(get(long, 'warnings') ?? []).map((warning) => get(warning, 'path')),
           ['res://test/long/a_leaves_test.gd'],
+          JSON.stringify(long, null, 2),
+        );
+        // gdUnit4's orphans are the nodes outside the tree, and the warning once called them the
+        // ones still in it.
+        assert.match(
+          text(get(long, 'warnings', 0, 'message')),
+          /^2 nodes built during this suite were neither freed nor in the tree when it finished, which gdUnit4 counts as orphans\. Free each one, or make it with auto_free\(\)/,
           JSON.stringify(long, null, 2),
         );
 
@@ -42957,6 +43213,11 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       });
     const music = await speaker('Music');
     assert.equal(get(music, 'result', 'isError'), undefined, textOf(music) ?? '');
+    assert.deepEqual(
+      get(parseTextContent(music), 'properties'),
+      { bus: 'Music' },
+      `an add says what it wrote: ${textOf(music) ?? ''}`,
+    );
     assert.match(readFileSync(join(project, 'speaker.tscn'), 'utf8'), /^bus = &"Music"$/m);
     assert.equal(
       textOf(await speaker('Musik')),
@@ -42968,8 +43229,8 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     );
 
     // A property the resource lacks is refused with the ones it has nearest it, alone, beside
-    // another, and as the start of a path; and with no list when none is near, since a resource
-    // declares dozens.
+    // another, and as the start of a path; and with its script's own when none is near, since the
+    // engine's run to dozens.
     const rarity = 'ItemData has no property rarety; the nearest it has is rarity.';
     assert.equal(await refused({ rarety: 1 }), rarity);
     assert.equal(
@@ -42977,7 +43238,10 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       `${rarity} None of the 2 properties given was written.`,
     );
     assert.equal(await refused({ 'rarety:x': 1 }), rarity);
-    assert.equal(await refused({ zzz: 1 }), 'ItemData has no property zzz.');
+    assert.equal(
+      await refused({ zzz: 1 }),
+      'ItemData has no property zzz; its script declares growth, icon, kind, level, rarity, tags, title.',
+    );
     assert.equal(
       await refused({ 'title:x': 1 }),
       'ItemData.title is a String, which a path does not step into: a path reaches the components of a vector, a colour, a rectangle or a transform.',
@@ -43003,7 +43267,12 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     );
 
     // An enum by the name of a value, as written and in another case, and by its number.
-    await written({ kind: 'POTION' });
+    const potion = await written({ kind: 'POTION' });
+    assert.deepEqual(
+      get(potion, 'properties'),
+      { kind: 2 },
+      `the answer has what the engine kept: ${JSON.stringify(potion)}`,
+    );
     assert.match(file(), /^kind = 2$/m, file());
     await written({ kind: 'shield' });
     assert.match(file(), /^kind = 1$/m, file());
@@ -48378,12 +48647,17 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       `a list judges a bound and an unbound argument as the call meets them: ${JSON.stringify(wires)}`,
     );
 
-    await written('scene_create', {
+    const scripted = await written('scene_create', {
       op: 'create',
       scenePath: 'made.tscn',
       rootNodeType: 'Node2D',
-      script: 'res://busy.gd',
+      script: 'busy.gd',
     });
+    assert.equal(
+      get(scripted, 'script'),
+      'res://busy.gd',
+      `the answer names the script: ${JSON.stringify(scripted)}`,
+    );
     assert.deepEqual(sets('made.tscn', '[node name="Node2D"'), ['script = ExtResource']);
     assert.match(
       fileOf('made.tscn'),
@@ -48525,7 +48799,16 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     // default for it to leave it out against.
     const tags = 'tags = PackedStringArray()';
     assert.deepEqual(sets('made.tres', '[resource]'), ['script = ExtResource', 'max_hp = 30', tags]);
-    await written('resource_edit', { op: 'modify', resourcePath: 'stats.tres', properties: { max_hp: 40 } });
+    const modified = await written('resource_edit', {
+      op: 'modify',
+      resourcePath: 'stats.tres',
+      properties: { max_hp: 40 },
+    });
+    assert.deepEqual(
+      get(modified, 'properties'),
+      { max_hp: 40 },
+      `a modify says what it wrote: ${JSON.stringify(modified)}`,
+    );
     assert.deepEqual(sets('stats.tres', '[resource]'), ['script = ExtResource', 'max_hp = 40', tags]);
     // Made by its class_name, as the editor's create dialog offers it.
     const made = await written('resource_edit', {
@@ -48535,6 +48818,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       properties: { max_hp: 50 },
     });
     assert.equal(get(made, 'resourceType'), 'Stats', JSON.stringify(made));
+    assert.deepEqual(
+      get(made, 'properties'),
+      { max_hp: 50 },
+      `a create says what it wrote: ${JSON.stringify(made)}`,
+    );
     assert.deepEqual(sets('named.tres', '[resource]'), ['script = ExtResource', 'max_hp = 50', tags]);
     assert.match(
       fileOf('named.tres'),
@@ -48573,11 +48861,16 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     );
     // Reached by a slash path, the scripted resource built into the file keeps what was written to
     // it, which the check for what its script changed would otherwise put back.
-    await written('resource_edit', {
+    const reached = await written('resource_edit', {
       op: 'modify',
       resourcePath: 'pack.tres',
       properties: { 'inner/hp': 7, 'inner/spot:x': 3 },
     });
+    assert.deepEqual(
+      get(reached, 'properties'),
+      { 'inner/hp': 7, 'inner/spot:x': 3 },
+      `each path comes back as it was given: ${JSON.stringify(reached)}`,
+    );
     assert.deepEqual(
       sets('pack.tres', '[sub_resource type="Resource"'),
       ['script = ExtResource', 'max_hp = 20', 'hp = 7', tags, 'spot = Vector2(3, 0)'],
@@ -48855,7 +49148,15 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       '[node name="Lifted" type="Node3D" parent="Arm"]\ntop_level = true\n' +
       'transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 5)\n\n' +
       '[node name="Finger" type="Node3D" parent="Arm/Lifted"]\n' +
-      'transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)\n',
+      'transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)\n\n' +
+      '[node name="Squash" type="Node3D" parent="."]\ntransform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)\n\n' +
+      '[node name="Turned" type="Node3D" parent="Squash"]\n' +
+      'transform = Transform3D(0.70710677, 0, -0.70710677, 0, 1, 0, 0.70710677, 0, 0.70710677, 0, 0, 0)\n\n' +
+      '[node name="Leaned" type="Node3D" parent="Squash"]\n' +
+      'transform = Transform3D(0.70710677, -0.70710677, 0, 0.70710677, 0.70710677, 0, 0, 0, 1, 0, 0, 0)\n\n' +
+      '[node name="Tall" type="Node3D" parent="."]\ntransform = Transform3D(1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0)\n\n' +
+      '[node name="Tipped" type="Node3D" parent="Tall"]\n' +
+      'transform = Transform3D(1, 0, 0, 0, 0.70710677, -0.70710677, 0, 0.70710677, 0.70710677, 0, 0, 0)\n',
     'twice.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://coin.tscn" id="1_coin"]\n\n' +
       '[node name="Twice" type="Node2D"]\n\n' +
@@ -49056,6 +49357,34 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       fileOf('world.tscn'),
       /\[node name="Hand" type="Node3D" parent="\."[^\]]*\]\ntransform = Transform3D\(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 3, 3\)\n/,
     );
+    assert.equal(
+      get(hand, 'sheared'),
+      undefined,
+      `a move under a square parent shears nothing: ${JSON.stringify(hand)}`,
+    );
+    // Kept in place out from under a parent scaled along one axis while it is turned about another,
+    // two of the node's axes stop being square, which position, rotation and scale cannot say. One
+    // node for each pair of axes, since each pair is a check of its own.
+    for (const [path, name] of [
+      ['Squash/Turned', 'Turned'],
+      ['Squash/Leaned', 'Leaned'],
+      ['Tall/Tipped', 'Tipped'],
+    ]) {
+      const moved = await node({
+        op: 'reparent',
+        scenePath: 'world.tscn',
+        nodePath: path,
+        newParentPath: '.',
+      });
+      assert.ok(
+        Object.keys(asObject(get(moved, 'alsoChanged'))).includes('transform'),
+        `the transform ${name} holds is in the answer: ${JSON.stringify(moved)}`,
+      );
+      assert.equal(
+        get(moved, 'sheared'),
+        `${name} keeps where it is drawn under ., which is scaled unevenly across the way it is turned, so its basis is sheared: no position, rotation and scale describe it, and transform is what it holds. keepGlobalTransform false keeps its own transform instead.`,
+      );
+    }
     const loose = await node({
       op: 'reparent',
       scenePath: 'world.tscn',
@@ -49523,6 +49852,178 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     });
     assert.deepEqual([get(found, 'animationFound'), get(found, 'animationMissing')], [true, undefined]);
     assert.match(readFileSync(join(project, 'moves.tscn'), 'utf8'), /^states\/Lone\/node = SubResource\(/m);
+
+    // A transition and a state come out as they went in, a state with every transition leaving or
+    // reaching it, which the engine drops with it and the answer names.
+    for (const [fromState, toState] of [
+      ['Idle', 'Rest'],
+      ['Rest', 'Idle'],
+      ['Start', 'Rest'],
+    ]) {
+      await written({ op: 'connect_states', animTreePath: 'Tree', fromState, toState });
+    }
+    for (const [args, refusal] of [
+      [
+        { op: 'disconnect_states', fromState: 'Idle', toState: 'Early' },
+        'There is no transition from Idle to Early; the ones leaving Idle go to Rest.',
+      ],
+      [
+        { op: 'disconnect_states', fromState: 'Early', toState: 'Idle' },
+        'There is no transition from Early to Idle; none leaves Early.',
+      ],
+      [
+        { op: 'remove_state', stateName: 'Start' },
+        'Start is part of every state machine, so it cannot be removed.',
+      ],
+      [
+        { op: 'remove_state', stateName: 'End' },
+        'End is part of every state machine, so it cannot be removed.',
+      ],
+      [
+        { op: 'remove_state', stateName: 'Rets' },
+        'The state machine has no state named Rets; its states are Early, End, Idle, Rest, Spin, Start.',
+      ],
+    ] as const) {
+      assert.equal(textOf(await call({ ...args, animTreePath: 'Tree' })), refusal, JSON.stringify(args));
+    }
+    const disconnected = await written({
+      op: 'disconnect_states',
+      animTreePath: 'Tree',
+      fromState: 'Spin',
+      toState: 'Idle',
+    });
+    assert.deepEqual(
+      get(disconnected, 'removed'),
+      { from: 'Spin', to: 'Idle' },
+      JSON.stringify(disconnected),
+    );
+    assert.doesNotMatch(fileOf('moves.tscn'), /"Spin", "Idle"/, fileOf('moves.tscn'));
+    assert.match(fileOf('moves.tscn'), /"Idle", "Rest"/, 'and the transitions not named stay');
+    const gone = await written({ op: 'remove_state', animTreePath: 'Tree', stateName: 'Rest' });
+    assert.deepEqual(
+      [get(gone, 'removed'), get(gone, 'transitionsRemoved')],
+      [
+        'Rest',
+        [
+          { from: 'Idle', to: 'Rest' },
+          { from: 'Rest', to: 'Idle' },
+          { from: 'Start', to: 'Rest' },
+        ],
+      ],
+      JSON.stringify(gone),
+    );
+    assert.doesNotMatch(fileOf('moves.tscn'), /"Rest"|states\/Rest\//, fileOf('moves.tscn'));
+    const left = parseTextContent(await call({ op: 'read_states', animTreePath: 'Tree' }));
+    assert.deepEqual(
+      [
+        asArray(get(left, 'states'))
+          .map((state) => get(state, 'stateName'))
+          .includes('Rest'),
+        asArray(get(left, 'transitions')).length,
+      ],
+      [false, 0],
+      JSON.stringify(left),
+    );
+    assert.ok(
+      asArray(get(left, 'states'))
+        .map((state) => get(state, 'stateName'))
+        .includes('Spin'),
+      'and the states not named stay',
+    );
+
+    // A track comes out by its type, node and property as read gives them, so a track read back is
+    // passed as it stands; the others stay.
+    await written({ op: 'create', playerNodePath: 'Player', animationName: 'sway' });
+    for (const [property, keyframes] of [
+      [
+        'rotation',
+        [
+          { time: 0, value: 0 },
+          { time: 0.5, value: 1 },
+        ],
+      ],
+      ['position', [{ time: 0, value: { x: 1, y: 2 } }]],
+    ] as const) {
+      await written({
+        op: 'add_track',
+        playerNodePath: 'Player',
+        animationName: 'sway',
+        track: { type: 'property', nodePath: 'Body', property, keyframes },
+      });
+    }
+    assert.equal(
+      textOf(
+        await call({
+          op: 'add_track',
+          playerNodePath: 'Player',
+          animationName: 'sway',
+          track: { type: 'property', nodePath: 'Body', property: 'scale' },
+        }),
+      ),
+      'Missing track.keyframes',
+    );
+    assert.equal(
+      textOf(
+        await call({
+          op: 'add_track',
+          playerNodePath: 'Player',
+          animationName: 'sway',
+          track: { type: 'bezier', nodePath: 'Body', keyframes: [{ time: 0, value: 1 }] },
+        }),
+      ),
+      'add_track makes property and method tracks, and track.type is bezier; remove_track takes any.',
+    );
+    const sway = parseTextContent(
+      await call({ op: 'read', playerNodePath: 'Player', animationName: 'sway' }),
+    );
+    const turning = asArray(get(sway, 'tracks'))[0];
+    assert.equal(get(turning, 'property'), 'rotation', JSON.stringify(sway));
+    const untracked = await written({
+      op: 'remove_track',
+      playerNodePath: 'Player',
+      animationName: 'sway',
+      track: turning,
+    });
+    assert.deepEqual(
+      [
+        get(untracked, 'removed'),
+        get(untracked, 'tracksRemoved'),
+        get(untracked, 'keysRemoved'),
+        get(untracked, 'tracks'),
+      ],
+      [{ type: 'property', nodePath: 'Body', property: 'rotation' }, 1, 2, 1],
+      JSON.stringify(untracked),
+    );
+    assert.doesNotMatch(fileOf('moves.tscn'), /NodePath\("Body:rotation"\)/, fileOf('moves.tscn'));
+    assert.match(fileOf('moves.tscn'), /NodePath\("Body:position"\)/, 'and the other track stays');
+    for (const [track, refusal] of [
+      [turning, 'sway has no property track on Body:rotation; its tracks are Body:position (property).'],
+      [
+        { type: 'method', nodePath: 'Body' },
+        'sway has no method track on Body; its tracks are Body:position (property).',
+      ],
+      [
+        { type: 'colour', nodePath: 'Body' },
+        'scene_animation takes track.type as one of property, method, position_3d, rotation_3d, scale_3d, blend_shape, bezier, audio, animation, not "colour".',
+      ],
+    ] as const) {
+      assert.equal(
+        textOf(await call({ op: 'remove_track', playerNodePath: 'Player', animationName: 'sway', track })),
+        refusal,
+        JSON.stringify(track),
+      );
+    }
+    assert.equal(
+      textOf(
+        await call({
+          op: 'remove_track',
+          playerNodePath: 'Player',
+          animationName: 'moves/idle',
+          track: { type: 'property', nodePath: 'Body', property: 'rotation' },
+        }),
+      ),
+      'moves/idle has no property track on Body:rotation; it has no tracks.',
+    );
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
@@ -49740,6 +50241,12 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       script: 'heavy.gd',
     });
     assert.equal(get(scripted, 'rootNodeName'), 'Heavy', JSON.stringify(scripted));
+    assert.equal(
+      get(scripted, 'script'),
+      'res://heavy.gd',
+      `the answer names the script: ${JSON.stringify(scripted)}`,
+    );
+    assert.equal(get(made, 'script'), undefined, `and none when none was given: ${JSON.stringify(made)}`);
     assert.match(
       fileOf('parts/heavy_crate.tscn'),
       /\[node name="Heavy" instance=ExtResource\("1_base"\)\]\nscript = ExtResource\("2_script"\)\n/,
@@ -49829,7 +50336,16 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       nodePath: 'Crate2/Hit',
       properties: { shape: { _type: 'CircleShape2D', radius: 9 } },
     });
-    await written('scene_node', { ...inside, nodePath: 'Crate2/Hit', properties: { 'shape/radius': 11 } });
+    const radius = await written('scene_node', {
+      ...inside,
+      nodePath: 'Crate2/Hit',
+      properties: { 'shape/radius': 11 },
+    });
+    assert.equal(
+      get(radius, 'notStored'),
+      undefined,
+      `a write into a resource is no property of the node: ${JSON.stringify(radius)}`,
+    );
     const ownShape = fileOf('main.tscn');
     assert.match(
       ownShape,
@@ -49839,7 +50355,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     assert.equal(fileOf('parts/crate.tscn'), crateBefore, 'and crate.tscn keeps its own shape');
     assert.equal(
       textOf(await call('scene_node', { op: 'delete', scenePath: 'main.tscn', nodePath: 'Crate2/Look' })),
-      'Crate2/Look is inside an instanced scene, which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in res://parts/crate.tscn, which removes it from every scene using that one.',
+      'Crate2/Look is inside the scene instanced at Crate2 (res://parts/crate.tscn), which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in res://parts/crate.tscn, which removes it from every scene using that one.',
     );
 
     const head = { ...inside, nodePath: 'Crate2/Bolt/Head', properties: { scale: [4, 4] } };
@@ -49921,6 +50437,11 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       'Crate2/Spare is made by a script as the scene is instanced, and no scene file saves anything about it.',
     );
     assert.equal(
+      textOf(await call('scene_node', { op: 'delete', scenePath: 'main.tscn', nodePath: 'Crate2/Spare' })),
+      'Crate2/Spare is made by a script as the scene is instanced, and no scene file saves anything about it.',
+      'a delete says so too, with no scene to send it to',
+    );
+    assert.equal(
       textOf(await call('scene_node', { ...head, nodePath: 'Crate2/Spare/Head' })),
       'Crate2/Spare/Head belongs to the scene instanced at Crate2/Spare (res://parts/bolt.tscn), and this scene saves nothing about it. Edit that scene instead, which changes every instance of it.',
       'no editable children reach an instance a script makes',
@@ -49993,6 +50514,139 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       `a node cut off by depth says how many children it has: ${JSON.stringify(shallow)}`,
     );
 
+    // Each node an inherited scene is given names the file that makes it, past a base that only
+    // sets values on it, and a node of the scene's own names none.
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'parts/big_crate.tscn',
+      nodeType: 'Node2D',
+      nodeName: 'Tag',
+    });
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'parts/bigger_crate.tscn',
+      nodeType: 'Node2D',
+      nodeName: 'Own',
+    });
+    const sources = (tree: unknown): unknown[] =>
+      asArray(get(tree, 'children')).map((child) => [
+        get(child, 'name'),
+        get(child, 'inheritedFrom') ?? null,
+      ]);
+    const biggerTree = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'parts/bigger_crate.tscn' })),
+      'tree',
+    );
+    assert.deepEqual(
+      [get(biggerTree, 'inherits'), get(biggerTree, 'inheritedFrom'), sources(biggerTree)],
+      [
+        'res://parts/big_crate.tscn',
+        undefined,
+        [
+          ['Look', 'res://parts/crate.tscn'],
+          ['Hit', 'res://parts/crate.tscn'],
+          ['Bolt', 'res://parts/crate.tscn'],
+          ['Mark', 'res://parts/crate.tscn'],
+          ['Tag', 'res://parts/big_crate.tscn'],
+          ['Own', null],
+        ],
+      ],
+      JSON.stringify(biggerTree),
+    );
+    const mainTree = get(parseTextContent(await call('scene_tree', { scenePath: 'main.tscn' })), 'tree');
+    assert.deepEqual(
+      [get(mainTree, 'inherits'), sources(mainTree)],
+      [
+        undefined,
+        [
+          ['Floor', null],
+          ['Crate1', null],
+          ['Crate2', null],
+        ],
+      ],
+      `a scene inheriting nothing says so by leaving both out: ${JSON.stringify(mainTree)}`,
+    );
+    assert.equal(
+      get(asArray(get(asArray(get(mainTree, 'children'))[1], 'children'))[0], 'inheritedFrom'),
+      undefined,
+      `and the nodes an instance brings are named by instanceOf alone: ${JSON.stringify(mainTree)}`,
+    );
+
+    // A node inside an instance is sent to the file that makes it, which for an inherited scene can
+    // be a scene it inherits; editable children would let this scene keep values and no more.
+    writeFileSync(
+      join(project, 'yard.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/bigger_crate.tscn" id="1_bigger"]\n\n' +
+        '[node name="Yard" type="Node2D"]\n\n' +
+        '[node name="Open" parent="." instance=ExtResource("1_bigger")]\n\n' +
+        '[node name="Shut" parent="." instance=ExtResource("1_bigger")]\n\n[editable path="Open"]\n',
+    );
+    const yard = { scenePath: 'yard.tscn' };
+    const deleting = [
+      ['Open/Look', 'Open', 'res://parts/crate.tscn'],
+      ['Open/Tag', 'Open', 'res://parts/big_crate.tscn'],
+      ['Open/Own', 'Open', 'res://parts/bigger_crate.tscn'],
+      ['Shut/Look', 'Shut', 'res://parts/crate.tscn'],
+    ] as const;
+    for (const [nodePath, instance, maker] of deleting) {
+      assert.equal(
+        textOf(await call('scene_node', { ...yard, op: 'delete', nodePath })),
+        `${nodePath} is inside the scene instanced at ${instance} (res://parts/bigger_crate.tscn), which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in ${maker}, which removes it from every scene using that one.`,
+      );
+    }
+    assert.equal(
+      textOf(
+        await call('scene_node', { ...yard, op: 'set', nodePath: 'Shut/Tag', properties: { name: 'Label' } }),
+      ),
+      'Shut/Tag is inside the scene instanced at Shut (res://parts/bigger_crate.tscn), which creates it again on load. Edit res://parts/big_crate.tscn instead.',
+      'a rename inside an instance whose children are not editable is not offered editable children',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_node', { ...yard, op: 'reparent', nodePath: 'Open/Bolt/Head', newParentPath: '.' }),
+      ),
+      'Open/Bolt/Head is inside the scene instanced at Open/Bolt (res://parts/bolt.tscn), which creates it again on load. Edit res://parts/bolt.tscn instead.',
+      'a node of an instance nested in one is sent to the nested scene',
+    );
+
+    // A value set back to what the node has without it is left out of the file, and the answer
+    // says so, with what the node follows from then on.
+    const moved = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2',
+      properties: { position: [7, 0] },
+    });
+    assert.equal(get(moved, 'notStored'), undefined, JSON.stringify(moved));
+    assert.match(fileOf('main.tscn'), /\[node name="Crate2"[^\]]*\]\nposition = Vector2\(7, 0\)\n/);
+    const back = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2',
+      properties: { position: [0, 0], 'scale:x': 1, 'scale:y': 1 },
+    });
+    assert.deepEqual(
+      [get(back, 'notStored'), get(back, 'notStoredNote')],
+      [
+        ['position', 'scale'],
+        'position, scale now hold what res://parts/crate.tscn gives this node, so the file does not store them, and a change there reaches this node.',
+      ],
+      JSON.stringify(back),
+    );
+    assert.doesNotMatch(fileOf('main.tscn'), /\[node name="Crate2"[^\]]*\]\n(?:[a-z_]+ = .*\n)*position = /);
+    const floor = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Floor',
+      properties: { rotation: 0, z_index: 2 },
+    });
+    assert.deepEqual(
+      [get(floor, 'notStored'), get(floor, 'notStoredNote')],
+      [['rotation'], 'rotation now holds the default, so the file does not store it.'],
+      `a node this scene makes follows its defaults, and a value kept is not named: ${JSON.stringify(floor)}`,
+    );
+    assert.match(fileOf('main.tscn'), /\[node name="Floor"[^\]]*\]\nz_index = 2\n/);
+
     // A scene copied whole carries the uid of the one it was copied from, so one of the two names a
     // uid the loader resolves to the other, whichever the import kept.
     writeFileSync(
@@ -50018,12 +50672,17 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
 
     // The engine finds a value entry whose node was renamed in the scene it comes from by its
     // unique_id, and so must a read of the file.
-    await written('scene_node', {
+    const renamed = await written('scene_node', {
       op: 'set',
       scenePath: 'parts/plank.tscn',
       nodePath: 'Grain',
       properties: { name: 'Knot' },
     });
+    assert.equal(
+      get(renamed, 'notStored'),
+      undefined,
+      `a name is no stored value: ${JSON.stringify(renamed)}`,
+    );
     assert.match(fileOf('parts/plank.tscn'), /\[node name="Knot" type="Sprite2D" parent="\." unique_id=12\]/);
     const wide = get(
       parseTextContent(await call('scene_tree', { scenePath: 'wide_plank.tscn', includeProperties: true })),
@@ -50037,6 +50696,11 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
         ['Knot', 2],
       ],
       `the renamed node keeps the scale wide_plank.tscn gives it: ${JSON.stringify(wide)}`,
+    );
+    assert.deepEqual(
+      [get(wide, 'inherits'), knot.map((child) => get(child, 'inheritedFrom'))],
+      ['res://parts/plank.tscn', ['res://parts/plank.tscn', 'res://parts/plank.tscn']],
+      `an inherited scene's tree says what it inherits and where its nodes come from: ${JSON.stringify(wide)}`,
     );
   } finally {
     await server.stop();
@@ -51012,7 +51676,22 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     writeFileSync(
       join(project, 'map.tscn'),
       '[gd_scene format=3]\n\n[node name="Map" type="Node2D"]\n\n[node name="Ground" type="TileMapLayer" parent="."]\n\n' +
-        '[node name="Built" type="TileMapLayer" parent="."]\n',
+        '[node name="Built" type="TileMapLayer" parent="."]\n\n[node name="Bare" type="TileMapLayer" parent="."]\n',
+    );
+    const bare = { scenePath: 'res://map.tscn', nodePath: 'Bare' };
+    const cell = { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } };
+    assert.equal(
+      textOf(await call('scene_node', { ...bare, op: 'set_tilemap_cells', cells: [cell] })),
+      'Bare has no TileSet, so no cell can name a source. scene_node set with properties {"tile_set": "res://..."} on Bare gives it one, a TileSet file such as resource_edit create_tileset makes.',
+    );
+    await call('scene_node', { ...bare, op: 'set', properties: { tile_set: 'res://set.tres' } });
+    const given = parseTextContent(
+      await call('scene_node', { ...bare, op: 'set_tilemap_cells', cells: [cell] }),
+    );
+    assert.equal(
+      get(given, 'placed'),
+      1,
+      `and the call it names lets the paint through: ${JSON.stringify(given)}`,
     );
     const map = { scenePath: 'res://map.tscn', nodePath: 'Ground' };
     await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://set.tres' } });

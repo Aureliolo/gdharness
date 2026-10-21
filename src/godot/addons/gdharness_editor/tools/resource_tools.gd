@@ -9,6 +9,7 @@ const GdhPropertyValues = preload("../property_values.gd")
 const GdhRead = preload("../reading.gd")
 const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhSerialisation = preload("../serialisation.gd")
 
 # The minimal shader of a type: its declaration and the one function the engine calls for it.
 const SHADER_EMPTY: String = """shader_type %s;
@@ -25,6 +26,7 @@ const CELLS_SHOWN: int = 1000
 
 var _editor_plugin: EditorPlugin = null
 var _properties: GdhPropertyValues = GdhPropertyValues.new()
+var _values: GdhSerialisation = GdhSerialisation.new()
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
@@ -257,6 +259,8 @@ func create_resource(args: Dictionary) -> Dictionary:
 	var failed: String = _save_checked(resource, res_path, properties.keys(), null)
 	if not failed.is_empty():
 		return {"ok": false, "error": failed}
+	if not properties.is_empty():
+		answer["properties"] = _held(resource, properties.keys())
 	return answer
 
 
@@ -307,7 +311,18 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	var failed: String = _save_checked(resource, res_path, properties.keys(), previous)
 	if not failed.is_empty():
 		return {"ok": false, "error": failed}
+	answer["properties"] = _held(resource, properties.keys())
 	return answer
+
+
+## What [param resource] holds at each property or path in [param asked], once the save has been
+## checked against it: a write saying only that it was written left the caller a second call to
+## learn what the engine kept.
+func _held(resource: Resource, asked: Array) -> Dictionary:
+	var held: Dictionary = {}
+	for key: Variant in asked:
+		held[str(key)] = _values.serialize_value(_properties.read_at(resource, str(key)))
+	return held
 
 
 ## What a resource file holds, read as a headless engine reads it with no editor connected.
@@ -649,7 +664,16 @@ func _tile_node(scene: GdhSceneFile, node_path: String, layer: int) -> Array:
 		return [null, "%s has %d layers, and no layer %d" % [node_path, layered.get_layers_count(), layer]]
 	var tile_set: TileSet = layered.tile_set if layered != null else single.tile_set
 	if tile_set == null:
-		return [null, "%s has no TileSet, so no cell can name a source" % node_path]
+		return [
+			null,
+			(
+				(
+					'%s has no TileSet, so no cell can name a source. scene_node set with properties {"tile_set": '
+					+ '"res://..."} on %s gives it one, a TileSet file such as resource_edit create_tileset makes.'
+				)
+				% [node_path, node_path]
+			)
+		]
 	return [node, ""]
 
 

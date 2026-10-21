@@ -76,6 +76,9 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	if not full_script_path.begins_with("res://"):
 		full_script_path = "res://" + full_script_path
 
+	# Read as GDScript, a scene came back as a script extending RefCounted with nothing in it.
+	if full_script_path.get_extension().to_lower() != "gd":
+		return _log.failure(_not_a_script(full_script_path))
 	if not FileAccess.file_exists(full_script_path):
 		return _log.failure(
 			GdhFileWalk.new().with_nearest_files(
@@ -332,6 +335,17 @@ func _inner_class(
 	body.line = at + 1
 	_mark_virtuals(body.functions, body.extends_name, _reading)
 	return body
+
+
+## The refusal for [param path], which is not a .gd file, with the tool that reads what it is.
+static func _not_a_script(path: String) -> String:
+	var said: String = "%s is not a GDScript file, and script_info reads .gd files only" % path
+	match path.get_extension().to_lower():
+		"tscn", "scn":
+			return said + ": scene_tree reads a scene's nodes, and with properties the script each carries."
+		"tres", "res":
+			return said + ": resource_edit read reads a resource."
+	return said + "."
 
 
 static func _indentation(line: String) -> String:

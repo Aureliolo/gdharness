@@ -886,12 +886,12 @@ script left off, and asks that, so the libraries and the tree root are the ones 
 and no script of the scene runs.
 
 The scene and resource writes take the other way round. With no editor, `editor_tools.gd` runs the
-editor addon's own `scene_tools.gd`, `animation_tools.gd` or `resource_tools.gd` in a headless
-engine, preloaded from beside the operations in the package, so a write passes the checks the
-editor's does and answers in
-its shape, with `writtenBy` (or `readBy`) added. A write cannot avoid instancing the scene the way a
-read does, and outside the editor instancing runs every script, where the editor gives a script that
-is not a tool a placeholder. So `scene_file.gd` and `headless_check.gd` put back what scripts did:
+editor addon's own `scene_tools.gd`, `animation_tools.gd`, `animation_states.gd` or
+`resource_tools.gd` in a headless engine, preloaded from beside the operations in the package, so
+a write passes the checks the editor's does and answers in its shape, with `writtenBy` (or
+`readBy`) added. A write cannot avoid instancing the scene the way a read does, and outside the
+editor instancing runs every script, where the editor gives a script that is not a tool a
+placeholder. So `scene_file.gd` and `headless_check.gd` put back what scripts did:
 on opening, each node with such a script is compared with what the file stores for it, and a
 difference goes back to the file's value, or to what the node would load with if the file did not set
 it, read from the files of the scenes it is instanced from rather than by instancing them; on writing,

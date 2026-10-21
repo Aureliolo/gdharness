@@ -204,6 +204,8 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 	var answer: Dictionary = {
 		"ok": true, "scenePath": scene_path, "rootNodeType": asked_type, "rootNodeName": root_node_name
 	}
+	if not script_path.is_empty():
+		answer["script"] = script_path
 	if not had_folder:
 		answer["madeFolder"] = scene_path.get_base_dir()
 	return answer
@@ -299,6 +301,11 @@ func add_node(args: Dictionary) -> Dictionary:
 		"nodePath": new_path,
 		"index": new_node.get_index(),
 	}
+	if not properties.is_empty():
+		var held: Dictionary = {}
+		for key: Variant in properties:
+			held[str(key)] = _readable(new_node, _properties.read_at(new_node, str(key)))
+		answer["properties"] = held
 	_properties.note_write(answer, new_node)
 	if not adding.is_empty():
 		answer.merge(GdhGroups.read(scene, new_node))
@@ -503,6 +510,7 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	var drawn_at: Dictionary = {}
 	for property: String in GdhPlacing.placing(node):
 		drawn_at[property] = _properties.read_at(node, property)
+	var held_at: Transform3D = (node as Node3D).transform if node is Node3D else Transform3D.IDENTITY
 	# Unowned while it moves: a node taken out of the tree keeps its owner, and adding it under the new
 	# parent warned that the owner was not above it. Node.reparent warns the same way.
 	node.owner = null
@@ -517,6 +525,20 @@ func reparent_node(args: Dictionary) -> Dictionary:
 		var now: Variant = _properties.read_at(node, property)
 		if not GdhSame.same(now, drawn_at[property]):
 			also_changed[property] = {"was": _readable(node, drawn_at[property]), "now": _readable(node, now)}
+	var sheared: String = ""
+	if node is Node3D and GdhPlacing.sheared((node as Node3D).basis):
+		var spatial: Node3D = node
+		also_changed["transform"] = {
+			"was": _readable(node, held_at), "now": _readable(node, spatial.transform)
+		}
+		sheared = (
+			(
+				"%s keeps where it is drawn under %s, which is scaled unevenly across the way it is turned,"
+				+ " so its basis is sheared: no position, rotation and scale describe it, and transform is"
+				+ " what it holds. keepGlobalTransform false keeps its own transform instead."
+			)
+			% [str(node.name), new_parent_path]
+		)
 
 	var new_path: String = scene.path_of(node)
 	var index: int = node.get_index()
@@ -546,6 +568,8 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	}
 	if not also_changed.is_empty():
 		answer["alsoChanged"] = also_changed
+	if not sheared.is_empty():
+		answer["sheared"] = sheared
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
 	return answer
@@ -571,9 +595,8 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var node: Node = GdhSceneFile.node_at(scene.root, node_path)
 	if not node:
 		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
-	var foreign: String = scene.foreign(node)
-	if not foreign.is_empty():
-		return scene.refuse(foreign)
+	# A rename is refused for the scene that makes the node before anything else, since editable
+	# children would let this scene keep values on it and still never rename it.
 	if properties.has("name") and node != scene.root:
 		var fixed: String = scene.fixed(node)
 		if not fixed.is_empty():
@@ -581,6 +604,9 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		var unusable: String = scene.unusable_name(node.get_parent(), str(properties["name"]), node)
 		if not unusable.is_empty():
 			return scene.refuse(unusable)
+	var foreign: String = scene.foreign(node)
+	if not foreign.is_empty():
+		return scene.refuse(foreign)
 
 	var dropped: Dictionary = {}
 	if editable != null:
@@ -607,6 +633,12 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	_properties.note_write(answer, node)
 	if not adding.is_empty() or not removing.is_empty():
 		answer["groups"] = GdhGroups.read(scene, node).get("groups", [])
+	var named: Array[String] = []
+	for key: Variant in properties:
+		var property: String = str(key).get_slice(":", 0)
+		if property != "name" and property in node and not named.has(property):
+			named.append(property)
+	var source: String = scene.values_from(node, old_path)
 	var carried: GdhPaths = GdhPaths.new()
 	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
 	var written: Dictionary = scene.write(
@@ -630,9 +662,46 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	if not dropped.is_empty():
 		answer["droppedValues"] = dropped["values"]
 		answer["droppedNodes"] = dropped["nodes"]
+	_note_left_out(answer, scene.written_pack, new_path, named, source)
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
 	return answer
+
+
+## Notes under notStored each of [param named] the file saved from [param pack] does not set on the
+## node at [param at]: a set gave it the value the node has without it, so the packer leaves it out,
+## as the editor does, and it follows [param source], or its default, from then on.
+static func _note_left_out(
+	answer: Dictionary, pack: PackedScene, at: String, named: Array[String], source: String
+) -> void:
+	var stored: Dictionary = {}
+	var state: SceneState = pack.get_state()
+	for index: int in state.get_node_count():
+		if str(state.get_node_path(index)).trim_prefix("./") == at:
+			for property: int in state.get_node_property_count(index):
+				stored[str(state.get_node_property_name(index, property))] = true
+	var left: Array[String] = []
+	for asked: String in named:
+		if not stored.has(asked):
+			left.append(asked)
+	if left.is_empty():
+		return
+	answer["notStored"] = left
+	var names: String = ", ".join(left)
+	var verb: String = "holds" if left.size() == 1 else "hold"
+	var pronoun: String = "it" if left.size() == 1 else "them"
+	if source.is_empty():
+		answer["notStoredNote"] = (
+			"%s now %s the default, so the file does not store %s." % [names, verb, pronoun]
+		)
+	else:
+		answer["notStoredNote"] = (
+			(
+				"%s now %s what %s gives this node, so the file does not store %s, and a change there reaches "
+				+ "this node."
+			)
+			% [names, verb, source, pronoun]
+		)
 
 
 func get_node_properties(args: Dictionary) -> Dictionary:

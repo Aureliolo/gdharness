@@ -493,6 +493,9 @@ func call_method(params: Dictionary) -> Dictionary:
 		answer["awaited"] = true
 	_keep_reported(answer, "errors", caught.raised)
 	_keep_reported(answer, "warnings", caught.warned)
+	# Main.explode, ended at a null it called into, answered result 0 as if it had counted something.
+	if caught.ended_at.has(named):
+		answer["ended_by_error_at"] = caught.ended_at[named]
 	var asked: Variant = params.get("properties")
 	if _reads_the_result(asked):
 		answer.merge(_read_off_result(result, asked))

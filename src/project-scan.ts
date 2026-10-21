@@ -128,24 +128,39 @@ export function projectStructure(projectPath: string): ProjectStructure {
  * project-relative with forward slashes and sorted, stepping over what the engine steps over.
  */
 export function projectFiles(projectPath: string, extensions: readonly string[]): string[] {
+  return filesBelow(projectPath, extensions);
+}
+
+/**
+ * [method projectFiles] for one folder of a project that a caller named, relative to that folder.
+ * The folder is walked even when gdharness installed it, since naming it asks for it; below it,
+ * as everywhere, what the engine steps over and what gdharness installed are stepped over. A walk
+ * of its own here took in gdharness's addons, so a project's diagnostics checked fifty-five of
+ * them beside its three scripts while every other answer called the three the project's.
+ */
+export function folderFiles(directory: string, extensions: readonly string[]): string[] {
+  return gdignored(directory) ? [] : filesBelow(directory, extensions);
+}
+
+function filesBelow(root: string, extensions: readonly string[]): string[] {
   const found: string[] = [];
   const visit = (directory: string, prefix: string): void => {
-    if (steppedOver(directory)) {
-      return;
-    }
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (skipped(entry.name)) {
         continue;
       }
       const spelled = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const path = join(directory, entry.name);
       if (entry.isDirectory()) {
-        visit(join(directory, entry.name), spelled);
+        if (!steppedOver(path)) {
+          visit(path, spelled);
+        }
       } else if (entry.isFile() && extensions.includes(extname(entry.name).toLowerCase())) {
         found.push(spelled);
       }
     }
   };
-  visit(projectPath, '');
+  visit(root, '');
   return found.sort();
 }
 
