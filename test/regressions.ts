@@ -7642,7 +7642,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 139;
+const READ_IN_WORDS = 140;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -51543,7 +51543,7 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     const variation = await colour('Buton');
     assert.match(
       text(get(variation, 'note')),
-      /^Buton is not a Control or Window class, so this is a type variation: it styles only a control whose theme_type_variation is Buton\. If a class was meant, the nearest (?:is|are) Button[,.]/,
+      /^Buton is not a Control or Window class, so this is a type variation: it styles only a control whose theme_type_variation is Buton\. If a class was meant, the nearest (?:is|are) Button(?:, [A-Za-z]+)*, and remove_theme_item with controlType Buton takes this out\.$/,
       JSON.stringify(variation),
     );
     assert.match(fileOf('theme.tres'), /\nButon\/colors\/font_color = Color\(1, 0, 0, 1\)\n/);
@@ -51578,6 +51578,59 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       ),
       'color is {"r": .., "g": .., "b": .., "a": ..} from 0 to 1, a optional, or an html code such as "#ff8000" or "#ff800080"; "orange" is neither.',
     );
+    // The way back from a misspelt type: one item out, or the whole type, and what the theme does
+    // not hold is refused with the names it does.
+    const remove = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+      await call('resource_edit', { ...theme, op: 'remove_theme_item', ...args });
+    const gone = parseTextContent(await remove({ controlType: 'Buton' }));
+    assert.deepEqual(get(gone, 'removed'), ['Buton/colors/font_color'], JSON.stringify(gone));
+    assert.doesNotMatch(fileOf('theme.tres'), /^Buton\//m, fileOf('theme.tres'));
+    assert.match(fileOf('theme.tres'), /\nButton\/colors\/font_color = Color\(1, 0, 0, 1\)\n/);
+    const one = parseTextContent(await remove({ controlType: 'Label', item: 'colors/font_color' }));
+    assert.deepEqual(get(one, 'removed'), ['Label/colors/font_color'], JSON.stringify(one));
+    assert.doesNotMatch(fileOf('theme.tres'), /^Label\/colors\//m, fileOf('theme.tres'));
+    assert.match(fileOf('theme.tres'), /\nLabel\/font_sizes\/font_size = 12\n/, 'and its other item stays');
+    assert.equal(
+      textOf(await remove({ controlType: 'Labl' })),
+      'res://theme.tres holds no type Labl; the nearest it has is Label',
+    );
+    assert.equal(
+      textOf(await remove({ controlType: 'Label', item: 'font_sizes/font_szie' })),
+      'Label has no item font_sizes/font_szie; the nearest it has is font_sizes/font_size',
+    );
+    // A variation's base is stored beside its items rather than as one, and goes with the type.
+    writeFileSync(
+      join(project, 'variant.tres'),
+      '[gd_resource type="Theme" format=3]\n\n[resource]\nFancy/base_type = &"Button"\nFancy/colors/font_color = Color(0, 1, 0, 1)\n',
+    );
+    const variant = { resourcePath: 'res://variant.tres', op: 'remove_theme_item', controlType: 'Fancy' };
+    const itemOut = parseTextContent(await call('resource_edit', { ...variant, item: 'colors/font_color' }));
+    assert.deepEqual(get(itemOut, 'removed'), ['Fancy/colors/font_color'], JSON.stringify(itemOut));
+    assert.match(fileOf('variant.tres'), /^Fancy\/base_type = &"Button"$/m, fileOf('variant.tres'));
+    assert.equal(
+      textOf(await call('resource_edit', { ...variant, item: 'colors/font_color' })),
+      'Fancy holds no items, only the type it varies, Button; without item, remove_theme_item takes it out.',
+    );
+    const typeOut = parseTextContent(await call('resource_edit', variant));
+    assert.deepEqual(get(typeOut, 'removed'), ['Fancy/base_type'], JSON.stringify(typeOut));
+    assert.doesNotMatch(fileOf('variant.tres'), /^Fancy\//m, fileOf('variant.tres'));
+    // A name cut at three would leave out a fourth that only adds to the word as the others do.
+    await call('resource_edit', {
+      op: 'create',
+      resourcePath: 'res://box.tres',
+      resourceType: 'StyleBoxFlat',
+    });
+    const corners =
+      textOf(
+        await call('resource_edit', {
+          op: 'modify',
+          resourcePath: 'res://box.tres',
+          properties: { corner_radius: 6 },
+        }),
+      ) ?? '';
+    for (const corner of ['top_left', 'top_right', 'bottom_right', 'bottom_left']) {
+      assert.match(corners, new RegExp(`\\bcorner_radius_${corner}\\b`), corners);
+    }
 
     writeFileSync(join(project, 'late.png'), solidPng(200, 60, 60));
     const tileset = {
@@ -51705,6 +51758,16 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
         }),
       ),
       'TileMapLayer.tile_set is res://set.tres, a file of its own, so physics_layer_1/collision_layer is written there, with resource_edit modify on res://set.tres.',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_node', {
+          ...map,
+          op: 'set',
+          properties: { 'tile_set:physics_layer_1/collision_layer': 4 },
+        }),
+      ),
+      'TileMapLayer.tile_set is an Object, which a path does not step into: a path reaches the components of a vector, a colour, a rectangle or a transform. A property of the resource it holds is reached with a slash: tile_set/physics_layer_1/collision_layer.',
     );
     const built = { scenePath: 'res://map.tscn', nodePath: 'Built', op: 'set' };
     await call('scene_node', { ...built, properties: { tile_set: { _type: 'TileSet' } } });

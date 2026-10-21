@@ -813,13 +813,13 @@ func _cell_at(node: Node, layer: int, at: Vector2i) -> Array:
 	return []
 
 
-## Saves [param theme] over [param theme_path] with [param item] changed, answering "" or why not.
-func _save_theme(theme: Theme, theme_path: String, item: String) -> String:
+## Saves [param theme] over [param theme_path] with [param items] changed, answering "" or why not.
+func _save_theme(theme: Theme, theme_path: String, items: Array) -> String:
 	var previous: PackedByteArray = FileAccess.get_file_as_bytes(theme_path)
 	var saving: Error = GdhSceneFile.save_keeping_uid(theme, theme_path)
 	if saving != OK:
 		return "Failed to save %s: %s" % [theme_path, error_string(saving)]
-	var unkept: String = _unkept_headless(theme, theme_path, [item], previous)
+	var unkept: String = _unkept_headless(theme, theme_path, items, previous)
 	if not unkept.is_empty():
 		return "Nothing was written: " + unkept + GdhHeadlessCheck.put_back(theme_path, previous)
 	_written(theme_path)
@@ -848,7 +848,7 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 	var color: Color = parsed[1]
 	theme.set_color(color_name, control_type, color)
 
-	var unsaved: String = _save_theme(theme, theme_path, "%s/colors/%s" % [control_type, color_name])
+	var unsaved: String = _save_theme(theme, theme_path, ["%s/colors/%s" % [control_type, color_name]])
 	if not unsaved.is_empty():
 		return {"ok": false, "error": unsaved}
 
@@ -901,7 +901,9 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 		}
 	theme.set_font_size(font_size_name, control_type, int(pixels))
 
-	var unsaved: String = _save_theme(theme, theme_path, "%s/font_sizes/%s" % [control_type, font_size_name])
+	var unsaved: String = _save_theme(
+		theme, theme_path, ["%s/font_sizes/%s" % [control_type, font_size_name]]
+	)
 	if not unsaved.is_empty():
 		return {"ok": false, "error": unsaved}
 
@@ -918,6 +920,49 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 			"size": saved.get_font_size(font_size_name, control_type)
 		}
 	)
+
+
+## Takes one item, such as "colors/font_color", or with none every item of a theme type, out of a
+## Theme: a type is any name, so a misspelt one is written as given, and this is the way back.
+func remove_theme_item(args: Dictionary) -> Dictionary:
+	var theme_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
+	var control_type: String = str(args.get("controlType", ""))
+	var theme: Theme = _load_theme(theme_path)
+	if theme == null:
+		return {"ok": false, "error": "No Theme at %s." % theme_path}
+	if not theme.get_type_list().has(control_type):
+		var types: PackedStringArray = theme.get_type_list()
+		var said: String = "%s holds no type %s" % [theme_path, control_type]
+		return {"ok": false, "error": GdhRead.offered(said, control_type, Array(types))}
+	var kinds: Array[String] = ["colors", "constants", "fonts", "font_sizes", "icons", "styles"]
+	var item: String = str(args.get("item", ""))
+	var removed: Array[String] = []
+	var held: Array[String] = []
+	for kind: int in kinds.size():
+		for called: String in theme.get_theme_item_list(kind as Theme.DataType, control_type):
+			var entry: String = "%s/%s" % [kinds[kind], called]
+			held.append(entry)
+			if item.is_empty() or item == entry:
+				removed.append("%s/%s" % [control_type, entry])
+				theme.clear_theme_item(kind as Theme.DataType, called, control_type)
+	var base: String = theme.get_type_variation_base(control_type)
+	if item.is_empty():
+		# A variation's base is stored apart from its items and would outlive them in the file.
+		if not base.is_empty():
+			removed.append("%s/base_type" % control_type)
+		theme.remove_type(control_type)
+	elif removed.is_empty() and held.is_empty():
+		var only: String = (
+			"%s holds no items, only the type it varies, %s; "
+			+ "without item, remove_theme_item takes it out."
+		)
+		return {"ok": false, "error": only % [control_type, base]}
+	elif removed.is_empty():
+		return {"ok": false, "error": GdhRead.offered("%s has no item %s" % [control_type, item], item, held)}
+	var unsaved: String = _save_theme(theme, theme_path, removed)
+	if not unsaved.is_empty():
+		return {"ok": false, "error": unsaved}
+	return {"ok": true, "themePath": theme_path, "controlType": control_type, "removed": removed}
 
 
 ## [param answer] with a note when its controlType names no class a theme styles. Any name is a
@@ -946,7 +991,7 @@ func _noting_variation(answer: Dictionary) -> Dictionary:
 	var close: PackedStringArray = GdhRead.nearest(type, themed)
 	if not close.is_empty():
 		answer["note"] += (
-			" If a class was meant, the nearest %s %s."
-			% ["is" if close.size() == 1 else "are", ", ".join(close)]
+			(" If a class was meant, the nearest %s %s, and remove_theme_item with controlType %s takes this out.")
+			% ["is" if close.size() == 1 else "are", ", ".join(close), type]
 		)
 	return answer

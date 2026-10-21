@@ -33,6 +33,7 @@ const RESOURCE_COMMANDS: Array[String] = [
 	"create_tileset",
 	"set_theme_color",
 	"set_theme_font_size",
+	"remove_theme_item",
 ]
 const ANIMATION_COMMANDS: Array[String] = [
 	"create_animation",

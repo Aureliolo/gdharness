@@ -124,6 +124,7 @@ func _init_tools() -> void:
 		"set_tilemap_cells": [_resource_tools, "set_tilemap_cells"],
 		"set_theme_color": [_resource_tools, "set_theme_color"],
 		"set_theme_font_size": [_resource_tools, "set_theme_font_size"],
+		"remove_theme_item": [_resource_tools, "remove_theme_item"],
 		"play_scene": [_play_tools, "play_scene"],
 		"restart_editor": [_play_tools, "restart_editor"],
 		"quit_editor": [_play_tools, "quit_editor"],

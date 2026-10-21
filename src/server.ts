@@ -4758,6 +4758,8 @@ class GodotServer {
             return await editorOrEngine('create_tileset', 'writes');
           case 'set_theme_color':
             return await editorOrEngine('set_theme_color', 'writes');
+          case 'remove_theme_item':
+            return await editorOrEngine('remove_theme_item', 'writes');
           default:
             return await editorOrEngine('set_theme_font_size', 'writes');
         }

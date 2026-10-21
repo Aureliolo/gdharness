@@ -393,16 +393,20 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 		var has: PackedStringArray = GdhSerialisation.components_of(value)
 		var sort: String = GdhRead.with_article(type_string(typeof(value)))
 		if has.is_empty():
-			return {
-				"refused":
+			var refused: String = (
 				(
-					(
-						"%s.%s is %s, which a path does not step into: a path reaches the components of a "
-						+ "vector, a colour, a rectangle or a transform."
-					)
-					% [owner, walked, sort]
+					"%s.%s is %s, which a path does not step into: a path reaches the components of a "
+					+ "vector, a colour, a rectangle or a transform."
 				)
-			}
+				% [owner, walked, sort]
+			)
+			# A resource is reached with a slash, which a caller writing a colon had no way to know.
+			if value is Resource:
+				refused += (
+					" A property of the resource it holds is reached with a slash: %s/%s."
+					% [walked, ":".join(steps.slice(index))]
+				)
+			return {"refused": refused}
 		if not step in has:
 			return {
 				"refused":

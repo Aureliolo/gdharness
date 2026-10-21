@@ -1350,7 +1350,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       controlType: {
         type: 'string',
-        ops: ['set_theme_color', 'set_theme_font_size'],
+        ops: ['set_theme_color', 'set_theme_font_size', 'remove_theme_item'],
         description:
           'Theme ops: the theme type, a Control or Window class such as "Button", or the name of a type variation, which can be any name. A name that is no such class is set as a variation and answered with a note saying so.',
       },
@@ -1369,6 +1369,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'number',
         ops: ['set_theme_font_size'],
         description: 'set_theme_font_size: pixels, a whole number of 1 or more.',
+      },
+      item: {
+        type: 'string',
+        ops: ['remove_theme_item'],
+        description:
+          'remove_theme_item: the item to take out, its kind and name as the file writes them, such as "colors/font_color" or "styles/normal". Without it, every item of controlType goes, and the type with them, its base_type among them when it is a variation of one. The answer names each one removed.',
       },
     },
     requires: ['projectPath', 'resourcePath'],
@@ -1396,6 +1402,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         effect: 'destructive',
         summary: 'a font size in a Theme',
         requires: ['controlType', 'fontSizeName', 'size'],
+      },
+      remove_theme_item: {
+        effect: 'destructive',
+        summary: 'take one item, or every item of a type, out of a Theme',
+        requires: ['controlType'],
       },
       move: {
         effect: 'destructive',

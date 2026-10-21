@@ -193,7 +193,13 @@ static func nearest(word: String, names: PackedStringArray) -> PackedStringArray
 		func(a: String, b: String) -> bool:
 			return a.to_lower().similarity(wanted) > b.to_lower().similarity(wanted)
 	)
-	return PackedStringArray(close.slice(0, 3))
+	# Every name that only adds to the word stays, since cutting at three named three corners of
+	# corner_radius and left out the fourth as if it were not there.
+	var named: PackedStringArray = PackedStringArray(close.slice(0, 3))
+	for name: String in close.slice(3):
+		if name.to_lower().begins_with(wanted):
+			var _added: bool = named.append(name)
+	return named
 
 
 ## [param said], the refusal for [param word], which is not among [param names], with those nearest
