@@ -29791,7 +29791,7 @@ async function testInputThatReachesNothingSaysWhatWould(): Promise<void> {
     // ten-second wait, and which the game's log counted as errors the game made.
     const output = await call('editor_output', { op: 'run' });
     assert.deepEqual(
-      [get(output.answer, 'errors'), /Unicode parsing error/.test(output.said)],
+      [get(output.answer, 'errors'), output.said.includes('Unicode parsing error')],
       [0, false],
       `the refusal leaves the game's log as it was: ${output.said}`,
     );
