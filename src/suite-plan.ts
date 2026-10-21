@@ -334,6 +334,14 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
   return bins.map((bin, index) => planOf(bin, declared, index === 0 && windowed.length > 0));
 }
 
+/** What the line announcing a run says of its window, after the number of engines. */
+export function windowedSaid(plans: readonly EnginePlan[]): string {
+  if (!plans.some((plan) => plan.windowed)) {
+    return '';
+  }
+  return plans.length === 1 ? ', with a window' : ', one of them windowed';
+}
+
 /** Every unit in one engine, in the order given. */
 export function inOneEngine(units: readonly Unit[], declared: CasesBySuite): EnginePlan {
   return planOf(

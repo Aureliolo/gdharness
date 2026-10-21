@@ -196,7 +196,10 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	if not problems.is_empty():
 		var refusal: String = "Nothing was changed: " + "; ".join(problems)
 		if _redeclares(modifications, declared):
-			refusal += ". modify only adds, so a member the script declares already is changed in the file itself"
+			refusal += (
+				". modify only adds members; to change one the script declares already,"
+				+ " edit its lines in the file"
+			)
 		return _log.failure(refusal)
 	# Each placed line as a zero-based index that moves down whenever a later insertion lands above
 	# it, so the numbers answered are where the lines are in the file written, not where each went

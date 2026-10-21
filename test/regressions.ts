@@ -335,6 +335,7 @@ import {
   timesAfter,
   type Unit,
   unitsOf,
+  windowedSaid,
 } from '../src/suite-plan.js';
 import { macMemoryLevel, roomFor, TestUsageError, testOptionsOf } from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
@@ -37577,6 +37578,19 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'one engine at most, the windowed one running everything',
     );
     assert.equal(dealt(units, declared, 2).length, 2, 'the windowed engine counts toward the most');
+    assert.deepEqual(
+      [
+        plans,
+        dealt(units, declared, 1),
+        dealt(
+          units.filter((u) => !u.windowed),
+          declared,
+          4,
+        ),
+      ].map(windowedSaid),
+      [', one of them windowed', ', with a window', ''],
+      'the run line says which engine has the window, and of a lone engine that it has one',
+    );
 
     // A run whose one windowed suite is quick: kept to that suite alone, the windowed engine sat
     // idle for most of the run while three engines carried 1100 s. Over four it is about a quarter.
@@ -38057,9 +38071,12 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
           '',
         ].join('\n'),
       });
-      const shown = test('tests/window_test.gd', 'tests/ok_test.gd');
+      // One engine, so the headless suite has to run in the windowed engine beside the one that
+      // needs the window.
+      const shown = test('--engines', '1', 'tests/window_test.gd', 'tests/ok_test.gd');
       assert.equal(shown.status, 0, shown.said);
-      assert.match(shown.said, /over 2 engines, one of them windowed\./, shown.said);
+      assert.match(shown.said, /in 2 suites over 1 engine, with a window\./, shown.said);
+      assert.match(shown.said, /^Passed: \d+ cases in 2 suites across 1 engine/m, shown.said);
     } else {
       console.log(`test command windowed case skipped: ${windowed}`);
     }

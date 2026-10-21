@@ -1045,7 +1045,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.match(
     duplicated.stderr,
     new RegExp(
-      `Nothing was changed: modification 1 adds speed, and the script already declares var speed on line ${speedLine}; modification 3 adds fresh, which modification 2 adds too; modification 4 is a constant with no defaultValue, and a constant needs a value\\. modify only adds, so a member the script declares already is changed in the file itself`,
+      `Nothing was changed: modification 1 adds speed, and the script already declares var speed on line ${speedLine}; modification 3 adds fresh, which modification 2 adds too; modification 4 is a constant with no defaultValue, and a constant needs a value\\. modify only adds members; to change one the script declares already, edit its lines in the file`,
     ),
     duplicated.stderr,
   );
