@@ -301,6 +301,11 @@ func add_node(args: Dictionary) -> Dictionary:
 		"nodePath": new_path,
 		"index": new_node.get_index(),
 	}
+	if not properties.is_empty():
+		var held: Dictionary = {}
+		for key: Variant in properties:
+			held[str(key)] = _readable(new_node, _properties.read_at(new_node, str(key)))
+		answer["properties"] = held
 	_properties.note_write(answer, new_node)
 	if not adding.is_empty():
 		answer.merge(GdhGroups.read(scene, new_node))
@@ -505,6 +510,7 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	var drawn_at: Dictionary = {}
 	for property: String in GdhPlacing.placing(node):
 		drawn_at[property] = _properties.read_at(node, property)
+	var held_at: Transform3D = (node as Node3D).transform if node is Node3D else Transform3D.IDENTITY
 	# Unowned while it moves: a node taken out of the tree keeps its owner, and adding it under the new
 	# parent warned that the owner was not above it. Node.reparent warns the same way.
 	node.owner = null
@@ -519,6 +525,20 @@ func reparent_node(args: Dictionary) -> Dictionary:
 		var now: Variant = _properties.read_at(node, property)
 		if not GdhSame.same(now, drawn_at[property]):
 			also_changed[property] = {"was": _readable(node, drawn_at[property]), "now": _readable(node, now)}
+	var sheared: String = ""
+	if node is Node3D and GdhPlacing.sheared((node as Node3D).basis):
+		var spatial: Node3D = node
+		also_changed["transform"] = {
+			"was": _readable(node, held_at), "now": _readable(node, spatial.transform)
+		}
+		sheared = (
+			(
+				"%s keeps where it is drawn under %s, which is scaled unevenly across the way it is turned,"
+				+ " so its basis is sheared: no position, rotation and scale describe it, and transform is"
+				+ " what it holds. keepGlobalTransform false keeps its own transform instead."
+			)
+			% [str(node.name), new_parent_path]
+		)
 
 	var new_path: String = scene.path_of(node)
 	var index: int = node.get_index()
@@ -548,6 +568,8 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	}
 	if not also_changed.is_empty():
 		answer["alsoChanged"] = also_changed
+	if not sheared.is_empty():
+		answer["sheared"] = sheared
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
 	return answer

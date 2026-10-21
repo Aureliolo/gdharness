@@ -42971,6 +42971,11 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       });
     const music = await speaker('Music');
     assert.equal(get(music, 'result', 'isError'), undefined, textOf(music) ?? '');
+    assert.deepEqual(
+      get(parseTextContent(music), 'properties'),
+      { bus: 'Music' },
+      `an add says what it wrote: ${textOf(music) ?? ''}`,
+    );
     assert.match(readFileSync(join(project, 'speaker.tscn'), 'utf8'), /^bus = &"Music"$/m);
     assert.equal(
       textOf(await speaker('Musik')),
@@ -43020,7 +43025,12 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     );
 
     // An enum by the name of a value, as written and in another case, and by its number.
-    await written({ kind: 'POTION' });
+    const potion = await written({ kind: 'POTION' });
+    assert.deepEqual(
+      get(potion, 'properties'),
+      { kind: 2 },
+      `the answer has what the engine kept: ${JSON.stringify(potion)}`,
+    );
     assert.match(file(), /^kind = 2$/m, file());
     await written({ kind: 'shield' });
     assert.match(file(), /^kind = 1$/m, file());
@@ -48547,7 +48557,16 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     // default for it to leave it out against.
     const tags = 'tags = PackedStringArray()';
     assert.deepEqual(sets('made.tres', '[resource]'), ['script = ExtResource', 'max_hp = 30', tags]);
-    await written('resource_edit', { op: 'modify', resourcePath: 'stats.tres', properties: { max_hp: 40 } });
+    const modified = await written('resource_edit', {
+      op: 'modify',
+      resourcePath: 'stats.tres',
+      properties: { max_hp: 40 },
+    });
+    assert.deepEqual(
+      get(modified, 'properties'),
+      { max_hp: 40 },
+      `a modify says what it wrote: ${JSON.stringify(modified)}`,
+    );
     assert.deepEqual(sets('stats.tres', '[resource]'), ['script = ExtResource', 'max_hp = 40', tags]);
     // Made by its class_name, as the editor's create dialog offers it.
     const made = await written('resource_edit', {
@@ -48557,6 +48576,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       properties: { max_hp: 50 },
     });
     assert.equal(get(made, 'resourceType'), 'Stats', JSON.stringify(made));
+    assert.deepEqual(
+      get(made, 'properties'),
+      { max_hp: 50 },
+      `a create says what it wrote: ${JSON.stringify(made)}`,
+    );
     assert.deepEqual(sets('named.tres', '[resource]'), ['script = ExtResource', 'max_hp = 50', tags]);
     assert.match(
       fileOf('named.tres'),
@@ -48595,11 +48619,16 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     );
     // Reached by a slash path, the scripted resource built into the file keeps what was written to
     // it, which the check for what its script changed would otherwise put back.
-    await written('resource_edit', {
+    const reached = await written('resource_edit', {
       op: 'modify',
       resourcePath: 'pack.tres',
       properties: { 'inner/hp': 7, 'inner/spot:x': 3 },
     });
+    assert.deepEqual(
+      get(reached, 'properties'),
+      { 'inner/hp': 7, 'inner/spot:x': 3 },
+      `each path comes back as it was given: ${JSON.stringify(reached)}`,
+    );
     assert.deepEqual(
       sets('pack.tres', '[sub_resource type="Resource"'),
       ['script = ExtResource', 'max_hp = 20', 'hp = 7', tags, 'spot = Vector2(3, 0)'],
@@ -48877,7 +48906,15 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       '[node name="Lifted" type="Node3D" parent="Arm"]\ntop_level = true\n' +
       'transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 5)\n\n' +
       '[node name="Finger" type="Node3D" parent="Arm/Lifted"]\n' +
-      'transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)\n',
+      'transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)\n\n' +
+      '[node name="Squash" type="Node3D" parent="."]\ntransform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)\n\n' +
+      '[node name="Turned" type="Node3D" parent="Squash"]\n' +
+      'transform = Transform3D(0.70710677, 0, -0.70710677, 0, 1, 0, 0.70710677, 0, 0.70710677, 0, 0, 0)\n\n' +
+      '[node name="Leaned" type="Node3D" parent="Squash"]\n' +
+      'transform = Transform3D(0.70710677, -0.70710677, 0, 0.70710677, 0.70710677, 0, 0, 0, 1, 0, 0, 0)\n\n' +
+      '[node name="Tall" type="Node3D" parent="."]\ntransform = Transform3D(1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0)\n\n' +
+      '[node name="Tipped" type="Node3D" parent="Tall"]\n' +
+      'transform = Transform3D(1, 0, 0, 0, 0.70710677, -0.70710677, 0, 0.70710677, 0.70710677, 0, 0, 0)\n',
     'twice.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://coin.tscn" id="1_coin"]\n\n' +
       '[node name="Twice" type="Node2D"]\n\n' +
@@ -49078,6 +49115,34 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       fileOf('world.tscn'),
       /\[node name="Hand" type="Node3D" parent="\."[^\]]*\]\ntransform = Transform3D\(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 3, 3\)\n/,
     );
+    assert.equal(
+      get(hand, 'sheared'),
+      undefined,
+      `a move under a square parent shears nothing: ${JSON.stringify(hand)}`,
+    );
+    // Kept in place out from under a parent scaled along one axis while it is turned about another,
+    // two of the node's axes stop being square, which position, rotation and scale cannot say. One
+    // node for each pair of axes, since each pair is a check of its own.
+    for (const [path, name] of [
+      ['Squash/Turned', 'Turned'],
+      ['Squash/Leaned', 'Leaned'],
+      ['Tall/Tipped', 'Tipped'],
+    ]) {
+      const moved = await node({
+        op: 'reparent',
+        scenePath: 'world.tscn',
+        nodePath: path,
+        newParentPath: '.',
+      });
+      assert.ok(
+        Object.keys(asObject(get(moved, 'alsoChanged'))).includes('transform'),
+        `the transform ${name} holds is in the answer: ${JSON.stringify(moved)}`,
+      );
+      assert.equal(
+        get(moved, 'sheared'),
+        `${name} keeps where it is drawn under ., which is scaled unevenly across the way it is turned, so its basis is sheared: no position, rotation and scale describe it, and transform is what it holds. keepGlobalTransform false keeps its own transform instead.`,
+      );
+    }
     const loose = await node({
       op: 'reparent',
       scenePath: 'world.tscn',
