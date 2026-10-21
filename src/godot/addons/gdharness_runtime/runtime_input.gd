@@ -150,6 +150,9 @@ func inject_action(params: Dictionary) -> Dictionary:
 
 	var focused: String = _focus_owner()
 	_say_action(action, whole or held, strength)
+	var shortcuts: Dictionary = {"shortcuts": [], "shortcut_pressed": null}
+	if whole or held:
+		shortcuts = await GdhValues.press_shortcuts(_host.get_tree().root, action)
 	var lasted: Variant = null
 	if whole:
 		# A frame between the halves at least, as a click has: a listener that acts on the press and
@@ -163,6 +166,8 @@ func inject_action(params: Dictionary) -> Dictionary:
 			"type": "input_injected",
 			"input_type": "action",
 			"action": action,
+			"shortcuts": shortcuts["shortcuts"],
+			"shortcut_pressed": shortcuts["shortcut_pressed"],
 			"pressed": held and not whole,
 			"whole": whole,
 			"held_frames": GdhValues.held_answer(whole, frames),

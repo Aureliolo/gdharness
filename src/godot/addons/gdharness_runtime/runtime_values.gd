@@ -211,6 +211,56 @@ static func actions_of(event: InputEvent) -> Array[String]:
 	return named
 
 
+## Presses the buttons under [param root] whose Shortcut [param action] matches, as the player's key
+## bound to it would, and answers their paths under "shortcuts" and the one that took the press
+## under "shortcut_pressed". A Viewport hands a shortcut only keys, joypad buttons and
+## InputEventShortcut, so an action pressed on its own never reached a Button whose Shortcut holds
+## that action, which is how a game gives a button a binding the player can change.
+##
+## A key goes to the shortcuts last in the tree first and stops at the first button that takes it,
+## while an InputEventShortcut reaches only the buttons holding that one Shortcut. So each Shortcut
+## is sent in that order, a frame apart, until a button is pressed; a button still decides by its
+## disabled, its visibility and its shortcut context, as it does for the key.
+static func press_shortcuts(root: Node, action: String) -> Dictionary:
+	var pressing: InputEventAction = InputEventAction.new()
+	pressing.action = action
+	pressing.pressed = true
+	var buttons: Array[BaseButton] = []
+	for node: Node in root.find_children("*", "BaseButton", true, false):
+		var button: BaseButton = node
+		if button.shortcut != null and button.shortcut.matches_event(pressing):
+			buttons.append(button)
+	var paths: Array[String] = []
+	for button: BaseButton in buttons:
+		paths.append(str(button.get_path()))
+	buttons.reverse()
+	var taken: Array[String] = []
+	var heard: Array[Callable] = []
+	for button: BaseButton in buttons:
+		var path: String = str(button.get_path())
+		var hearing: Callable = func() -> void: taken.append(path)
+		heard.append(hearing)
+		var _listening: int = button.pressed.connect(hearing)
+	var sent: Dictionary = {}
+	for button: BaseButton in buttons:
+		if not taken.is_empty():
+			break
+		if sent.has(button.shortcut):
+			continue
+		sent[button.shortcut] = true
+		var through: InputEventShortcut = InputEventShortcut.new()
+		through.shortcut = button.shortcut
+		Input.parse_input_event(through)
+		await root.get_tree().process_frame
+	for at: int in buttons.size():
+		if is_instance_valid(buttons[at]):
+			buttons[at].pressed.disconnect(heard[at])
+	var pressed: Variant = null
+	if not taken.is_empty():
+		pressed = taken[0]
+	return {"shortcuts": paths, "shortcut_pressed": pressed}
+
+
 ## What [param path] names: a node under [param root], as [method node_at] reads it, or an engine
 ## singleton by its name. Answers the object under "object", and under "node" the node that objects
 ## named in a value are found from, which for a singleton is [param root].

@@ -1216,7 +1216,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'script_info',
     title: 'Script info',
     description:
-      "What a script contains: its structure from the file, or symbols, completions and hover text from the editor's language server.",
+      "What a script contains: its structure from the file, or symbols, completions and hover text from the editor's language server. It reads .gd files only, and answers what a script uses rather than what uses it: project_search finds where a class, a member or a signal is named.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
@@ -2084,7 +2084,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['action'],
         description:
-          'action: the InputMap action name. An engine dialog is not answered this way: AcceptDialog reads the Escape key itself and never asks the InputMap, so ui_cancel goes in and the question stays up. Dismiss one with the key op and keycode Escape, or click its button.',
+          'action: the InputMap action name. A Viewport never hands an action to a shortcut, so the buttons whose Shortcut holds the action are sent it as their Shortcut too, and pressed as by the key bound to it: one button at most, the last in the tree that takes it, passing over one that is disabled, hidden or outside its shortcut context. The answer names those buttons under shortcuts and the one pressed under shortcut_pressed, null when none took it. An engine dialog is not answered this way: AcceptDialog reads the Escape key itself and never asks the InputMap, so ui_cancel goes in and the question stays up. Dismiss one with the key op and keycode Escape, or click its button.',
       },
       pressed: {
         type: 'boolean',

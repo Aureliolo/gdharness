@@ -19205,6 +19205,12 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     writeFileSync(join(project, 'scripts', 'ignored', '.gdignore'), '');
     writeFileSync(join(project, 'scripts', 'notes.txt'), 'not a script\n');
     mkdirSync(join(project, 'empty'));
+    // An addon gdharness installed is stepped over as every other walk steps over it, and read when
+    // it is the folder named.
+    script('addons/gdharness_editor/plugin.gd');
+    script('addons/gdharness_editor/tools/scene_tools.gd');
+    writeFileSync(join(project, 'addons', 'gdharness_editor', VERSION_MARKER), '1.0.0\n');
+    script('addons/theirs/thing.gd');
 
     // Which scripts a call names, without a language server.
     assert.deepEqual(
@@ -19222,7 +19228,13 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       value: ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd'],
     });
     // The project itself is a folder too, which is how a caller asks for every script in it.
-    const everyScript = ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd', 'ui/shop.gd'];
+    const everyScript = [
+      'addons/theirs/thing.gd',
+      'scripts/a.gd',
+      'scripts/quiet.gd',
+      'scripts/sub/b.gd',
+      'ui/shop.gd',
+    ];
     for (const root of ['res://', '.', ['res://']]) {
       assert.deepEqual(
         scriptsToDiagnose(project, root),
@@ -19230,6 +19242,14 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
         `${JSON.stringify(root)} names every script in the project`,
       );
     }
+    assert.deepEqual(
+      scriptsToDiagnose(project, 'addons/gdharness_editor'),
+      {
+        ok: true,
+        value: ['addons/gdharness_editor/plugin.gd', 'addons/gdharness_editor/tools/scene_tools.gd'],
+      },
+      'an installed addon named is read',
+    );
     assert.deepEqual(scriptsToDiagnose(project, ['ui', 'scripts/sub', 'ui/shop.gd', 'scripts/gone.gd']), {
       ok: true,
       value: ['ui/shop.gd', 'scripts/sub/b.gd', 'scripts/gone.gd'],
@@ -19239,6 +19259,7 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       [['ui', 5], /^scriptPath\[1\] is 5, not a script or a folder/],
       [['../elsewhere'], /outside the project/],
       [['empty'], /^No \.gd script is under empty\.$/],
+      [['scripts/ignored'], /^No \.gd script is under scripts\/ignored\.$/],
     ] as const) {
       const refused = scriptsToDiagnose(project, given);
       assert.ok(
@@ -19520,7 +19541,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     assert.match(text(get(answered, 'languageServer')), /^Godot LSP is unavailable on port \d+/, shown);
     assert.match(
       text(get(answered, 'note')),
-      /^No editor of this project is open to ask, so a headless engine compiled the scripts .* warnings is null rather than 0\. editor_launch with hidden: true/,
+      /^No editor of this project is open to ask, so a headless engine compiled the scripts .* warnings is null rather than 0\. editor_launch with hidden: true .* Until then clean says only that every script compiles\.$/,
       shown,
     );
 

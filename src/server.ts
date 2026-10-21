@@ -190,6 +190,7 @@ import {
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
 import {
+  folderFiles,
   pathsInUidCache,
   projectFiles,
   projectStructure,
@@ -3339,7 +3340,9 @@ export function scriptsToDiagnose(
       found.push(relative);
       continue;
     }
-    const inside = scriptsUnder(location.absolutePath, relative);
+    const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
+      relative === '' ? script : `${relative}/${script}`,
+    );
     if (inside.length === 0) {
       empty.push(entry);
     }
@@ -3367,7 +3370,7 @@ function engineChecked(why: string): OperationParams {
   return {
     checkedBy: 'engine',
     languageServer: why,
-    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, and no warnings, which the engine tells only an editor: warnings is null rather than 0. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both.",
+    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, and no warnings, which the engine tells only an editor: warnings is null rather than 0. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both. Until then clean says only that every script compiles.",
   };
 }
 
@@ -3380,28 +3383,6 @@ function isDirectory(path: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** The `.gd` files under [param directory], as paths beginning [param prefix], in a stable order. */
-function scriptsUnder(directory: string, prefix: string): string[] {
-  if (existsSync(join(directory, '.gdignore'))) {
-    return [];
-  }
-  const found: string[] = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
-    a.name < b.name ? -1 : 1,
-  )) {
-    if (entry.name.startsWith('.')) {
-      continue;
-    }
-    const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
-    if (entry.isDirectory()) {
-      found.push(...scriptsUnder(join(directory, entry.name), path));
-    } else if (entry.isFile() && entry.name.endsWith('.gd')) {
-      found.push(path);
-    }
-  }
-  return found;
 }
 
 /** The scene project.godot names for the game to start in, or null when it names none. */

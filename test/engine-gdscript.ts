@@ -2574,6 +2574,22 @@ function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _p
         { script_path: 'res://zebra_pn.gd' },
         `Script file does not exist: res://zebra_pn.gd. ${nearZebra}`,
       ],
+      // A scene was read as a script with nothing in it that extends RefCounted.
+      [
+        'get_script_info',
+        { script_path: 'res://stage.tscn' },
+        "res://stage.tscn is not a GDScript file, and script_info reads .gd files only: scene_tree reads a scene's nodes, and with properties the script each carries.",
+      ],
+      [
+        'get_script_info',
+        { script_path: 'kept.tres' },
+        'res://kept.tres is not a GDScript file, and script_info reads .gd files only: resource_edit read reads a resource.',
+      ],
+      [
+        'get_script_info',
+        { script_path: 'res://notes.txt' },
+        'res://notes.txt is not a GDScript file, and script_info reads .gd files only.',
+      ],
       [
         'modify_script',
         { script_path: 'res://zebra_pn.gd', modifications: [{ type: 'add_signal', name: 'went' }] },

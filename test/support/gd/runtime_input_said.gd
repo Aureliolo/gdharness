@@ -6,6 +6,7 @@ extends SceneTree
 ## engine did with the event: the action counted by a listener, the button pressed.
 
 const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 const Checked = preload("checked.gd")
 
@@ -49,6 +50,7 @@ func _everything() -> void:
 
 	await _check_refusals(input)
 	await _check_keys(input)
+	await _check_shortcuts(input)
 	await _check_clicks(input)
 
 	InputMap.erase_action("leap")
@@ -120,6 +122,77 @@ func _check_keys(input: GdhInputCommands) -> void:
 	if unbound.get("actions") != []:
 		_fail("Q is bound to nothing: %s" % JSON.stringify(unbound))
 	watcher.queue_free()
+
+
+## An action presses a button whose Shortcut holds it, as the key bound to it does, and names it
+## under shortcut_pressed. A Viewport never hands an InputEventAction to a shortcut, so the press
+## read input_injected and the button stayed as it was. Like the key, it presses one button: the
+## last in the tree that takes it, then the next when that one is disabled, across buttons holding
+## the same Shortcut and buttons holding their own. A button whose Shortcut is the key itself is not
+## pressed by the action.
+func _check_shortcuts(input: GdhInputCommands) -> void:
+	var spare: Button = _counted("Spare")
+	spare.shortcut = Shortcut.new()
+	spare.shortcut.events = [_leap()]
+	var by_action: Button = _counted("By action")
+	by_action.shortcut = Shortcut.new()
+	by_action.shortcut.events = [_leap()]
+	var twin: Button = _counted("Twin")
+	twin.shortcut = by_action.shortcut
+	var by_key: Button = _counted("By key")
+	var key: InputEventKey = InputEventKey.new()
+	key.keycode = KEY_SPACE
+	by_key.shortcut = Shortcut.new()
+	by_key.shortcut.events = [key]
+	await process_frame
+	var holding: Array[String] = [str(spare.get_path()), str(by_action.get_path()), str(twin.get_path())]
+
+	var takers: Array[Button] = [twin, by_action, spare, null]
+	for turn: int in takers.size():
+		var pressed: Dictionary = await input.inject_action({"action": "leap"})
+		var taking: Button = takers[turn]
+		var expected: Variant = null
+		if taking != null:
+			expected = str(taking.get_path())
+		if pressed.get("shortcuts") != holding or pressed.get("shortcut_pressed") != expected:
+			_fail("leap names %s as the button it pressed: %s" % [expected, JSON.stringify(pressed)])
+		var counts: Array[int] = []
+		for button: Button in [spare, by_action, twin, by_key]:
+			counts.append(GdhRead.as_int(button.get_meta("presses"), 0))
+		if counts != ([[0, 0, 1, 0], [0, 1, 1, 0], [1, 1, 1, 0], [1, 1, 1, 0]] as Array)[turn]:
+			_fail("leap presses one button at most, %s: %s" % [expected, JSON.stringify(counts)])
+		if taking != null:
+			taking.disabled = true
+	var _keyed: Dictionary = await input.inject_key({"keycode": "Space"})
+	if by_key.get_meta("presses") != 1:
+		_fail("Space presses its own button: %d" % GdhRead.as_int(by_key.get_meta("presses"), 0))
+	var other: Dictionary = await input.inject_action({"action": "shoot"})
+	if other.get("shortcuts") != [] or other.get("shortcut_pressed") != null:
+		_fail("shoot is no button's shortcut: %s" % JSON.stringify(other))
+	for button: Button in [spare, by_action, twin, by_key]:
+		button.queue_free()
+
+
+func _leap() -> InputEventAction:
+	var bound: InputEventAction = InputEventAction.new()
+	bound.action = "leap"
+	bound.pressed = true
+	return bound
+
+
+func _counted(words: String) -> Button:
+	var button: Button = Button.new()
+	button.text = words
+	button.size = Vector2(20, 10)
+	button.set_meta("presses", 0)
+	Checked.done(
+		button.pressed.connect(
+			func() -> void: button.set_meta("presses", GdhRead.as_int(button.get_meta("presses"), 0) + 1)
+		),
+		"counting presses on %s" % words
+	)
+	root.add_child(button)
+	return button
 
 
 ## A mouse_click names the control under it and the actions its button is bound to, and a click on a
