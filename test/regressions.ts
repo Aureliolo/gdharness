@@ -373,7 +373,13 @@ import { containedEngine } from './support/contained-engine.js';
 import { greeting } from './support/greeting.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
 import { asArray, asNumber, asObject, get, text } from './support/json.js';
-import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
+import {
+  isFeedbackBlock,
+  isRecord,
+  type JsonRpcMessage,
+  parseTextContent,
+  textOf,
+} from './support/json-rpc.js';
 import { pixelPng, solidPng } from './support/png.js';
 import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
 import {
@@ -2632,6 +2638,57 @@ async function testACancelledFolderStopsAsking(): Promise<void> {
       seen,
     );
   } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * Every two hundred and fiftieth answer carries the block asking for the tool that is missing, as
+ * a block of its own after the answer, and the suites read answers without it.
+ *
+ * Nothing measured this end to end, and the block landing on a refusal an editor case anchors on
+ * its last sentence failed that case at whichever call the suite had reached.
+ */
+async function testEveryTwoHundredAndFiftiethAnswerAsksForWhatIsMissing(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-feedback-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(project, 'a.gd'), 'extends Node\n\nvar hp: int = 3\n');
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+    },
+  });
+  try {
+    await server.initialize('regression-test');
+    const counts: number[] = [];
+    let last: JsonRpcMessage | null = null;
+    for (let at = 1; at <= 250; at += 1) {
+      last = await server.request(
+        'tools/call',
+        { name: 'script_info', arguments: { projectPath: project, scriptPath: 'a.gd', op: 'structure' } },
+        30_000,
+      );
+      const content = get(last, 'result', 'content');
+      counts.push(Array.isArray(content) ? content.length : 0);
+    }
+    assert.deepEqual([...new Set(counts.slice(0, 249))], [1], 'the first 249 answers are one block each');
+    const blocks = asArray(get(last, 'result', 'content'));
+    assert.equal(blocks.length, 2, `the 250th has the ask after it: ${JSON.stringify(blocks)}`);
+    assert.ok(isFeedbackBlock(blocks[1] as { type: string; text?: string }), JSON.stringify(blocks[1]));
+    assert.ok(
+      !isFeedbackBlock(blocks[0] as { type: string; text?: string }),
+      'and the answer is not taken for it',
+    );
+    assert.equal(textOf(last), get(blocks[0], 'text'), 'the suites read the answer without the ask');
+    // With no engine every answer is the same refusal, which is answer enough to count.
+    assert.match(
+      textOf(last) ?? '',
+      /^GODOT_PATH is set to .*, which does not exist\./,
+      'the refusal it was',
+    );
+  } finally {
+    await server.stop();
     sweep(project);
   }
 }
@@ -53627,6 +53684,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameOnAnotherRuntimeAddonSaysSo,
   testAGameSaysWhichRuntimeAddonItLoaded,
   testAWorktreeFindsItsMainCheckoutsEngine,
+  testEveryTwoHundredAndFiftiethAnswerAsksForWhatIsMissing,
   testARelativeEnginePathIsMadeWhole,
   testAPointerOnTheHiddenDesktopIsNoted,
   testAClickThatDoesNotProcessSaysWhy,
