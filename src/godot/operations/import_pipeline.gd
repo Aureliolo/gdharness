@@ -227,6 +227,7 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	# One already holding the value given changes nothing, and listing it as updated said it had.
 	var updated_keys: Array[String] = []
 	var unchanged_keys: Array[String] = []
+	var changes: Dictionary = {}
 	for name: String in fitted_values:
 		var held: Variant = config.get_value("params", name, null)
 		var value: Variant = fitted_values[name]
@@ -235,6 +236,10 @@ func set_import_options(params: Dictionary) -> Dictionary:
 			continue
 		config.set_value("params", name, value)
 		updated_keys.append(name)
+		changes[name] = {
+			"was": null if held == null else _values.serialize_value(held),
+			"now": _values.serialize_value(value),
+		}
 		_log.debug("Set " + name + " = " + str(value))
 
 	if not updated_keys.is_empty():
@@ -244,6 +249,8 @@ func set_import_options(params: Dictionary) -> Dictionary:
 
 	# The reimport that applies them is the server's, through the editor or the engine's import.
 	var answer: Dictionary = {"resource_path": resource_path, "updated_options": updated_keys}
+	if not changes.is_empty():
+		answer["changed"] = changes
 	if not unchanged_keys.is_empty():
 		answer["unchanged_options"] = unchanged_keys
 	return answer
@@ -383,6 +390,25 @@ func validate_project(params: Dictionary) -> Dictionary:
 				"main_scene",
 				"Main scene " + GdhFileWalk.missing_reason(main_scene),
 				"Update the main scene setting or create the missing scene file",
+				include_suggestions
+			)
+		)
+
+	# A file never imported is on disk, so the reference checks pass it, and still nothing loads it:
+	# a scene using one fails to load in a run or an export.
+	checks_performed.append("imports")
+	var never: Array[String] = []
+	for path: String in _files.find_files_with_extensions("res://", IMPORTABLE_EXTENSIONS):
+		if not FileAccess.file_exists(path + ".import"):
+			never.append(path)
+	if not never.is_empty():
+		never.sort()
+		warnings.append(
+			_finding(
+				"warning",
+				"imports",
+				never_imported_line(never),
+				"Run project_import reimport, or open the project in the editor, whose scan imports them",
 				include_suggestions
 			)
 		)
@@ -602,7 +628,25 @@ func _no_sidecar(resource_path: String) -> String:
 		return resource_path + " has no import options: " + never
 	return (
 		resource_path
-		+ " has not been imported yet, so it has no import file: project_import reimport imports it"
+		+ " has not been imported yet, so it has no import file: project_import reimport imports"
+		+ " it with the importer's defaults and writes that file"
+	)
+
+
+## [param paths], files the engine imports and never has, as health and validation say it: at most
+## five named, since a project never opened in an editor has every one of its assets here.
+static func never_imported_line(paths: Array[String]) -> String:
+	var named: String = ", ".join(paths.slice(0, 5))
+	if paths.size() > 5:
+		named += " and %d more" % (paths.size() - 5)
+	if paths.size() == 1:
+		return (
+			named
+			+ " has never been imported, so nothing can load it until project_import reimport imports it"
+		)
+	return (
+		"%d files have never been imported, so nothing can load them until project_import reimport imports them: %s"
+		% [paths.size(), named]
 	)
 
 

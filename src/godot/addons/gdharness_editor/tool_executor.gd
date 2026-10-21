@@ -8,6 +8,7 @@ extends Node
 const GdhSceneTools = preload("tools/scene_tools.gd")
 const GdhSignalTools = preload("tools/signal_tools.gd")
 const GdhResourceTools = preload("tools/resource_tools.gd")
+const GdhAnimationStates = preload("tools/animation_states.gd")
 const GdhAnimationTools = preload("tools/animation_tools.gd")
 const GdhPlayTools = preload("tools/play_tools.gd")
 const GdhClassTools = preload("tools/class_tools.gd")
@@ -20,6 +21,7 @@ var _editor_plugin: EditorPlugin = null
 var _scene_tools: GdhSceneTools = null
 var _signal_tools: GdhSignalTools = null
 var _resource_tools: GdhResourceTools = null
+var _animation_states: GdhAnimationStates = null
 var _animation_tools: GdhAnimationTools = null
 var _play_tools: GdhPlayTools = null
 var _class_tools: GdhClassTools = null
@@ -37,6 +39,7 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_scene_tools.set_editor_plugin(plugin)
 	_resource_tools.set_editor_plugin(plugin)
 	_animation_tools.set_editor_plugin(plugin)
+	_animation_states.set_editor_plugin(plugin)
 	_play_tools.set_editor_plugin(plugin)
 	_class_tools.set_editor_plugin(plugin)
 	_filesystem_tools.set_editor_plugin(plugin)
@@ -63,6 +66,10 @@ func _init_tools() -> void:
 	_animation_tools = GdhAnimationTools.new()
 	_animation_tools.name = "AnimationTools"
 	add_child(_animation_tools)
+
+	_animation_states = GdhAnimationStates.new()
+	_animation_states.name = "AnimationStates"
+	add_child(_animation_states)
 
 	_play_tools = GdhPlayTools.new()
 	_play_tools.name = "PlayTools"
@@ -131,11 +138,14 @@ func _init_tools() -> void:
 		"read_animation_states": [_animation_tools, "read_animation_states"],
 		"create_animation": [_animation_tools, "create_animation"],
 		"add_animation_track": [_animation_tools, "add_animation_track"],
+		"remove_animation_track": [_animation_tools, "remove_animation_track"],
 		"set_animation": [_animation_tools, "set_animation"],
 		"rename_animation": [_animation_tools, "rename_animation"],
 		"remove_animation": [_animation_tools, "remove_animation"],
-		"add_animation_state": [_animation_tools, "add_animation_state"],
-		"connect_animation_states": [_animation_tools, "connect_animation_states"],
+		"add_animation_state": [_animation_states, "add_animation_state"],
+		"connect_animation_states": [_animation_states, "connect_animation_states"],
+		"remove_animation_state": [_animation_states, "remove_animation_state"],
+		"disconnect_animation_states": [_animation_states, "disconnect_animation_states"],
 	}
 
 

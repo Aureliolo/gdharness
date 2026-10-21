@@ -55,6 +55,9 @@ export interface ProjectStructure {
 /** Text scenes and the binary ones a project may save instead. */
 const SCENE_EXTENSIONS = new Set(['tscn', 'scn']);
 
+/** What the engine writes beside a file it imports or gives a uid, which is no file of the project's own. */
+const SIDECAR_EXTENSIONS = new Set(['import', 'uid']);
+
 /** What a project imports as media: images, fonts, sound, models, video and shaders. */
 const ASSET_EXTENSIONS = new Set([
   'png',
@@ -101,6 +104,9 @@ export function projectStructure(projectPath: string): ProjectStructure {
         visit(join(directory, entry.name));
       } else if (entry.isFile()) {
         const extension = entry.name.split('.').pop()?.toLowerCase() ?? '';
+        if (SIDECAR_EXTENSIONS.has(extension)) {
+          continue;
+        }
         if (SCENE_EXTENSIONS.has(extension)) {
           structure.scenes += 1;
         } else if (extension === 'gd' || extension === 'cs') {
@@ -122,24 +128,39 @@ export function projectStructure(projectPath: string): ProjectStructure {
  * project-relative with forward slashes and sorted, stepping over what the engine steps over.
  */
 export function projectFiles(projectPath: string, extensions: readonly string[]): string[] {
+  return filesBelow(projectPath, extensions);
+}
+
+/**
+ * [method projectFiles] for one folder of a project that a caller named, relative to that folder.
+ * The folder is walked even when gdharness installed it, since naming it asks for it; below it,
+ * as everywhere, what the engine steps over and what gdharness installed are stepped over. A walk
+ * of its own here took in gdharness's addons, so a project's diagnostics checked fifty-five of
+ * them beside its three scripts while every other answer called the three the project's.
+ */
+export function folderFiles(directory: string, extensions: readonly string[]): string[] {
+  return gdignored(directory) ? [] : filesBelow(directory, extensions);
+}
+
+function filesBelow(root: string, extensions: readonly string[]): string[] {
   const found: string[] = [];
   const visit = (directory: string, prefix: string): void => {
-    if (steppedOver(directory)) {
-      return;
-    }
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (skipped(entry.name)) {
         continue;
       }
       const spelled = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const path = join(directory, entry.name);
       if (entry.isDirectory()) {
-        visit(join(directory, entry.name), spelled);
+        if (!steppedOver(path)) {
+          visit(path, spelled);
+        }
       } else if (entry.isFile() && extensions.includes(extname(entry.name).toLowerCase())) {
         found.push(spelled);
       }
     }
   };
-  visit(projectPath, '');
+  visit(root, '');
   return found.sort();
 }
 
@@ -243,6 +264,8 @@ export interface SearchResult {
     total_matches: number;
     truncated: boolean;
   };
+  /** The folders a `.gdignore` kept out, which a search for words the project holds may want. */
+  not_searched?: string[];
 }
 
 /** Whether [param bytes] are a binary file's: a NUL in the first eight thousand, as git judges. */
@@ -397,9 +420,13 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   // Truncated only once a match past the limit has been seen: a search whose matches came to the
   // limit exactly was called cut, and raising the limit gave the same list.
   const full = (): boolean => result.summary.truncated;
+  const notSearched: string[] = [];
 
   const visit = (directory: string): void => {
     if (steppedOver(directory)) {
+      if (gdignored(directory)) {
+        notSearched.push(`res://${directory.slice(projectPath.length + 1).replace(/\\/g, '/')}/`);
+      }
       return;
     }
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -450,5 +477,5 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
     }
   };
   visit(projectPath);
-  return result;
+  return notSearched.length === 0 ? result : { ...result, not_searched: notSearched };
 }

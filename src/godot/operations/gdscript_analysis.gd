@@ -23,6 +23,8 @@ class GdhMembers:
 	var constants: Array[Dictionary] = []
 	var enums: Array[Dictionary] = []
 	var inner_classes: Array[Dictionary] = []
+	## The `##` comment the class is documented with, empty when it has none.
+	var doc: String = ""
 	## The index of the last line the body holds.
 	var last: int = -1
 	## An inner class's name and the line its `class` is on.
@@ -43,6 +45,22 @@ class GdhMembers:
 			"inner_classes": inner_classes,
 		}
 
+	## Whether a member is declared yet, past which a `##` block no longer documents the class.
+	func declares_members() -> bool:
+		return not (
+			signals.is_empty()
+			and variables.is_empty()
+			and functions.is_empty()
+			and constants.is_empty()
+			and enums.is_empty()
+			and inner_classes.is_empty()
+		)
+
+	## [param lines] as the class's documentation, when it has none yet.
+	func take_doc(lines: Array[String]) -> void:
+		if doc.is_empty() and not lines.is_empty():
+			doc = "\n".join(PackedStringArray(lines))
+
 
 func _init(p_log: GdhLog) -> void:
 	_log = p_log
@@ -58,6 +76,9 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	if not full_script_path.begins_with("res://"):
 		full_script_path = "res://" + full_script_path
 
+	# Read as GDScript, a scene came back as a script extending RefCounted with nothing in it.
+	if full_script_path.get_extension().to_lower() != "gd":
+		return _log.failure(_not_a_script(full_script_path))
 	if not FileAccess.file_exists(full_script_path):
 		return _log.failure(
 			GdhFileWalk.new().with_nearest_files(
@@ -130,6 +151,8 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		"autoloads_used": autoloads_used,
 		"line_count": lines.size() - 1 if content.is_empty() or content.ends_with("\n") else lines.size()
 	}
+	if not own.doc.is_empty():
+		answer["class_doc"] = own.doc
 	if GdhRead.as_bool(params.get("include_inherited", false)):
 		_add_inherited(answer, [full_script_path])
 	return answer
@@ -143,6 +166,7 @@ func _members(
 ) -> GdhMembers:
 	var own: GdhMembers = GdhMembers.new()
 	var in_multiline_string: bool = false
+	var doc: Array[String] = []
 
 	var i: int = first - 1
 	while i + 1 < lines.size():
@@ -158,9 +182,25 @@ func _members(
 			if _triple_quotes(raw) % 2 == 1:
 				in_multiline_string = false
 			continue
+		# A `##` block documents what it sits directly above: the class when that is its class_name
+		# or extends line, or when a blank line follows it before any member, and otherwise the next
+		# member. One at a shallower indent is the outer body's, for what follows this inner class.
+		var trimmed: String = raw.strip_edges()
+		if trimmed.begins_with("##"):
+			if not raw.begins_with(margin):
+				own.last = i - 1
+				return own
+			if _indentation(raw).length() <= margin.length():
+				var said: String = trimmed.substr(2)
+				doc.append(said.substr(1) if said.begins_with(" ") else said)
+			continue
 		var stripped: String = GdhPatterns.without_comment(raw)
 
 		if stripped.is_empty():
+			if trimmed.is_empty() and not doc.is_empty():
+				if not own.declares_members():
+					own.take_doc(doc)
+				doc.clear()
 			continue
 
 		# A line back at a shallower indent closes an inner class's body, and is the outer body's
@@ -210,6 +250,7 @@ func _members(
 				stripped = (stripped + " " + GdhPatterns.without_comment(lines[i])).strip_edges()
 			header = GdhPatterns.without_annotations(stripped)
 		var declaration: RegExMatch = GdhPatterns.declared_class(header)
+		var entry: Dictionary = {}
 		if declaration != null:
 			own.declared_class_name = declaration.get_string(1)
 			# `class_name X extends Y` is also one line, and taking the rest of it as the name
@@ -217,28 +258,46 @@ func _members(
 			# `RefCounted`: the name unusable and the base flatly wrong.
 			if not declaration.get_string(2).is_empty():
 				own.extends_name = declaration.get_string(2)
+			own.take_doc(doc)
 		elif header.begins_with("extends "):
 			own.extends_name = header.substr(8).strip_edges()
+			own.take_doc(doc)
 		elif header.begins_with("signal "):
 			# `at`, not `i`: a wrapped declaration starts where it starts, and `i` is now sitting on
 			# the line that closed it.
-			own.signals.append(_parse_signal(header, at + 1))
+			entry = _parse_signal(header, at + 1)
+			own.signals.append(entry)
 		elif header.begins_with("const "):
-			own.constants.append(_parse_constant(header, at + 1))
+			entry = _parse_constant(header, at + 1)
+			own.constants.append(entry)
 		elif header.begins_with("enum "):
-			own.enums.append(_parse_enum(header, at + 1))
+			entry = _parse_enum(header, at + 1)
+			own.enums.append(entry)
 		elif header.begins_with("var ") or header.begins_with("static var "):
 			# The whole line here, not the header: which annotations a variable carries is the
 			# answer rather than noise in front of it, and `@export_range(0, 1)` is the hint.
-			own.variables.append(_parse_variable(stripped, at + 1))
+			entry = _parse_variable(stripped, at + 1)
+			own.variables.append(entry)
 		elif header.begins_with("func ") or header.begins_with("static func "):
-			own.functions.append(_parse_function(header, at + 1, stripped))
+			entry = _parse_function(header, at + 1, stripped)
+			own.functions.append(entry)
 		elif header.begins_with("class "):
 			_collect_dependencies(stripped, dependencies)
 			var inner: GdhMembers = _inner_class(lines, i, margin, header, dependencies)
-			own.inner_classes.append(inner.as_inner())
+			entry = inner.as_inner()
+			if not doc.is_empty():
+				entry["doc"] = "\n".join(PackedStringArray(doc))
+			doc.clear()
+			own.inner_classes.append(entry)
 			i = inner.last
 			continue
+
+		if not entry.is_empty() and not doc.is_empty():
+			entry["doc"] = "\n".join(PackedStringArray(doc))
+		# A line of annotations alone, `@tool` or `@export` above its variable, is between a comment
+		# and what it documents rather than after it.
+		if not header.is_empty():
+			doc.clear()
 
 		_collect_dependencies(stripped, dependencies)
 
@@ -276,6 +335,17 @@ func _inner_class(
 	body.line = at + 1
 	_mark_virtuals(body.functions, body.extends_name, _reading)
 	return body
+
+
+## The refusal for [param path], which is not a .gd file, with the tool that reads what it is.
+static func _not_a_script(path: String) -> String:
+	var said: String = "%s is not a GDScript file, and script_info reads .gd files only" % path
+	match path.get_extension().to_lower():
+		"tscn", "scn":
+			return said + ": scene_tree reads a scene's nodes, and with properties the script each carries."
+		"tres", "res":
+			return said + ": resource_edit read reads a resource."
+	return said + "."
 
 
 static func _indentation(line: String) -> String:

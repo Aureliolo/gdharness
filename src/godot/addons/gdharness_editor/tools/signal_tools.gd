@@ -265,8 +265,14 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 	# A connection that was never there saved the scene unchanged and answered as removed, so a
 	# typo in either name read as success.
 	if _connection_flags(scene.root, from, signal_name, to, method_name) < 0:
+		# The root's path is ".", which before ".method" read as "..method".
+		var said_from: String = str(source.name) if source == scene.root else from
+		var said_to: String = str(target.name) if target == scene.root else to
 		return scene.refuse(
-			"%s has no connection from %s.%s to %s.%s." % [scene_path, from, signal_name, to, method_name]
+			(
+				"%s has no connection from %s.%s to %s.%s."
+				% [scene_path, said_from, signal_name, said_to, method_name]
+			)
 		)
 	source.disconnect(signal_name, Callable(target, method_name))
 

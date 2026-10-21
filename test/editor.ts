@@ -2434,8 +2434,10 @@ async function testAWriteKeepsWhatTheSceneComesFrom({ call, refusal, project }: 
     await refusal('scene_node', { ...inside, op: 'set', properties: { position: { x: 9, y: 9 } } }),
     foreign,
   );
-  assert.match(await refusal('scene_node', { ...inside, op: 'delete' }), foreign);
-  assert.match(await refusal('scene_node', { ...inside, op: 'reparent', newParentPath: '.' }), foreign);
+  const made =
+    /Part\/Inner is inside the scene instanced at Part \(res:\/\/layers\/part\.tscn\), which creates it again on load\./;
+  assert.match(await refusal('scene_node', { ...inside, op: 'delete' }), made);
+  assert.match(await refusal('scene_node', { ...inside, op: 'reparent', newParentPath: '.' }), made);
   assert.match(
     await refusal('scene_signal', {
       ...host,
@@ -3001,6 +3003,21 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
     await refusal('scene_signal', { ...ends, op: 'disconnect', methodName: 'missing' }),
     /has no connection from Go\.pressed to Sink\.missing/,
   );
+  // The root is named, since its path, ".", ran into the method's dot.
+  assert.match(
+    await refusal('scene_signal', { ...ends, op: 'disconnect', targetNodePath: '.', methodName: 'missing' }),
+    /has no connection from Go\.pressed to [A-Za-z]\w*\.missing\.$/,
+  );
+  assert.match(
+    await refusal('scene_signal', {
+      ...ends,
+      op: 'disconnect',
+      sourceNodePath: '.',
+      signalName: 'resized',
+      methodName: 'missing',
+    }),
+    /has no connection from [A-Za-z]\w*\.resized to Sink\.missing\.$/,
+  );
   // A copy keeps the connections of what it copies.
   await call('scene_node', { ...scene, op: 'duplicate', nodePath: 'Go', newName: 'Again' });
   assert.match(
@@ -3120,6 +3137,22 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
     await refusal('scene_animation', { ...scene, op: 'read', animationName: 'moves/run' }),
     /has no animation moves\/run\. It has: .*moves\/walk/,
   );
+  const untracked = await call('scene_animation', {
+    ...scene,
+    op: 'remove_track',
+    animationName: 'moves/idle',
+    track: tracks[1],
+  });
+  assert.deepEqual(
+    [get(untracked, 'removed'), get(untracked, 'keysRemoved'), get(untracked, 'tracks')],
+    [{ type: 'method', nodePath: 'Sprite' }, 1, 1],
+    JSON.stringify(untracked),
+  );
+  assert.deepEqual(
+    get(await call('scene_animation', { ...scene, op: 'read', animationName: 'moves/idle' }), 'tracks'),
+    [tracks[0]],
+    "and the track goes from the editor's scene",
+  );
 
   // Through the editor, into the library file: a key on a path walk animates goes in that track,
   // a shorter length names what it leaves past the end, and a rename and a removal are saved there.
@@ -3162,7 +3195,7 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
   assert.match(
     await refusal('scene_animation', {
       ...track([]),
-      track: { type: 'property', nodePath: 'Nowhere', property: 'position' },
+      track: { type: 'property', nodePath: 'Nowhere', property: 'position', keyframes: [] },
     }),
     /No node at Nowhere from the player's root node/,
   );
@@ -3205,6 +3238,22 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
       toState: 'Waiting',
     }),
     /No transition can leave End/,
+  );
+  await call('scene_animation', { ...states, op: 'connect_states', fromState: 'Start', toState: 'Waiting' });
+  assert.equal(
+    await refusal('scene_animation', {
+      ...states,
+      op: 'disconnect_states',
+      fromState: 'Start',
+      toState: 'End',
+    }),
+    'The editor answered scene_animation disconnect_states with an error: There is no transition from Start to End; the ones leaving Start go to Waiting.',
+  );
+  const dropped = await call('scene_animation', { ...states, op: 'remove_state', stateName: 'Waiting' });
+  assert.deepEqual(
+    [get(dropped, 'removed'), get(dropped, 'transitionsRemoved')],
+    ['Waiting', [{ from: 'Start', to: 'Waiting' }]],
+    JSON.stringify(dropped),
   );
   const lost = await call('scene_animation', {
     projectPath: project,
@@ -3347,6 +3396,11 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     script: 'res://layers/tool_node.gd',
   });
   assert.equal((made as { rootNodeName?: unknown }).rootNodeName, 'Arena', JSON.stringify(made));
+  assert.equal(
+    get(made, 'script'),
+    'res://layers/tool_node.gd',
+    `the answer names the script: ${JSON.stringify(made)}`,
+  );
   assert.match(
     nodeBody(fileText(project, 'arena.tscn'), 'Arena'),
     /script = ExtResource/,

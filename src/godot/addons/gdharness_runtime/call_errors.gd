@@ -16,6 +16,10 @@ var refused: String = ""
 var raised: Array[String] = []
 ## The warnings reported while it ran, a line each.
 var warned: Array[String] = []
+## Where a script error first ended each function it ended, as "res://path:line" by function name.
+## A function the VM ends at a script error gives back its return type's default, 0, "" or null,
+## and its caller goes on with that as if it had been returned.
+var ended_at: Dictionary = {}
 
 
 func _log_message(_message: String, _error: bool) -> void:
@@ -26,8 +30,8 @@ func _log_message(_message: String, _error: bool) -> void:
 # gdlint:ignore = function-arguments-number
 func _log_error(
 	function: String,
-	_file: String,
-	_line: int,
+	file: String,
+	line: int,
 	code: String,
 	rationale: String,
 	_editor_notify: bool,
@@ -45,3 +49,5 @@ func _log_error(
 		warned.append(text)
 	else:
 		raised.append(text)
+	if error_type == ERROR_TYPE_SCRIPT and not ended_at.has(function):
+		ended_at[function] = "%s:%d" % [file, line]

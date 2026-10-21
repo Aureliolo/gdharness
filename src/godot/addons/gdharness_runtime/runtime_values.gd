@@ -31,6 +31,9 @@ const SINGLETONS: Array[String] = [
 ## The most frames a press is held in one call, as many as a frames wait takes.
 const MOST_HELD: int = 600
 
+## Read by [method _key_names], once a game.
+static var _named_keys: PackedStringArray = []
+
 var _shared: GdhSerialisation = GdhSerialisation.new()
 
 
@@ -160,12 +163,7 @@ static func glyph_of(keycode: Key, shifted: bool) -> int:
 ## engine's own names, printable keys and the special ones above [constant KEY_SPECIAL], since the
 ## game takes any name OS.find_keycode_from_string does.
 static func unknown_key(name: String) -> String:
-	var names: PackedStringArray = []
-	for code: int in range(32, 127) + range(KEY_SPECIAL + 1, KEY_SPECIAL + 0x100):
-		var spelled: String = OS.get_keycode_string(code as Key)
-		if not spelled.is_empty() and OS.find_keycode_from_string(spelled) == code:
-			var _named: bool = names.append(spelled)
-	var close: PackedStringArray = GdhRead.nearest(name, names)
+	var close: PackedStringArray = GdhRead.nearest(name, _key_names())
 	var said: String = "No key is called %s." % name
 	if close.size() == 1:
 		said += " The nearest key name is %s." % close[0]
@@ -176,6 +174,107 @@ static func unknown_key(name: String) -> String:
 		+ ' A key is named as Godot names it, such as "Space", "Enter", "Escape", "A" or "F1",'
 		+ " or given by its keycode."
 	)
+
+
+## Every key name the engine takes, read once a game. The engine spells a code it has no name for as
+## the character it would be, and past the last code point that is an error it prints: 136 of them
+## for the special range, two seconds of console on a fast machine, more than a call's whole wait on
+## a loaded one, and each in the game's log as an error the game never made. So they are asked with
+## the engine's error printing off, which no other line of the main thread runs beside.
+static func _key_names() -> PackedStringArray:
+	if not _named_keys.is_empty():
+		return _named_keys
+	var printing: bool = Engine.print_error_messages
+	Engine.print_error_messages = false
+	for code: int in range(32, 127) + range(KEY_SPECIAL + 1, KEY_SPECIAL + 0x100):
+		var spelled: String = OS.get_keycode_string(code as Key)
+		if not spelled.is_empty() and OS.find_keycode_from_string(spelled) == code:
+			var _named: bool = _named_keys.append(spelled)
+	Engine.print_error_messages = printing
+	return _named_keys
+
+
+## The refusal for [param action], which the input map lacks, with the nearest of the project's own
+## actions, or else all of them. The engine's ui_ ones are in every project, and offered for any name
+## they only buried the project's ("dance" is near ui_cancel), so they are offered for a ui_ name only.
+static func no_action(action: String) -> String:
+	var engine: PackedStringArray = []
+	var own: PackedStringArray = []
+	for named: StringName in InputMap.get_actions():
+		if str(named).begins_with("ui_"):
+			var _listed: bool = engine.append(str(named))
+		else:
+			var _owned: bool = own.append(str(named))
+	own.sort()
+	var said: String = "Action not found: %s" % action
+	var close: PackedStringArray = GdhRead.nearest(action, engine if action.begins_with("ui_") else own)
+	if not close.is_empty():
+		return "%s; the nearest %s %s." % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+	if own.is_empty():
+		return "%s; the project defines no actions of its own, and the engine's are the ui_ ones." % said
+	return "%s; the project's own actions are %s, beside the engine's ui_ ones." % [said, ", ".join(own)]
+
+
+## The actions of the input map that [param event] stands for, as Input reads it for
+## is_action_pressed: a key or a button bound to an action presses that action too, so a game
+## counting the action counted the key, and the answer had said only that a key went in.
+static func actions_of(event: InputEvent) -> Array[String]:
+	var named: Array[String] = []
+	for action: StringName in InputMap.get_actions():
+		if InputMap.event_is_action(event, action):
+			named.append(str(action))
+	named.sort()
+	return named
+
+
+## Presses the buttons under [param root] whose Shortcut [param action] matches, as the player's key
+## bound to it would, and answers their paths under "shortcuts" and the one that took the press
+## under "shortcut_pressed". A Viewport hands a shortcut only keys, joypad buttons and
+## InputEventShortcut, so an action pressed on its own never reached a Button whose Shortcut holds
+## that action, which is how a game gives a button a binding the player can change.
+##
+## A key goes to the shortcuts last in the tree first and stops at the first button that takes it,
+## while an InputEventShortcut reaches only the buttons holding that one Shortcut. So each Shortcut
+## is sent in that order, a frame apart, until a button is pressed; a button still decides by its
+## disabled, its visibility and its shortcut context, as it does for the key.
+static func press_shortcuts(root: Node, action: String) -> Dictionary:
+	var pressing: InputEventAction = InputEventAction.new()
+	pressing.action = action
+	pressing.pressed = true
+	var buttons: Array[BaseButton] = []
+	for node: Node in root.find_children("*", "BaseButton", true, false):
+		var button: BaseButton = node
+		if button.shortcut != null and button.shortcut.matches_event(pressing):
+			buttons.append(button)
+	var paths: Array[String] = []
+	for button: BaseButton in buttons:
+		paths.append(str(button.get_path()))
+	buttons.reverse()
+	var taken: Array[String] = []
+	var heard: Array[Callable] = []
+	for button: BaseButton in buttons:
+		var path: String = str(button.get_path())
+		var hearing: Callable = func() -> void: taken.append(path)
+		heard.append(hearing)
+		var _listening: int = button.pressed.connect(hearing)
+	var sent: Dictionary = {}
+	for button: BaseButton in buttons:
+		if not taken.is_empty():
+			break
+		if sent.has(button.shortcut):
+			continue
+		sent[button.shortcut] = true
+		var through: InputEventShortcut = InputEventShortcut.new()
+		through.shortcut = button.shortcut
+		Input.parse_input_event(through)
+		await root.get_tree().process_frame
+	for at: int in buttons.size():
+		if is_instance_valid(buttons[at]):
+			buttons[at].pressed.disconnect(heard[at])
+	var pressed: Variant = null
+	if not taken.is_empty():
+		pressed = taken[0]
+	return {"shortcuts": paths, "shortcut_pressed": pressed}
 
 
 ## What [param path] names: a node under [param root], as [method node_at] reads it, or an engine

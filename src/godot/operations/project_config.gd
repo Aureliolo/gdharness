@@ -166,6 +166,37 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	return answer
 
 
+# Takes a setting's line out of project.godot, so the engine's default holds again, or nothing at all
+# for one the engine does not declare: the way back from a set, which writes a misspelt name as given.
+func unset_project_setting(params: Dictionary) -> Dictionary:
+	var setting_path: String = str(params.get("setting", ""))
+	if setting_path.is_empty():
+		return _log.failure("setting is required")
+	var default_value: Variant = ProjectSettings.property_get_revert(setting_path)
+	var held: bool = ProjectSettings.has_setting(setting_path)
+	var value: Variant = ProjectSettings.get_setting(setting_path) if held else null
+	var answer: Dictionary = {
+		"setting_path": setting_path,
+		"default_value": _values.serialize_value(default_value) if default_value != null else null,
+	}
+	# A setting at the engine's default has no line to take out, as the engine leaves it out of the file.
+	if not held or (default_value != null and value == default_value):
+		answer["removed"] = false
+		answer["saved"] = false
+		answer["note"] = "project.godot does not set %s, so there was nothing to take out." % setting_path
+		return answer
+	answer["old_value"] = _values.serialize_value(value)
+	# The default rather than null for a setting the engine declares: null takes the declaration away
+	# as well, and a value at its default is left out of the file all the same.
+	ProjectSettings.set_setting(setting_path, default_value)
+	var err: Error = GdhProjectFile.save()
+	if err != OK:
+		return _log.failure("Failed to save project.godot: " + error_string(err))
+	answer["removed"] = true
+	answer["saved"] = true
+	return answer
+
+
 # The settings in the same section as [param setting_path] named nearest it, for a new one that is
 # likely a misspelt one: a setting nothing declares is written all the same, and is never read.
 static func _settings_near(setting_path: String) -> PackedStringArray:

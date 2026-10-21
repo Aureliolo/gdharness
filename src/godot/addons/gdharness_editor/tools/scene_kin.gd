@@ -118,13 +118,16 @@ static func inherit(scene_path: String, base_path: String, root_name: String, sc
 			"%s did not load back as a scene inheriting %s, so it was removed." % [scene_path, base_path]
 		}
 	GdhSceneFile.refresh(scene_path)
-	return {
+	var answer: Dictionary = {
 		"ok": true,
 		"scenePath": scene_path,
 		"inherits": base_path,
 		"rootNodeType": root_type,
 		"rootNodeName": name
 	}
+	if script != null:
+		answer["script"] = script.resource_path
+	return answer
 
 
 ## Makes the children of [param node], an instance in [param scene], editable or not, answering why

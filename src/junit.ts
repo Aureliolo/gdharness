@@ -262,6 +262,48 @@ export function ignoredYetRan(report: TestReport, ignored: readonly string[]): I
 }
 
 /**
+ * What [param ignored] left out, read against the cases the suites under the run's paths declare,
+ * [param declared]: each case an entry names that the report does not hold, as `suite_name:test_name`,
+ * and each entry naming no case there at all. A run that left a case out was answered passed with
+ * nothing saying a case had not run, and an entry spelt wrong left out nothing and said nothing.
+ */
+export function ignoredLeftOut(
+  report: TestReport,
+  ignored: readonly string[],
+  declared: ReadonlyArray<{ readonly path: string; readonly cases: readonly string[] }>,
+): { leftOut: string[]; unmatched: string[] } {
+  const nameOf = (path: string): string => (path.split('/').at(-1) ?? path).replace(/\.gd$/, '');
+  const leftOut = new Set<string>();
+  const unmatched: string[] = [];
+  for (const entry of ignored) {
+    const bare = entry.replace('res://', '');
+    const at = bare.lastIndexOf(':');
+    const suiteNamed = at === -1 ? bare : bare.slice(0, at);
+    const testNamed = at === -1 ? null : bare.slice(at + 1);
+    const named = declared
+      .filter((suite) => nameOf(suite.path) === suiteNamed || suite.path.includes(suiteNamed))
+      .flatMap((suite) =>
+        suite.cases.filter((one) => testNamed === null || one === testNamed).map((test) => ({ suite, test })),
+      );
+    if (named.length === 0) {
+      unmatched.push(entry);
+      continue;
+    }
+    for (const { suite, test } of named) {
+      const reported = report.suites
+        .filter((ran) => ran.path === suite.path || (ran.path === null && ran.name === nameOf(suite.path)))
+        .some((ran) =>
+          ran.cases.some((one) => one.name === test || new RegExp(`^${test}\\W`).test(one.name)),
+        );
+      if (!reported) {
+        leftOut.add(`${nameOf(suite.path)}:${test}`);
+      }
+    }
+  }
+  return { leftOut: [...leftOut].sort(), unmatched };
+}
+
+/**
  * A case with every report gdUnit4 wrote for it.
  *
  * gdUnit4 goes on past a failed assertion and writes one child per report, so a case can carry
@@ -798,7 +840,7 @@ function masked(expected: string, actual: string): boolean {
 
 const PRINTED_DICTIONARY = /^\{\n\t[\s\S]*\n {2}\}$/;
 
-/** One suite that finished with nodes still in the tree, and how many. */
+/** One suite that finished with nodes neither freed nor in the tree, and how many. */
 interface SuiteOrphans {
   /** The suite's script, as gdUnit4 names it on the line announcing the run. */
   readonly path: string;
@@ -820,7 +862,7 @@ const OVERALL = 'Overall Summary';
  * The orphan nodes a run reported, read off what it printed.
  *
  * Read from the console because it is the only place they are. gdUnit4 counts orphans per suite
- * and decides the run's state from them: no errors and no failures, but nodes left in the tree,
+ * and decides the run's state from them: no errors and no failures, but nodes neither freed nor in the tree,
  * is the WARNING state, which is exit 101. Its JUnit writer does not carry any of that: an ORPHAN
  * report produces no element at all, and neither `testsuite` nor `testsuites` gets an attribute
  * for it, so a report parsed from the XML has every count at zero and nothing to explain the

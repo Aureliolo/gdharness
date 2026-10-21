@@ -493,6 +493,9 @@ func call_method(params: Dictionary) -> Dictionary:
 		answer["awaited"] = true
 	_keep_reported(answer, "errors", caught.raised)
 	_keep_reported(answer, "warnings", caught.warned)
+	# Main.explode, ended at a null it called into, answered result 0 as if it had counted something.
+	if caught.ended_at.has(named):
+		answer["ended_by_error_at"] = caught.ended_at[named]
 	var asked: Variant = params.get("properties")
 	if _reads_the_result(asked):
 		answer.merge(_read_off_result(result, asked))
@@ -524,7 +527,9 @@ static func _not_a_method_to_call(holder: Object, named: String, called: String)
 				% [called, named]
 			)
 		method = GdhPaths.method_of(named)
-	return "" if holder.has_method(method) else "%s has no method %s" % [called, method]
+	if holder.has_method(method):
+		return ""
+	return GdhPaths.with_methods_offered("%s has no method %s" % [called, method], holder, method)
 
 
 ## Whether a call's `properties` asks for its result to be read: true, or a list of names.

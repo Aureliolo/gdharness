@@ -57,6 +57,7 @@ import {
   type Unit,
   unitsOf,
   viewportOf,
+  windowedSaid,
   writeJson,
 } from './suite-plan.js';
 import { getLocalVersion } from './version.js';
@@ -441,7 +442,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         : '';
     const how =
       options.order === null
-        ? `${plans.some((plan) => plan.windowed) ? ', one of them windowed' : ''}${held}`
+        ? `${windowedSaid(plans)}${held}`
         : options.order === 'reversed'
           ? ', in reverse order of path'
           : `, shuffled by ${String(options.order)}`;

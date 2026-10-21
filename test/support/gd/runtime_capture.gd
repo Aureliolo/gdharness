@@ -82,6 +82,8 @@ func _check_what_is_asked(capture: CaptureCommands, output_path: String) -> void
 		[{"zoom": 2, "width": 100}, "give one or the other"],
 		[{"region": {"x": 0, "y": 0, "width": 0, "height": 4}}, "with an area"],
 		[{"region": "the corner"}, "with an area"],
+		# A path naming nothing, which a headless game told only that it has no window.
+		[{"nodePath": "/root/Nowhere"}, "Node not found: /root/Nowhere"],
 	]
 	for case: Array in cases:
 		var asked: Dictionary = case[0]
@@ -92,6 +94,11 @@ func _check_what_is_asked(capture: CaptureCommands, output_path: String) -> void
 		var why: String = case[1]
 		if answer.get("type", "") != "error" or not message.contains(why):
 			_fail("%s should be refused for what was asked (%s): %s" % [asked, why, message])
+	# And a path that names a node goes on to the window, which here is the refusal for having none.
+	var found: Dictionary = await capture.capture_screenshot(
+		{"output_path": output_path, "nodePath": str(host.get_path())}
+	)
+	_check_refused(found, "a node that is there", output_path)
 
 	# A SubViewport's texture is in its own pixels, so window pixels name nothing in it.
 	var sub: SubViewport = SubViewport.new()
