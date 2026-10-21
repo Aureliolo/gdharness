@@ -5542,6 +5542,47 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
     asNumber(get(everything, 'total'), 'total') - 100,
     'with the rest counted',
   );
+
+  // A class written beside the editor, which it has not scanned: the language server reads it as
+  // nothing, so a completion after self. in a script extending it came back empty without a word.
+  writeFileSync(
+    join(project, 'unseen_base.gd'),
+    'class_name UnseenBase\nextends Node\n\nvar health: int = 3\n',
+  );
+  writeFileSync(join(project, 'unseen_child.gd'), 'extends UnseenBase\n\n\nfunc hit() -> void:\n\tself.\n');
+  const child = {
+    projectPath: project,
+    scriptPath: 'res://unseen_child.gd',
+    op: 'completion',
+    line: 5,
+    character: 7,
+  };
+  try {
+    const blind = await call('script_info', child);
+    assert.deepEqual(
+      get(blind, 'unseenByEditor'),
+      [{ className: 'UnseenBase', path: 'res://unseen_base.gd' }],
+      JSON.stringify(blind),
+    );
+    assert.match(
+      text(get(blind, 'unseenNote')),
+      /^The editor cannot see UnseenBase yet, though its script declares it/,
+    );
+    await call('editor_rescan', { projectPath: project });
+    const seen = await call('script_info', child);
+    const offeredNow = asArray(get(seen, 'completions'), 'completions').map((entry) =>
+      asString(get(entry, 'label'), 'label'),
+    );
+    assert.ok(
+      offeredNow.includes('health'),
+      `once scanned, the base's members are offered: ${offeredNow.join(', ')}`,
+    );
+    assert.equal(get(seen, 'unseenByEditor'), undefined, JSON.stringify(get(seen, 'unseenNote')));
+  } finally {
+    rmSync(join(project, 'unseen_base.gd'), { force: true });
+    rmSync(join(project, 'unseen_child.gd'), { force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
 }
 
 /**

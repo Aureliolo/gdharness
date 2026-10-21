@@ -7891,8 +7891,27 @@ class GodotServer {
       return waited;
     }
     const answer = await this.handleLSP(toolName, args);
-    const refused = this.languageServerRefusal(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), asked);
-    return refused === null ? answer : refused.refusal;
+    const payload = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
+    const refused = this.languageServerRefusal(payload, asked);
+    if (refused !== null) {
+      return refused.refusal;
+    }
+    if (!this.godotBridge.isConnected()) {
+      return answer;
+    }
+    // The language server reads a class the editor has not seen as nothing, so a completion after
+    // self. in a script extending one came back empty and a hover lost its types, with no word of why.
+    const { unseen } = await this.classesTheEditorCannotSee(args);
+    if (unseen.length === 0) {
+      return answer;
+    }
+    const names = unseen.map((entry) => entry.className).join(', ');
+    const empty = Array.isArray(payload['completions']) && payload['completions'].length === 0;
+    const said = `The editor cannot see ${names} yet, though ${unseen.length === 1 ? 'its script declares it' : 'their scripts declare them'}, so the language server reads what reaches ${unseen.length === 1 ? 'it' : 'them'} as nothing${empty ? ', which is why no completions came back' : ''}. editor_rescan brings ${unseen.length === 1 ? 'it' : 'them'} in; then ask again.`;
+    return {
+      ...answer,
+      content: [{ type: 'text', text: answerJson({ ...payload, unseenByEditor: unseen, unseenNote: said }) }],
+    };
   }
 
   /**
