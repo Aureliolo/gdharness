@@ -38263,6 +38263,87 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         );
         rmSync(join(project, 'many'), { recursive: true, force: true });
 
+        // A declared text matches the whole error, so the start of one is never printed. Only the
+        // case that declared it can have printed it instead: test_silent declares the same text
+        // beside test_near printing the longer error, and test_far prints one that does not hold it.
+        writeTree(project, {
+          'near/near_test.gd': [
+            'extends GdUnitTestSuite',
+            '',
+            'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {',
+            '\t"test_near": ["the amount was refused"],',
+            '\t"test_silent": ["the amount was refused"],',
+            '\t"test_far": ["never said at all"],',
+            '}',
+            '',
+            '',
+            'func test_near() -> void:',
+            '\tpush_error("the amount was refused, got -1")',
+            '\tassert_bool(true).is_true()',
+            '',
+            '',
+            'func test_silent() -> void:',
+            '\tassert_bool(true).is_true()',
+            '',
+            '',
+            'func test_far() -> void:',
+            '\tpush_error("the amount was refused, got -2")',
+            '\tassert_bool(true).is_true()',
+            '',
+          ].join('\n'),
+        });
+        const near = jsonOf(
+          await call('project_test', { projectPath: project, path: 'near' }, ENGINE_CALL_TIMEOUT_MS * 3),
+          'near',
+        );
+        assert.deepEqual(
+          Object.fromEntries(
+            asArray(get(near, 'declaredNotPrinted')).map((missing) => [
+              text(get(missing, 'case')),
+              get(missing, 'printedInstead'),
+            ]),
+          ),
+          { test_far: undefined, test_near: 'the amount was refused, got -1', test_silent: undefined },
+          JSON.stringify(near),
+        );
+        rmSync(join(project, 'near'), { recursive: true, force: true });
+
+        // Godot writes an error raised while it prints another straight to stderr, past the log
+        // file the run is read from. gdUnit4's loggers raise two as the engine exits after a stack
+        // overflow, and they were counted under engineErrors and judged nowhere.
+        writeTree(project, {
+          'deep/deep_test.gd': [
+            'extends GdUnitTestSuite',
+            '',
+            '',
+            'func deeper(n: int) -> int:',
+            '\treturn deeper(n + 1) if n < 100000 else n',
+            '',
+            '',
+            'func test_recurses() -> void:',
+            '\tassert_int(deeper(0)).is_greater(0)',
+            '',
+          ].join('\n'),
+        });
+        const deep = jsonOf(
+          await call('project_test', { projectPath: project, path: 'deep' }, ENGINE_CALL_TIMEOUT_MS * 3),
+          'deep',
+        );
+        const undeclared = asArray(get(deep, 'undeclaredErrors'));
+        assert.equal(
+          undeclared.reduce((sum: number, error) => sum + asNumber(get(error, 'times') ?? 1), 0),
+          get(deep, 'engineErrors'),
+          `every error the run printed is judged: ${JSON.stringify(deep)}`,
+        );
+        assert.ok(
+          undeclared.some(
+            (error) =>
+              get(error, 'suite') === undefined && text(get(error, 'text')).startsWith('Stack overflow'),
+          ),
+          `the overflows printed past the log file belong to no suite: ${JSON.stringify(deep)}`,
+        );
+        rmSync(join(project, 'deep'), { recursive: true, force: true });
+
         // Each on its own, since either fails the run and the run above holds both.
         for (const [path, verdict] of [
           ['tests/noisy_test.gd', 'one engine error no suite declared'],
@@ -39704,7 +39785,7 @@ async function testGdUnitRunner(): Promise<void> {
         mkdirSync(join(projectDir, 'test', 'long'));
         writeFileSync(
           join(projectDir, 'test', 'long', 'a_leaves_test.gd'),
-          'extends GdUnitTestSuite\n\n\nfunc test_leaves_a_node() -> void:\n\tvar kept: Node = Node.new()\n\tassert_object(kept).is_not_null()\n',
+          'extends GdUnitTestSuite\n\n\nfunc test_leaves_a_node() -> void:\n\tvar kept: Node = Node.new()\n\tvar beside: Node = Node.new()\n\tassert_object(kept).is_not_null()\n\tassert_object(beside).is_not_null()\n',
         );
         writeFileSync(
           join(projectDir, 'test', 'long', 'z_talks_test.gd'),
@@ -39723,6 +39804,13 @@ async function testGdUnitRunner(): Promise<void> {
         assert.deepEqual(
           asArray(get(long, 'warnings') ?? []).map((warning) => get(warning, 'path')),
           ['res://test/long/a_leaves_test.gd'],
+          JSON.stringify(long, null, 2),
+        );
+        // gdUnit4's orphans are the nodes outside the tree, and the warning once called them the
+        // ones still in it.
+        assert.match(
+          text(get(long, 'warnings', 0, 'message')),
+          /^2 nodes built during this suite were neither freed nor in the tree when it finished, which gdUnit4 counts as orphans\. Free each one, or make it with auto_free\(\)/,
           JSON.stringify(long, null, 2),
         );
 

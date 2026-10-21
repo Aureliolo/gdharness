@@ -304,7 +304,7 @@ import {
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
 // array element, so a path full of backslashes, spaces or quotes is just a path.
 import { runHidden as run, spawnHidden } from './spawn.js';
-import { declaringAdvice, readExpected, readRun, unexpectedErrors } from './suite-judge.js';
+import { declaringAdvice, readExpected, readRun, unexpectedErrors, withNestedErrors } from './suite-judge.js';
 import { ProjectScripts, TEST_DIRECTORIES } from './suite-plan.js';
 import { selectTests } from './test-selection.js';
 import {
@@ -6732,7 +6732,10 @@ class GodotServer {
     const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
     let reportProblem: string | null = null;
-    const casePrinted = readRun(existsSync(engineLog) ? readFileSync(engineLog, 'utf8') : '');
+    const casePrinted = withNestedErrors(
+      readRun(existsSync(engineLog) ? readFileSync(engineLog, 'utf8') : ''),
+      run.log.all,
+    );
     const declaredErrors = readExpected(expectedFile);
     try {
       const written =
@@ -6950,7 +6953,7 @@ class GodotServer {
       path: suite.path,
       name: report.suites.find((entry) => entry.path === suite.path)?.name ?? suite.path,
       orphans: suite.orphans,
-      message: `${suite.orphans} node${suite.orphans === 1 ? '' : 's'} were still in the tree when this suite finished. A node built in a test and neither freed nor added to the tree is the usual cause; free it, or add it with auto_free().`,
+      message: `${suite.orphans === 1 ? '1 node' : `${String(suite.orphans)} nodes`} built during this suite ${suite.orphans === 1 ? 'was' : 'were'} neither freed nor in the tree when it finished, which gdUnit4 counts as orphans. Free each one, or make it with auto_free(), which frees it once the case is over.`,
     }));
     // A suite that passed every case has nothing to say that the totals do not, and a whole tier
     // of them is most of the answer: a hundred and three clean suites came back as fifteen
@@ -6986,10 +6989,18 @@ class GodotServer {
       times: error.times > 1 ? error.times : undefined,
     }));
     const undeclaredErrors = undeclaredAll.slice(0, MOST_UNDECLARED_ERRORS);
+    // A declared text matches the whole line, so one declaring the start of a message that ends in
+    // a number reads as both never printed and undeclared, and nothing said the two were one line.
     const declaredNotPrinted = judgedErrors.neverPrinted.map((missing) => ({
       suite: missing.suite,
       case: missing.during,
       text: missing.text,
+      printedInstead: judgedErrors.printed.find(
+        (error) =>
+          error.suite === missing.suite &&
+          error.during === missing.during &&
+          error.text.includes(missing.text),
+      )?.text,
     }));
     const erring = (path: string | null): { undeclared: number; notPrinted: number } => ({
       undeclared: undeclaredPrinted.filter((error) => error.suite === path).length,

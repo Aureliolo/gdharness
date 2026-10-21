@@ -840,7 +840,7 @@ function masked(expected: string, actual: string): boolean {
 
 const PRINTED_DICTIONARY = /^\{\n\t[\s\S]*\n {2}\}$/;
 
-/** One suite that finished with nodes still in the tree, and how many. */
+/** One suite that finished with nodes neither freed nor in the tree, and how many. */
 interface SuiteOrphans {
   /** The suite's script, as gdUnit4 names it on the line announcing the run. */
   readonly path: string;
@@ -862,7 +862,7 @@ const OVERALL = 'Overall Summary';
  * The orphan nodes a run reported, read off what it printed.
  *
  * Read from the console because it is the only place they are. gdUnit4 counts orphans per suite
- * and decides the run's state from them: no errors and no failures, but nodes left in the tree,
+ * and decides the run's state from them: no errors and no failures, but nodes neither freed nor in the tree,
  * is the WARNING state, which is exit 101. Its JUnit writer does not carry any of that: an ORPHAN
  * report produces no element at all, and neither `testsuite` nor `testsuites` gets an attribute
  * for it, so a report parsed from the XML has every count at zero and nothing to explain the
