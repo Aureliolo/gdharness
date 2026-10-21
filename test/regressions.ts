@@ -113,7 +113,7 @@ import {
 } from '../src/godot-bridge.js';
 import { DebuggerStream, decodeVariant, framedCommand, type SentValue } from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
-import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
+import { type ImportOutcome, librariesNotCopied, notImportedNote, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { IMPORTABLE_EXTENSIONS, staleImports } from '../src/import-freshness.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
@@ -8441,13 +8441,24 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
 
     // What the structure counts as scenes and assets, which was text scenes and a short list of
     // images, fonts and sound: a project saving binary scenes had none, and its models were other.
-    for (const file of ['level.tscn', 'baked.scn', 'ship.glb', 'intro.ogv', 'water.gdshader', 'notes.txt']) {
+    // The .import and .uid files the engine writes beside a file are not files of their own, and
+    // counted as other, a project of a hundred imported images had a hundred others.
+    for (const file of [
+      'level.tscn',
+      'baked.scn',
+      'ship.glb',
+      'ship.glb.import',
+      'scripts/hero.gd.uid',
+      'intro.ogv',
+      'water.gdshader',
+      'notes.txt',
+    ]) {
       writeFileSync(join(sandbox, file), '');
     }
     assert.deepEqual(
       projectStructure(sandbox),
       { scenes: 2, scripts: 2, assets: 3, other: 1 },
-      'binary scenes are scenes, and models, video and shaders are assets',
+      'binary scenes are scenes, models, video and shaders are assets, and the sidecars are nothing',
     );
   } finally {
     sweep(sandbox);
@@ -9178,6 +9189,39 @@ function testChangelogReach(): void {
   assert.equal(counterpart('Release v1.3.6 (#1195)', history), 'c2');
   assert.equal(counterpart('Release v1.3.5 (#1190)', history), undefined);
   assert.equal(counterpart('Release v1.3.6 (#1195)', history.slice(3)), undefined);
+}
+
+/**
+ * The note beside a "No loader found" for a file the engine imports, which the engine's words
+ * leave reading as a file that is not there: a scene using an image never imported came back
+ * calling the image a non-existent resource while it sat on disk.
+ */
+function testANeverImportedFileIsSaidToBeOne(): void {
+  const entry = (text: string): LogEntry => ({
+    index: 0,
+    severity: 'error',
+    source: 'stderr',
+    text,
+    detail: [],
+  });
+  const image = 'No loader found for resource: res://art/hero.png (expected type: Texture2D)';
+  assert.equal(
+    notImportedNote([entry(image), entry(image)]),
+    'res://art/hero.png has no import the engine can load, which is how a file it imports stands before it is first imported, so what uses it reads it as missing although it is on disk: project_import reimport imports it.',
+  );
+  assert.equal(
+    notImportedNote([
+      entry(image),
+      entry('No loader found for resource: res://sound/step.ogg (expected type: AudioStream)'),
+    ]),
+    'res://art/hero.png, res://sound/step.ogg have no import the engine can load, which is how a file it imports stands before it is first imported, so what uses them reads them as missing although they are on disk: project_import reimport imports them.',
+  );
+  // A file the engine reads as it is has no import to be missing, so its missing loader is another fault.
+  assert.equal(
+    notImportedNote([entry('No loader found for resource: res://data/table.json (expected type: JSON)')]),
+    undefined,
+  );
+  assert.equal(notImportedNote([]), undefined);
 }
 
 /**
@@ -51475,6 +51519,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
   testChangelogReach,
+  testANeverImportedFileIsSaidToBeOne,
   testTheCureIsWrittenWhole,
   testEveryRemedyLeadsWithTheScan,
   testTheStaleNoteNamesTheCallThatRebuildsTheCopy,

@@ -55,6 +55,9 @@ export interface ProjectStructure {
 /** Text scenes and the binary ones a project may save instead. */
 const SCENE_EXTENSIONS = new Set(['tscn', 'scn']);
 
+/** What the engine writes beside a file it imports or gives a uid, which is no file of the project's own. */
+const SIDECAR_EXTENSIONS = new Set(['import', 'uid']);
+
 /** What a project imports as media: images, fonts, sound, models, video and shaders. */
 const ASSET_EXTENSIONS = new Set([
   'png',
@@ -101,6 +104,9 @@ export function projectStructure(projectPath: string): ProjectStructure {
         visit(join(directory, entry.name));
       } else if (entry.isFile()) {
         const extension = entry.name.split('.').pop()?.toLowerCase() ?? '';
+        if (SIDECAR_EXTENSIONS.has(extension)) {
+          continue;
+        }
         if (SCENE_EXTENSIONS.has(extension)) {
           structure.scenes += 1;
         } else if (extension === 'gd' || extension === 'cs') {

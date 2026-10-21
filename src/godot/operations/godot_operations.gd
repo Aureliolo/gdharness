@@ -237,6 +237,8 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = GdhDependencies.new(_log).get_dependencies(params)
 		"find_resource_usages":
 			payload = GdhDependencies.new(_log).find_resource_usages(params)
+		"list_script_classes":
+			payload = GdhDependencies.new(_log).list_script_classes(params)
 		"get_project_health":
 			payload = GdhProjectDiagnostics.new(_log).get_project_health(params)
 

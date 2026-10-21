@@ -95,6 +95,7 @@ export function effectsOf(spec: ToolSpec): Effect[] {
  */
 const PROJECT_INFO_SECTIONS = [
   'autoloads',
+  'classes',
   'input_actions',
   'plugins',
   'export_presets',
@@ -379,14 +380,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Project info',
     effect: 'read',
     description:
-      'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets it holds, other counting every remaining file, leaving out the addons gdharness installed and any folder holding a .gdignore, with optional sections on top.',
+      'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets it holds, other counting every remaining file, leaving out the .import and .uid files the engine writes beside others, the addons gdharness installed and any folder holding a .gdignore, with optional sections on top.',
     parameters: {
       projectPath: PROJECT_PATH,
       include: {
         type: 'array',
         items: { type: 'string', enum: [...PROJECT_INFO_SECTIONS] },
         description:
-          'Extra sections: registered autoloads, the input actions project.godot holds with their events (an engine ui_ action only when the project rebinds it, as engineAction), addons and whether each is enabled, export presets, the audio bus layout, a health report, or export validation. health and validation compile every script of the project in headless engines and name each that fails with its first error, and each file a scene, resource or script refers to that does not exist.',
+          "Extra sections: registered autoloads, the classes the project's scripts declare with class_name, each with its script, read from the files, the input actions project.godot holds with their events (an engine ui_ action only when the project rebinds it, as engineAction), addons and whether each is enabled, export presets, the audio bus layout, a health report, or export validation. health and validation compile every script of the project in headless engines and name each that fails with its first error, and each file a scene, resource or script refers to that does not exist.",
       },
       preset: { type: 'string', description: 'For validation: the export preset to validate against.' },
       detail: {
@@ -602,7 +603,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'object',
         ops: ['set_options'],
         description:
-          'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}. A dictionary option whose keys are numbers, a font\'s opentype_features or any option already holding number keys, takes them written as strings of digits, and opentype_features also takes an OpenType tag by its four-letter name: {"opentype_features": {"liga": 0}} turns ligatures off. Both are written as the numbers the engine reads. One already holding the value given is answered under unchanged_options rather than updated_options, and when none changed nothing is written or reimported.',
+          'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}. A dictionary option whose keys are numbers, a font\'s opentype_features or any option already holding number keys, takes them written as strings of digits, and opentype_features also takes an OpenType tag by its four-letter name: {"opentype_features": {"liga": 0}} turns ligatures off. Both are written as the numbers the engine reads. One already holding the value given is answered under unchanged_options rather than updated_options, and when none changed nothing is written or reimported. changed gives each option written as {was, now}, was null for one the import file did not hold.',
         additionalProperties: true,
       },
       reimport: {
@@ -1213,7 +1214,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       structure: {
         effect: 'read',
         summary:
-          "functions, variables (static ones marked is_static; one written with := has the type of a literal or built-in constructor it is given, marked inferred, as a constant always does), signals, constants, enums, inner_classes (each with its name, line and extends, and its own members in these same fields), class_name, extends and line_count, read from the file, and dependencies: the paths it loads or preloads as written, then the scripts declaring each project class_name its code uses, which classes_used names with the class; autoloads_used names each autoload the code uses by its global name, with the autoload's script, which the project loads rather than this script, so it is not under dependencies",
+          "functions, variables (static ones marked is_static; one written with := has the type of a literal or built-in constructor it is given, marked inferred, as a constant always does), signals, constants, enums, inner_classes (each with its name, line and extends, and its own members in these same fields), class_name, extends and line_count, read from the file, and dependencies: the paths it loads or preloads as written, then the scripts declaring each project class_name its code uses, which classes_used names with the class; autoloads_used names each autoload the code uses by its global name, with the autoload's script, which the project loads rather than this script, so it is not under dependencies. A member or inner class with a ## documentation comment directly above it carries the comment's text as doc, and the script's own, the ## block above class_name or extends or one followed by a blank line before any member, comes back as class_doc",
         requires: [],
       },
       symbols: {

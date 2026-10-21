@@ -530,6 +530,18 @@ func classes_declared() -> Dictionary:
 	return _classes_declared
 
 
+## Every class the project's scripts declare with class_name, sorted by name, with the script
+## declaring it. Read from the files rather than the class cache, which only a scan rewrites.
+func list_script_classes(_params: Dictionary) -> Dictionary:
+	var declared: Dictionary = classes_declared()
+	var names: Array = declared.keys()
+	names.sort()
+	var classes: Array[Dictionary] = []
+	for name: Variant in names:
+		classes.append({"name": str(name), "path": str(declared[name])})
+	return {"classes": classes, "count": classes.size()}
+
+
 ## The names in [param classes] that the code in [param content] uses, in the order first used: words
 ## outside strings and comments, so a class named in prose or in a message is not a use of it.
 static func classes_used_in(content: String, classes: Dictionary) -> Array[String]:
