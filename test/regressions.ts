@@ -25374,10 +25374,24 @@ async function testTheFrameTimeIsTheFrame(): Promise<void> {
         asNumber(get(waited, 'elapsed_ms'), JSON.stringify(waited)) /
         asNumber(get(waited, 'frames'), JSON.stringify(waited)) /
         1000;
+      const counted = asNumber(
+        get(
+          await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'frames' }),
+          'value',
+        ),
+        'Main.frames',
+      );
       const metrics = await call('runtime_inspect', { op: 'metrics' });
       const read = (name: string): number => asNumber(get(metrics, 'data', name), JSON.stringify(metrics));
-      const shown = `${JSON.stringify(metrics)}, a frames wait measured ${measured}s a frame`;
+      const shown = `${JSON.stringify(metrics)}, a frames wait measured ${measured}s a frame, Main counted ${counted}`;
       assert.equal(read('frames_timed'), 120, `the window is full: ${shown}`);
+      // Headless, nothing is drawn, so the frames the game ran are counted by process_frames, which
+      // has to cover every frame Main's _process saw and not run far ahead of it.
+      assert.ok(
+        read('process_frames') >= counted && read('process_frames') < counted + 60,
+        `process_frames counts the frames the game ran: ${shown}`,
+      );
+      assert.ok(read('physics_frames') > 0, `physics_frames counts the physics steps: ${shown}`);
       assert.ok(
         read('frame_time') > measured / 2 && read('frame_time') < measured * 2,
         `frame_time is the frame the wait measured: ${shown}`,
@@ -42968,8 +42982,8 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     );
 
     // A property the resource lacks is refused with the ones it has nearest it, alone, beside
-    // another, and as the start of a path; and with no list when none is near, since a resource
-    // declares dozens.
+    // another, and as the start of a path; and with its script's own when none is near, since the
+    // engine's run to dozens.
     const rarity = 'ItemData has no property rarety; the nearest it has is rarity.';
     assert.equal(await refused({ rarety: 1 }), rarity);
     assert.equal(
@@ -42977,7 +42991,10 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       `${rarity} None of the 2 properties given was written.`,
     );
     assert.equal(await refused({ 'rarety:x': 1 }), rarity);
-    assert.equal(await refused({ zzz: 1 }), 'ItemData has no property zzz.');
+    assert.equal(
+      await refused({ zzz: 1 }),
+      'ItemData has no property zzz; its script declares growth, icon, kind, level, rarity, tags, title.',
+    );
     assert.equal(
       await refused({ 'title:x': 1 }),
       'ItemData.title is a String, which a path does not step into: a path reaches the components of a vector, a colour, a rectangle or a transform.',

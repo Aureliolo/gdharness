@@ -190,18 +190,26 @@ static func offered(said: String, word: String, names: Array) -> String:
 
 
 ## [param said], the refusal for [param property], which [param target] does not declare, with the
-## names it declares nearest it when any are, as a misspelt one is usually one of them. Unlike
-## [method offered], nothing is listed when none is near, since an object declares a hundred.
+## names it declares nearest it when any are, as a misspelt one is usually one of them, or else the
+## variables its script declares. The engine's own are not listed when none is near, since an object
+## has a hundred, while a script's are the few a caller most likely meant.
 static func near_property(said: String, target: Object, property: String) -> String:
 	var headings: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP
 	var names: Array[String] = []
+	var scripted: Array[String] = []
 	for declared: Dictionary in target.get_property_list():
-		if not as_int(declared.get("usage", 0)) & headings:
+		var usage: int = as_int(declared.get("usage", 0))
+		if not usage & headings:
 			names.append(str(declared.get("name", "")))
+		if usage & PROPERTY_USAGE_SCRIPT_VARIABLE and not usage & headings:
+			scripted.append(str(declared.get("name", "")))
 	var close: PackedStringArray = nearest(property, PackedStringArray(names))
-	if close.is_empty():
+	if not close.is_empty():
+		return "%s; the nearest it has %s %s" % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+	if scripted.is_empty():
 		return said
-	return "%s; the nearest it has %s %s" % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+	scripted.sort()
+	return "%s; its script declares %s" % [said, ", ".join(PackedStringArray(scripted))]
 
 
 ## The signals [param object] has that a caller can connect, its own class's first: the engine
