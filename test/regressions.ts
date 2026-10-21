@@ -69,7 +69,13 @@ import {
 import { classNotePath, readClassNote } from '../src/class-note.js';
 import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
-import { ensureHelperCompiled, HIDDEN_DESKTOP, helperAssembly, windowsCommandLine } from '../src/desktop.js';
+import {
+  ensureHelperCompiled,
+  HIDDEN_DESKTOP,
+  helperAssembly,
+  helperFailure,
+  windowsCommandLine,
+} from '../src/desktop.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { docCacheCrash, editorCacheDirectory } from '../src/doc-cache.js';
 import {
@@ -111,6 +117,7 @@ import {
   theEditorHasComeBack,
   withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
+import { GodotLocator } from '../src/godot-path.js';
 import { DebuggerStream, decodeVariant, framedCommand, type SentValue } from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
 import { type ImportOutcome, librariesNotCopied, notImportedNote, runImport } from '../src/headless.js';
@@ -339,7 +346,14 @@ import {
   unitsOf,
   windowedSaid,
 } from '../src/suite-plan.js';
-import { macMemoryLevel, roomFor, TestUsageError, testOptionsOf } from '../src/suite-run.js';
+import {
+  inTurns,
+  macMemoryLevel,
+  roomFor,
+  roomSaid,
+  TestUsageError,
+  testOptionsOf,
+} from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -15003,6 +15017,56 @@ async function testAPointerOnTheHiddenDesktopIsNoted(): Promise<void> {
 }
 
 /**
+ * A relative GODOT_PATH is made whole against the directory the server runs in.
+ *
+ * Reported from a downstream lane: `gdharness test` with `GODOT_PATH=.tools/godot/godot_console.exe`
+ * said only that the engine exited 1, since the windowed engine is started by the desktop helper,
+ * which runs elsewhere, so the relative path named nothing there. The helper's own message, which
+ * said so, reached only a file in the run directory, and is read back here as it was written.
+ */
+async function testARelativeEnginePathIsMadeWhole(): Promise<void> {
+  const before = process.env['GODOT_PATH'];
+  const directory = process.cwd();
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-relative-engine-'));
+  try {
+    process.env['GODOT_PATH'] = join('nowhere', 'godot.exe');
+    const missing = await new GodotLocator().find();
+    assert.deepEqual(
+      missing,
+      { ok: false, named: resolve('nowhere', 'godot.exe'), reason: 'does not exist' },
+      'a relative path that names nothing is named whole',
+    );
+    if (before === undefined || before === '') {
+      console.log('relative engine path case skipped past the refusal: no GODOT_PATH');
+    } else {
+      process.chdir(dirname(resolve(before)));
+      process.env['GODOT_PATH'] = basename(before);
+      const found = await new GodotLocator().find();
+      assert.deepEqual(
+        found,
+        { ok: true, path: resolve(before) },
+        'an engine named relatively is found whole',
+      );
+    }
+
+    const written = join(scratch, 'error');
+    assert.equal(helperFailure(written), null, 'no file is no failure');
+    writeFileSync(written, '  \n');
+    assert.equal(helperFailure(written), null, 'nor is an empty one');
+    writeFileSync(written, 'Exception calling "Run": CreateProcessW godot.exe\r\n');
+    assert.equal(helperFailure(written), 'Exception calling "Run": CreateProcessW godot.exe');
+  } finally {
+    process.chdir(directory);
+    if (before === undefined) {
+      delete process.env['GODOT_PATH'];
+    } else {
+      process.env['GODOT_PATH'] = before;
+    }
+    sweep(scratch);
+  }
+}
+
+/**
  * A project in a git worktree finds the engine its main checkout's config names.
  *
  * Reported from game-b: `upgrade` in a worktree refused for want of an engine, because the engine
@@ -15038,6 +15102,18 @@ function testAWorktreeFindsItsMainCheckoutsEngine(): void {
       `the main checkout: ${main}`,
     );
     assert.equal(recordedEnginePath(main), engine, "and its config's engine is the one found");
+    writeFileSync(
+      join(root, 'main', 'game', '.mcp.json'),
+      JSON.stringify({
+        mcpServers: { gdharness: { command: 'npx', env: { GODOT_PATH: '../.tools/godot.exe' } } },
+      }),
+    );
+    assert.equal(
+      recordedEnginePath(main),
+      engine,
+      'a relative engine path is read from the project, made whole',
+    );
+    assert.equal(recordedEnginePath(worktree), null, 'and still names nothing from the worktree');
 
     writeFileSync(join(root, 'next', '.git'), 'gitdir: ../main/.git/worktrees/next\n');
     const relativeMain = mainCheckoutOf(worktree);
@@ -37989,6 +38065,33 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       ['res://tests/stood_test.gd'],
       'in one engine, the suite saying it runs headless is named as running with the window',
     );
+    const held = dealt(lone, loneDeclared, 1, 4);
+    assert.deepEqual(
+      held.map((plan) => [plan.windowed, plan.suites.map((s) => s.path)]),
+      [
+        [true, ['res://tests/menu_test.gd']],
+        [false, ['res://tests/plain_test.gd', 'res://tests/stood_test.gd']],
+      ],
+      'a machine with room for one engine of the four asked for still gives the suite an engine of its own',
+    );
+    assert.deepEqual(headlessInAWindow(held, lone), [], 'so it is not said to run with the window');
+    const memory = 'the machine has 5.7 GB of memory free';
+    assert.equal(roomSaid(2, { engines: 1, held: memory }, 4), `, one at a time, since ${memory}`);
+    assert.equal(roomSaid(3, { engines: 2, held: memory }, 4), `, 2 at a time, since ${memory}`);
+    assert.equal(roomSaid(2, { engines: 2, held: memory }, 4), `, of the 4 asked for, since ${memory}`);
+    assert.equal(roomSaid(1, { engines: 2, held: memory }, 4), '', 'fewer units than engines held nothing');
+    assert.equal(roomSaid(4, { engines: 4, held: undefined }, 4), '');
+    let going = 0;
+    let most = 0;
+    const turned = await inTurns([30, 10, 20, 5], 2, async (wait, index) => {
+      going += 1;
+      most = Math.max(most, going);
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      going -= 1;
+      return `${String(index)}:${String(wait)}`;
+    });
+    assert.deepEqual(turned, ['0:30', '1:10', '2:20', '3:5'], 'every answer in the order given');
+    assert.equal(most, 2, 'two at a time and no more');
     assert.deepEqual(
       headlessInAWindow([inOneEngine(lone, loneDeclared)], lone),
       ['res://tests/stood_test.gd'],
@@ -38474,7 +38577,12 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       // Beside one needing a window, the suite saying it runs headless gets an engine of its own.
       const beside = test('tests/window_test.gd', 'tests/stood_test.gd');
       assert.equal(beside.status, 0, beside.said);
-      assert.match(beside.said, /in 2 suites over 2 engines, one of them windowed\./, beside.said);
+      // A runner short of memory runs the two one after the other.
+      assert.match(
+        beside.said,
+        /in 2 suites over 2 engines, one of them windowed(?:, one at a time, since [^\n]*)?\.$/m,
+        beside.said,
+      );
       assert.doesNotMatch(beside.said, /runs with a window here/, beside.said);
       // In one engine it has to share the window, and the run says so before it starts.
       for (const [args, why] of [
@@ -53471,6 +53579,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameOnAnotherRuntimeAddonSaysSo,
   testAGameSaysWhichRuntimeAddonItLoaded,
   testAWorktreeFindsItsMainCheckoutsEngine,
+  testARelativeEnginePathIsMadeWhole,
   testAPointerOnTheHiddenDesktopIsNoted,
   testAClickThatDoesNotProcessSaysWhy,
   testAClickInAWindowNothingEnteredPresses,

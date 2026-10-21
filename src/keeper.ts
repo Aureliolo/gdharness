@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { exitOf } from './alive.js';
-import { DESKTOP_VARIABLE, ensureHelperCompiled, throughHelper } from './desktop.js';
+import { DESKTOP_VARIABLE, ensureHelperCompiled, helperFailure, throughHelper } from './desktop.js';
 import { crashesReported, letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
@@ -145,9 +145,7 @@ async function startThroughHelper(
         return { child: started.child, pid };
       }
       if (exited.now) {
-        const why = existsSync(errorFile)
-          ? readFileSync(errorFile, 'utf8').trim()
-          : 'it exited saying nothing';
+        const why = helperFailure(errorFile) ?? 'it exited saying nothing';
         return { error: `it could not be started ${where}: ${why}` };
       }
       await delay(50);

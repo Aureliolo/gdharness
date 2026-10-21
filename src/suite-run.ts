@@ -25,7 +25,13 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive, exitOf } from './alive.js';
-import { DESKTOP_VARIABLE, ensureHelperCompiled, HIDDEN_DESKTOP, throughHelper } from './desktop.js';
+import {
+  DESKTOP_VARIABLE,
+  ensureHelperCompiled,
+  HIDDEN_DESKTOP,
+  helperFailure,
+  throughHelper,
+} from './desktop.js';
 import { EngineSlots, ownStart } from './engine-slots.js';
 import { crashesReported } from './error-mode.js';
 import { Refusal } from './errors.js';
@@ -433,17 +439,12 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     const room = roomFor(options.engines, availableParallelism(), await memoryAvailable());
     const plans =
       options.order === null
-        ? dealt(units, declared, room.engines)
+        ? dealt(units, declared, room.engines, options.engines)
         : [inOneEngine(ordered(units, options.order), declared)];
     const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
-    // Said only when the room was the limit, rather than a run with fewer units than engines.
-    const held =
-      options.order === null && room.held !== undefined && plans.length === room.engines
-        ? `, of the ${String(options.engines)} asked for, since ${room.held}`
-        : '';
     const how =
       options.order === null
-        ? `${windowedSaid(plans)}${held}`
+        ? `${windowedSaid(plans)}${roomSaid(plans.length, room, options.engines)}`
         : options.order === 'reversed'
           ? ', in reverse order of path'
           : `, shuffled by ${String(options.order)}`;
@@ -465,7 +466,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(split)}.`,
       );
     }
-    let ran = await Promise.all(plans.map((plan, index) => runEngine(launch, plan, index, units)));
+    let ran = await inTurns(plans, room.engines, (plan, index) => runEngine(launch, plan, index, units));
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
       console.log('An engine ran out of memory, so every engine that failed runs again, one at a time.');
       const again: EngineRan[] = [];
@@ -490,6 +491,43 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     process.off('SIGINT', interrupted);
     process.off('SIGTERM', interrupted);
   }
+}
+
+/**
+ * What the line announcing a dealt run says of the machine's room, after the window: nothing unless
+ * the room held [param engines] engines below the [param asked], since a run with fewer units than
+ * engines was not held by anything.
+ */
+export function roomSaid(
+  engines: number,
+  room: { readonly engines: number; readonly held: string | undefined },
+  asked: number,
+): string {
+  if (room.held === undefined || engines < room.engines) {
+    return '';
+  }
+  return engines > room.engines
+    ? `, ${room.engines === 1 ? 'one' : String(room.engines)} at a time, since ${room.held}`
+    : `, of the ${String(asked)} asked for, since ${room.held}`;
+}
+
+/** [param run] over every one of [param items], [param at] at most at a time, answered in their order. */
+export async function inTurns<T, R>(
+  items: readonly T[],
+  at: number,
+  run: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const answers: R[] = [];
+  let next = 0;
+  const lane = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      answers[index] = await run(items[index] as T, index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(at, items.length)) }, lane));
+  return answers;
 }
 
 function plural(count: number, noun: string): string {
@@ -662,23 +700,26 @@ async function watched(
   const output = openSync(log, 'w');
   let child: ChildProcess;
   let stop: () => void;
+  let helper: { readonly error: string; readonly how: string } | null = null;
   try {
     // Through the helper on Windows for a desktop of its own, and also wherever this process could
     // not clear the bit that keeps a crash from being reported, since the helper clears it in itself.
     if (process.platform === 'win32' && (windowed || !crashesReported())) {
+      const where = windowed ? 'on a desktop of its own' : 'through the desktop helper';
       const compiled = await ensureHelperCompiled();
       if (compiled !== null) {
-        const how = windowed ? 'on a desktop of its own' : 'through the desktop helper';
-        return { code: null, signal: null, ended: `the engine could not be started ${how}: ${compiled}` };
+        return { code: null, signal: null, ended: `the engine could not be started ${where}: ${compiled}` };
       }
       const stopFile = join(directory, 'stop');
+      const error = join(directory, 'error');
+      helper = { error, how: where };
       const how = windowed
         ? { desktop: HIDDEN_DESKTOP, directory: launch.projectPath }
         : { directory: launch.projectPath };
       const wrapper = throughHelper(how, launch.godotPath, args, {
         spec: join(directory, 'spec.json'),
         pid: join(directory, 'pid'),
-        error: join(directory, 'error'),
+        error,
         stop: stopFile,
       });
       child = spawnHidden(wrapper.command, wrapper.args, {
@@ -747,6 +788,11 @@ async function watched(
     launch.running.delete(stop);
   }
   const { code, signal } = await exited;
+  // The helper's own failure reaches only its file, and the exit code it leaves says nothing.
+  const failed = helper === null ? null : helperFailure(helper.error);
+  if (failed !== null && helper !== null) {
+    ended ??= `the engine could not be started ${helper.how}: ${failed}`;
+  }
   return { code, signal, ended };
 }
 

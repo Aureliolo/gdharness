@@ -879,8 +879,10 @@ export function recordedEnginePath(projectPath: string): string | null {
       continue;
     }
     const named = reach(entryEnvironment(harness, projectPath), 'GODOT_PATH');
-    if (typeof named === 'string' && named !== '' && existsSync(named)) {
-      return named;
+    // Relative to the project, where the harness starts the server that reads it.
+    const path = typeof named === 'string' && named !== '' ? resolve(projectPath, named) : null;
+    if (path !== null && existsSync(path)) {
+      return path;
     }
   }
   return null;

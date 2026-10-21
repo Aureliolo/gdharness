@@ -131,9 +131,10 @@ nothing like the others, so a few quick windowed suites never leave it idle. A s
 meets the real display server, so the screen size and scale and the display features it reports are
 the machine's rather than the headless server's, and setting the root viewport's size leaves it the
 window's. A suite declaring `false` is therefore never dealt there while another engine runs, and a
-run that has a windowed suite and one declaring `false` starts two engines at least. When the run is
-one engine (`--engines 1`, a machine with room for one, or `--order`), the run names each suite
-declaring `false` that runs with the window before it starts. The windowed engine runs without
+run that has a windowed suite and one declaring `false` starts two engines at least. On a machine
+with room for one engine, they run one after the other, and the line announcing the run says so.
+When the run is one engine (`--engines 1` or `--order`), the run names each suite declaring `false`
+that runs with the window before it starts. The windowed engine runs without
 `--headless`, at the size `project.godot` gives its viewport, and with the Dummy audio driver like
 every other test engine. On Windows it runs on a desktop of its own, so its window never appears
 on the desktop in use or takes its focus. Elsewhere it uses the display there is; on a CI runner

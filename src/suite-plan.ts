@@ -325,9 +325,16 @@ export type CasesBySuite = ReadonlyMap<string, readonly string[]>;
  * so far, and no more engines than it takes to keep each one busy for as long as the slowest unit
  * takes. The windowed units all go to the first engine, which then takes headless units like the
  * others, since an engine holding a few quick windowed suites alone sits idle while the rest carry
- * the run. A unit whose suite says it runs headless goes there only when it is the only engine.
+ * the run. A unit whose suite says it runs headless goes there only when the run was [param asked]
+ * for one engine. Held to fewer than asked by the machine, it is still given an engine of its own,
+ * and the engines past [param most] wait their turn.
  */
-export function dealt(units: readonly Unit[], declared: CasesBySuite, most: number): EnginePlan[] {
+export function dealt(
+  units: readonly Unit[],
+  declared: CasesBySuite,
+  most: number,
+  asked = most,
+): EnginePlan[] {
   const windowed = units.filter((unit) => unit.windowed);
   const headless = units
     .filter((unit) => !unit.windowed)
@@ -348,7 +355,7 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
   // however little work the run holds, since there it would run with the window it said it did not need.
   const apart = windowed.length > 0 && headless.some((unit) => unit.headless) ? 2 : 1;
   const count = Math.max(
-    Math.min(apart, most),
+    Math.min(apart, asked),
     Math.min(
       most,
       headless.length + (windowed.length > 0 ? 1 : 0),
@@ -378,7 +385,7 @@ export function windowedSaid(plans: readonly EnginePlan[]): string {
 
 /**
  * The suites saying they run headless that a windowed engine holds, which happens only when the
- * run is one engine and a suite in it needs a window.
+ * run was asked for one engine and a suite in it needs a window.
  */
 export function headlessInAWindow(plans: readonly EnginePlan[], units: readonly Unit[]): string[] {
   const said = new Set(units.filter((unit) => unit.headless).map((unit) => unit.suite));
