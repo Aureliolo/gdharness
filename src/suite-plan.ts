@@ -293,9 +293,11 @@ export interface EnginePlan {
 export type CasesBySuite = ReadonlyMap<string, readonly string[]>;
 
 /**
- * [param units] dealt to engines, slowest first, each to the engine with least so far: the windowed
- * ones to one engine of their own, the rest over at most [param most] engines, and no more of those
- * than it takes to keep each one busy for as long as the slowest unit takes.
+ * [param units] dealt to at most [param most] engines, slowest first, each to the engine with least
+ * so far, and no more engines than it takes to keep each one busy for as long as the slowest unit
+ * takes. The windowed units all go to the first engine, which then takes headless units like the
+ * others, since an engine holding a few quick windowed suites alone sits idle while the rest carry
+ * the run.
  */
 export function dealt(units: readonly Unit[], declared: CasesBySuite, most: number): EnginePlan[] {
   const windowed = units.filter((unit) => unit.windowed);
@@ -307,25 +309,29 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
         a.suite.localeCompare(b.suite) ||
         (a.cases[0] ?? '').localeCompare(b.cases[0] ?? ''),
     );
-  const total = headless.reduce((sum, unit) => sum + unit.cost, 0);
-  const slowest = headless[0]?.cost ?? 0;
-  const room = Math.max(1, most - (windowed.length > 0 && most > 1 ? 1 : 0));
-  const count =
-    headless.length === 0
-      ? 0
-      : Math.max(
-          1,
-          Math.min(room, headless.length, Math.ceil(total / Math.max(slowest, ENGINE_START_SECONDS))),
-        );
-  const bins: Unit[][] = Array.from({ length: count }, () => []);
-  const loads = Array.from({ length: count }, () => 0);
+  if (units.length === 0) {
+    return [];
+  }
+  // The windowed units stay together, so for the count they are one unit as slow as all of them.
+  const together = windowed.reduce((sum, unit) => sum + unit.cost, 0);
+  const total = units.reduce((sum, unit) => sum + unit.cost, 0);
+  const slowest = Math.max(together, headless[0]?.cost ?? 0);
+  const count = Math.max(
+    1,
+    Math.min(
+      most,
+      headless.length + (windowed.length > 0 ? 1 : 0),
+      Math.ceil(total / Math.max(slowest, ENGINE_START_SECONDS)),
+    ),
+  );
+  const bins: Unit[][] = Array.from({ length: count }, (_, index) => (index === 0 ? [...windowed] : []));
+  const loads = Array.from({ length: count }, (_, index) => (index === 0 ? together : 0));
   for (const unit of headless) {
     const lightest = loads.indexOf(Math.min(...loads));
     bins[lightest]?.push(unit);
     loads[lightest] = (loads[lightest] ?? 0) + unit.cost;
   }
-  const plans = bins.map((bin) => planOf(bin, declared, false));
-  return windowed.length > 0 ? [planOf(windowed, declared, true), ...plans] : plans;
+  return bins.map((bin, index) => planOf(bin, declared, index === 0 && windowed.length > 0));
 }
 
 /** Every unit in one engine, in the order given. */

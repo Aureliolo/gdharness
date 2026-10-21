@@ -4342,6 +4342,68 @@ function testAFontsFeaturesAreWrittenAsTheEngineReadsThem(godotPath: string, _pr
   }
 }
 
+/**
+ * A script naming an autoload depends on the autoload's script, both ways round. Asked what used
+ * an autoload's script, the answer was its line in project.godot alone, beside the script calling
+ * it by name, and asked what that script depended on, the autoload was not there. An autoload
+ * that is not global is no name code can use, so a word spelling it is not a use.
+ */
+function testAnAutoloadIsUsedByItsName(godotPath: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  try {
+    writeFileSync(
+      join(dir, 'project.godot'),
+      `${readFileSync(join(dir, 'project.godot'), 'utf8')}\n[autoload]\n\nScore="*res://score.gd"\nQuiet="res://quiet.gd"\n`,
+    );
+    writeFileSync(
+      join(dir, 'score.gd'),
+      'extends Node\n\n\nfunc add(points: int) -> void:\n\tprint(points)\n',
+    );
+    writeFileSync(join(dir, 'quiet.gd'), 'extends Node\n');
+    writeFileSync(
+      join(dir, 'enemy.gd'),
+      'extends Node\n\n# Score is told below.\n\n\nfunc hit() -> void:\n\tScore.add(10)\n\tprint(Quiet)\n',
+    );
+
+    const forward = operation('get_dependencies', { resource_path: 'res://enemy.gd' });
+    assert.deepEqual(
+      asArray(get(forward, 'dependencies', 'res://enemy.gd')),
+      [{ path: 'res://score.gd', exists: true, by_autoload: 'Score' }],
+      JSON.stringify(forward),
+    );
+
+    const reverse = operation('find_resource_usages', { resource_path: 'res://score.gd' });
+    assert.equal(get(reverse, 'autoload'), 'Score', JSON.stringify(reverse));
+    const kinds = (file: string): unknown[] =>
+      asArray(
+        get(
+          asArray(get(reverse, 'usages')).find((usage) => get(usage, 'file') === file),
+          'references',
+        ) ?? [],
+      ).map((reference) => [get(reference, 'kind'), get(reference, 'line')]);
+    assert.deepEqual(kinds('res://enemy.gd'), [
+      ['comment', 3],
+      ['autoload', 7],
+    ]);
+    assert.deepEqual(
+      kinds('res://project.godot').map((entry) => asArray(entry)[0]),
+      ['setting'],
+      JSON.stringify(reverse),
+    );
+    assert.equal(get(reverse, 'summary', 'in_code'), 2, 'the call and the setting, the comment left out');
+    const quiet = operation('find_resource_usages', { resource_path: 'res://quiet.gd' });
+    assert.deepEqual(
+      asArray(get(quiet, 'usages')).map((usage) => get(usage, 'file')),
+      ['res://project.godot'],
+      `an autoload that is not global has no name in code: ${JSON.stringify(quiet)}`,
+    );
+    assert.equal(get(quiet, 'autoload'), undefined, JSON.stringify(quiet));
+  } finally {
+    sweep(dir);
+  }
+}
+
 /** The cases after the fixtures, in the order the leg runs them, by the name `case` takes. */
 const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => void | Promise<void>>> = {
   dependencyWalk: testDependencyWalk,
@@ -4349,6 +4411,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   gdignore: testAGdignoreStopsTheWalk,
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
   referencesMissing: testAReferenceIsMissingOnlyWhereTheEngineMissesIt,
+  autoloadUses: (godotPath) => {
+    testAnAutoloadIsUsedByItsName(godotPath);
+  },
   fontFeatures: testAFontsFeaturesAreWrittenAsTheEngineReadsThem,
   importerFirst: (godotPath) => {
     testTheImporterIsAskedFirst(godotPath);

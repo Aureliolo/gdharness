@@ -249,6 +249,8 @@ export interface SearchResult {
     total_matches: number;
     truncated: boolean;
   };
+  /** The folders a `.gdignore` kept out, which a search for words the project holds may want. */
+  not_searched?: string[];
 }
 
 /** Whether [param bytes] are a binary file's: a NUL in the first eight thousand, as git judges. */
@@ -403,9 +405,13 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   // Truncated only once a match past the limit has been seen: a search whose matches came to the
   // limit exactly was called cut, and raising the limit gave the same list.
   const full = (): boolean => result.summary.truncated;
+  const notSearched: string[] = [];
 
   const visit = (directory: string): void => {
     if (steppedOver(directory)) {
+      if (gdignored(directory)) {
+        notSearched.push(`res://${directory.slice(projectPath.length + 1).replace(/\\/g, '/')}/`);
+      }
       return;
     }
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -456,5 +462,5 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
     }
   };
   visit(projectPath);
-  return result;
+  return notSearched.length === 0 ? result : { ...result, not_searched: notSearched };
 }

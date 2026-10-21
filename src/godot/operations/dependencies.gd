@@ -168,6 +168,16 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 	var by_class: RegEx = null
 	if not class_name_declared.is_empty():
 		by_class = GdhPatterns.compiled("\\b" + _regex_escaped(class_name_declared) + "\\b")
+	# The script of an autoload is used wherever code names the autoload, and asked what uses it,
+	# the answer was its line in project.godot alone, beside the scripts calling it.
+	var autoload_named: String = ""
+	var autoloads: Dictionary = autoloads_declared()
+	for name: String in autoloads:
+		if str(autoloads[name]) == resource_path:
+			autoload_named = name
+	var by_autoload: RegEx = null
+	if not autoload_named.is_empty():
+		by_autoload = GdhPatterns.compiled("\\b" + _regex_escaped(autoload_named) + "\\b")
 	var target: Dictionary = {
 		"path": resource_path,
 		"uid": str(GdhResourceFiles.uid_of(resource_path).get("uid", "")) if exists else ""
@@ -203,7 +213,12 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 				# Strings are text, so a class named in one is not a use of it.
 				by_its_name = by_class.search(_code_of(line)) != null
 				name_in_comment = not by_its_name and by_class.search(_comment_of(line)) != null
-			if not by_its_path and not by_its_name and not name_in_comment:
+			var by_its_autoload: bool = false
+			if not by_its_path and not by_its_name and code and by_autoload != null:
+				by_its_autoload = by_autoload.search(_code_of(line)) != null
+				if not by_its_autoload and not name_in_comment:
+					name_in_comment = by_autoload.search(_comment_of(line)) != null
+			if not by_its_path and not by_its_name and not by_its_autoload and not name_in_comment:
 				continue
 			var trimmed: String = line.strip_edges()
 			var kind: String = ""
@@ -219,6 +234,8 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 				kind = "comment"
 			elif by_its_path:
 				kind = _path_reference_kind(line, file_path)
+			elif by_its_autoload:
+				kind = "autoload"
 			else:
 				kind = (
 					"extends"
@@ -244,7 +261,7 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 	var declared: Variant = null
 	if not class_name_declared.is_empty():
 		declared = class_name_declared
-	return {
+	var answer: Dictionary = {
 		"resource_path": resource_path,
 		"exists": exists,
 		"class_name": declared,
@@ -260,6 +277,9 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 			"by_kind": by_kind,
 		},
 	}
+	if not autoload_named.is_empty():
+		answer["autoload"] = autoload_named
+	return answer
 
 
 # The class_name a script declares, or empty for a scene, a resource or a script without one.
@@ -477,15 +497,19 @@ func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk
 				if not walk.include_built_in and dep_path.begins_with("res://."):
 					continue
 
-				_depend(deps, path, dep_path, "", current_depth, walk)
+				_depend(deps, path, dep_path, {}, current_depth, walk)
 
 		# A script uses another by its class_name as surely as by a preload, and only the reverse walk
 		# looked for that: asked what a script depends on, the answer left out the script it typed a
-		# variable with, while asking what used that script named this one.
+		# variable with, while asking what used that script named this one. An autoload's global
+		# name is the same kind of use, of the script registered under it.
 		if path.get_extension() == "gd":
 			var classes: Dictionary = classes_declared()
 			for used: String in classes_used_in(content, classes):
-				_depend(deps, path, str(classes[used]), used, current_depth, walk)
+				_depend(deps, path, str(classes[used]), {"by_class": used}, current_depth, walk)
+			var autoloads: Dictionary = autoloads_declared()
+			for used: String in classes_used_in(content, autoloads):
+				_depend(deps, path, str(autoloads[used]), {"by_autoload": used}, current_depth, walk)
 
 	walk.path_stack.pop_back()
 	walk.visited[path] = {"deps": deps, "remaining": remaining}
@@ -493,13 +517,13 @@ func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk
 
 
 # Adds [param dep_path] to [param deps], what [param path] depends on, walked as far as the depth left
-# allows, once however many times it is named. [param by_class] is the class name it was named by,
-# or empty for a path.
+# allows, once however many times it is named. [param named_by] is the class or autoload name it was
+# named by, as by_class or by_autoload, or empty for a path.
 func _depend(
 	deps: Array[Dictionary],
 	path: String,
 	dep_path: String,
-	by_class: String,
+	named_by: Dictionary,
 	current_depth: int,
 	walk: GdhDependencyWalk
 ) -> void:
@@ -509,13 +533,28 @@ func _depend(
 		if existing.get("path", "") == dep_path:
 			return
 	var dep_info: Dictionary = {"path": dep_path, "exists": FileAccess.file_exists(dep_path)}
-	if not by_class.is_empty():
-		dep_info["by_class"] = by_class
+	dep_info.merge(named_by)
 	if dep_info["exists"] and current_depth + 1 < walk.max_depth:
 		var sub_deps: Array[Dictionary] = _analyze_resource(dep_path, current_depth + 1, walk)
 		if sub_deps.size() > 0:
 			dep_info["dependencies"] = sub_deps
 	deps.append(dep_info)
+
+
+## Every autoload the project registers as a global name, with its script. One that is not global
+## is no name code can use.
+static func autoloads_declared() -> Dictionary:
+	var autoloads: Dictionary = {}
+	for property: Dictionary in ProjectSettings.get_property_list():
+		var setting: String = str(property.get("name", ""))
+		if not setting.begins_with("autoload/"):
+			continue
+		var value: String = str(ProjectSettings.get_setting(setting))
+		if value.begins_with("*"):
+			autoloads[setting.trim_prefix("autoload/")] = _resolved(
+				value.trim_prefix("*"), "res://project.godot"
+			)
+	return autoloads
 
 
 ## Every class_name the project's scripts declare, with the script declaring it.
