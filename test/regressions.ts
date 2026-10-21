@@ -51676,7 +51676,22 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     writeFileSync(
       join(project, 'map.tscn'),
       '[gd_scene format=3]\n\n[node name="Map" type="Node2D"]\n\n[node name="Ground" type="TileMapLayer" parent="."]\n\n' +
-        '[node name="Built" type="TileMapLayer" parent="."]\n',
+        '[node name="Built" type="TileMapLayer" parent="."]\n\n[node name="Bare" type="TileMapLayer" parent="."]\n',
+    );
+    const bare = { scenePath: 'res://map.tscn', nodePath: 'Bare' };
+    const cell = { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } };
+    assert.equal(
+      textOf(await call('scene_node', { ...bare, op: 'set_tilemap_cells', cells: [cell] })),
+      'Bare has no TileSet, so no cell can name a source. scene_node set with properties {"tile_set": "res://..."} on Bare gives it one, a TileSet file such as resource_edit create_tileset makes.',
+    );
+    await call('scene_node', { ...bare, op: 'set', properties: { tile_set: 'res://set.tres' } });
+    const given = parseTextContent(
+      await call('scene_node', { ...bare, op: 'set_tilemap_cells', cells: [cell] }),
+    );
+    assert.equal(
+      get(given, 'placed'),
+      1,
+      `and the call it names lets the paint through: ${JSON.stringify(given)}`,
     );
     const map = { scenePath: 'res://map.tscn', nodePath: 'Ground' };
     await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://set.tres' } });

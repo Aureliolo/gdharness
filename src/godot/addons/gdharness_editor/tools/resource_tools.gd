@@ -664,7 +664,16 @@ func _tile_node(scene: GdhSceneFile, node_path: String, layer: int) -> Array:
 		return [null, "%s has %d layers, and no layer %d" % [node_path, layered.get_layers_count(), layer]]
 	var tile_set: TileSet = layered.tile_set if layered != null else single.tile_set
 	if tile_set == null:
-		return [null, "%s has no TileSet, so no cell can name a source" % node_path]
+		return [
+			null,
+			(
+				(
+					'%s has no TileSet, so no cell can name a source. scene_node set with properties {"tile_set": '
+					+ '"res://..."} on %s gives it one, a TileSet file such as resource_edit create_tileset makes.'
+				)
+				% [node_path, node_path]
+			)
+		]
 	return [node, ""]
 
 
