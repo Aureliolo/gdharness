@@ -9,6 +9,7 @@ const GdhResourceFiles = preload("resource_files.gd")
 ## What a reverse search reads unless told otherwise: the resource and code files, and the settings
 ## files that name resources, "godot" for project.godot, "cfg" for plugin.cfg and export_presets.cfg,
 ## and "import" for the sidecars that name import scripts and external materials.
+const PROJECT_FILE: String = "res://project.godot"
 const DEFAULT_USAGE_KINDS: Array[String] = ["tscn", "tres", "gd", "gdshader", "godot", "cfg", "import"]
 ## One string literal of either quote, its contents captured by the one it opened with.
 const STRING_LITERAL: String = "\"((?:[^\"\\\\]|\\\\.)*)\"|'((?:[^'\\\\]|\\\\.)*)'"
@@ -127,6 +128,10 @@ func missing_references() -> Array[Dictionary]:
 			var naming: Array = missing.get_or_add(path, [])
 			if not file in naming:
 				naming.append(file)
+	for path: String in _named_by_settings():
+		var naming: Array = missing.get_or_add(path, [])
+		if not PROJECT_FILE in naming:
+			naming.append(PROJECT_FILE)
 	# Sorted, since the walk meets files in the order the filesystem lists them, which differs
 	# between platforms.
 	var paths: Array = missing.keys()
@@ -137,6 +142,23 @@ func missing_references() -> Array[Dictionary]:
 		naming.sort()
 		found.append({"path": path, "referenced_by": naming})
 	return found
+
+
+## The files project.godot's settings name that are not on disk: an autoload, a registered
+## translation, an icon, an enabled plugin. Not the main scene, which has a check of its own, and
+## the engine reports each of the rest on every boot.
+static func _named_by_settings() -> Array[String]:
+	var named: Array[String] = []
+	for line: String in FileAccess.get_file_as_string(PROJECT_FILE).split("\n"):
+		var held: String = line.strip_edges()
+		if held.begins_with(";") or held.begins_with("run/main_scene="):
+			continue
+		for found: RegExMatch in GdhPatterns.compiled('"\\*?(res://[^"]+)"').search_all(held):
+			var path: String = found.get_string(1)
+			if FileAccess.file_exists(path) or DirAccess.dir_exists_absolute(path):
+				continue
+			named.append(path)
+	return named
 
 
 ## One line for [param entry], one of [method missing_references].

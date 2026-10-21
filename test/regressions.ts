@@ -38415,7 +38415,13 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     });
     const stood = test('tests/stood_test.gd');
     assert.equal(stood.status, 0, stood.said);
-    assert.match(stood.said, /^1 test function in 1 suite over 1 engine\.$/m, stood.said);
+    // A loaded runner adds why it started fewer engines than asked for, which is no window.
+    assert.match(
+      stood.said,
+      /^1 test function in 1 suite over 1 engine(?:, of the \d+ asked for, since [^\n]*)?\.$/m,
+      stood.said,
+    );
+    assert.doesNotMatch(stood.said, /windowed|with a window/, stood.said);
 
     const windowed = windowedRunRefused();
     if (windowed === null) {
@@ -50478,7 +50484,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "res://parts/big_crate.tscn is named by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
+      "What this saved names res://parts/big_crate.tscn by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -51294,7 +51300,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "res://lamp.tscn, res://desk.tscn are named by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
+      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
@@ -51775,12 +51781,6 @@ async function testAHandWrittenValueIsNoChangeOfAScripts(): Promise<void> {
 }
 
 /**
- * A theme and a tile set with no editor, through the server and a real engine. A font size Godot
- * would read back as the theme's default is refused; a theme type that is no class is set as the
- * variation it is and said to be one; and an image written since the import is named as not yet
- * imported, with the call that imports it, which this then makes and follows.
- */
-/**
  * A control is laid out as the editor lays it out. An anchor preset on a control in Position mode
  * was refused as a value the engine would not hold, since Godot applies one only in Anchors mode,
  * which picking a preset in the editor switches to. A container's child was refused its position
@@ -51887,6 +51887,169 @@ async function testAControlIsLaidOutAsTheEditorLaysItOut(): Promise<void> {
   }
 }
 
+/**
+ * What a project's settings name, and what its layers are called, with no editor. A CSV of
+ * translations and a GLSL shader were refused a reimport as files no importer built into the
+ * engine takes, though the engine's own import pass imports both. A .blend file was given the same
+ * reason, when the engine imports it through Blender and, with no Blender set, stops its whole pass
+ * at it and exits 0. A setting naming a file that does not exist was written without a word, and
+ * validation passed the project while the engine complained of the file on every boot. A layer mask
+ * read as a bare number, and one given a layer past 32 was refused with only "holds 0".
+ */
+async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('project files and layers regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-named-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-named-rt-'));
+  writeTree(project, {
+    // A comment naming a file is no setting naming it. Godot drops comments when it saves, so this
+    // holds only until the first write.
+    'project.godot':
+      '; Engine configuration file.\n; The icon was "res://old_icon.png".\nconfig_version=5\n\n[application]\n\nconfig/name="Named"\nrun/main_scene="res://main.tscn"\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n\n[node name="Hero" type="CharacterBody2D" parent="."]\n',
+    'text/strings.csv': 'keys,en,de\nGREETING,Hello,Hallo\n',
+    'shaders/blur.glsl': '#[compute]\n#version 450\nlayout(local_size_x = 1) in;\nvoid main() {}\n',
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  const setting = async (name: string, value: unknown): Promise<JsonRpcMessage> =>
+    await call('project_settings', { op: 'set', setting: name, value });
+  const references = async (): Promise<string[]> => {
+    const read = await call('project_info', { include: ['validation'] });
+    const issues = get(parseTextContent(read), 'validation', 'issues') as {
+      check: string;
+      message: string;
+    }[];
+    return issues.filter((issue) => issue.check === 'references').map((issue) => issue.message);
+  };
+  const statusOf = async (path: string): Promise<unknown> =>
+    get(parseTextContent(await call('project_import', { op: 'status', resourcePath: path })), 'resources', 0);
+  try {
+    await server.initialize('regression-test');
+    assert.deepEqual(await references(), [], 'nothing missing before a setting names anything');
+
+    // A folder is something a setting can name, and it is there.
+    const folder = await setting('editor/script/templates_search_path', 'res://shaders');
+    assert.equal(get(parseTextContent(folder), 'saved'), true, textOf(folder) ?? '');
+    assert.equal(get(parseTextContent(folder), 'missing_files'), undefined, textOf(folder) ?? '');
+
+    const translations = await setting('internationalization/locale/translations', [
+      'res://text/strings.en.translation',
+      'res://text/strings.de.translation',
+    ]);
+    assert.deepEqual(
+      get(parseTextContent(translations), 'missing_files'),
+      ['res://text/strings.en.translation', 'res://text/strings.de.translation'],
+      textOf(translations) ?? '',
+    );
+    assert.equal(
+      get(parseTextContent(translations), 'note'),
+      'res://text/strings.en.translation, res://text/strings.de.translation do not exist, and the engine reports them on every boot until they do; project_import reimport makes the translation files from res://text/strings.csv.',
+    );
+    const ghost = await setting('autoload/Ghost', '*res://ghost.gd');
+    assert.equal(
+      get(parseTextContent(ghost), 'note'),
+      'res://ghost.gd does not exist, and the engine reports it on every boot until it does.',
+      textOf(ghost) ?? '',
+    );
+    // The main scene has a check of its own, which names it once.
+    await setting('application/run/main_scene', 'res://gone.tscn');
+    assert.deepEqual(await references(), [
+      'res://ghost.gd does not exist, and res://project.godot refers to it',
+      'res://text/strings.de.translation does not exist, and res://project.godot refers to it',
+      'res://text/strings.en.translation does not exist, and res://project.godot refers to it',
+    ]);
+    await call('project_settings', { op: 'unset', setting: 'autoload/Ghost' });
+    await setting('application/run/main_scene', 'res://main.tscn');
+
+    assert.equal(get(await statusOf('res://text/strings.csv'), 'status'), 'needs_reimport');
+    const imported = await call('project_import', { op: 'reimport' });
+    assert.deepEqual(
+      get(parseTextContent(imported), 'reimported'),
+      ['res://shaders/blur.glsl', 'res://text/strings.csv'],
+      textOf(imported) ?? '',
+    );
+    assert.ok(
+      existsSync(join(project, 'text', 'strings.de.translation')),
+      'the import made the translations',
+    );
+    assert.deepEqual(await references(), [], 'and once they are made nothing is missing');
+
+    // One .blend with no Blender set and the engine imports nothing at all, the CSV beside it too.
+    rmSync(join(project, 'text', 'strings.csv.import'));
+    writeFileSync(join(project, 'model.blend'), 'not really a blend\n');
+    assert.equal(
+      get(await statusOf('res://model.blend'), 'reason'),
+      'the engine imports .blend files through Blender, which it finds through the editor setting filesystem/import/blender/blender_path. An editor with it set imports them on its scan; an import pass with it unset stops at the first one and imports nothing, and setting filesystem/import/blender/enabled to false has the engine leave them unimported',
+    );
+    const stopped = await call('project_import', { op: 'reimport' });
+    assert.ok(
+      (textOf(stopped) ?? '').includes(
+        'the import pass stopped at a .blend file and imported nothing: the engine imports .blend files through Blender, which the editor setting filesystem/import/blender/blender_path names, and here it names none. Set it in an editor, or set the project setting filesystem/import/blender/enabled to false with project_settings set, which has the engine leave .blend files unimported.',
+      ),
+      textOf(stopped) ?? '',
+    );
+    assert.ok(!existsSync(join(project, 'text', 'strings.csv.import')), 'and nothing was imported');
+    await setting('filesystem/import/blender/enabled', false);
+    const past = await call('project_import', { op: 'reimport' });
+    assert.deepEqual(
+      get(parseTextContent(past), 'reimported'),
+      ['res://text/strings.csv'],
+      textOf(past) ?? '',
+    );
+    assert.equal(
+      get(await statusOf('res://model.blend'), 'reason'),
+      'the project sets filesystem/import/blender/enabled to false, so the engine leaves them unimported',
+    );
+
+    await setting('layer_names/2d_physics/layer_1', 'World');
+    await setting('layer_names/2d_physics/layer_2', 'Player');
+    const node = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+      await call('scene_node', { scenePath: 'res://main.tscn', nodePath: 'Hero', ...args });
+    await node({ op: 'set', properties: { collision_layer: 2, collision_mask: 5 } });
+    const read = await node({ op: 'get' });
+    assert.deepEqual(
+      get(parseTextContent(read), 'layers'),
+      {
+        collision_layer: [{ layer: 2, name: 'Player' }],
+        collision_mask: [{ layer: 1, name: 'World' }, { layer: 3 }],
+      },
+      textOf(read) ?? '',
+    );
+    const before = readFileSync(join(project, 'main.tscn'), 'utf8');
+    const past32 = await node({ op: 'set', properties: { collision_layer: 2 ** 32 } });
+    assert.equal(
+      textOf(past32),
+      'CharacterBody2D.collision_layer was given 4294967296 and holds 0 after it was set: it is a mask of the 2d_physics layers, one bit each from layer 1 (1) to layer 32 (2147483648), so it takes 0 to 4294967295 and the engine keeps only those bits. Nothing was written.',
+    );
+    assert.equal(readFileSync(join(project, 'main.tscn'), 'utf8'), before, 'and the scene is as it was');
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A theme and a tile set with no editor, through the server and a real engine. A font size Godot
+ * would read back as the theme's default is refused; a theme type that is no class is set as the
+ * variation it is and said to be one; and an image written since the import is named as not yet
+ * imported, with the call that imports it, which this then makes and follows.
+ */
 async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -52589,6 +52752,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testANodeKeepsItsGroupsAndItsPlace,
   testAThemeAndATilesetWithNoEditor,
   testAControlIsLaidOutAsTheEditorLaysItOut,
+  testAProjectsFilesAndLayersAreNamedWithNoEditor,
   testASceneKeepsItsOwnValuesForAnotherScenesNodes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,

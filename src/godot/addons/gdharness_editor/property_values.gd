@@ -281,6 +281,20 @@ func _not_held(
 	)
 	var type: int = GdhRead.as_int(declared.get("type", TYPE_NIL))
 	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+	if hint in GdhDeclared.LAYER_NAMES and typeof(value) == TYPE_INT:
+		return (
+			(
+				"%s: it is a mask of the %s layers, one bit each from layer 1 (1) to layer %d (%d), so it "
+				+ "takes 0 to %d and the engine keeps only those bits. Nothing was written."
+			)
+			% [
+				said,
+				GdhDeclared.LAYER_NAMES[hint],
+				GdhDeclared.MASK_LAYERS,
+				1 << (GdhDeclared.MASK_LAYERS - 1),
+				(1 << GdhDeclared.MASK_LAYERS) - 1,
+			]
+		)
 	var names: PackedStringArray = []
 	if hint == PROPERTY_HINT_ENUM and (type == TYPE_STRING or type == TYPE_STRING_NAME):
 		names = PackedStringArray(GdhDeclared.enum_values(str(declared.get("hint_string", ""))).keys())

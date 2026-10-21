@@ -6,6 +6,36 @@ extends RefCounted
 
 const GdhRead = preload("reading.gd")
 
+## The section of layer_names in project.godot naming the layers of each layers hint.
+const LAYER_NAMES: Dictionary[int, String] = {
+	PROPERTY_HINT_LAYERS_2D_PHYSICS: "2d_physics",
+	PROPERTY_HINT_LAYERS_2D_RENDER: "2d_render",
+	PROPERTY_HINT_LAYERS_2D_NAVIGATION: "2d_navigation",
+	PROPERTY_HINT_LAYERS_3D_PHYSICS: "3d_physics",
+	PROPERTY_HINT_LAYERS_3D_RENDER: "3d_render",
+	PROPERTY_HINT_LAYERS_3D_NAVIGATION: "3d_navigation",
+	PROPERTY_HINT_LAYERS_AVOIDANCE: "avoidance",
+}
+## How many layers a mask holds, one bit each, whatever the editor names.
+const MASK_LAYERS: int = 32
+
+
+## The layers [param mask] holds under a layers [param hint], each with the name project.godot
+## gives it where it gives one.
+static func layers_in(hint: int, mask: int) -> Array[Dictionary]:
+	var layers: Array[Dictionary] = []
+	for layer: int in range(1, MASK_LAYERS + 1):
+		if mask & (1 << (layer - 1)) == 0:
+			continue
+		var entry: Dictionary = {"layer": layer}
+		var name: String = str(
+			ProjectSettings.get_setting("layer_names/%s/layer_%d" % [LAYER_NAMES[hint], layer], "")
+		)
+		if not name.is_empty():
+			entry["name"] = name
+		layers.append(entry)
+	return layers
+
 
 ## The values an enum hint names, by name, from its hint string: "SWORD:0,SHIELD:1" as a script
 ## declares one, or "Add,Subtract" as an engine property does, each name then taking the number

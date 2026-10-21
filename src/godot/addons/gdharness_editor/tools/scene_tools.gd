@@ -3,6 +3,7 @@ extends Node
 
 ## Scenes and their nodes, edited in the open editor and read back from what it holds.
 
+const GdhDeclared = preload("../declared_values.gd")
 const GdhFileReads = preload("../file_reads.gd")
 const GdhRead = preload("../reading.gd")
 const GdhGroups = preload("scene_groups.gd")
@@ -747,6 +748,17 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 			)
 			% [str(node.name) if at == "." else at, bus, AudioServer.get_bus_name(0), ", ".join(buses)]
 		)
+	# A mask reads as a number, and which layers it holds, under the names the project gives them,
+	# is what a caller reads it for.
+	var layers: Dictionary = {}
+	for declared: Dictionary in node.get_property_list():
+		var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+		var named: String = str(declared.get("name", ""))
+		var mask: Variant = node.get(named) if props.has(named) else null
+		if hint in GdhDeclared.LAYER_NAMES and mask is int:
+			layers[named] = GdhDeclared.layers_in(hint, GdhRead.as_int(mask))
+	if not layers.is_empty():
+		answer["layers"] = layers
 	answer.merge(GdhSceneFile.class_of(node))
 	answer.merge(GdhGroups.read(scene, node))
 	var from: String = scene.values_from(node, at)

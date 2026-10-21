@@ -390,6 +390,12 @@ export async function runImport(
   };
 }
 
+/** What the engine prints when a .blend file is to be imported and no Blender is set. */
+const NO_BLENDER = 'Blender path is invalid or not set';
+
+const BLENDER_STOPPED =
+  'the import pass stopped at a .blend file and imported nothing: the engine imports .blend files through Blender, which the editor setting filesystem/import/blender/blender_path names, and here it names none. Set it in an editor, or set the project setting filesystem/import/blender/enabled to false with project_settings set, which has the engine leave .blend files unimported.';
+
 async function importOnce(godotPath: string, projectPath: string): Promise<ImportOutcome> {
   const logDir = scratchDirectory('import');
   const caches = editorCacheDirectory(godotPath);
@@ -409,6 +415,16 @@ async function importOnce(godotPath: string, projectPath: string): Promise<Impor
   }
   const problems = problemsIn(ran.log);
   const crash = docCacheCrash(ran, cachesBefore, docCachesWritten(caches), 'import');
+  // The engine exits 0 having imported nothing at all, the files before the .blend in the scan
+  // included, so the pass is a failure whatever the exit code says.
+  if (problems.some((entry) => entry.text.startsWith(NO_BLENDER))) {
+    return {
+      ok: false,
+      message: BLENDER_STOPPED,
+      ...reported(problems),
+      ...(crash === null ? {} : { docCacheNote: crash }),
+    };
+  }
   if (ran.exitCode === 0 && ran.failure === null) {
     return { ok: true, ...reported(problems), ...(crash === null ? {} : { docCacheNote: crash }) };
   }

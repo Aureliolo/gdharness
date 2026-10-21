@@ -40,7 +40,14 @@ const IMPORTABLE_EXTENSIONS: Array[String] = [
 	"fbx",
 	"obj",
 	"dae",
+	"csv",
+	"glsl",
 ]
+## What the engine imports through Blender, which it finds only through an editor setting. With the
+## setting unset, a headless import stops at the first of these and imports nothing after it.
+const BLENDER_EXTENSIONS: Array[String] = ["blend"]
+const BLENDER_SETTING: String = "filesystem/import/blender/blender_path"
+const BLENDER_ENABLED: String = "filesystem/import/blender/enabled"
 ## The format version each importer writes as `importer_version` where it is above 0, which the
 ## editor reimports anything older than. Read off sidecars 4.7.2 writes: scene and animation_library
 ## write 1, and the texture importers write none. A case imports one fresh and compares, so an engine
@@ -662,6 +669,19 @@ func _never_imported(resource_path: String) -> String:
 	var extension: String = resource_path.get_extension().to_lower()
 	if extension in IMPORTABLE_EXTENSIONS:
 		return ""
+	if extension in BLENDER_EXTENSIONS:
+		if not ProjectSettings.get_setting(BLENDER_ENABLED, true):
+			return "the project sets " + BLENDER_ENABLED + " to false, so the engine leaves them unimported"
+		return (
+			"the engine imports ."
+			+ extension
+			+ " files through Blender, which it finds through the editor setting "
+			+ BLENDER_SETTING
+			+ ". An editor with it set imports them on its scan; an import pass with it unset stops at"
+			+ " the first one and imports nothing, and setting "
+			+ BLENDER_ENABLED
+			+ " to false has the engine leave them unimported"
+		)
 	# Loadable without a sidecar is what a scene, a script or a saved resource is: read as it is.
 	if ResourceLoader.exists(resource_path):
 		return "the engine loads ." + extension + " files as they are, without importing them"

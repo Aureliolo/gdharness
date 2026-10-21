@@ -159,11 +159,68 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 			)
 			% [setting_path, "setting is" if near.size() == 1 else "settings are", ", ".join(near)]
 		)
+	# Written as given, since a file can be made after the setting names it, as an import makes a
+	# translation; said, since until then the engine complains of it on every boot.
+	var missing: Array[String] = _missing_files(final_value)
+	if not missing.is_empty():
+		answer["missing_files"] = missing
+		var said: String = (
+			"%s %s not exist, and the engine reports %s on every boot until %s"
+			% [
+				", ".join(missing),
+				"does" if missing.size() == 1 else "do",
+				"it" if missing.size() == 1 else "them",
+				"it does" if missing.size() == 1 else "they do",
+			]
+		)
+		var made: Array[String] = _translations_made_by(missing)
+		if not made.is_empty():
+			said += ("; project_import reimport makes the translation files from " + ", ".join(made))
+		answer["note"] = (str(answer["note"]) + " " if answer.has("note") else "") + said + "."
 	ProjectSettings.set_setting(setting_path, final_value)
 	var err: Error = GdhProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 	return answer
+
+
+## The res:// files [param value] names that are not on disk: a path, an autoload's starred path, or
+## a list or dictionary of them.
+static func _missing_files(value: Variant) -> Array[String]:
+	var items: Array = []
+	if value is String or value is StringName:
+		items = [value]
+	elif value is PackedStringArray:
+		var strings: PackedStringArray = value
+		items = Array(strings)
+	elif value is Array:
+		items = value
+	elif value is Dictionary:
+		var held: Dictionary = value
+		items = held.values()
+	var missing: Array[String] = []
+	for item: Variant in items:
+		if not (item is String or item is StringName):
+			continue
+		var path: String = str(item).trim_prefix("*")
+		if not path.begins_with("res://"):
+			continue
+		if not FileAccess.file_exists(path) and not DirAccess.dir_exists_absolute(path):
+			missing.append(path)
+	return missing
+
+
+## The CSV files an import makes the translations among [param missing] from: strings.en.translation
+## from strings.csv beside it.
+static func _translations_made_by(missing: Array[String]) -> Array[String]:
+	var sources: Array[String] = []
+	for path: String in missing:
+		if path.get_extension() != "translation":
+			continue
+		var csv: String = path.get_basename().get_basename() + ".csv"
+		if FileAccess.file_exists(csv) and not csv in sources:
+			sources.append(csv)
+	return sources
 
 
 # Takes a setting's line out of project.godot, so the engine's default holds again, or nothing at all
