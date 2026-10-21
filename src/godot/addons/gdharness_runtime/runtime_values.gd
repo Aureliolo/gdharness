@@ -80,9 +80,18 @@ static func node_at(root: Node, path: String) -> Dictionary:
 
 ## "Node not found" for [param path], with the deepest node of it the game has and the children that
 ## node has instead, as a scene's refusal names them: a mistyped step was otherwise found by reading
-## the whole tree.
+## the whole tree. A path written from the current scene rather than from the root, as a scene's
+## tools take one, is given the path that reaches it.
 static func _not_found(root: Node, path: String) -> String:
 	var said: String = "Node not found: " + path
+	var scene: Node = root.get_tree().current_scene if root.is_inside_tree() else null
+	if not path.begins_with("/") and scene != null:
+		var meant: Node = scene.get_node_or_null(path)
+		if meant != null:
+			return (
+				"%s. Paths here go from the root, /root, not from the current scene, so this one is %s."
+				% [said, str(meant.get_path())]
+			)
 	var parts: PackedStringArray = path.split("/", false)
 	var at: Node = root
 	var step: int = 0

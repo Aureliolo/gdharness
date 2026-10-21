@@ -2344,7 +2344,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['signal', 'watch', 'until'],
         description:
-          'signal, watch, until: the node. Needed for a signal without a watch, a watch and a property; for says it defaults to /root, the whole screen.',
+          'signal, watch, until: the node, by its path from the root, such as "/root/Main/Player". Needed for a signal without a watch, a watch and a property; for says it defaults to /root, the whole screen.',
       },
       signal: { type: 'string', ops: ['signal', 'watch'], description: 'signal, watch: the signal name.' },
       watch: {

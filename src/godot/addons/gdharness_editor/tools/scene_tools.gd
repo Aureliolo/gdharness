@@ -310,7 +310,7 @@ func add_node(args: Dictionary) -> Dictionary:
 		answer["properties"] = held
 	_properties.note_write(answer, new_node)
 	if not adding.is_empty():
-		answer.merge(GdhGroups.read(scene, new_node))
+		answer.merge(GdhGroups.read_added(new_node, adding))
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var unkept: String = _kept(

@@ -31630,7 +31630,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       writeFileSync(
         join(project, 'main.tscn'),
         '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
-          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n[node name="Rack" type="Node" parent="."]\n',
       );
       // A game run straight off the files knows a script class only once the project has been
       // imported, which is what writes the list of global classes an editor would have. Run without
@@ -31707,7 +31707,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         ],
         [
           '/root/Main/Shelf:wares:0',
-          /^\/root\/Main\.wear argument 1: Node not found: \/root\/Main\/Shelf\. \/root\/Main has no Shelf; it has no children\.$/,
+          /^\/root\/Main\.wear argument 1: Node not found: \/root\/Main\/Shelf\. \/root\/Main has no Shelf; its children are Rack\.$/,
         ],
         [{ _type: 'Object', class: 'RefCounted', id: 1 }, /argument 1: an object is named by its path/],
       ];
@@ -31721,6 +31721,27 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           `wear was not called with anything for ${JSON.stringify(given)}`,
         );
       }
+
+      // A node path written from the current scene, as the scene tools take one, is given the path
+      // from the root that reaches it.
+      const inspected = async (nodePath: string): Promise<string> =>
+        textOf(
+          await server.request(
+            'tools/call',
+            { name: 'runtime_inspect', arguments: { op: 'property', nodePath, property: 'name' } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ) ?? '';
+      assert.match(await inspected('/root/Main/Rack'), /"Rack"/, 'the path from the root reads the node');
+      assert.match(
+        await inspected('Rack'),
+        /Node not found: Rack\. Paths here go from the root, \/root, not from the current scene, so this one is \/root\/Main\/Rack\./,
+      );
+      assert.match(
+        await inspected('Shelf'),
+        /Node not found: Shelf\. \/root has no Shelf; its children are GdharnessRuntime, Main\./,
+        'a path the scene has not either is told what the root has',
+      );
 
       // The same naming on a write. Each slot starts empty or holding another piece, so the write
       // is what puts the instance there: an empty `Gear` property reads as no type at all, and is
@@ -49670,6 +49691,33 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       [['coins', 'pickups'], ['pickups']],
       JSON.stringify(read),
     );
+    const added = await node({
+      op: 'add',
+      parentNodePath: 'Items',
+      instancePath: 'res://coin.tscn',
+      nodeName: 'Coin9',
+      addGroups: ['pickups', 'pickups'],
+    });
+    assert.deepEqual(
+      [get(added, 'groups'), get(added, 'groupsHere')],
+      [['coins', 'pickups'], ['pickups']],
+      `an instance added here is in the group put here, beside its own scene's: ${JSON.stringify(added)}`,
+    );
+    const chest = await node({
+      op: 'add',
+      parentNodePath: 'Items',
+      nodeType: 'Node2D',
+      nodeName: 'Chest',
+      addGroups: ['loot'],
+    });
+    assert.deepEqual(get(chest, 'groups'), ['loot'], JSON.stringify(chest));
+    assert.equal(
+      get(chest, 'groupsHere'),
+      undefined,
+      `a node made here has only this scene's: ${JSON.stringify(chest)}`,
+    );
+    await node({ op: 'delete', nodePath: 'Items/Coin9' });
+    await node({ op: 'delete', nodePath: 'Items/Chest' });
     const level = parseTextContent(await call('scene_tree', {}));
     assert.deepEqual(
       [
