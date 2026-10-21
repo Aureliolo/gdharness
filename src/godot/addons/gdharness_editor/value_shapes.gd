@@ -105,23 +105,27 @@ static func buildable(fields: Dictionary, tag: String) -> bool:
 ## or "" when there is none. Digits in quotes are a number, as a write takes them for a float.
 static func not_a_number(fields: Dictionary, tag: String) -> String:
 	for key: String in NUMBER_FIELDS.get(tag, []):
-		if not fields.has(key):
-			continue
-		var held: Variant = fields[key]
-		if held is int or held is float:
-			continue
-		if held is String and str(held).is_valid_float():
-			continue
-		return key
+		if fields.has(key) and not _is_number(fields[key]):
+			return key
 	return ""
 
 
 ## Whether every item of [param items] is a number, for a list read by its places as a vector.
 static func all_numbers(items: Array) -> bool:
-	return items.all(
-		func(item: Variant) -> bool:
-			return item is int or item is float or (item is String and str(item).is_valid_float())
-	)
+	return items.all(_is_number)
+
+
+# A float JSON has no number for, infinity or NaN, crosses tagged as {"_type": "float", "value":
+# "inf"}, and is a number.
+static func _is_number(held: Variant) -> bool:
+	if held is int or held is float:
+		return true
+	if held is String:
+		return str(held).is_valid_float()
+	if held is Dictionary:
+		var tagged: Dictionary = held
+		return str(tagged.get("_type", "")) in ["float", "int"] and tagged.has("value")
+	return false
 
 
 ## The sentences a refusal of [param value] where a [param type] goes ends with: which of its keys

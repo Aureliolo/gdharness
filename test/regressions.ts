@@ -52055,6 +52055,147 @@ async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> 
 }
 
 /**
+ * A 3D level read back as it was written, with no editor. A light turned 45 degrees down read back
+ * as its transform alone; a joint given a node that is not there was saved without a word; a
+ * resource built into the scene, given to resource_edit modify, was offered remedies for a path
+ * outside the project; and a bake read from meshes passed on the engine's warning unexplained.
+ */
+async function testA3DLevelIsReadAsItIsWritten(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('3D level regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-level-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-level-rt-'));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Level"\n',
+    'arena.tscn': [
+      '[gd_scene format=3]\n',
+      '[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_g"]\nalbedo_color = Color(0.2, 0.5, 0.3, 1)\n',
+      '[sub_resource type="PlaneMesh" id="PlaneMesh_p"]\nmaterial = SubResource("StandardMaterial3D_g")\nsize = Vector2(10, 10)\n',
+      '[sub_resource type="NavigationMesh" id="NavigationMesh_s"]\ngeometry_parsed_geometry_type = 1\n',
+      '[sub_resource type="BoxShape3D" id="BoxShape3D_b"]\nsize = Vector3(10, 0.2, 10)\n',
+      // Read from a group: with its children, and the group's own nodes alone.
+      '[sub_resource type="NavigationMesh" id="NavigationMesh_w"]\ngeometry_source_geometry_mode = 1\ngeometry_source_group_name = &"floors"\n',
+      '[sub_resource type="NavigationMesh" id="NavigationMesh_e"]\ngeometry_source_geometry_mode = 2\ngeometry_source_group_name = &"floors"\n',
+      '[node name="Arena" type="Node3D"]\n',
+      '[node name="Sun" type="DirectionalLight3D" parent="."]\n',
+      // Its first column leans into its second, which no rotation and scale make.
+      '[node name="Leaning" type="Node3D" parent="."]\ntransform = Transform3D(1, 0, 0, 0.5, 1, 0, 0, 0, 1, 0, 0, 0)\n',
+      '[node name="Crate" type="RigidBody3D" parent="."]\n',
+      '[node name="Post" type="StaticBody3D" parent="."]\n',
+      '[node name="Hinge" type="HingeJoint3D" parent="."]\n',
+      '[node name="Paths" type="NavigationRegion3D" parent="."]\n',
+      '[node name="Ground" type="MeshInstance3D" parent="Paths"]\nmesh = SubResource("PlaneMesh_p")\n',
+      '[node name="Solid" type="NavigationRegion3D" parent="."]\nnavigation_mesh = SubResource("NavigationMesh_s")\n',
+      '[node name="Slab" type="StaticBody3D" parent="Solid"]\n',
+      '[node name="Shape" type="CollisionShape3D" parent="Solid/Slab"]\nshape = SubResource("BoxShape3D_b")\n',
+      // Drawn, and not read: this region reads shapes alone.
+      '[node name="Look" type="MeshInstance3D" parent="Solid/Slab"]\nmesh = SubResource("PlaneMesh_p")\n',
+      '[node name="Floors" type="Node3D" parent="." groups=["floors"]]\n',
+      '[node name="Tile" type="MeshInstance3D" parent="Floors"]\nmesh = SubResource("PlaneMesh_p")\n',
+      '[node name="Widely" type="NavigationRegion3D" parent="."]\nnavigation_mesh = SubResource("NavigationMesh_w")\n',
+      '[node name="Exactly" type="NavigationRegion3D" parent="."]\nnavigation_mesh = SubResource("NavigationMesh_e")\n',
+    ].join('\n'),
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  const node = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await call('scene_node', { scenePath: 'arena.tscn', ...args });
+  try {
+    await server.initialize('regression-test');
+
+    await node({ op: 'set', nodePath: 'Sun', properties: { rotation_degrees: { x: -45, y: 0, z: 0 } } });
+    const sun = parseTextContent(await node({ op: 'get', nodePath: 'Sun' }));
+    const placed = get(sun, 'placement') as Record<string, Record<string, number>> | undefined;
+    assert.ok(placed !== undefined, JSON.stringify(sun));
+    assert.ok(Math.abs((placed['rotation_degrees']?.['x'] ?? 0) + 45) < 1e-3, JSON.stringify(placed));
+    assert.deepEqual(placed['scale'], { x: 1, y: 1, z: 1, _type: 'Vector3' }, JSON.stringify(placed));
+    const leaning = parseTextContent(await node({ op: 'get', nodePath: 'Leaning' }));
+    assert.ok(get(leaning, 'properties', 'transform') !== undefined, JSON.stringify(leaning));
+    assert.equal(
+      get(leaning, 'placement'),
+      undefined,
+      `a sheared node is left to its transform: ${JSON.stringify(leaning)}`,
+    );
+
+    const joined = parseTextContent(
+      await node({ op: 'set', nodePath: 'Hinge', properties: { node_a: '../Crate', node_b: '../Nothing' } }),
+    );
+    assert.deepEqual(
+      get(joined, 'namesNoNode'),
+      {
+        node_b:
+          '../Nothing names no node from Hinge. It is written, as the editor writes one, since that node may be added next; until it is, node_b finds nothing.',
+      },
+      JSON.stringify(joined),
+    );
+    assert.match(readFileSync(join(project, 'arena.tscn'), 'utf8'), /node_b = NodePath\("\.\.\/Nothing"\)/);
+
+    const built = textOf(
+      await call('resource_edit', {
+        op: 'modify',
+        resourcePath: 'res://arena.tscn::StandardMaterial3D_g',
+        properties: { roughness: 0.8 },
+      }),
+    );
+    assert.equal(
+      built,
+      'Path \'res://arena.tscn::StandardMaterial3D_g\' names the resource StandardMaterial3D_g kept inside res://arena.tscn, not a file. resource_edit read reads one by that path; this argument takes a file.Possible solutions:\n- Write it through the node holding it, with scene_node set on res://arena.tscn and a path through the property, such as "mesh/material/albedo_color"; scene_node get names the property that holds it',
+    );
+    const through = parseTextContent(
+      await node({ op: 'set', nodePath: 'Paths/Ground', properties: { 'mesh/material/roughness': 0.8 } }),
+    );
+    // Held in 32 bits, which a plain float's answer does not shorten.
+    assert.equal(
+      get(through, 'properties', 'mesh/material/roughness'),
+      Math.fround(0.8),
+      JSON.stringify(through),
+    );
+
+    const meshes = parseTextContent(await node({ op: 'bake_navigation', nodePath: 'Paths' }));
+    assert.ok((get(meshes, 'polygons') as number) > 0, JSON.stringify(meshes));
+    assert.match(
+      String(get(meshes, 'meshesNote')),
+      /^The engine's warning that it had to parse RenderingServer meshes/,
+    );
+    const colliders = parseTextContent(await node({ op: 'bake_navigation', nodePath: 'Solid' }));
+    assert.ok((get(colliders, 'polygons') as number) > 0, JSON.stringify(colliders));
+    assert.equal(
+      get(colliders, 'meshesNote'),
+      undefined,
+      `a bake read from shapes reads no mesh: ${JSON.stringify(colliders)}`,
+    );
+    // The group's node holds no mesh itself, its child does.
+    const widely = parseTextContent(await node({ op: 'bake_navigation', nodePath: 'Widely' }));
+    assert.ok((get(widely, 'polygons') as number) > 0, JSON.stringify(widely));
+    assert.match(String(get(widely, 'meshesNote')), /^The engine's warning/, JSON.stringify(widely));
+    const exactly = parseTextContent(await node({ op: 'bake_navigation', nodePath: 'Exactly' }));
+    assert.equal(get(exactly, 'polygons'), 0, JSON.stringify(exactly));
+    assert.equal(
+      get(exactly, 'meshesNote'),
+      undefined,
+      `only the group's own node is read: ${JSON.stringify(exactly)}`,
+    );
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A navigation region baked with no editor, and the points it is given read as numbers, through
  * the server and a real engine. A point whose field held a word was written as 0, in a vector and in
  * a list of them; the outlines of a NavigationPolygon, a list holding lists, were refused whatever
@@ -53053,6 +53194,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAControlIsLaidOutAsTheEditorLaysItOut,
   testAProjectsFilesAndLayersAreNamedWithNoEditor,
   testANavigationRegionIsBakedWithNoEditor,
+  testA3DLevelIsReadAsItIsWritten,
   testASceneKeepsItsOwnValuesForAnotherScenesNodes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,

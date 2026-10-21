@@ -63,6 +63,13 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 		)
 	if polygons == 0:
 		answer["note"] = _why_empty(held, flat, parsed)
+	if not flat and not Engine.is_editor_hint() and _reads_meshes(region, held):
+		answer["meshesNote"] = (
+			"The engine's warning that it had to parse RenderingServer meshes at runtime is about a "
+			+ "game rebaking as it runs, where reading a mesh back from the GPU stalls a frame. A "
+			+ "headless engine gives it for any bake read from MeshInstance3D nodes; this one ran once "
+			+ "and is saved."
+		)
 
 	if not embedded:
 		scene.close()
@@ -121,6 +128,30 @@ static func _parse_and_bake(scene: GdhSceneFile, at: String, held: Resource, fla
 	tree.root.remove_child(copy)
 	copy.free()
 	return found
+
+
+## Whether a bake of [param held] for [param region] reads the mesh of any node, which only a
+## NavigationMesh reading mesh instances does.
+static func _reads_meshes(region: Node, held: Resource) -> bool:
+	var mesh: NavigationMesh = held
+	if mesh.geometry_parsed_geometry_type == NavigationMesh.PARSED_GEOMETRY_STATIC_COLLIDERS:
+		return false
+	var read: Array[Node] = []
+	match mesh.geometry_source_geometry_mode:
+		NavigationMesh.SOURCE_GEOMETRY_ROOT_NODE_CHILDREN:
+			read = _all_under(region)
+		NavigationMesh.SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN:
+			for node: Node in _all_under(region.owner if region.owner != null else region):
+				if node.is_in_group(mesh.geometry_source_group_name):
+					read.append_array(_all_under(node))
+		_:
+			for node: Node in _all_under(region.owner if region.owner != null else region):
+				if node.is_in_group(mesh.geometry_source_group_name):
+					read.append(node)
+	return read.any(
+		func(node: Node) -> bool:
+			return node is MeshInstance3D or node is MultiMeshInstance3D or node is GridMap
+	)
 
 
 static func _all_under(top: Node) -> Array[Node]:

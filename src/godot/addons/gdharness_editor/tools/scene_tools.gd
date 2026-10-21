@@ -733,6 +733,23 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	var here: Array = set_here.keys()
 	here.sort()
 	var answer: Dictionary = {"ok": true, "nodePath": at, "properties": props, "setHere": here}
+	# A Node3D stores only its transform, a matrix, while a set takes the position, rotation and
+	# scale the inspector shows, so a node turned 45 degrees down read back as nine numbers. A
+	# sheared one has no such three, and is left to its transform.
+	var placed: Node3D = node as Node3D
+	var rebuilt: Transform3D = Transform3D()
+	if placed != null:
+		var turned: Basis = Basis.from_euler(placed.rotation, placed.rotation_order)
+		rebuilt = Transform3D(turned * Basis.from_scale(placed.scale), placed.position)
+	if placed != null and props.has("transform") and rebuilt.is_equal_approx(placed.transform):
+		# Rounded, since a node never scaled came back with a scale of 0.99999994 out of the matrix;
+		# the transform beside it is exact.
+		var step: Vector3 = Vector3.ONE * 0.00001
+		answer["placement"] = {
+			"position": _readable(node, placed.position.snapped(step)),
+			"rotation_degrees": _readable(node, placed.rotation_degrees.snapped(step)),
+			"scale": _readable(node, placed.scale.snapped(step)),
+		}
 	# A player's getter answers Master for a bus the layout does not have, while the file keeps the
 	# name, so a player left on a renamed or removed bus read as one put on Master.
 	var bus: String = str(set_here.get("bus", ""))

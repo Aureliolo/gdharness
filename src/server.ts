@@ -2712,6 +2712,21 @@ const PATH_SOLUTIONS = [
   'Point projectPath at the project the file belongs to',
 ];
 
+/**
+ * What to tell a caller who named a resource built into [file] where a file goes. Moving it into
+ * a file of its own or a path to the project would both leave it where it was, so the way offered
+ * is through what holds it, which takes a path through a property into the resource it holds.
+ */
+function keptSolutions(file: string): string[] {
+  return /\.t?scn$/.test(file)
+    ? [
+        `Write it through the node holding it, with scene_node set on ${file} and a path through the property, such as "mesh/material/albedo_color"; scene_node get names the property that holds it`,
+      ]
+    : [
+        `Write it through the file holding it, with resource_edit modify on ${file} and a path through the property, such as "material/albedo_color"; resource_edit read names the property that holds it`,
+      ];
+}
+
 /** The arguments naming where a file goes rather than one the project holds. */
 const DESTINATION_ARGUMENTS: ReadonlySet<string> = new Set(['newPath', 'newScriptPath']);
 
@@ -5582,7 +5597,13 @@ class GodotServer {
       }
       const location = resolveWithinProject(projectPath, value);
       if (!location.ok) {
-        const solutions = DESTINATION_ARGUMENTS.has(key) ? destinationSolutions(key) : PATH_SOLUTIONS;
+        const kept = keptInside(value);
+        const solutions =
+          kept.inner !== undefined
+            ? keptSolutions(kept.file)
+            : DESTINATION_ARGUMENTS.has(key)
+              ? destinationSolutions(key)
+              : PATH_SOLUTIONS;
         return { ok: false, response: this.createErrorResponse(location.reason, solutions) };
       }
       contained[key] = `res://${location.relativePath}`;

@@ -74,6 +74,10 @@ var _also_changed: Dictionary = {}
 # the inspector would not have let it be entered, so a write answered as made said nothing of it.
 var _outside_declared: Dictionary = {}
 
+# The node paths the last write_all wrote that name no node from the node written, by property, as
+# a sentence saying so.
+var _names_no_node: Dictionary = {}
+
 
 ## Turns what arrived over the wire into the Godot value a property wants.
 ##
@@ -193,6 +197,7 @@ func cannot_hold(
 func write_all(target: Object, properties: Dictionary) -> String:
 	_also_changed = {}
 	_outside_declared = {}
+	_names_no_node = {}
 	var named: Dictionary = {}
 	for key: Variant in properties:
 		named[str(key).get_slice(":", 0)] = true
@@ -275,6 +280,8 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		var now: Variant = target.get(property)
 		if not GdhSame.same(now, before[property]):
 			_also_changed[property] = [before[property], now]
+	if target is Node:
+		_names_no_node = GdhDeclared.naming_nothing(target as Node, given)
 	return ""
 
 
@@ -327,6 +334,8 @@ static func _no_uniform(material: ShaderMaterial, property: String) -> String:
 func note_write(answer: Dictionary, relative_to: Node = null) -> void:
 	if not _outside_declared.is_empty():
 		answer["outsideDeclared"] = _outside_declared.duplicate()
+	if not _names_no_node.is_empty():
+		answer["namesNoNode"] = _names_no_node.duplicate()
 	if _also_changed.is_empty():
 		return
 	var noted: Dictionary = {}
@@ -706,22 +715,9 @@ static func no_property(target: Object, property: String) -> String:
 		)
 		+ "."
 	)
-	# A property of a helper node set on the body it serves, as navigation_layers on the
-	# CharacterBody2D rather than its NavigationAgent2D: the nearest name it has was a physics layer.
 	if not target is Node:
 		return said
-	var node: Node = target
-	var root: Node = node.owner if node.owner != null else node
-	var holders: PackedStringArray = []
-	for child: Node in node.get_children():
-		if property in child:
-			var _added: bool = holders.append("%s (a %s)" % [root.get_path_to(child), child.get_class()])
-	if holders.is_empty():
-		return said
-	if holders.size() == 1:
-		return said + " The node at %s has it." % holders[0]
-	var last: String = holders[holders.size() - 1]
-	return said + " The nodes at %s and %s have it." % [", ".join(holders.slice(0, -1)), last]
+	return said + GdhDeclared.held_by_children(target as Node, property)
 
 
 ## The resource [param path] names, as [found, resource or why not].

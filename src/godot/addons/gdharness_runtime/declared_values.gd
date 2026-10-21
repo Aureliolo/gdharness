@@ -415,3 +415,45 @@ static func not_held(
 			"it lists " + ", ".join(names) if nearest.is_empty() else "the nearest it lists " + nearest
 		]
 	)
+
+
+## The sentence naming the children of [param node] that have [param property], or "" when none
+## does. A property of a helper node set on the body it serves, as navigation_layers on the
+## CharacterBody2D rather than its NavigationAgent2D, was refused with the nearest physics layer.
+static func held_by_children(node: Node, property: String) -> String:
+	var root: Node = node.owner if node.owner != null else node
+	var holders: PackedStringArray = []
+	for child: Node in node.get_children():
+		if property in child:
+			var _added: bool = holders.append("%s (a %s)" % [root.get_path_to(child), child.get_class()])
+	if holders.is_empty():
+		return ""
+	if holders.size() == 1:
+		return " The node at %s has it." % holders[0]
+	var last: String = holders[holders.size() - 1]
+	return " The nodes at %s and %s have it." % [", ".join(holders.slice(0, -1)), last]
+
+
+## A sentence for each node path in [param given], by property, that names no node from
+## [param node]. A path is written whatever it names, as the inspector writes one, since the node may
+## be added next; a joint whose node_a named nothing then joined nothing, and no answer said so.
+static func naming_nothing(node: Node, given: Dictionary) -> Dictionary:
+	var said: Dictionary = {}
+	for property: String in given:
+		if "/" in property or ":" in property:
+			continue
+		# What the node holds, since a path given as text is held as text until the engine stores it.
+		var path: Variant = node.get(property)
+		if not path is NodePath:
+			continue
+		var named: NodePath = path
+		if named.is_empty() or node.get_node_or_null(named) != null:
+			continue
+		said[property] = (
+			(
+				"%s names no node from %s. It is written, as the editor writes one, since that node may "
+				+ "be added next; until it is, %s finds nothing."
+			)
+			% [str(named), node.name, property]
+		)
+	return said
