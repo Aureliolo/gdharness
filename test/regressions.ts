@@ -19549,6 +19549,24 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       /^No editor of this project is open to ask, so a headless engine compiled the scripts .* warnings is null rather than 0\. editor_launch with hidden: true .* Until then clean says only that every script compiles\.$/,
       shown,
     );
+    // Three syntax errors, of which the engine reads only the first. Taken out again after, since
+    // the project's own checks below count its scripts.
+    writeFileSync(
+      join(project, 'checked', 'unfinished.gd'),
+      'extends Node\n\n\nfunc broken(:\n\tvar x = \n\tif x\n\t\tpass\n',
+    );
+    const unfinished = parseTextContent(await diagnose('checked/unfinished.gd'));
+    rmSync(join(project, 'checked', 'unfinished.gd'));
+    assert.deepEqual(
+      get(unfinished, 'diagnostics'),
+      [{ severity: 'error', message: 'Parse Error: Expected parameter name.', line: 4 }],
+      JSON.stringify(unfinished),
+    );
+    assert.match(
+      text(get(unfinished, 'note')),
+      /but stops reading a script at its first syntax error, so an error after one shows once it is fixed\./,
+      JSON.stringify(unfinished),
+    );
 
     const folder = await diagnose('checked');
     const all = parseTextContent(folder);

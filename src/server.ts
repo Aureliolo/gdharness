@@ -3448,7 +3448,7 @@ function engineChecked(why: string): OperationParams {
   return {
     checkedBy: 'engine',
     languageServer: why,
-    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, and no warnings, which the engine tells only an editor: warnings is null rather than 0. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both. Until then clean says only that every script compiles.",
+    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, but stops reading a script at its first syntax error, so an error after one shows once it is fixed. It reports no warnings, which the engine tells only an editor: warnings is null rather than 0. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both. Until then clean says only that every script compiles.",
   };
 }
 
@@ -7522,7 +7522,8 @@ class GodotServer {
    * [param scripts], paths inside the project, compiled by headless engines and answered each in
    * the shape the language server's diagnostics are, for a project whose editor's language server
    * cannot answer. Without an editor open the tool answered nothing at all, while the engine the
-   * other headless tools start reports every error that stops a script compiling, at its line.
+   * other headless tools start reports every error that stops a script compiling, at its line, up
+   * to the first syntax error in each.
    * Warnings are left as null rather than 0: the engine reports them only to an editor or a debugger,
    * so none counted is not none found. [param why] is what the language server answered, which a
    * refusal gives first, since it is the reason the engine was asked at all.
