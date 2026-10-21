@@ -124,7 +124,10 @@ frame prints there, and as `after`'s once the last case is done.
 A suite declaring `const GDHARNESS_NEEDS_WINDOW: bool = true`, or calling gdUnit4's `scene_runner`,
 runs in an engine with a window, since a headless engine delivers no input events. All of those go
 to one windowed engine, which starts first and counts toward `--engines`, and which is then dealt
-headless suites like the others, so a few quick windowed suites never leave it idle. It runs without
+headless suites like the others, so a few quick windowed suites never leave it idle. A headless
+suite dealt there meets the real display server, so the screen size and scale and the display
+features it reports are the machine's rather than the headless server's; a suite that relies on the
+headless answers passes or fails by where it was dealt. It runs without
 `--headless`, at the size `project.godot` gives its viewport, and with the Dummy audio driver like
 every other test engine. On Windows it runs on a desktop of its own, so its window never appears
 on the desktop in use or takes its focus. Elsewhere it uses the display there is; on a CI runner

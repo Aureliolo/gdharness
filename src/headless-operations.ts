@@ -13,6 +13,7 @@ export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string
   project_settings: dictionary({
     get: 'get_project_setting',
     set: 'set_project_setting',
+    unset: 'unset_project_setting',
     add_autoload: 'add_autoload',
     remove_autoload: 'remove_autoload',
     set_main_scene: 'set_main_scene',

@@ -13,6 +13,15 @@ const GdhWords = preload("runtime_words.gd")
 ## How many of the controls saying the same words a refusal names, with the index for each.
 const LISTED_CANDIDATES: int = 10
 
+## Node.ProcessMode as its names, for a refusal to say which one is in force.
+const PROCESS_MODES: Dictionary[int, String] = {
+	Node.PROCESS_MODE_INHERIT: "INHERIT",
+	Node.PROCESS_MODE_PAUSABLE: "PAUSABLE",
+	Node.PROCESS_MODE_WHEN_PAUSED: "WHEN_PAUSED",
+	Node.PROCESS_MODE_ALWAYS: "ALWAYS",
+	Node.PROCESS_MODE_DISABLED: "DISABLED",
+}
+
 ## What a game started without a window gets whatever the project settings say, and the usual
 ## reason a control is out of reach. Only worth telling somebody when it is what they have.
 const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
@@ -954,3 +963,20 @@ static func _out_of_reach_exactly(nodes: Array[Node], why: Array[String]) -> Str
 	if nodes.size() == 1:
 		return "1 control says exactly that and cannot be clicked: %s" % first
 	return "%d controls say exactly that and cannot be clicked, such as %s" % [nodes.size(), first]
+
+
+## Which node's process_mode keeps [param control] from processing, and what it is. A node set to
+## inherit takes its parent's, so the one deciding can be any node above it: the game turning a
+## whole screen off while a menu shows over it reads, on the button, as a button turned off.
+static func why_it_does_not_process(control: Control, node_path: String) -> String:
+	var deciding: Node = control
+	while deciding.process_mode == Node.PROCESS_MODE_INHERIT and deciding.get_parent() != null:
+		deciding = deciding.get_parent()
+	# The root inherits from nothing, which processes as pausable.
+	var value: int = deciding.process_mode
+	if value == Node.PROCESS_MODE_INHERIT:
+		value = Node.PROCESS_MODE_PAUSABLE
+	var mode: String = PROCESS_MODES.get(value, str(value))
+	if deciding == control:
+		return "its process_mode is %s" % mode
+	return "%s inherits process_mode %s from %s" % [node_path, mode, deciding.get_path()]

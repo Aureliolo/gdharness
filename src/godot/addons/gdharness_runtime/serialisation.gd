@@ -142,28 +142,29 @@ func serialize_value(value: Variant) -> Variant:
 		return value
 	var carried: Variant = call(serialiser, value)
 	# The fixed shapes carry their components as bare floats, so an infinite one in a Vector2 is
-	# tagged here; containers reach their members through this function already.
-	return carried if typeof(value) in [TYPE_ARRAY, TYPE_DICTIONARY] else _finite(carried)
+	# tagged here, and a 32-bit one shortened; containers reach their members through this already.
+	var type: int = typeof(value)
+	return carried if type in [TYPE_ARRAY, TYPE_DICTIONARY] else _finite(carried, GdhRead.holds_singles(type))
 
 
 # [param carried] with every non-finite float in it tagged. JSON has no spelling for infinity or
 # NaN: the engine writes 1e99999 and null, and the server, reading 1e99999 as Infinity, writes it
 # back out as null, so a property holding INF was answered as holding nothing.
-func _finite(carried: Variant) -> Variant:
+func _finite(carried: Variant, single: bool = false) -> Variant:
 	if carried is float:
 		var number: float = carried
-		return _serialize_float(number)
+		return _serialize_float(GdhRead.single(number) if single else number)
 	if carried is Dictionary:
 		var fields: Dictionary = carried
 		var tagged: Dictionary = {}
 		for key: Variant in fields:
-			tagged[key] = _finite(fields[key])
+			tagged[key] = _finite(fields[key], single)
 		return tagged
 	if carried is Array:
 		var items: Array = carried
 		var tagged_items: Array = []
 		for item: Variant in items:
-			tagged_items.append(_finite(item))
+			tagged_items.append(_finite(item, single))
 		return tagged_items
 	return carried
 
@@ -189,7 +190,7 @@ func _serialize_floats(value: Variant) -> Variant:
 			for each: float in numbers:
 				items.append(_serialize_float(each))
 			return items
-	return value
+	return numbers if value is PackedFloat32Array else value
 
 
 # Rebuilds a Godot value from the shape serialize_value gave it.

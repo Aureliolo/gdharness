@@ -218,6 +218,8 @@ export class GameDebugger {
   private readonly server: Server;
   readonly port: number;
   private readonly breakpoints: readonly string[];
+  /** Every `res://path:line` the game holds a breakpoint on now, as set at its start and since. */
+  private readonly breakpointLines: Set<string>;
   private readonly observers: readonly DebugObserver[];
 
   private constructor(
@@ -229,6 +231,7 @@ export class GameDebugger {
     this.server = server;
     this.port = port;
     this.breakpoints = breakpoints;
+    this.breakpointLines = new Set(breakpoints);
     this.observers = observers;
   }
 
@@ -453,6 +456,11 @@ export class GameDebugger {
     }
     switch (request.op) {
       case 'breakpoint':
+        if (request.set) {
+          this.breakpointLines.add(`${request.script}:${String(request.line)}`);
+        } else {
+          this.breakpointLines.delete(`${request.script}:${String(request.line)}`);
+        }
         this.send(
           'breakpoint',
           [request.script, request.line, request.set],
@@ -553,23 +561,12 @@ export class GameDebugger {
     }
     // The runtime addon is an autoload, so its _process runs first in every frame, and a pause taken
     // every 2048 lines falls wherever they do: an idle game stopped in gdharness's code, not its own.
-    let frames = await this.stack();
-    const stepping = Date.now();
-    while (
-      frames !== null &&
-      this.held !== null &&
-      (frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false) &&
-      Date.now() - stepping < ADDON_STEP_MS
-    ) {
-      this.forget('debug_enter');
-      this.send('step', [], this.held.thread);
-      if ((await this.next(GameDebugger.named('debug_enter'), STEP_MS)) === null) {
-        return {
-          paused: false,
-          note: `The game stopped in gdharness's runtime addon and was stepped on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs; debug_state stack reads it then.`,
-        };
-      }
-      frames = await this.stack();
+    const frames = await this.pastTheAddon();
+    if (frames === 'lost') {
+      return {
+        paused: false,
+        note: `The game stopped in gdharness's runtime addon and was stepped on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs; debug_state stack reads it then.`,
+      };
     }
     this.stoppedBy('Paused');
     const stack = frames ?? [];
@@ -583,6 +580,29 @@ export class GameDebugger {
           }
         : {}),
     };
+  }
+
+  /**
+   * The held game's stack, stepped on into while its top frame is gdharness's runtime addon, for at
+   * most {@link ADDON_STEP_MS}; `lost` when a step did not stop again.
+   */
+  private async pastTheAddon(): Promise<DebugFrame[] | null | 'lost'> {
+    let frames = await this.stack();
+    const stepping = Date.now();
+    while (
+      frames !== null &&
+      this.held !== null &&
+      (frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false) &&
+      Date.now() - stepping < ADDON_STEP_MS
+    ) {
+      this.forget('debug_enter');
+      this.send('step', [], this.held.thread);
+      if ((await this.next(GameDebugger.named('debug_enter'), STEP_MS)) === null) {
+        return 'lost';
+      }
+      frames = await this.stack();
+    }
+    return frames;
   }
 
   /**
@@ -627,8 +647,28 @@ export class GameDebugger {
         note: `The game had not stopped again ${STEP_MS / 1000}s after the step: the step is still running, as one out of a function that never returns does, or it went on without reaching another line. debug_state stack answers once it stops, and debug_control pause stops it wherever it is.`,
       };
     }
+    // The step into a function's last line goes on into whatever runs next, which in an idle frame
+    // is the runtime addon's _process, the first thing every frame runs.
+    const frames = await this.pastTheAddon();
+    if (frames === 'lost') {
+      return {
+        stepped: true,
+        heldAgain: false,
+        note: `The step stopped in gdharness's runtime addon and was stepped on to reach the game's own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script the game runs; debug_state stack reads it then.`,
+      };
+    }
     this.stoppedBy('Stepped');
-    return { stepped: true, heldAgain: true, held: this.heldState(), stack: (await this.stack()) ?? [] };
+    const stack = frames ?? [];
+    const top = stack[0];
+    // The engine names every stop Breakpoint, so a step that ran into one cannot be told from a step
+    // that ended on its line; the line is what can be said.
+    const onBreakpoint = top !== undefined && this.breakpointLines.has(`${top.script}:${String(top.line)}`);
+    return {
+      stepped: true,
+      heldAgain: true,
+      held: { ...this.heldState(), ...(onBreakpoint ? { onBreakpoint: true } : {}) },
+      stack,
+    };
   }
 
   private async variables(frame: number): Promise<DebugAnswer> {

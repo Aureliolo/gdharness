@@ -9,6 +9,7 @@
 
 import { readFileSync } from 'node:fs';
 import { stripVTControlCharacters } from 'node:util';
+import type { LogEntry } from './game-log.js';
 import { scriptErrorsPrinted } from './junit.js';
 
 /** One case as the run reported it finishing. */
@@ -199,6 +200,27 @@ export function readRun(printed: string): RunPrinted {
     (error) => `${error.path}${error.line === null ? '' : `:${String(error.line)}`}: ${error.message}`,
   );
   return { lines, suites, errors, leaks, starved, executed, unloadable, stoppedIn };
+}
+
+// What Godot prints before an error raised while it was printing another. It writes the pair
+// straight to stderr, past every logger, so a log the engine writes with --log-file never has them.
+const NESTED_ERROR = 'While attempting to print an error, another error was printed:';
+
+/**
+ * [param printed], read off the engine's --log-file, with the errors Godot raised while printing
+ * another added from [param piped], the log of its streams. They belong to no suite, since where
+ * in the run they came went with them, and fail it as gdharness test does, which reads both streams
+ * through one handle and so has them in place. gdUnit4's own loggers raise them, after a stack
+ * overflow has left the engine counting a call stack it no longer has.
+ */
+export function withNestedErrors(printed: RunPrinted, piped: readonly LogEntry[]): RunPrinted {
+  const nested = piped.flatMap((entry, at) => {
+    const next = piped[at + 1];
+    return entry.severity === 'info' && entry.text.trim() === NESTED_ERROR && next?.severity === 'error'
+      ? [{ text: next.text, at: printed.lines.length, suite: null, during: null }]
+      : [];
+  });
+  return nested.length === 0 ? printed : { ...printed, errors: [...printed.errors, ...nested] };
 }
 
 /** What one engine was handed, which is what its run is judged against. */

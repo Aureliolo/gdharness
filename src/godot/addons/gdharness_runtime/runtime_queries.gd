@@ -723,6 +723,8 @@ func get_metrics(params: Dictionary) -> Dictionary:
 		"frame_time": frame_time,
 		"frame_time_max": frame_time_max,
 		"frames_timed": timed,
+		"process_frames": Engine.get_process_frames(),
+		"physics_frames": Engine.get_physics_frames(),
 		"physics_steps_per_second": physics_steps_per_second,
 		"physics_ticks_per_second": Engine.physics_ticks_per_second,
 		"max_physics_steps_per_frame": Engine.max_physics_steps_per_frame,

@@ -24,6 +24,7 @@ func _init() -> void:
 	_check_non_finite()
 	_check_exact_ints()
 	_check_keys()
+	_check_single_floats()
 
 	if failures.is_empty():
 		print(JSON.stringify({"ok": true}))
@@ -139,6 +140,31 @@ func _check_serialize() -> void:
 
 ## Keys that are not text, through JSON and back. JSON keys are text, so an int key was answered as
 ## its text and a dictionary written back from the answer had words where its numbers were.
+## A 32-bit float read back as the decimal it was written as, where the double it widens to is
+## 0.200000002980232; and the shorter decimal, rebuilt, is the same 32 bits. A plain float is left
+## as it is, since a 64-bit one shortened would be a different number.
+func _check_single_floats() -> void:
+	var colour: Variant = values.serialize_value(Color(0.2, 0.4, 0.6, 1))
+	if JSON.stringify(colour) != '{"_type":"Color","a":1.0,"b":0.6,"g":0.4,"r":0.2}':
+		_fail("a colour reads as written: %s" % JSON.stringify(colour))
+	var point: Variant = values.serialize_value(Vector2(0.1, -0.3))
+	if not OS.has_feature("double") and JSON.stringify(point) != '{"_type":"Vector2","x":0.1,"y":-0.3}':
+		_fail("a vector reads as written: %s" % JSON.stringify(point))
+	var listed: Variant = values.serialize_value(PackedFloat32Array([0.1, 2.5]))
+	if JSON.stringify(listed) != "[0.1,2.5]":
+		_fail("a 32-bit array reads as written: %s" % JSON.stringify(listed))
+	var widened: float = PackedFloat32Array([0.2])[0]
+	if values.serialize_value(widened) != widened:
+		_fail("a plain float is not shortened: %s" % JSON.stringify(values.serialize_value(widened)))
+	for held: float in [1.0 / 3.0, 16777217.0, 1.0e-30, -123456.789, 3.4e38]:
+		var single: float = PackedFloat32Array([held])[0]
+		var said: Variant = values.serialize_value(Color(single, 0, 0))
+		var back: Variant = values.deserialize_value(said)
+		var rebuilt: Color = back if back is Color else Color.TRANSPARENT
+		if not back is Color or rebuilt.r != single:
+			_fail("%s shortened is the same 32 bits: %s" % [str(held), JSON.stringify(said)])
+
+
 func _check_keys() -> void:
 	var keyed: Dictionary = {1: "one", Vector2(1, 2): Vector2(3, 4)}
 	var wire: String = JSON.stringify(values.serialize_value(keyed))

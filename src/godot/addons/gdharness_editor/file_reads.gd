@@ -119,6 +119,9 @@ static func _laid(scene_path: String) -> Dictionary:
 		return {"ok": false, "error": refused}
 	if not nodes.has("."):
 		return {"ok": false, "error": "%s holds no nodes" % scene_path}
+	var base: SceneState = packed.get_state().get_base_scene_state()
+	if base != null:
+		nodes["."]["inherits"] = base.get_path()
 	return {"ok": true, "nodes": nodes}
 
 
@@ -175,6 +178,10 @@ static func _lay(
 				nodes[path] = _made(str(state.get_node_type(index)))
 			if ids[index] >= 0:
 				nodes[path]["uniqueId"] = ids[index]
+			# Laid at the root with no scene handed in is a scene the one being read inherits, and the
+			# deepest is laid first, so this is the file that makes the node.
+			if prefix == "." and loaded == null:
+				nodes[path]["inheritedFrom"] = state.get_path()
 		# The name is the state's even for an entry laid already, since an inherited scene names its
 		# root itself; a root instanced inside another scene is renamed by that scene once laid.
 		if not recovered:
@@ -324,6 +331,12 @@ static func _entry(
 		data["instanceOf"] = node["instanceOf"]
 		if node.has("editableChildren"):
 			data["editableChildren"] = node["editableChildren"]
+	# An inherited scene's file holds only what it changes, so the read says what it inherits and
+	# which nodes come from there, as the editor greys them.
+	if node.has("inherits"):
+		data["inherits"] = node["inherits"]
+	elif node.has("inheritedFrom"):
+		data["inheritedFrom"] = node["inheritedFrom"]
 	var groups: Array[String] = node["groups"]
 	if not groups.is_empty():
 		var sorted: Array[String] = groups.duplicate()

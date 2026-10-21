@@ -259,7 +259,7 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 			)
 		return _log.failure(
 			(
-				"Nothing was changed: %s parses as it is and would not with these additions: %s"
+				"Nothing was changed: %s parses now, and would not with these additions: %s"
 				% [script_path, _reasons(caught.raised, full_script_path)]
 			)
 		)

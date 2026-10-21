@@ -171,6 +171,16 @@ static func place(node: Node, asked: Variant) -> void:
 		node.get_parent().move_child(node, GdhRead.as_int(asked))
 
 
+## Whether [param basis] has axes that are not at right angles, which a node kept in place under a
+## parent scaled unevenly across its turn ends up with. A Node2D says so through skew; a Node3D has
+## no property for it, and its position, rotation and scale read as if the axes were square.
+static func sheared(basis: Basis) -> bool:
+	var x: Vector3 = basis.x.normalized()
+	var y: Vector3 = basis.y.normalized()
+	var z: Vector3 = basis.z.normalized()
+	return absf(x.dot(y)) > 0.0001 or absf(x.dot(z)) > 0.0001 or absf(y.dot(z)) > 0.0001
+
+
 ## The properties that hold where [param node] is drawn, which a reparent keeping it in place
 ## changes: a Control keeps only its position, as Node.reparent keeps it.
 static func placing(node: Node) -> Array[String]:

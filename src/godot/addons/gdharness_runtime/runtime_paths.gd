@@ -405,10 +405,13 @@ static func _arity(object: Object, method: String) -> Dictionary:
 ##
 ## A path is read, and a wait reads it every frame, so a call in one has to be a read. The engine
 ## marks its own reading methods const and `queue_free()`, `free()` and `set_name()` not, measured on
-## 4.7.2. A game's methods carry no such mark, so one declared `-> void` is taken at its word, as
-## doing something and answering nothing, and one left untyped is trusted. Without this a find
-## with property "queue_free()" freed every node it matched, and a wait on "advance_day()" called
-## it once a frame and then reported the state it had driven the game to.
+## 4.7.2, though it leaves some reads unmarked as well, `Engine.get_frames_drawn()` and
+## `get_time_scale()` among them; so the refusal says the mark is missing, not that the method
+## changes anything, and points at runtime_invoke call, which calls it. A game's methods carry no
+## such mark, so one declared `-> void` is taken at its word, as doing something and answering
+## nothing, and one left untyped is trusted. Without this a find with property "queue_free()" freed
+## every node it matched, and a wait on "advance_day()" called it once a frame and then reported the
+## state it had driven the game to.
 ##
 ## Given [param given] arguments, a call is the engine's and marked as reading, or it is refused. A
 ## game's method taking arguments is trusted on nothing at all: one answering a value can as well
@@ -450,7 +453,10 @@ static func call_refused(object: Object, method: String, called_as: String, give
 			)
 		return ""
 	if _native_flags(object, method) & METHOD_FLAG_CONST == 0:
-		return "%s.%s changes what it is called on rather than reading it%s" % [called_as, method, READS_ONLY]
+		return (
+			"%s.%s is not one the engine marks as only reading%s; runtime_invoke call calls it"
+			% [called_as, method, READS_ONLY]
+		)
 	return ""
 
 

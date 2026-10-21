@@ -7,6 +7,7 @@ extends RefCounted
 ## made here passes the same checks and answers in the same shape. What the engine does that an
 ## editor does not, running every script, is put back in scene_file.gd and headless_check.gd.
 
+const GdhAnimationStates = preload("../addons/gdharness_editor/tools/animation_states.gd")
 const GdhAnimationTools = preload("../addons/gdharness_editor/tools/animation_tools.gd")
 const GdhResourceTools = preload("../addons/gdharness_editor/tools/resource_tools.gd")
 const GdhSceneTools = preload("../addons/gdharness_editor/tools/scene_tools.gd")
@@ -36,11 +37,16 @@ const RESOURCE_COMMANDS: Array[String] = [
 const ANIMATION_COMMANDS: Array[String] = [
 	"create_animation",
 	"add_animation_track",
+	"remove_animation_track",
 	"set_animation",
 	"rename_animation",
 	"remove_animation",
+]
+const ANIMATION_STATE_COMMANDS: Array[String] = [
 	"add_animation_state",
 	"connect_animation_states",
+	"remove_animation_state",
+	"disconnect_animation_states",
 ]
 
 
@@ -60,6 +66,8 @@ static func run(params: Dictionary) -> Dictionary:
 		tools = GdhResourceTools.new()
 	elif command in ANIMATION_COMMANDS:
 		tools = GdhAnimationTools.new()
+	elif command in ANIMATION_STATE_COMMANDS:
+		tools = GdhAnimationStates.new()
 	else:
 		return {"ok": false, "error": "No editor tool runs headless as " + command}
 	var answer: Variant = tools.call(command, arguments)

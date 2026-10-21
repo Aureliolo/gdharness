@@ -190,6 +190,7 @@ import {
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
 import {
+  folderFiles,
   pathsInUidCache,
   projectFiles,
   projectStructure,
@@ -303,7 +304,7 @@ import {
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
 // array element, so a path full of backslashes, spaces or quotes is just a path.
 import { runHidden as run, spawnHidden } from './spawn.js';
-import { declaringAdvice, readExpected, readRun, unexpectedErrors } from './suite-judge.js';
+import { declaringAdvice, readExpected, readRun, unexpectedErrors, withNestedErrors } from './suite-judge.js';
 import { ProjectScripts, TEST_DIRECTORIES } from './suite-plan.js';
 import { selectTests } from './test-selection.js';
 import {
@@ -2264,6 +2265,7 @@ export function settingsNamedBy(op: string, args: OperationParams): string[] {
   const text = (key: string): string => readString(args, key) ?? '';
   switch (op) {
     case 'set':
+    case 'unset':
       return text('setting') === '' ? [] : [text('setting')];
     case 'add_autoload':
     case 'remove_autoload':
@@ -3339,7 +3341,9 @@ export function scriptsToDiagnose(
       found.push(relative);
       continue;
     }
-    const inside = scriptsUnder(location.absolutePath, relative);
+    const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
+      relative === '' ? script : `${relative}/${script}`,
+    );
     if (inside.length === 0) {
       empty.push(entry);
     }
@@ -3367,7 +3371,7 @@ function engineChecked(why: string): OperationParams {
   return {
     checkedBy: 'engine',
     languageServer: why,
-    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, and no warnings, which the engine tells only an editor: warnings is null rather than 0. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both.",
+    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, and no warnings, which the engine tells only an editor: warnings is null rather than 0. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both. Until then clean says only that every script compiles.",
   };
 }
 
@@ -3380,28 +3384,6 @@ function isDirectory(path: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** The `.gd` files under [param directory], as paths beginning [param prefix], in a stable order. */
-function scriptsUnder(directory: string, prefix: string): string[] {
-  if (existsSync(join(directory, '.gdignore'))) {
-    return [];
-  }
-  const found: string[] = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
-    a.name < b.name ? -1 : 1,
-  )) {
-    if (entry.name.startsWith('.')) {
-      continue;
-    }
-    const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
-    if (entry.isDirectory()) {
-      found.push(...scriptsUnder(join(directory, entry.name), path));
-    } else if (entry.isFile() && entry.name.endsWith('.gd')) {
-      found.push(path);
-    }
-  }
-  return found;
 }
 
 /** The scene project.godot names for the game to start in, or null when it names none. */
@@ -4715,6 +4697,8 @@ class GodotServer {
             return await editorOrEngine('create_animation', 'writes');
           case 'add_track':
             return await editorOrEngine('add_animation_track', 'writes');
+          case 'remove_track':
+            return await editorOrEngine('remove_animation_track', 'writes');
           case 'set':
             return await editorOrEngine('set_animation', 'writes');
           case 'rename':
@@ -4723,6 +4707,10 @@ class GodotServer {
             return await editorOrEngine('remove_animation', 'writes');
           case 'add_state':
             return await editorOrEngine('add_animation_state', 'writes');
+          case 'remove_state':
+            return await editorOrEngine('remove_animation_state', 'writes');
+          case 'disconnect_states':
+            return await editorOrEngine('disconnect_animation_states', 'writes');
           default:
             return await editorOrEngine('connect_animation_states', 'writes');
         }
@@ -6745,7 +6733,10 @@ class GodotServer {
     const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
     let reportProblem: string | null = null;
-    const casePrinted = readRun(existsSync(engineLog) ? readFileSync(engineLog, 'utf8') : '');
+    const casePrinted = withNestedErrors(
+      readRun(existsSync(engineLog) ? readFileSync(engineLog, 'utf8') : ''),
+      run.log.all,
+    );
     const declaredErrors = readExpected(expectedFile);
     try {
       const written =
@@ -6963,7 +6954,7 @@ class GodotServer {
       path: suite.path,
       name: report.suites.find((entry) => entry.path === suite.path)?.name ?? suite.path,
       orphans: suite.orphans,
-      message: `${suite.orphans} node${suite.orphans === 1 ? '' : 's'} were still in the tree when this suite finished. A node built in a test and neither freed nor added to the tree is the usual cause; free it, or add it with auto_free().`,
+      message: `${suite.orphans === 1 ? '1 node' : `${String(suite.orphans)} nodes`} built during this suite ${suite.orphans === 1 ? 'was' : 'were'} neither freed nor in the tree when it finished, which gdUnit4 counts as orphans. Free each one, or make it with auto_free(), which frees it once the case is over.`,
     }));
     // A suite that passed every case has nothing to say that the totals do not, and a whole tier
     // of them is most of the answer: a hundred and three clean suites came back as fifteen
@@ -6999,10 +6990,18 @@ class GodotServer {
       times: error.times > 1 ? error.times : undefined,
     }));
     const undeclaredErrors = undeclaredAll.slice(0, MOST_UNDECLARED_ERRORS);
+    // A declared text matches the whole line, so one declaring the start of a message that ends in
+    // a number reads as both never printed and undeclared, and nothing said the two were one line.
     const declaredNotPrinted = judgedErrors.neverPrinted.map((missing) => ({
       suite: missing.suite,
       case: missing.during,
       text: missing.text,
+      printedInstead: judgedErrors.printed.find(
+        (error) =>
+          error.suite === missing.suite &&
+          error.during === missing.during &&
+          error.text.includes(missing.text),
+      )?.text,
     }));
     const erring = (path: string | null): { undeclared: number; notPrinted: number } => ({
       undeclared: undeclaredPrinted.filter((error) => error.suite === path).length,
@@ -13955,6 +13954,36 @@ class GodotServer {
   }
 
   /**
+   * Where the game this server started is held by its keeper's debugger, when [param endpoint] is
+   * that game and it is held; null otherwise, and for a debugger that does not answer. The editor's
+   * session says this of its game before a call goes, and a kept game said nothing: a call that met
+   * a breakpoint waited out the whole runtime timeout, then said only that the game might be held.
+   */
+  private async keptHoldOn(endpoint: RuntimeEndpoint): Promise<string | null> {
+    const kept = this.keptRun();
+    if (kept === null || this.announcedPidOf(kept) !== endpoint.pid) {
+      return null;
+    }
+    const answered = await askTheKeepersDebugger(kept.keeper, { op: 'stack' }, KEEPER_DEBUG_MS);
+    if ('unreached' in answered || !Array.isArray(answered['stack'])) {
+      return null;
+    }
+    const top: unknown = answered['stack'][0];
+    const held: unknown = answered['held'];
+    const reason =
+      typeof held === 'object' &&
+      held !== null &&
+      typeof (held as Record<string, unknown>)['reason'] === 'string'
+        ? ` (${String((held as Record<string, unknown>)['reason'])})`
+        : '';
+    if (typeof top !== 'object' || top === null) {
+      return `held by its debugger between frames${reason}`;
+    }
+    const frame = top as Record<string, unknown>;
+    return `held by its debugger at ${String(frame['script'])}:${String(frame['line'])} in ${String(frame['name'])}${reason}`;
+  }
+
+  /**
    * Whether an editor-played run is held at a breakpoint, from the session when it knows and from
    * the runtime when it does not.
    *
@@ -14200,6 +14229,17 @@ class GodotServer {
         ],
       );
     }
+    const keptHeld = await this.keptHoldOn(choice.endpoint);
+    if (keptHeld !== null) {
+      return this.createErrorResponse(
+        `The game (pid ${choice.endpoint.pid}) is ${keptHeld}, and answers no runtime call while it is.`,
+        [
+          'debug_control continue lets it go, after which this call answers',
+          'debug_state stack reads where it is held, and debug_state variables what it is holding there',
+          'editor_run stop ends it',
+        ],
+      );
+    }
 
     const expectsScreenshot = command === 'capture_screenshot' || command === 'capture_viewport';
     // Checked before the game is asked, so a refused place costs no capture.
@@ -14264,12 +14304,18 @@ class GodotServer {
       // rather than as a failure: the call has not failed, and a caller told it had repeated calls
       // that had already run.
       if (!reply.ok && reply.requestId !== undefined) {
+        // The call itself can be what reached the breakpoint, which no check before it could see.
+        const heldSince = await this.keptHoldOn(choice.endpoint);
         return this.jsonTextResponse({
           pending: true,
           requestId: reply.requestId,
           command,
           waitedMs: timeoutMs,
-          note: `${reply.message} ${longerWaitNote(asked.tool, asked.op, timeoutMs)}`,
+          ...(heldSince === null ? {} : { heldAt: heldSince }),
+          note:
+            heldSince === null
+              ? `${reply.message} ${longerWaitNote(asked.tool, asked.op, timeoutMs)}`
+              : `The game is ${heldSince}, so it answers once it goes on: debug_control continue lets it go, and runtime_invoke op result with requestId ${reply.requestId} then answers with what the call returned.`,
           ...answeredBy,
           ...alongside(),
         });

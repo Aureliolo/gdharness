@@ -146,7 +146,9 @@ func _read(path: String, property: String) -> Dictionary:
 
 ## #896: an engine method that reads takes literal arguments in a path, so a control's theme is read
 ## where it is drawn. A game's method is given none, since nothing marks one as only reading, and an
-## engine method that changes what it is called on is refused with arguments as without.
+## engine method the engine does not mark as reading is refused with arguments as without. Some
+## reads go unmarked too, get_tree_string() among them, so the refusal claims only the missing mark
+## and names the tool that calls the method anyway.
 func _check_reading_calls_take_literal_arguments() -> void:
 	var card: PanelContainer = PanelContainer.new()
 	card.name = "Card"
@@ -185,8 +187,9 @@ func _check_reading_calls_take_literal_arguments() -> void:
 		"charged(1)": "is the game's own",
 		# Its argument is optional, so only the rule about a game method given arguments refuses it.
 		"boosted(2)": "is the game's own",
-		'set("day", 5)': "changes what it is called on",
-		'set_name("Renamed")': "changes what it is called on",
+		'set("day", 5)': "is not one the engine marks as only reading",
+		'set_name("Renamed")': "is not one the engine marks as only reading",
+		"get_tree_string()": "get_tree_string is not one the engine marks as only reading",
 		"/root/Column:get_theme_constant(separation)": "literal arguments only",
 		"/root/Column:get_theme_constant()": "takes 1 to 2 arguments and the path gives it 0",
 		"roster:size(1)": "calls size() on one with no arguments",
@@ -198,6 +201,11 @@ func _check_reading_calls_take_literal_arguments() -> void:
 			_fail("%s is refused, saying %s: %s" % [asked, refusals[asked], str(answer)])
 	if game.get("day") != 0 or game.name != "Game":
 		_fail("and none of them ran: day %s, named %s" % [str(game.get("day")), game.name])
+	var unmarked: Dictionary = await _read("/root/Game", "get_tree_string()")
+	if not str(unmarked.get("message", "")).ends_with(
+		"only calls methods that read; runtime_invoke call calls it"
+	):
+		_fail("an unmarked engine method's refusal names the tool that calls it: %s" % str(unmarked))
 	card.queue_free()
 	column.queue_free()
 	await process_frame
@@ -223,7 +231,9 @@ func _check_a_returned_object_is_read() -> void:
 	if (
 		some.get("result_properties") != {"dead_allowed": true, "terms:0": "first"}
 		or missing.size() != 1
-		or not str(missing[0]).contains("has no property nope")
+		or not str(missing[0]).ends_with(
+			"has no property nope; its script declares dead_allowed, terms, title"
+		)
 	):
 		_fail("named paths are read off it, and one not there is listed: %s" % str(some))
 	var plain: Dictionary = await node._execute_command(
