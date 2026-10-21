@@ -21,15 +21,6 @@ const GdhMouse = preload("runtime_mouse.gd")
 ## everything that process starts. Kept in step with `DESKTOP_VARIABLE` in src/desktop.ts.
 const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
 
-## Node.ProcessMode as its names, for a refusal to say which one is in force.
-const PROCESS_MODES: Dictionary[int, String] = {
-	Node.PROCESS_MODE_INHERIT: "INHERIT",
-	Node.PROCESS_MODE_PAUSABLE: "PAUSABLE",
-	Node.PROCESS_MODE_WHEN_PAUSED: "WHEN_PAUSED",
-	Node.PROCESS_MODE_ALWAYS: "ALWAYS",
-	Node.PROCESS_MODE_DISABLED: "DISABLED",
-}
-
 ## Whether this run has had the pointer note in full; the game process is the run.
 static var _pointer_explained: bool = false
 
@@ -151,7 +142,7 @@ func inject_action(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": "Action name required"}
 
 	if not InputMap.has_action(action):
-		return {"type": "error", "message": "Action not found: " + action}
+		return {"type": "error", "message": GdhValues.no_action(action)}
 	var holding: Variant = GdhValues.held_for(params)
 	if holding is String:
 		return {"type": "error", "message": holding}
@@ -272,6 +263,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 			"ctrl": event.ctrl_pressed,
 			"alt": event.alt_pressed,
 			"unicode": event.unicode,
+			"actions": GdhValues.actions_of(event),
 			"pressed": held and not whole,
 			"whole": whole,
 		},
@@ -317,7 +309,8 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	# its drag from the press, which is where a real pointer would be.
 	var _moved: Vector2 = _arrive(position)
 	var supplied: bool = _follow_in_the_window(position)
-	Input.parse_input_event(_button(position, button, whole or held, double))
+	var press: InputEventMouseButton = _button(position, button, whole or held, double)
+	Input.parse_input_event(press)
 	var lasted: Variant = null
 	if notch:
 		Input.parse_input_event(_button(position, button, false, false))
@@ -326,7 +319,12 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		# press and one that acts on the release each get a frame to do it in.
 		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		Input.parse_input_event(_button(position, button, false, false))
-		await _host.get_tree().process_frame
+	# Input hands the events on at the next frame, so the control under the pointer is read after it.
+	await _host.get_tree().process_frame
+	var hovered: Control = _hover.hovered_in(_host.get_viewport())
+	var hovered_path: Variant = null
+	if hovered != null:
+		hovered_path = str(hovered.get_path())
 
 	var at: Array[Vector2] = [position]
 	var said: Dictionary = _pointer_noted(
@@ -338,6 +336,8 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 				"held_for": lasted,
 				"position": [position.x, position.y],
 				"button": button,
+				"hovered": hovered_path,
+				"actions": GdhValues.actions_of(press),
 				"pressed": held and not whole,
 				"whole": whole,
 				"double": double
@@ -653,7 +653,8 @@ func click(params: Dictionary) -> Dictionary:
 	var was_pressed: Variant = null
 	if toggle != null and toggle.toggle_mode:
 		was_pressed = toggle.button_pressed
-	_press_button(viewport, _button(position, button, true, double))
+	var press: InputEventMouseButton = _button(position, button, true, double)
+	_press_button(viewport, press)
 	await _host.get_tree().process_frame
 	_press_button(viewport, _button(position, button, false, false))
 	# The release is what a button acts on, and a queue_free it causes lands at the end of
@@ -675,9 +676,16 @@ func click(params: Dictionary) -> Dictionary:
 		"double": double,
 		"hovered": hovered_path,
 		"landed": landed,
+		"actions": GdhValues.actions_of(press),
 		"control_afterwards": afterwards,
 		"scrolled_into_view": scrolled,
 	}
+	# A Label and a TextureRect ignore the pointer unless told otherwise, so the click goes to what is
+	# under them, and landed false with that control as hovered said nothing of why.
+	if not landed and control.mouse_filter == Control.MOUSE_FILTER_IGNORE:
+		answer["why_not_landed"] = (
+			"%s's mouse_filter is ignore, so the pointer passes through it to what is under it" % node_path
+		)
 	if found != null:
 		answer["found"] = found
 	if was_pressed != null:
@@ -718,7 +726,7 @@ func _takes_no_click(control: Control, node_path: String) -> String:
 			% [node_path, on]
 		)
 	if not control.can_process():
-		var why: String = _why_it_does_not_process(control, node_path)
+		var why: String = GdhTargets.why_it_does_not_process(control, node_path)
 		var over: Node = GdhTargets.drawn_over(control)
 		var cover: String = "" if over == null else "; %s is drawn over it" % over.get_path()
 		if _host.get_tree().paused:
@@ -728,23 +736,6 @@ func _takes_no_click(control: Control, node_path: String) -> String:
 			)
 		return "%s does not process (%s), so clicking it does nothing%s" % [node_path, why, cover]
 	return ""
-
-
-## Which node's process_mode keeps [param control] from processing, and what it is. A node set to
-## inherit takes its parent's, so the one deciding can be any node above it: the game turning a
-## whole screen off while a menu shows over it reads, on the button, as a button turned off.
-static func _why_it_does_not_process(control: Control, node_path: String) -> String:
-	var deciding: Node = control
-	while deciding.process_mode == Node.PROCESS_MODE_INHERIT and deciding.get_parent() != null:
-		deciding = deciding.get_parent()
-	# The root inherits from nothing, which processes as pausable.
-	var value: int = deciding.process_mode
-	if value == Node.PROCESS_MODE_INHERIT:
-		value = Node.PROCESS_MODE_PAUSABLE
-	var mode: String = PROCESS_MODES.get(value, str(value))
-	if deciding == control:
-		return "its process_mode is %s" % mode
-	return "%s inherits process_mode %s from %s" % [node_path, mode, deciding.get_path()]
 
 
 ## Why a click at [param control]'s centre would reach nothing, or "" when it would reach it: the

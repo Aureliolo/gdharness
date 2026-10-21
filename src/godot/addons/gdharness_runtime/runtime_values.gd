@@ -178,6 +178,39 @@ static func unknown_key(name: String) -> String:
 	)
 
 
+## The refusal for [param action], which the input map lacks, with the nearest of the project's own
+## actions, or else all of them. The engine's ui_ ones are in every project, and offered for any name
+## they only buried the project's ("dance" is near ui_cancel), so they are offered for a ui_ name only.
+static func no_action(action: String) -> String:
+	var engine: PackedStringArray = []
+	var own: PackedStringArray = []
+	for named: StringName in InputMap.get_actions():
+		if str(named).begins_with("ui_"):
+			var _listed: bool = engine.append(str(named))
+		else:
+			var _owned: bool = own.append(str(named))
+	own.sort()
+	var said: String = "Action not found: %s" % action
+	var close: PackedStringArray = GdhRead.nearest(action, engine if action.begins_with("ui_") else own)
+	if not close.is_empty():
+		return "%s; the nearest %s %s." % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+	if own.is_empty():
+		return "%s; the project defines no actions of its own, and the engine's are the ui_ ones." % said
+	return "%s; the project's own actions are %s, beside the engine's ui_ ones." % [said, ", ".join(own)]
+
+
+## The actions of the input map that [param event] stands for, as Input reads it for
+## is_action_pressed: a key or a button bound to an action presses that action too, so a game
+## counting the action counted the key, and the answer had said only that a key went in.
+static func actions_of(event: InputEvent) -> Array[String]:
+	var named: Array[String] = []
+	for action: StringName in InputMap.get_actions():
+		if InputMap.event_is_action(event, action):
+			named.append(str(action))
+	named.sort()
+	return named
+
+
 ## What [param path] names: a node under [param root], as [method node_at] reads it, or an engine
 ## singleton by its name. Answers the object under "object", and under "node" the node that objects
 ## named in a value are found from, which for a singleton is [param root].

@@ -314,8 +314,8 @@ function runFixture(godotPath: string, projectDir: string, name: string): unknow
 function testTypedGate(godotPath: string, projectDir: string): void {
   const shipped = shippedScripts();
   const fixtures = fixtureScripts();
-  assert.ok(shipped.length >= 56, `the package ships GDScript: ${shipped.length} files`);
-  assert.ok(fixtures.length >= 27, `the fixtures are GDScript: ${fixtures.length} files`);
+  assert.ok(shipped.length >= 85, `the package ships GDScript: ${shipped.length} files`);
+  assert.ok(fixtures.length >= 31, `the fixtures are GDScript: ${fixtures.length} files`);
   // The fixtures run under these settings on the engine leg and nowhere else, so a fixture that
   // discarded a return value passed every local check and failed there.
   const fixturesDir = join(projectDir, 'fixtures');
@@ -4535,6 +4535,7 @@ async function main(): Promise<void> {
     }
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
+    runFixture(godotPath, projectDir, 'runtime_input_said');
     runFixture(godotPath, projectDir, 'runtime_drag');
     runFixture(godotPath, projectDir, 'runtime_offers');
     runFixture(godotPath, projectDir, 'runtime_pad');

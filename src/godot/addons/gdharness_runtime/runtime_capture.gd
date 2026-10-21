@@ -172,6 +172,11 @@ func _cut_asked(params: Dictionary, in_window: bool) -> Dictionary:
 			return _refused(shape % JSON.stringify(region_given))
 		asked["region"] = region
 	if not node_path.is_empty():
+		# Before any refusal of the window: a headless game refused a path that named nothing for
+		# having no window, and the wrong path was found only after a restart with one.
+		var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
+		if standing.has("message"):
+			return standing
 		asked["node_path"] = node_path
 	return asked
 
