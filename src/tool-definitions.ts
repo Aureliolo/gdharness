@@ -327,7 +327,8 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
 
 const INPUT_EVENTS: JsonSchema = {
   type: 'array',
-  description: 'The events that trigger the action.',
+  description:
+    'The events that trigger the action, each bound to every device, as the editor binds them. A read names device only on an event bound to one device.',
   items: {
     type: 'object',
     properties: {
@@ -339,6 +340,11 @@ const INPUT_EVENTS: JsonSchema = {
       ctrl: { type: 'boolean', description: 'Keys: bind it with Ctrl held.' },
       alt: { type: 'boolean', description: 'Keys: bind it with Alt held.' },
       shift: { type: 'boolean', description: 'Keys: bind it with Shift held.' },
+      physical: {
+        type: 'boolean',
+        description:
+          'Keys: bind the key by where it sits on the keyboard (physical_keycode) rather than by what it types, as the editor offers, so W stays the key above S on any layout. Default false.',
+      },
     },
     required: ['type'],
     additionalProperties: false,
@@ -418,12 +424,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_settings',
     title: 'Project settings',
     description:
-      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. project_info include lists the autoloads, input actions and audio buses as the project holds them. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, or one on another release's addon that was not asked, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events and deadzone, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. Every write keeps the sections and keys of project.godot in the order the file had them, so a change moves no other line; the save is the engine's, and like the editor's it writes Godot's header and config/features into a file that lacks them. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
+      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. project_info include lists the autoloads, input actions and audio buses as the project holds them. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, or one on another release's addon that was not asked, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events, and its deadzone when one is given, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. unset takes a setting's line out of project.godot, the way back from a set of a misspelt name, and answers removed, old_value and default_value, the value that holds now (null for a setting the engine does not declare); on one the file does not set it answers removed false and writes nothing. Every write keeps the sections and keys of project.godot in the order the file had them, so a change moves no other line; the save is the engine's, and like the editor's it writes Godot's header and config/features into a file that lacks them. get answers exists, true for any setting the engine knows, and at_default, true when the value is the engine's own default and so has no line in project.godot. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
     parameters: {
       projectPath: PROJECT_PATH,
       setting: {
         type: 'string',
-        ops: ['get', 'set'],
+        ops: ['get', 'set', 'unset'],
         description: 'Setting path, such as "display/window/size/viewport_width".',
       },
       from: {
@@ -475,7 +481,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['add_input_action'],
         minimum: 0,
         maximum: 1,
-        description: 'Input actions: analogue deadzone, 0 to 1. Default 0.5.',
+        description:
+          'Input actions: analogue deadzone, 0 to 1. Default: the deadzone of the action being rebound, or 0.5 for a new one.',
       },
       pluginName: {
         type: 'string',
@@ -513,6 +520,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       // than a list of both: the engine answers that, since it is what reads them.
       get: { effect: 'read', summary: 'read one setting, or every setting under prefix', requires: [] },
       set: { effect: 'destructive', summary: 'write one setting', requires: ['setting', 'value'] },
+      unset: {
+        effect: 'destructive',
+        summary: 'take a setting out of project.godot, so the engine default holds',
+        requires: ['setting'],
+      },
       add_autoload: {
         effect: 'additive',
         summary: 'register an autoload singleton',

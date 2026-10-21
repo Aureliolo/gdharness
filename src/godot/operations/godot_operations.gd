@@ -247,6 +247,8 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = GdhProjectConfig.new(_log).get_project_setting(params)
 		"set_project_setting":
 			payload = GdhProjectConfig.new(_log).set_project_setting(params)
+		"unset_project_setting":
+			payload = GdhProjectConfig.new(_log).unset_project_setting(params)
 		"add_autoload":
 			payload = GdhProjectConfig.new(_log).add_autoload(params)
 		"remove_autoload":

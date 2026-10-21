@@ -868,7 +868,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     assert.equal(refused.answer, null, `${modification.name}: ${JSON.stringify(refused.answer)}`);
     assert.match(
       refused.stderr,
-      /Nothing was changed: made\/plain\.gd parses as it is and would not with these additions: /,
+      /Nothing was changed: made\/plain\.gd parses now, and would not with these additions: /,
       refused.stderr,
     );
     assert.match(refused.stderr, reason, refused.stderr);
@@ -1424,6 +1424,37 @@ function testOperations(godotPath: string, projectDir: string): void {
     `a section nothing declares has nothing to be near: ${JSON.stringify(own)}`,
   );
   assert.match(readFileSync(projectFile, 'utf8'), /^\[fixture_game\]\n\ntempo=3$/m);
+  // The way back from a misspelt set: unset takes the line out, leaving every other line as it was.
+  const unwritten = operation('unset_project_setting', { setting: 'display/window/size/viewport_widht' });
+  assert.deepEqual(
+    [get(unwritten, 'removed'), get(unwritten, 'old_value'), get(unwritten, 'default_value')],
+    [true, 800, null],
+    JSON.stringify(unwritten),
+  );
+  assert.doesNotMatch(readFileSync(projectFile, 'utf8'), /viewport_widht/);
+  assert.match(readFileSync(projectFile, 'utf8'), /^\[fixture_game\]\n\ntempo=3$/m, 'and the rest stays');
+  operation('set_project_setting', { setting: 'display/window/size/viewport_width', value: 640 });
+  const engineDeclared = operation('unset_project_setting', {
+    setting: 'display/window/size/viewport_width',
+  });
+  assert.deepEqual(
+    [get(engineDeclared, 'removed'), get(engineDeclared, 'old_value'), get(engineDeclared, 'default_value')],
+    [true, 640, 1152],
+    `a declared setting goes back to the engine's default: ${JSON.stringify(engineDeclared)}`,
+  );
+  assert.doesNotMatch(readFileSync(projectFile, 'utf8'), /viewport_width=/);
+  const unsaid = readFileSync(projectFile, 'utf8');
+  const nothing = operation('unset_project_setting', { setting: 'display/window/size/viewport_width' });
+  assert.deepEqual(
+    [get(nothing, 'removed'), get(nothing, 'saved'), get(nothing, 'note')],
+    [
+      false,
+      false,
+      'project.godot does not set display/window/size/viewport_width, so there was nothing to take out.',
+    ],
+    JSON.stringify(nothing),
+  );
+  assert.equal(readFileSync(projectFile, 'utf8'), unsaid, 'and an unset of a line not there writes nothing');
   writeFileSync(projectFile, beforeNew);
 
   // Autoloads are written into project.godot by hand, so the round trip is the only proof.
@@ -2122,6 +2153,46 @@ function testOperations(godotPath: string, projectDir: string): void {
     listedAction('ui_cancel'),
     undefined,
     `an engine action left alone is not listed: ${JSON.stringify(actions)}`,
+  );
+  // A rebind naming no deadzone keeps the action's own; a key can be bound by where it sits, and
+  // every event is bound to every device, as the editor binds it, so a second joypad reaches it.
+  const physical = operation('add_input_action', {
+    action_name: 'fixture_jump',
+    events: [
+      { type: 'key', keycode: 'W', physical: true },
+      { type: 'joypad_button', button: 0 },
+    ],
+  });
+  assert.deepEqual(
+    [get(physical, 'deadzone'), get(physical, 'old_deadzone'), get(physical, 'events', 0)],
+    [0.2, 0.2, { class_name: 'InputEventKey', physical_keycode: 87 }],
+    JSON.stringify(physical),
+  );
+  const boundEverywhere = readFileSync(projectFile, 'utf8');
+  const jumpLine = /^fixture_jump=\{[\s\S]*?\n\}$/m.exec(boundEverywhere)?.[0] ?? boundEverywhere;
+  assert.equal(jumpLine.match(/"device":-1,/g)?.length, 2, jumpLine);
+  assert.match(jumpLine, /"keycode":0,[^)]*"physical_keycode":87,/, jumpLine);
+  const relisted = asArray(get(operation('list_input_actions', {}), 'actions')).find(
+    (entry) => get(entry, 'name') === 'fixture_jump',
+  );
+  assert.deepEqual(
+    [get(relisted, 'events', 0, 'physical_keycode'), get(relisted, 'events', 0, 'keycode')],
+    [87, undefined],
+    `a physical binding reads back as one: ${JSON.stringify(relisted)}`,
+  );
+  assert.equal(get(relisted, 'events', 1, 'device'), undefined, JSON.stringify(relisted));
+  // An event a file binds to one device says which, as the editor's binding to every device does not.
+  writeFileSync(
+    projectFile,
+    boundEverywhere.replace(jumpLine, jumpLine.replace('"device":-1,', '"device":2,')),
+  );
+  const onePad = asArray(get(operation('list_input_actions', {}), 'actions')).find(
+    (entry) => get(entry, 'name') === 'fixture_jump',
+  );
+  assert.deepEqual(
+    [get(onePad, 'events', 0, 'device'), get(onePad, 'events', 1, 'device')],
+    [2, undefined],
+    JSON.stringify(onePad),
   );
   writeFileSync(projectFile, beforeUi);
   // A name the Input Map would refuse, and a key no name reaches, are refused with what is taken.

@@ -3,6 +3,8 @@ extends RefCounted
 const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhProjectFile = preload("project_file.gd")
+## The device an event matches every device with, InputMap's ALL_DEVICES, which GDScript is not given.
+const ALL_DEVICES: int = -1
 
 # The key names a caller may write, and what the engine calls them.
 const KEY_NAMES: Dictionary = {
@@ -108,7 +110,13 @@ func _init(p_log: GdhLog) -> void:
 func add_input_action(params: Dictionary) -> Dictionary:
 	var action_name: String = str(params.get("action_name", ""))
 	var events: Array = params.get("events", [])
-	var deadzone: float = GdhRead.as_float(params.get("deadzone", 0.5), 0.5)
+	var setting: String = "input/" + action_name
+	var held: Variant = ProjectSettings.get_setting(setting) if ProjectSettings.has_setting(setting) else null
+	var old: Dictionary = held if held is Dictionary else {}
+	var old_deadzone: float = GdhRead.as_float(old.get("deadzone", 0.5), 0.5)
+	# A rebind that names no deadzone keeps the one the action has, which a caller adding a key did
+	# not mean to change.
+	var deadzone: float = GdhRead.as_float(params.get("deadzone", old_deadzone), old_deadzone)
 
 	_log.info("Adding input action: " + action_name)
 	# The editor's Input Map refuses these, since project.godot keys an action by its name and
@@ -150,7 +158,9 @@ func add_input_action(params: Dictionary) -> Dictionary:
 				if key_value == KEY_NONE:
 					return _log.failure(_unknown_key(keycode))
 
-				var event_config: Dictionary = {"class_name": "InputEventKey", "keycode": key_value}
+				var event_config: Dictionary = {"class_name": "InputEventKey"}
+				var physical: bool = GdhRead.as_bool(fields.get("physical", false))
+				event_config["physical_keycode" if physical else "keycode"] = key_value
 				if fields.get("ctrl", false):
 					event_config["ctrl_pressed"] = true
 				if fields.get("alt", false):
@@ -190,7 +200,6 @@ func add_input_action(params: Dictionary) -> Dictionary:
 
 	# An action that exists is rebound, which is how one of the engine's ui_ actions is changed, so
 	# what it held is answered rather than lost without a word.
-	var setting: String = "input/" + action_name
 	var answer: Dictionary = {
 		"action_name": action_name,
 		"events_count": events_config.size(),
@@ -199,8 +208,6 @@ func add_input_action(params: Dictionary) -> Dictionary:
 		"was_new": not ProjectSettings.has_setting(setting),
 	}
 	if not answer["was_new"]:
-		var held: Variant = ProjectSettings.get_setting(setting)
-		var old: Dictionary = held if held is Dictionary else {}
 		var old_events: Array[Dictionary] = []
 		var listed: Variant = old.get("events", [])
 		if listed is Array:
@@ -210,7 +217,7 @@ func add_input_action(params: Dictionary) -> Dictionary:
 					var bound: InputEvent = event
 					old_events.append(_shaped(bound))
 		answer["old_events"] = old_events
-		answer["old_deadzone"] = GdhRead.as_float(old.get("deadzone", 0.5), 0.5)
+		answer["old_deadzone"] = old_deadzone
 
 	# Through ProjectSettings so the file is saved the way the editor saves it, header and
 	# every other line kept; a ConfigFile of project.godot drops the comments on the way out.
@@ -226,9 +233,12 @@ func add_input_action(params: Dictionary) -> Dictionary:
 ## under text, which also covers a kind of event that form has no fields for.
 static func _shaped(event: InputEvent) -> Dictionary:
 	var shaped: Dictionary = {"class_name": event.get_class(), "text": event.as_text()}
+	if event.device != ALL_DEVICES:
+		shaped["device"] = event.device
 	if event is InputEventKey:
 		var key: InputEventKey = event
-		shaped["keycode"] = key.keycode
+		if key.keycode != KEY_NONE or key.physical_keycode == KEY_NONE:
+			shaped["keycode"] = key.keycode
 		if key.physical_keycode != KEY_NONE:
 			shaped["physical_keycode"] = key.physical_keycode
 		for modifier: String in ["ctrl_pressed", "alt_pressed", "shift_pressed"]:
@@ -328,6 +338,7 @@ func build_input_action(deadzone: float, events: Array) -> Dictionary:
 			"InputEventKey":
 				var key: InputEventKey = InputEventKey.new()
 				key.keycode = GdhRead.as_int(event.get("keycode", 0)) as Key
+				key.physical_keycode = GdhRead.as_int(event.get("physical_keycode", 0)) as Key
 				key.ctrl_pressed = GdhRead.as_bool(event.get("ctrl_pressed", false))
 				key.alt_pressed = GdhRead.as_bool(event.get("alt_pressed", false))
 				key.shift_pressed = GdhRead.as_bool(event.get("shift_pressed", false))
@@ -354,6 +365,10 @@ func build_input_action(deadzone: float, events: Array) -> Dictionary:
 
 			_:
 				return _log.failure("Unknown input event class: " + evt_class)
+		# Every device, as the editor's Input Map binds an event: a new event names one device, and
+		# an action bound to it ignored a second joypad.
+		var bound: InputEvent = built.back()
+		bound.device = ALL_DEVICES
 
 	return {"deadzone": deadzone, "events": built}
 

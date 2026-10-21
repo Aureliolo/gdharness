@@ -2265,6 +2265,7 @@ export function settingsNamedBy(op: string, args: OperationParams): string[] {
   const text = (key: string): string => readString(args, key) ?? '';
   switch (op) {
     case 'set':
+    case 'unset':
       return text('setting') === '' ? [] : [text('setting')];
     case 'add_autoload':
     case 'remove_autoload':
