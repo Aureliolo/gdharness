@@ -280,6 +280,9 @@ const PROVOKED: Readonly<Record<string, readonly RegExp[]>> = {
     /^ERROR: Unable to convert array index 0 from "Object" to "Object"\.$/,
     /^ERROR: Attempted to assign an object into a TypedDictionary\.Value, that does not inherit from 'GDScript'\.$/,
     /^ERROR: Unable to convert value at key "a" from "Object" to "Object"\.$/,
+    // A setter's own reports, which the write's answer carries.
+    /^ERROR: health cannot go below zero$/,
+    /^WARNING: level is high$/,
   ],
   // The parse error the refused reload is refused for.
   reload_script: [/^SCRIPT ERROR: Parse Error: Expected parameter name\.$/],

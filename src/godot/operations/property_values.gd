@@ -35,18 +35,7 @@ const THEME_ITEMS: Dictionary[String, Array] = {
 # written as a list of pairs, and only the property knows that each pair is a Vector2 rather than a
 # list of two numbers: without being told, every element was read as itself and the engine turned
 # the lot into zeroes on the way into the property.
-const PACKED_ELEMENTS: Dictionary = {
-	TYPE_PACKED_BYTE_ARRAY: TYPE_INT,
-	TYPE_PACKED_INT32_ARRAY: TYPE_INT,
-	TYPE_PACKED_INT64_ARRAY: TYPE_INT,
-	TYPE_PACKED_FLOAT32_ARRAY: TYPE_FLOAT,
-	TYPE_PACKED_FLOAT64_ARRAY: TYPE_FLOAT,
-	TYPE_PACKED_STRING_ARRAY: TYPE_STRING,
-	TYPE_PACKED_VECTOR2_ARRAY: TYPE_VECTOR2,
-	TYPE_PACKED_VECTOR3_ARRAY: TYPE_VECTOR3,
-	TYPE_PACKED_VECTOR4_ARRAY: TYPE_VECTOR4,
-	TYPE_PACKED_COLOR_ARRAY: TYPE_COLOR,
-}
+const PACKED_ELEMENTS: Dictionary = GdhShapes.PACKED_ELEMENTS
 
 # Entries in a property list that only head a section of the inspector. Object.set ignores their
 # names, so a write to "Visibility" or "Transform" changed nothing and was answered as made.

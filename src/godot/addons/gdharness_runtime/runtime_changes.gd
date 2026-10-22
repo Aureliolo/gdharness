@@ -78,12 +78,16 @@ func set_property(params: Dictionary) -> Dictionary:
 		var unwritable: String = GdhPaths.unwritable_copy(chain)
 		if not unwritable.is_empty():
 			return {"type": "error", "message": unwritable}
-	# The write alone, setter included, which is where a property's cost is.
+	# The write alone, setter included, which is where a property's cost is. Listened to as a call
+	# is, since a setter refusing a value says why only in what it reports.
+	var caught: GdhCallErrors = GdhCallErrors.new()
+	OS.add_logger(caught)
 	var began: int = Time.get_ticks_usec()
 	var written: Variant = GdhPaths.write(holder, named, given)
 	if copied:
 		GdhPaths.write_back(chain, written)
 	var elapsed: int = Time.get_ticks_usec() - began
+	OS.remove_logger(caught)
 	var now: Variant = GdhPaths.read_under(holder, named)
 	if copied:
 		var again: Dictionary = GdhPaths.walk_to(target, node_path, property)
@@ -122,20 +126,20 @@ func set_property(params: Dictionary) -> Dictionary:
 				)
 				% [named, str(slot["class"]), GdhValues.class_of(refused_object)]
 			)
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s.%s was given %s and reads %s afterwards, as it did before: %s."
-				% [
-					reached["called"],
-					named,
-					JSON.stringify(_values.serialize(given), "", false),
-					JSON.stringify(_values.serialize(now), "", false),
-					why,
-				]
-			)
-		}
+		var refused: String = (
+			"%s.%s was given %s and reads %s afterwards, as it did before: %s."
+			% [
+				reached["called"],
+				named,
+				JSON.stringify(_values.serialize(given), "", false),
+				JSON.stringify(_values.serialize(now), "", false),
+				why,
+			]
+		)
+		if not caught.raised.is_empty():
+			var reported: PackedStringArray = PackedStringArray(caught.raised.slice(0, ERRORS_KEPT))
+			refused += " While it was written the game reported: %s" % "; ".join(reported)
+		return {"type": "error", "message": refused}
 
 	var answer: Dictionary = {
 		"type": "property_set",
@@ -147,6 +151,8 @@ func set_property(params: Dictionary) -> Dictionary:
 	}
 	if already and unmoved:
 		answer["unchanged"] = true
+	_keep_reported(answer, "errors", caught.raised)
+	_keep_reported(answer, "warnings", caught.warned)
 	# The engine stores a number past an export range, or one no enum value has, as given; only the
 	# inspector holds a property to them, so the game now holds a value its own script never expected.
 	if holder is Object:
@@ -169,6 +175,33 @@ func _argument_for(
 	var holder: Object = reached["holder"]
 	var called: String = reached["called"]
 	var wants: int = _values.parameter_type(holder, named, index)
+	var choices: Dictionary = _values.parameter_enum(holder, named, index)
+	var values: Dictionary = choices.get("values", {})
+	if not choices.is_empty() and sent is String and not str(sent).strip_edges().is_valid_int():
+		var chosen: Variant = GdhDeclared.enum_named(values, str(sent))
+		if chosen == null:
+			return {
+				"type": "error",
+				"message":
+				GdhDeclared.enum_argument_refusal(
+					"%s.%s" % [called, named], index, str(choices["enum"]), str(sent), values
+				)
+			}
+		return {"value": chosen}
+	# A packed list's elements are fitted one by one, and one that cannot become what the list holds
+	# is named: converted whole, a word or a fraction among them became 0 or was cut, and the call ran.
+	var packed: Variant = GdhValues.packed_template(wants)
+	if packed != null and sent is Array:
+		var elements: Dictionary = _values.typed_like(sent, packed, _element_object.bind(node, node_path))
+		if elements.has("message"):
+			return {
+				"type": "error",
+				"message":
+				(
+					"%s.%s takes %s as argument %d: %s"
+					% [called, named, type_string(wants), index + 1, elements["message"]]
+				)
+			}
 	if GdhValues.cuts(sent, wants):
 		return {
 			"type": "error",
@@ -259,6 +292,14 @@ func _value_for(
 			return {"value": by_name[1]}
 		if not str(by_name[1]).is_empty():
 			return {"type": "error", "message": by_name[1]}
+	var packed: Variant = GdhValues.packed_template(wanted)
+	if packed != null and value is Array:
+		var elements: Dictionary = _values.typed_like(value, packed, _element_object.bind(node, node_path))
+		if elements.has("message"):
+			return {
+				"type": "error",
+				"message": "%s.%s holds %s: %s" % [called, named, type_string(wanted), elements["message"]]
+			}
 	var holds_objects: bool = (
 		declared == TYPE_OBJECT or (declared == TYPE_NIL and (old_value == null or old_value is Object))
 	)
@@ -424,6 +465,9 @@ func call_method(params: Dictionary) -> Dictionary:
 	# The object arguments checked only against the engine class, by position from 1, for the refusal
 	# the engine may still make: see [method GdhValues.slot_declared].
 	var by_engine_class: Dictionary = {}
+	# The enum arguments given a number none of their values has, said beside the answer: the engine
+	# passes any number on, and a write of the same number to a property already said so.
+	var outside: PackedStringArray = []
 	for index: int in args.size():
 		var wants: int = _values.parameter_type(holder, named, index)
 		if wants == TYPE_OBJECT and (args[index] is String or args[index] is Dictionary):
@@ -444,6 +488,14 @@ func call_method(params: Dictionary) -> Dictionary:
 		if argument.has("message"):
 			return argument
 		deserialized_args.append(argument["value"])
+		var choices: Dictionary = _values.parameter_enum(holder, named, index)
+		if not choices.is_empty():
+			var values: Dictionary = choices["values"]
+			var stray: String = GdhDeclared.outside_enum_argument(
+				index, str(choices["enum"]), argument["value"], values
+			)
+			if not stray.is_empty():
+				var _noted: bool = outside.append(stray)
 
 	# Timed around the call alone, since the bridge's round trip is a second or more and swamps what
 	# one click's work costs; the frame metrics read whichever frame is last, which is not this one.
@@ -491,6 +543,8 @@ func call_method(params: Dictionary) -> Dictionary:
 	}
 	if awaited:
 		answer["awaited"] = true
+	if not outside.is_empty():
+		answer["outside_declared"] = " ".join(outside)
 	_keep_reported(answer, "errors", caught.raised)
 	_keep_reported(answer, "warnings", caught.warned)
 	# Main.explode, ended at a null it called into, answered result 0 as if it had counted something.

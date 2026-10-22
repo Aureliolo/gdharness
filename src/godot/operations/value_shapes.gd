@@ -5,6 +5,20 @@ extends RefCounted
 ##
 ## This file is the one beside the operations, and `bun run sync:gd` copies it into each addon.
 
+## What each packed array holds, one value of which every element is fitted to.
+const PACKED_ELEMENTS: Dictionary = {
+	TYPE_PACKED_BYTE_ARRAY: TYPE_INT,
+	TYPE_PACKED_INT32_ARRAY: TYPE_INT,
+	TYPE_PACKED_INT64_ARRAY: TYPE_INT,
+	TYPE_PACKED_FLOAT32_ARRAY: TYPE_FLOAT,
+	TYPE_PACKED_FLOAT64_ARRAY: TYPE_FLOAT,
+	TYPE_PACKED_STRING_ARRAY: TYPE_STRING,
+	TYPE_PACKED_VECTOR2_ARRAY: TYPE_VECTOR2,
+	TYPE_PACKED_VECTOR3_ARRAY: TYPE_VECTOR3,
+	TYPE_PACKED_VECTOR4_ARRAY: TYPE_VECTOR4,
+	TYPE_PACKED_COLOR_ARRAY: TYPE_COLOR,
+}
+
 # What each tag has to carry before it is built. A tag naming a type whose keys are not there is a
 # tag somebody wrote by mistake or wrote for a different shape, and building one out of defaults
 # answers with a Transform2D of zeros where the caller meant something else entirely. Unbuilt, it
@@ -126,6 +140,22 @@ static func _is_number(held: Variant) -> bool:
 		var tagged: Dictionary = held
 		return str(tagged.get("_type", "")) in ["float", "int"] and tagged.has("value")
 	return false
+
+
+## The packed array [param type] built from [param items], each fitted by [param fit] to what the
+## array holds, or [param items] as they are when one cannot become that, for the caller to refuse.
+## Element by element, so a point given as its fields is read as one: converted whole, a list of
+## {"x": 3, "y": 4} became zero vectors, and the call ran on them.
+static func packed_from(items: Array, type: int, fit: Callable) -> Variant:
+	var element: int = PACKED_ELEMENTS[type]
+	var numbers: Array[int] = [TYPE_INT, TYPE_FLOAT]
+	var built: Array = []
+	for item: Variant in items:
+		var one: Variant = fit.call(item, element)
+		if typeof(one) != element and not (numbers.has(typeof(one)) and numbers.has(element)):
+			return items
+		built.append(one)
+	return type_convert(built, type)
 
 
 ## The sentences a refusal of [param value] where a [param type] goes ends with: which of its keys

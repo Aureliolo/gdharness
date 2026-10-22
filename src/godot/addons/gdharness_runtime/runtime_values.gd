@@ -8,6 +8,7 @@ extends RefCounted
 ## only true of a running game: reaching a node by path, and fitting an argument to the type the
 ## method it is going to declares.
 
+const GdhDeclared = preload("declared_values.gd")
 const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhShapes = preload("value_shapes.gd")
@@ -372,6 +373,55 @@ func parameter_type(object: Object, method: String, index: int) -> int:
 	return TYPE_NIL
 
 
+## The values of the enum argument [param index] of [param method] declares, by name, as
+## `{"enum": "Mood", "values": {...}}`, or {} when it declares none. The engine gives such an argument
+## the type int and the enum's name, as res://main.gd.Mood or Node.ProcessMode.
+func parameter_enum(object: Object, method: String, index: int) -> Dictionary:
+	for entry: Dictionary in object.get_method_list():
+		if entry.get("name", "") != method:
+			continue
+		var params: Array = entry.get("args", [])
+		if index < 0 or index >= params.size():
+			return {}
+		var parameter: Dictionary = params[index]
+		if GdhRead.as_int(parameter.get("usage", 0)) & PROPERTY_USAGE_CLASS_IS_ENUM == 0:
+			return {}
+		var qualified: String = str(parameter.get("class_name", ""))
+		var enum_name: String = qualified.get_slice(".", qualified.get_slice_count(".") - 1)
+		var values: Dictionary = GdhDeclared.enum_declared_as(qualified)
+		if values.is_empty():
+			values = _enum_along(object.get_script(), enum_name)
+		if values.is_empty():
+			return {}
+		return {"enum": enum_name, "values": values}
+	return {}
+
+
+## The enum [param named] declared by [param script] or a script it extends, or {}. A script built in
+## a scene or made at run time names its enums by an id nothing loads, gdscript://-92233….gd.Mood
+## measured on 4.7.2, and a method of the object called declares its enums along this chain.
+static func _enum_along(script: Variant, named: String) -> Dictionary:
+	if not script is Script:
+		return {}
+	var current: Script = script
+	while current != null:
+		var found: Variant = current.get_script_constant_map().get(named)
+		if found is Dictionary:
+			var values: Dictionary = found
+			return values
+		current = current.get_base_script()
+	return {}
+
+
+## An empty list typed as what the packed array [param type] holds, for its elements to be fitted
+## against one by one, or null for any other type.
+static func packed_template(type: int) -> Variant:
+	if not GdhSerialisation.LIST_TYPES.has(type):
+		return null
+	var element: int = GdhShapes.PACKED_ELEMENTS[type]
+	return Array([], element, &"", null)
+
+
 ## The class a method declares for argument [param index], or "" when it names none: an untyped
 ## parameter, a Variant, or a type that is not an object.
 func parameter_class(object: Object, method: String, index: int) -> String:
@@ -663,6 +713,18 @@ func _element(item: Variant, builtin: int, declared: String, script: Script, res
 		if named.has("message"):
 			return {"message": str(named["message"]) + "."}
 		return {"value": named["object"]}
+	# Fitted alone, 4.5 into an Array[int] went in as 4, as a single value is refused for.
+	if cuts(item, builtin):
+		return {
+			"message":
+			(
+				"is %s, which %s cannot hold without changing it."
+				% [JSON.stringify(serialize(item), "", false), cut_by(builtin)]
+			)
+		}
+	var rounded: String = inexact(item, builtin)
+	if not rounded.is_empty():
+		return {"message": "is too large to be sure of: %s." % rounded}
 	var fitted_item: Variant = fitted(item, builtin)
 	if not acceptable(fitted_item, builtin):
 		# The value as it was sent rather than its engine type: JSON numbers arrive as floats, so a 7

@@ -404,7 +404,8 @@ func fitted(value: Variant, type: int) -> Variant:
 				return built
 
 	if rebuilt is Array and LIST_TYPES.has(type):
-		return type_convert(rebuilt, type)
+		var items: Array = value if value is Array else rebuilt
+		return GdhShapes.packed_from(items, type, fitted)
 
 	# The inspector and every colour picker give a colour as its html code. Anything else stays the
 	# text it is, for the refusal to name.

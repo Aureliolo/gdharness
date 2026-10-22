@@ -157,6 +157,77 @@ static func enum_refusal(
 	return said + ". The nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
 
 
+## Why [param word], given as argument [param index] of [param called] for the enum [param named],
+## names none of its [param choices].
+static func enum_argument_refusal(
+	called: String, index: int, named: String, word: String, choices: Dictionary
+) -> String:
+	var said: String = (
+		"%s takes the enum %s as argument %d, and %s is none of its values: send %s by name or by number"
+		% [called, named, index + 1, word, _listed(choices)]
+	)
+	var close: PackedStringArray = GdhRead.nearest(word, PackedStringArray(choices.keys()))
+	if close.is_empty():
+		return said + "."
+	return said + ". The nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
+
+
+## Why [param value], given as argument [param index] for the enum [param named], is none of its
+## [param choices], or "" when it is one. The engine passes any number on.
+static func outside_enum_argument(index: int, named: String, value: Variant, choices: Dictionary) -> String:
+	if typeof(value) != TYPE_INT or choices.values().has(value):
+		return ""
+	return (
+		"argument %d, %d, is none of the values %s declares: %s."
+		% [index + 1, value, named, _listed(choices)]
+	)
+
+
+## The values of the enum the engine names [param qualified], by name: an engine class's, as
+## Node.ProcessMode, or a script's, as Named.Size for a class_name, res://main.gd.Mood for a script
+## without one, and either followed by inner classes. {} when it names nothing this can read.
+static func enum_declared_as(qualified: String) -> Dictionary:
+	var cut: int = qualified.rfind(".")
+	if cut <= 0:
+		return {}
+	var owner: String = qualified.substr(0, cut)
+	var named: String = qualified.substr(cut + 1)
+	if ClassDB.class_exists(owner):
+		var constants: Dictionary = {}
+		for constant: String in ClassDB.class_get_enum_constants(owner, named):
+			constants[constant] = ClassDB.class_get_integer_constant(owner, constant)
+		return constants
+	var script: Script = _script_named_as(owner)
+	if script == null:
+		return {}
+	var found: Variant = script.get_script_constant_map().get(named)
+	if not found is Dictionary:
+		return {}
+	var values: Dictionary = found
+	return values
+
+
+## The script [param owner] names: a class_name, a res:// path, or an inner class of either after a
+## dot, or null.
+static func _script_named_as(owner: String) -> Script:
+	var by_name: Script = script_class(owner)
+	if by_name != null:
+		return by_name
+	if owner.begins_with("res://") and ResourceLoader.exists(owner):
+		return load(owner) as Script
+	var cut: int = owner.rfind(".")
+	if cut <= 0:
+		return null
+	var outer: Script = _script_named_as(owner.substr(0, cut))
+	if outer == null:
+		return null
+	var inner: Variant = outer.get_script_constant_map().get(owner.substr(cut + 1))
+	if not inner is Script:
+		return null
+	var inner_script: Script = inner
+	return inner_script
+
+
 ## Why [param value], shown as [param shown], lies outside what [param declared] allows, an export
 ## range or an enum's values, or "" when it does not. A range marked or_greater or or_less is open
 ## on that side.
