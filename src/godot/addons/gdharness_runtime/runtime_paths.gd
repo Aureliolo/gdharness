@@ -386,7 +386,7 @@ static func _not_literals(named: String) -> String:
 ## [method Object.has_method], because a method given too few or too many raises inside the game
 ## rather than answering.
 static func _arity(object: Object, method: String) -> Dictionary:
-	for entry: Dictionary in object.get_method_list():
+	for entry: Dictionary in GdhValues.methods_of(object):
 		if str(entry.get("name", "")) != method:
 			continue
 		var params: Array = entry.get("args", [])
@@ -465,15 +465,18 @@ static func call_refused(object: Object, method: String, called_as: String, give
 ## so they are offered only when one is near.
 static func with_methods_offered(said: String, object: Object, method: String) -> String:
 	var own: Array[String] = []
-	var attached: Variant = object.get_script()
+	var attached: Variant = object if object is Script else object.get_script()
 	if attached is Script:
 		var script: Script = attached
 		for entry: Dictionary in script.get_script_method_list():
 			var name: String = str(entry.get("name", ""))
-			if not name.is_empty() and not own.has(name):
+			# A class called by its name runs only its static functions, so offering the rest leads to a refusal.
+			var flags: int = entry.get("flags", 0)
+			var callable: bool = not object is Script or flags & METHOD_FLAG_STATIC
+			if callable and not name.is_empty() and not own.has(name):
 				own.append(name)
 	var every: Array[String] = own.duplicate()
-	for entry: Dictionary in object.get_method_list():
+	for entry: Dictionary in GdhValues.methods_of(object):
 		var name: String = str(entry.get("name", ""))
 		if not every.has(name):
 			every.append(name)
@@ -483,7 +486,8 @@ static func with_methods_offered(said: String, object: Object, method: String) -
 	if own.is_empty():
 		return said
 	own.sort()
-	return "%s; its script declares %s" % [said, ", ".join(PackedStringArray(own))]
+	var offered: String = "its static functions are" if object is Script else "its script declares"
+	return "%s; %s %s" % [said, offered, ", ".join(PackedStringArray(own))]
 
 
 ## The entry a script attached to [param object] declares for [param method], or an empty one when
@@ -501,7 +505,7 @@ static func _script_method(object: Object, method: String) -> Dictionary:
 
 ## The flags the engine declares [param method] with on [param object].
 static func _native_flags(object: Object, method: String) -> int:
-	for entry: Dictionary in object.get_method_list():
+	for entry: Dictionary in GdhValues.methods_of(object):
 		if str(entry.get("name", "")) == method:
 			var flags: int = entry.get("flags", 0)
 			return flags

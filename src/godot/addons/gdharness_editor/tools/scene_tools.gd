@@ -7,15 +7,16 @@ const GdhDeclared = preload("../declared_values.gd")
 const GdhFileReads = preload("../file_reads.gd")
 const GdhRead = preload("../reading.gd")
 const GdhGroups = preload("scene_groups.gd")
+const GdhHeadlessCheck = preload("../headless_check.gd")
 const GdhKin = preload("scene_kin.gd")
 const GdhNavigationBake = preload("navigation_bake.gd")
 const GdhPaths = preload("scene_paths.gd")
 const GdhPlacing = preload("scene_placing.gd")
 const GdhPropertyValues = preload("../property_values.gd")
-const GdhResourceTools = preload("resource_tools.gd")
 const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSerialisation = preload("../serialisation.gd")
+const GdhTilesetTools = preload("tileset_tools.gd")
 
 var _editor_plugin: EditorPlugin = null
 var _values: GdhSerialisation = GdhSerialisation.new()
@@ -289,6 +290,8 @@ func add_node(args: Dictionary) -> Dictionary:
 		return scene.refuse("Nothing was written: " + unsettled)
 	scene.asked(new_node, properties.keys())
 	var unwritten: String = _properties.write_all(new_node, properties)
+	if not unwritten.is_empty():
+		unwritten = GdhHeadlessCheck.setter_ran(new_node, _properties.unheld, unwritten)
 	if unwritten.is_empty():
 		unwritten = GdhGroups.change(scene, new_node, adding, [])
 	if not unwritten.is_empty():
@@ -622,7 +625,11 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
 	if not refused_property.is_empty():
-		return scene.refuse(GdhSceneFile.missing_on(node, refused_property))
+		return scene.refuse(
+			GdhHeadlessCheck.setter_ran(
+				node, _properties.unheld, GdhSceneFile.missing_on(node, refused_property)
+			)
+		)
 	var ungrouped: String = GdhGroups.change(scene, node, adding, removing)
 	if not ungrouped.is_empty():
 		return scene.refuse(ungrouped)
@@ -728,7 +735,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	# names this scene's file sets are always answered.
 	var set_here: Dictionary = scene.set_here(node)
 	var props: Dictionary = _properties_of(node, include_defaults, set_here)
-	var cells: Dictionary = GdhResourceTools.cells_of(node)
+	var cells: Dictionary = GdhTilesetTools.cells_of(node)
 	var at: String = scene.path_of(node)
 	var here: Array = set_here.keys()
 	here.sort()

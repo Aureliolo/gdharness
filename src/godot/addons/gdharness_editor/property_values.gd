@@ -46,6 +46,9 @@ const LAYOUT_MODE_ANCHORS: int = 1
 ## What a container sets on each child it lays out, beside the anchors and offsets.
 const PLACED_BY_A_CONTAINER: Array[String] = ["position", "size", "global_position"]
 
+## The property the last write_all refused because it did not hold what it was given, or "".
+var unheld: String = ""
+
 var _values: GdhSerialisation = GdhSerialisation.new()
 
 # Why the value being parsed cannot be written, when the parse is what found out. A resource is
@@ -113,7 +116,7 @@ func cannot_hold(
 	if not GdhSerialisation.acceptable(value, expected_type):
 		var shape: String = "%s.%s is %s and the value given is %s, which cannot become one."
 		var remedy: String = GdhShapes.remedy(value, expected_type)
-		return shape % [holder, property, held, type_string(typeof(value))] + remedy + cost
+		return shape % [holder, property, held, _kind(value)] + remedy + cost
 
 	# And the same question of each element, because a list is accepted for a packed or typed array
 	# whatever is in it: a polygon written as [{"x": 1}] passes the check above and lands as one zero
@@ -126,9 +129,7 @@ func cannot_hold(
 		for index: int in items.size():
 			if not GdhSerialisation.acceptable(items[index], element):
 				var shape: String = "%s.%s is %s and item %d of the list given is %s, not %s."
-				var named: Array = [
-					holder, property, held, index, type_string(typeof(items[index])), type_string(element)
-				]
+				var named: Array = [holder, property, held, index, _kind(items[index]), type_string(element)]
 				return shape % named + GdhShapes.remedy(items[index], element) + cost
 			# A list of polygons is a list of lists of points, and each point is read as one too.
 			var inner: int = GdhRead.as_int(PACKED_ELEMENTS.get(element, TYPE_NIL), TYPE_NIL)
@@ -139,13 +140,7 @@ func cannot_hold(
 				if not GdhSerialisation.acceptable(points[at], inner):
 					var nested: String = "%s.%s holds lists of %s, and item %d of list %d given is %s, not %s."
 					var said: Array = [
-						holder,
-						property,
-						type_string(inner),
-						at,
-						index,
-						type_string(typeof(points[at])),
-						type_string(inner)
+						holder, property, type_string(inner), at, index, _kind(points[at]), type_string(inner)
 					]
 					return nested % said + GdhShapes.remedy(points[at], inner) + cost
 	if expected_type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
@@ -162,6 +157,14 @@ func cannot_hold(
 				var named: Array = [holder, property, type_string(value_type), shown(key), shown(entry)]
 				return shape % named + GdhShapes.remedy(entry, value_type) + cost
 	return ""
+
+
+## What [param value] is, as a refusal names it. A number arrives from JSON as a float whether or not
+## it has a fraction, so [1, 2] given for a list of words was called a list of floats.
+static func _kind(value: Variant) -> String:
+	if value is int or value is float:
+		return "a number"
+	return type_string(typeof(value))
 
 
 ## Writes each of [param properties] onto [param target], stopping at the first it cannot write and
@@ -187,6 +190,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	_also_changed = {}
 	_outside_declared = {}
 	_names_no_node = {}
+	unheld = ""
 	var named: Dictionary = {}
 	for key: Variant in properties:
 		named[str(key).get_slice(":", 0)] = true
@@ -198,6 +202,10 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	# says so a second time.
 	var written_at: Dictionary[String, int] = {}
 	var writes: int = 0
+	# Which other property's write last changed each one already written, by name. A Gradient keeps
+	# one offset for each colour, so offsets given after colors cut them back, and the refusal said
+	# only that the engine had changed the colours.
+	var undone_by: Dictionary[String, String] = {}
 	# A refusal of one of several leaves the others unwritten too, which a refusal naming only the
 	# one it refused left a caller to guess.
 	var unwritten: String = (
@@ -229,7 +237,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			if declared.has("refused"):
 				return str(declared["refused"]) + unwritten
 		if declared.is_empty() and holder is ShaderMaterial and name.begins_with("shader_parameter/"):
-			return _no_uniform(holder as ShaderMaterial, name) + unwritten
+			return GdhDeclared.no_uniform(holder as ShaderMaterial, name) + unwritten
 		if declared.is_empty():
 			return no_property(holder, name) + unwritten
 		if holder is Control:
@@ -245,6 +253,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		_write(target, property, value[1])
 		writes += 1
 		written_at[property] = writes
+		_note_undone(target, property, given, undone_by)
 		given[property] = value[1]
 		declarations[property] = declared
 
@@ -253,9 +262,25 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			_write(target, property, given[property])
 			writes += 1
 			written_at[property] = writes
+			_note_undone(target, property, given, undone_by)
 	for property: String in given:
 		var held: Variant = read_at(target, property)
 		if not GdhSame.same(held, given[property]):
+			unheld = property
+			if undone_by.has(property):
+				return (
+					(
+						"%s.%s was given %s and holds %s once %s was set as well: the engine keeps the two "
+						+ "in step, so they cannot hold these values together. Nothing was written."
+					)
+					% [
+						GdhPropertyPaths.class_called(target),
+						property,
+						shown(given[property]),
+						shown(held),
+						undone_by[property]
+					]
+				)
 			var declared: Dictionary = declarations[property]
 			return GdhDeclared.not_held(
 				GdhPropertyPaths.class_called(target),
@@ -272,6 +297,16 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	if target is Node:
 		_names_no_node = GdhDeclared.naming_nothing(target as Node, given)
 	return ""
+
+
+## Notes in [param undone_by] each property of [param given] that writing [param written] on
+## [param target] left holding something else.
+func _note_undone(
+	target: Object, written: String, given: Dictionary, undone_by: Dictionary[String, String]
+) -> void:
+	for other: String in given:
+		if other != written and not GdhSame.same(read_at(target, other), given[other]):
+			undone_by[other] = written
 
 
 ## Why [param name] cannot be written on [param control], or "" once it can. A container places and
@@ -295,24 +330,6 @@ func _laid_out(control: Control, name: String) -> String:
 	if anchoring and GdhRead.as_int(control.get("layout_mode")) == LAYOUT_MODE_POSITION:
 		control.set("layout_mode", LAYOUT_MODE_ANCHORS)
 	return ""
-
-
-## Why [param material] has no [param property]: a ShaderMaterial's parameters are its shader's
-## uniforms, so the shader is what lacks one, and "ShaderMaterial has no property" named the
-## material.
-static func _no_uniform(material: ShaderMaterial, property: String) -> String:
-	var uniform: String = property.trim_prefix("shader_parameter/")
-	if material.shader == null:
-		return "The ShaderMaterial has no shader, so it has no parameter %s yet; set shader first." % uniform
-	var shader: String = material.shader.resource_path
-	var named: String = shader if not shader.is_empty() else "Its shader"
-	var uniforms: Array = []
-	for entry: Dictionary in material.shader.get_shader_uniform_list():
-		uniforms.append(str(entry["name"]))
-	var said: String = "%s declares no uniform %s, which %s would set" % [named, uniform, property]
-	if uniforms.is_empty():
-		return said + "; it declares no uniforms."
-	return GdhRead.offered(said, uniform, uniforms) + "."
 
 
 ## Puts under alsoChanged in [param answer] each property the last [method write_all] changed

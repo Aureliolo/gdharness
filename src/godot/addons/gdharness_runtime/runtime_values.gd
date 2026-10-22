@@ -287,6 +287,20 @@ static func press_shortcuts(root: Node, action: String) -> Dictionary:
 	return {"shortcuts": paths, "shortcut_pressed": pressed}
 
 
+## The methods [param object] answers to, as the engine lists them: for a script itself, the static
+## functions it declares before the methods every script has. The engine's list for a script holds
+## only those, so a static function called on its class was read as taking nothing.
+static func methods_of(object: Object) -> Array[Dictionary]:
+	var listed: Array[Dictionary] = []
+	if object is Script:
+		var script: Script = object
+		for entry: Dictionary in script.get_script_method_list():
+			if GdhRead.as_int(entry.get("flags", 0)) & METHOD_FLAG_STATIC:
+				listed.append(entry)
+	listed.append_array(object.get_method_list())
+	return listed
+
+
 ## What [param path] names: a node under [param root], as [method node_at] reads it, or an engine
 ## singleton by its name. Answers the object under "object", and under "node" the node that objects
 ## named in a value are found from, which for a singleton is [param root].
@@ -310,6 +324,32 @@ static func target_at(root: Node, path: String) -> Dictionary:
 	if standing.has("message"):
 		return standing
 	return {"object": standing["node"], "node": standing["node"]}
+
+
+## The script [param path] names for a call of one of its static functions, as [method target_at]
+## answers a node, with [param root] as the node objects named in its arguments are found from: a
+## script by its res:// path, or the global class of that name where no node is at [param path].
+## Answers {} when it names a node or no class, and a message for a res:// path holding no script.
+## A class no node carries could not be called at all, and each way of naming it read as a node or
+## a method misspelt.
+static func class_at(root: Node, path: String) -> Dictionary:
+	var script_path: String = path
+	if not path.begins_with("res://"):
+		if not path.is_valid_ascii_identifier() or not node_at(root, path).has("message"):
+			return {}
+		script_path = ""
+		for declared: Dictionary in ProjectSettings.get_global_class_list():
+			if str(declared.get("class", "")) == path:
+				script_path = str(declared.get("path", ""))
+		if script_path.is_empty():
+			return {}
+	var loaded: Resource = load(script_path) if ResourceLoader.exists(script_path) else null
+	if not loaded is Script:
+		return {
+			"type": "error",
+			"message": "No script is at %s to call a static function of." % script_path,
+		}
+	return {"object": loaded, "node": root}
 
 
 ## Whether two values can be compared without the comparison itself failing.
@@ -362,7 +402,7 @@ static func remedy(value: Variant, type: int) -> String:
 ## The declared type of one parameter of a method, or TYPE_NIL when the method or the parameter
 ## is not there, which reads as "no opinion".
 func parameter_type(object: Object, method: String, index: int) -> int:
-	for entry: Dictionary in object.get_method_list():
+	for entry: Dictionary in methods_of(object):
 		if entry.get("name", "") != method:
 			continue
 		var params: Array = entry.get("args", [])
@@ -377,7 +417,7 @@ func parameter_type(object: Object, method: String, index: int) -> int:
 ## `{"enum": "Mood", "values": {...}}`, or {} when it declares none. The engine gives such an argument
 ## the type int and the enum's name, as res://main.gd.Mood or Node.ProcessMode.
 func parameter_enum(object: Object, method: String, index: int) -> Dictionary:
-	for entry: Dictionary in object.get_method_list():
+	for entry: Dictionary in methods_of(object):
 		if entry.get("name", "") != method:
 			continue
 		var params: Array = entry.get("args", [])
@@ -390,7 +430,7 @@ func parameter_enum(object: Object, method: String, index: int) -> Dictionary:
 		var enum_name: String = qualified.get_slice(".", qualified.get_slice_count(".") - 1)
 		var values: Dictionary = GdhDeclared.enum_declared_as(qualified)
 		if values.is_empty():
-			values = _enum_along(object.get_script(), enum_name)
+			values = _enum_along(object if object is Script else object.get_script(), enum_name)
 		if values.is_empty():
 			return {}
 		return {"enum": enum_name, "values": values}
@@ -425,7 +465,7 @@ static func packed_template(type: int) -> Variant:
 ## The class a method declares for argument [param index], or "" when it names none: an untyped
 ## parameter, a Variant, or a type that is not an object.
 func parameter_class(object: Object, method: String, index: int) -> String:
-	for entry: Dictionary in object.get_method_list():
+	for entry: Dictionary in methods_of(object):
 		if entry.get("name", "") != method:
 			continue
 		var params: Array = entry.get("args", [])
@@ -571,7 +611,7 @@ func fitted(value: Variant, type: int) -> Variant:
 ## An empty list or map typed the way argument [param index] of [param method] declares, or null
 ## when that argument is not a typed container. What [method typed_like] builds against.
 func parameter_container(object: Object, method: String, index: int) -> Variant:
-	for entry: Dictionary in object.get_method_list():
+	for entry: Dictionary in methods_of(object):
 		if entry.get("name", "") != method:
 			continue
 		var params: Array = entry.get("args", [])

@@ -276,24 +276,7 @@ static func components_of(value: Variant) -> PackedStringArray:
 		TYPE_VECTOR4, TYPE_VECTOR4I, TYPE_QUATERNION:
 			return PackedStringArray(["x", "y", "z", "w"])
 		TYPE_COLOR:
-			return PackedStringArray(
-				[
-					"r",
-					"g",
-					"b",
-					"a",
-					"r8",
-					"g8",
-					"b8",
-					"a8",
-					"h",
-					"s",
-					"v",
-					"ok_hsl_h",
-					"ok_hsl_s",
-					"ok_hsl_l"
-				]
-			)
+			return "r g b a r8 g8 b8 a8 h s v ok_hsl_h ok_hsl_s ok_hsl_l".split(" ")
 		TYPE_RECT2, TYPE_RECT2I, TYPE_AABB:
 			return PackedStringArray(["position", "size", "end"])
 		TYPE_PLANE:
@@ -705,7 +688,13 @@ func _describe_built_in(resource: Resource) -> Dictionary:
 	var script: Script = null
 	if attached is Script:
 		script = attached
-		described["script"] = serialize_value(script)
+		# By the class its script declares, which a write takes as the _type and which says what it
+		# is: as Resource with the script beside it, one answer named a Shop's built-in item that way
+		# and the file item beside it as an Item.
+		if script.get_global_name().is_empty():
+			described["script"] = serialize_value(script)
+		else:
+			described["_type"] = str(script.get_global_name())
 	var fresh: Object = _fresh(script)
 	for property: Dictionary in resource.get_property_list():
 		var usage: int = property.get("usage", 0)

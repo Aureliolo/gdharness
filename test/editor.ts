@@ -3619,6 +3619,28 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     }),
     /res:\/\/tiles\/atlas\.png is imported/,
   );
+
+  // A setter of a script that is not a tool runs in the game and not in the editor, so the editor
+  // saves the value given. With no editor the same create is refused with that said, and the
+  // refusal's remedy is this call.
+  writeFileSync(
+    join(project, 'clamped_stock.gd'),
+    'extends Resource\n\n@export var stock: int = 0:\n\tset(value):\n\t\tstock = maxi(value, 0)\n',
+  );
+  const clamped = await call('resource_edit', {
+    projectPath: project,
+    op: 'create',
+    resourcePath: 'res://clamped.tres',
+    resourceType: 'Resource',
+    script: 'res://clamped_stock.gd',
+    properties: { stock: -5 },
+  });
+  assert.deepEqual(
+    [get(clamped, 'properties'), get(clamped, 'script')],
+    [{ stock: -5 }, 'res://clamped_stock.gd'],
+    JSON.stringify(clamped),
+  );
+  assert.match(fileText(project, 'clamped.tres'), /^stock = -5$/m, 'the file holds the value given');
 }
 
 /** editor_rescan is how a file written from outside the editor becomes loadable. */

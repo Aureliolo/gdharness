@@ -32,6 +32,7 @@ import {
   helperFailure,
   throughHelper,
 } from './desktop.js';
+import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, ownStart } from './engine-slots.js';
 import { crashesReported } from './error-mode.js';
 import { Refusal } from './errors.js';
@@ -418,6 +419,7 @@ interface Launch {
   readonly slots: EngineSlots;
   readonly silenceFloorSeconds: number;
   readonly running: Set<() => void>;
+  readonly selfTyped: readonly SelfTypedExport[];
 }
 
 /** Runs the suites [param options] asks for with the engine at [param godotPath], answering the exit code. */
@@ -462,6 +464,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     slots,
     silenceFloorSeconds: options.silenceSeconds,
     running,
+    selfTyped: selfTypedExports(scripts.sources),
   };
   try {
     if (options.importFirst) {
@@ -740,7 +743,11 @@ async function runEngine(
     launch.slots.release(lock);
   }
   const printed = readRun(readFileSync(log, 'utf8'));
-  const assignment: EngineAssignment = { suites: plan.suites, expected: readExpected(expectedFile) };
+  const assignment: EngineAssignment = {
+    suites: plan.suites,
+    expected: readExpected(expectedFile),
+    selfTyped: launch.selfTyped,
+  };
   return {
     index,
     plan,

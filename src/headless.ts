@@ -11,6 +11,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
+import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import type { GameLog, LogEntry } from './game-log.js';
 import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
@@ -39,6 +40,8 @@ interface Reported {
   /** What was reported once the answer was written, which is not the operation's. */
   readonly afterAnswerMessages?: readonly LogEntry[];
   readonly afterAnswerOmitted?: number;
+  /** The project's scripts the engine never frees, when it reported at exit what it still held. */
+  readonly exitLeakNote?: string;
   /** What the autoloads reported while an operation waited for them, which is not its own either. */
   readonly beforeOperationMessages?: readonly LogEntry[];
   readonly beforeOperationOmitted?: number;
@@ -76,10 +79,16 @@ export function engineExtras(
 ): Record<string, unknown> {
   const after = outcome.afterAnswerMessages ?? [];
   const before = outcome.beforeOperationMessages ?? [];
-  const notImported = notImportedNote(outcome.messages);
+  // Beside whichever list holds the engine's report at exit: after the answer when there is one,
+  // among the operation's own when it refused and wrote none.
+  const leakIn = (entries: readonly LogEntry[]): string | undefined =>
+    entries.some((entry) => EXIT_LEAK.test(entry.text)) ? outcome.exitLeakNote : undefined;
+  const notes = (...parts: (string | undefined)[]): string | undefined =>
+    parts.filter((part) => part !== undefined).join(' ') || undefined;
+  const ownNote = notes(notImportedNote(outcome.messages), leakIn(outcome.messages));
   return {
     ...(outcome.messages.length > 0 ? { engine_messages: outcome.messages } : {}),
-    ...(notImported === undefined ? {} : { engine_messages_note: notImported }),
+    ...(ownNote === undefined ? {} : { engine_messages_note: ownNote }),
     ...(before.length > 0
       ? {
           engine_messages_before_operation: before,
@@ -93,7 +102,7 @@ export function engineExtras(
     ...(after.length > 0
       ? {
           engine_messages_after_answer: after,
-          engine_messages_after_answer_note: withNotCompiled(AFTER_ANSWER_NOTE, after),
+          engine_messages_after_answer_note: notes(withNotCompiled(AFTER_ANSWER_NOTE, after), leakIn(after)),
         }
       : {}),
     ...(outcome.afterAnswerOmitted === undefined
@@ -438,7 +447,25 @@ async function importOnce(godotPath: string, projectPath: string): Promise<Impor
   };
 }
 
+/**
+ * [param operation] run by the operations script on the project at [param projectPath], with the
+ * project's scripts the engine never frees named when it reported at exit what it still held.
+ */
 export async function runOperation(
+  engine: HeadlessEngine,
+  operation: string,
+  params: OperationParams,
+  projectPath: string,
+): Promise<HeadlessOutcome> {
+  const outcome = await operationOutcome(engine, operation, params, projectPath);
+  const heldAtExit = [...outcome.messages, ...(outcome.afterAnswerMessages ?? [])].some((entry) =>
+    EXIT_LEAK.test(entry.text),
+  );
+  const note = heldAtExit ? selfTypedSentence(projectSelfTypedExports(projectPath)) : undefined;
+  return note === undefined ? outcome : { ...outcome, exitLeakNote: note };
+}
+
+async function operationOutcome(
   engine: HeadlessEngine,
   operation: string,
   params: OperationParams,

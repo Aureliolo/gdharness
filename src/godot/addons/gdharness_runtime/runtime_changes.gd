@@ -384,7 +384,33 @@ func call_method(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or method.is_empty():
 		return {"type": "error", "message": "Node path and method required"}
 
-	var standing: Dictionary = GdhValues.target_at(_host.get_tree().root, node_path)
+	var root: Node = _host.get_tree().root
+	var standing: Dictionary = GdhValues.class_at(root, node_path)
+	if standing.is_empty():
+		standing = GdhValues.target_at(root, node_path)
+		if standing.has("message") and node_path.is_valid_ascii_identifier():
+			var classes: Array[String] = []
+			for declared: Dictionary in ProjectSettings.get_global_class_list():
+				classes.append(str(declared.get("class", "")))
+			var close: PackedStringArray = GdhRead.nearest(node_path, PackedStringArray(classes))
+			standing["message"] = (
+				(
+					"%s. No global class is called %s either%s; a static function is called with its"
+					+ " class's name or its script's res:// path as the path."
+				)
+				% [
+					str(standing["message"]).trim_suffix("."),
+					node_path,
+					(
+						""
+						if close.is_empty()
+						else (
+							", and the nearest %s %s"
+							% ["is" if close.size() == 1 else "are", ", ".join(close)]
+						)
+					),
+				]
+			)
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
@@ -448,7 +474,13 @@ func call_method(params: Dictionary) -> Dictionary:
 	# The method a call ends on is the one being called whether or not it carries the brackets a
 	# step along the way would: "get_viewport():gui_get_focus_owner()" is the same call as without
 	# the last pair.
-	var not_called: String = _not_a_method_to_call(holder, named, str(reached["called"]))
+	var not_called: String = _instance_method(
+		holder,
+		named if GdhPaths.method_of(named).is_empty() else GdhPaths.method_of(named),
+		str(reached["called"])
+	)
+	if not_called.is_empty():
+		not_called = _not_a_method_to_call(holder, named, str(reached["called"]))
 	if not not_called.is_empty():
 		return {"type": "error", "message": not_called}
 	if not GdhPaths.method_of(named).is_empty():
@@ -586,6 +618,25 @@ static func _not_a_method_to_call(holder: Object, named: String, called: String)
 	return GdhPaths.with_methods_offered("%s has no method %s" % [called, method], holder, method)
 
 
+## Why [param method] cannot be called on [param holder], a script named by its class or its path,
+## or "": a function that is not static runs on an instance of the class, which the script is not.
+static func _instance_method(holder: Object, method: String, called: String) -> String:
+	if not holder is Script:
+		return ""
+	var script: Script = holder
+	for entry: Dictionary in script.get_script_method_list():
+		if str(entry.get("name", "")) != method or GdhRead.as_int(entry.get("flags", 0)) & METHOD_FLAG_STATIC:
+			continue
+		return (
+			(
+				"%s.%s is not static, so it runs on an instance of the class: call it on a node carrying %s,"
+				+ " or on an object a path from one reaches"
+			)
+			% [called, method, script.resource_path]
+		)
+	return ""
+
+
 ## Whether a call's `properties` asks for its result to be read: true, or a list of names.
 static func _reads_the_result(asked: Variant) -> bool:
 	return asked is Array or (asked is bool and asked)
@@ -667,7 +718,7 @@ static func _argument_count_refused(holder: Object, method: String, given: int) 
 	# of the game's frame; a call giving exactly the arguments the method declares needs no walk.
 	if given == holder.get_method_argument_count(method):
 		return ""
-	for entry: Dictionary in holder.get_method_list():
+	for entry: Dictionary in GdhValues.methods_of(holder):
 		if str(entry.get("name", "")) != method:
 			continue
 		var parameters: Array = entry.get("args", [])

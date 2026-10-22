@@ -8,6 +8,7 @@ extends Node
 const GdhSceneTools = preload("tools/scene_tools.gd")
 const GdhSignalTools = preload("tools/signal_tools.gd")
 const GdhResourceTools = preload("tools/resource_tools.gd")
+const GdhTilesetTools = preload("tools/tileset_tools.gd")
 const GdhAnimationStates = preload("tools/animation_states.gd")
 const GdhAnimationTools = preload("tools/animation_tools.gd")
 const GdhAnimationTracks = preload("tools/animation_tracks.gd")
@@ -22,6 +23,7 @@ var _editor_plugin: EditorPlugin = null
 var _scene_tools: GdhSceneTools = null
 var _signal_tools: GdhSignalTools = null
 var _resource_tools: GdhResourceTools = null
+var _tileset_tools: GdhTilesetTools = null
 var _animation_states: GdhAnimationStates = null
 var _animation_tools: GdhAnimationTools = null
 var _animation_tracks: GdhAnimationTracks = null
@@ -40,6 +42,7 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_init_tools()
 	_scene_tools.set_editor_plugin(plugin)
 	_resource_tools.set_editor_plugin(plugin)
+	_tileset_tools.set_editor_plugin(plugin)
 	_animation_tools.set_editor_plugin(plugin)
 	_animation_states.set_editor_plugin(plugin)
 	_animation_tracks.set_editor_plugin(plugin)
@@ -65,6 +68,10 @@ func _init_tools() -> void:
 	_resource_tools = GdhResourceTools.new()
 	_resource_tools.name = "ResourceTools"
 	add_child(_resource_tools)
+
+	_tileset_tools = GdhTilesetTools.new()
+	_tileset_tools.name = "TilesetTools"
+	add_child(_tileset_tools)
 
 	_animation_tools = GdhAnimationTools.new()
 	_animation_tools.name = "AnimationTools"
@@ -128,8 +135,8 @@ func _init_tools() -> void:
 		"modify_resource": [_resource_tools, "modify_resource"],
 		"read_resource": [_resource_tools, "read_resource"],
 		"create_shader": [_resource_tools, "create_shader"],
-		"create_tileset": [_resource_tools, "create_tileset"],
-		"set_tilemap_cells": [_resource_tools, "set_tilemap_cells"],
+		"create_tileset": [_tileset_tools, "create_tileset"],
+		"set_tilemap_cells": [_tileset_tools, "set_tilemap_cells"],
 		"set_theme_color": [_resource_tools, "set_theme_color"],
 		"set_theme_font_size": [_resource_tools, "set_theme_font_size"],
 		"remove_theme_item": [_resource_tools, "remove_theme_item"],

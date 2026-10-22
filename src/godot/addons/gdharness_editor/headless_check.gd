@@ -458,6 +458,32 @@ static func put_back_value(object: Object, name: String, was_set: bool, held: St
 	return ""
 
 
+## [param refused], a refusal of [param property] on [param object] for not holding what it was given,
+## with why when a headless engine set it through a script that is not a tool. That setter runs here
+## and in the game, and an editor runs none and saves the value given, so a setter clamping stock to
+## 0 refused -5 here and the same call through an editor wrote it.
+static func setter_ran(object: Object, property: String, refused: String) -> String:
+	if Engine.is_editor_hint() or property.is_empty():
+		return refused
+	if not through_script(object, {property.get_slice(":", 0): true}):
+		return refused
+	var attached: Variant = object.get_script()
+	var named: String = "Its script"
+	if attached is Script:
+		var script: Script = attached
+		named = script.resource_path
+	return (
+		(
+			(
+				"%s %s is not a tool script, so its setter ran in the headless engine writing this as it runs "
+				+ "in the game; an editor runs none and would have saved the value given. "
+			)
+			% [refused, named]
+		)
+		+ REMEDY
+	)
+
+
 ## Why [param name] on [param what] cannot be saved as the file held it.
 static func unasked(what: String, name: String, why: String = "") -> String:
 	return (

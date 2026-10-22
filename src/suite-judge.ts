@@ -10,6 +10,7 @@
 
 import { readFileSync } from 'node:fs';
 import { stripVTControlCharacters } from 'node:util';
+import { EXIT_LEAK, type SelfTypedExport, selfTypedSentence } from './engine-leaks.js';
 import type { LogEntry } from './game-log.js';
 import { scriptErrorsPrinted } from './junit.js';
 
@@ -81,8 +82,6 @@ const EXECUTED = /^Executed test cases\s*:\s*\((\d+)\//;
 // is the engine probing a driver: a windowed engine on a machine without a Vulkan surface prints
 // two and then runs its cases on Direct3D 12 or OpenGL.
 const DRIVER_FALLBACK = /^\s*WARNING: Your video card drivers .*, switching to /;
-const LEAK =
-  /ObjectDB instances (?:were )?leaked at exit|resources? still in use at exit|Pages in use exist at exit/;
 // The allocator's null, in its error line and the location under it, and an image decode the same
 // pressure made fail. Both are the machine running out, not the case being wrong.
 const STARVED = [
@@ -167,7 +166,7 @@ export function readRun(printed: string): RunPrinted {
       executed = Number(counted[1]);
       continue;
     }
-    if (LEAK.test(line)) {
+    if (EXIT_LEAK.test(line)) {
       leaks.push(line.trim());
       continue;
     }
@@ -251,6 +250,8 @@ export interface EngineAssignment {
   /** Each suite, with the functions this engine is to run of it. */
   readonly suites: ReadonlyArray<{ readonly path: string; readonly cases: readonly string[] }>;
   readonly expected: Expected;
+  /** The project's scripts the engine never frees once loaded, which its report at exit counts. */
+  readonly selfTyped?: readonly SelfTypedExport[];
 }
 
 /** What each suite declares, as the runner's `--expected-out` wrote it, or nothing. */
@@ -444,9 +445,13 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
     );
     failing.add(missing.suite);
   }
-  for (const leak of printed.leaks) {
-    faults.push(`the engine exited holding what it should have freed: ${leak}`);
-  }
+  const selfTyped = selfTypedSentence(handed.selfTyped ?? []);
+  printed.leaks.forEach((leak, at) => {
+    const last = at === printed.leaks.length - 1;
+    faults.push(
+      `the engine exited holding what it should have freed: ${leak}${last && selfTyped !== undefined ? ` ${selfTyped}` : ''}`,
+    );
+  });
   const memoryExit = end.code !== null && MEMORY_EXITS.has(end.code >>> 0);
   const starved = memoryExit || printed.starved.length > 0;
   if (printed.starved.length > 0) {

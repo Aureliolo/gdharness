@@ -13,6 +13,7 @@ const GdhAnimationTracks = preload("../addons/gdharness_editor/tools/animation_t
 const GdhResourceTools = preload("../addons/gdharness_editor/tools/resource_tools.gd")
 const GdhSceneTools = preload("../addons/gdharness_editor/tools/scene_tools.gd")
 const GdhSignalTools = preload("../addons/gdharness_editor/tools/signal_tools.gd")
+const GdhTilesetTools = preload("../addons/gdharness_editor/tools/tileset_tools.gd")
 const GdhSceneFile = preload("../addons/gdharness_editor/scene_file.gd")
 
 const SCENE_COMMANDS: Array[String] = [
@@ -28,15 +29,14 @@ const SCENE_COMMANDS: Array[String] = [
 ]
 const SIGNAL_COMMANDS: Array[String] = ["connect_signal", "disconnect_signal", "list_connections"]
 const RESOURCE_COMMANDS: Array[String] = [
-	"set_tilemap_cells",
 	"create_resource",
 	"modify_resource",
 	"create_shader",
-	"create_tileset",
 	"set_theme_color",
 	"set_theme_font_size",
 	"remove_theme_item",
 ]
+const TILESET_COMMANDS: Array[String] = ["create_tileset", "set_tilemap_cells"]
 const ANIMATION_COMMANDS: Array[String] = [
 	"create_animation",
 	"set_animation",
@@ -66,6 +66,8 @@ static func run(params: Dictionary) -> Dictionary:
 		tools = GdhSignalTools.new()
 	elif command in RESOURCE_COMMANDS:
 		tools = GdhResourceTools.new()
+	elif command in TILESET_COMMANDS:
+		tools = GdhTilesetTools.new()
 	elif command in ANIMATION_COMMANDS:
 		tools = GdhAnimationTools.new()
 	elif command in ANIMATION_TRACK_COMMANDS:

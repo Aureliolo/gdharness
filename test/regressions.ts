@@ -87,6 +87,7 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from '../src/editor-log.js';
+import { selfTypedExports, selfTypedSentence } from '../src/engine-leaks.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import {
   EngineSlots,
@@ -32027,6 +32028,13 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         'class_name Gear\nextends RefCounted\n\nvar label: String = ""\n',
       );
       writeFileSync(join(project, 'helm.gd'), 'class_name Helm\nextends Gear\n');
+      // A class no node carries, whose static functions answer what the game's own rules would.
+      writeFileSync(
+        join(project, 'chooser.gd'),
+        'class_name Chooser\nextends RefCounted\n\n\nstatic func best(values: Array) -> int:\n\treturn values.max()\n\n\n' +
+          'static func named_of(node: Node) -> String:\n\treturn node.name\n\n\nfunc not_static() -> int:\n\treturn 1\n',
+      );
+      writeFileSync(join(project, 'main_rules.gd'), 'class_name Main\nextends RefCounted\n');
       writeFileSync(
         join(project, 'main.gd'),
         'extends Node\n\nvar wares: Array[Gear] = []\nvar worn: Gear = null\n' +
@@ -32117,6 +32125,51 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
 
       const node = await invoke('named', ['/root/Main']);
       assert.equal(node.result, 'Main', `a node is named by its path alone: ${node.said}`);
+
+      // A static function of a class no node carries, named by the class or by its script's path.
+      const onClass = async (nodePath: string, method: string, args: unknown[]): Promise<string> =>
+        textOf(
+          await server.request(
+            'tools/call',
+            { name: 'runtime_invoke', arguments: { op: 'call', nodePath, method, args } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ) ?? '';
+      // A refusal is prose, so it is matched before being read as an answer and is shown whole.
+      const answered = (said: string): unknown => {
+        assert.match(said, /^\{/, `an answer rather than a refusal: ${said}`);
+        return JSON.parse(said);
+      };
+      for (const named of ['Chooser', 'res://chooser.gd']) {
+        const best = await onClass(named, 'best', [[3, 9, 4]]);
+        assert.deepEqual(
+          [get(answered(best), 'type'), get(answered(best), 'result')],
+          ['method_result', 9],
+          `${named} answers its static function: ${best}`,
+        );
+      }
+      const passed = await onClass('Chooser', 'named_of', ['/root/Main']);
+      assert.equal(get(answered(passed), 'result'), 'Main', `an object argument is a node path: ${passed}`);
+      // A node is called before a class of the same name: Main is both, and only the node is at /root.
+      const nodeFirst = await onClass('Main', 'get_path', []);
+      assert.match(JSON.stringify(get(answered(nodeFirst), 'result')), /\/root\/Main/, nodeFirst);
+      assert.doesNotMatch(nodeFirst, /main_rules/, nodeFirst);
+      assert.match(
+        await onClass('Chooser', 'not_static', []),
+        /Chooser\.not_static is not static, so it runs on an instance of the class: call it on a node carrying res:\/\/chooser\.gd, or on an object a path from one reaches/,
+      );
+      assert.match(
+        await onClass('Chooser', 'bets', [[1]]),
+        /Chooser has no method bets; its static functions are best, named_of$/,
+      );
+      assert.match(
+        await onClass('Choser', 'best', [[1]]),
+        /No global class is called Choser either, and the nearest is Chooser; a static function is called with its class's name or its script's res:\/\/ path as the path\./,
+      );
+      assert.match(
+        await onClass('res://nowhere.gd', 'best', [[1]]),
+        /No script is at res:\/\/nowhere\.gd to call a static function of\./,
+      );
 
       const cleared = await invoke('take_off', [null]);
       assert.equal(cleared.result, true, `null still reaches an object parameter as null: ${cleared.said}`);
@@ -37584,6 +37637,54 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
         new RegExp(`${misspelt} names no suite or case under the paths run, so it left nothing out\\.`),
         JSON.stringify(typo),
       );
+
+      // What the engine still holds at exit fails the run as it fails gdharness test's, read off the
+      // engine's streams: the log file it writes stops taking lines before the engine reports them.
+      assert.deepEqual(
+        [get(plain, 'passed'), text(get(plain, 'verdict'))],
+        [false, 'the engine exited holding what it should have freed'],
+        JSON.stringify(plain),
+      );
+      assert.ok(
+        asArray(get(plain, 'leakedAtExit')).some((line) =>
+          /ObjectDB instances? (?:was|were) leaked/.test(text(line)),
+        ),
+        `the lines are named: ${JSON.stringify(plain)}`,
+      );
+      assert.match(
+        text(get(plain, 'note')),
+        /What the engine still held as it exited fails the run, as gdharness test judges it; engineArgs \["--verbose"\] names each instance and resource under engineEntries\./,
+      );
+      assert.doesNotMatch(
+        text(get(plain, 'note')),
+        /Godot never frees/,
+        'with no such script, none is named',
+      );
+      const kept = await run({ ignore: [form.replace(/test_other$/, 'test_keeps_one')] });
+      assert.deepEqual(
+        [get(kept, 'tests'), get(kept, 'passed'), get(kept, 'leakedAtExit')],
+        [1, true, undefined],
+        `without the case keeping an object the run passes: ${JSON.stringify(kept)}`,
+      );
+
+      // A script exporting an array of its own class is one Godot never frees, so a suite freeing
+      // everything it makes still ends the run this way, and the note names the script.
+      mkdirSync(join(projectDir, 'looped'));
+      writeFileSync(
+        join(projectDir, 'looped', 'looped.gd'),
+        'class_name Looped\nextends Resource\n\n@export var parts: Array[Looped] = []\n',
+      );
+      writeFileSync(
+        join(projectDir, 'looped', 'looped_test.gd'),
+        'extends GdUnitTestSuite\n\n\nfunc test_makes_one() -> void:\n\tassert_int(Looped.new().parts.size()).is_equal(0)\n',
+      );
+      const looped = await run({ path: 'res://looped' });
+      assert.deepEqual([get(looped, 'tests'), get(looped, 'passed')], [1, false], JSON.stringify(looped));
+      assert.match(
+        text(get(looped, 'note')),
+        /Godot never frees a script exporting an array or dictionary typed with its own class once a run has loaded it, and reports it as leaked at exit: res:\/\/looped\/looped\.gd \(Looped\.parts\) does, so a run loading it ends with this report whatever else it frees\. Typed with a class it extends instead, as Array\[Resource\], it is freed\./,
+        JSON.stringify(looped),
+      );
     });
   } finally {
     sweep(projectDir);
@@ -37870,6 +37971,57 @@ function testAnEngineRunIsReadCaseByCase(): void {
  * suite that does not load is reported by none of its cases, a case printing an engine error passes,
  * and a declared error that stopped printing means the case no longer reaches what it tests.
  */
+/**
+ * The scripts Godot never frees once loaded: an exported array or dictionary typed with the script's
+ * own class, the annotation on its own line or the variable's. A headless write of such a resource
+ * answered that the engine's report of a leak at exit came from the project's autoloads, and a test
+ * run loading one fails with nothing naming why. The found shapes leak when tried against the
+ * engine, and a group heading, an unexported variable and one typed with a base class do not; the
+ * rest are text that only looks like a declaration.
+ */
+function testTheScriptsGodotNeverFreesAreFound(): void {
+  const found = selfTypedExports([
+    ['res://item.gd', 'class_name Item\nextends Resource\n\n@export var parts: Array[Item] = []\n'],
+    ['res://node.gd', 'class_name Kin\nextends Node\n\n@export\nvar kids: Array[Kin] = []\n'],
+    [
+      'res://stash.gd',
+      'class_name Stash\nextends Resource\n\n@export_storage var held: Dictionary[String, Stash] = {}\n',
+    ],
+    [
+      'res://quiet.gd',
+      [
+        'class_name Quiet',
+        'extends Resource',
+        '',
+        '@export_group("Parts")',
+        'var grouped: Array[Quiet] = []',
+        'var local: Array[Quiet] = []',
+        '@export var others: Array[Resource] = []',
+        '@export var longer: Array[QuietPart] = []',
+        '# @export var commented: Array[Quiet] = []',
+        '@export var named: String = "@export var quoted: Array[Quiet]"',
+        '',
+      ].join('\n'),
+    ],
+    ['res://nameless.gd', 'extends Resource\n\n@export var parts: Array[Resource] = []\n'],
+  ]);
+  assert.deepEqual(
+    found,
+    [
+      { script: 'res://item.gd', className: 'Item', property: 'parts' },
+      { script: 'res://node.gd', className: 'Kin', property: 'kids' },
+      { script: 'res://stash.gd', className: 'Stash', property: 'held' },
+    ],
+    'each exported variable typed with its own class, and nothing else',
+  );
+  assert.equal(selfTypedSentence([]), undefined, 'none is said as nothing');
+  assert.match(
+    selfTypedSentence(found) ?? '',
+    /: res:\/\/item\.gd \(Item\.parts\), res:\/\/node\.gd \(Kin\.kids\) and res:\/\/stash\.gd \(Stash\.held\) do, so a run loading one ends with this report whatever else it frees\. Typed with a class it extends instead, as Array\[Resource\], each is freed\.$/,
+    'several are listed and the sentence follows them',
+  );
+}
+
 function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   const clean = { code: 0, signal: null, ended: null };
   const handed = (
@@ -38087,6 +38239,39 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
       'the engine exited holding what it should have freed: ERROR: 2 resources still in use at exit (run with --verbose for details).',
     ],
     'leaks at exit, each once and not again as an engine error',
+  );
+  // As the engine words them now, one instance in the singular.
+  for (const said of [
+    'WARNING: 1 ObjectDB instance was leaked at exit (run with `--verbose` for details).',
+    'WARNING: 2 ObjectDB instances were leaked at exit (run with `--verbose` for details).',
+    'ERROR: 1 resources still in use at exit (run with --verbose for details).',
+  ]) {
+    assert.deepEqual(
+      judgeEngine(readRun(`${rows([1])}\n${said}`), declaredRows, clean).faults,
+      [`the engine exited holding what it should have freed: ${said}`],
+      said,
+    );
+  }
+  const looped = [{ script: 'res://looped.gd', className: 'Looped', property: 'parts' }];
+  const leakedLooped = judgeEngine(
+    readRun(
+      `${rows([1])}\nWARNING: ObjectDB instances leaked at exit (run with --verbose for details).\nERROR: 2 resources still in use at exit (run with --verbose for details).`,
+    ),
+    { ...declaredRows, selfTyped: looped },
+    clean,
+  );
+  assert.deepEqual(
+    leakedLooped.faults,
+    [
+      'the engine exited holding what it should have freed: WARNING: ObjectDB instances leaked at exit (run with --verbose for details).',
+      'the engine exited holding what it should have freed: ERROR: 2 resources still in use at exit (run with --verbose for details). Godot never frees a script exporting an array or dictionary typed with its own class once a run has loaded it, and reports it as leaked at exit: res://looped.gd (Looped.parts) does, so a run loading it ends with this report whatever else it frees. Typed with a class it extends instead, as Array[Resource], it is freed.',
+    ],
+    'a script the engine never frees is named once, after the last of the lines it can account for',
+  );
+  assert.deepEqual(
+    judgeEngine(readRun(rows([1])), { ...declaredRows, selfTyped: looped }, clean).faults,
+    [],
+    'and a run that reported nothing held at exit says nothing of it',
   );
 
   const shortOfCases = judgeEngine(readRun(rows([1])), handed(['test_a', 'test_c'], {}), clean);
@@ -44192,6 +44377,233 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
  * @export_range(0, 10) without a word, and a picture never imported was "No resource at" a path
  * that held one.
  */
+/**
+ * What stops a resource write with no editor is named for what it is (probe 158): a setter of a
+ * script that is not a tool, which runs here and not in an editor; two properties the engine keeps
+ * in step; a resource given its own file; a shader that does not compile. And a resource built into
+ * a file reads by its script's class, a create names the script it attached, and the engine's report
+ * of a script it never frees is not put down to the autoloads.
+ */
+async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('resource refusals regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-refusals-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-refusals-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Refusals"\n',
+  );
+  writeFileSync(
+    join(project, 'item.gd'),
+    'class_name Item\nextends Resource\n\n@export var title: String = ""\n@export var parts: Array[Item] = []\n' +
+      '@export var stock: int = 0:\n\tset(value):\n\t\tstock = maxi(value, 0)\n',
+  );
+  writeFileSync(
+    join(project, 'shop.gd'),
+    'class_name Shop\nextends Resource\n\n@export var items: Array[Item] = []\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const request = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: 'resource_edit', arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  const answered = async (args: Record<string, unknown>): Promise<unknown> => {
+    const response = await request(args);
+    const answer = parseTextContent(response);
+    assert.ok(answer !== null, `${JSON.stringify(args)}: ${textOf(response) ?? JSON.stringify(response)}`);
+    return answer;
+  };
+  // The refusal itself, without the engine's messages after it: every engine that loads item.gd
+  // reports at exit the script it never frees.
+  let lastRefusal = '';
+  const refused = async (args: Record<string, unknown>): Promise<string> => {
+    const response = await request(args);
+    assert.equal(get(response, 'result', 'isError'), true, `${JSON.stringify(args)} is refused`);
+    lastRefusal = textOf(response) ?? '';
+    return lastRefusal.split(/\{\n\s+"engine_messages"/)[0] ?? '';
+  };
+  try {
+    await server.initialize('regression-test');
+    await server.request('tools/call', {
+      name: 'project_import',
+      arguments: { projectPath: project, op: 'refresh_classes' },
+    });
+
+    // The setter clamps -5 to 0 here, where an editor runs no script that is not a tool and saves -5.
+    const clamped = await refused({
+      op: 'create',
+      resourcePath: 'res://sword.tres',
+      resourceType: 'Item',
+      properties: { title: 'Sword', stock: -5 },
+    });
+    assert.match(
+      clamped,
+      /^Item\.stock was given -5 and holds 0 after it was set: the engine changed or refused the value, so nothing was written\. res:\/\/item\.gd is not a tool script, so its setter ran in the headless engine writing this as it runs in the game; an editor runs none and would have saved the value given\. Open the project's editor \(editor_launch with hidden: true\) and ask again/,
+      clamped,
+    );
+    assert.equal(existsSync(join(project, 'sword.tres')), false, 'and nothing was written');
+    const made = await answered({
+      op: 'create',
+      resourcePath: 'res://sword.tres',
+      resourceType: 'Item',
+      properties: { title: 'Sword', stock: 4 },
+    });
+    assert.deepEqual(
+      [get(made, 'resourceType'), get(made, 'script'), get(made, 'scriptClass')],
+      ['Item', 'res://item.gd', 'Item'],
+      `a create names the script it attached: ${JSON.stringify(made)}`,
+    );
+    // Godot never frees item.gd, which exports a list of its own class, and says so at exit.
+    assert.match(
+      text(get(made, 'engine_messages_after_answer_note')),
+      / Godot never frees a script exporting an array or dictionary typed with its own class once a run has loaded it, and reports it as leaked at exit: res:\/\/item\.gd \(Item\.parts\) does, so a run loading it ends with this report whatever else it frees\./,
+      JSON.stringify(made),
+    );
+    const plain = await answered({
+      op: 'create',
+      resourcePath: 'res://plain.tres',
+      resourceType: 'Resource',
+      script: 'res://item.gd',
+      properties: { title: 'Plain' },
+    });
+    assert.deepEqual(
+      [get(plain, 'resourceType'), get(plain, 'script'), get(plain, 'scriptClass')],
+      ['Resource', 'res://item.gd', 'Item'],
+      `given by its script, the class is named too: ${JSON.stringify(plain)}`,
+    );
+    const physics = await answered({
+      op: 'create',
+      resourcePath: 'res://bounce.tres',
+      resourceType: 'PhysicsMaterial',
+      properties: { bounce: 0.5 },
+    });
+    assert.deepEqual(
+      [get(physics, 'script'), get(physics, 'engine_messages_after_answer')],
+      [undefined, undefined],
+      `a resource with no script names none, and the engine reports nothing held: ${JSON.stringify(physics)}`,
+    );
+
+    // A file cannot hold itself: Godot saves the reference as null.
+    const before = readFileSync(join(project, 'sword.tres'), 'utf8');
+    assert.equal(
+      await refused({
+        op: 'modify',
+        resourcePath: 'res://sword.tres',
+        properties: { parts: ['res://sword.tres'] },
+      }),
+      'Item.parts would hold res://sword.tres itself, and a resource cannot hold the file it is saved as: Godot saves the reference as null. Nothing was written.',
+    );
+    assert.equal(readFileSync(join(project, 'sword.tres'), 'utf8'), before, 'and the file is as it was');
+    assert.match(
+      text(get(JSON.parse(lastRefusal.slice(lastRefusal.indexOf('{\n'))), 'engine_messages_note')),
+      /res:\/\/item\.gd \(Item\.parts\) does/,
+      `a refusal names the script beside the engine's report among its own messages: ${lastRefusal}`,
+    );
+    await answered({
+      op: 'modify',
+      resourcePath: 'res://plain.tres',
+      properties: { parts: ['res://sword.tres'] },
+    });
+    assert.match(readFileSync(join(project, 'plain.tres'), 'utf8'), /path="res:\/\/sword\.tres"/);
+    assert.equal(
+      await refused({ op: 'modify', resourcePath: 'res://nowhere.tres', properties: { title: 'x' } }),
+      'No resource at res://nowhere.tres; op=create makes one there.',
+    );
+
+    // A Gradient keeps one offset for each colour, so two offsets given after three colours cut the
+    // colours back to two, and the refusal names the property that did it.
+    const stepped = await refused({
+      op: 'create',
+      resourcePath: 'res://ramp.tres',
+      resourceType: 'Gradient',
+      properties: {
+        colors: [
+          { _type: 'Color', r: 1, g: 0, b: 0, a: 1 },
+          { _type: 'Color', r: 0, g: 1, b: 0, a: 1 },
+          { _type: 'Color', r: 0, g: 0, b: 1, a: 1 },
+        ],
+        offsets: [0, 1],
+      },
+    });
+    assert.equal(
+      stepped,
+      'Gradient.colors was given [{"r":1.0,"g":0.0,"b":0.0,"a":1.0,"_type":"Color"},{"r":0.0,"g":1.0,"b":0.0,"a":1.0,"_type":"Color"},{"r":0.0,"g":0.0,"b":1.0,"a":1.0,"_type":"Color"}] and holds [{"r":1.0,"g":0.0,"b":0.0,"a":1.0,"_type":"Color"},{"r":0.0,"g":1.0,"b":0.0,"a":1.0,"_type":"Color"}] once offsets was set as well: the engine keeps the two in step, so they cannot hold these values together. Nothing was written.',
+    );
+    assert.equal(existsSync(join(project, 'ramp.tres')), false);
+    const agreeing = await answered({
+      op: 'create',
+      resourcePath: 'res://ramp.tres',
+      resourceType: 'Gradient',
+      properties: {
+        offsets: [0, 0.5, 1],
+        colors: [
+          { _type: 'Color', r: 1, g: 0, b: 0, a: 1 },
+          { _type: 'Color', r: 0, g: 1, b: 0, a: 1 },
+          { _type: 'Color', r: 0, g: 0, b: 1, a: 1 },
+        ],
+      },
+    });
+    assert.deepEqual(get(agreeing, 'properties', 'offsets'), [0, 0.5, 1], JSON.stringify(agreeing));
+
+    // A resource built into a file reads by the class its script declares, the _type a write takes.
+    await answered({
+      op: 'create',
+      resourcePath: 'res://shop.tres',
+      resourceType: 'Shop',
+      properties: { items: ['res://sword.tres', { _type: 'Item', title: 'Shield' }] },
+    });
+    const shop = await answered({ op: 'read', resourcePath: 'res://shop.tres' });
+    const items = asArray(get(shop, 'properties', 'items'));
+    assert.deepEqual(
+      [get(items[0], 'scriptClass'), items[1]],
+      ['Item', { _type: 'Item', title: 'Shield' }],
+      JSON.stringify(shop),
+    );
+    await answered({ op: 'modify', resourcePath: 'res://shop.tres', properties: { items: [items[1]] } });
+    assert.match(
+      readFileSync(join(project, 'shop.tres'), 'utf8'),
+      /^title = "Shield"$/m,
+      'and the read form writes back',
+    );
+
+    const broken = await answered({
+      op: 'create_shader',
+      resourcePath: 'res://broken.gdshader',
+      shaderType: 'canvas_item',
+      code: 'shader_type canvas_item;\n\nvoid fragment() {\n\tCOLOR = vec4(1.0, 0.0, 0.0, 1.0)\n}\n',
+    });
+    assert.deepEqual(
+      [get(broken, 'compiles'), get(broken, 'compileErrors')],
+      [false, [{ line: 5, message: "Expected a ';'." }]],
+      JSON.stringify(broken),
+    );
+    assert.ok(existsSync(join(project, 'broken.gdshader')), 'the shader is written as given');
+    const empty = await answered({
+      op: 'create_shader',
+      resourcePath: 'res://plain.gdshader',
+      shaderType: 'spatial',
+    });
+    assert.deepEqual(
+      [get(empty, 'compiles'), get(empty, 'compileErrors')],
+      [true, undefined],
+      JSON.stringify(empty),
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
@@ -44360,13 +44772,13 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     const listed = await refused({ tags: [1, 2] });
     assert.match(
       listed,
-      /ItemData\.tags is Array and item 0 of the list given is float, not String\. Text is sent in quotes, as "1"\. Setting it would save a different value/,
+      /ItemData\.tags is Array and item 0 of the list given is a number, not String\. Text is sent in quotes, as "1"\. Setting it would save a different value/,
       listed,
     );
     const titled = await refused({ title: 5 });
     assert.match(
       titled,
-      /ItemData\.title is String and the value given is float, which cannot become one\. Text is sent in quotes, as "5"\./,
+      /ItemData\.title is String and the value given is a number, which cannot become one\. Text is sent in quotes, as "5"\./,
       titled,
     );
     await written({ tags: ['1', '2'] });
@@ -44612,7 +45024,7 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     });
     assert.equal(
       textOf(await request('scene_node', { ...hero, properties: { lives: 20 } })),
-      'Player.lives was given 20 and holds 9 after it was set: the engine changed or refused the value, so nothing was written.',
+      "Player.lives was given 20 and holds 9 after it was set: the engine changed or refused the value, so nothing was written. res://player.gd is not a tool script, so its setter ran in the headless engine writing this as it runs in the game; an editor runs none and would have saved the value given. Open the project's editor (editor_launch with hidden: true) and ask again: the write then goes through it, and the editor runs no script that is not a tool.",
     );
 
     // A bus renamed takes its sends and the scenes naming it along, and a script naming it in a
@@ -54521,6 +54933,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnElementIsToldWhatItsTypeTakes,
   testAWriteSaysWhatElseItChanged,
   testAWriteReadsWhatThePropertyDeclares,
+  testAResourceWriteWithNoEditorSaysWhatStoppedIt,
   testATestRunTakesTheCasesNamed,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
@@ -54801,6 +55214,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheShippedRunnerRunsAFileOfSuites,
   testAnEngineRunIsReadCaseByCase,
   testAnEngineRunIsJudgedOnEverythingItPrinted,
+  testTheScriptsGodotNeverFreesAreFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAFingerprintFollowsWhatASuiteReaches,

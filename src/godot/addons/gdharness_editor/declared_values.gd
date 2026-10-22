@@ -528,3 +528,21 @@ static func naming_nothing(node: Node, given: Dictionary) -> Dictionary:
 			% [str(named), node.name, property]
 		)
 	return said
+
+
+## Why [param material] has no [param property]: a ShaderMaterial's parameters are its shader's
+## uniforms, so the shader is what lacks one, and "ShaderMaterial has no property" named the
+## material.
+static func no_uniform(material: ShaderMaterial, property: String) -> String:
+	var uniform: String = property.trim_prefix("shader_parameter/")
+	if material.shader == null:
+		return "The ShaderMaterial has no shader, so it has no parameter %s yet; set shader first." % uniform
+	var shader: String = material.shader.resource_path
+	var named: String = shader if not shader.is_empty() else "Its shader"
+	var uniforms: Array = []
+	for entry: Dictionary in material.shader.get_shader_uniform_list():
+		uniforms.append(str(entry["name"]))
+	var said: String = "%s declares no uniform %s, which %s would set" % [named, uniform, property]
+	if uniforms.is_empty():
+		return said + "; it declares no uniforms."
+	return GdhRead.offered(said, uniform, uniforms) + "."

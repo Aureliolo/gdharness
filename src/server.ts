@@ -90,6 +90,7 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from './editor-log.js';
+import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
 import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
@@ -7311,11 +7312,22 @@ class GodotServer {
         seen.times += 1;
       }
     }
-    const undeclaredAll = [...undeclaredFolded.values()].map((error) => ({
+    // By suite, each suite's in the order printed: the suites do not run in the same order on every
+    // platform, and the same run listed them one way on Windows and the other on Linux.
+    const bySuite = (a: { suite: string | undefined }, b: { suite: string | undefined }): number => {
+      const [left, right] = [a.suite ?? '', b.suite ?? ''];
+      return left < right ? -1 : left > right ? 1 : 0;
+    };
+    const undeclaredAll = [...undeclaredFolded.values()].sort(bySuite).map((error) => ({
       ...error,
       times: error.times > 1 ? error.times : undefined,
     }));
     const undeclaredErrors = undeclaredAll.slice(0, MOST_UNDECLARED_ERRORS);
+    // Off the piped streams rather than the engine's log file, which has stopped taking lines by
+    // the time the engine reports what it still holds at exit.
+    const leakedAtExit = [
+      ...new Set(run.log.all.filter((entry) => EXIT_LEAK.test(entry.text)).map((entry) => entry.text)),
+    ];
     // A declared text matches the whole line, so one declaring the start of a message that ends in
     // a number reads as both never printed and undeclared, and nothing said the two were one line.
     const declaredNotPrinted = judgedErrors.neverPrinted.map((missing) => ({
@@ -7430,11 +7442,12 @@ class GodotServer {
         uncaught.length === 0 &&
         undeclaredPrinted.length === 0 &&
         declaredNotPrinted.length === 0 &&
+        leakedAtExit.length === 0 &&
         missing.length === 0 &&
         testsNotRun.length === 0,
       verdict: [
         // gdUnit4's word for the exit, which is not the run's when something below fails it.
-        verdict === 'passed' && undeclaredPrinted.length + declaredNotPrinted.length > 0
+        verdict === 'passed' && undeclaredPrinted.length + declaredNotPrinted.length + leakedAtExit.length > 0
           ? undefined
           : verdict,
         ...[false, true].map((warning) => {
@@ -7451,6 +7464,7 @@ class GodotServer {
             ? `${count === 1 ? `one declared ${word}` : `${String(count)} declared ${word}s`} never printed`
             : undefined;
         }),
+        leakedAtExit.length > 0 ? 'the engine exited holding what it should have freed' : undefined,
         testsNotRun.length > 0 ? `not run: ${testsNotRun.join(', ')}` : undefined,
       ]
         .filter((part) => part !== undefined)
@@ -7476,6 +7490,7 @@ class GodotServer {
           ? undeclaredAll.length - undeclaredErrors.length
           : undefined,
       declaredNotPrinted: declaredNotPrinted.length > 0 ? declaredNotPrinted : undefined,
+      leakedAtExit: leakedAtExit.length > 0 ? leakedAtExit : undefined,
       // Alongside `failed` rather than folded into it: a suite that left nodes behind failed
       // nothing, and an agent reading `failed` for what to fix must not find a passing test in it.
       warnings: warnings.length > 0 ? warnings : undefined,
@@ -7509,6 +7524,14 @@ class GodotServer {
             : undefined,
           declaredNotPrinted.length > 0
             ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'
+            : undefined,
+          leakedAtExit.length > 0
+            ? [
+                'What the engine still held as it exited fails the run, as gdharness test judges it; engineArgs ["--verbose"] names each instance and resource under engineEntries.',
+                selfTypedSentence(projectSelfTypedExports(project.value.path)),
+              ]
+                .filter((part) => part !== undefined)
+                .join(' ')
             : undefined,
           ranAs.startsWith('warnings') && warnings.length === 0
             ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
