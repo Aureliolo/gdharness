@@ -7715,7 +7715,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 142;
+const READ_IN_WORDS = 149;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -42294,9 +42294,14 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     }
   }
   const dispatched = new Set(Object.values(HEADLESS_OPERATIONS).flatMap((ops) => Object.values(ops)));
-  // project_info's sections and the CLI reach operations no tool op names, so those are read
-  // from the source that names them rather than assumed.
-  const otherwise = namesPassedTo(/this\.(?:headless|operation)\(|operation: '/g, 'engine operations', 10);
+  // project_info's sections, the CLI and the export options read in an editor-mode engine reach
+  // operations no tool op names, so those are read from the source that names them rather than
+  // assumed.
+  const otherwise = namesPassedTo(
+    /this\.(?:headless|operation)\(|operation: '|runOperation\(/g,
+    'engine operations',
+    10,
+  );
   const fromCli = namesIn('src/cli.ts', /'([a-z_]+)'/g, 'names in the CLI', 5);
   for (const operation of engine) {
     assert.ok(
