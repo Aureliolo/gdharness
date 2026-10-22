@@ -31,15 +31,6 @@ const GdhHeadlessCheck = preload("headless_check.gd")
 const PUTTING_BACK_PASSES: int = 4
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
-## The names Object.ConnectFlags gives each bit. The number alone left a reader guessing that 2 is
-## the persistence every connection in a saved scene carries.
-const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
-	Object.CONNECT_DEFERRED: "deferred",
-	Object.CONNECT_PERSIST: "persist",
-	Object.CONNECT_ONE_SHOT: "one_shot",
-	Object.CONNECT_REFERENCE_COUNTED: "reference_counted",
-	Object.CONNECT_APPEND_SOURCE_OBJECT: "append_source_object",
-}
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
 ## for the editor's files to settle has to wait through as well.
@@ -168,19 +159,6 @@ static func unsaved_in_editor(scene_path: String) -> String:
 func refuse(error: String) -> Dictionary:
 	close()
 	return {"ok": false, "error": error}
-
-
-## Each bit set in [param flags], a connection's, by name, and any bits left unnamed as one number.
-static func flag_names(flags: int) -> Array[String]:
-	var names: Array[String] = []
-	var rest: int = flags
-	for bit: int in CONNECT_FLAG_NAMES:
-		if flags & bit:
-			names.append(CONNECT_FLAG_NAMES[bit])
-			rest &= ~bit
-	if rest != 0:
-		names.append(str(rest))
-	return names
 
 
 ## [param said], the refusal for [param node_path] found nowhere in this scene, with how a path is

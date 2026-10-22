@@ -49397,7 +49397,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       '[node name="Loop" type="Node"]\nmetadata/loop = SubResource("Resource_loop")\n',
     'wired.gd':
       'extends Node2D\n\nsignal died(points: int)\n\n\nfunc take(amount: int) -> void:\n\tprint(amount)\n\n\n' +
-      'func take_node(node: Node2D) -> void:\n\tprint(node)\n',
+      'func take_node(node: Node2D) -> void:\n\tprint(node)\n\n\nfunc scale_by(factor: float) -> void:\n\tprint(factor)\n',
     // One connection with an argument bound and one with an argument unbound, which fit only once
     // the bound one is added and the unbound one dropped.
     'wires.tscn':
@@ -49662,6 +49662,211 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
         [false, 'fits'],
       ],
       `a list judges a bound and an unbound argument as the call meets them: ${JSON.stringify(wires)}`,
+    );
+    const carried = Object.fromEntries(
+      asArray(get(wires, 'connections')).map((one) => [
+        `${text(get(one, 'signalName'))} ${text(get(one, 'methodName'))}`,
+        [get(one, 'binds'), get(one, 'unbinds')],
+      ]),
+    );
+    assert.deepEqual(
+      [carried['visibility_changed take'], carried['child_entered_tree queue_free'], carried['died take']],
+      [
+        [[5], undefined],
+        [undefined, 1],
+        [undefined, undefined],
+      ],
+      `and says what each binds and unbinds: ${JSON.stringify(wires)}`,
+    );
+
+    // A connection carrying binds is found again by its ends, and keeps them: the engine's own
+    // is_connected found it, so it was taken out and a bare one put in its place.
+    const lineOf = (signalName: string, methodName: string): string =>
+      fileOf('wires.tscn')
+        .split('\n')
+        .find((line) =>
+          line.startsWith(
+            `[connection signal="${signalName}" from="Emitter" to="Taker" method="${methodName}"`,
+          ),
+        ) ?? '';
+    const rewire = async (
+      signalName: string,
+      methodName: string,
+      more: Record<string, unknown>,
+    ): Promise<unknown> =>
+      await written('scene_signal', {
+        op: 'connect',
+        scenePath: 'wires.tscn',
+        sourceNodePath: 'Emitter',
+        signalName,
+        targetNodePath: 'Taker',
+        methodName,
+        ...more,
+      });
+    const once = await rewire('visibility_changed', 'take', { flags: 4 });
+    assert.deepEqual(
+      [
+        get(once, 'alreadyConnected'),
+        get(once, 'flagsBefore'),
+        get(once, 'binds'),
+        get(once, 'bindsBefore'),
+        get(once, 'argumentsFit'),
+      ],
+      [true, ['persist'], [5], undefined, true],
+      `a reconnect keeps the binds: ${JSON.stringify(once)}`,
+    );
+    assert.equal(
+      lineOf('visibility_changed', 'take'),
+      '[connection signal="visibility_changed" from="Emitter" to="Taker" method="take" flags=6 binds= [5]]',
+    );
+    const bare = await rewire('visibility_changed', 'take', { binds: [] });
+    assert.deepEqual(
+      [get(bare, 'binds'), get(bare, 'bindsBefore'), get(bare, 'argumentsFit'), get(bare, 'flagNames')],
+      [undefined, [5], false, ['persist']],
+      `binds [] takes them off, and the method then misses its argument: ${JSON.stringify(bare)}`,
+    );
+    assert.equal(
+      lineOf('visibility_changed', 'take'),
+      '[connection signal="visibility_changed" from="Emitter" to="Taker" method="take"]',
+    );
+    const placed = await rewire('visibility_changed', 'take', { binds: [{ _type: 'int', value: '7' }] });
+    assert.deepEqual(
+      [get(placed, 'binds'), get(placed, 'bindsBefore'), get(placed, 'argumentsFit')],
+      [[7], [], true],
+      `binds are read as a read answers them: ${JSON.stringify(placed)}`,
+    );
+    assert.equal(
+      lineOf('visibility_changed', 'take'),
+      '[connection signal="visibility_changed" from="Emitter" to="Taker" method="take" binds= [7]]',
+    );
+    const unbound = await rewire('child_entered_tree', 'queue_free', { unbinds: 0 });
+    assert.deepEqual(
+      [get(unbound, 'unbinds'), get(unbound, 'unbindsBefore'), get(unbound, 'misfit')],
+      [undefined, 1, `child_entered_tree passes 1 argument, and queue_free takes none${fails}`],
+      JSON.stringify(unbound),
+    );
+    const rebound = await rewire('child_entered_tree', 'queue_free', { unbinds: 1, binds: [3] });
+    assert.deepEqual(
+      [get(rebound, 'unbinds'), get(rebound, 'binds'), get(rebound, 'unbindsBefore')],
+      [1, [3], 0],
+      JSON.stringify(rebound),
+    );
+    assert.equal(
+      lineOf('child_entered_tree', 'queue_free'),
+      '[connection signal="child_entered_tree" from="Emitter" to="Taker" method="queue_free" unbinds=1 binds= [3]]',
+    );
+    // A number lands as the parameter it reaches declares it, since JSON cannot tell 2 from 2.0.
+    const scaled = await rewire('visibility_changed', 'scale_by', { binds: [2] });
+    assert.deepEqual(
+      [get(scaled, 'binds'), get(scaled, 'argumentsFit')],
+      [[2], true],
+      JSON.stringify(scaled),
+    );
+    assert.equal(
+      lineOf('visibility_changed', 'scale_by'),
+      '[connection signal="visibility_changed" from="Emitter" to="Taker" method="scale_by" binds= [2.0]]',
+    );
+    // Where a bind lands moves with what the signal passes: unbinds drops the node child_entered_tree
+    // passes, so the bind reaches factor, and the source an append adds pushes it past the end.
+    const dropped = await rewire('child_entered_tree', 'scale_by', { unbinds: 1, binds: [2] });
+    assert.equal(get(dropped, 'argumentsFit'), true, JSON.stringify(dropped));
+    assert.equal(
+      lineOf('child_entered_tree', 'scale_by'),
+      '[connection signal="child_entered_tree" from="Emitter" to="Taker" method="scale_by" unbinds=1 binds= [2.0]]',
+    );
+    await rewire('tree_exited', 'scale_by', { flags: 16, binds: [2] });
+    assert.equal(
+      lineOf('tree_exited', 'scale_by'),
+      '[connection signal="tree_exited" from="Emitter" to="Taker" method="scale_by" flags=18 binds= [2]]',
+    );
+    // A number past 2^53 stays the float JSON carried, since no int holds it as written.
+    await rewire('died', 'take', { binds: [1e20] });
+    assert.equal(
+      lineOf('died', 'take'),
+      '[connection signal="died" from="Emitter" to="Taker" method="take" binds= [1e+20]]',
+    );
+    const wiresBefore = fileOf('wires.tscn');
+    for (const [more, refusal] of [
+      [
+        { flags: 64 },
+        /^flags 64 holds bits no flag a scene connects with has: they are deferred 1, persist 2, one_shot 4, reference_counted 8, append_source_object 16, added together\./,
+      ],
+      [{ flags: 32 }, /^flags 32 holds bits no flag a scene connects with has/],
+      [{ binds: 'x' }, /^scene_signal takes binds as array, not a string\.$/],
+      [{ unbinds: 1.5 }, /^scene_signal takes unbinds as /],
+      [{ unbinds: -1 }, /^scene_signal takes unbinds of 0 or more, not -1\.$/],
+    ] as const) {
+      const said =
+        textOf(
+          await call('scene_signal', {
+            op: 'connect',
+            scenePath: 'wires.tscn',
+            sourceNodePath: 'Emitter',
+            signalName: 'died',
+            targetNodePath: 'Taker',
+            methodName: 'take',
+            ...more,
+          }),
+        ) ?? '';
+      assert.match(said, refusal, `${JSON.stringify(more)}: ${said}`);
+    }
+    assert.equal(fileOf('wires.tscn'), wiresBefore, 'and nothing is written for any of them');
+    // A reconnect giving neither keeps both.
+    const kept = await rewire('child_entered_tree', 'queue_free', { flags: 1 });
+    assert.deepEqual(
+      [get(kept, 'unbinds'), get(kept, 'binds'), get(kept, 'unbindsBefore'), get(kept, 'bindsBefore')],
+      [1, [3], undefined, undefined],
+      JSON.stringify(kept),
+    );
+    const cut = await written('scene_signal', {
+      op: 'disconnect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'child_entered_tree',
+      targetNodePath: 'Taker',
+      methodName: 'queue_free',
+    });
+    assert.deepEqual(
+      [get(cut, 'removed'), get(cut, 'binds'), get(cut, 'unbinds')],
+      [true, [3], 1],
+      `a disconnect says what went: ${JSON.stringify(cut)}`,
+    );
+    assert.equal(lineOf('child_entered_tree', 'queue_free'), '', fileOf('wires.tscn'));
+    assert.notEqual(
+      lineOf('visibility_changed', 'take'),
+      '',
+      `and nothing else went: ${fileOf('wires.tscn')}`,
+    );
+    // A bit Object.ConnectFlags does not name, in a file written elsewhere, is said as its number.
+    writeFileSync(
+      join(project, 'odd.tscn'),
+      '[gd_scene format=3]\n\n[node name="Odd" type="Node2D"]\n\n' +
+        '[connection signal="visibility_changed" from="." to="." method="queue_free" flags=1026]\n',
+    );
+    const odd = asArray(
+      get(parseTextContent(await call('scene_signal', { op: 'list', scenePath: 'odd.tscn' })), 'connections'),
+    );
+    assert.deepEqual(
+      odd.map((one) => get(one, 'flagNames')),
+      [['persist', '1024']],
+      JSON.stringify(odd),
+    );
+    // A connection an instanced scene makes inside itself carries the engine's inherited flag.
+    writeFileSync(
+      join(project, 'nest.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://wires.tscn" id="1_wires"]\n\n' +
+        '[node name="Nest" type="Node2D"]\n\n[node name="Wires" parent="." instance=ExtResource("1_wires")]\n',
+    );
+    const nested = asArray(
+      get(
+        parseTextContent(await call('scene_signal', { op: 'list', scenePath: 'nest.tscn' })),
+        'connections',
+      ),
+    ).find((one) => get(one, 'methodName') === 'take' && get(one, 'signalName') === 'visibility_changed');
+    assert.deepEqual(
+      [get(nested, 'flagNames'), get(nested, 'editable'), get(nested, 'binds')],
+      [['persist', 'inherited'], false, [7]],
+      JSON.stringify(nested),
     );
 
     const scripted = await written('scene_create', {

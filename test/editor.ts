@@ -3079,15 +3079,12 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
   await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_free' });
   assert.doesNotMatch(fileText(project, 'signals.tscn'), /\[connection/, 'and a disconnect removes it');
 
-  // A bit Object.ConnectFlags does not name is still said, as its number, rather than dropped.
-  const unnamed = await call('scene_signal', {
-    ...ends,
-    op: 'connect',
-    methodName: 'queue_free',
-    flags: 1024,
-  });
-  assert.deepEqual(get(unnamed, 'flagNames'), ['persist', '1024'], JSON.stringify(unnamed));
-  await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_free' });
+  // A bit no flag a scene connects with has is refused before anything is written.
+  assert.match(
+    await refusal('scene_signal', { ...ends, op: 'connect', methodName: 'queue_free', flags: 1024 }),
+    /flags 1024 holds bits no flag a scene connects with has: they are deferred 1, persist 2, /,
+  );
+  assert.doesNotMatch(fileText(project, 'signals.tscn'), /\[connection/, 'and the scene is left as it was');
 }
 
 /**

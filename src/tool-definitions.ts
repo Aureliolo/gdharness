@@ -1075,7 +1075,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_signal',
     title: 'Scene signals',
-    description: `Signal connections in a scene file. Each connection answers with its flags as the number and as flagNames; persist is on every connection, since a scene saves no other kind. A connect of a pair already connected says alreadyConnected, with flagsBefore when it changed the flags. A connect to a method the target does not have is still written, as the editor's own dialog allows, since the method may be written next; methodFound false says so, and until the method exists the signal fails each time it is emitted. One whose method cannot take what the signal passes, with its binds and unbinds (too few or too many arguments, an object where the method takes a value or the reverse, or an engine class unrelated to the one it takes), is written too, and answers argumentsFit false with misfit saying why; list gives each connection its methodFound, and misfit when it has one. list marks editable false on a connection an instanced scene makes inside itself, which only that scene can change. ${WITHOUT_AN_EDITOR}`,
+    description: `Signal connections in a scene file. Each connection answers with its flags as the number and as flagNames; persist is on every connection, since a scene saves no other kind. A connection carries binds, the values passed after the signal's own, and unbinds, how many of the signal's own are dropped first, as the editor's connect dialog offers them; each is answered only when there is one. A connect of a pair already connected says alreadyConnected, with flagsBefore, bindsBefore and unbindsBefore when it changed them, and keeps the binds and unbinds it had unless the call gives new ones. A connect to a method the target does not have is still written, as the editor's own dialog allows, since the method may be written next; methodFound false says so, and until the method exists the signal fails each time it is emitted. One whose method cannot take what the signal passes, with its binds and unbinds (too few or too many arguments, an object where the method takes a value or the reverse, or an engine class unrelated to the one it takes), is written too, and answers argumentsFit false with misfit saying why; list gives each connection its methodFound, and misfit when it has one. list marks editable false on a connection an instanced scene makes inside itself, which only that scene can change. ${WITHOUT_AN_EDITOR}`,
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -1098,7 +1098,21 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       flags: {
         type: 'number',
         ops: ['connect'],
-        description: 'connect: Object.ConnectFlags, such as 1 for deferred.',
+        description:
+          'connect: Object.ConnectFlags added together: deferred 1, persist 2, one_shot 4, reference_counted 8, append_source_object 16. Persist is added either way. A read can also name inherited, 32, on a connection an instanced scene makes, which is not given.',
+      },
+      binds: {
+        type: 'array',
+        ops: ['connect'],
+        description:
+          "connect: the values passed to the method after the signal's own, written as a read answers them. [] takes them off. Default: those the connection already has.",
+      },
+      unbinds: {
+        type: 'integer',
+        minimum: 0,
+        ops: ['connect'],
+        description:
+          "connect: how many of the signal's own arguments are dropped, from the end, before the binds are added. 0 takes it off. Default: what the connection already has.",
       },
       nodePath: { type: 'string', ops: ['list'], description: 'list: only connections involving this node.' },
     },
