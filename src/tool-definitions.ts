@@ -221,6 +221,15 @@ const SCRIPT_PATH: JsonSchema = {
   description: 'Script file inside the project, such as "scripts/player.gd".',
 };
 const RESOURCE_FILE = 'File inside the project, such as "sprites/hero.png" or "materials/steel.tres".';
+/** The platforms project_export add_preset takes, by the names export_presets.cfg gives them. */
+export const EXPORT_PLATFORMS: readonly string[] = [
+  'Windows Desktop',
+  'Linux',
+  'macOS',
+  'Android',
+  'iOS',
+  'Web',
+];
 const RESOURCE_PATH: JsonSchema = { type: 'string', description: RESOURCE_FILE };
 const NODE_PATH: JsonSchema = {
   type: 'string',
@@ -723,7 +732,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_export',
     title: 'Export',
     description:
-      "Export presets and exports. add_preset writes a preset to export_presets.cfg with the keys the editor's Project > Export writes for a new one, every platform option left at its default, and makes it the platform's runnable preset when the platform has none. set_preset changes a preset's export path, its resource filter and the files it lists, its include and exclude filters, its custom features and its platform's options, and answers under changed what each held before and holds now; nothing is written when any of it is refused. The option names are the exporter's own, as the Export dialog's Options tab shows them by their paths, such as binary_format/embed_pck, and a name the platform does not have is refused with the nearest it has. remove_preset takes a preset out, and when it was its platform's runnable preset the next of that platform becomes it, under runnableNow. It answers where this engine's export templates belong and whether the preset's platform has them, since an export needs them; list says the same for every preset. An editor open on the project does not see a preset added this way until it restarts. run names, as alsoWritten, what else the export wrote beside its output, such as the .pck a Windows or Linux build cannot start without. Its entries are the errors and warnings the export printed, the newest two hundred distinct ones, one printed more than once carrying times, and errors and warnings count them; exported is true only when this run wrote the output and printed no error.",
+      "Export presets and exports. add_preset writes a preset to export_presets.cfg with the keys the editor's Project > Export writes for a new one and every option a new preset of its platform shows, each at its default, and makes it the platform's runnable preset when the platform has none. set_preset changes a preset's export path, its resource filter and the files it lists, its include and exclude filters, its custom features and its platform's options, and answers under changed what each held before and holds now, and under unchanged what already held the value given; nothing is written when any of it is refused. The option names are the exporter's own, as the Export dialog's Options tab shows them by their paths, such as binary_format/embed_pck, and a name the platform does not have is refused with the nearest it has, or all of them when none is near. An option the dialog shows only while another is on, such as codesign/identity behind codesign/enable, is taken when the preset has that one on or the same call turns it on. A secret option, such as a signing password, is written to .godot/export_credentials.cfg, where the editor keeps secrets out of the committed file, and its value is never answered. A file an option names that is not there is written and listed under missing_files. remove_preset takes a preset out, and when it was its platform's runnable preset the next of that platform becomes it, under runnableNow. It answers where this engine's export templates belong and whether the preset's platform has them, since an export needs them; list says the same for every preset. An editor open on the project does not see a preset added this way until it restarts. run names, as alsoWritten, what else the export wrote beside its output, such as the .pck a Windows or Linux build cannot start without. Its entries are the errors and warnings the export printed, the newest two hundred distinct ones, one printed more than once carrying times, and errors and warnings count them; exported is true only when this run wrote the output and printed no error.",
     parameters: {
       projectPath: PROJECT_PATH,
       preset: {
@@ -734,7 +743,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       platform: {
         type: 'string',
         ops: ['add_preset'],
-        enum: ['Windows Desktop', 'Linux', 'macOS', 'Android', 'iOS', 'Web'],
+        enum: [...EXPORT_PLATFORMS],
         description: 'add_preset: the platform the preset exports for.',
       },
       outputPath: {

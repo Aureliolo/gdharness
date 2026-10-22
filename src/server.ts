@@ -322,6 +322,7 @@ import {
 import {
   argumentsOf,
   buildToolDefinitions,
+  EXPORT_PLATFORMS,
   opTakes,
   type ProjectInfoSection,
   TOOL_SPECS,
@@ -6502,12 +6503,23 @@ class GodotServer {
     if (output !== null && !output.ok) {
       return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
+    const platform = readString(args, 'platform') ?? '';
+    // A platform the exporters do not know is refused by the operation, naming the ones they do.
+    let knownOptions: unknown[] = [];
+    if (EXPORT_PLATFORMS.includes(platform)) {
+      const known = await this.exportOptions(platform);
+      if (typeof known === 'string') {
+        return this.createErrorResponse(known);
+      }
+      knownOptions = known;
+    }
     const outcome = await this.operation(
       'add_export_preset',
       {
         preset: readString(args, 'preset') ?? '',
-        platform: readString(args, 'platform') ?? '',
+        platform,
         outputPath: output?.relativePath ?? '',
+        knownOptions,
       },
       project.value.path,
     );
@@ -6553,7 +6565,11 @@ class GodotServer {
     if (options !== undefined && options !== null && Object.keys(options).length > 0) {
       const platform = presetPlatform(project.value.path, preset);
       if (platform !== null) {
-        const known = await this.exportOptions(platform);
+        const known = await this.exportOptions(platform, {
+          presetsFile: join(project.value.path, 'export_presets.cfg'),
+          preset,
+          asked: options,
+        });
         if (typeof known === 'string') {
           return this.createErrorResponse(known);
         }
@@ -6595,17 +6611,22 @@ class GodotServer {
   }
 
   /**
-   * Every option a new preset of [param platform] has, from an editor-mode engine on an empty
-   * project, or why it could not be read. Kept for the server's life, since the list is the
-   * engine's and changes only with it.
+   * The options a preset of [param platform] lists, from an editor-mode engine on an empty project,
+   * or why they could not be read. With no [param standing], a new preset's, kept for the server's
+   * life since the list is the engine's and changes only with it. With it, the preset's as it would
+   * stand with its own options and the ones asked applied, since an exporter lists some options only
+   * while others are on.
    */
-  private async exportOptions(platform: string): Promise<unknown[] | string> {
+  private async exportOptions(
+    platform: string,
+    standing?: { presetsFile: string; preset: string; asked: unknown },
+  ): Promise<unknown[] | string> {
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response.content.map((block) => block.text).join(' ');
     }
     const key = `${engine.value}\n${platform}`;
-    const kept = this.exportOptionsRead.get(key);
+    const kept = standing === undefined ? this.exportOptionsRead.get(key) : undefined;
     if (kept !== undefined) {
       return kept;
     }
@@ -6615,7 +6636,7 @@ class GodotServer {
       const outcome = await runOperation(
         { godotPath: engine.value, script: this.operationsScript, debug: DEBUG_MODE, editor: true },
         'export_options',
-        { platform },
+        { platform, ...standing },
         empty,
       );
       const options: unknown = outcome.ok ? outcome.payload['options'] : undefined;
@@ -6623,7 +6644,9 @@ class GodotServer {
         return `The ${platform} export options could not be read from the engine: ${outcome.ok ? 'it named none' : outcome.message}`;
       }
       const read: unknown[] = options;
-      this.exportOptionsRead.set(key, read);
+      if (standing === undefined) {
+        this.exportOptionsRead.set(key, read);
+      }
       return read;
     } finally {
       discard(empty);

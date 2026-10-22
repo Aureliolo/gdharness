@@ -455,6 +455,18 @@ func validate_project(params: Dictionary) -> Dictionary:
 					include_suggestions
 				)
 			)
+		else:
+			var gone: Array[String] = GdhExportPresets.missing_named(preset_name)
+			if not gone.is_empty():
+				warnings.append(
+					_finding(
+						"warning",
+						"export_preset_files",
+						"The preset %s names files that are not there: %s" % [preset_name, "; ".join(gone)],
+						"Add the files, or point the options at others with project_export set_preset",
+						include_suggestions
+					)
+				)
 
 	checks_performed.append("icon")
 	var icon_path: String = str(ProjectSettings.get_setting("application/config/icon", ""))

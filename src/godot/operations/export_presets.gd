@@ -31,6 +31,12 @@ const EXPORTERS: Dictionary[String, String] = {
 ## What export_filter takes, as the Export dialog's Resources tab names them: everything, the scenes
 ## listed under export_files and what they use, the resources listed, or everything but those listed.
 const FILTERS: Array[String] = ["all_resources", "scenes", "resources", "exclude"]
+## Where the editor keeps a preset's secret options, such as a signing password, out of
+## export_presets.cfg, which a project commits.
+const CREDENTIALS_FILE: String = "res://.godot/export_credentials.cfg"
+## Options of every platform that a preset lists only with the Export dialog's Advanced Options on,
+## a switch no script can reach.
+const TEMPLATE_OPTIONS: Array[String] = ["custom_template/debug", "custom_template/release"]
 ## The types of option a value is written for. An option of another type is left to the editor.
 const WRITABLE: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING, TYPE_PACKED_STRING_ARRAY]
 
@@ -107,8 +113,10 @@ static func _runnable(config: ConfigFile, section: String) -> bool:
 
 
 ## Adds an export preset to export_presets.cfg, written with the keys the editor's Project > Export
-## writes for a new one. The editor's exporter fills every platform option the file leaves out with
-## its default when it loads the file, which is what a preset fresh from that dialog holds too.
+## writes for a new one, and every option in [code]known_options[/code] (what
+## [method export_options] answers for the platform) at its default. The editor also writes the
+## options a new preset hides until another option shows them; its exporter fills those, and any
+## option the file leaves out, with their defaults when it loads the file.
 func add_export_preset(params: Dictionary) -> Dictionary:
 	var preset_name: String = str(params.get("preset", "")).strip_edges()
 	var platform: String = str(params.get("platform", ""))
@@ -165,10 +173,23 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 	}
 	for key: String in values:
 		config.set_value(section, key, values[key])
+	# A secret's default stays out of the file, as the editor keeps secrets in CREDENTIALS_FILE.
+	var known: Variant = params.get("known_options", [])
+	if known is Array:
+		for option: Variant in known:
+			if option is Dictionary:
+				var described: Dictionary = option
+				if not GdhRead.as_bool(described.get("secret", false)):
+					config.set_value(
+						section + ".options",
+						str(described.get("name", "")),
+						str_to_var(str(described.get("defaultText", "null")))
+					)
 	# A section with nothing in it is not written, and the editor's loader reports a missing options
 	# section as an error; these two are options of every platform, empty in a new preset.
-	config.set_value(section + ".options", "custom_template/debug", "")
-	config.set_value(section + ".options", "custom_template/release", "")
+	for name: String in TEMPLATE_OPTIONS:
+		if not config.has_section_key(section + ".options", name):
+			config.set_value(section + ".options", name, "")
 	var saving: Error = config.save(PRESETS_FILE)
 	if saving != OK:
 		return _log.failure("Failed to save export_presets.cfg: " + error_string(saving))
@@ -247,8 +268,12 @@ static func _marks_self_contained(directory: String) -> bool:
 	)
 
 
-## Every option of [param params]'s platform, as its exporter gives a new preset them: the name, the
-## type, the hint and hint string of one that is an enum or a list, and the default.
+## The options a preset of [param params]'s platform lists: the name, the type, the hint and hint
+## string of one that is an enum or a list, the default (also as Godot text, which keeps its type),
+## and whether the editor keeps it as a secret. An exporter lists an option only while the preset's
+## other options make it visible, as codesign/identity shows once codesign/enable is on, so the
+## options the preset [code]preset[/code] holds in [code]presets_file[/code] are applied first, then
+## those [code]asked[/code] gives, until nothing more comes into view.
 func export_options(params: Dictionary) -> Dictionary:
 	var platform: String = str(params.get("platform", ""))
 	if platform not in EXPORTERS:
@@ -262,28 +287,75 @@ func export_options(params: Dictionary) -> Dictionary:
 		return _log.failure("The engine made no %s exporter." % platform)
 	var made: Object = exporter
 	var preset: Variant = made.call("create_preset")
-	if not preset is Object:
+	var standing: Variant = made.call("create_preset")
+	if not preset is Object or not standing is Object:
 		return _log.failure("The %s exporter made no preset." % platform)
 	var fresh: Object = preset
-	var options: Array[Dictionary] = []
-	for property: Dictionary in fresh.get_property_list():
+	var state: Object = standing
+	var presets_file: String = str(params.get("presets_file", ""))
+	var config: ConfigFile = ConfigFile.new()
+	if not presets_file.is_empty() and config.load(presets_file) == OK:
+		var index: int = 0
+		while config.has_section("preset." + str(index)):
+			var section: String = "preset." + str(index)
+			if str(config.get_value(section, "name", "")) == str(params.get("preset", "")):
+				if config.has_section(section + ".options"):
+					for key: String in config.get_section_keys(section + ".options"):
+						state.set(key, config.get_value(section + ".options", key))
+				break
+			index += 1
+	var asked: Dictionary = {}
+	if params.get("asked") is Dictionary:
+		asked = params["asked"]
+	var pending: Array = asked.keys()
+	var listed: Dictionary = _options_shown(state, fresh)
+	var came: bool = true
+	while came and not pending.is_empty():
+		came = false
+		for key: Variant in pending.duplicate():
+			var name: String = str(key)
+			if not listed.has(name):
+				continue
+			pending.erase(key)
+			var option: Dictionary = listed[name]
+			var fitted: Variant = _fitted(name, asked[key], option)
+			if not _is_refusal(fitted):
+				state.set(name, fitted)
+				came = true
+		listed = _options_shown(state, fresh)
+	return {"platform": platform, "options": listed.values()}
+
+
+## Each option [param state] lists, by name, described with the default [param fresh] holds, and
+## the options every platform has behind Advanced Options.
+static func _options_shown(state: Object, fresh: Object) -> Dictionary:
+	var listed: Dictionary = {}
+	for property: Dictionary in state.get_property_list():
 		var usage: int = GdhRead.as_int(property.get("usage", 0))
 		var name: String = str(property.get("name", ""))
 		if usage & PROPERTY_USAGE_CATEGORY or usage & PROPERTY_USAGE_GROUP or not name.contains("/"):
 			continue
-		(
-			options
-			. append(
-				{
-					"name": name,
-					"type": GdhRead.as_int(property.get("type", TYPE_NIL)),
-					"hint": GdhRead.as_int(property.get("hint", PROPERTY_HINT_NONE)),
-					"hintString": str(property.get("hint_string", "")),
-					"default": fresh.get(name),
-				}
-			)
-		)
-	return {"platform": platform, "options": options}
+		listed[name] = {
+			"name": name,
+			"type": GdhRead.as_int(property.get("type", TYPE_NIL)),
+			"hint": GdhRead.as_int(property.get("hint", PROPERTY_HINT_NONE)),
+			"hintString": str(property.get("hint_string", "")),
+			"default": fresh.get(name),
+			"defaultText": var_to_str(fresh.get(name)),
+			"secret": usage & PROPERTY_USAGE_SECRET != 0,
+		}
+	for name: String in TEMPLATE_OPTIONS:
+		if not listed.has(name):
+			listed[name] = {
+				"name": name,
+				"type": TYPE_STRING,
+				"hint": PROPERTY_HINT_GLOBAL_FILE,
+				"hintString": "",
+				"default": "",
+				"defaultText": var_to_str(""),
+				"secret": false,
+			}
+	return listed
 
 
 ## Changes what [param params] gives of a preset in export_presets.cfg: its export path, its
@@ -347,31 +419,99 @@ func set_export_preset(params: Dictionary) -> Dictionary:
 			)
 		)
 	var changed: Dictionary = {}
+	var unchanged: Array[String] = []
 	for key: String in top:
 		var before: Variant = config.get_value(section, key) if config.has_section_key(section, key) else null
+		if _same(before, top[key]):
+			unchanged.append(key)
+			continue
 		changed[key] = {"before": before, "now": top[key]}
 		config.set_value(section, key, top[key])
-	var defaults: Dictionary = {}
+	var described: Dictionary = {}
 	if known is Array:
 		for option: Variant in known:
 			if option is Dictionary:
-				var described: Dictionary = option
-				defaults[str(described.get("name", ""))] = described.get("default")
+				var one: Dictionary = option
+				described[str(one.get("name", ""))] = one
+	var credentials: ConfigFile = ConfigFile.new()
+	var _no_credentials: Error = credentials.load(CREDENTIALS_FILE)
+	var secrets: Array[String] = []
+	var missing: Array[String] = []
 	for name: String in values:
-		var held: Variant = defaults.get(name)
-		if config.has_section_key(section + ".options", name):
-			held = config.get_value(section + ".options", name)
-		changed[name] = {"before": held, "now": values[name]}
-		config.set_value(section + ".options", name, values[name])
-	var saving: Error = config.save(PRESETS_FILE)
-	if saving != OK:
-		return _log.failure("Failed to save export_presets.cfg: " + error_string(saving))
-	return {
+		var option: Dictionary = described.get(name, {})
+		var secret: bool = GdhRead.as_bool(option.get("secret", false))
+		# The editor writes a secret where the project's version control does not reach.
+		var holder: ConfigFile = credentials if secret else config
+		var held: Variant = str_to_var(str(option.get("defaultText", "null")))
+		if holder.has_section_key(section + ".options", name):
+			held = holder.get_value(section + ".options", name)
+		if _same(held, values[name]):
+			unchanged.append(name)
+			continue
+		holder.set_value(section + ".options", name, values[name])
+		if secret:
+			secrets.append(name)
+			changed[name] = {"secret": true}
+		else:
+			changed[name] = {"before": held, "now": values[name]}
+		var gone: String = _missing_path(values[name], option)
+		if not gone.is_empty():
+			missing.append(gone)
+	var answer: Dictionary = {
 		"preset": config.get_value(section, "name"),
 		"platform": platform,
 		"changed": changed,
 		"file": PRESETS_FILE,
 	}
+	if not unchanged.is_empty():
+		answer["unchanged"] = unchanged
+	if changed.is_empty():
+		answer["saved"] = false
+		return answer
+	if not secrets.is_empty():
+		var _made: Error = DirAccess.make_dir_recursive_absolute(CREDENTIALS_FILE.get_base_dir())
+		var keeping: Error = credentials.save(CREDENTIALS_FILE)
+		if keeping != OK:
+			return _log.failure("Failed to save %s: %s" % [CREDENTIALS_FILE, error_string(keeping)])
+		answer["credentials"] = CREDENTIALS_FILE
+		answer["secretNote"] = (
+			(
+				"%s %s secret, so %s written to %s, where the editor keeps secrets out of the "
+				+ "export_presets.cfg a project commits, and %s not answered."
+			)
+			% [
+				_and_joined(secrets),
+				"is a" if secrets.size() == 1 else "are",
+				"it is" if secrets.size() == 1 else "they are",
+				CREDENTIALS_FILE,
+				"its value is" if secrets.size() == 1 else "their values are",
+			]
+		)
+	var saving: Error = config.save(PRESETS_FILE)
+	if saving != OK:
+		return _log.failure("Failed to save export_presets.cfg: " + error_string(saving))
+	# Written as given, since the file can come after the preset names it; said, since an export can
+	# fail on it until it does.
+	if not missing.is_empty():
+		answer["missing_files"] = missing
+		answer["note"] = (
+			(
+				"%s %s not exist, and an exporter can refuse the preset until %s, as the Windows "
+				+ "exporter refuses a missing icon as an invalid icon path."
+			)
+			% [
+				_and_joined(missing),
+				"does" if missing.size() == 1 else "do",
+				"it does" if missing.size() == 1 else "they do",
+			]
+		)
+	return answer
+
+
+static func _and_joined(items: Array[String]) -> String:
+	if items.size() < 2:
+		return "".join(items)
+	return ", ".join(items.slice(0, items.size() - 1)) + " and " + items[items.size() - 1]
 
 
 ## Removes a preset from export_presets.cfg, numbering those after it down by one as the editor
@@ -389,16 +529,16 @@ func remove_export_preset(params: Dictionary) -> Dictionary:
 	var last: int = index
 	while config.has_section("preset." + str(last + 1)):
 		last += 1
-	for at: int in range(index, last + 1):
-		for part: String in ["", ".options"]:
-			var into: String = "preset.%d%s" % [at, part]
-			var from: String = "preset.%d%s" % [at + 1, part]
-			if config.has_section(into):
-				config.erase_section(into)
-			if at < last and config.has_section(from):
-				for key: String in config.get_section_keys(from):
-					config.set_value(into, key, config.get_value(from, key))
+	_renumber(config, index, last)
 	var answer: Dictionary = {"removed": preset_name, "platform": platform, "file": PRESETS_FILE}
+	# The secrets are kept by the same numbers, so left alone they would pass to the next preset.
+	var credentials: ConfigFile = ConfigFile.new()
+	if FileAccess.file_exists(CREDENTIALS_FILE) and credentials.load(CREDENTIALS_FILE) == OK:
+		_renumber(credentials, index, last)
+		var keeping: Error = credentials.save(CREDENTIALS_FILE)
+		if keeping != OK:
+			return _log.failure("Failed to save %s: %s" % [CREDENTIALS_FILE, error_string(keeping)])
+		answer["credentials"] = CREDENTIALS_FILE
 	if str(config.get_value(RUNNABLE_SECTION, platform, "")) == preset_name:
 		config.set_value(RUNNABLE_SECTION, platform, null)
 		var at: int = 0
@@ -414,6 +554,20 @@ func remove_export_preset(params: Dictionary) -> Dictionary:
 		return _log.failure("Failed to save export_presets.cfg: " + error_string(saving))
 	answer["presets"] = names()
 	return answer
+
+
+## [param config] with preset [param index] taken out and those after it, up to [param last],
+## numbered down by one.
+static func _renumber(config: ConfigFile, index: int, last: int) -> void:
+	for at: int in range(index, last + 1):
+		for part: String in ["", ".options"]:
+			var into: String = "preset.%d%s" % [at, part]
+			var from: String = "preset.%d%s" % [at + 1, part]
+			if config.has_section(into):
+				config.erase_section(into)
+			if at < last and config.has_section(from):
+				for key: String in config.get_section_keys(from):
+					config.set_value(into, key, config.get_value(from, key))
 
 
 ## export_presets.cfg loaded, with the section and index of the preset called [param preset_name],
@@ -491,12 +645,65 @@ static func _options_for(platform: String, asked: Dictionary, known: Variant) ->
 			)
 		var option: Dictionary = by_name[name]
 		var fitted: Variant = _fitted(name, asked[key], option)
-		if fitted is Dictionary:
+		if _is_refusal(fitted):
 			var refusal: Dictionary = fitted
-			if refusal.has("refused"):
-				return str(refusal["refused"])
+			return str(refusal["refused"])
 		values[name] = fitted
 	return values
+
+
+static func _is_refusal(fitted: Variant) -> bool:
+	if not fitted is Dictionary:
+		return false
+	var held: Dictionary = fitted
+	return held.has("refused")
+
+
+## Whether [param before] already is [param now], in its type too, so a write of it changes nothing.
+static func _same(before: Variant, now: Variant) -> bool:
+	return typeof(before) == typeof(now) and before == now
+
+
+## The file [param value] names for [param option] that is not there, or an empty string: a res://
+## path, or a path on the machine for an option taking one, such as a custom template.
+static func _missing_path(value: Variant, option: Dictionary) -> String:
+	if not value is String or str(value).is_empty():
+		return ""
+	var path: String = value
+	var hint: int = GdhRead.as_int(option.get("hint", PROPERTY_HINT_NONE))
+	var on_machine: bool = (
+		hint in [PROPERTY_HINT_GLOBAL_FILE, PROPERTY_HINT_GLOBAL_DIR] and path.is_absolute_path()
+	)
+	if not path.begins_with("res://") and not on_machine:
+		return ""
+	if FileAccess.file_exists(path) or DirAccess.dir_exists_absolute(path):
+		return ""
+	return path
+
+
+## Each file the preset [param preset_name] names that is not there, as the option or list naming
+## it and the path: an option's res:// path or custom template, or a file export_files lists.
+static func missing_named(preset_name: String) -> Array[String]:
+	var missing: Array[String] = []
+	var loaded: Variant = _preset_named(preset_name)
+	if not loaded is Dictionary:
+		return missing
+	var found: Dictionary = loaded
+	var config: ConfigFile = found["config"]
+	var section: String = found["section"]
+	if config.has_section(section + ".options"):
+		for key: String in config.get_section_keys(section + ".options"):
+			var option: Dictionary = {"hint": PROPERTY_HINT_GLOBAL_FILE} if key in TEMPLATE_OPTIONS else {}
+			var gone: String = _missing_path(config.get_value(section + ".options", key), option)
+			if not gone.is_empty():
+				missing.append("%s: %s" % [key, gone])
+	var listed: Variant = config.get_value(section, "export_files", PackedStringArray())
+	if listed is PackedStringArray:
+		var files: PackedStringArray = listed
+		for path: String in files:
+			if not FileAccess.file_exists(path):
+				missing.append("export_files: " + path)
+	return missing
 
 
 ## [param value] as option [param name], described by [param option], holds it, or {refused} saying

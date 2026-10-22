@@ -24799,6 +24799,12 @@ async function testAnAddedPresetExports(): Promise<void> {
  * options, nothing could take a preset out, and there was no export of the resources alone. The
  * option names are the exporter's own, read from an editor-mode engine on an empty project, so a
  * misspelt or foreign one is refused rather than written into a file the exporter ignores it in.
+ *
+ * Probe 151 of those ops found a value already held answered as changed, a missing icon written
+ * without a word (the Windows export then fails on an invalid icon path), and a new preset written
+ * with two of its options. An exporter lists an option only while the others show it, so the list
+ * is read with the preset's own options and the asked ones applied; a secret such as a signing
+ * password goes where the editor keeps it, numbered with the preset, and never into an answer.
  */
 async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -24836,15 +24842,25 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
     parseTextContent(await call({ op: 'set_preset', ...args }));
   const refused = async (args: Record<string, unknown>): Promise<string> => textOf(await call(args)) ?? '';
   const file = (): string => readFileSync(join(project, 'export_presets.cfg'), 'utf8');
+  const credentials = (): string => readFileSync(join(project, '.godot', 'export_credentials.cfg'), 'utf8');
   try {
     await server.initialize('set-preset');
     for (const [preset, platform] of [
       ['Penguin', 'Linux'],
       ['Tux', 'Linux'],
       ['Win', 'Windows Desktop'],
+      ['Droid', 'Android'],
     ]) {
       await call({ op: 'add_preset', preset, platform });
     }
+    assert.match(
+      file(),
+      /\[preset\.0\.options\][^[]*binary_format\/architecture="x86_64"[^[]*custom_template\/debug=""/,
+      `a new preset holds every option it shows at its default, as the editor writes one: ${file()}`,
+    );
+    // A new Android preset shows its keystore, whose secrets the editor never writes into this file.
+    assert.match(file(), /\[preset\.3\.options\][^[]*gradle_build\/use_gradle_build=false/, file());
+    assert.doesNotMatch(file(), /keystore\/release_password/, file());
 
     const options = await set({
       preset: 'Penguin',
@@ -24868,6 +24884,63 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       get(wrapper, 'changed', 'debug/export_console_wrapper'),
       { before: 1, now: 0 },
       `an enum is given by the name the dialog shows and written as its number: ${JSON.stringify(wrapper)}`,
+    );
+
+    const hidden = await refused({
+      op: 'set_preset',
+      preset: 'Win',
+      options: { 'codesign/identity': 'ABC' },
+    });
+    assert.ok(
+      hidden.includes('A Windows Desktop preset has no option codesign/identity'),
+      `an option stays hidden while what shows it is off: ${hidden}`,
+    );
+    const signed = await set({
+      preset: 'Win',
+      options: {
+        'codesign/enable': true,
+        'codesign/identity': 'ABC',
+        'codesign/password': 'pw-kept-out',
+        'application/icon': 'res://nope.ico',
+      },
+    });
+    assert.deepEqual(
+      [
+        get(signed, 'changed', 'codesign/identity'),
+        get(signed, 'changed', 'codesign/password'),
+        get(signed, 'missing_files'),
+      ],
+      [{ secret: true }, { secret: true }, ['res://nope.ico']],
+      `an option codesign/enable shows is taken beside it, a secret's value is not answered, and a missing file is named: ${JSON.stringify(signed)}`,
+    );
+    assert.ok(!JSON.stringify(signed).includes('pw-kept-out'), JSON.stringify(signed));
+    const secretNote = get(signed, 'secretNote');
+    assert.match(
+      typeof secretNote === 'string' ? secretNote : '',
+      /^codesign\/identity and codesign\/password are secret, so they are written to res:\/\/\.godot\/export_credentials\.cfg,/,
+      JSON.stringify(signed),
+    );
+    assert.ok(!file().includes('pw-kept-out'), `the secret stays out of export_presets.cfg: ${file()}`);
+    assert.match(credentials(), /\[preset\.2\.options\][^[]*codesign\/password="pw-kept-out"/, credentials());
+    const shown = await set({ preset: 'Win', options: { 'codesign/timestamp_server_url': 'http://t.test' } });
+    assert.equal(
+      get(shown, 'changed', 'codesign/timestamp_server_url', 'now'),
+      'http://t.test',
+      `an option shown by what the preset already holds is taken alone: ${JSON.stringify(shown)}`,
+    );
+    const validated = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'project_info', arguments: { projectPath: project, include: ['validation'], preset: 'Win' } },
+        300_000,
+      ),
+    );
+    assert.deepEqual(
+      asArray(get(validated, 'validation', 'warnings'))
+        .filter((warning) => get(warning, 'check') === 'export_preset_files')
+        .map((warning) => get(warning, 'message')),
+      ['The preset Win names files that are not there: application/icon: res://nope.ico'],
+      JSON.stringify(validated),
     );
 
     const written = file();
@@ -24923,11 +24996,38 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
     assert.match(file(), /export_files=PackedStringArray\("res:\/\/main\.tscn"\)/, file());
     assert.match(file(), /exclude_filter="\*\.txt"/, file());
 
-    await set({ preset: 'Tux', options: { 'binary_format/embed_pck': true } });
+    const template = `${project.replaceAll('\\', '/')}/no-such-template.zip`;
+    const tux = await set({
+      preset: 'Tux',
+      options: { 'binary_format/embed_pck': true, 'custom_template/release': template },
+    });
+    assert.deepEqual(
+      [get(tux, 'changed', 'custom_template/release', 'now'), get(tux, 'missing_files')],
+      [template, [template]],
+      `a custom template, listed only behind Advanced Options, is taken, and a missing one named: ${JSON.stringify(tux)}`,
+    );
+    const held = file();
+    const heldSince = statSync(join(project, 'export_presets.cfg')).mtimeMs;
+    const again = await set({
+      preset: 'Tux',
+      excludeFilter: '',
+      options: { 'binary_format/embed_pck': true },
+    });
+    assert.deepEqual(
+      [get(again, 'changed'), get(again, 'unchanged'), get(again, 'saved')],
+      [{}, ['exclude_filter', 'binary_format/embed_pck'], false],
+      `a value already held is no change: ${JSON.stringify(again)}`,
+    );
+    assert.equal(file(), held, 'and the file is left alone');
+    assert.equal(
+      statSync(join(project, 'export_presets.cfg')).mtimeMs,
+      heldSince,
+      'not even saved again, which an editor watching the file would take for a change',
+    );
     const removed = parseTextContent(await call({ op: 'remove_preset', preset: 'Penguin' }));
     assert.deepEqual(
       [get(removed, 'removed'), get(removed, 'runnableNow'), get(removed, 'presets')],
-      ['Penguin', 'Tux', ['Tux', 'Win']],
+      ['Penguin', 'Tux', ['Tux', 'Win', 'Droid']],
       `the next preset of the platform becomes the one it runs: ${JSON.stringify(removed)}`,
     );
     assert.match(file(), /\[preset\.0\]\s*\n\s*name="Tux"/, file());
@@ -24937,14 +25037,22 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       `Tux keeps its options: ${file()}`,
     );
     assert.match(file(), /\[preset\.1\]\s*\n\s*name="Win"/, file());
-    assert.doesNotMatch(file(), /\[preset\.2/, file());
+    assert.match(file(), /\[preset\.2\]\s*\n\s*name="Droid"/, file());
+    assert.doesNotMatch(file(), /\[preset\.3/, file());
     assert.match(file(), /Linux="Tux"/, file());
+    assert.match(
+      credentials(),
+      /\[preset\.1\.options\][^[]*codesign\/password="pw-kept-out"/,
+      `Win's secrets move down with it: ${credentials()}`,
+    );
+    assert.doesNotMatch(credentials(), /\[preset\.2/, credentials());
     const listed = parseTextContent(await call({ op: 'list' }));
     assert.deepEqual(
       asArray(get(listed, 'presets')).map((preset) => [get(preset, 'name'), get(preset, 'runnable')]),
       [
         ['Tux', true],
         ['Win', true],
+        ['Droid', true],
       ],
       JSON.stringify(listed),
     );
