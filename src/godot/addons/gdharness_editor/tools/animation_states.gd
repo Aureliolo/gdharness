@@ -58,27 +58,11 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 	# Written all the same, as the editor writes one: a state machine is often laid out before its
 	# animations are made, and refusing it stopped a tree being built in that order.
 	if player != null and not found:
-		answer["animationMissing"] = _missing_animation(scene, player, animation_name)
+		answer["animationMissing"] = GdhAnimationReads.missing_animation(
+			player, scene.path_of(player), animation_name
+		)
 	var files: Dictionary = machine[2]
 	return _finish(scene, Callable(), files, answer)
-
-
-## Why the state playing [param animation_name] plays nothing yet. The player is named by its path
-## from the scene root, as playerNodePath takes it; anim_player is relative to the tree ("../Anim"),
-## which no argument takes.
-static func _missing_animation(
-	scene: GdhSceneFile, player: AnimationPlayer, animation_name: String
-) -> String:
-	var said: String = (
-		"The AnimationPlayer at %s has no animation %s yet, so the state plays nothing until it has one."
-		% [str(scene.root.get_path_to(player)), animation_name]
-	)
-	var close: PackedStringArray = GdhRead.nearest(animation_name, player.get_animation_list())
-	if close.is_empty():
-		return said
-	return (
-		said + " The nearest %s %s." % ["it has is" if close.size() == 1 else "it has are", ", ".join(close)]
-	)
 
 
 # =============================================================================

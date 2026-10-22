@@ -168,22 +168,24 @@ func _homes(scene: GdhSceneFile, held: Array) -> Array:
 	return [true, homes]
 
 
-## The library a new animation called [param animation_name] goes in, as [library, why not]: the
-## default one, made when the player has none, or the one named before a slash, as the player
-## names them ("moves/walk").
+## The library a new animation called [param animation_name] goes in, as [library, why not, made]:
+## the default one, or the one named before a slash, as the player names them ("moves/walk"). One
+## the player lacks is made, built into the scene, and made says so; no other op makes a library,
+## so refusing one left "moves/walk" with no way to be written.
 func _library_for(player: AnimationPlayer, animation_name: String) -> Array:
 	var library: String = ""
 	if animation_name.contains("/"):
 		library = animation_name.get_slice("/", 0)
 	if player.has_animation_library(StringName(library)):
-		return [player.get_animation_library(StringName(library)), ""]
-	if not library.is_empty():
-		return [null, "%s has no animation library named %s." % [player.name, library]]
+		return [player.get_animation_library(StringName(library)), "", false]
 	var made: AnimationLibrary = AnimationLibrary.new()
-	var adding: Error = player.add_animation_library("", made)
+	var adding: Error = player.add_animation_library(StringName(library), made)
 	if adding != OK:
-		return [null, "Failed to create the default AnimationLibrary: " + error_string(adding)]
-	return [made, ""]
+		var called: String = (
+			"the default AnimationLibrary" if library.is_empty() else "the library " + library
+		)
+		return [null, "Failed to create %s: %s" % [called, error_string(adding)], false]
+	return [made, "", true]
 
 
 ## The library [param animation_name] is in on [param player].
@@ -256,7 +258,9 @@ func read_animation_states(args: Dictionary) -> Dictionary:
 	if opened[1] == null:
 		return opened[2]
 	var anim_tree: AnimationTree = opened[1]
-	return _read_in(scene, GdhAnimationReads.states(anim_tree, state_machine_path))
+	var player: AnimationPlayer = anim_tree.get_node_or_null(anim_tree.anim_player) as AnimationPlayer
+	var player_path: String = "" if player == null else scene.path_of(player)
+	return _read_in(scene, GdhAnimationReads.states(anim_tree, state_machine_path, player, player_path))
 
 
 # =============================================================================
@@ -272,6 +276,9 @@ func create_animation(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Missing scenePath"}
 	if animation_name.strip_edges().is_empty():
 		return {"ok": false, "error": "Missing animationName"}
+	var named: String = _name_refusal(animation_name)
+	if not named.is_empty():
+		return {"ok": false, "error": named}
 	var loop_modes: Dictionary = LOOP_MODES
 	if not loop_modes.has(loop_mode_name):
 		return {"ok": false, "error": "Unsupported loopMode: " + loop_mode_name}
@@ -299,6 +306,8 @@ func create_animation(args: Dictionary) -> Dictionary:
 	anim.loop_mode = GdhRead.as_int(loop_modes[loop_mode_name]) as Animation.LoopMode
 	anim.step = GdhRead.as_float(args.get("step", 0.1), 0.1)
 	var called: String = animation_name.get_slice("/", 1) if animation_name.contains("/") else animation_name
+	# As the editor names a new one: the file keeps it as resource_name, which the inspector shows.
+	anim.resource_name = called
 	var add_err: Error = anim_lib.add_animation(StringName(called), anim)
 	if add_err != OK:
 		return scene.refuse("Failed to add animation: " + error_string(add_err))
@@ -312,265 +321,30 @@ func create_animation(args: Dictionary) -> Dictionary:
 	var answer: Dictionary = {
 		"ok": true, "animationName": animation_name, "length": anim.length, "loopMode": loop_mode_name
 	}
+	if library[2]:
+		answer["libraryMade"] = animation_name.get_slice("/", 0) if animation_name.contains("/") else ""
 	var files: Dictionary = homes[1]
 	return _finish(scene, check, files, answer)
 
 
-# =============================================================================
-# add_animation_track
-# =============================================================================
-func add_animation_track(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
-	var player_node_path: String = str(args.get("playerNodePath", "."))
-	var animation_name: String = str(args.get("animationName", ""))
-	var given_track: Variant = args.get("track", {})
-
-	if scene_path.strip_edges() == "res://":
-		return {"ok": false, "error": "Missing scenePath"}
-	if animation_name.strip_edges().is_empty():
-		return {"ok": false, "error": "Missing animationName"}
-	var track: Dictionary = given_track if given_track is Dictionary else {}
-	if track.is_empty():
-		return {"ok": false, "error": "Missing track"}
-	# The schema leaves keyframes out of what track requires, since remove_track finds a track without
-	# them.
-	if not track.has("keyframes"):
-		return {"ok": false, "error": "Missing track.keyframes"}
-	var keyed: Array = _keyframes(track)
-	if not keyed[0]:
-		return {"ok": false, "error": keyed[1]}
-
-	# Asked of the player, which knows every library: looking only in the default one refused
-	# "moves/walk" as missing.
-	var opened: Array = _animation_at(scene_path, player_node_path, animation_name)
-	var scene: GdhSceneFile = opened[0]
-	if opened[1] == null:
-		return opened[2]
-	var player: AnimationPlayer = opened[1]
-	var anim: Animation = player.get_animation(StringName(animation_name))
-	var homes: Array = _homes(
-		scene, [[_library_of(player, animation_name), "animation library"], [anim, "animation"]]
-	)
-	if not homes[0]:
-		return scene.refuse(str(homes[1]))
-
-	var target_path: String = str(track.get("nodePath", ""))
-	if target_path.is_empty():
-		target_path = "."
-	var target: Node = _animated(player, target_path)
-	if target == null:
-		return scene.refuse(
+## Why [param animation_name] cannot name an animation, or "". The player refuses : , and [ in an
+## animation's or a library's name, and reads one slash as the end of the library's.
+static func _name_refusal(animation_name: String) -> String:
+	if animation_name.count("/") > 1:
+		return (
 			(
-				(
-					"No node at %s from the player's root node, %s, which is what the track path is read "
-					+ "against."
-				)
-				% [target_path, str(player.root_node)]
+				"%s names a library and an animation in it with one slash, as moves/walk; a library holds no "
+				+ "libraries."
 			)
+			% animation_name
 		)
-	var keyframes: Array = keyed[1]
-	var built: Array = _add_track(anim, track, target, target_path, keyframes)
-	if not str(built[1]).is_empty():
-		return scene.refuse(str(built[1]))
-	var track_idx: int = built[0]
-
-	var at: String = scene.path_of(player)
-	var keys: int = anim.track_get_key_count(track_idx)
-	var check: Callable = func(saved: Node) -> String:
-		var copy: AnimationPlayer = saved.get_node_or_null(at) as AnimationPlayer
-		if copy == null or not copy.has_animation(StringName(animation_name)):
-			return "%s would not be in the scene when it loads." % animation_name
-		var loaded: Animation = copy.get_animation(StringName(animation_name))
-		if loaded.get_track_count() <= track_idx or loaded.track_get_key_count(track_idx) != keys:
-			return "the track would not be in %s when the scene loads." % animation_name
-		return ""
-	var answer: Dictionary = {
-		"ok": true,
-		"trackType": str(track.get("type", "")),
-		"trackIndex": track_idx,
-		"keys": keys,
-		"keysAdded": keyframes.size(),
-	}
-	if built[3]:
-		answer["existingTrack"] = true
-	if built[2] != null:
-		answer["methodFound"] = built[2]
-	var past: String = _past_length(anim, animation_name)
-	if not past.is_empty():
-		answer["pastLength"] = past
-	var files: Dictionary = homes[1]
-	return _finish(scene, check, files, answer)
-
-
-## Adds [param track] to [param anim] with [param keyframes], as [index, why not, methodFound,
-## existing]: methodFound is null for a property track, and existing is whether the keys went into
-## a track the animation already had for that path.
-##
-## Into that track rather than a second one beside it, as the editor keys a property it already
-## animates: two tracks for one path both play, the later overriding the earlier, and a key meant
-## to extend the motion was split off where reading the animation showed two halves.
-func _add_track(
-	anim: Animation, track: Dictionary, target: Node, target_path: String, keyframes: Array
-) -> Array:
-	var track_type: String = str(track.get("type", ""))
-	var keys: Array = []
-	var method_found: Variant = null
-	var kind: Animation.TrackType = Animation.TYPE_VALUE
-	var path: NodePath = NodePath(target_path)
-	if track_type == "property":
-		var prop_name: String = str(track.get("property", ""))
-		if prop_name.is_empty():
-			return [-1, "track.property is required for property track", null, false]
-		var values: Array = _key_values(target, prop_name, keyframes)
-		if not values[0]:
-			return [-1, values[1], null, false]
-		keys = values[1]
-		path = NodePath(target_path + ":" + prop_name)
-	elif track_type == "method":
-		var method_name: String = str(track.get("method", ""))
-		if method_name.is_empty():
-			return [-1, "track.method is required for method track", null, false]
-		for index: int in keyframes.size():
-			var keyframe: Dictionary = keyframes[index]
-			var given: Variant = keyframe.get("args", [])
-			if not given is Array:
-				return [-1, "keyframes[%d].args must be a list." % index, null, false]
-			var arguments: Array = given
-			keys.append({"method": method_name, "args": _parse_method_args(arguments)})
-		method_found = target.has_method(method_name)
-		kind = Animation.TYPE_METHOD
-	else:
-		return [
-			-1,
-			(
-				"add_track makes property and method tracks, and track.type is %s; remove_track takes any."
-				% track_type
-			),
-			null,
-			false
-		]
-
-	var track_idx: int = anim.find_track(path, kind)
-	var existing: bool = track_idx >= 0
-	if existing:
-		# Checked before any key goes in, since track_insert_key replaces a key at the same time
-		# without a word, and a refusal partway would leave the editor's scene half changed.
-		for index: int in keyframes.size():
-			var keyframe: Dictionary = keyframes[index]
-			var time: float = GdhRead.as_float(keyframe["time"])
-			if anim.track_find_key(track_idx, time, Animation.FIND_MODE_APPROX) >= 0:
-				return [
-					-1,
-					(
-						(
-							"Track %d already animates %s and has a key at %s s, which keyframes[%d] would "
-							+ "replace. Nothing was written."
-						)
-						% [track_idx, str(path), _seconds(time), index]
-					),
-					null,
-					false
-				]
-	else:
-		track_idx = anim.add_track(kind)
-		anim.track_set_path(track_idx, path)
-	for index: int in keyframes.size():
-		var keyframe: Dictionary = keyframes[index]
-		if anim.track_insert_key(track_idx, GdhRead.as_float(keyframe["time"]), keys[index]) < 0:
-			return [-1, "Keyframe %d could not be inserted." % index, null, false]
-	return [track_idx, "", method_found, existing]
-
-
-## Takes out the track [code]track[/code] names by its type, nodePath and property as read answers
-## them, so a track read back can be passed as it stands; its keyframes are not looked at. Every
-## track of that shape goes, since the editor can make two for one path and both play.
-func remove_animation_track(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
-	var player_node_path: String = str(args.get("playerNodePath", "."))
-	var animation_name: String = str(args.get("animationName", ""))
-	var given_track: Variant = args.get("track", {})
-	if scene_path.strip_edges() == "res://":
-		return {"ok": false, "error": "Missing scenePath"}
-	if animation_name.strip_edges().is_empty():
-		return {"ok": false, "error": "Missing animationName"}
-	var track: Dictionary = given_track if given_track is Dictionary else {}
-	if track.is_empty():
-		return {"ok": false, "error": "Missing track"}
-	var track_type: String = str(track.get("type", ""))
-	if not track_type in GdhAnimationReads.TRACK_TYPE_NAMES.values():
-		return {"ok": false, "error": "Unsupported track.type: " + track_type}
-	var node_path: String = str(track.get("nodePath", ""))
-	var property: String = str(track.get("property", ""))
-	var shape: Array = [track_type, node_path, property]
-
-	var found: Array = _animation_at(scene_path, player_node_path, animation_name)
-	if found[1] == null:
-		return found[2]
-	var scene: GdhSceneFile = found[0]
-	var player: AnimationPlayer = found[1]
-	var anim: Animation = player.get_animation(StringName(animation_name))
-	var homes: Array = _homes(
-		scene, [[_library_of(player, animation_name), "animation library"], [anim, "animation"]]
-	)
-	if not homes[0]:
-		return scene.refuse(str(homes[1]))
-	var matching: Array[int] = []
-	var held: PackedStringArray = []
-	for index: int in anim.get_track_count():
-		var of: Array = _track_shape(anim, index)
-		if of == shape:
-			matching.append(index)
-		var _listed: bool = held.append("%s (%s)" % [str(anim.track_get_path(index)), of[0]])
-	if matching.is_empty():
-		var said: String = (
-			"%s has no %s track on %s"
-			% [
-				animation_name,
-				track_type,
-				node_path if property.is_empty() else "%s:%s" % [node_path, property]
-			]
-		)
-		if held.is_empty():
-			return scene.refuse("%s; it has no tracks." % said)
-		return scene.refuse("%s; its tracks are %s." % [said, ", ".join(held)])
-	var keys: int = 0
-	matching.reverse()
-	for index: int in matching:
-		keys += anim.track_get_key_count(index)
-		anim.remove_track(index)
-
-	var at: String = scene.path_of(player)
-	var left: int = anim.get_track_count()
-	var check: Callable = func(saved: Node) -> String:
-		var copy: AnimationPlayer = saved.get_node_or_null(at) as AnimationPlayer
-		if copy == null or not copy.has_animation(StringName(animation_name)):
-			return "%s would not be in the scene when it loads." % animation_name
-		if copy.get_animation(StringName(animation_name)).get_track_count() != left:
-			return "the track would still be in %s when the scene loads." % animation_name
-		return ""
-	var removed: Dictionary = {"type": track_type, "nodePath": node_path}
-	if not property.is_empty():
-		removed["property"] = property
-	var answer: Dictionary = {
-		"ok": true,
-		"animationName": animation_name,
-		"removed": removed,
-		"tracksRemoved": matching.size(),
-		"keysRemoved": keys,
-		"tracks": left,
-	}
-	var files: Dictionary = homes[1]
-	return _finish(scene, check, files, answer)
-
-
-## Track [param index] of [param anim] as [type, nodePath, property], named as read names them.
-static func _track_shape(anim: Animation, index: int) -> Array:
-	var path: NodePath = anim.track_get_path(index)
-	return [
-		GdhAnimationReads.TRACK_TYPE_NAMES.get(anim.track_get_type(index), str(anim.track_get_type(index))),
-		str(path.get_concatenated_names()),
-		str(path.get_concatenated_subnames()),
-	]
+	for forbidden: String in [":", ",", "["]:
+		if animation_name.contains(forbidden):
+			return "An animation's name cannot hold : , or [, and %s does." % animation_name
+	for part: String in animation_name.split("/"):
+		if part.strip_edges().is_empty() and animation_name.contains("/"):
+			return "%s leaves the library's or the animation's name empty." % animation_name
+	return ""
 
 
 ## The keys of [param anim], called [param animation_name], that lie past its end, where they never
@@ -585,6 +359,12 @@ static func _past_length(anim: Animation, animation_name: String) -> String:
 				var _added: bool = past.append(
 					"%s at %s s" % [str(anim.track_get_path(track)), _seconds(time)]
 				)
+	return _past_sentence(anim, animation_name, past)
+
+
+## The pastLength sentence for [param past], keys of [param anim] each named by its track's path and
+## time, or "" for none.
+static func _past_sentence(anim: Animation, animation_name: String, past: PackedStringArray) -> String:
 	if past.is_empty():
 		return ""
 	return (
@@ -608,57 +388,6 @@ static func _past_length(anim: Animation, animation_name: String) -> String:
 static func _seconds(seconds: float) -> String:
 	var rounded: float = snappedf(seconds, 0.0001)
 	return str(int(rounded)) if rounded == floorf(rounded) else str(rounded)
-
-
-## The keyframes of [param track], as [true, list] or [false, why]. Each needs its own time: one
-## that was not a dictionary was skipped, and one without a time went in at 0, where the next such
-## key replaced it, and the answer said nothing of either.
-func _keyframes(track: Dictionary) -> Array:
-	var given: Variant = track.get("keyframes", [])
-	if not given is Array:
-		return [false, "track.keyframes must be a list."]
-	var keyframes: Array = given
-	var times: Dictionary = {}
-	for index: int in keyframes.size():
-		if not keyframes[index] is Dictionary:
-			return [false, "keyframes[%d] is not an object with a time." % index]
-		var keyframe: Dictionary = keyframes[index]
-		var time: Variant = keyframe.get("time")
-		if not (time is float or time is int):
-			return [false, "keyframes[%d] has no time." % index]
-		var seconds: float = GdhRead.as_float(time)
-		if times.has(seconds):
-			return [
-				false, "keyframes[%d] and [%d] are both at %s seconds." % [times[seconds], index, seconds]
-			]
-		times[seconds] = index
-	return [true, keyframes]
-
-
-## Each keyframe's value read as the property [param prop_name] on [param target] takes it, as
-## [true, values] or [false, why]. Read without the property, a string "10" keyed on Label.text
-## was stored as the number 10, and a Vector2 given as [1, 2] as a list.
-func _key_values(target: Node, prop_name: String, keyframes: Array) -> Array:
-	var base: String = prop_name.get_slice(":", 0)
-	var declared: Dictionary = _properties.declaration(target, base)
-	if declared.is_empty():
-		return [false, GdhPropertyValues.no_property(target, base)]
-	var values: Array = []
-	for index: int in keyframes.size():
-		var keyframe: Dictionary = keyframes[index]
-		var raw: Variant = keyframe.get("value")
-		if base != prop_name:
-			# A subname such as position:x keys one component, which is a number.
-			var component: Variant = _properties.parse(raw, TYPE_FLOAT)
-			if not component is float:
-				return [false, "keyframes[%d].value keys %s, which is a number." % [index, prop_name]]
-			values.append(component)
-			continue
-		var value: Array = _properties.value_for(target, declared, raw)
-		if not value[0]:
-			return [false, "keyframes[%d]: %s" % [index, value[1]]]
-		values.append(value[1])
-	return [true, values]
 
 
 # =============================================================================
@@ -803,7 +532,7 @@ func rename_animation(args: Dictionary) -> Dictionary:
 	if player.has_animation(StringName(new_full)):
 		return scene.refuse("%s already has an animation %s." % [player_node_path, new_full])
 	var library: AnimationLibrary = _library_of(player, animation_name)
-	var states: Array = _states_playing(scene, player, animation_name)
+	var states: Array = GdhAnimationReads.states_playing(scene.root, player, animation_name)
 	var held: Array = [[library, "animation library"]]
 	for state: Array in states:
 		held.append([state[0], "state playing %s" % animation_name])
@@ -817,6 +546,9 @@ func rename_animation(args: Dictionary) -> Dictionary:
 	library.rename_animation(StringName(animation_name.trim_prefix(prefix)), StringName(new_name))
 	if not player.has_animation(StringName(new_full)):
 		return scene.refuse("The library did not take the name %s." % new_full)
+	# As the editor's rename sets it: the library's key alone left the file's resource_name, which
+	# the inspector shows, on the old name.
+	player.get_animation(StringName(new_full)).resource_name = new_name
 	var answer: Dictionary = {"ok": true, "animationName": new_full, "was": animation_name}
 	if autoplayed:
 		answer["autoplay"] = new_full
@@ -868,7 +600,7 @@ func remove_animation(args: Dictionary) -> Dictionary:
 		player.autoplay = ""
 		answer["autoplayCleared"] = true
 	var orphaned: Array = []
-	for state: Array in _states_playing(scene, player, animation_name):
+	for state: Array in GdhAnimationReads.states_playing(scene.root, player, animation_name):
 		orphaned.append(state[1])
 	if not orphaned.is_empty():
 		answer["statesPlayingNothing"] = orphaned
@@ -881,49 +613,3 @@ func remove_animation(args: Dictionary) -> Dictionary:
 		return ""
 	var files: Dictionary = homes[1]
 	return _finish(scene, check, files, answer)
-
-
-## The states of [param scene]'s AnimationTrees that play [param animation_name] from [param player],
-## as [[node, {animTreePath, state}]], a state named by the path of the nodes leading to it.
-func _states_playing(scene: GdhSceneFile, player: AnimationPlayer, animation_name: String) -> Array:
-	var found: Array = []
-	var trees: Array[Node] = scene.root.find_children("*", "AnimationTree", true, false)
-	if scene.root is AnimationTree:
-		trees.append(scene.root)
-	for node: Node in trees:
-		var tree: AnimationTree = node
-		if tree.tree_root == null or tree.get_node_or_null(tree.anim_player) != player:
-			continue
-		var tree_path: String = str(scene.root.get_path_to(tree))
-		_collect_playing(tree.tree_root, "", tree_path, animation_name, found)
-	return found
-
-
-static func _collect_playing(
-	node: AnimationNode, at: String, tree_path: String, animation_name: String, found: Array
-) -> void:
-	if node is AnimationNodeAnimation:
-		var plays: AnimationNodeAnimation = node
-		if plays.animation == StringName(animation_name):
-			found.append([plays, {"animTreePath": tree_path, "state": "." if at.is_empty() else at}])
-		return
-	var children: Dictionary = {}
-	if node is AnimationNodeStateMachine:
-		var machine: AnimationNodeStateMachine = node
-		for state: StringName in machine.get_node_list():
-			children[str(state)] = machine.get_node(state)
-	elif node is AnimationNodeBlendTree:
-		var blend: AnimationNodeBlendTree = node
-		for input: StringName in blend.get_node_list():
-			children[str(input)] = blend.get_node(input)
-	elif node is AnimationNodeBlendSpace1D:
-		var line: AnimationNodeBlendSpace1D = node
-		for point: int in line.get_blend_point_count():
-			children[str(point)] = line.get_blend_point_node(point)
-	elif node is AnimationNodeBlendSpace2D:
-		var plane: AnimationNodeBlendSpace2D = node
-		for point: int in plane.get_blend_point_count():
-			children[str(point)] = plane.get_blend_point_node(point)
-	for step: String in children:
-		var child: AnimationNode = children[step]
-		_collect_playing(child, step if at.is_empty() else at + "/" + step, tree_path, animation_name, found)

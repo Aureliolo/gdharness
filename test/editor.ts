@@ -2419,7 +2419,8 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
     asArray(get(machine, 'states'), 'states').find((state) => get(state, 'stateName') === name);
   assert.deepEqual(
     named('walk'),
-    { stateName: 'walk', type: 'AnimationNodeAnimation', animationName: 'step' },
+    // This tree has no player, so there is nothing to find the animation in or name as missing.
+    { stateName: 'walk', type: 'AnimationNodeAnimation', animationName: 'step', animationFound: false },
     JSON.stringify(machine),
   );
   assert.equal(
@@ -3188,7 +3189,8 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
   });
   assert.deepEqual(
     [get(untracked, 'removed'), get(untracked, 'keysRemoved'), get(untracked, 'tracks')],
-    [{ type: 'method', nodePath: 'Sprite' }, 1, 1],
+    // Read gives the track the method all its keys call, so every key goes, and the track with them.
+    [{ type: 'method', nodePath: 'Sprite', method: 'set_visible' }, 1, 1],
     JSON.stringify(untracked),
   );
   assert.deepEqual(
@@ -3310,6 +3312,21 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
   assert.match(
     String(get(lost, 'animationMissing')),
     /^The AnimationPlayer at Body\/Player has no animation moves\/missing yet, so the state plays nothing until it has one\./,
+  );
+  // Read through the editor, the state says the same, the player named from the scene root.
+  const treed = await call('scene_animation', {
+    projectPath: project,
+    scenePath: 'res://moves/treed.tscn',
+    animTreePath: 'Tree',
+    op: 'read_states',
+  });
+  const lostRead = asArray(get(treed, 'states'), 'states').find(
+    (state) => get(state, 'stateName') === 'Lost',
+  );
+  assert.deepEqual(
+    [get(lostRead, 'animationFound'), get(lostRead, 'animationMissing')],
+    [false, get(lost, 'animationMissing')],
+    JSON.stringify(treed),
   );
 
   // A resource kept inside a file, read through the editor by the path a read answers it with.

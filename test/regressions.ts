@@ -50701,7 +50701,10 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     'anim_player = NodePath("../Player")\n\n[node name="Bare" type="AnimationTree" parent="."]\n';
   const files: Record<string, string> = {
     'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Animation"\n',
-    'root.gd': 'extends Node2D\n\n\nfunc _init() -> void:\n\tposition = Vector2(9, 9)\n',
+    'root.gd':
+      'extends Node2D\n\n\nfunc _init() -> void:\n\tposition = Vector2(9, 9)\n\n\n' +
+      'func cheer(word: String, times: int = 1) -> void:\n\tprint(word.repeat(times))\n\n\n' +
+      'func hold(node: Node) -> void:\n\tprint(node)\n\n\nfunc lean(by: float) -> void:\n\tprint(by)\n',
     'library.tres':
       '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_idle"]\n' +
       'resource_name = "idle"\n\n[resource]\n_data = {\n&"idle": SubResource("Animation_idle")\n}\n',
@@ -50713,6 +50716,26 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       '[resource]\n_data = {\n&"long": SubResource("Animation_long")\n}\n',
     'stretched.tscn': `${player('stretched.tres')}\n[node name="Root" type="Node" parent="."]\n`,
     'lone.tscn': '[gd_scene format=3]\n\n[node name="Lone" type="Node2D"]\n',
+    // A tree two levels from a player that is not its sibling, so the path anim_player holds is
+    // joined to the tree's own before the player is read from the file.
+    'treed.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="res://library.tres" id="1_library"]\n\n' +
+      '[sub_resource type="AnimationNodeAnimation" id="Plays_idle"]\nanimation = &"moves/idle"\n\n' +
+      '[sub_resource type="AnimationNodeAnimation" id="Plays_gone"]\nanimation = &"moves/gone"\n\n' +
+      '[sub_resource type="AnimationNodeStateMachine" id="StateMachine_1"]\n' +
+      'states/Idle/node = SubResource("Plays_idle")\nstates/Idle/position = Vector2(300, 100)\n' +
+      'states/Gone/node = SubResource("Plays_gone")\nstates/Gone/position = Vector2(500, 100)\n\n' +
+      '[node name="Root" type="Node2D"]\n\n[node name="Body" type="Node2D" parent="."]\n\n' +
+      '[node name="Player" type="AnimationPlayer" parent="Body"]\nlibraries = {\n&"moves": ExtResource("1_library")\n}\n\n' +
+      '[node name="Rig" type="Node2D" parent="."]\n\n[node name="Tree" type="AnimationTree" parent="Rig"]\n' +
+      'tree_root = SubResource("StateMachine_1")\nanim_player = NodePath("../../Body/Player")\n',
+    // A tree whose player is the root, which the joined path names as nothing at all.
+    'held.tscn':
+      '[gd_scene format=3]\n\n[sub_resource type="AnimationNodeAnimation" id="Plays_gone"]\nanimation = &"gone"\n\n' +
+      '[sub_resource type="AnimationNodeStateMachine" id="StateMachine_1"]\n' +
+      'states/Gone/node = SubResource("Plays_gone")\nstates/Gone/position = Vector2(300, 100)\n\n' +
+      '[node name="Player" type="AnimationPlayer"]\n\n[node name="Tree" type="AnimationTree" parent="."]\n' +
+      'tree_root = SubResource("StateMachine_1")\nanim_player = NodePath("..")\n',
     'warned.gd': 'extends Node2D\n',
     'warned.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" uid="uid://kwuaqmq5q26f" path="res://warned.gd" id="1_warned"]\n\n' +
@@ -50769,7 +50792,12 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     });
     assert.equal(get(track, 'trackIndex'), 0, JSON.stringify(track));
     const scene = fileOf('moves.tscn');
-    assert.match(scene, /\[sub_resource type="Animation" id="[^"]+"\]\nlength = 0\.5\n/, scene);
+    // Named in the file as the editor names a new one, which the inspector shows.
+    assert.match(
+      scene,
+      /\[sub_resource type="Animation" id="[^"]+"\]\nresource_name = "spin"\nlength = 0\.5\n/,
+      scene,
+    );
     assert.match(scene, /&"spin": SubResource/, scene);
     assert.match(scene, /tracks\/0\/path = NodePath\("Body:rotation"\)/, scene);
     const spin = parseTextContent(
@@ -50834,6 +50862,14 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       textOf(await call({ ...rotaton, track: { ...rotaton.track, property: 'rotaton' } })),
       'Sprite2D has no property rotaton; the nearest it has are rotation, global_rotation.',
     );
+    // Only the keys a call writes are judged against the length: the key at 2 s was named again on
+    // every later call to the track, as though the one just written were past the end.
+    const inside = await written(rotation([{ time: 0.1, value: 0.5 }]));
+    assert.deepEqual(
+      [get(inside, 'keys'), get(inside, 'pastLength')],
+      [5, undefined],
+      JSON.stringify(inside),
+    );
 
     const shorter = await written({
       op: 'set',
@@ -50852,6 +50888,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     assert.equal(
       get(shorter, 'pastLength'),
       'spin is 0.25 s long, and these keys are past its end, where they never play: Body:rotation at 0.5 s, Body:rotation at 2 s. They are kept; scene_animation set with a longer length plays them.',
+      'set judges every key, the earlier ones too',
     );
     assert.match(fileOf('moves.tscn'), /\nlength = 0\.25\nloop_mode = 1\n/, fileOf('moves.tscn'));
     const longer = await written({ op: 'set', playerNodePath: 'Player', animationName: 'spin', length: 2 });
@@ -50905,6 +50942,9 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     assert.match(afterRename, /&"turn": SubResource/, afterRename);
     assert.match(afterRename, /autoplay = &"turn"/, afterRename);
     assert.match(afterRename, /animation = &"turn"/, afterRename);
+    // The animation's own name too, as the editor's rename sets it: the library's key alone left
+    // resource_name on the old name.
+    assert.match(afterRename, /resource_name = "turn"/, afterRename);
     assert.doesNotMatch(afterRename, /"spin"/, afterRename);
     for (const [args, refusal] of [
       [
@@ -50941,6 +50981,38 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       textOf(await call({ op: 'remove', playerNodePath: 'Player', animationName: 'turn' })),
       'Player has no animation turn. It has: moves/idle, moves/leap.',
     );
+    // A library named before the slash that the player lacks is made, since no op makes one.
+    const kit = await written({ op: 'create', playerNodePath: 'Player', animationName: 'kit/walk' });
+    assert.deepEqual(
+      [get(kit, 'animationName'), get(kit, 'libraryMade')],
+      ['kit/walk', 'kit'],
+      JSON.stringify(kit),
+    );
+    assert.match(
+      fileOf('moves.tscn'),
+      /\nlibraries\/kit = SubResource\("AnimationLibrary_/,
+      fileOf('moves.tscn'),
+    );
+    assert.match(fileOf('moves.tscn'), /&"walk": SubResource\("Animation_/, fileOf('moves.tscn'));
+    const again = await written({ op: 'create', playerNodePath: 'Player', animationName: 'kit/run' });
+    assert.equal(get(again, 'libraryMade'), undefined, JSON.stringify(again));
+    assert.equal(
+      get(await written({ op: 'create', playerNodePath: 'Player', animationName: 'stand' }), 'libraryMade'),
+      undefined,
+      'the default library the player already has is not made again',
+    );
+    for (const [animationName, refusal] of [
+      [
+        'kit/a/b',
+        'kit/a/b names a library and an animation in it with one slash, as moves/walk; a library holds no libraries.',
+      ],
+      ['kit/a:b', "An animation's name cannot hold : , or [, and kit/a:b does."],
+      ['/walk', "/walk leaves the library's or the animation's name empty."],
+      ['kit/', "kit/ leaves the library's or the animation's name empty."],
+    ] as const) {
+      assert.equal(textOf(await call({ op: 'create', playerNodePath: 'Player', animationName })), refusal);
+    }
+    assert.doesNotMatch(fileOf('moves.tscn'), /libraries\/a |&"a"|&"b"/, 'and nothing of them is written');
 
     const before = fileOf('stretched.tres');
     const scripted =
@@ -51092,7 +51164,59 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       'The AnimationPlayer at Player has no animation moves/idel yet, so the state plays nothing until it has one. The nearest it has are moves/idle, moves/leap.',
     );
     const laidOut = parseTextContent(await call({ op: 'read_states', animTreePath: 'Tree' }));
-    assert.match(JSON.stringify(laidOut), /"Early"/, JSON.stringify(laidOut));
+    const stateOf = (read: unknown, name: string): unknown =>
+      asArray(get(read, 'states')).find((state) => get(state, 'stateName') === name);
+    // Read says what add_state said, as a state naming an animation the player lacks plays nothing.
+    assert.deepEqual(
+      stateOf(laidOut, 'Early'),
+      {
+        stateName: 'Early',
+        type: 'AnimationNodeAnimation',
+        animationName: 'moves/idel',
+        animationFound: false,
+        animationMissing: get(early, 'animationMissing'),
+      },
+      JSON.stringify(laidOut),
+    );
+    assert.deepEqual(
+      stateOf(laidOut, 'Idle'),
+      {
+        stateName: 'Idle',
+        type: 'AnimationNodeAnimation',
+        animationName: 'moves/idle',
+        animationFound: true,
+      },
+      JSON.stringify(laidOut),
+    );
+    assert.equal(get(stateOf(laidOut, 'Spin'), 'animationFound'), false, 'turn was removed');
+    const loneRead = parseTextContent(await call({ op: 'read_states', animTreePath: 'Bare' }));
+    assert.deepEqual(
+      [get(stateOf(loneRead, 'Lone'), 'animationFound'), get(stateOf(loneRead, 'Lone'), 'animationMissing')],
+      [false, undefined],
+      `a tree with no player has nothing to look in: ${JSON.stringify(loneRead)}`,
+    );
+    const treed = parseTextContent(
+      await call({ op: 'read_states', scenePath: 'treed.tscn', animTreePath: 'Rig/Tree' }),
+    );
+    assert.deepEqual(
+      [get(stateOf(treed, 'Idle'), 'animationFound'), get(stateOf(treed, 'Idle'), 'animationMissing')],
+      [true, undefined],
+      JSON.stringify(treed),
+    );
+    assert.equal(get(stateOf(treed, 'Gone'), 'animationFound'), false, JSON.stringify(treed));
+    const held = parseTextContent(
+      await call({ op: 'read_states', scenePath: 'held.tscn', animTreePath: 'Tree' }),
+    );
+    assert.equal(
+      get(stateOf(held, 'Gone'), 'animationMissing'),
+      'The AnimationPlayer at . has no animation gone yet, so the state plays nothing until it has one.',
+      JSON.stringify(held),
+    );
+    assert.match(
+      text(get(stateOf(treed, 'Gone'), 'animationMissing')),
+      /^The AnimationPlayer at Body\/Player has no animation moves\/gone yet, so the state plays nothing until it has one\./,
+      JSON.stringify(treed),
+    );
     const found = await written({
       op: 'add_state',
       animTreePath: 'Tree',
@@ -51272,6 +51396,104 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
         }),
       ),
       'moves/idle has no property track on Body:rotation; it has no tracks.',
+    );
+
+    // A method key whose arguments the method cannot take is written, as one calling a missing
+    // method is, and says why; add_track puts every method called on a node in one track.
+    await written({ op: 'create', playerNodePath: 'Player', animationName: 'calls', length: 2 });
+    const calling = (keyframes: unknown[], method = 'cheer') => ({
+      op: 'add_track',
+      playerNodePath: 'Player',
+      animationName: 'calls',
+      track: { type: 'method', nodePath: '.', method, keyframes },
+    });
+    const fits = await written(calling([{ time: 0.1, args: ['hi'] }]));
+    assert.deepEqual(
+      [get(fits, 'methodFound'), get(fits, 'argumentsFit'), get(fits, 'misfit')],
+      [true, true, undefined],
+      `a default fills what is not given: ${JSON.stringify(fits)}`,
+    );
+    for (const [keyframes, method, misfit] of [
+      [
+        [
+          { time: 0.2, args: ['ok', 2] },
+          { time: 0.3, args: [] },
+          { time: 0.35, args: ['fine'] },
+        ],
+        'cheer',
+        'keyframes[1] calls cheer with no arguments, and it needs 1, so the call fails each time the key plays.',
+      ],
+      [
+        [{ time: 0.4, args: ['a', 2, 3] }],
+        'cheer',
+        'keyframes[0] calls cheer with 3 arguments, and it takes at most 2, so the call fails each time the key plays.',
+      ],
+      [
+        [{ time: 0.5, args: [3] }],
+        'hold',
+        'keyframes[0] passes argument 1 as int, and hold takes node as Object, so the call fails each time the key plays.',
+      ],
+    ] as const) {
+      const misfitting = await written(calling([...keyframes], method));
+      assert.deepEqual(
+        [get(misfitting, 'methodFound'), get(misfitting, 'argumentsFit'), get(misfitting, 'misfit')],
+        [true, false, misfit],
+        JSON.stringify(misfitting),
+      );
+    }
+    // JSON gives every number as a float; a whole one is saved as the int the method takes.
+    assert.match(fileOf('moves.tscn'), /"args": \["ok", 2\]/, fileOf('moves.tscn'));
+    const missing = await written(calling([{ time: 0.6, args: [1] }], 'gone'));
+    assert.deepEqual(
+      [
+        get(missing, 'methodFound'),
+        get(missing, 'argumentsFit'),
+        get(missing, 'misfit'),
+        get(missing, 'keys'),
+      ],
+      [false, undefined, undefined, 7],
+      `a method that is not there has nothing to judge against: ${JSON.stringify(missing)}`,
+    );
+    const method = (name: string) => ({
+      op: 'remove_track',
+      playerNodePath: 'Player',
+      animationName: 'calls',
+      track: { type: 'method', nodePath: '.', method: name },
+    });
+    const goneKeys = await written(method('gone'));
+    assert.deepEqual(
+      [
+        get(goneKeys, 'removed'),
+        get(goneKeys, 'tracksRemoved'),
+        get(goneKeys, 'keysRemoved'),
+        get(goneKeys, 'tracks'),
+      ],
+      [{ type: 'method', nodePath: '.', method: 'gone' }, 0, 1, 1],
+      JSON.stringify(goneKeys),
+    );
+    assert.doesNotMatch(fileOf('moves.tscn'), /&"gone"/, fileOf('moves.tscn'));
+    assert.match(fileOf('moves.tscn'), /&"hold"/, 'and the keys calling the others stay');
+    assert.equal(
+      textOf(await call(method('gone'))),
+      "calls's method track on . has no key calling gone; its keys call cheer, hold.",
+    );
+    const cheers = await written(method('cheer'));
+    assert.deepEqual(
+      [get(cheers, 'tracksRemoved'), get(cheers, 'keysRemoved'), get(cheers, 'tracks')],
+      [0, 5, 1],
+      JSON.stringify(cheers),
+    );
+    const last = await written(method('hold'));
+    assert.deepEqual(
+      [get(last, 'tracksRemoved'), get(last, 'keysRemoved'), get(last, 'tracks')],
+      [1, 1, 0],
+      `the track goes with its last key: ${JSON.stringify(last)}`,
+    );
+    await written(calling([{ time: 0.1, args: [1] }], 'lean'));
+    assert.match(
+      fileOf('moves.tscn'),
+      /"args": \[1\.0\]/,
+      `unless it takes a float: ${fileOf('moves.tscn')}`,
     );
   } finally {
     await server.stop();
