@@ -101,6 +101,7 @@ const operationsModules = [
   'scene_connections.gd',
   'script_check.gd',
   'serialisation.gd',
+  'setting_reads.gd',
   'value_shapes.gd',
 ];
 

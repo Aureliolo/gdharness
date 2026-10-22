@@ -272,14 +272,28 @@ func remove_input_action(params: Dictionary) -> Dictionary:
 		return _log.failure("This project has no input action named " + action_name)
 	# The engine registers its own ui_ actions with a default, so clearing one from project.godot
 	# puts the engine's binding back rather than removing the action.
-	if ProjectSettings.property_get_revert(setting) != null:
+	var engine_binding: Variant = ProjectSettings.property_get_revert(setting)
+	if engine_binding != null:
+		# At the engine's binding the file holds no line for it, and the refusal for a rebound one
+		# spoke of a binding the project had never changed.
+		if ProjectSettings.get_setting(setting) == engine_binding:
+			return _log.failure(
+				(
+					(
+						"%s is one of the engine's own actions, and project.godot does not rebind it, so "
+						+ "there is nothing to remove: the engine's binding holds. Rebind it with "
+						+ "add_input_action."
+					)
+					% action_name
+				)
+			)
 		return _log.failure(
 			(
 				(
-					"%s is one of the engine's own actions: removing it from project.godot restores the "
-					+ "engine's binding rather than removing it. Rebind it with add_input_action instead."
+					"%s is one of the engine's own actions, so it cannot be removed. project_settings "
+					+ "unset %s puts the engine's binding back, and add_input_action rebinds it."
 				)
-				% action_name
+				% [action_name, setting]
 			)
 		)
 	ProjectSettings.set_setting(setting, null)

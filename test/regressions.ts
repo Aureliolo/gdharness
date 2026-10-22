@@ -15489,6 +15489,15 @@ async function testARelativeEnginePathIsMadeWhole(): Promise<void> {
         { ok: true, path: resolve(before) },
         'an engine named relatively is found whole',
       );
+      // Setup writes the path it found into the harness config, so an absolute one comes back as
+      // written: resolving it respelt X:/ as X:\ and rewrote a config nobody had asked to change.
+      const forward = resolve(before).replaceAll('\\', '/');
+      process.env['GODOT_PATH'] = forward;
+      assert.deepEqual(
+        await new GodotLocator().find(),
+        { ok: true, path: forward },
+        'an absolute engine path is kept as written',
+      );
     }
 
     const written = join(scratch, 'error');
@@ -15544,6 +15553,12 @@ function testAWorktreeFindsItsMainCheckoutsEngine(): void {
       `the main checkout: ${main}`,
     );
     assert.equal(recordedEnginePath(main), engine, "and its config's engine is the one found");
+    const forward = engine.replaceAll('\\', '/');
+    writeFileSync(
+      join(root, 'main', 'game', '.mcp.json'),
+      JSON.stringify({ mcpServers: { gdharness: { command: 'npx', env: { GODOT_PATH: forward } } } }),
+    );
+    assert.equal(recordedEnginePath(main), forward, 'an absolute engine path is read as written');
     writeFileSync(
       join(root, 'main', 'game', '.mcp.json'),
       JSON.stringify({

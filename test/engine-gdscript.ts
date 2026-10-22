@@ -2440,7 +2440,27 @@ function testOperations(godotPath: string, projectDir: string): void {
   const builtIn = runRefusedOperation(godotPath, projectDir, 'remove_input_action', {
     action_name: 'ui_accept',
   });
-  assert.match(builtIn.stderr, /ui_accept is one of the engine's own actions/, builtIn.stderr);
+  const untouchedBinding =
+    "ui_accept is one of the engine's own actions, and project.godot does not rebind it, so there is nothing to remove: the engine's binding holds. Rebind it with add_input_action.";
+  assert.ok(builtIn.stderr.includes(untouchedBinding), builtIn.stderr);
+  // Rebound, it can go back to the engine's binding, and the refusal says how; the way it names
+  // has to work, so it is taken.
+  operation('add_input_action', { action_name: 'ui_accept', events: [{ type: 'key', keycode: 'E' }] });
+  const reboundRefused = runRefusedOperation(godotPath, projectDir, 'remove_input_action', {
+    action_name: 'ui_accept',
+  });
+  assert.ok(
+    reboundRefused.stderr.includes(
+      "ui_accept is one of the engine's own actions, so it cannot be removed. project_settings unset input/ui_accept puts the engine's binding back, and add_input_action rebinds it.",
+    ),
+    reboundRefused.stderr,
+  );
+  assert.equal(get(operation('unset_project_setting', { setting: 'input/ui_accept' }), 'removed'), true);
+  assert.doesNotMatch(readFileSync(projectFile, 'utf8'), /^ui_accept=/m, 'and the file holds no binding');
+  const restored = runRefusedOperation(godotPath, projectDir, 'remove_input_action', {
+    action_name: 'ui_accept',
+  });
+  assert.ok(restored.stderr.includes(untouchedBinding), restored.stderr);
   const missingAction = runRefusedOperation(godotPath, projectDir, 'remove_input_action', {
     action_name: 'fixture_jump',
   });
@@ -3820,6 +3840,84 @@ function testASettingSaysWhatReplacesIt(godotPath: string): void {
     );
     const bare = runOperation(godotPath, dir, 'get_project_setting', { setting: 'application/config/name' });
     assert.equal(get(bare, 'overrides'), undefined, 'and a setting with none carries none');
+
+    // An override names its base setting, and one the file does not set is not a setting nobody
+    // knows: a build with its feature reads the base setting, which the answer holds.
+    const set = runOperation(godotPath, dir, 'get_project_setting', {
+      setting: 'application/config/description.windows',
+    });
+    assert.deepEqual(
+      [get(set, 'exists'), get(set, 'value'), get(set, 'override_of'), get(set, 'message')],
+      [true, 'on windows', 'application/config/description', undefined],
+      JSON.stringify(set),
+    );
+    const unsetOverride = runOperation(godotPath, dir, 'get_project_setting', {
+      setting: 'application/config/description.mobile',
+    });
+    assert.deepEqual(
+      [
+        get(unsetOverride, 'exists'),
+        get(unsetOverride, 'override_of'),
+        get(unsetOverride, 'holds'),
+        get(unsetOverride, 'message'),
+      ],
+      [
+        false,
+        'application/config/description',
+        'plain',
+        'project.godot sets no mobile override of application/config/description, so a build with the mobile feature reads application/config/description, the value under holds, unless it also has a feature with an override: editor, windows.',
+      ],
+      JSON.stringify(unsetOverride),
+    );
+    const unknown = runOperation(godotPath, dir, 'get_project_setting', {
+      setting: 'application/config/nothing.mobile',
+    });
+    assert.deepEqual(
+      [get(unknown, 'exists'), get(unknown, 'holds'), get(unknown, 'message')],
+      [false, undefined, 'Setting does not exist'],
+      `an override of a setting nothing declares has nothing to fall back to: ${JSON.stringify(unknown)}`,
+    );
+    const family = asArray(
+      get(
+        runOperation(godotPath, dir, 'get_project_setting', { prefix: 'application/config/description' }),
+        'settings',
+      ),
+    );
+    assert.deepEqual(
+      family.map((one) => [get(one, 'setting'), get(one, 'override_of')]),
+      [
+        ['application/config/description', undefined],
+        ['application/config/description.editor', 'application/config/description'],
+        ['application/config/description.windows', 'application/config/description'],
+      ],
+      JSON.stringify(family),
+    );
+
+    // Taking an override out says what its builds read now, which default_value, null for an
+    // override, does not.
+    const taken = runOperation(godotPath, dir, 'unset_project_setting', {
+      setting: 'application/config/description.windows',
+    });
+    const fallsBack =
+      'project.godot sets no windows override of application/config/description, so a build with the windows feature reads application/config/description, the value under holds, unless it also has a feature with an override: editor.';
+    assert.deepEqual(
+      [get(taken, 'removed'), get(taken, 'override_of'), get(taken, 'holds'), get(taken, 'note')],
+      [true, 'application/config/description', 'plain', fallsBack],
+      JSON.stringify(taken),
+    );
+    assert.doesNotMatch(readFileSync(join(dir, 'project.godot'), 'utf8'), /description\.windows/);
+    const again = runOperation(godotPath, dir, 'unset_project_setting', {
+      setting: 'application/config/description.windows',
+    });
+    assert.deepEqual(
+      [get(again, 'removed'), get(again, 'holds'), get(again, 'note')],
+      [
+        false,
+        'plain',
+        `project.godot does not set application/config/description.windows, so there was nothing to take out. ${fallsBack}`,
+      ],
+      JSON.stringify(again),
+    );
   } finally {
     sweep(dir);
   }
@@ -4180,13 +4278,13 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
 
     // One helper made to raise part-way through building the answer, in a copy of the scripts.
     cpSync(resolve('src/godot/operations'), operations, { recursive: true });
-    const config = join(operations, 'project_config.gd');
-    const source = readFileSync(config, 'utf8');
+    const reads = join(operations, 'setting_reads.gd');
+    const source = readFileSync(reads, 'utf8');
     const faulted = source.replace('"setting_path": setting_path,', '"setting_path": _faulty(),');
     assert.notEqual(faulted, source, 'the fault should have gone in where the answer is built');
     writeFileSync(
-      config,
-      `${faulted}\n\nfunc _faulty() -> String:\n\tvar none: Array = []\n\treturn none[1]\n`,
+      reads,
+      `${faulted}\n\nstatic func _faulty() -> String:\n\tvar none: Array = []\n\treturn none[1]\n`,
     );
     const partial = await runThroughTheServersOwnPath(
       { ...engine, script: join(operations, 'godot_operations.gd') },
@@ -4200,7 +4298,7 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
     );
     assert.match(
       partial.message,
-      /^get_project_setting hit an error in the operations script, so its answer is left out: .*Out of bounds get index '1'.* \(_faulty \(.*project_config\.gd:\d+\)\)$/,
+      /^get_project_setting hit an error in the operations script, so its answer is left out: .*Out of bounds get index '1'.* \(_faulty \(.*setting_reads\.gd:\d+\)\)$/,
       partial.message,
     );
 

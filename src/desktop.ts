@@ -359,7 +359,6 @@ export function windowsCommandLine(command: string, args: readonly string[]): st
   return [command, ...args].map(quoted).join(' ');
 }
 
-/** The files a helper is handed and writes, all in a directory of the caller's own. */
 /** What the helper wrote to [param file] on failing, or null when it wrote nothing there. */
 export function helperFailure(file: string): string | null {
   try {
@@ -370,6 +369,7 @@ export function helperFailure(file: string): string | null {
   }
 }
 
+/** The files a helper is handed and writes, all in a directory of the caller's own. */
 export interface HelperFiles {
   /** What to start, read by the helper as it starts. */
   readonly spec: string;

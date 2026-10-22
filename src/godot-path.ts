@@ -5,7 +5,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { normalize, resolve } from 'node:path';
+import { isAbsolute, normalize, resolve } from 'node:path';
 import { godotCandidates, resolveHomeDirectory } from './detection.js';
 import { errorMessage } from './errors.js';
 import { envValue } from './launch.js';
@@ -40,8 +40,9 @@ export class GodotLocator {
     if (named !== undefined) {
       // Made whole against the directory this process runs in, since the desktop helper starting a
       // windowed engine runs in another, where a relative path names nothing. Bare godot is the one
-      // name looked up on PATH.
-      const path = named === 'godot' ? named : resolve(named);
+      // name looked up on PATH. An absolute one is kept as written, since setup writes it into the
+      // harness config and resolving respells X:/ as X:\ there.
+      const path = named === 'godot' || isAbsolute(named) ? named : resolve(named);
       const reason = await this.whyNot(path);
       if (reason === null) {
         this.found = path;

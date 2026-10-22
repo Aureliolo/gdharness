@@ -4197,6 +4197,29 @@ async function testASettingReadFromTheEditor({ call, refusal, project }: Editor)
     from: 'editor',
   });
   assert.equal(get(held, 'exists'), true, `the editor should hold the new action: ${text(held)}`);
+  // The editor's read answers what the headless one does, the default and the overrides included.
+  const width = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: 'display/window/size/viewport_width',
+    from: 'editor',
+  });
+  assert.equal(
+    typeof get(width, 'at_default'),
+    'boolean',
+    `the editor should say at_default: ${text(width)}`,
+  );
+  const mobile = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: 'display/window/size/viewport_width.mobile',
+    from: 'editor',
+  });
+  assert.deepEqual(
+    [get(mobile, 'exists'), get(mobile, 'override_of'), get(mobile, 'holds')],
+    [false, 'display/window/size/viewport_width', get(width, 'value')],
+    `an override the project does not set reads as its base: ${text(mobile)}`,
+  );
 
   // And a setting a write takes out, which the editor has to let go of rather than save back.
   writeFileSync(join(project, 'adopted_autoload.gd'), 'extends Node\n');
