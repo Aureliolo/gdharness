@@ -308,6 +308,15 @@ export function unitsOf(
   });
 }
 
+/**
+ * [param suites] with every one that does not need a window taken as saying it runs headless, so the
+ * windowed engine runs only those that do: a suite dealt there meets the machine's display, its
+ * keyboard layout and screen among it, and one reading them passes or fails by where it was dealt.
+ */
+export function windowOnlyWhereNeeded(suites: readonly DeclaredSuite[]): DeclaredSuite[] {
+  return suites.map((suite) => (suite.windowed ? suite : { ...suite, headless: true }));
+}
+
 /** What one engine is handed. */
 export interface EnginePlan {
   readonly suites: ReadonlyArray<{ readonly path: string; readonly cases: readonly string[] }>;

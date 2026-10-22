@@ -33,6 +33,10 @@ command line itself is wrong.
   iterating only.
 - `--reach-also PATH`: a file every suite depends on, for `--changed-only`. May be given more than
   once.
+- `--window-only-needed`: keep the windowed engine to the suites that need a window, as though
+  every other suite declared `GDHARNESS_NEEDS_WINDOW = false`.
+- `--print-output`: print everything each engine printed, before the verdict, as for a benchmark
+  written as a suite and run by hand. A gate never passes it.
 - `--runner`: print the path of the shipped runner and exit.
 
 ## Which suites run
@@ -67,7 +71,9 @@ dealt slowest first, each to the engine with the least so far. A run starts no m
 free memory allows once 4 GB is left for everything else at 1.5 GB an engine, and no more than it
 takes to keep each one busy for as long as the slowest unit or 5 seconds, whichever is longer. A
 run held below `--engines` by processors or memory says which on its first line. On macOS the free
-memory is the share the system itself counts as free, which includes the cache it can give back.
+memory is the share the system itself counts as free, which includes the cache it can give back. On
+Windows it is the smaller of the physical memory free and what the system can still commit, since
+an allocation fails at the commit limit however much physical memory is free.
 
 ## What fails a run
 
@@ -92,7 +98,8 @@ and the line after it, and the run's summary. When an engine was cut short and n
 it, its last 60 lines. The engine's whole output stays in
 `.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names, and the
 last lines count the problems and name the run's directory. A run that passes leaves no logs, and
-the next run removes the logs of runs that have ended.
+the next run removes the logs of runs that have ended; `--print-output` prints every engine's
+output before the verdict, whether the run passed or not.
 
 ## Errors a suite expects
 
@@ -128,9 +135,11 @@ read it declares `const GDHARNESS_NEEDS_WINDOW: bool = false` and runs headless.
 counts from the suite or any script it extends. All the windowed suites go to one windowed engine,
 which starts first and counts toward `--engines`, and which is then dealt the suites that declare
 nothing like the others, so a few quick windowed suites never leave it idle. A suite dealt there
-meets the real display server, so the screen size and scale and the display features it reports are
-the machine's rather than the headless server's, and setting the root viewport's size leaves it the
-window's. A suite declaring `false` is therefore never dealt there while another engine runs, and a
+meets the real display server, so the screen size and scale, the keyboard layout and the display
+features it reports are the machine's rather than the headless server's, and setting the root
+viewport's size leaves it the window's. `--window-only-needed` keeps every suite that does not need
+a window out of it, for a project with suites reading any of those. A suite declaring `false` is
+therefore never dealt there while another engine runs, and a
 run that has a windowed suite and one declaring `false` starts two engines at least. On a machine
 with room for one engine, they run one after the other, and the line announcing the run says so.
 When the run is one engine (`--engines 1` or `--order`), the run names each suite declaring `false`

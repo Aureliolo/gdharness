@@ -345,14 +345,17 @@ import {
   type Unit,
   unitsOf,
   windowedSaid,
+  windowOnlyWhereNeeded,
 } from '../src/suite-plan.js';
 import {
   inTurns,
   macMemoryLevel,
+  memoryRoomOf,
   roomFor,
   roomSaid,
   TestUsageError,
   testOptionsOf,
+  windowsCommitLeft,
 } from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
@@ -38468,6 +38471,33 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       ],
       'saying it runs headless holds for a suite whole and for each case of one split',
     );
+    // --window-only-needed: a suite that declares nothing is dealt as one saying it runs headless,
+    // since a suite reading the keyboard layout or the screen passed or failed by where it was dealt.
+    const plainSuites = [
+      suite('res://tests/menu_test.gd', ['test_m'], true),
+      suite('res://tests/keys_test.gd', ['test_k']),
+      suite('res://tests/lay_test.gd', ['test_l']),
+    ];
+    const dealing = (suites: Parameters<typeof unitsOf>[0]): [boolean, string[]][] => {
+      const these = unitsOf(suites, {});
+      return dealt(these, new Map(these.map((u) => [u.suite, u.cases])), 4).map((plan) => [
+        plan.windowed,
+        plan.suites.map((s) => s.path),
+      ]);
+    };
+    assert.deepEqual(
+      dealing(plainSuites),
+      [[true, ['res://tests/menu_test.gd', 'res://tests/keys_test.gd', 'res://tests/lay_test.gd']]],
+      'without it, a few quick suites share the windowed engine',
+    );
+    assert.deepEqual(
+      dealing(windowOnlyWhereNeeded(plainSuites)),
+      [
+        [true, ['res://tests/menu_test.gd']],
+        [false, ['res://tests/keys_test.gd', 'res://tests/lay_test.gd']],
+      ],
+      'with it, the windowed engine runs only the suite needing a window',
+    );
     const lone = [unit('menu', 1, true), unit('stood', 1, false, true), unit('plain', 1)];
     const loneDeclared = new Map(lone.map((u) => [u.suite, u.cases]));
     const apart = dealt(lone, loneDeclared, 4);
@@ -38540,6 +38570,35 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       { engines: 2, held: 'the machine has 2 processors' },
       'and processors do',
     );
+    // Windows refuses an allocation at the commit limit: the machine in the report had 23 GB free
+    // and 4.9 GB left to commit, and sixteen engines sized by the first died of the second.
+    const room = memoryRoomOf(23 * gb, 4.9 * gb);
+    assert.deepEqual(room, { bytes: 4.9 * gb, said: 'of memory left to commit' }, 'the smaller of the two');
+    assert.deepEqual(
+      roomFor(16, 16, room.bytes, room.said),
+      {
+        engines: 1,
+        held: 'the machine has 4.9 GB of memory left to commit, 4.0 GB of it kept for everything else and 1.5 GB taken for each engine',
+      },
+      'and the line says which it was',
+    );
+    assert.deepEqual(memoryRoomOf(8 * gb, 100 * gb), { bytes: 8 * gb, said: 'of memory free' });
+    assert.deepEqual(memoryRoomOf(8 * gb, null), { bytes: 8 * gb, said: 'of memory free' }, 'off Windows');
+    assert.deepEqual(
+      memoryRoomOf(8 * gb, 'PowerShell timed out'),
+      { bytes: 8 * gb, said: 'of memory free', unread: 'PowerShell timed out' },
+      'and a reading Windows did not give is said',
+    );
+    // Asked of the real system, since every case above hands the reading in.
+    const commit = await windowsCommitLeft();
+    if (process.platform === 'win32') {
+      assert.ok(
+        typeof commit === 'number' && commit > 0,
+        `Windows says what it can still commit: ${String(commit)}`,
+      );
+    } else {
+      assert.equal(commit, null, 'and nothing is asked elsewhere');
+    }
     // macOS's own reading, asked of the real kernel there: without it every run on a Mac is held
     // to the few hundred megabytes freemem counts.
     const level = await macMemoryLevel();
@@ -38696,8 +38755,16 @@ function testTheTestCommandReadsItsOwnOptions(): void {
         '--order',
         '7',
         '--changed-only',
+        '--window-only-needed',
+        '--print-output',
       ],
       tmpdir(),
+    );
+    assert.deepEqual([read.windowOnlyNeeded, read.printOutput], [true, true]);
+    assert.deepEqual(
+      [testOptionsOf([], project).windowOnlyNeeded, testOptionsOf([], project).printOutput],
+      [false, false],
+      'both off unless asked for',
     );
     assert.equal(read.projectPath, project, 'the project named first');
     assert.deepEqual(
@@ -38885,6 +38952,32 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     assert.doesNotMatch(everything.said, /are not run/, 'without the flag, every suite runs');
     assert.doesNotMatch(everything.said, /Dealt out case by case/, 'nothing took long enough to split');
 
+    // A benchmark written as a suite reports by printing, which a passing run otherwise throws away.
+    writeTree(project, {
+      'tests/says_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_says() -> void:\n\tprint("frames per second: 4f2a")\n\tassert_bool(true).is_true()\n',
+    });
+    const quiet = test('tests/says_test.gd');
+    assert.equal(quiet.status, 0, quiet.said);
+    assert.match(quiet.said, /^Passed: 1 case in 1 suite across 1 engine, /m, quiet.said);
+    assert.ok(!quiet.said.includes('frames per second: 4f2a'), quiet.said);
+    const told = test('tests/says_test.gd', '--print-output');
+    assert.equal(told.status, 0, told.said);
+    assert.match(
+      told.said,
+      /^--- what engine \d+ printed, running res:\/\/tests\/says_test\.gd:\n[\s\S]*^frames per second: 4f2a$[\s\S]*^Passed: 1 case in 1 suite across 1 engine, /m,
+      told.said,
+    );
+    assert.ok(
+      !told.said.includes(String.fromCharCode(0x1b)),
+      'without the codes that clear the screen and colour the lines',
+    );
+    assert.equal(
+      existsSync(join(state, 'test-runs')) && readdirSync(join(state, 'test-runs')).length > 0,
+      false,
+      'and the run still keeps no logs once it has printed them',
+    );
+
     const reversed = test('tests/ok_test.gd', 'tests/declared_test.gd', '--order', 'reversed');
     assert.match(reversed.said, /over 1 engine, in reverse order of path\.$/m, reversed.said);
     const shuffled = test('tests/ok_test.gd', '--order', '7');
@@ -39009,6 +39102,17 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
         beside.said,
       );
       assert.doesNotMatch(beside.said, /runs with a window here/, beside.said);
+      // A suite declaring nothing shares the windowed engine unless the run keeps it to the suites
+      // needing a window.
+      const kept = test('--window-only-needed', 'tests/window_test.gd', 'tests/ok_test.gd');
+      assert.equal(kept.status, 0, kept.said);
+      assert.match(
+        kept.said,
+        /in 2 suites over 2 engines, one of them windowed(?:, one at a time, since [^\n]*)?\.$/m,
+        kept.said,
+      );
+      const together = test('tests/window_test.gd', 'tests/ok_test.gd');
+      assert.match(together.said, /in 2 suites over 1 engine, with a window\./, together.said);
       // In one engine it has to share the window, and the run says so before it starts.
       for (const [args, why] of [
         [['--engines', '1'], 'the run has one engine'],

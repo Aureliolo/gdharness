@@ -65,9 +65,11 @@ import {
   unitsOf,
   viewportOf,
   windowedSaid,
+  windowOnlyWhereNeeded,
   writeJson,
 } from './suite-plan.js';
 import { getLocalVersion } from './version.js';
+import { askWindows } from './windows-ask.js';
 
 /** A command line `test` cannot act on, which the CLI answers with exit code 2. */
 export class TestUsageError extends Refusal {}
@@ -87,6 +89,10 @@ export interface TestOptions {
   readonly importFirst: boolean;
   /** Every suite in one engine in this order: `reversed`, or shuffled by the seed. */
   readonly order: 'reversed' | number | null;
+  /** Keep the windowed engine to the suites needing a window, as though every other said `false`. */
+  readonly windowOnlyNeeded: boolean;
+  /** Print what each engine printed, after the run and before its verdict. */
+  readonly printOutput: boolean;
 }
 
 /** Most engines a run starts, whatever the machine has. */
@@ -99,8 +105,15 @@ const SILENCE_FLOOR_SECONDS = 300;
 /** How many times its slowest unit an engine may print nothing for. */
 const SILENCE_TIMES_SLOWEST = 4;
 const LOOK_MS = 500;
+/** How long Windows is given to say how much it can still commit, on a machine the run may load. */
+const COMMIT_ASK_MS = 15_000;
 /** What the engine prints when an autoload did not start, after which no suite can mean anything. */
 const AUTOLOAD_FAILED = 'Failed to instantiate an autoload';
+/**
+ * A terminal control sequence. gdUnit4 opens its output by clearing the screen, which printed as it
+ * stands would wipe the lines the run had printed before it.
+ */
+const CONTROL_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[A-Za-z]`, 'g');
 
 const VALUED = new Set([
   '--engines',
@@ -111,7 +124,7 @@ const VALUED = new Set([
   '--reach-also',
   '--order',
 ]);
-const SWITCHES = new Set(['--changed-only', '--import']);
+const SWITCHES = new Set(['--changed-only', '--import', '--window-only-needed', '--print-output']);
 
 /** [param args], everything after `test`, read into options; relative paths are read from [param cwd]. */
 export function testOptionsOf(args: readonly string[], cwd: string): TestOptions {
@@ -156,6 +169,8 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
     importFirst: switches.has('--import'),
     order: order === undefined ? null : order === 'reversed' ? 'reversed' : seedOf(order),
+    windowOnlyNeeded: switches.has('--window-only-needed'),
+    printOutput: switches.has('--print-output'),
   };
 }
 
@@ -270,6 +285,7 @@ export function roomFor(
   most: number,
   processors: number,
   available: number,
+  said = 'of memory free',
 ): { engines: number; held: string | undefined } {
   const byMemory = Math.floor((available - MEMORY_KEPT) / MEMORY_PER_ENGINE);
   const engines = Math.max(1, Math.min(most, processors, byMemory));
@@ -281,20 +297,68 @@ export function roomFor(
     engines,
     held:
       byMemory < processors
-        ? `the machine has ${gigabytes(Math.max(0, available))} of memory free, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(MEMORY_PER_ENGINE)} taken for each engine`
+        ? `the machine has ${gigabytes(Math.max(0, available))} ${said}, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(MEMORY_PER_ENGINE)} taken for each engine`
         : `the machine has ${plural(processors, 'processor')}`,
   };
+}
+
+/** The memory the machine can give engines, how the line on room words it, and why a reading failed. */
+interface MemoryRoom {
+  readonly bytes: number;
+  readonly said: string;
+  readonly unread?: string;
 }
 
 /**
  * The memory the machine can give engines. freemem on macOS counts only the pages nobody holds,
  * a few hundred megabytes on a Mac whose file cache would give way at once, so a run there was held
  * to one engine whatever it asked for. The kernel's own share of memory it counts as free, the
- * percentage memory_pressure prints, includes what it can take back.
+ * percentage memory_pressure prints, includes what it can take back. Windows refuses an allocation
+ * at the commit limit rather than at physical memory, and a machine with 23 GB free and 4.9 GB left
+ * to commit started sixteen engines that died with STATUS_COMMITMENT_LIMIT, so there the smaller
+ * of the two is the room.
  */
-async function memoryAvailable(): Promise<number> {
+async function memoryAvailable(): Promise<MemoryRoom> {
   const level = await macMemoryLevel();
-  return level === null ? freemem() : (totalmem() * level) / 100;
+  if (level !== null) {
+    return { bytes: (totalmem() * level) / 100, said: 'of memory free' };
+  }
+  return memoryRoomOf(freemem(), await windowsCommitLeft());
+}
+
+/**
+ * The room [param free] physical bytes and [param commit], what Windows can still commit (null
+ * elsewhere, or why it did not say), leave engines: the smaller of the two.
+ */
+export function memoryRoomOf(free: number, commit: number | string | null): MemoryRoom {
+  if (typeof commit === 'string') {
+    return { bytes: free, said: 'of memory free', unread: commit };
+  }
+  return commit !== null && commit < free
+    ? { bytes: commit, said: 'of memory left to commit' }
+    : { bytes: free, said: 'of memory free' };
+}
+
+/**
+ * How much more Windows will commit, in bytes, which is what GlobalMemoryStatusEx answers as
+ * ullAvailPageFile; null off Windows, or why Windows did not say.
+ */
+export async function windowsCommitLeft(): Promise<number | string | null> {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+  try {
+    const said = await askWindows(
+      '(Get-CimInstance Win32_OperatingSystem -Property FreeVirtualMemory).FreeVirtualMemory',
+      COMMIT_ASK_MS,
+    );
+    const kilobytes = Number(said.trim());
+    return Number.isFinite(kilobytes) && kilobytes > 0
+      ? kilobytes * 1024
+      : `it answered ${JSON.stringify(said.trim())}`;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 /** The percentage of memory macOS counts as free, or null off macOS or when it would not say. */
@@ -435,8 +499,14 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       }
     }
     const times = readTimes(timesFile);
-    const units = unitsOf(suites, times);
-    const room = roomFor(options.engines, availableParallelism(), await memoryAvailable());
+    const units = unitsOf(options.windowOnlyNeeded ? windowOnlyWhereNeeded(suites) : suites, times);
+    const memory = await memoryAvailable();
+    if (memory.unread !== undefined) {
+      console.log(
+        `Windows did not say how much memory it can still commit (${memory.unread}), so engines are sized by the physical memory free.`,
+      );
+    }
+    const room = roomFor(options.engines, availableParallelism(), memory.bytes, memory.said);
     const plans =
       options.order === null
         ? dealt(units, declared, room.engines, options.engines)
@@ -455,7 +525,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     if (windowedAnyway.length > 0) {
       const one = windowedAnyway.length === 1;
       console.log(
-        `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since ${options.order === null ? 'the run has one engine' : 'an ordered run is one engine'} and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
+        `${named(windowedAnyway)} ${options.windowOnlyNeeded ? `${one ? 'needs' : 'need'} no window, which --window-only-needed keeps ${one ? 'it' : 'them'} out of,` : `${one ? 'says it runs' : 'say they run'} headless`} and ${one ? 'runs' : 'run'} with a window here, since ${options.order === null ? 'the run has one engine' : 'an ordered run is one engine'} and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
       );
     }
     const split = [...new Set(units.map((unit) => unit.suite))].filter(
@@ -486,7 +556,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       ),
     );
     recordPassed(passedFile, ran, printsOf);
-    return report(ran, startedAt, runDirectory);
+    return report(ran, startedAt, runDirectory, options.printOutput);
   } finally {
     process.off('SIGINT', interrupted);
     process.off('SIGTERM', interrupted);
@@ -815,7 +885,26 @@ function endTree(child: ChildProcess): void {
 }
 
 /** Prints how the run went and answers the exit code: what failed, in full, then one line of totals. */
-function report(ran: readonly EngineRan[], startedAt: number, runDirectory: string): number {
+function report(
+  ran: readonly EngineRan[],
+  startedAt: number,
+  runDirectory: string,
+  printOutput: boolean,
+): number {
+  // Ahead of the verdict, so the last lines are still how the run went.
+  if (printOutput) {
+    for (const engine of ran) {
+      console.log('');
+      console.log(
+        `--- what engine ${String(engine.index)} printed, running ${named(engine.plan.suites.map((suite) => suite.path))}:`,
+      );
+      console.log(
+        existsSync(engine.log)
+          ? readFileSync(engine.log, 'utf8').replace(CONTROL_SEQUENCE, '').trimEnd()
+          : '(no log was written)',
+      );
+    }
+  }
   const failed = ran.filter((engine) => !engine.verdict.passed);
   for (const engine of failed) {
     console.log('');
