@@ -401,8 +401,10 @@ the engine for a log file as it starts, and `editor_output op: "editor"` reads i
 replaces that file when it opens it, so one file is one editor session from its first line, which
 is where a wall of startup errors will be. Beside it, `.godot/gdharness-editor.json` records which
 editor the log belongs to: a log from yesterday's editor is still on disk today, and reading it as
-this one's would answer with a session that has ended. An editor somebody opened by hand has no log
-at all and is refused saying so.
+this one's would answer with a session that has ended. The same note answers once no editor is
+connected: the log of the editor it names is read as that editor's, with whether it still runs, so
+an editor that closed or crashed can still be asked what it printed last. An editor somebody opened
+by hand has no log at all and is refused saying so.
 
 The editor keeps asking from its end too, so the order the two start in does not matter. A socket
 pointed at a port nothing is listening on sits in its connect for thirty seconds before it gives

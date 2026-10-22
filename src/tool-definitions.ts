@@ -1770,7 +1770,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       "What the project started by editor_run has printed, as entries with a severity: the errors and warnings the engine reported, each with where it happened, and everything else as info. For a run the editor plays the reports come from the game itself, through the runtime addon, since the editor's debugger relays what a game prints and not what it reports; a played game without the runtime addon answers here with its prints alone, with errorsUnread true and no clean, since what it raised reaches nothing here. A run answers with counts and a verdict: clean is true when no error was reported, and warnings, counted beside it, do not make it false. heldAt is three answers: null for a run this server knows is not held, running or over, an object for one it knows is held at a breakpoint, whether the adapter said so or the runtime did by accepting a connection and never answering, and absent with heldUnknown beside it for a server that connected to the debugger after the stop and has no runtime to ask, since the adapter reports a stop only to the sessions connected when it happened. A run that has quit still answers here, with running false and its exit code, until the next one starts; a run ended by a signal has no exit code, and exitSignal names the signal instead. A run this server started also answers with transcript, the file both its streams are written to: uncapped, written while the run is going, and the thing to read or tail for a long run rather than the engine's own log, which every engine start rotates away. Read the file for output and this answer for state: endedBy says whether gdharness ended the run, and a transcript that has stopped growing is a run between prints rather than a run that is over. running is asked of the operating system whenever there is a process to ask about, which is every run this server started and every editor-played run whose game announced its runtime. For an editor-played run that never announced, there is no process id here and running is the editor's answer, which can lag: one reported a game as playing fifteen seconds after its process was ended from outside. editor_status names that game under runtimes, which does not depend on the editor answering. op: \"editor\" answers about the editor itself instead, which is a different log and the only way anything here can read what an editor printed: its console reaches no plugin, so the addon cannot scrape it, and an editor gdharness opened is asked for a log file as it starts. That covers the whole session from the editor's first line, where the output worth reading usually is, since the class cache, the plugins and the language server speak before any harness connects. It answers counts with no clean, since an editor neither passes nor fails, the entries in the order they were printed and, beside them under repeated, each message shape several lines share: how many, what varied in each slot of it and how many different values stood there, the first occurrence, and the ordinary lines above the group, found by walking back past the group rather than by counting lines. An editor somebody opened by hand has no console here and is refused saying so rather than answered empty, because an editor that printed nothing and an editor nobody captured are not the same thing. startedAt is when the run began and elapsedMs how long it has been going; for a run that is over, endedAt is when it ended and elapsedMs how long it ran, and both are left out when nobody saw the end, as for a game closed in the editor or a run picked up from a note written before ends were recorded.",
     answer:
-      "Each entry's source says where it was read: transcript for a line of the run's transcript file, which holds both its streams and is how every run with one is read; stdout or stderr for a line of that stream of a run with no transcript, such as an editor-played run picked up after a reconnect whose first server left no note; debugger for what the editor's debug adapter reported and the game never printed, such as the script error a game stopped on.",
+      "Each entry's source says where it was read: transcript for a line of the run's transcript file, which holds both its streams and is how every run with one is read; stdout or stderr for a line of that stream of a run with no transcript, such as an editor-played run picked up after a reconnect whose first server left no note; debugger for what the editor's debug adapter reported and the game never printed, such as the script error a game stopped on. A printerr line is info: it prints to stderr, and the engine reports no error for it. For op editor with no editor connected, connected is false, editorRunning says whether the editor whose console it is still runs, and editorNote whether this server closed it or it went without a close, as a crash does; the next editor gdharness opens on the project starts a new console.",
     parameters: {
       projectPath: {
         type: 'string',
@@ -1827,7 +1827,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       editor: {
         effect: 'read',
         summary:
-          "What the connected editor itself has printed, from its first line, with repeated messages grouped and the ordinary lines above each group carried with it. The engine's progress bars are one line per task, saying how far an unfinished one got",
+          "What the editor itself has printed, from its first line, each of the engine's progress bars as one line saying how far an unfinished task got. With no editor connected, the console the last editor gdharness opened here left, ending where a crashed one stopped",
         requires: [],
       },
     },
@@ -1875,7 +1875,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_classes',
     title: 'Engine classes',
-    description: "The engine's ClassDB: find classes, read one in full, or walk an inheritance tree.",
+    description:
+      "The engine's ClassDB, with the classes the project's scripts declare beside it: find classes, read one in full, or walk an inheritance tree. The project's classes are read from the scripts on disk, so one written a moment ago is there before any scan. query and inheritance answer them under project_classes, project_children and project_descendants, each with its path, what it extends and whether it is abstract; info reads engine classes only, and a project class is read in full by script_info structure.",
     parameters: {
       projectPath: PROJECT_PATH,
       filter: { type: 'string', ops: ['query'], description: 'query: a substring of the class name.' },
@@ -1901,7 +1902,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       instantiableOnly: {
         type: 'boolean',
         ops: ['query'],
-        description: 'query: leave out abstract classes. Default false.',
+        description:
+          'query: leave out abstract classes: an engine class that cannot be instantiated, and a project class that is @abstract or built on an engine class that cannot be. A class extending an @abstract one is kept. Default false.',
       },
       className: {
         type: 'string',
@@ -1923,7 +1925,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath'],
     operations: {
-      query: { effect: 'read', summary: 'classes matching a filter or category', requires: [] },
+      query: {
+        effect: 'read',
+        summary: "classes matching a filter or category, the engine's and the project's",
+        requires: [],
+      },
       info: {
         effect: 'read',
         summary: 'methods, properties, signals and enums of one class, or one member of it by name',
@@ -1931,7 +1937,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       inheritance: {
         effect: 'read',
-        summary: 'ancestors and descendants of one class',
+        summary: 'ancestors and descendants of one class, an engine class or one a project script declares',
         requires: ['className'],
       },
     },

@@ -17,12 +17,14 @@ on:
         description: The regression parts as a JSON list of k/n, such as ["1/3", "2/3", "3/3"].
         type: string
         required: true
-      engine-fixtures-in-first-part:
+      engine-fixtures-with-editor-fixtures:
         description: >-
-          Run the engine fixtures on the first regression part's machine rather than their own, the
-          regressions dealt round them. For macOS, where GitHub runs five jobs at once for the
-          account: a run asking for five queued behind any other holding one, a pull request's beside
-          main's or the release's install check beside the release commit's, for up to eight minutes.
+          Run the engine fixtures on the editor fixtures' machine rather than their own. For macOS,
+          where GitHub runs five jobs at once for the account: a run asking for five queued behind any
+          other holding one, a pull request's beside main's or the release's install check beside the
+          release commit's, for up to eight minutes. That machine has the room: its editor fixtures
+          take about six minutes, while a regression part carrying the fixtures, which took from 370
+          to 491 seconds between runs of the same code, reached its twenty-minute limit.
         type: boolean
         default: false
 
@@ -73,13 +75,6 @@ jobs:
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
           GDHARNESS_REGRESSION_SHARD: ${{ matrix.part }}
-          GDHARNESS_ENGINE_FIXTURES_IN_FIRST_PART: ${{ inputs.engine-fixtures-in-first-part && '1' || '' }}
-
-      - name: Engine fixtures
-        if: inputs.engine-fixtures-in-first-part && startsWith(matrix.part, '1/') && !cancelled()
-        run: bun run test:engine
-        env:
-          GDHARNESS_REQUIRE_GODOT: '1'
 
   fixtures:
     name: ${{ matrix.part }}
@@ -90,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: ${{ fromJSON(inputs.engine-fixtures-in-first-part && '["editor fixtures"]' || '["engine fixtures", "editor fixtures"]') }}
+        part: ${{ fromJSON(inputs.engine-fixtures-with-editor-fixtures && '["editor fixtures"]' || '["engine fixtures", "editor fixtures"]') }}
 
     steps:
       - name: Checkout
@@ -115,14 +110,6 @@ jobs:
         if: matrix.part == 'editor fixtures'
         run: bun run build
 
-      - name: Engine fixtures
-        if: matrix.part == 'engine fixtures'
-        run: bun run test:engine
-        env:
-          # The suite skips when it cannot run Godot, which is right on a contributor's machine
-          # and wrong here: without this a broken install would read as a pass.
-          GDHARNESS_REQUIRE_GODOT: '1'
-
       # The bridge test's ClassDB phase reaches the engine and skips without one, so it is run
       # again here, where a skip is a failure.
       - name: Bridge integration test with the engine
@@ -138,4 +125,14 @@ jobs:
         if: matrix.part == 'editor fixtures' && !cancelled()
         run: bun run test:editor
         env:
+          GDHARNESS_REQUIRE_GODOT: '1'
+
+      # Last, because the bridge test runs only after every step before it passed, and on a machine
+      # running both a failing engine fixture would otherwise keep it from running.
+      - name: Engine fixtures
+        if: (matrix.part == 'engine fixtures' || inputs.engine-fixtures-with-editor-fixtures) && !cancelled()
+        run: bun run test:engine
+        env:
+          # The suite skips when it cannot run Godot, which is right on a contributor's machine
+          # and wrong here: without this a broken install would read as a pass.
           GDHARNESS_REQUIRE_GODOT: '1'

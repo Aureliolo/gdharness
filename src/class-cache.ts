@@ -12,7 +12,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
-import { codeOf } from './gdscript-source.js';
+import { codeOf, shapeOf } from './gdscript-source.js';
 
 /**
  * What a `class_name` line looks like, including the annotations that may share it.
@@ -57,6 +57,72 @@ export function declaredClasses(projectPath: string): Map<string, string> {
     }
   });
   return declared;
+}
+
+/** A `class_name` a project script declares, with what it extends and whether it is abstract. */
+export interface DeclaredClass {
+  readonly path: string;
+  /**
+   * The class it extends: a project class, an engine class, or as written when it names neither,
+   * such as an inner class. A base script with no class_name is passed through to what that script
+   * extends, since only a named class can stand in an inheritance line.
+   */
+  readonly extends: string;
+  readonly abstract: boolean;
+}
+
+const ABSTRACT_HEADER = /^((?:@[\p{L}_][\p{L}\p{N}_]*(?:\([^)]*\))?\s+)*)(?:class_name|extends)\s/mu;
+
+/**
+ * Every class_name declared under the project, as [method declaredClasses] finds them, with what
+ * each extends and whether it is abstract, read from the scripts for the reason the names are: the
+ * class cache lags them.
+ */
+export function declaredClassLines(projectPath: string): Map<string, DeclaredClass> {
+  const sources = new Map<string, string>();
+  eachScript(projectPath, (script, source) => {
+    sources.set(script, source);
+  });
+  const named = new Map<string, string>();
+  for (const [script, source] of sources) {
+    const found = declaredClassOf(source);
+    if (found !== null) {
+      named.set(script, found);
+    }
+  }
+  const baseOf = (script: string, seen: Set<string>): string => {
+    const written = shapeOf(sources.get(script) ?? '').body.extendsAs;
+    if (written === null) {
+      return 'RefCounted';
+    }
+    const quote = written[0];
+    if (quote !== '"' && quote !== "'") {
+      return written;
+    }
+    const given = written.slice(1, -1);
+    const path = given.startsWith('res://')
+      ? given
+      : posix.join(posix.dirname(script), given).replace(/^res:\/(?!\/)/, 'res://');
+    const name = named.get(path);
+    if (name !== undefined) {
+      return name;
+    }
+    if (!sources.has(path) || seen.has(path)) {
+      return written;
+    }
+    seen.add(path);
+    return baseOf(path, seen);
+  };
+  const lines = new Map<string, DeclaredClass>();
+  for (const [script, name] of named) {
+    const header = ABSTRACT_HEADER.exec(codeOf(sources.get(script) ?? ''))?.[1] ?? '';
+    lines.set(name, {
+      path: script,
+      extends: baseOf(script, new Set([script])),
+      abstract: /@abstract\b/u.test(header),
+    });
+  }
+  return lines;
 }
 
 /** The `class_name` [param source] declares, or null. */

@@ -25,6 +25,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { declaredClassLines } from '../src/class-cache.js';
 import {
   ANSWERED,
   ASIDE,
@@ -2560,7 +2561,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   // though the project had no such class. The cache rebuilt above holds FixtureHero.
   const scripted = runRefusedOperation(godotPath, projectDir, 'query_class_info', {
     class_name: 'FixtureHero',
-    project_classes: { FixtureHero: 'res://made/hero.gd' },
+    project_classes: { FixtureHero: { path: 'res://made/hero.gd', extends: 'Node2D', abstract: false } },
   });
   assert.match(
     scripted.stderr,
@@ -2572,7 +2573,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   });
   assert.match(
     nowhere.stderr,
-    /Class not found: FixtureNobody\. editor_classes reads the engine's ClassDB/,
+    /Class not found: FixtureNobody\. Neither the engine nor a project script declares it\./,
     nowhere.stderr,
   );
   // A letter short of an engine class is offered the class, as the usual miss is a spelling.
@@ -2587,9 +2588,12 @@ function testOperations(godotPath: string, projectDir: string): void {
   // The classes the scripts declare on disk are the ones judged, not the class cache, which lags
   // them: a class written a moment ago was refused as declared nowhere, and a misspelt one was
   // offered only engine classes.
-  const unscanned = runRefusedOperation(godotPath, projectDir, 'inspect_inheritance', {
+  const unscanned = runRefusedOperation(godotPath, projectDir, 'query_class_info', {
     class_name: 'FixtureLater',
-    project_classes: { FixtureHero: 'res://made/hero.gd', FixtureLater: 'res://made/later.gd' },
+    project_classes: {
+      FixtureHero: { path: 'res://made/hero.gd', extends: 'Node2D', abstract: false },
+      FixtureLater: { path: 'res://made/later.gd', extends: 'Node', abstract: false },
+    },
   });
   assert.match(
     unscanned.stderr,
@@ -2598,7 +2602,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   const ownMisspelt = runRefusedOperation(godotPath, projectDir, 'query_class_info', {
     class_name: 'FixtureHerp',
-    project_classes: { FixtureHero: 'res://made/hero.gd' },
+    project_classes: { FixtureHero: { path: 'res://made/hero.gd', extends: 'Node2D', abstract: false } },
   });
   assert.match(
     ownMisspelt.stderr,
@@ -4812,7 +4816,127 @@ function testAnAutoloadIsUsedByItsName(godotPath: string): void {
 }
 
 /** The cases after the fixtures, in the order the leg runs them, by the name `case` takes. */
+/**
+ * The classes a project's scripts declare stand beside the engine's in query and inheritance.
+ *
+ * Found by a probe: Creature extends Node2D, and inheritance on Node2D listed fifty descendants
+ * without it, a query for "Creature" answered nothing, and inheritance on a project class was
+ * refused, with no word that the answers covered the engine's classes alone. The case hands the
+ * operation what the server reads from this project's scripts, so the reading and the answer are
+ * held together rather than against a table written here.
+ */
+function testTheProjectsClassesStandBesideTheEngines(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    const scripts: Record<string, string> = {
+      'creature.gd': 'class_name Creature\nextends Node2D\n',
+      'dragon.gd': 'class_name Dragon\nextends Creature\n',
+      // A base script with no class_name, between two that have one.
+      'wyrm.gd': 'extends "res://dragon.gd"\n',
+      'wyvern.gd': 'class_name Wyvern\nextends "wyrm.gd"\n',
+      'shape.gd': '@abstract\nclass_name Shape\nextends Resource\n\n\n@abstract func area() -> float\n',
+      'polygon.gd': '@abstract class_name Polygon extends Shape\n',
+      'circle.gd': 'class_name Circle\nextends Shape\n\n\nfunc area() -> float:\n\treturn 1.0\n',
+      'plain.gd': 'class_name Plain\n',
+      // Concrete itself, on an engine class that cannot be instantiated.
+      'body.gd': 'class_name Body\nextends PhysicsBody2D\n',
+    };
+    for (const [file, source] of Object.entries(scripts)) {
+      writeFileSync(join(dir, file), source);
+    }
+    const mine = ['Body', 'Circle', 'Creature', 'Dragon', 'Plain', 'Polygon', 'Shape', 'Wyvern'];
+    const project_classes = Object.fromEntries(declaredClassLines(dir));
+    const operation = (name: string, params: Record<string, unknown>): unknown =>
+      runOperation(godotPath, dir, name, { ...params, project_classes });
+    const names = (list: unknown): string[] =>
+      asArray(list)
+        .map((entry) => String(get(entry, 'name')))
+        .filter((name) => mine.includes(name));
+
+    const found = operation('query_classes', { filter: 'creature' });
+    assert.deepEqual(
+      [get(found, 'classes'), get(found, 'project_classes')],
+      [[], [{ name: 'Creature', path: 'res://creature.gd', extends: 'Node2D', abstract: false }]],
+      JSON.stringify(found),
+    );
+    assert.deepEqual(
+      names(get(operation('query_classes', { category: 'node2d' }), 'project_classes')),
+      ['Body', 'Creature', 'Dragon', 'Wyvern'],
+      'a category is the engine class a project class is built on',
+    );
+    assert.deepEqual(
+      names(get(operation('query_classes', { instantiable_only: true }), 'project_classes')),
+      ['Circle', 'Creature', 'Dragon', 'Plain', 'Wyvern'],
+      'the @abstract classes and one on an abstract engine class are left out, and one extending an @abstract class is kept',
+    );
+
+    const node2d = operation('inspect_inheritance', { class_name: 'Node2D' });
+    assert.deepEqual(
+      [names(get(node2d, 'project_children')), names(get(node2d, 'project_descendants'))],
+      [['Creature'], ['Body', 'Creature', 'Dragon', 'Wyvern']],
+      JSON.stringify(node2d),
+    );
+    assert.ok(asArray(get(node2d, 'all_descendants')).includes('Camera2D'), 'beside the engine classes');
+
+    const dragon = operation('inspect_inheritance', { class_name: 'Dragon' });
+    assert.deepEqual(
+      [
+        get(dragon, 'declared_in'),
+        get(dragon, 'parent_class'),
+        get(dragon, 'ancestors'),
+        names(get(dragon, 'project_children')),
+        get(dragon, 'abstract'),
+        get(dragon, 'can_instantiate'),
+      ],
+      [
+        'res://dragon.gd',
+        'Creature',
+        ['Creature', 'Node2D', 'CanvasItem', 'Node', 'Object'],
+        ['Wyvern'],
+        false,
+        true,
+      ],
+      JSON.stringify(dragon),
+    );
+    const shape = operation('inspect_inheritance', { class_name: 'Shape' });
+    assert.deepEqual(
+      [
+        get(shape, 'ancestors'),
+        names(get(shape, 'project_children')),
+        get(shape, 'abstract'),
+        get(shape, 'can_instantiate'),
+      ],
+      [['Resource', 'RefCounted', 'Object'], ['Circle', 'Polygon'], true, false],
+      JSON.stringify(shape),
+    );
+
+    const misspelt = runRefusedOperation(godotPath, dir, 'inspect_inheritance', {
+      class_name: 'Dragn',
+      project_classes,
+    });
+    assert.match(
+      misspelt.stderr,
+      /Class not found: Dragn\..* The nearest class a project script declares is Dragon\. Neither the engine nor a project script declares it\./,
+      misspelt.stderr,
+    );
+    const read = runRefusedOperation(godotPath, dir, 'query_class_info', {
+      class_name: 'Dragon',
+      project_classes,
+    });
+    assert.match(
+      read.stderr,
+      /Dragon is not an engine class: it is the class_name res:\/\/dragon\.gd declares, .*script_info structure/,
+      read.stderr,
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
 const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => void | Promise<void>>> = {
+  projectClasses: (godotPath) => {
+    testTheProjectsClassesStandBesideTheEngines(godotPath);
+  },
   dependencyWalk: testDependencyWalk,
   operations: testOperations,
   gdignore: testAGdignoreStopsTheWalk,

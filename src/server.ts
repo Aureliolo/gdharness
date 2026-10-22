@@ -44,6 +44,7 @@ import {
   classesNamedIn,
   contradictedDiagnostics,
   declaredClasses,
+  declaredClassLines,
   declaredSince,
   eachScript,
   externalMemberIn,
@@ -85,8 +86,10 @@ import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cac
 import {
   bursts,
   clearEditorLog,
+  type EditorLogNote,
   editorConsole,
   editorLogPath,
+  readEditorLogNote,
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from './editor-log.js';
@@ -3644,6 +3647,12 @@ class GodotServer {
    * for the editor it had just closed.
    */
   private closedHere: { readonly editorPid: number; readonly at: string } | null = null;
+  /**
+   * Every editor that has greeted this server, by pid. The editor this server launched stays its
+   * launched editor after it connects, so one that connected and then went is told apart from one
+   * that never connected only by this.
+   */
+  private readonly greetedEditors = new Set<number>();
 
   /** The calls being answered, by a number of their own, which the lifecycle log's ended line names. */
   private readonly inFlight = new Map<number, CallInFlight>();
@@ -3676,6 +3685,10 @@ class GodotServer {
     this.godotBridge = getDefaultBridge(this.ownProject);
     this.godotBridge.identifyEditorsWith(oneShotOptionOf);
     this.godotBridge.on('godot_connected', () => {
+      const greeted = this.godotBridge.getStatus().editorPid;
+      if (greeted !== undefined) {
+        this.greetedEditors.add(greeted);
+      }
       this.closedHere = null;
       this.settleTheLaunchReading();
     });
@@ -4727,7 +4740,7 @@ class GodotServer {
         if (!project.ok) {
           return project.response;
         }
-        const projectClasses = Object.fromEntries(declaredClasses(project.value.path));
+        const projectClasses = Object.fromEntries(declaredClassLines(project.value.path));
         return await this.headless(headless, { ...answerable, projectClasses });
       }
       if (headless !== 'refresh_class_cache') {
@@ -9617,12 +9630,13 @@ class GodotServer {
     // it: an editor that exited without connecting left its number behind, and a later process the
     // operating system handed it to answered yes, so the server reported an editor still on its way
     // and named a pid belonging to something else. The launcher leaves no handle to ask instead.
-    this.launchedEditor = {
-      pid: launched.pid,
-      startedAt: (await startTimesOf([launched.pid])).get(launched.pid) ?? null,
-      projectPath,
-      arguments: args,
-    };
+    const startedAt = (await startTimesOf([launched.pid])).get(launched.pid) ?? null;
+    // Again with the start time, which a server reading this console after the editor has gone
+    // needs to tell the editor from a later process holding its pid.
+    if (startedAt !== null) {
+      writeEditorLogNote(projectPath, launched.pid, startedAt);
+    }
+    this.launchedEditor = { pid: launched.pid, startedAt, projectPath, arguments: args };
     this.closedHere = null;
     return { pid: launched.pid, error: null, arguments: args };
   }
@@ -12178,19 +12192,32 @@ class GodotServer {
       );
     }
     const projectPath =
-      status.projectPath ?? this.launchedEditor?.projectPath ?? this.ownProject ?? undefined;
+      status.projectPath ??
+      this.launchedEditor?.projectPath ??
+      this.ownProject ??
+      readNonEmptyString(args, 'projectPath');
     const elsewhere = this.anotherProjectNamed(args, projectPath);
     if (elsewhere !== null) {
       return elsewhere;
     }
-    if (projectPath === undefined || (!greeted && launched === null)) {
-      return this.createErrorResponse('No editor is connected, so there is no console to read.', [
+    // With nothing connected and nothing launched, the console on disk is that of the last editor
+    // gdharness opened on the project, which a closed or crashed editor leaves behind: the end of
+    // it is where a crash says why.
+    const noted =
+      projectPath === undefined || greeted || launched !== null ? null : readEditorLogNote(projectPath);
+    const editorPid = greeted ? (status.editorPid ?? null) : (launched ?? noted?.pid ?? null);
+    const nothing = (): ToolResponse =>
+      this.createErrorResponse('No editor is connected, so there is no console to read.', [
         'editor_status says whether one is connected and whether it may yet be',
         'editor_launch opens one, and an editor opened here has its console captured',
       ]);
+    if (projectPath === undefined || editorPid === null) {
+      return nothing();
     }
-    const editorPid = greeted ? (status.editorPid ?? null) : launched;
     const console = editorConsole(projectPath, editorPid, greeted ? status.openedByAServer === true : true);
+    if ('kind' in console && noted !== null) {
+      return nothing();
+    }
     if ('kind' in console) {
       return this.createErrorResponse(theConsoleWasNotCaptured(console, projectPath), [
         'editor_launch restart replaces this editor with one whose console is captured',
@@ -12220,12 +12247,10 @@ class GodotServer {
       filtered ? (entry) => answersTo(entry, severity, contains) : undefined,
     );
     const shown = grouped.slice(0, MOST_GROUPS);
-    const stillComing = !status.connected && (await this.launchedEditorIsUp());
     return this.jsonTextResponse({
-      editorPid: editorPid ?? undefined,
+      editorPid,
       projectPath,
-      // Said only before it connects, so a short console is read as one still being written.
-      ...(status.connected ? {} : stillComing ? { stillConnecting: true } : { exitedBeforeConnecting: true }),
+      ...(greeted ? {} : await this.whatBecameOfTheEditor(editorPid, noted, console.path)),
       capturedIn: console.path,
       // Said only when it happened: a console read whole needs no sentence about how much of it
       // was read, and one that was cut off is a different answer from one that is all there.
@@ -12247,6 +12272,39 @@ class GodotServer {
       entries: selected.entries,
       omitted: selected.omitted === 0 ? undefined : selected.omitted,
     });
+  }
+
+  /**
+   * What editor_output op editor says of an editor that is not connected, beside its console.
+   *
+   * Before it first connects, only that, so a short console is read as one still being written.
+   * After, whether it still runs and whether this server closed it, since the console of an editor
+   * that went is read for why it went.
+   */
+  private async whatBecameOfTheEditor(
+    editorPid: number,
+    noted: EditorLogNote | null,
+    path: string,
+  ): Promise<Record<string, unknown>> {
+    const launched = this.launchedEditor?.pid === editorPid ? this.launchedEditor : null;
+    if (launched !== null && !this.greetedEditors.has(editorPid)) {
+      return (await this.launchedEditorIsUp()) ? { stillConnecting: true } : { exitedBeforeConnecting: true };
+    }
+    const startedAt = launched?.startedAt ?? noted?.processStartedAt ?? null;
+    const now = alive(editorPid) ? (await startTimesOf([editorPid])).get(editorPid) : undefined;
+    const running = alive(editorPid) && (startedAt === null || now === undefined || now === startedAt);
+    const closed = this.closedHere?.editorPid === editorPid ? this.closedHere : null;
+    return {
+      connected: false,
+      editorRunning: running,
+      ...(closed === null ? {} : { closedAt: closed.at }),
+      editorNote:
+        closed !== null
+          ? `Editor ${editorPid} was closed with editor_launch close at ${closed.at}, and this is the console it wrote, read from ${path}. The next editor gdharness opens on this project starts a new one.`
+          : running
+            ? `Editor ${editorPid}, which gdharness opened on this project, is still running and is not connected to this server, so this console may still be growing. editor_status says whether it may yet connect.`
+            : `Editor ${editorPid}, which gdharness opened on this project, is no longer running, and this server did not close it: it was closed by hand, ended from outside or crashed, and an editor that crashed has its last lines at the end of this console. The next editor gdharness opens on this project starts a new one.`,
+    };
   }
 
   /**

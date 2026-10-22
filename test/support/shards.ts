@@ -118,15 +118,6 @@ export const REGRESSION_SECONDS: Readonly<Record<string, number>> = {
 };
 
 /**
- * Seconds the engine fixtures took on macOS, where they run on the first regression part's machine
- * rather than one of their own (339 in the same runs). GitHub runs five macOS jobs at once for the
- * account, and a run that asked for five queued behind any other run holding one: a pull request's
- * run beside main's, or the release's install check beside the release commit's, waited up to eight
- * minutes for a machine.
- */
-export const ENGINE_FIXTURES_SECONDS = 340;
-
-/**
  * What a regression too quick to have been measured is counted as. The ones under five seconds
  * averaged about half a second on Windows, the slowest platform, in the same run.
  */
@@ -144,14 +135,12 @@ export function regressionPart(
   part: number,
   parts: number,
   seconds: Readonly<Record<string, number>> = REGRESSION_SECONDS,
-  firstPartCarries = 0,
 ): string[] {
   const weight = (name: string): number => seconds[name] ?? UNMEASURED_SECONDS;
   const order = names
     .map((name, at) => ({ name, at }))
     .sort((a, b) => weight(b.name) - weight(a.name) || a.at - b.at);
-  // Work the first part's machine does besides its regressions, so the rest are dealt round it.
-  const loads = Array.from({ length: parts }, (_unused, at) => (at === 0 ? firstPartCarries : 0));
+  const loads = Array.from({ length: parts }, () => 0);
   const placed = new Map<string, number>();
   for (const { name } of order) {
     const lightest = loads.indexOf(Math.min(...loads));

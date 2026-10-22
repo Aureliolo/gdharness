@@ -51,6 +51,7 @@ import {
   classesNamedIn,
   contradictedDiagnostics,
   declaredClasses,
+  declaredClassLines,
   declaresMember,
   externalMemberIn,
   type FailedReload,
@@ -83,6 +84,7 @@ import {
   clearEditorLog,
   editorConsole,
   editorLogPath,
+  readEditorLogNote,
   shapeOf,
   theConsoleWasNotCaptured,
   writeEditorLogNote,
@@ -386,12 +388,7 @@ import {
 } from './support/json-rpc.js';
 import { pixelPng, solidPng } from './support/png.js';
 import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
-import {
-  ENGINE_FIXTURES_SECONDS,
-  REGRESSION_SECONDS,
-  regressionPart,
-  UNMEASURED_SECONDS,
-} from './support/shards.js';
+import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
 import { endEnginesLeft, leftBehindBy, reportUnswept, sweep, sweepingFor } from './support/sweep.js';
 
 /**
@@ -10833,6 +10830,12 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     );
     pid = asNumber(get(opened, 'pid'), 'pid');
     assert.ok(alive(pid), `the fixture needs the opened editor running: ${JSON.stringify(opened)}`);
+    // The note beside its console says when it began, which tells a server reading that console
+    // after the editor has gone the editor from a later process given its pid. Here because this
+    // is the editor that lives long enough to be asked: a stand-in engine exits first.
+    const began = (await startTimesOf([pid])).get(pid);
+    const noted = readEditorLogNote(project);
+    assert.deepEqual([noted?.pid, noted?.processStartedAt], [pid, began], JSON.stringify(noted));
 
     const asked = sceneCreate();
     await delay(1_500);
@@ -11061,6 +11064,274 @@ async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void
     );
   } finally {
     await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * editor_classes answers the project's own classes through the server, which reads what each
+ * extends from the scripts and hands it to the engine. The engine case gives the operation that
+ * reading itself, so only this one holds the server handing it over.
+ */
+async function testEditorClassesAnswersTheProjectsClasses(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('project classes regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-own-classes-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Own classes"\n',
+  );
+  writeFileSync(join(project, 'creature.gd'), 'class_name Creature\nextends Node2D\n');
+  writeFileSync(join(project, 'dragon.gd'), 'class_name Dragon\nextends Creature\n');
+  const server = new ServerProcess({ env: { GODOT_PATH: engine, GDHARNESS_PROJECT: project } });
+  try {
+    await server.initialize('regression-test');
+    const asked = await server.request(
+      'tools/call',
+      { name: 'editor_classes', arguments: { projectPath: project, op: 'inheritance', className: 'Node2D' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const said = textOf(asked) ?? '';
+    assert.deepEqual(
+      get(parseTextContent(asked), 'project_descendants'),
+      [
+        { name: 'Creature', path: 'res://creature.gd', extends: 'Node2D', abstract: false },
+        { name: 'Dragon', path: 'res://dragon.gd', extends: 'Creature', abstract: false },
+      ],
+      said,
+    );
+  } finally {
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * What each declared class extends and whether it is abstract, read from its script.
+ *
+ * editor_classes stands the project's classes beside the engine's from this, so a wrong reading is
+ * a wrong inheritance line. Each script is a shape the header can take: a base reached through
+ * scripts with no class_name, a quoted path relative to the script, annotations on their own lines
+ * and on the class line, an @abstract that marks a function rather than the class, one inside a
+ * comment, a loop of unnamed bases, and an inner class as a base.
+ */
+function testWhatADeclaredClassExtendsIsReadFromItsScript(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-class-lines-'));
+  try {
+    mkdirSync(join(project, 'sub'));
+    const scripts: Record<string, string> = {
+      'a.gd': '@tool\nclass_name A\nextends "res://sub/b.gd"\n',
+      'sub/b.gd': 'extends "c.gd"\n',
+      'sub/c.gd': 'class_name C\nextends Node\n',
+      'd.gd': 'class_name D\n\n\n@abstract\nfunc f() -> void\n',
+      'e.gd': '@abstract\n@icon("res://e.svg")\nclass_name E\nextends Resource\n',
+      'f.gd': '# @abstract\n@icon("res://@abstract.svg")\nclass_name F extends Node  # @abstract\n',
+      'loop1.gd': 'extends "loop2.gd"\n',
+      'loop2.gd': 'extends "loop1.gd"\n',
+      'g.gd': 'class_name G\nextends "loop1.gd"\n',
+      'h.gd': 'class_name H\nextends C.Inner\n',
+    };
+    for (const [file, source] of Object.entries(scripts)) {
+      writeFileSync(join(project, file), source);
+    }
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    const lines = declaredClassLines(project);
+    assert.deepEqual(
+      [...lines.entries()].sort(([one], [other]) => one.localeCompare(other)),
+      [
+        ['A', { path: 'res://a.gd', extends: 'C', abstract: false }],
+        ['C', { path: 'res://sub/c.gd', extends: 'Node', abstract: false }],
+        ['D', { path: 'res://d.gd', extends: 'RefCounted', abstract: false }],
+        ['E', { path: 'res://e.gd', extends: 'Resource', abstract: true }],
+        ['F', { path: 'res://f.gd', extends: 'Node', abstract: false }],
+        ['G', { path: 'res://g.gd', extends: '"loop1.gd"', abstract: false }],
+        ['H', { path: 'res://h.gd', extends: 'C.Inner', abstract: false }],
+      ],
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The console of an editor that has gone is still read, saying what became of it.
+ *
+ * Found by a probe: after editor_launch close the call was refused with "No editor is connected",
+ * while the file the editor wrote sat beside the project, and the console of an editor that
+ * crashed is the one thing that says why. The editor this server launched also stays its launched
+ * editor after connecting, so one that connected and then went was answered as having exited before
+ * it connected.
+ *
+ * The editor is a stand-in: a launch of an engine that exits at once, for the pid and the note, and
+ * a socket greeting with that pid. A second server has none of the first one's memory and reads
+ * the note alone, and the note's start time is what tells the editor from a live process holding
+ * its pid, which the last two reads take apart.
+ */
+async function testAGoneEditorsConsoleIsStillRead(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-console-gone-'));
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+  });
+  let later: ServerProcess | null = null;
+  let editor: WebSocket | null = null;
+  const callOn = async (on: ServerProcess, name: string, args: Record<string, unknown>): Promise<string> =>
+    textOf(await on.request('tools/call', { name, arguments: args })) ?? '';
+  const greet = async (pid: number): Promise<WebSocket> => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (isRecord(message) && message['type'] === 'tool_invoke') {
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: {} }));
+      }
+    });
+    socket.send(JSON.stringify(greeting(project, { editor_pid: pid, opened_by_a_server: true })));
+    let connected = false;
+    for (let waited = 0; waited < 10_000 && !connected; waited += 100) {
+      await delay(100);
+      connected =
+        get(
+          parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+          'editor',
+          'connected',
+        ) === true;
+    }
+    assert.ok(connected, 'the stand-in editor should have been greeted');
+    return socket;
+  };
+  const consoleOf = async (on: ServerProcess): Promise<{ said: string; read: unknown }> => {
+    const said = await callOn(on, 'editor_output', { op: 'editor' });
+    assert.ok(said.trimStart().startsWith('{'), `a console rather than a refusal: ${said}`);
+    return { said, read: jsonOf(said, 'editor_output op editor') };
+  };
+  try {
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Gone"\n\n' +
+        '[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    await server.initialize('regression-test');
+    const opened = await callOn(server, 'editor_launch', { op: 'open', projectPath: project });
+    const pid = asNumber(get(jsonOf(opened, 'editor_launch open'), 'pid'));
+    assert.ok(pid > 0, `the fixture needs a launch with a pid: ${opened}`);
+    for (let waited = 0; waited < 10_000 && alive(pid); waited += 100) {
+      await delay(100);
+    }
+    assert.ok(!alive(pid), 'the stand-in engine has exited, as an editor that went has');
+    writeFileSync(
+      editorLogPath(project),
+      'Godot Engine v4.7.2.stable.official\nbooting\nERROR: the last thing it said\n',
+    );
+
+    editor = await greet(pid);
+    const connected = await consoleOf(server);
+    assert.equal(get(connected.read, 'connected'), undefined, connected.said);
+    assert.equal(get(connected.read, 'counts', 'error'), 1, connected.said);
+
+    // Connected, then gone without a close: it did connect, so not "exited before connecting".
+    editor.close();
+    editor = null;
+    for (let waited = 0; waited < 10_000; waited += 100) {
+      await delay(100);
+      if (
+        get(
+          parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+          'editor',
+          'connected',
+        ) === false
+      ) {
+        break;
+      }
+    }
+    const crashed = await consoleOf(server);
+    assert.deepEqual(
+      [
+        get(crashed.read, 'editorPid'),
+        get(crashed.read, 'connected'),
+        get(crashed.read, 'editorRunning'),
+        get(crashed.read, 'exitedBeforeConnecting'),
+        get(crashed.read, 'counts', 'error'),
+        get(crashed.read, 'editorNote'),
+      ],
+      [
+        pid,
+        false,
+        false,
+        undefined,
+        1,
+        `Editor ${pid}, which gdharness opened on this project, is no longer running, and this server did not close it: it was closed by hand, ended from outside or crashed, and an editor that crashed has its last lines at the end of this console. The next editor gdharness opens on this project starts a new one.`,
+      ],
+      crashed.said,
+    );
+
+    // Back, then closed here: the close is named, with when.
+    editor = await greet(pid);
+    const closing = await callOn(server, 'editor_launch', { op: 'close' });
+    assert.equal(get(jsonOf(closing, 'editor_launch close'), 'closed'), true, closing);
+    editor.close();
+    editor = null;
+    const closed = await consoleOf(server);
+    const at = text(get(closed.read, 'closedAt'));
+    assert.deepEqual(
+      [get(closed.read, 'editorPid'), get(closed.read, 'editorRunning'), get(closed.read, 'editorNote')],
+      [
+        pid,
+        false,
+        `Editor ${pid} was closed with editor_launch close at ${at}, and this is the console it wrote, read from ${editorLogPath(project)}. The next editor gdharness opens on this project starts a new one.`,
+      ],
+      closed.said,
+    );
+    await server.stop();
+
+    // A server that opened nothing reads the note the launch left.
+    later = new ServerProcess({ env: { GDHARNESS_PROJECT: project, GODOT_PATH: process.execPath } });
+    await later.initialize('regression-test');
+    const fresh = await consoleOf(later);
+    assert.deepEqual(
+      [get(fresh.read, 'editorPid'), get(fresh.read, 'editorRunning'), get(fresh.read, 'counts', 'error')],
+      [pid, false, 1],
+      fresh.said,
+    );
+    assert.match(
+      text(get(fresh.read, 'editorNote')),
+      /is no longer running, and this server did not close it/,
+      fresh.said,
+    );
+
+    // A live process with the noted pid is the editor only if it began when the editor did.
+    const began = (await startTimesOf([process.pid])).get(process.pid);
+    assert.ok(began !== undefined, 'the platform says when this process began');
+    writeEditorLogNote(project, process.pid, began);
+    const running = await consoleOf(later);
+    assert.deepEqual(
+      [get(running.read, 'editorPid'), get(running.read, 'editorRunning'), get(running.read, 'editorNote')],
+      [
+        process.pid,
+        true,
+        `Editor ${process.pid}, which gdharness opened on this project, is still running and is not connected to this server, so this console may still be growing. editor_status says whether it may yet connect.`,
+      ],
+      running.said,
+    );
+    writeEditorLogNote(project, process.pid, began - 60_000);
+    const reused = await consoleOf(later);
+    assert.equal(get(reused.read, 'editorRunning'), false, `a later process holding the pid: ${reused.said}`);
+  } finally {
+    editor?.close();
+    await server.stop();
+    await later?.stop();
     sweep(project);
   }
 }
@@ -44292,7 +44563,7 @@ function testEveryToolNamedInProseIsATool(): void {
   const names = new Set(TOOL_SPECS.map((spec) => spec.name));
   const families = [...new Set(TOOL_SPECS.map((spec) => spec.name.split('_')[0]))];
   // Words this project owns or reads that are shaped like a tool and are not one: the fields the
-  // bridge sends the addon and the server sends a headless operation, the autoload the runtime installs, a section of project.godot, the
+  // bridge sends the addon, the server sends a headless operation and editor_classes answers with, the autoload the runtime installs, a section of project.godot, the
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
@@ -44303,6 +44574,8 @@ function testEveryToolNamedInProseIsATool(): void {
   const notTools = new Set([
     'project_path',
     'project_classes',
+    'project_children',
+    'project_descendants',
     'scene_path',
     'resource_path',
     'script_path',
@@ -55180,23 +55453,6 @@ function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
   const weights = { a: 20, b: 1, c: 20, d: 1 };
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights), ['a', 'b']);
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights), ['c', 'd']);
-  // A first part that carries other work is dealt that much less: with 20 on it already, one of the
-  // heavy pair goes to it and both light ones to the other part.
-  assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights, 20), ['c']);
-  assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights, 20), ['a', 'b', 'd']);
-  // And over the real list with the engine fixtures on the first of three, which is how macOS runs.
-  const carrying = Array.from({ length: 3 }, (_unused, at) =>
-    regressionPart(names, at + 1, 3, REGRESSION_SECONDS, ENGINE_FIXTURES_SECONDS),
-  );
-  assert.deepEqual(carrying.flat().sort(), [...names].sort(), 'still every regression once');
-  const carried = carrying.map(
-    (part, at) =>
-      part.reduce((total, name) => total + weight(name), 0) + (at === 0 ? ENGINE_FIXTURES_SECONDS : 0),
-  );
-  assert.ok(
-    Math.max(...carried) - Math.min(...carried) <= heaviest,
-    `and the parts within the heaviest regression of each other, the fixtures counted: ${carried.join(', ')}`,
-  );
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
@@ -55458,6 +55714,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartWaitsForTheEditorToSayWhoItIs,
   testTheStaleHalfIsNamedCorrectly,
   testALaunchedEditorsConsoleIsReadBeforeItConnects,
+  testAGoneEditorsConsoleIsStillRead,
+  testWhatADeclaredClassExtendsIsReadFromItsScript,
+  testEditorClassesAnswersTheProjectsClasses,
   testACallWaitsForTheEditorThisServerOpened,
   testEditorOutputChecksTheProjectItIsGiven,
   testTheLifecycleLogSaysHowAServerEnded,
@@ -55690,8 +55949,6 @@ async function main(): Promise<void> {
             Number(part[1]),
             Number(part[2]),
             REGRESSION_SECONDS,
-            // Set by the workflow for a platform whose first part also runs the engine fixtures.
-            process.env['GDHARNESS_ENGINE_FIXTURES_IN_FIRST_PART'] === '1' ? ENGINE_FIXTURES_SECONDS : 0,
           ),
         );
   const chosen = inPart === null ? named : named.filter((test) => inPart.has(test.name));
