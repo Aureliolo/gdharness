@@ -50273,6 +50273,15 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
     assert.equal(get(at(shown, 'Pet/Body/Tail'), 'properties', 'visible'), true, 'a default is listed');
     assert.equal(get(at(shown, 'Loud'), 'properties', 'speed'), 9, 'a script property the file sets');
     assert.equal(get(at(shown, '.'), 'properties', 'grow_horizontal'), 2, 'what the anchors preset set');
+    // Which of those values this file sets, said on the nodes another file makes and on no other:
+    // the values alone read the same whether this scene changed them or the instanced one gave them.
+    assert.deepEqual(
+      ['.', 'First', 'Pet', 'Pet/Body', 'Pet/Body/Added', 'Loud'].map((path) =>
+        get(at(shown, path), 'setHere'),
+      ),
+      [undefined, undefined, ['position'], [], undefined, []],
+      JSON.stringify(shown),
+    );
     assert.ok(!existsSync(join(project, 'init_ran.txt')), 'reading the properties ran a node script');
 
     // Read on its own, since inside world.tscn the instancing scene renames the root.
@@ -50283,6 +50292,15 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       'Body/Tail Node2D Tail',
       'Body/Extra Label Extra',
     ]);
+    const derivedShown = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'derived.tscn', includeProperties: true })),
+      'tree',
+    );
+    assert.deepEqual(
+      ['.', 'Body', 'Body/Tail', 'Body/Extra'].map((path) => get(at(derivedShown, path), 'setHere')),
+      [['position'], ['visible'], [], undefined],
+      `an inherited scene sets what it changes on the nodes its base makes: ${JSON.stringify(derivedShown)}`,
+    );
 
     const shallow = get(
       parseTextContent(await call('scene_tree', { scenePath: 'world.tscn', depth: 1 })),

@@ -17,7 +17,8 @@ const GdhSerialisation = preload("serialisation.gd")
 
 ## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
 ## editableChildren on a node that instances another scene and every stored property when
-## [param include_properties] is set, the file's value or the default where it sets none.
+## [param include_properties] is set, the file's value or the default where it sets none, and on a
+## node another file makes setHere, the properties this file sets on it.
 ## [param depth] -1 reads every level.
 static func scene_tree(scene_path: String, depth: int, include_properties: bool) -> Dictionary:
 	var laid: Dictionary = _laid(scene_path)
@@ -176,6 +177,7 @@ static func _lay(
 				continue
 			else:
 				nodes[path] = _made(str(state.get_node_type(index)))
+				nodes[path]["madeHere"] = loaded != null
 			if ids[index] >= 0:
 				nodes[path]["uniqueId"] = ids[index]
 			# Laid at the root with no scene handed in is a scene the one being read inherits, and the
@@ -202,10 +204,15 @@ static func _lay(
 			if not grouped.has(str(group)):
 				grouped.append(str(group))
 		var held: Dictionary = nodes[path]["properties"]
+		# What the file being read sets, kept apart for a node another file makes, whose values read
+		# the same whether this scene changed them or that one gave them.
+		var laid: Dictionary = nodes[path]
+		var set_here: Array = laid.get_or_add("setHere", [])
 		for property: int in state.get_node_property_count(index):
-			held[str(state.get_node_property_name(index, property))] = state.get_node_property_value(
-				index, property
-			)
+			var named: String = str(state.get_node_property_name(index, property))
+			held[named] = state.get_node_property_value(index, property)
+			if loaded != null and not set_here.has(named):
+				set_here.append(named)
 	# Only the scene being read and the scenes it inherits share its root, the owner whose editable
 	# instances a write here sets; a file instanced below makes its own owner's editable.
 	if prefix == ".":
@@ -345,6 +352,11 @@ static func _entry(
 	if include_properties:
 		var given: Dictionary = node["properties"]
 		data["properties"] = _stored(str(node["type"]), given)
+		if not node.get("madeHere", false):
+			var kept: Array = node.get("setHere", [])
+			var set_here: Array = kept.duplicate()
+			set_here.sort()
+			data["setHere"] = set_here
 	var below: Array[String] = node["children"]
 	# Counted rather than left as an empty list, which reads as a node with no children.
 	if depth >= 0 and current_depth >= depth:

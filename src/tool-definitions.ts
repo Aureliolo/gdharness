@@ -939,7 +939,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'How many levels to descend. Default: all. A node at the last level that has children of its own lists none and says how many under childrenNotListed.',
       },
-      includeProperties: { type: 'boolean', description: "Include each node's properties. Default false." },
+      includeProperties: {
+        type: 'boolean',
+        description:
+          "Include each node's properties, and on a node another scene makes (an instance, a node inside one, or a node of the scene this one inherits) setHere, the properties this scene's own file sets on it, since the values read the same either way. Default false.",
+      },
     },
     requires: ['projectPath', 'scenePath'],
   },
