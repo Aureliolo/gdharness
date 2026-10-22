@@ -45757,7 +45757,10 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     }
     for (const [properties, refusal] of [
       [{ pack: [{ _type: 'Curve' }] }, 'Player.pack holds ItemData, and item 0 of the list given is Curve.'],
-      [{ pack: ['res://nothing.tres'] }, 'No resource at res://nothing.tres for item 0 of pack'],
+      [
+        { pack: ['res://nothing.tres'] },
+        "No resource at res://nothing.tres for item 0 of pack. The project's .tres files are res://bare.tres, res://chain.tres, res://default_bus_layout.tres, res://glow.tres, res://sword.tres.",
+      ],
       [{ named: { best: 'sword' } }, 'named["best"] takes a res:// or uid:// path, not sword'],
       [{ mates: ['Nobody'] }, 'item 0 of mates names Nobody, and there is no node at that path from Hero.'],
     ] as const) {
@@ -55165,6 +55168,16 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     assert.ok(existsSync(join(project, 'late.png.import')), textOf(reimported) ?? JSON.stringify(reimported));
     const made = parseTextContent(await call('resource_edit', tileset));
     assert.equal(asArray(get(made, 'sources')).length, 1, JSON.stringify(made));
+    // The file leaves the default 16 by 16 out, so the answer is where the size is said.
+    assert.deepEqual(get(made, 'tileSize'), { x: 2, y: 2 }, JSON.stringify(made));
+    const wide = parseTextContent(
+      await call('resource_edit', {
+        ...tileset,
+        resourcePath: 'res://wide.tres',
+        sources: [{ texture: 'res://late.png', tileSize: { x: 2, y: 1 } }],
+      }),
+    );
+    assert.deepEqual(get(wide, 'tileSize'), { x: 2, y: 1 }, JSON.stringify(wide));
     assert.match(fileOf('set.tres'), /\[gd_resource type="TileSet"/);
     assert.equal(
       textOf(await call('resource_edit', tileset)),
@@ -55197,6 +55210,27 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       fileOf('set.tres'),
       /^0:0\/0\/physics_layer_0\/polygon_0\/points = PackedVector2Array\(-1, -1, 1, -1, 1, 1, -1, 1\)$/m,
       fileOf('set.tres'),
+    );
+    // A custom data layer's type by its name, as the inspector lists it, and a tile's value on it.
+    await call('resource_edit', {
+      ...set,
+      properties: { 'custom_data_layer_0/name': 'damage', 'custom_data_layer_0/type': 'int' },
+    });
+    await call('resource_edit', { ...set, properties: { 'sources/0/1:0/0/custom_data_0': 5 } });
+    assert.match(fileOf('set.tres'), /^custom_data_layer_0\/type = 2$/m, fileOf('set.tres'));
+    // The atlas source read by its own path keeps what its tiles hold on the TileSet's layers, which
+    // went with the TileSet once the read let go of it.
+    const atlasId = /\[sub_resource type="TileSetAtlasSource" id="([^"]+)"\]/.exec(fileOf('set.tres'))?.[1];
+    const atlasRead = parseTextContent(
+      await call('resource_edit', { op: 'read', resourcePath: `res://set.tres::${atlasId}` }),
+    );
+    assert.deepEqual(
+      [
+        get(atlasRead, 'properties', '0:0/0/physics_layer_0/polygon_0/points', 0),
+        get(atlasRead, 'properties', '1:0/0/custom_data_0'),
+      ],
+      [{ x: -1, y: -1, _type: 'Vector2' }, 5],
+      JSON.stringify(atlasRead),
     );
     // A list inside a list grows through its own add method, given the index of the one around it.
     const terrains = await call('resource_edit', {
@@ -55329,6 +55363,31 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       get(ground, 'cells'),
       [{ coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 }, alternativeTile: 0 }],
       JSON.stringify(ground),
+    );
+    // The tree counts the cells the file keeps as packed bytes, and names the call that lists them.
+    const tree = parseTextContent(
+      await call('scene_tree', { scenePath: 'res://map.tscn', includeProperties: true }),
+    );
+    assert.deepEqual(
+      asArray(get(tree, 'tree', 'children')).map((child) => [
+        get(child, 'name'),
+        get(child, 'cellCount'),
+        get(child, 'cellsListedBy'),
+      ]),
+      [
+        [
+          'Ground',
+          1,
+          'scene_node get with nodePath Ground, which lists them as set_tilemap_cells takes them',
+        ],
+        ['Built', undefined, undefined],
+        ['Bare', 1, 'scene_node get with nodePath Bare, which lists them as set_tilemap_cells takes them'],
+      ],
+      JSON.stringify(tree),
+    );
+    assert.equal(
+      textOf(await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://missing.tres' } })),
+      "No resource at res://missing.tres for tile_set. The project's .tres files are res://box.tres, res://set.tres, res://spaced.tres, res://theme.tres, res://variant.tres, res://wide.tres.",
     );
   } finally {
     await server.stop();

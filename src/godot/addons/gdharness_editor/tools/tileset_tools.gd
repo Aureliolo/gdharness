@@ -98,7 +98,13 @@ func create_tileset(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Failed to save %s: %s" % [tileset_path, error_string(saving)]}
 
 	_written(tileset_path)
-	return {"ok": true, "tilesetPath": tileset_path, "sources": made}
+	# The size cells are drawn at, which the file leaves out when it is the default 16 by 16.
+	return {
+		"ok": true,
+		"tilesetPath": tileset_path,
+		"tileSize": {"x": tileset.tile_size.x, "y": tileset.tile_size.y},
+		"sources": made
+	}
 
 
 ## One atlas source from its description, with its tiles made, as [true, source, the grid cells left

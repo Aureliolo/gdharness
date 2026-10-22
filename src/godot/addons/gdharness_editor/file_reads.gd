@@ -352,6 +352,12 @@ static func _entry(
 	if include_properties:
 		var given: Dictionary = node["properties"]
 		data["properties"] = _stored(str(node["type"]), given)
+		var cells: int = _cell_count(str(node["type"]), given)
+		if cells >= 0:
+			data["cellCount"] = cells
+			data["cellsListedBy"] = (
+				"scene_node get with nodePath %s, which lists them as set_tilemap_cells takes them" % path
+			)
 		if not node.get("madeHere", false):
 			var kept: Array = node.get("setHere", [])
 			var set_here: Array = kept.duplicate()
@@ -366,6 +372,38 @@ static func _entry(
 	for child: String in below:
 		children.append(_entry(nodes, child, include_properties, depth, current_depth + 1))
 	return data
+
+
+## How many cells a TileMapLayer or TileMap of [param type] holds under the values [param given], or
+## -1 when it is another node or the file sets none of its cells. The file keeps them as packed bytes,
+## which a read of the tree answered with alone, so a caller decoded the base64 to learn what was
+## painted. Only cells the file sets are counted: an instance's come from its own scene.
+static func _cell_count(type: String, given: Dictionary) -> int:
+	if not ClassDB.class_exists(type) or not ClassDB.can_instantiate(type):
+		return -1
+	var single: bool = ClassDB.is_parent_class(type, "TileMapLayer")
+	if not single and not ClassDB.is_parent_class(type, "TileMap"):
+		return -1
+	var painted: bool = false
+	for property: Variant in given:
+		var named: String = str(property)
+		if named == "tile_map_data" or (named.begins_with("layer_") and named.ends_with("/tile_data")):
+			painted = true
+	if not painted:
+		return -1
+	var bare: Node = ClassDB.instantiate(type)
+	for property: Variant in given:
+		if property != "script":
+			bare.set(str(property), given[property])
+	var count: int = 0
+	if single:
+		count = (bare as TileMapLayer).get_used_cells().size()
+	else:
+		var layered: TileMap = bare as TileMap
+		for layer: int in layered.get_layers_count():
+			count += layered.get_used_cells(layer).size()
+	bare.free()
+	return count
 
 
 ## Every property a node of [param type] stores, with the value [param given] sets or the default,
@@ -419,12 +457,16 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	var file: String = res_path.get_slice("::", 0)
 	if not FileAccess.file_exists(file):
 		return {"ok": false, "error": "No resource at " + file}
-	var loaded: Resource = ResourceLoader.load(file, "", ResourceLoader.CACHE_MODE_IGNORE)
-	if loaded == null:
+	var whole: Resource = ResourceLoader.load(file, "", ResourceLoader.CACHE_MODE_IGNORE)
+	if whole == null:
 		return {"ok": false, "error": "%s did not load as a resource." % file}
+	# The file's resource is held until the read is done, since what it keeps can depend on it: a
+	# TileSet that goes unlinks its sources, and an atlas source with no TileSet lists none of its
+	# tiles' physics, navigation or custom data.
+	var loaded: Resource = whole
 	if file != res_path:
 		var id: String = res_path.trim_prefix(file + "::")
-		var inner: Resource = _kept_in(loaded, file, id, {})
+		var inner: Resource = _kept_in(whole, file, id, {})
 		if inner == null:
 			return {"ok": false, "error": "%s keeps no resource with the id %s." % [file, id]}
 		loaded = inner

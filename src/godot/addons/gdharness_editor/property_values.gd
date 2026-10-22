@@ -15,6 +15,7 @@ extends RefCounted
 ## dictionary shaped like a vector or a bare pair of numbers can be read as one.
 
 const GdhDeclared = preload("declared_values.gd")
+const GdhFileWalk = preload("file_walk.gd")
 const GdhPropertyPaths = preload("property_paths.gd")
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
@@ -762,7 +763,11 @@ func _resource_at(path: String, property: String) -> Array:
 					% [path, property, path]
 				)
 			]
-		return [false, "No resource at %s for %s" % [path, property]]
+		if path.begins_with("uid://"):
+			return [false, "No resource at %s for %s" % [path, property]]
+		return [
+			false, GdhFileWalk.new().with_nearest_files("No resource at %s for %s" % [path, property], path)
+		]
 	return [true, load(path)]
 
 

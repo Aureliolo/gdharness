@@ -371,7 +371,7 @@ const INPUT_EVENTS: JsonSchema = {
 const TILESET_SOURCES: JsonSchema = {
   type: 'array',
   description:
-    'Atlas sources, one per texture. A wholly transparent cell gets no tile, and the answer lists those cells as leftBlank; a strip at the right or bottom that no whole tile reaches is described in notInAnyTile. A path that already exists is refused, as create_tileset would replace the whole TileSet.',
+    'Atlas sources, one per texture. A wholly transparent cell gets no tile, and the answer lists those cells as leftBlank; a strip at the right or bottom that no whole tile reaches is described in notInAnyTile. The answer gives tileSize, the size cells are drawn at, which the first source sets. A path that already exists is refused, as create_tileset would replace the whole TileSet.',
   items: {
     type: 'object',
     properties: {
@@ -948,7 +948,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       includeProperties: {
         type: 'boolean',
         description:
-          "Include each node's properties, and on a node another scene makes (an instance, a node inside one, or a node of the scene this one inherits) setHere, the properties this scene's own file sets on it, since the values read the same either way. Default false.",
+          "Include each node's properties, and on a node another scene makes (an instance, a node inside one, or a node of the scene this one inherits) setHere, the properties this scene's own file sets on it, since the values read the same either way. A TileMapLayer or TileMap whose cells the file sets also answers cellCount, since tile_map_data keeps them as packed bytes, and cellsListedBy, the scene_node get call that lists them. Default false.",
       },
     },
     requires: ['projectPath', 'scenePath'],
@@ -1521,7 +1521,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       create_tileset: {
         effect: 'destructive',
         summary:
-          "a TileSet from texture atlases; its physics, terrain and custom data layers, and each tile's collision and other values, are written with modify after it",
+          'a TileSet from texture atlases; its physics, terrain and custom data layers, and each tile\'s collision and other values, are written with modify after it, where a custom data layer\'s type takes a type name such as "int"',
         requires: ['sources'],
       },
       set_theme_color: {
