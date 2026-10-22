@@ -24,6 +24,7 @@ const GdhFileReads = preload("file_reads.gd")
 const GdhGdscriptAnalysis = preload("gdscript_analysis.gd")
 const GdhGdscriptAuthoring = preload("gdscript_authoring.gd")
 const GdhImportPipeline = preload("import_pipeline.gd")
+const GdhProjectValidation = preload("project_validation.gd")
 const GdhInputActions = preload("input_actions.gd")
 const GdhLog = preload("logger.gd")
 const GdhPlugins = preload("plugins.gd")
@@ -238,7 +239,7 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 		"export_options":
 			payload = GdhExportPresets.new(_log).export_options(params)
 		"validate_project":
-			payload = GdhImportPipeline.new(_log).validate_project(params)
+			payload = GdhProjectValidation.new(_log).validate_project(params)
 
 		# Dependencies and project inspection
 		"get_dependencies":

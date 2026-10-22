@@ -3878,6 +3878,100 @@ function testValidationSaysHowMuchItRead(godotPath: string): void {
 }
 
 /**
+ * Validation and health name each scene connection whose method or signal is not there, judging
+ * the node by its type, its script and every script that script extends, by path or by class_name,
+ * and leave alone every node the text cannot settle.
+ *
+ * A connection to a method nobody wrote loads without a word and fails on every emission, and one
+ * from a signal the node lacks is dropped as the scene loads, so neither shows until the game runs.
+ */
+function testAConnectionNamesWhatItReaches(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    mkdirSync(join(dir, 'conn'));
+    const files: Record<string, string> = {
+      'base.gd': 'extends Node\n\nsignal shouted\n\n\nfunc greet() -> void:\n\tpass\n',
+      'named_base.gd': 'class_name GdhFixtureBase extends Node2D\n\n\nfunc wave() -> void:\n\tpass\n',
+      'hero.gd':
+        'extends "base.gd"\n\n\nfunc _on_go() -> void:\n\tpass\n\n\nclass Inner:\n' +
+        '\tfunc hidden_method() -> void:\n\t\tpass\n',
+      'waver.gd': '@tool extends GdhFixtureBase\n',
+      'loop_a.gd': 'extends "loop_b.gd"\n',
+      'loop_b.gd': 'extends "loop_a.gd"\n',
+      'part.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://conn/base.gd" id="1"]\n\n' +
+        '[node name="Part" type="Node2D"]\nscript = ExtResource("1")\n',
+      'inherited.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://conn/part.tscn" id="1"]\n\n' +
+        '[node name="Derived" instance=ExtResource("1")]\n\n' +
+        '[connection signal="ready" from="." to="." method="missing_here"]\n' +
+        '[connection signal="ready" from="." to="." method="greet"]\n',
+      'main.tscn':
+        '[gd_scene format=3]\n\n' +
+        '[ext_resource type="Script" path="res://conn/hero.gd" id="1"]\n' +
+        '[ext_resource type="Script" path="res://conn/waver.gd" id="2"]\n' +
+        '[ext_resource type="PackedScene" path="res://conn/part.tscn" id="3"]\n' +
+        '[ext_resource type="Script" path="res://conn/loop_a.gd" id="4"]\n\n' +
+        '[sub_resource type="GDScript" id="GDScript_in"]\nscript/source = "extends Node\n"\n\n' +
+        '[node name="Hub" type="Node"]\nscript = ExtResource("1")\n\n' +
+        '[node name="Go" type="Button" parent="."]\n\n' +
+        '[node name="Wave" type="Node2D" parent="."]\nscript = ExtResource("2")\n\n' +
+        '[node name="Part" parent="." instance=ExtResource("3")]\n\n' +
+        '[node name="Looped" type="Node" parent="."]\nscript = ExtResource("4")\n\n' +
+        '[node name="Builtin" type="Node" parent="."]\nscript = SubResource("GDScript_in")\n\n' +
+        '[node name="Child" parent="Part"]\n\n' +
+        '[node name="Dangling" type="Node" parent="."]\nscript = ExtResource("99")\n\n' +
+        [
+          ['pressed', 'Go', '.', '_on_go'],
+          ['pressed', 'Go', '.', 'greet'],
+          ['pressed', 'Go', '.', 'hidden_method'],
+          ['pressed', 'Go', 'Wave', 'wave'],
+          ['pressed', 'Go', 'Wave', 'queue_free'],
+          ['pressed', 'Go', 'Wave', 'nope'],
+          ['nope_signal', 'Go', '.', '_on_go'],
+          ['shouted', '.', 'Part', 'greet'],
+          ['shouted', '.', 'Part', 'absent_in_part'],
+          ['pressed', 'Go', 'Looped', 'anything'],
+          ['pressed', 'Go', 'Builtin', 'anything'],
+          ['pressed', 'Go', 'Part/Child', 'anything'],
+          ['pressed', 'Go', 'Dangling', 'anything'],
+        ]
+          .map(
+            ([signal, from, to, method]) =>
+              `[connection signal="${signal}" from="${from}" to="${to}" method="${method}"]\n`,
+          )
+          .join(''),
+    };
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(join(dir, 'conn', name), content);
+    }
+    const method = ', a method that node does not have, so every emission fails to call it.';
+    const expected = [
+      `res://conn/inherited.tscn connects Derived.ready to Derived.missing_here${method}`,
+      `res://conn/main.tscn connects Go.nope_signal to Hub._on_go, a signal that node does not have, so the engine drops it as the scene loads.`,
+      `res://conn/main.tscn connects Go.pressed to Hub.hidden_method${method}`,
+      `res://conn/main.tscn connects Go.pressed to Wave.nope${method}`,
+      `res://conn/main.tscn connects Hub.shouted to Part.absent_in_part${method}`,
+    ];
+    const validated = runOperation(godotPath, dir, 'validate_project', {});
+    assert.ok(asArray(get(validated, 'checks_performed')).includes('connections'), JSON.stringify(validated));
+    const warned = asArray(get(validated, 'warnings'))
+      .filter((warning) => get(warning, 'check') === 'connections')
+      .map((warning) => asString(get(warning, 'message')))
+      .sort();
+    assert.deepEqual(warned, expected, JSON.stringify(get(validated, 'warnings')));
+    const health = runOperation(godotPath, dir, 'get_project_health', { categories: ['scenes'] });
+    const noted = asArray(get(health, 'checks', 'scenes', 'details'))
+      .map((detail) => asString(detail))
+      .filter((detail) => detail.includes(' connects '))
+      .sort();
+    assert.deepEqual(noted, expected, JSON.stringify(health));
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * Moves [sidecar]'s time two seconds past the second [importedAt] falls in, for a case that rewrites
  * a sidecar and then has `--import` act on it. The engine's filesystem cache keeps whole seconds and
  * asks the importer only about a sidecar whose time has moved, so a rewrite landing in the second
@@ -4733,6 +4827,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   },
   validationCounts: (godotPath) => {
     testValidationSaysHowMuchItRead(godotPath);
+  },
+  connectionsReached: (godotPath) => {
+    testAConnectionNamesWhatItReaches(godotPath);
   },
   everyUse: (godotPath) => {
     testEveryUseIsFound(godotPath);
