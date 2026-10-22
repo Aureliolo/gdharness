@@ -476,6 +476,32 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
     [1, 2],
     `ouro depends on boros alone: ${JSON.stringify(get(cyclicPayload, 'summary'))}`,
   );
+  // The cycle is marked at boros's reference back, which is the one that closes it.
+  assert.deepEqual(
+    get(cyclicPayload, 'dependencies', 'res://chain/ouro.gd'),
+    [
+      {
+        path: 'res://chain/boros.gd',
+        exists: true,
+        dependencies: [{ path: 'res://chain/ouro.gd', exists: true, circular: true }],
+      },
+    ],
+    'ouro is not a dependency of itself',
+  );
+  // Counting what boros names past the depth reads boros alone, and not ouro again in turn, which
+  // around a cycle has no end.
+  assert.deepEqual(
+    get(
+      runOperation(godotPath, projectDir, 'get_dependencies', {
+        resource_path: 'res://chain/ouro.gd',
+        depth: 1,
+      }),
+      'dependencies',
+      'res://chain/ouro.gd',
+    ),
+    [{ path: 'res://chain/boros.gd', exists: true, beyond_depth: 1 }],
+    'boros names one file the depth kept out',
+  );
 
   // addons/ is project content and often shipping content, so it is walked like anything
   // else; what the walk leaves out by default is the engine's own res://. space.
@@ -2581,6 +2607,67 @@ function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _p
       ],
       `the moved script is followed by its uid and the gone image is missing: ${JSON.stringify(stage)}`,
     );
+    assert.equal(
+      get(asArray(get(stage, 'dependencies', 'res://stage.tscn'))[0], 'stale_path'),
+      'res://leaf.gd',
+      'with the path the scene still writes',
+    );
+    // Asked what uses the old path, the line is no use of it, since the engine loads the moved file.
+    const old = operation('find_resource_usages', { resource_path: 'res://leaf.gd' });
+    assert.deepEqual(
+      [
+        get(old, 'exists'),
+        asArray(get(old, 'usages')).map((usage) => [get(usage, 'file'), get(usage, 'references')]),
+        get(old, 'summary', 'in_code'),
+      ],
+      [
+        false,
+        [
+          [
+            'res://stage.tscn',
+            [
+              {
+                line: 3,
+                kind: 'stale_path',
+                text: `[ext_resource type="Script" uid="${uid}" path="res://leaf.gd" id="1_leaf"]`,
+                loads: 'res://moved/leaf.gd',
+              },
+            ],
+          ],
+        ],
+        0,
+      ],
+      JSON.stringify(old),
+    );
+    const moved = operation('find_resource_usages', { resource_path: 'res://moved/leaf.gd' });
+    const fromStage = asArray(get(moved, 'usages')).find(
+      (usage) => get(usage, 'file') === 'res://stage.tscn',
+    );
+    assert.deepEqual(
+      asArray(get(fromStage, 'references')).map((reference) => [
+        get(reference, 'kind'),
+        get(reference, 'stale_path'),
+      ]),
+      [['ext_resource', 'res://leaf.gd']],
+      `the moved file is used by its uid, under a path that is stale: ${JSON.stringify(moved)}`,
+    );
+    // The uid wins over a path that has a file again, as the engine loads it.
+    writeFileSync(join(dir, 'leaf.gd'), 'extends Node2D\n');
+    assert.deepEqual(
+      asArray(
+        get(
+          operation('get_dependencies', { resource_path: 'res://stage.tscn' }),
+          'dependencies',
+          'res://stage.tscn',
+        ),
+      ).map((dep) => [get(dep, 'path'), get(dep, 'stale_path')]),
+      [
+        ['res://moved/leaf.gd', 'res://leaf.gd'],
+        ['res://gone.png', undefined],
+      ],
+      'a file back at the old path is not what the scene loads',
+    );
+    rmSync(join(dir, 'leaf.gd'));
     const top = operation('get_dependencies', { resource_path: 'res://top.tscn' });
     assert.deepEqual(
       get(top, 'summary', 'missing'),
@@ -3492,6 +3579,85 @@ function testEveryUseIsFound(godotPath: string): void {
       [get(whole, 'summary', 'total_dependencies'), get(whole, 'summary', 'total_references')],
       [4, 7],
       `four files, seven entries: ${JSON.stringify(get(whole, 'dependencies'))}`,
+    );
+    // At depth three, d is reached through b and c at the limit and says it names one more file,
+    // while e at the limit names none and says nothing.
+    const throughB = asArray(
+      get(
+        walked.find((dep) => get(dep, 'path') === 'res://sub/chain_b.gd'),
+        'dependencies',
+      ),
+    );
+    assert.deepEqual(
+      asArray(get(throughB[0], 'dependencies')),
+      [{ path: 'res://sub/chain_d.gd', exists: true, beyond_depth: 1 }],
+      `the depth stopped the walk at d, which names e: ${JSON.stringify(walked)}`,
+    );
+    assert.deepEqual(
+      asArray(get(asArray(get(shortcut, 'dependencies'))[0], 'dependencies')),
+      [{ path: 'res://sub/chain_e.gd', exists: true }],
+      'and e names nothing',
+    );
+
+    // A shader includes relative to itself, as the preprocessor reads it, and its comments are // and
+    // /* */: a # there opens a directive. A word in a shader is no use of a class.
+    const enemyUses = kinds('enemy.gd');
+    mkdirSync(join(dir, 'sub', 'parts'));
+    writeFileSync(
+      join(dir, 'sub', 'glow.gdshader'),
+      'shader_type canvas_item;\n// once #include "res://sub/ghost_line.gdshaderinc"\n/* and\n#include "res://sub/ghost_block.gdshaderinc" */\n' +
+        '#include "parts/tint.gdshaderinc" // after "res://sub/ghost_trailing.gdshaderinc"\nuniform float Enemy;\n',
+    );
+    writeFileSync(
+      join(dir, 'sub', 'parts', 'tint.gdshaderinc'),
+      '#include "res://sub/more.gdshaderinc"\nvec4 tinted(vec4 c) {\n\treturn more(c);\n}\n',
+    );
+    writeFileSync(join(dir, 'sub', 'more.gdshaderinc'), 'vec4 more(vec4 c) {\n\treturn c;\n}\n');
+    assert.deepEqual(
+      get(
+        operation('get_dependencies', { resource_path: 'sub/glow.gdshader' }),
+        'dependencies',
+        'res://sub/glow.gdshader',
+      ),
+      [
+        {
+          path: 'res://sub/parts/tint.gdshaderinc',
+          exists: true,
+          dependencies: [{ path: 'res://sub/more.gdshaderinc', exists: true }],
+        },
+      ],
+      'the relative include is followed, the include in it too, and no comment is',
+    );
+    assert.deepEqual(
+      kinds('sub/parts/tint.gdshaderinc'),
+      { include: 1 },
+      'an include is a use, not a comment',
+    );
+    assert.deepEqual(kinds('sub/more.gdshaderinc'), { include: 1 }, 'and one inside an include is found');
+    assert.deepEqual(
+      [
+        kinds('sub/ghost_line.gdshaderinc'),
+        kinds('sub/ghost_block.gdshaderinc'),
+        kinds('sub/ghost_trailing.gdshaderinc'),
+      ],
+      [{ comment: 1 }, { comment: 1 }, { comment: 1 }],
+      'a path in a shader comment is a mention',
+    );
+    assert.equal(get(enemyUses, 'class_name'), 1, JSON.stringify(enemyUses));
+    assert.deepEqual(kinds('enemy.gd'), enemyUses, 'and a uniform named like a class is no use of it');
+    // An ext_resource path relative to its scene, under a word holding load.
+    writeFileSync(
+      join(dir, 'sub', 'loader.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Texture2D" path="art/loading.png" id="1_l"]\n\n[node name="Loader" type="Sprite2D"]\ntexture = ExtResource("1_l")\n',
+    );
+    assert.deepEqual(
+      get(
+        operation('get_dependencies', { resource_path: 'sub/loader.tscn' }),
+        'dependencies',
+        'res://sub/loader.tscn',
+      ),
+      [{ path: 'res://sub/art/loading.png', exists: false }],
+      'the path is read from path=, not the first quoted value on the line',
     );
   } finally {
     sweep(dir);

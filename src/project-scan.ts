@@ -87,6 +87,7 @@ const ASSET_EXTENSIONS = new Set([
   'dae',
   'ogv',
   'gdshader',
+  'gdshaderinc',
   'shader',
   'glsl',
 ]);

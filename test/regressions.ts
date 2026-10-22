@@ -8552,14 +8552,15 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
       'scripts/hero.gd.uid',
       'intro.ogv',
       'water.gdshader',
+      'tint.gdshaderinc',
       'notes.txt',
     ]) {
       writeFileSync(join(sandbox, file), '');
     }
     assert.deepEqual(
       projectStructure(sandbox),
-      { scenes: 2, scripts: 2, assets: 3, other: 1 },
-      'binary scenes are scenes, models, video and shaders are assets, and the sidecars are nothing',
+      { scenes: 2, scripts: 2, assets: 4, other: 1 },
+      'binary scenes are scenes, models, video, shaders and their includes are assets, and the sidecars are nothing',
     );
   } finally {
     sweep(sandbox);
@@ -39112,7 +39113,12 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
         kept.said,
       );
       const together = test('tests/window_test.gd', 'tests/ok_test.gd');
-      assert.match(together.said, /in 2 suites over 1 engine, with a window\./, together.said);
+      // A runner short of memory adds why it started fewer engines than asked for.
+      assert.match(
+        together.said,
+        /in 2 suites over 1 engine, with a window(?:, of the \d+ asked for, since [^\n]*)?\.$/m,
+        together.said,
+      );
       // In one engine it has to share the window, and the run says so before it starts.
       for (const [args, why] of [
         [['--engines', '1'], 'the run has one engine'],

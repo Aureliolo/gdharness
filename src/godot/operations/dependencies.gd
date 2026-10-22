@@ -10,7 +10,12 @@ const GdhResourceFiles = preload("resource_files.gd")
 ## files that name resources, "godot" for project.godot, "cfg" for plugin.cfg and export_presets.cfg,
 ## and "import" for the sidecars that name import scripts and external materials.
 const PROJECT_FILE: String = "res://project.godot"
-const DEFAULT_USAGE_KINDS: Array[String] = ["tscn", "tres", "gd", "gdshader", "godot", "cfg", "import"]
+const DEFAULT_USAGE_KINDS: Array[String] = [
+	"tscn", "tres", "gd", "gdshader", "gdshaderinc", "godot", "cfg", "import"
+]
+## The files written in the shader language, whose comments are // and /* */ rather than #, which in a
+## shader starts a preprocessor directive.
+const SHADER_KINDS: Array[String] = ["gdshader", "gdshaderinc"]
 ## One string literal of either quote, its contents captured by the one it opened with.
 const STRING_LITERAL: String = "\"((?:[^\"\\\\]|\\\\.)*)\"|'((?:[^'\\\\]|\\\\.)*)'"
 
@@ -20,6 +25,9 @@ const REFERENCE_PATTERNS: Array[String] = [
 	'preload\\("([^"]+)"\\)',
 	'load\\("([^"]+)"\\)',
 	'ext_resource.*path="([^"]+)"',
+	# The shader preprocessor reads a relative include against the including file, and only the bare
+	# res:// form was read, so a shader including its sibling depended on nothing.
+	'#include\\s+"([^"]+)"',
 ]
 
 var _log: GdhLog
@@ -40,11 +48,17 @@ class GdhDependencyWalk:
 	var visited: Dictionary = {}
 	var path_stack: Array[String] = []
 	var circular_references: Array
+	## Whether a file the depth stops at is read for how many files it names, which the walk doing
+	## that reading does not do again for those.
+	var counts_beyond: bool
 
-	func _init(p_max_depth: int, p_include_built_in: bool, p_circular_references: Array) -> void:
+	func _init(
+		p_max_depth: int, p_include_built_in: bool, p_circular_references: Array, p_counts_beyond: bool = true
+	) -> void:
 		max_depth = p_max_depth
 		include_built_in = p_include_built_in
 		circular_references = p_circular_references
+		counts_beyond = p_counts_beyond
 
 
 func _init(p_log: GdhLog) -> void:
@@ -219,11 +233,18 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 		var file: FileAccess = FileAccess.open(file_path, FileAccess.READ)
 		if not file:
 			continue
-		var lines: PackedStringArray = file.get_as_text().split("\n")
+		var text: String = file.get_as_text()
 		file.close()
-		# A class is used by name only in code. In a scene or a resource the same word is a node's
-		# name or a caption, and each was counted as a use of the class.
-		var code: bool = file_path.get_extension() in ["gd", "gdshader"]
+		var lines: PackedStringArray = text.split("\n")
+		# A class is used by name only in a script's code. In a scene or a resource the same word is a
+		# node's name or a caption, and each was counted as a use of the class; a shader has no use
+		# for one at all.
+		var code: bool = file_path.get_extension() == "gd"
+		# In a shader # opens a directive, so an #include was answered as a comment, and its
+		# comments are // and /* */.
+		var shader_lines: PackedStringArray = []
+		if file_path.get_extension() in SHADER_KINDS:
+			shader_lines = _shader_code(text).split("\n")
 
 		var references: Array[Dictionary] = []
 		for i: int in range(lines.size()):
@@ -244,6 +265,10 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 				continue
 			var trimmed: String = line.strip_edges()
 			var kind: String = ""
+			var extra: Dictionary = {}
+			var loaded: String = _loaded_by_uid(line) if trimmed.begins_with("[ext_resource") else ""
+			var written: RegExMatch = GdhPatterns.compiled('path="([^"]+)"').search(line)
+			var written_path: String = "" if written == null else _resolved(written.get_string(1), file_path)
 			# A mention in a comment is not a use, and both were answered as one. The question a
 			# reverse walk is asked is whether anything still uses a class, and a project that
 			# documents itself names its collaborators in `##` links: four references to one class,
@@ -254,8 +279,16 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 				kind = "doc"
 			elif (code and trimmed.begins_with("#")) or name_in_comment:
 				kind = "comment"
+			elif not shader_lines.is_empty() and not _names_target(shader_lines[i], file_path, target):
+				kind = "comment"
+			elif by_its_path and not loaded.is_empty() and loaded != target["path"]:
+				# The engine loads the file the uid names, so the path written here is used by nothing.
+				kind = "stale_path"
+				extra["loads"] = loaded
 			elif by_its_path:
 				kind = _path_reference_kind(line, file_path)
+				if not loaded.is_empty() and written_path != loaded:
+					extra["stale_path"] = written_path
 			elif by_its_autoload:
 				kind = "autoload"
 			else:
@@ -264,9 +297,11 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 					if GdhPatterns.without_annotations(line).begins_with("extends ")
 					else "class_name"
 				)
-			references.append({"line": i + 1, "kind": kind, "text": trimmed})
+			var found: Dictionary = {"line": i + 1, "kind": kind, "text": trimmed}
+			found.merge(extra)
+			references.append(found)
 			by_kind[kind] = GdhRead.as_int(by_kind.get(kind, 0)) + 1
-			if kind != "doc" and kind != "comment":
+			if not kind in ["doc", "comment", "stale_path"]:
 				in_code += 1
 
 		if not references.is_empty():
@@ -410,6 +445,8 @@ func _path_reference_kind(line: String, file_path: String) -> String:
 		return "extends"
 	if trimmed.begins_with("[ext_resource"):
 		return "ext_resource"
+	if trimmed.begins_with("#include"):
+		return "include"
 	if "preload(" in trimmed:
 		return "preload"
 	if "load(" in trimmed:
@@ -451,13 +488,10 @@ func _gather_missing(deps: Array[Dictionary], parent: String, into: Dictionary) 
 			_gather_missing(deeper, path, into)
 
 
-# A circular entry is not counted: it marks that the entry holding it was reached again, which that
-# entry already counts as one reference.
 func _count_recursive(deps: Array[Dictionary]) -> int:
 	var count: int = 0
 	for dep: Dictionary in deps:
-		if not dep.get("circular", false):
-			count += 1
+		count += 1
 		if dep.has("dependencies"):
 			var deeper: Array[Dictionary] = dep["dependencies"]
 			count += _count_recursive(deeper)
@@ -469,13 +503,6 @@ func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk
 
 	if current_depth >= walk.max_depth:
 		return deps
-
-	if path in walk.path_stack:
-		var cycle: Array[String] = walk.path_stack.slice(walk.path_stack.find(path))
-		cycle.append(path)
-		if not cycle in walk.circular_references:
-			walk.circular_references.append(cycle)
-		return [{"path": path, "circular": true}]
 
 	# Reused only when it was walked with as much depth left as now. A resource first reached deep in
 	# the walk has a list cut short at the limit, and handing that to a nearer reach answered with a
@@ -498,13 +525,15 @@ func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk
 		# about `["res://addons/x/plugin.cfg"]` was a dependency of every project with the addon.
 		if path.get_extension() == "gd":
 			content = _code_lines(content)
+		elif path.get_extension() in SHADER_KINDS:
+			content = _shader_code(content)
 		var moved: Dictionary = _moved_by_uid(content)
 
 		for pattern: String in REFERENCE_PATTERNS:
 			var regex: RegEx = GdhPatterns.compiled(pattern)
 			for m: RegExMatch in regex.search_all(content):
-				var dep_path: String = _resolved(_referenced_path(m.get_string()), path)
-				dep_path = str(moved.get(dep_path, dep_path))
+				var written: String = _resolved(_referenced_path(m.get_string()), path)
+				var dep_path: String = str(moved.get(written, written))
 
 				if not dep_path.begins_with("res://"):
 					continue
@@ -519,7 +548,14 @@ func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk
 				if not walk.include_built_in and dep_path.begins_with("res://."):
 					continue
 
-				_depend(deps, path, dep_path, {}, current_depth, walk)
+				_depend(
+					deps,
+					path,
+					dep_path,
+					{"stale_path": written} if dep_path != written else {},
+					current_depth,
+					walk
+				)
 
 		# A script uses another by its class_name as surely as by a preload, and only the reverse walk
 		# looked for that: asked what a script depends on, the answer left out the script it typed a
@@ -540,7 +576,8 @@ func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk
 
 # Adds [param dep_path] to [param deps], what [param path] depends on, walked as far as the depth left
 # allows, once however many times it is named. [param named_by] is the class or autoload name it was
-# named by, as by_class or by_autoload, or empty for a path.
+# named by, as by_class or by_autoload, and the path written when the engine loads another, as
+# stale_path; empty for a path that is the file.
 func _depend(
 	deps: Array[Dictionary],
 	path: String,
@@ -556,10 +593,27 @@ func _depend(
 			return
 	var dep_info: Dictionary = {"path": dep_path, "exists": FileAccess.file_exists(dep_path)}
 	dep_info.merge(named_by)
+	# Marked where the reference closing the cycle is. Marked inside the file reached again, the tree
+	# answered that file as a dependency of itself.
+	if dep_path in walk.path_stack:
+		var cycle: Array[String] = walk.path_stack.slice(walk.path_stack.find(dep_path))
+		cycle.append(dep_path)
+		if not cycle in walk.circular_references:
+			walk.circular_references.append(cycle)
+		dep_info["circular"] = true
+		deps.append(dep_info)
+		return
 	if dep_info["exists"] and current_depth + 1 < walk.max_depth:
 		var sub_deps: Array[Dictionary] = _analyze_resource(dep_path, current_depth + 1, walk)
 		if sub_deps.size() > 0:
 			dep_info["dependencies"] = sub_deps
+	elif dep_info["exists"] and walk.counts_beyond:
+		# A file the depth stopped at read the same as one naming nothing, and a missing file past it
+		# went unsaid.
+		var beyond: GdhDependencyWalk = GdhDependencyWalk.new(1, walk.include_built_in, [], false)
+		var named: int = _analyze_resource(dep_path, 0, beyond).size()
+		if named > 0:
+			dep_info["beyond_depth"] = named
 	deps.append(dep_info)
 
 
@@ -633,34 +687,71 @@ static func _resolved(written: String, from: String) -> String:
 	return from.get_base_dir().path_join(written).simplify_path()
 
 
-# The path inside a preload(), load() or ext_resource match; a bare res:// match is the path.
-# The ext_resource paths in [param content] that nothing is at, each with the file its uid names
-# instead. The engine loads an ext_resource by its uid first, so a file moved outside the editor
-# still loads, and the walk called it missing; every pattern reads the old path, the bare res://
-# one included, so the paths are mapped before any of them runs.
+# The ext_resource paths in [param content] whose uid leads elsewhere, each with the file the uid
+# names. The engine loads an ext_resource by its uid whenever the uid is known, whatever the path
+# says, so a file moved outside the editor still loads, and the walk called it missing; every pattern
+# reads the old path, the bare res:// one included, so the paths are mapped before any of them runs.
 static func _moved_by_uid(content: String) -> Dictionary:
 	var moved: Dictionary = {}
 	for line: RegExMatch in GdhPatterns.compiled("\\[ext_resource[^\\]]*\\]").search_all(content):
-		var entry: String = line.get_string()
-		var at: RegExMatch = GdhPatterns.compiled('path="([^"]+)"').search(entry)
-		var uid: RegExMatch = GdhPatterns.compiled('uid="(uid://[^"]+)"').search(entry)
-		if at == null or uid == null or FileAccess.file_exists(at.get_string(1)):
-			continue
-		var id: int = ResourceUID.text_to_id(uid.get_string(1))
-		if id == ResourceUID.INVALID_ID or not ResourceUID.has_id(id):
-			continue
-		var found: String = ResourceUID.get_id_path(id)
-		if FileAccess.file_exists(found):
+		var found: String = _loaded_by_uid(line.get_string())
+		var at: RegExMatch = GdhPatterns.compiled('path="([^"]+)"').search(line.get_string())
+		if at != null and not found.is_empty() and found != at.get_string(1):
 			moved[at.get_string(1)] = found
 	return moved
 
 
+# The file an ext_resource [param entry] is loaded from by its uid, or empty when it carries none
+# the project knows, and the engine falls back to the path.
+static func _loaded_by_uid(entry: String) -> String:
+	var uid: RegExMatch = GdhPatterns.compiled('uid="(uid://[^"]+)"').search(entry)
+	if uid == null:
+		return ""
+	var id: int = ResourceUID.text_to_id(uid.get_string(1))
+	if id == ResourceUID.INVALID_ID or not ResourceUID.has_id(id):
+		return ""
+	var found: String = ResourceUID.get_id_path(id)
+	return found if FileAccess.file_exists(found) else ""
+
+
+# [param content], a shader's code, with its // and /* */ comments emptied and its lines kept, so a
+# path written in one is no include.
+static func _shader_code(content: String) -> String:
+	var kept: Array[String] = []
+	var length: int = content.length()
+	var copied: int = 0
+	var at: int = 0
+	while at < length:
+		var pair: String = content.substr(at, 2)
+		if content[at] == '"':
+			# Stepped over whole, since an include's res:// holds the // that opens a comment.
+			var close: int = content.find('"', at + 1)
+			var line_end: int = content.find("\n", at + 1)
+			var ends: int = close + 1 if close != -1 else length
+			at = line_end if line_end != -1 and line_end < ends else ends
+		elif pair == "//" or pair == "/*":
+			kept.append(content.substr(copied, at - copied))
+			var block: bool = pair == "/*"
+			var close: int = content.find("*/" if block else "\n", at + 2)
+			var resumes: int = length if close == -1 else (close + 2 if block else close)
+			if block:
+				kept.append("\n".repeat(content.substr(at, resumes - at).count("\n")))
+			at = resumes
+			copied = at
+		else:
+			at += 1
+	kept.append(content.substr(copied))
+	return "".join(PackedStringArray(kept))
+
+
+# The path inside a preload(), load(), #include or ext_resource match; a bare res:// match is the path.
+# An ext_resource is read first, since its type or its path can hold the word load.
 func _referenced_path(matched: String) -> String:
 	var expression: String = ""
-	if "preload" in matched or "load" in matched:
-		expression = '"([^"]+)"'
-	elif "ext_resource" in matched:
+	if matched.begins_with("ext_resource"):
 		expression = 'path="([^"]+)"'
+	elif "load" in matched or matched.begins_with("#include"):
+		expression = '"([^"]+)"'
 	else:
 		return matched
 	var inner: RegEx = GdhPatterns.compiled(expression)
