@@ -1961,6 +1961,43 @@ export function notRunNote(notRun: number, failFast: boolean): string | undefine
 }
 
 /**
+ * The name and platform of each preset in the project's export_presets.cfg, in the file's order, or
+ * null when it has none.
+ */
+function presetsIn(projectPath: string): { name: string; platform: string }[] | null {
+  let text: string;
+  try {
+    text = readFileSync(join(projectPath, 'export_presets.cfg'), 'utf8');
+  } catch {
+    return null;
+  }
+  const presets: { name: string; platform: string }[] = [];
+  let held: { name: string; platform: string } | null = null;
+  const quoted = (line: string, key: string): string | undefined =>
+    new RegExp(`^\\s*${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(line)?.[1]?.replace(/\\(.)/g, '$1');
+  for (const line of text.split(/\r?\n/)) {
+    const section = /^\s*\[([^\]]+)\]/.exec(line)?.[1];
+    if (section !== undefined) {
+      held = /^preset\.\d+$/.test(section.trim()) ? { name: '', platform: '' } : null;
+      if (held !== null) {
+        presets.push(held);
+      }
+      continue;
+    }
+    if (held !== null) {
+      held.name = quoted(line, 'name') ?? held.name;
+      held.platform = quoted(line, 'platform') ?? held.platform;
+    }
+  }
+  return presets;
+}
+
+/** The platform of the preset called [param preset], or null when the project has none by that name. */
+function presetPlatform(projectPath: string, preset: string): string | null {
+  return presetsIn(projectPath)?.find((held) => held.name === preset)?.platform ?? null;
+}
+
+/**
  * Why [param preset] cannot be exported with, read off the project's export_presets.cfg, or null
  * when it is one of the presets there.
  *
@@ -1969,25 +2006,11 @@ export function notRunNote(notRun: number, failFast: boolean): string | undefine
  * of the whole project to learn that.
  */
 export function exportPresetRefusal(projectPath: string, preset: string): string | null {
-  let text: string;
-  try {
-    text = readFileSync(join(projectPath, 'export_presets.cfg'), 'utf8');
-  } catch {
+  const presets = presetsIn(projectPath);
+  if (presets === null) {
     return `This project has no export_presets.cfg, so it has no preset '${preset}' to export with. project_export add_preset writes one, as the editor's Project > Export does.`;
   }
-  const names: string[] = [];
-  let inPreset = false;
-  for (const line of text.split(/\r?\n/)) {
-    const section = /^\s*\[([^\]]+)\]/.exec(line)?.[1];
-    if (section !== undefined) {
-      inPreset = /^preset\.\d+$/.test(section.trim());
-      continue;
-    }
-    const named = inPreset ? /^\s*name\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(line)?.[1] : undefined;
-    if (named !== undefined) {
-      names.push(named.replace(/\\(.)/g, '$1'));
-    }
-  }
+  const names = presets.map((held) => held.name);
   if (names.includes(preset)) {
     return null;
   }
@@ -2009,7 +2032,12 @@ export function exportPresetRefusal(projectPath: string, preset: string): string
  */
 export function exportAnswer(
   ending: EngineRun,
-  asked: { readonly preset: string; readonly outputPath: string; readonly debug: boolean },
+  asked: {
+    readonly preset: string;
+    readonly outputPath: string;
+    readonly debug: boolean;
+    readonly pack?: boolean;
+  },
   before: number | null,
   after: number | null,
   beside: readonly string[] = [],
@@ -3514,6 +3542,8 @@ class GodotServer {
   private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
   private readonly operationsScript = join(__dirname, 'godot', 'operations', 'godot_operations.gd');
+  /** The options of each platform's presets, by engine and platform, read once in an editor. */
+  private readonly exportOptionsRead = new Map<string, unknown[]>();
   private readonly listedRunner = shippedListedRunner();
   private readonly godotBridge: GodotBridge;
   private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
@@ -4617,6 +4647,12 @@ class GodotServer {
     }
     if (tool === 'project_export' && op === 'add_preset') {
       return await this.handleAddExportPreset(args);
+    }
+    if (tool === 'project_export' && op === 'set_preset') {
+      return await this.handleSetExportPreset(args);
+    }
+    if (tool === 'project_export' && op === 'remove_preset') {
+      return await this.handleRemoveExportPreset(args);
     }
     const headless = HEADLESS_OPERATIONS[tool]?.[op];
     if (headless !== undefined) {
@@ -6475,15 +6511,123 @@ class GodotServer {
       },
       project.value.path,
     );
-    if (!outcome.ok || !this.editorHasOpen(project.value.path)) {
+    return this.presetsAnswer(outcome, project.value.path, 'does not list this preset');
+  }
+
+  /**
+   * [param outcome] of a write to export_presets.cfg, with a note when an editor is open on the
+   * project, which holds the presets it read as it started and saves its own list over the file.
+   * [param unseen] says what that editor does not know of the write.
+   */
+  private presetsAnswer(outcome: HeadlessOutcome, projectPath: string, unseen: string): ToolResponse {
+    if (!outcome.ok || !this.editorHasOpen(projectPath)) {
       return this.answer(outcome);
     }
     return this.jsonTextResponse({
       ...outcome.payload,
-      editorNote:
-        'The editor open on this project read export_presets.cfg when it started and does not list this preset, and saving presets in its Export dialog writes its own list over the file. editor_launch restart loads the file; an export through project_export run reads the file and needs no restart.',
+      editorNote: `The editor open on this project read export_presets.cfg when it started and ${unseen}, and saving presets in its Export dialog writes its own list over the file. editor_launch restart loads the file; an export through project_export run reads the file and needs no restart.`,
       ...engineExtras(outcome),
     });
+  }
+
+  /**
+   * project_export set_preset. The option names are checked against what the preset's platform's
+   * exporter gives a new preset, which only an engine started as an editor can make, so that list is
+   * read in one on an empty project of its own, once for each platform, rather than on this project,
+   * where an editor would scan and import it.
+   */
+  private async handleSetExportPreset(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const preset = readString(args, 'preset') ?? '';
+    const given = readString(args, 'outputPath');
+    const output =
+      given === undefined || given === '' ? null : resolveWithinProject(project.value.path, given);
+    if (output !== null && !output.ok) {
+      return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
+    }
+    const options = args['options'];
+    let knownOptions: unknown[] = [];
+    if (options !== undefined && options !== null && Object.keys(options).length > 0) {
+      const platform = presetPlatform(project.value.path, preset);
+      if (platform !== null) {
+        const known = await this.exportOptions(platform);
+        if (typeof known === 'string') {
+          return this.createErrorResponse(known);
+        }
+        knownOptions = known;
+      }
+    }
+    const params: OperationParams = { preset, knownOptions };
+    if (given !== undefined) {
+      params['outputPath'] = output?.relativePath ?? '';
+    }
+    for (const key of [
+      'exportFilter',
+      'files',
+      'includeFilter',
+      'excludeFilter',
+      'customFeatures',
+      'options',
+    ]) {
+      if (args[key] !== undefined) {
+        params[key] = args[key];
+      }
+    }
+    const outcome = await this.operation('set_export_preset', params, project.value.path);
+    return this.presetsAnswer(outcome, project.value.path, 'does not have this change');
+  }
+
+  /** project_export remove_preset. */
+  private async handleRemoveExportPreset(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const outcome = await this.operation(
+      'remove_export_preset',
+      { preset: readString(args, 'preset') ?? '' },
+      project.value.path,
+    );
+    return this.presetsAnswer(outcome, project.value.path, 'still lists this preset');
+  }
+
+  /**
+   * Every option a new preset of [param platform] has, from an editor-mode engine on an empty
+   * project, or why it could not be read. Kept for the server's life, since the list is the
+   * engine's and changes only with it.
+   */
+  private async exportOptions(platform: string): Promise<unknown[] | string> {
+    const engine = await this.engine();
+    if (!engine.ok) {
+      return engine.response.content.map((block) => block.text).join(' ');
+    }
+    const key = `${engine.value}\n${platform}`;
+    const kept = this.exportOptionsRead.get(key);
+    if (kept !== undefined) {
+      return kept;
+    }
+    const empty = scratchDirectory('export');
+    try {
+      writeFileSync(join(empty, 'project.godot'), 'config_version=5\n');
+      const outcome = await runOperation(
+        { godotPath: engine.value, script: this.operationsScript, debug: DEBUG_MODE, editor: true },
+        'export_options',
+        { platform },
+        empty,
+      );
+      const options: unknown = outcome.ok ? outcome.payload['options'] : undefined;
+      if (!Array.isArray(options)) {
+        return `The ${platform} export options could not be read from the engine: ${outcome.ok ? 'it named none' : outcome.message}`;
+      }
+      const read: unknown[] = options;
+      this.exportOptionsRead.set(key, read);
+      return read;
+    } finally {
+      discard(empty);
+    }
   }
 
   /**
@@ -6528,6 +6672,21 @@ class GodotServer {
     }
 
     const debug = readBoolean(args, 'debug') ?? false;
+    const pack = readBoolean(args, 'pack') ?? false;
+    // Godot's command line exports a pack as a release whatever else it is told.
+    if (pack && debug) {
+      return this.createErrorResponse(
+        'A pack is exported as a release: the command-line exporter has no debug pack, so debug and pack cannot both be true.',
+        ['Leave debug out for a pack', 'Or leave pack out for a debug build'],
+      );
+    }
+    const extension = extname(output.relativePath).toLowerCase();
+    if (pack && extension !== '.pck' && extension !== '.zip') {
+      return this.createErrorResponse(
+        `A pack is written as a .pck or a .zip, and ${output.relativePath} is neither: the exporter picks the format by the extension.`,
+        ['Give outputPath ending in .pck, or .zip for a zip of the resources'],
+      );
+    }
     // Away from the project's own user://logs/, for the reason the operations are: the engine
     // renames that file when a process starts, so an export beside a running game rotated the
     // game's log out from under it. What this run printed is read off its streams just below and
@@ -6539,7 +6698,7 @@ class GodotServer {
       join(exportLogs, 'engine.log'),
       '--path',
       project.value.path,
-      debug ? '--export-debug' : '--export-release',
+      pack ? '--export-pack' : debug ? '--export-debug' : '--export-release',
       preset,
       output.absolutePath,
     ];
@@ -6590,7 +6749,7 @@ class GodotServer {
     );
     return exportAnswer(
       ending,
-      { preset, outputPath: output.relativePath, debug },
+      { preset, outputPath: output.relativePath, debug, ...(pack ? { pack } : {}) },
       before,
       writtenAt(),
       beside,

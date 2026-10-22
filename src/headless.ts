@@ -27,6 +27,8 @@ export interface HeadlessEngine {
   readonly script: string;
   /** Ask the script for its own debug lines. */
   readonly debug: boolean;
+  /** Start the engine as an editor, which is the only engine that can make an exporter. */
+  readonly editor?: boolean;
 }
 
 /** The problems a run reported, as many as an answer carries, and how many older ones it left out. */
@@ -450,6 +452,7 @@ export async function runOperation(
   writeFileSync(paramsFile, JSON.stringify(snakeCased(params)), 'utf8');
   const args = [
     '--headless',
+    ...(engine.editor === true ? ['--editor'] : []),
     // Away from the project's own user://logs/godot.log, which a project with file logging on
     // has a run writing to. The engine renames that file when a process starts, so a boot here
     // rotated a running bench's log out from under it and the bench went on writing at the

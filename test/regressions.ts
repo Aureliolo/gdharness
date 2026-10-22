@@ -24793,6 +24793,193 @@ async function testAnAddedPresetExports(): Promise<void> {
 }
 
 /**
+ * project_export set_preset, remove_preset and run with pack.
+ *
+ * Found by probe 150: nothing could set a preset's export path, its filters or its platform's
+ * options, nothing could take a preset out, and there was no export of the resources alone. The
+ * option names are the exporter's own, read from an editor-mode engine on an empty project, so a
+ * misspelt or foreign one is refused rather than written into a file the exporter ignores it in.
+ */
+async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('preset options regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-set-preset-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-set-preset-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Presets"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  writeFileSync(join(project, 'notes.txt'), 'kept out\n');
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: 'project_export', arguments: { projectPath: project, ...args } },
+      300_000,
+    );
+  const set = async (args: Record<string, unknown>): Promise<unknown> =>
+    parseTextContent(await call({ op: 'set_preset', ...args }));
+  const refused = async (args: Record<string, unknown>): Promise<string> => textOf(await call(args)) ?? '';
+  const file = (): string => readFileSync(join(project, 'export_presets.cfg'), 'utf8');
+  try {
+    await server.initialize('set-preset');
+    for (const [preset, platform] of [
+      ['Penguin', 'Linux'],
+      ['Tux', 'Linux'],
+      ['Win', 'Windows Desktop'],
+    ]) {
+      await call({ op: 'add_preset', preset, platform });
+    }
+
+    const options = await set({
+      preset: 'Penguin',
+      outputPath: 'res://build/p.x86_64',
+      options: { 'binary_format/embed_pck': true, 'binary_format/architecture': 'arm64' },
+    });
+    assert.deepEqual(
+      get(options, 'changed'),
+      {
+        export_path: { before: '', now: 'build/p.x86_64' },
+        'binary_format/embed_pck': { before: false, now: true },
+        'binary_format/architecture': { before: 'x86_64', now: 'arm64' },
+      },
+      `each change is answered with what it held before, the defaults among them: ${JSON.stringify(options)}`,
+    );
+    assert.match(file(), /\[preset\.0\.options\][^[]*binary_format\/embed_pck=true/, file());
+    assert.match(file(), /\[preset\.0\.options\][^[]*binary_format\/architecture="arm64"/, file());
+
+    const wrapper = await set({ preset: 'Win', options: { 'debug/export_console_wrapper': 'No' } });
+    assert.deepEqual(
+      get(wrapper, 'changed', 'debug/export_console_wrapper'),
+      { before: 1, now: 0 },
+      `an enum is given by the name the dialog shows and written as its number: ${JSON.stringify(wrapper)}`,
+    );
+
+    const written = file();
+    for (const [args, expected] of [
+      [
+        { preset: 'Penguin', options: { 'binary_format/embed_pk': true } },
+        'A Linux preset has no option binary_format/embed_pk; the nearest it has are binary_format/embed_pck',
+      ],
+      [
+        { preset: 'Penguin', options: { 'application/icon': 'res://icon.svg' } },
+        'A Linux preset has no option application/icon',
+      ],
+      [
+        { preset: 'Penguin', options: { 'binary_format/architecture': 'mips' } },
+        'binary_format/architecture is one of x86_64, x86_32, arm64',
+      ],
+      [
+        { preset: 'Penguin', options: { 'binary_format/embed_pck': 'yes' } },
+        'binary_format/embed_pck is true or false, not "yes".',
+      ],
+      [
+        { preset: 'Penguin', exportFilter: 'scenes', files: ['res://notes.txt'] },
+        'export_filter scenes lists scenes, and res://notes.txt is not one',
+      ],
+      [
+        { preset: 'Penguin', exportFilter: 'resources', files: ['res://gone.tres'] },
+        'res://gone.tres is not in the project',
+      ],
+      [
+        { preset: 'Penguin', files: ['res://main.tscn'] },
+        'this one exports all_resources: give exportFilter too',
+      ],
+      [{ preset: 'Penguin', exportFilter: 'scenes' }, 'it lists none: give them in files'],
+      [{ preset: 'Pengin', excludeFilter: '*.txt' }, 'There is no export preset Pengin; the nearest it has'],
+    ] as const) {
+      const said = await refused({ op: 'set_preset', ...args });
+      assert.ok(said.includes(expected), `${JSON.stringify(args)} is refused: ${said}`);
+      assert.equal(file(), written, `and nothing was written for ${JSON.stringify(args)}`);
+    }
+
+    const filtered = await set({
+      preset: 'Penguin',
+      exportFilter: 'scenes',
+      files: ['main.tscn', 'res://main.tscn'],
+      excludeFilter: '*.txt',
+    });
+    assert.deepEqual(
+      get(filtered, 'changed', 'export_files'),
+      { before: null, now: ['res://main.tscn'] },
+      JSON.stringify(filtered),
+    );
+    assert.match(file(), /export_filter="scenes"/, file());
+    assert.match(file(), /export_files=PackedStringArray\("res:\/\/main\.tscn"\)/, file());
+    assert.match(file(), /exclude_filter="\*\.txt"/, file());
+
+    await set({ preset: 'Tux', options: { 'binary_format/embed_pck': true } });
+    const removed = parseTextContent(await call({ op: 'remove_preset', preset: 'Penguin' }));
+    assert.deepEqual(
+      [get(removed, 'removed'), get(removed, 'runnableNow'), get(removed, 'presets')],
+      ['Penguin', 'Tux', ['Tux', 'Win']],
+      `the next preset of the platform becomes the one it runs: ${JSON.stringify(removed)}`,
+    );
+    assert.match(file(), /\[preset\.0\]\s*\n\s*name="Tux"/, file());
+    assert.match(
+      file(),
+      /\[preset\.0\.options\][^[]*binary_format\/embed_pck=true/,
+      `Tux keeps its options: ${file()}`,
+    );
+    assert.match(file(), /\[preset\.1\]\s*\n\s*name="Win"/, file());
+    assert.doesNotMatch(file(), /\[preset\.2/, file());
+    assert.match(file(), /Linux="Tux"/, file());
+    const listed = parseTextContent(await call({ op: 'list' }));
+    assert.deepEqual(
+      asArray(get(listed, 'presets')).map((preset) => [get(preset, 'name'), get(preset, 'runnable')]),
+      [
+        ['Tux', true],
+        ['Win', true],
+      ],
+      JSON.stringify(listed),
+    );
+
+    const pack = parseTextContent(
+      await call({ op: 'run', preset: 'Tux', outputPath: 'build/tux.pck', pack: true }),
+    );
+    assert.deepEqual(
+      [get(pack, 'exported'), get(pack, 'pack'), get(pack, 'debug')],
+      [true, true, false],
+      `a pack needs no templates: ${JSON.stringify(pack)}`,
+    );
+    // A pack opens with the engine's pack header, where a build given a .pck name would be a program.
+    assert.equal(
+      readFileSync(join(project, 'build', 'tux.pck'))
+        .subarray(0, 4)
+        .toString('latin1'),
+      'GDPC',
+      'and the file written is a pack',
+    );
+    assert.match(
+      await refused({ op: 'run', preset: 'Tux', outputPath: 'build/tux.pck', pack: true, debug: true }),
+      /^A pack is exported as a release/,
+    );
+    assert.match(
+      await refused({ op: 'run', preset: 'Tux', outputPath: 'build/tux.x86_64', pack: true }),
+      /^A pack is written as a \.pck or a \.zip, and build\/tux\.x86_64 is neither/,
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * The exported build editor_run starts is a file inside the project, judged where it really is.
  *
  * It is a file this server runs, so a link inside the project leading to any program on the machine
@@ -53543,6 +53730,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExportThatCouldNotCopyALibrarySaysSo,
   testAnExportOfAMissingPresetIsRefusedFirst,
   testAnAddedPresetExports,
+  testAPresetIsSetRemovedAndPacked,
   testASelfContainedEngineKeepsItsTemplates,
   testAnExportedBuildIsFoundInsideTheProject,
   testAnExportedBuildIsStartedAndStopped,

@@ -51,6 +51,8 @@ const BEGUN: String = "[gdharness] begun"
 const AFTER_THE_AUTOLOADS: Array[String] = [
 	"check_scripts",
 	"create_script",
+	# An exporter made in _init, before an editor's main loop has started, crashed the engine.
+	"export_options",
 	"modify_script",
 	"read_animation_states",
 	"read_animations",
@@ -229,6 +231,12 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = GdhExportPresets.new(_log).list_export_presets(params)
 		"add_export_preset":
 			payload = GdhExportPresets.new(_log).add_export_preset(params)
+		"set_export_preset":
+			payload = GdhExportPresets.new(_log).set_export_preset(params)
+		"remove_export_preset":
+			payload = GdhExportPresets.new(_log).remove_export_preset(params)
+		"export_options":
+			payload = GdhExportPresets.new(_log).export_options(params)
 		"validate_project":
 			payload = GdhImportPipeline.new(_log).validate_project(params)
 

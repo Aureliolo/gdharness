@@ -19,6 +19,21 @@ const PLATFORMS: Dictionary[String, String] = {
 	"Web": "web_",
 }
 
+## Each platform's exporter, which only an editor can make: the options a preset of it takes are its.
+const EXPORTERS: Dictionary[String, String] = {
+	"Windows Desktop": "EditorExportPlatformWindows",
+	"Linux": "EditorExportPlatformLinuxBSD",
+	"macOS": "EditorExportPlatformMacOS",
+	"Android": "EditorExportPlatformAndroid",
+	"iOS": "EditorExportPlatformIOS",
+	"Web": "EditorExportPlatformWeb",
+}
+## What export_filter takes, as the Export dialog's Resources tab names them: everything, the scenes
+## listed under export_files and what they use, the resources listed, or everything but those listed.
+const FILTERS: Array[String] = ["all_resources", "scenes", "resources", "exclude"]
+## The types of option a value is written for. An option of another type is left to the editor.
+const WRITABLE: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING, TYPE_PACKED_STRING_ARRAY]
+
 var _log: GdhLog
 
 
@@ -230,3 +245,306 @@ static func _marks_self_contained(directory: String) -> bool:
 		FileAccess.file_exists(directory.path_join("._sc_"))
 		or FileAccess.file_exists(directory.path_join("_sc_"))
 	)
+
+
+## Every option of [param params]'s platform, as its exporter gives a new preset them: the name, the
+## type, the hint and hint string of one that is an enum or a list, and the default.
+func export_options(params: Dictionary) -> Dictionary:
+	var platform: String = str(params.get("platform", ""))
+	if platform not in EXPORTERS:
+		return _log.failure(
+			"Unknown platform '%s'. The platforms are %s." % [platform, ", ".join(EXPORTERS.keys())]
+		)
+	if not Engine.is_editor_hint():
+		return _log.failure("The export options are read in an engine started with --editor.")
+	var exporter: Variant = ClassDB.instantiate(EXPORTERS[platform])
+	if not exporter is Object:
+		return _log.failure("The engine made no %s exporter." % platform)
+	var made: Object = exporter
+	var preset: Variant = made.call("create_preset")
+	if not preset is Object:
+		return _log.failure("The %s exporter made no preset." % platform)
+	var fresh: Object = preset
+	var options: Array[Dictionary] = []
+	for property: Dictionary in fresh.get_property_list():
+		var usage: int = GdhRead.as_int(property.get("usage", 0))
+		var name: String = str(property.get("name", ""))
+		if usage & PROPERTY_USAGE_CATEGORY or usage & PROPERTY_USAGE_GROUP or not name.contains("/"):
+			continue
+		(
+			options
+			. append(
+				{
+					"name": name,
+					"type": GdhRead.as_int(property.get("type", TYPE_NIL)),
+					"hint": GdhRead.as_int(property.get("hint", PROPERTY_HINT_NONE)),
+					"hintString": str(property.get("hint_string", "")),
+					"default": fresh.get(name),
+				}
+			)
+		)
+	return {"platform": platform, "options": options}
+
+
+## Changes what [param params] gives of a preset in export_presets.cfg: its export path, its
+## resource filter and the files it names, its include and exclude filters, its custom features and
+## its platform's options, each option checked against [code]known_options[/code], the list
+## [method export_options] answers for the preset's platform. Nothing is written when any of it is
+## refused.
+func set_export_preset(params: Dictionary) -> Dictionary:
+	var loaded: Variant = _preset_named(str(params.get("preset", "")).strip_edges())
+	if loaded is String:
+		return _log.failure(str(loaded))
+	var found: Dictionary = loaded
+	var config: ConfigFile = found["config"]
+	var section: String = found["section"]
+	var platform: String = str(config.get_value(section, "platform", ""))
+	var top: Dictionary = {}
+	if params.has("output_path"):
+		top["export_path"] = str(params["output_path"]).trim_prefix("res://")
+	for key: String in ["include_filter", "exclude_filter", "custom_features"]:
+		if params.has(key):
+			top[key] = str(params[key])
+	var filter: String = str(
+		params.get("export_filter", config.get_value(section, "export_filter", "all_resources"))
+	)
+	if params.has("export_filter"):
+		if filter not in FILTERS:
+			return _log.failure(GdhRead.offered("export_filter takes no %s" % filter, filter, FILTERS) + ".")
+		top["export_filter"] = filter
+	if params.has("files"):
+		var listed: Variant = _files_for(filter, params["files"])
+		if listed is String:
+			return _log.failure(str(listed))
+		top["export_files"] = listed
+	elif filter != "all_resources" and params.has("export_filter"):
+		var kept: Variant = config.get_value(section, "export_files", PackedStringArray())
+		var kept_files: PackedStringArray = kept if kept is PackedStringArray else PackedStringArray()
+		if kept is PackedStringArray and kept_files.is_empty():
+			return (
+				_log
+				. failure(
+					(
+						"export_filter %s exports the files the preset lists, and it lists none: give them in files."
+						% filter
+					)
+				)
+			)
+	var options: Variant = params.get("options", {})
+	if not options is Dictionary:
+		return _log.failure("options is an object of option names and values.")
+	var asked: Dictionary = options
+	var known: Variant = params.get("known_options", [])
+	var written: Variant = _options_for(platform, asked, known)
+	if written is String:
+		return _log.failure(str(written))
+	var values: Dictionary = written
+	if top.is_empty() and values.is_empty():
+		return _log.failure(
+			(
+				"Nothing to change: give outputPath, exportFilter, files, includeFilter, excludeFilter, "
+				+ "customFeatures or options."
+			)
+		)
+	var changed: Dictionary = {}
+	for key: String in top:
+		var before: Variant = config.get_value(section, key) if config.has_section_key(section, key) else null
+		changed[key] = {"before": before, "now": top[key]}
+		config.set_value(section, key, top[key])
+	var defaults: Dictionary = {}
+	if known is Array:
+		for option: Variant in known:
+			if option is Dictionary:
+				var described: Dictionary = option
+				defaults[str(described.get("name", ""))] = described.get("default")
+	for name: String in values:
+		var held: Variant = defaults.get(name)
+		if config.has_section_key(section + ".options", name):
+			held = config.get_value(section + ".options", name)
+		changed[name] = {"before": held, "now": values[name]}
+		config.set_value(section + ".options", name, values[name])
+	var saving: Error = config.save(PRESETS_FILE)
+	if saving != OK:
+		return _log.failure("Failed to save export_presets.cfg: " + error_string(saving))
+	return {
+		"preset": config.get_value(section, "name"),
+		"platform": platform,
+		"changed": changed,
+		"file": PRESETS_FILE,
+	}
+
+
+## Removes a preset from export_presets.cfg, numbering those after it down by one as the editor
+## saves them, and gives its platform's runnable mark to the first other preset of that platform.
+func remove_export_preset(params: Dictionary) -> Dictionary:
+	var preset_name: String = str(params.get("preset", "")).strip_edges()
+	var loaded: Variant = _preset_named(preset_name)
+	if loaded is String:
+		return _log.failure(str(loaded))
+	var found: Dictionary = loaded
+	var config: ConfigFile = found["config"]
+	var index: int = found["index"]
+	var section: String = found["section"]
+	var platform: String = str(config.get_value(section, "platform", ""))
+	var last: int = index
+	while config.has_section("preset." + str(last + 1)):
+		last += 1
+	for at: int in range(index, last + 1):
+		for part: String in ["", ".options"]:
+			var into: String = "preset.%d%s" % [at, part]
+			var from: String = "preset.%d%s" % [at + 1, part]
+			if config.has_section(into):
+				config.erase_section(into)
+			if at < last and config.has_section(from):
+				for key: String in config.get_section_keys(from):
+					config.set_value(into, key, config.get_value(from, key))
+	var answer: Dictionary = {"removed": preset_name, "platform": platform, "file": PRESETS_FILE}
+	if str(config.get_value(RUNNABLE_SECTION, platform, "")) == preset_name:
+		config.set_value(RUNNABLE_SECTION, platform, null)
+		var at: int = 0
+		while config.has_section("preset." + str(at)):
+			if str(config.get_value("preset." + str(at), "platform", "")) == platform:
+				var next: String = str(config.get_value("preset." + str(at), "name", ""))
+				config.set_value(RUNNABLE_SECTION, platform, next)
+				answer["runnableNow"] = next
+				break
+			at += 1
+	var saving: Error = config.save(PRESETS_FILE)
+	if saving != OK:
+		return _log.failure("Failed to save export_presets.cfg: " + error_string(saving))
+	answer["presets"] = names()
+	return answer
+
+
+## export_presets.cfg loaded, with the section and index of the preset called [param preset_name],
+## or why there is none.
+static func _preset_named(preset_name: String) -> Variant:
+	if preset_name.is_empty():
+		return "preset is required: the name of the preset in export_presets.cfg"
+	if not FileAccess.file_exists(PRESETS_FILE):
+		return "This project has no export_presets.cfg; project_export add_preset adds a preset."
+	var config: ConfigFile = ConfigFile.new()
+	var loading: Error = config.load(PRESETS_FILE)
+	if loading != OK:
+		return "Failed to parse export_presets.cfg: " + error_string(loading)
+	var held: Array[String] = names()
+	var index: int = held.find(preset_name)
+	if index == -1:
+		if held.is_empty():
+			return "export_presets.cfg has no preset, so none called %s." % preset_name
+		return GdhRead.offered("There is no export preset %s" % preset_name, preset_name, held) + "."
+	return {"config": config, "section": "preset." + str(index), "index": index}
+
+
+## The files a preset exporting by [param filter] lists, from [param given], or why they are not.
+static func _files_for(filter: String, given: Variant) -> Variant:
+	if filter == "all_resources":
+		return (
+			"files are what a preset exports when export_filter is scenes, resources or exclude, and "
+			+ "this one exports all_resources: give exportFilter too."
+		)
+	if not given is Array:
+		return "files is a list of res:// paths."
+	var listed: PackedStringArray = []
+	var missing: PackedStringArray = []
+	var not_scenes: PackedStringArray = []
+	for entry: Variant in given:
+		var path: String = str(entry)
+		if not path.begins_with("res://"):
+			path = "res://" + path
+		if not FileAccess.file_exists(path):
+			var _missing: bool = missing.append(path)
+		elif filter == "scenes" and path.get_extension() not in ["tscn", "scn"]:
+			var _not_scene: bool = not_scenes.append(path)
+		elif not listed.has(path):
+			var _listed: bool = listed.append(path)
+	if not missing.is_empty():
+		return (
+			"Nothing was written: %s %s not in the project."
+			% [", ".join(missing), "is" if missing.size() == 1 else "are"]
+		)
+	if not not_scenes.is_empty():
+		return (
+			"Nothing was written: export_filter scenes lists scenes, and %s %s not one; resources lists any file."
+			% [", ".join(not_scenes), "is" if not_scenes.size() == 1 else "are"]
+		)
+	return listed
+
+
+## The values [param asked] gives [param platform]'s options, each fitted to the option's type in
+## [param known], or why one is refused.
+static func _options_for(platform: String, asked: Dictionary, known: Variant) -> Variant:
+	var values: Dictionary = {}
+	if asked.is_empty():
+		return values
+	var by_name: Dictionary = {}
+	if known is Array:
+		for option: Variant in known:
+			if option is Dictionary:
+				var described: Dictionary = option
+				by_name[str(described.get("name", ""))] = described
+	for key: Variant in asked:
+		var name: String = str(key)
+		if not by_name.has(name):
+			return (
+				GdhRead.offered("A %s preset has no option %s" % [platform, name], name, by_name.keys()) + "."
+			)
+		var option: Dictionary = by_name[name]
+		var fitted: Variant = _fitted(name, asked[key], option)
+		if fitted is Dictionary:
+			var refusal: Dictionary = fitted
+			if refusal.has("refused"):
+				return str(refusal["refused"])
+		values[name] = fitted
+	return values
+
+
+## [param value] as option [param name], described by [param option], holds it, or {refused} saying
+## why it cannot.
+static func _fitted(name: String, value: Variant, option: Dictionary) -> Variant:
+	var type: int = GdhRead.as_int(option.get("type", TYPE_NIL))
+	var hint: int = GdhRead.as_int(option.get("hint", PROPERTY_HINT_NONE))
+	var choices: PackedStringArray = str(option.get("hintString", "")).split(",", false)
+	var shown: String = JSON.stringify(value)
+	if type not in WRITABLE:
+		return {
+			"refused":
+			(
+				"%s is a %s, which this tool does not write; the editor's Export dialog does."
+				% [name, type_string(type)]
+			)
+		}
+	if type == TYPE_BOOL:
+		return value if value is bool else {"refused": "%s is true or false, not %s." % [name, shown]}
+	if type == TYPE_INT and hint == PROPERTY_HINT_ENUM:
+		var named: PackedStringArray = []
+		for at: int in choices.size():
+			var choice: String = choices[at].get_slice(":", 0)
+			var number: int = int(choices[at].get_slice(":", 1)) if choices[at].contains(":") else at
+			var _named: bool = named.append(choice)
+			if str(value) == choice or ((value is int or value is float) and value == number):
+				return number
+		return {"refused": "%s is one of %s, not %s." % [name, ", ".join(named), shown]}
+	if type == TYPE_INT:
+		if value is int:
+			return value
+		if value is float:
+			var whole: float = value
+			if whole == floorf(whole):
+				return int(whole)
+		return {"refused": "%s is a whole number, not %s." % [name, shown]}
+	if type == TYPE_FLOAT:
+		if value is int or value is float:
+			var amount: float = value
+			return amount
+		return {"refused": "%s is a number, not %s." % [name, shown]}
+	if type == TYPE_STRING:
+		if not value is String:
+			return {"refused": "%s is text, not %s." % [name, shown]}
+		if hint == PROPERTY_HINT_ENUM and not choices.is_empty() and str(value) not in choices:
+			return {"refused": "%s is one of %s, not %s." % [name, ", ".join(choices), shown]}
+		return value
+	if not value is Array:
+		return {"refused": "%s is a list of text, not %s." % [name, shown]}
+	var items: Array = value
+	return PackedStringArray(items)

@@ -723,12 +723,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_export',
     title: 'Export',
     description:
-      "Export presets and exports. add_preset writes a preset to export_presets.cfg with the keys the editor's Project > Export writes for a new one, every platform option left at its default, and makes it the platform's runnable preset when the platform has none. It answers where this engine's export templates belong and whether the preset's platform has them, since an export needs them; list says the same for every preset. An editor open on the project does not see a preset added this way until it restarts. run names, as alsoWritten, what else the export wrote beside its output, such as the .pck a Windows or Linux build cannot start without. Its entries are the errors and warnings the export printed, the newest two hundred distinct ones, one printed more than once carrying times, and errors and warnings count them; exported is true only when this run wrote the output and printed no error.",
+      "Export presets and exports. add_preset writes a preset to export_presets.cfg with the keys the editor's Project > Export writes for a new one, every platform option left at its default, and makes it the platform's runnable preset when the platform has none. set_preset changes a preset's export path, its resource filter and the files it lists, its include and exclude filters, its custom features and its platform's options, and answers under changed what each held before and holds now; nothing is written when any of it is refused. The option names are the exporter's own, as the Export dialog's Options tab shows them by their paths, such as binary_format/embed_pck, and a name the platform does not have is refused with the nearest it has. remove_preset takes a preset out, and when it was its platform's runnable preset the next of that platform becomes it, under runnableNow. It answers where this engine's export templates belong and whether the preset's platform has them, since an export needs them; list says the same for every preset. An editor open on the project does not see a preset added this way until it restarts. run names, as alsoWritten, what else the export wrote beside its output, such as the .pck a Windows or Linux build cannot start without. Its entries are the errors and warnings the export printed, the newest two hundred distinct ones, one printed more than once carrying times, and errors and warnings count them; exported is true only when this run wrote the output and printed no error.",
     parameters: {
       projectPath: PROJECT_PATH,
       preset: {
         type: 'string',
-        ops: ['run', 'add_preset'],
+        ops: ['run', 'add_preset', 'set_preset', 'remove_preset'],
         description: 'Preset name from export_presets.cfg. add_preset: the name of the new one.',
       },
       platform: {
@@ -739,11 +739,55 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       outputPath: {
         type: 'string',
-        ops: ['run', 'add_preset'],
+        ops: ['run', 'add_preset', 'set_preset'],
         description:
-          'Where the export is written, inside the project. The directory is created if it is not there: Godot\'s command-line exporter refuses a missing one with "The given export path doesn\'t exist", which reads as a wrong path in the preset. add_preset: the path the preset exports to from the editor, optional.',
+          'Where the export is written, inside the project. The directory is created if it is not there: Godot\'s command-line exporter refuses a missing one with "The given export path doesn\'t exist", which reads as a wrong path in the preset. add_preset, set_preset: the path the preset exports to from the editor, optional.',
       },
       debug: { type: 'boolean', ops: ['run'], description: 'run: a debug export. Default false.' },
+      pack: {
+        type: 'boolean',
+        ops: ['run'],
+        description:
+          'run: export the resources alone, as a .pck or a .zip by outputPath, which needs no export templates and runs with an engine of the same version. A pack is a release export, so debug is refused beside it. Default false.',
+      },
+      exportFilter: {
+        type: 'string',
+        ops: ['set_preset'],
+        enum: ['all_resources', 'scenes', 'resources', 'exclude'],
+        description:
+          'set_preset: what the preset exports: every resource, the scenes listed in files and what they use, the resources listed, or every resource but those listed.',
+      },
+      files: {
+        type: 'array',
+        items: { type: 'string' },
+        ops: ['set_preset'],
+        description:
+          'set_preset: the files the filter lists, as res:// paths; each must be in the project, and for scenes each must be a scene.',
+      },
+      includeFilter: {
+        type: 'string',
+        ops: ['set_preset'],
+        description:
+          'set_preset: the non-resource files to export too, as comma-separated patterns such as "*.json, data/*"; empty for none.',
+      },
+      excludeFilter: {
+        type: 'string',
+        ops: ['set_preset'],
+        description:
+          'set_preset: the files to leave out, as comma-separated patterns such as "*.txt"; empty for none.',
+      },
+      customFeatures: {
+        type: 'string',
+        ops: ['set_preset'],
+        description:
+          'set_preset: the custom feature tags the export carries, comma-separated; empty for none.',
+      },
+      options: {
+        type: 'object',
+        ops: ['set_preset'],
+        description:
+          'set_preset: platform options by name, such as {"binary_format/embed_pck": true, "debug/export_console_wrapper": "No"}. An enum takes the name the dialog shows or its number, and is written as the number.',
+      },
     },
     requires: ['projectPath'],
     operations: {
@@ -753,6 +797,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         effect: 'additive',
         summary: 'add an export preset to export_presets.cfg',
         requires: ['preset', 'platform'],
+      },
+      set_preset: {
+        effect: 'destructive',
+        summary: "change a preset's path, filters and options",
+        requires: ['preset'],
+      },
+      remove_preset: {
+        effect: 'destructive',
+        summary: 'take a preset out of export_presets.cfg',
+        requires: ['preset'],
       },
     },
   },
