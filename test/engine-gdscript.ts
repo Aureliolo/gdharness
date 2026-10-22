@@ -2260,7 +2260,61 @@ function testOperations(godotPath: string, projectDir: string): void {
     events: [{ type: 'key', keycode: 'Qwxz' }],
   });
   assert.match(farOff.stderr, /Unknown key: Qwxz\. A key is named by its letter/, farOff.stderr);
-  assert.equal(readFileSync(projectFile, 'utf8'), beforeUi, 'and nothing is written for either');
+  // A field an event needs was given a default, a left click or axis 0 pushed right, and a number the
+  // engine has no button or direction for was written as bound.
+  const unbound: [Record<string, unknown>, RegExp][] = [
+    [
+      { type: 'mouse_button' },
+      /A mouse_button event needs button, a whole number from 1 to 9 \(1 left, 2 right, 3 middle, [^)]*8 and 9 the side buttons\): none was given\./,
+    ],
+    [{ type: 'mouse_button', button: 10 }, /A mouse_button event needs button, [^:]*: 10 was given\./],
+    [
+      { type: 'joypad_button', button: 1.5 },
+      /A joypad_button event needs button, a whole number from 0 to 127 /,
+    ],
+    [
+      { type: 'joypad_axis', axisValue: 1 },
+      /A joypad_axis event needs axis, a whole number from 0 to 9 \(0 and 1 the left stick[^)]*\): none was given\./,
+    ],
+    [
+      { type: 'joypad_axis', axis: 2, axisValue: 0.5 },
+      /A joypad_axis event needs axisValue, -1 or 1, the way the axis is pushed: 0\.5 was given\./,
+    ],
+    [
+      { type: 'joypad_axis', axis: 2 },
+      /A joypad_axis event needs axisValue, -1 or 1, [^:]*: none was given\./,
+    ],
+    [
+      { type: 'joypad_axis', axis: 2, axisValue: '1' },
+      /A joypad_axis event needs axisValue, -1 or 1, [^:]*: "1" was given\./,
+    ],
+  ];
+  for (const [event, refusal] of unbound) {
+    const refused = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
+      action_name: 'fixture_dash',
+      events: [{ type: 'key', keycode: 'Space' }, event],
+    });
+    assert.match(refused.stderr, refusal, `${JSON.stringify(event)}: ${refused.stderr}`);
+  }
+  assert.equal(readFileSync(projectFile, 'utf8'), beforeUi, 'and nothing is written for any of them');
+  const aimed = operation('add_input_action', {
+    action_name: 'fixture_aim',
+    events: [
+      { type: 'joypad_axis', axis: 2, axisValue: -1 },
+      { type: 'mouse_button', button: 9 },
+      { type: 'joypad_button', button: 127 },
+    ],
+  });
+  assert.deepEqual(
+    get(aimed, 'events'),
+    [
+      { class_name: 'InputEventJoypadMotion', axis: 2, axis_value: -1 },
+      { class_name: 'InputEventMouseButton', button_index: 9 },
+      { class_name: 'InputEventJoypadButton', button_index: 127 },
+    ],
+    JSON.stringify(aimed),
+  );
+  writeFileSync(projectFile, beforeUi);
 
   // Audio buses live in the AudioServer and only survive the run if the layout is saved. Before any
   // change there is no layout file, and the setting names its path all the same.

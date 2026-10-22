@@ -343,9 +343,17 @@ const INPUT_EVENTS: JsonSchema = {
     properties: {
       type: { type: 'string', enum: ['key', 'mouse_button', 'joypad_button', 'joypad_axis'] },
       keycode: { type: 'string', description: 'Keys: the key name, such as "Space" or "W".' },
-      button: { type: 'number', description: 'Mouse: 1 left, 2 right, 3 middle. Joypad: the button index.' },
-      axis: { type: 'number', description: 'Joypad axes: the axis index.' },
-      axisValue: { type: 'number', description: 'Joypad axes: -1 or 1.' },
+      button: {
+        type: 'number',
+        description:
+          'Mouse and joypad buttons, needed for both. Mouse: 1 left, 2 right, 3 middle, 4 and 5 the wheel up and down, 6 and 7 the wheel left and right, 8 and 9 the side buttons. Joypad: the button index, 0 to 127, 0 being A.',
+      },
+      axis: {
+        type: 'number',
+        description:
+          'Joypad axes, needed: the axis index, 0 to 9, 0 and 1 being the left stick across and down, 2 and 3 the right stick, 4 and 5 the triggers.',
+      },
+      axisValue: { type: 'number', description: 'Joypad axes, needed: -1 or 1, the way the axis is pushed.' },
       ctrl: { type: 'boolean', description: 'Keys: bind it with Ctrl held.' },
       alt: { type: 'boolean', description: 'Keys: bind it with Alt held.' },
       shift: { type: 'boolean', description: 'Keys: bind it with Shift held.' },
@@ -2426,7 +2434,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       value: {
         ops: ['until'],
         description:
-          "until: the value to wait for, fitted to the property's type and compared at the precision the property keeps, so -1.1 meets a 32-bit float holding -1.10000002. A value the property would have to cut is refused: a fraction on a whole number, a number other than 0 or 1 on a bool. An enum property is waited for by the name of a value as well as its number, as set takes it. On a property holding an object, whether declared to or untyped and holding one or null, the text null means null. One declared to hold an object refuses any value other than null, since it can never hold it.",
+          "until: the value to wait for, fitted to the property's type and compared at the precision the property keeps, so -1.1 meets a 32-bit float holding -1.10000002. A value the property would have to cut is refused: a fraction on a whole number, a number other than 0 or 1 on a bool. An enum property is waited for by the name of a value as well as its number, as set takes it. A number no value of the enum has, or one past an export range, is waited for all the same, since a game may store one, and the answer says so under outside_declared. On a property holding an object, whether declared to or untyped and holding one or null, the text null means null. One declared to hold an object refuses any value other than null, since it can never hold it.",
       },
       compare: {
         type: 'string',

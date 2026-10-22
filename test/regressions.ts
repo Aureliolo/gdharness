@@ -30291,6 +30291,31 @@ async function testARunningGamesEnumIsSetByName(): Promise<void> {
       /^7 is none of the values mood declares: CALM \(0\), BUSY \(1\), ANGRY \(2\)\.$/,
       `as is a number no value of the enum has: ${unnamed.said}`,
     );
+    // A wait for such a number goes ahead, as the game may hold one, and says what it is waiting on.
+    const until = async (property: string, value: unknown): Promise<{ answer: unknown; said: string }> =>
+      await call('runtime_wait', { op: 'until', nodePath: '/root/Main', property, value, timeoutMs: 500 });
+    const unnamedWait = await until('mood', 7);
+    assert.deepEqual(
+      [get(unnamedWait.answer, 'met'), get(unnamedWait.answer, 'outside_declared')],
+      [true, '7 is none of the values mood declares: CALM (0), BUSY (1), ANGRY (2).'],
+      `a wait for a number no value has says so: ${unnamedWait.said}`,
+    );
+    const pastWait = await until('level', 11);
+    assert.match(
+      text(get(pastWait.answer, 'outside_declared')),
+      /^11 is outside the range level declares, 0 to 10, which the inspector holds it to; the engine stores it as given\.$/,
+      `as does one past the range: ${pastWait.said}`,
+    );
+    const namedWait = await until('mood', 'BUSY');
+    assert.deepEqual(
+      [
+        get(namedWait.answer, 'met'),
+        get(namedWait.answer, 'value'),
+        get(namedWait.answer, 'outside_declared'),
+      ],
+      [false, 7, undefined],
+      `a value of the enum says nothing more: ${namedWait.said}`,
+    );
   } finally {
     if (started) {
       await server.request(

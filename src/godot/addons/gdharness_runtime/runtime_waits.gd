@@ -305,7 +305,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 			return watched
 		current = watched["value"]
 
-	return {
+	var answer: Dictionary = {
 		"type": "condition",
 		"path": node_path,
 		"property": property,
@@ -315,6 +315,16 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"elapsed_ms": Time.get_ticks_msec() - started,
 		"frames": frames,
 	}
+	# Said rather than refused, since a game may store a number no value has, as set says it stores
+	# one: a wait for 7 on an enum of three ran its whole timeout and answered only that it was not met.
+	if watched["holder"] is Object:
+		var owner: Object = watched["holder"]
+		var shown: String = JSON.stringify(_values.serialize(wanted), "", false)
+		var declaration: Dictionary = watched["declaration"]
+		var outside: String = GdhDeclared.outside(owner, declaration, wanted, shown)
+		if not outside.is_empty():
+			answer["outside_declared"] = outside
+	return answer
 
 
 ## What a property wait is missing or was given wrongly, or "" when it can go ahead.

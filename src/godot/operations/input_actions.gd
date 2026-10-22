@@ -5,6 +5,13 @@ const GdhLog = preload("logger.gd")
 const GdhProjectFile = preload("project_file.gd")
 ## The device an event matches every device with, InputMap's ALL_DEVICES, which GDScript is not given.
 const ALL_DEVICES: int = -1
+const MOUSE_NAMES: String = (
+	"1 left, 2 right, 3 middle, 4 and 5 the wheel up and down, 6 and 7 the wheel left and right,"
+	+ " 8 and 9 the side buttons"
+)
+const AXIS_NAMES: String = (
+	"0 and 1 the left stick across and down, 2 and 3 the right stick," + " 4 and 5 the triggers"
+)
 
 # The key names a caller may write, and what the engine calls them.
 const KEY_NAMES: Dictionary = {
@@ -147,49 +154,11 @@ func add_input_action(params: Dictionary) -> Dictionary:
 		if not event is Dictionary:
 			return _log.failure("Every event must be an object, not " + JSON.stringify(event))
 		var fields: Dictionary = event
-		var event_type: String = str(fields.get("type", ""))
-
-		match event_type:
-			"key":
-				var keycode: String = str(fields.get("keycode", ""))
-				if keycode.is_empty():
-					return _log.failure("A key event needs keycode")
-				var key_value: int = _keycode_value(keycode)
-				if key_value == KEY_NONE:
-					return _log.failure(_unknown_key(keycode))
-
-				var event_config: Dictionary = {"class_name": "InputEventKey"}
-				var physical: bool = GdhRead.as_bool(fields.get("physical", false))
-				event_config["physical_keycode" if physical else "keycode"] = key_value
-				if fields.get("ctrl", false):
-					event_config["ctrl_pressed"] = true
-				if fields.get("alt", false):
-					event_config["alt_pressed"] = true
-				if fields.get("shift", false):
-					event_config["shift_pressed"] = true
-				events_config.append(event_config)
-
-			"mouse_button":
-				events_config.append(
-					{"class_name": "InputEventMouseButton", "button_index": fields.get("button", 1)}
-				)
-
-			"joypad_button":
-				events_config.append(
-					{"class_name": "InputEventJoypadButton", "button_index": fields.get("button", 0)}
-				)
-
-			"joypad_axis":
-				var motion: Dictionary = {
-					"class_name": "InputEventJoypadMotion",
-					"axis": fields.get("axis", 0),
-					"axis_value": fields.get("axisValue", 1),
-				}
-				events_config.append(motion)
-
-			_:
-				var known: String = "key, mouse_button, joypad_button, joypad_axis"
-				return _log.failure("Unknown event type: " + event_type + ". One of " + known + ".")
+		var built: Variant = _event_config(fields)
+		if built is String:
+			return _log.failure(str(built))
+		var event_config: Dictionary = built
+		events_config.append(event_config)
 
 	if events_config.is_empty():
 		return _log.failure("events must hold at least one event")
@@ -376,6 +345,84 @@ func build_input_action(deadzone: float, events: Array) -> Dictionary:
 # The keycode for a key name as the tool spells it, or KEY_NONE for a name the table lacks.
 ## The refusal for [param key_name], which names no key: the names nearest it, then every name taken,
 ## since a name the caller has to guess at is the same guess again.
+## The event [param fields] describe, as [method build_input_action] takes it, or why it is no event.
+func _event_config(fields: Dictionary) -> Variant:
+	var event_type: String = str(fields.get("type", ""))
+	match event_type:
+		"key":
+			var keycode: String = str(fields.get("keycode", ""))
+			if keycode.is_empty():
+				return "A key event needs keycode"
+			var key_value: int = _keycode_value(keycode)
+			if key_value == KEY_NONE:
+				return _unknown_key(keycode)
+			var event_config: Dictionary = {"class_name": "InputEventKey"}
+			var physical: bool = GdhRead.as_bool(fields.get("physical", false))
+			event_config["physical_keycode" if physical else "keycode"] = key_value
+			for modifier: String in ["ctrl", "alt", "shift"]:
+				if GdhRead.as_bool(fields.get(modifier, false)):
+					event_config[modifier + "_pressed"] = true
+			return event_config
+		"mouse_button":
+			var mouse: Variant = _whole_in(
+				fields, "button", MOUSE_BUTTON_LEFT, MOUSE_BUTTON_XBUTTON2, MOUSE_NAMES
+			)
+			if mouse is String:
+				return "A mouse_button event " + str(mouse)
+			return {"class_name": "InputEventMouseButton", "button_index": mouse}
+		"joypad_button":
+			var pad: Variant = _whole_in(fields, "button", 0, JOY_BUTTON_MAX - 1, "0 is A, 1 B, 2 X, 3 Y")
+			if pad is String:
+				return "A joypad_button event " + str(pad)
+			return {"class_name": "InputEventJoypadButton", "button_index": pad}
+		"joypad_axis":
+			var axis: Variant = _whole_in(fields, "axis", 0, JOY_AXIS_MAX - 1, AXIS_NAMES)
+			if axis is String:
+				return "A joypad_axis event " + str(axis)
+			# The direction is half the binding: left on a stick and right on it are two actions, and the
+			# editor binds only a whole push one way, so a guessed direction or part of one is a binding
+			# nobody asked for.
+			var direction: Variant = fields.get("axisValue")
+			var numeric: bool = direction is int or direction is float
+			if not numeric or absf(GdhRead.as_float(direction)) != 1.0:
+				return (
+					"A joypad_axis event needs axisValue, -1 or 1, the way the axis is pushed: %s was given."
+					% _shown(direction)
+				)
+			return {
+				"class_name": "InputEventJoypadMotion",
+				"axis": axis,
+				"axis_value": GdhRead.as_float(direction)
+			}
+	var known: String = "key, mouse_button, joypad_button, joypad_axis"
+	return "Unknown event type: " + event_type + ". One of " + known + "."
+
+
+## The whole number [param fields] holds under [param key], from [param least] to [param most], or
+## the rest of a refusal saying what it takes and what [param named] each number is. A field left out
+## was given a default, a left click for a mouse event and axis 0 for a stick, and written as bound.
+static func _whole_in(fields: Dictionary, key: String, least: int, most: int, named: String) -> Variant:
+	var held: Variant = fields.get(key)
+	if held is int or held is float:
+		var number: float = GdhRead.as_float(held)
+		if number == floorf(number) and number >= least and number <= most:
+			return int(number)
+	return (
+		"needs %s, a whole number from %d to %d (%s): %s was given." % [key, least, most, named, _shown(held)]
+	)
+
+
+## [param held] as the caller wrote it: JSON has one kind of number, so 10 arrives as 10.0.
+static func _shown(held: Variant) -> String:
+	if held == null:
+		return "none"
+	if held is float:
+		var number: float = held
+		if is_finite(number) and number == floorf(number):
+			return str(int(number))
+	return JSON.stringify(held)
+
+
 static func _unknown_key(key_name: String) -> String:
 	var every: PackedStringArray = []
 	var named: PackedStringArray = []
