@@ -21,6 +21,7 @@ import {
   readdirSync,
   readFileSync,
   readSync,
+  realpathSync,
   rmdirSync,
   statSync,
   writeFileSync,
@@ -6550,11 +6551,37 @@ class GodotServer {
     if (!project.ok) {
       return project.response;
     }
+    const given = readNonEmptyString(args, 'path');
+    const place =
+      given === undefined ? null : resolveWithinProject(project.value.path, given, { root: true });
+    if (place !== null && !place.ok) {
+      return this.createErrorResponse(place.reason);
+    }
+    if (place !== null && !existsSync(place.absolutePath)) {
+      const folders = readdirSync(project.value.path, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+        .map((entry) => entry.name)
+        .sort();
+      return this.createErrorResponse(
+        `There is nothing at res://${place.relativePath} to search.${folders.length === 0 ? '' : ` The project's folders are ${folders.join(', ')}.`}`,
+      );
+    }
+    // The walk steps over links, but the place asked for is opened through them, so a link inside
+    // the project naming a folder outside it would be searched whole.
+    if (
+      place !== null &&
+      !isWithinRoot(realpathSync.native(project.value.path), realpathSync.native(place.absolutePath))
+    ) {
+      return this.createErrorResponse(
+        `res://${place.relativePath} leads outside the project through a link, so it is not searched.`,
+      );
+    }
     try {
       return this.jsonTextResponse(
         searchProject(project.value.path, {
           query: readString(args, 'query') ?? '',
           ...this.fileTypes(args),
+          ...(place === null ? {} : { within: place.absolutePath }),
           regex: readBoolean(args, 'regex') ?? false,
           caseSensitive: readBoolean(args, 'caseSensitive') ?? false,
           maxResults: readPositiveNumber(args, 'maxResults') ?? 100,

@@ -178,6 +178,7 @@ import {
   projectStructure,
   projectTexts,
   type SearchOptions,
+  type SearchResult,
   searchProject,
   VERSION_MARKER,
 } from '../src/project-scan.js';
@@ -8753,6 +8754,49 @@ function testASearchReadsWhatItSaysItReads(): void {
       ),
       ['GameState'],
       'a search heeding case finds the query itself',
+    );
+
+    // A folder or one file, answered by the file's place in the project rather than in the folder.
+    mkdirSync(join(sandbox, 'scripts', 'empty'), { recursive: true });
+    writeFileSync(join(sandbox, 'scripts', 'state.gd'), 'var GameState := 1\n');
+    // The one file asked for is judged by its own extension when fileTypes is given too.
+    for (const [within, fileTypes, expected] of [
+      [join(sandbox, 'scripts'), undefined, ['res://scripts/state.gd']],
+      [join(sandbox, 'Hero.cs'), undefined, ['res://Hero.cs']],
+      [join(sandbox, 'Hero.cs'), ['cs'], ['res://Hero.cs']],
+    ] as const) {
+      const scoped = search('GameState', { within, ...(fileTypes === undefined ? {} : { fileTypes }) });
+      assert.deepEqual(
+        scoped.results.map((entry) => entry.file),
+        expected,
+        `a search within ${within} reads only what is there: ${JSON.stringify(scoped)}`,
+      );
+      assert.equal(scoped.note, undefined, 'and a search that read files carries no note');
+    }
+
+    // An extension nothing has, which answered as a search where nothing held the query.
+    const unmatched = search('GameState', { fileTypes: ['nosuchext'] });
+    assert.deepEqual(unmatched.summary.files_searched, 0);
+    assert.equal(
+      unmatched.note,
+      'No file was searched: none there has the extension nosuchext. The extensions there are cs, gd, godot, png.',
+      JSON.stringify(unmatched),
+    );
+    assert.equal(
+      search('GameState', { fileTypes: ['nosuchext'], within: join(sandbox, 'scripts') }).note,
+      'No file was searched: none there has the extension nosuchext. The extensions there are gd.',
+      'the extensions named are the ones where the search looked',
+    );
+    assert.equal(
+      search('GameState', { fileTypes: ['gd'], within: join(sandbox, 'scripts', 'empty') }).note,
+      'No file was searched: there is no file there to search.',
+    );
+    const matched = search('nothing holds this', { fileTypes: ['gd'] });
+    assert.equal(matched.summary.total_matches, 0);
+    assert.equal(
+      matched.note,
+      undefined,
+      `a type that matched files is no note, found or not: ${JSON.stringify(matched)}`,
     );
   } finally {
     sweep(sandbox);
@@ -36456,6 +36500,8 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
   writeFileSync(join(theirs, 'main.gd'), 'extends Node # theirs\n');
   writeFileSync(join(outside, 'secret.gd'), 'the secret\n');
   symlinkSync(outside, join(ours, 'vendor'), 'junction');
+  mkdirSync(join(ours, 'scripts'));
+  writeFileSync(join(ours, 'scripts', 'hero.gd'), 'extends Node # hero\n');
   const read = async (request: RawRequest, uri: string): Promise<string> => {
     const answer = await request('resources/read', { uri });
     return answer.error?.message ?? text(get(answer.result, 'contents', 0, 'text'));
@@ -36467,6 +36513,28 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
         const linked = await read(request, 'godot://script/vendor/secret.gd');
         assert.doesNotMatch(linked, /the secret/, `a link out of the project is not followed: ${linked}`);
         assert.match(linked, /leads outside the project through a link/, linked);
+
+        // A search in one place: the folder is read, and a link out of the project is not.
+        const inScripts = await call('project_search', {
+          projectPath: ours,
+          query: 'extends',
+          path: 'res://scripts',
+        });
+        assert.deepEqual(
+          (JSON.parse(inScripts) as SearchResult).results.map((entry) => entry.file),
+          ['res://scripts/hero.gd'],
+          inScripts,
+        );
+        for (const through of ['res://vendor', 'res://vendor/secret.gd']) {
+          assert.equal(
+            await call('project_search', { projectPath: ours, query: 'secret', path: through }),
+            `${through} leads outside the project through a link, so it is not searched.`,
+          );
+        }
+        assert.equal(
+          await call('project_search', { projectPath: ours, query: 'extends', path: 'res://nowhere' }),
+          "There is nothing at res://nowhere to search. The project's folders are scripts.",
+        );
 
         // The search with no fileTypes, through the server: every text file, project.godot included.
         const searched = await call('project_search', { projectPath: theirs, query: 'config_version' });

@@ -3,8 +3,8 @@
  * kinds of file it holds, and where a piece of text occurs.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { basename, extname, join } from 'node:path';
 import { errorMessage } from './errors.js';
 
 /** Directories that are never part of a project's own files, and are not spelled with a dot. */
@@ -246,6 +246,8 @@ export interface SearchOptions {
   readonly query: string;
   /** Extensions to search, or undefined for every text file. */
   readonly fileTypes?: readonly string[];
+  /** The folder or file inside the project to search, on disk, or undefined for the whole project. */
+  readonly within?: string;
   readonly regex: boolean;
   readonly caseSensitive: boolean;
   readonly maxResults: number;
@@ -268,6 +270,8 @@ export interface SearchResult {
   };
   /** The folders a `.gdignore` kept out, which a search for words the project holds may want. */
   not_searched?: string[];
+  /** Why nothing was searched, when the extensions asked for matched no file. */
+  note?: string;
 }
 
 /** Whether [param bytes] are a binary file's: a NUL in the first eight thousand, as git judges. */
@@ -423,7 +427,48 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   // limit exactly was called cut, and raising the limit gave the same list.
   const full = (): boolean => result.summary.truncated;
   const notSearched: string[] = [];
+  // The extensions the walk met, for a search whose fileTypes matched none of them: answered as an
+  // empty search, it read as a project where nothing held the query.
+  const met = new Set<string>();
 
+  const searchFile = (entryPath: string, name: string): void => {
+    const extension = name.includes('.') ? (name.split('.').pop()?.toLowerCase() ?? '') : '';
+    if (extension !== '') {
+      met.add(extension);
+    }
+    if (extensions !== null && !extensions.has(extension)) {
+      return;
+    }
+    const bytes = readFileSync(entryPath);
+    // Every text file by default, told by its content rather than a list of extensions: the list
+    // left out project.godot and C#, so an autoload registered only in project.godot was answered
+    // as used nowhere.
+    if (extensions === null && isBinary(bytes)) {
+      return;
+    }
+
+    result.summary.files_searched += 1;
+    const matches: SearchMatch[] = [];
+    // Split on either ending, so `$` in a pattern meets the end of a line in a CRLF checkout.
+    for (const [index, line] of bytes.toString('utf8').split(/\r?\n/).entries()) {
+      // Found or not, rather than by what it matched: a lookahead matches the empty string.
+      const found = regex ? regex.exec(line) : plainMatch(line, needle, options.caseSensitive);
+      if (found === null) {
+        continue;
+      }
+      if (result.summary.total_matches >= options.maxResults) {
+        result.summary.truncated = true;
+        break;
+      }
+      matches.push({ line: index + 1, content: line.trim(), match: found[0] });
+      result.summary.total_matches += 1;
+    }
+    if (matches.length > 0) {
+      const relativePath = entryPath.slice(projectPath.length + 1).replace(/\\/g, '/');
+      result.results.push({ file: `res://${relativePath}`, matches });
+      result.summary.files_with_matches += 1;
+    }
+  };
   const visit = (directory: string): void => {
     if (steppedOver(directory)) {
       if (gdignored(directory)) {
@@ -441,43 +486,28 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       const entryPath = join(directory, entry.name);
       if (entry.isDirectory()) {
         visit(entryPath);
-        continue;
-      }
-      const extension = entry.name.includes('.') ? (entry.name.split('.').pop()?.toLowerCase() ?? '') : '';
-      if (!entry.isFile() || (extensions !== null && !extensions.has(extension))) {
-        continue;
-      }
-      const bytes = readFileSync(entryPath);
-      // Every text file by default, told by its content rather than a list of extensions: the list
-      // left out project.godot and C#, so an autoload registered only in project.godot was answered
-      // as used nowhere.
-      if (extensions === null && isBinary(bytes)) {
-        continue;
-      }
-
-      result.summary.files_searched += 1;
-      const matches: SearchMatch[] = [];
-      // Split on either ending, so `$` in a pattern meets the end of a line in a CRLF checkout.
-      for (const [index, line] of bytes.toString('utf8').split(/\r?\n/).entries()) {
-        // Found or not, rather than by what it matched: a lookahead matches the empty string.
-        const found = regex ? regex.exec(line) : plainMatch(line, needle, options.caseSensitive);
-        if (found === null) {
-          continue;
-        }
-        if (result.summary.total_matches >= options.maxResults) {
-          result.summary.truncated = true;
-          break;
-        }
-        matches.push({ line: index + 1, content: line.trim(), match: found[0] });
-        result.summary.total_matches += 1;
-      }
-      if (matches.length > 0) {
-        const relativePath = entryPath.slice(projectPath.length + 1).replace(/\\/g, '/');
-        result.results.push({ file: `res://${relativePath}`, matches });
-        result.summary.files_with_matches += 1;
+      } else if (entry.isFile()) {
+        searchFile(entryPath, entry.name);
       }
     }
   };
-  visit(projectPath);
-  return notSearched.length === 0 ? result : { ...result, not_searched: notSearched };
+  const within = options.within ?? projectPath;
+  if (statSync(within).isDirectory()) {
+    visit(within);
+  } else {
+    searchFile(within, basename(within));
+  }
+  const answered = notSearched.length === 0 ? result : { ...result, not_searched: notSearched };
+  if (extensions === null || result.summary.files_searched > 0) {
+    return answered;
+  }
+  const asked = [...extensions].join(', ');
+  const there = [...met].sort().join(', ');
+  return {
+    ...answered,
+    note:
+      met.size === 0
+        ? `No file was searched: there is no file there to search.`
+        : `No file was searched: none there has the extension ${asked}. The extensions there are ${there}.`,
+  };
 }

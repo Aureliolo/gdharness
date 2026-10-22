@@ -614,14 +614,20 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Search the project',
     effect: 'read',
     description:
-      'Searches text or a regular expression across project files and returns file paths with line numbers. What the engine steps over is not searched: directories spelled with a dot, node_modules, and any directory holding a .gdignore, which not_searched names when the search passed one. A vendored engine or an export directory is therefore absent from the results rather than matching the code you are looking for in a copy nobody runs. The addons gdharness installed are not searched either, since nobody on the project wrote them.',
+      'Searches text or a regular expression across project files and returns file paths with line numbers, one entry per line that holds the query, however often it holds it; total_matches counts those lines. What the engine steps over is not searched: directories spelled with a dot, node_modules, and any directory holding a .gdignore, which not_searched names when the search passed one. A vendored engine or an export directory is therefore absent from the results rather than matching the code you are looking for in a copy nobody runs. The addons gdharness installed are not searched either, since nobody on the project wrote them.',
     parameters: {
       projectPath: PROJECT_PATH,
       query: { type: 'string', description: 'The text or pattern to find.' },
+      path: {
+        type: 'string',
+        description:
+          'A folder or file inside the project to search, such as "res://src". Default: the whole project. One that is not there is refused, naming the project\'s folders.',
+      },
       fileTypes: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Extensions to search, such as ["gd", "tscn"]. Default: every text file.',
+        description:
+          'Extensions to search, such as ["gd", "tscn"]. Default: every text file. When none of the files searched has one of them, note says so and names the extensions there are.',
       },
       regex: { type: 'boolean', description: 'Read the query as a regular expression. Default false.' },
       caseSensitive: { type: 'boolean', description: 'Default false.' },
