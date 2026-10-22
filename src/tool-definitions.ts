@@ -1952,6 +1952,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Inspect the running game',
     description:
       'Questions about the running game: what is written on the screen, the scene tree, the nodes matching a query, where one node is on screen, what one property reads, the performance metrics, or what it tells a screen reader. Needs the game running with the runtime addon.',
+    answer:
+      "text: lines, count, and under omitted how many lines the limit left behind; out_of_view counts the lines left out for being drawn outside the viewport or a ScrollContainer, with a note saying so. find: nodes and count, with hidden counting the matches left out as hidden and out_of_view those left out as drawn out of view, each with a note. rect: canvas and window, and for a Control visible and in_view, false when it is drawn wholly outside its viewport or a ScrollContainer holding it. metrics: frame_time is the mean wall time of the last frames_timed frames (up to 120; the game, physics and the wait for the display included), frame_time_max the slowest, both in seconds and null before a frame has passed; vsync says whether a frame waits for the display, and max_fps is the game's frame-rate cap, 0 for none. process_frames and physics_frames count frames and physics steps since the start; get_frames_drawn() stays 0 headless. physics_steps_per_second is the physics steps a second over those frames, fewer than physics_ticks_per_second when a frame needs more than max_physics_steps_per_frame or the editor's Game view slows it. fps, process_time_max and physics_time are the engine's monitors, set once a second: the last second's frames and its slowest process and physics step, so they trail a change by up to a second, and the last two are worst cases, not the frame. memory_static is the engine's CPU-side allocation in bytes; render_video_mem_used, render_texture_mem_used and render_buffer_mem_used are the renderer's GPU memory in bytes, which memory_static leaves out. accessibility: under windows, each element with its role (text for static text, button, check_box, group for a control holding others), name, value, value_text (a range's spoken words, such as \"75%\"), description, placeholder, bounds in the window's pixels, the actions a reader is offered (click, focus, toggle, set_value, select, expand_collapse, scroll_into_view), and focused on the focused one. node is the node that made the element; a part a node made of itself has part_of, the node drawn around it that holds its words, or part_of_candidates where several are, and part: announcement marks the text a window announces through. An empty name reads as nothing: static text takes it from accessibility_update_set_value, and _note counts the text elements on screen with none. tooltip is the node's tooltip_text, which a Windows reader is not told. With nothing focused, the engine calls GdharnessRuntime focused.",
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
@@ -2017,7 +2019,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['text', 'find'],
         description:
-          'text: read hidden nodes as well, for checking that something is not showing. Default false. find: default true, since a find means the node whether or not it is drawn; false answers with what the player can actually see, which is how a panel that keeps a label for every line and hides the ones that do not is read. A node counts as hidden when the engine would not draw it: a hidden Control, Node2D or Node3D above it hides it, a plain Node in between breaks that chain as it does for the engine, and a hidden canvas layer or window hides everything in it. How many matches were left out comes back under hidden.',
+          'text: read hidden nodes as well, and controls drawn outside the viewport or scrolled out of a ScrollContainer, for checking that something is not showing. Default false. find: default true, since a find means the node whether or not it is drawn; false answers with what the player can actually see, which is how a panel that keeps a label for every line and hides the ones that do not is read. A node counts as hidden when the engine would not draw it: a hidden Control, Node2D or Node3D above it hides it, a plain Node in between breaks that chain as it does for the engine, and a hidden canvas layer or window hides everything in it. How many matches were left out comes back under hidden.',
       },
       metrics: {
         type: 'array',
@@ -2038,19 +2040,19 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       text: {
         effect: 'read',
         summary:
-          "every line of text under nodePath, the values in its fields included, in reading order, leaving out what is hidden and everything under it. Every line reads as drawn: rich text without tags, text only as far as it is typed out, a translation rather than its key, an upper-case label in capitals and a secret field as its mask. Tab titles, menu bar titles, list items, a tree's column titles and rows, and an open menu's items and the titles of its separators read a line each",
+          "every line of text under nodePath, the values in its fields included, in reading order, leaving out what is hidden and everything under it, and a control drawn wholly outside the viewport or scrolled out of a ScrollContainer, which the player cannot read. Every line reads as drawn: rich text without tags, text only as far as it is typed out, a translation rather than its key, an upper-case label in capitals and a secret field as its mask. Tab titles, menu bar titles, list items, a tree's column titles and rows, and an open menu's items and the titles of its separators read a line each",
         requires: [],
       },
       find: {
         effect: 'read',
         summary:
-          'the paths of every node matching className, script, namePattern, group or says, with property read off each, hidden ones included unless includeHidden says otherwise',
+          'the paths of every node matching className, script, namePattern, group or says, with property read off each, hidden ones included unless includeHidden says otherwise; with it false, a control drawn wholly outside the viewport or a ScrollContainer is left out too',
         requires: [],
       },
       rect: {
         effect: 'read',
         summary:
-          "one node's rectangle or position, in canvas and in window pixels. Canvas is the node's own viewport; window is where it is drawn in the game's window, through any embedded dialog or SubViewport it sits in, which is what runtime_input mouse_click and mouse_motion take. A 3D node answers with the point to aim at, which is the middle of what it draws rather than the origin it stands on, the rectangle it covers under covers, the camera that drew it, and behind_camera when it is not in front of one",
+          "one node's rectangle or position, in canvas and in window pixels, and for a Control whether it is in view. Canvas is the node's own viewport; window is where it is drawn in the game's window, through any embedded dialog or SubViewport it sits in, which is what runtime_input mouse_click and mouse_motion take. A 3D node answers with the point to aim at, which is the middle of what it draws rather than the origin it stands on, the rectangle it covers under covers, the camera that drew it, and behind_camera when it is not in front of one",
         requires: ['nodePath'],
       },
       property: {
@@ -2062,13 +2064,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       metrics: {
         effect: 'read',
         summary:
-          "frame time, memory, draw calls and the rest. frame_time is the mean wall time of the last frames_timed frames (up to 120; the game, physics and the wait for the display included), frame_time_max the slowest, both in seconds and null before a frame has passed; vsync says whether a frame waits for the display, and max_fps is the game's frame-rate cap, 0 for none. process_frames and physics_frames count frames and physics steps since the start; get_frames_drawn() stays 0 headless. physics_steps_per_second is the physics steps a second over those frames, fewer than physics_ticks_per_second when a frame needs more than max_physics_steps_per_frame or the editor's Game view slows it. fps, process_time_max and physics_time are the engine's monitors, set once a second: the last second's frames and its slowest process and physics step, so they trail a change by up to a second, and the last two are worst cases, not the frame. Memory, object and render counts are read as asked. memory_static is the engine's CPU-side allocation in bytes; render_video_mem_used, render_texture_mem_used and render_buffer_mem_used are the renderer's GPU memory in bytes, which memory_static leaves out",
+          'frame time, memory, draw calls and the rest; memory, object and render counts are read as asked',
         requires: [],
       },
       accessibility: {
         effect: 'read',
         summary:
-          'what the game tells a screen reader, read through UI Automation as a Windows screen reader does, under windows: one tree per window, each element with its role (text for static text, button, check_box, group for a control holding others), name, value, value_text (a range\'s spoken words, such as "75%"), description, placeholder, bounds in the window\'s pixels, the actions a reader is offered (click, focus, toggle, set_value, select, expand_collapse, scroll_into_view), and focused on the focused one. node is the node that made the element; a part a node made of itself has part_of, the node drawn around it that holds its words, or part_of_candidates where several are, and part: announcement marks the text a window announces through. An empty name reads as nothing: static text takes it from accessibility_update_set_value, and _note counts the text elements on screen with none. tooltip is the node\'s tooltip_text, which a Windows reader is not told. With nothing focused, the engine calls GdharnessRuntime focused. Needs a windowed Windows run started with engineArgs ["--accessibility", "always"] or accessibility_support at Always Active, since the engine builds the tree only when asked; reading takes a second or two',
+          'what the game tells a screen reader, read through UI Automation as a Windows screen reader does, one tree per window. Needs a windowed Windows run started with engineArgs ["--accessibility", "always"] or accessibility_support at Always Active, since the engine builds the tree only when asked; reading takes a second or two',
         requires: [],
       },
     },
@@ -2479,7 +2481,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['until'],
         description:
-          'until, with says: count words on a hidden node too. Default false, since a wait for words is a wait for them to be shown: a button that exists hidden through a whole animation carries its words the whole time and satisfied the wait at once, and every wait on that screen fell back to counting frames.',
+          'until, with says: count words on a hidden node too, and on one drawn outside the viewport or scrolled out of a ScrollContainer. Default false, since a wait for words is a wait for them to be shown, and a wait that runs out while such a node holds them says so under unseen_note: a button that exists hidden through a whole animation carries its words the whole time and satisfied the wait at once, and every wait on that screen fell back to counting frames.',
       },
       timeoutMs: {
         type: 'integer',

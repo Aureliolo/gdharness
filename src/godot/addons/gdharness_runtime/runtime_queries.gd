@@ -148,24 +148,27 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	var nearly_hidden: int = 0
 	var nearly_said_hidden: int = 0
 	var hidden: int = 0
+	var out_of_view: int = 0
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
 		var rest: bool = _matches_apart_from_name(node, wanted)
 		if rest and _named(node, names):
 			if not include_hidden and not shown(node):
 				hidden += 1
+			elif not include_hidden and not GdhScreen.in_view(node):
+				out_of_view += 1
 			elif found.size() >= limit:
 				truncated = true
 				break
 			else:
 				found.append(_found(node, wanted_property))
 		elif rest and _contains_any(str(node.name), plain_names):
-			if include_hidden or shown(node):
+			if include_hidden or readable(node):
 				nearly += 1
 			else:
 				nearly_hidden += 1
 		elif not widened_says.is_empty() and _named(node, names) and _matches_apart_from_name(node, widened):
-			if include_hidden or shown(node):
+			if include_hidden or readable(node):
 				nearly_said += 1
 			else:
 				nearly_said_hidden += 1
@@ -200,7 +203,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 					'name is matched as a glob against the whole name; %d %snode %s %s, which "%s"%s would find'
 					% [
 						named_near,
-						"" if nearly > 0 else "hidden ",
+						"" if nearly > 0 else "hidden or out-of-view ",
 						holding,
 						" or ".join(PackedStringArray(near_words)),
 						GdhSays.joined_at_bars(opened),
@@ -220,7 +223,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 						widened_says,
 						"" if nearly_said > 0 else " with includeHidden true",
 						said_near,
-						"" if nearly_said > 0 else "hidden ",
+						"" if nearly_said > 0 else "hidden or out-of-view ",
 						"" if said_near == 1 else "s",
 					]
 				)
@@ -234,6 +237,17 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			(
 				"%d matching node%s hidden and left out; includeHidden true answers with them too"
 				% [hidden, "" if hidden == 1 else "s"]
+			)
+		)
+	if out_of_view > 0:
+		answer["out_of_view"] = out_of_view
+		notes.append(
+			(
+				(
+					"%d matching node%s drawn outside the viewport or scrolled out of a ScrollContainer"
+					+ " and left out; includeHidden true answers with them too"
+				)
+				% [out_of_view, "" if out_of_view == 1 else "s"]
 			)
 		)
 	if not notes.is_empty():
@@ -266,6 +280,13 @@ static func shown(node: Node) -> bool:
 	# A node that draws nothing is shown when what it sits in is.
 	var parent: Node = node.get_parent()
 	return parent == null or shown(parent)
+
+
+## Whether the player can read [param node]: [method shown], and drawn inside its viewport and every
+## ScrollContainer holding it, see [method GdhScreen.in_view]. A click by words asks [method shown]
+## alone, since it scrolls what it presses into view.
+static func readable(node: Node) -> bool:
+	return shown(node) and GdhScreen.in_view(node)
 
 
 ## Whether the canvas [param item] is drawn on is showing: its layer, and the windows around it.
@@ -426,15 +447,26 @@ func read_text(params: Dictionary) -> Dictionary:
 	# and a bare `truncated: true` was looked straight past twice before the limit was suspected.
 	# A number is what sends somebody back.
 	var lines: Array[String] = []
-	var left_out: int = _read_into(root, include_hidden, limit, lines)
-	return {
+	var tally: Dictionary[String, int] = {"omitted": 0, "out_of_view": 0}
+	_read_into(root, include_hidden, limit, lines, tally)
+	var answer: Dictionary = {
 		"type": "text",
 		"root": root_path,
 		"lines": lines,
 		"count": lines.size(),
-		"truncated": left_out > 0,
-		"omitted": left_out,
+		"truncated": tally["omitted"] > 0,
+		"omitted": tally["omitted"],
 	}
+	if tally["out_of_view"] > 0:
+		answer["out_of_view"] = tally["out_of_view"]
+		answer["note"] = (
+			(
+				"%d line%s drawn outside the viewport or scrolled out of a ScrollContainer, where the"
+				+ " player cannot read them, left out; includeHidden true answers with them too"
+			)
+			% [tally["out_of_view"], "" if tally["out_of_view"] == 1 else "s"]
+		)
+	return answer
 
 
 ## Walks [param node] depth first, which is the order the screen is laid out in and the order a
@@ -445,22 +477,27 @@ func read_text(params: Dictionary) -> Dictionary:
 ## screen full of forms answered with every label on it and none of the values in it. The hidden
 ## check covers a [Window] for the same walk: a dropdown's popup is a child that is not drawn
 ## until it is opened, and reading a closed menu would put every item on the screen.
-## Fills [param into] up to [param most] lines and answers with how many further lines the rest of
-## the subtree says, which is what the caller is told rather than left to infer.
+## Fills [param into] up to [param most] lines and counts in [param tally] how many further lines the
+## rest of the subtree says, under omitted, and how many it says out of view, under out_of_view, which
+## is what the caller is told rather than left to infer.
 ##
 ## Asked of each node rather than cut off at the first hidden one, since a hidden panel does not
 ## hide a label reached through a plain Node: see [method shown].
-func _read_into(node: Node, include_hidden: bool, most: int, into: Array[String]) -> int:
-	var left_out: int = 0
+func _read_into(
+	node: Node, include_hidden: bool, most: int, into: Array[String], tally: Dictionary[String, int]
+) -> void:
 	if include_hidden or shown(node):
-		for said: String in GdhWords.lines_said_by(node):
-			if into.size() < most:
-				into.append(said)
-			else:
-				left_out += 1
+		var said: Array[String] = GdhWords.lines_said_by(node)
+		if not include_hidden and not GdhScreen.in_view(node):
+			tally["out_of_view"] += said.size()
+		else:
+			for line: String in said:
+				if into.size() < most:
+					into.append(line)
+				else:
+					tally["omitted"] += 1
 	for child: Node in node.get_children(true):
-		left_out += _read_into(child, include_hidden, most, into)
-	return left_out
+		_read_into(child, include_hidden, most, into, tally)
 
 
 ## Where a node is on screen: a Control's rectangle, a Node2D's position, or the place a 3D node
@@ -488,6 +525,7 @@ func get_rect(params: Dictionary) -> Dictionary:
 			"type": "rect",
 			"path": node_path,
 			"visible": control.is_visible_in_tree(),
+			"in_view": GdhScreen.in_view(control),
 			"canvas": _values.serialize(canvas_rect),
 			"window":
 			_values.serialize(

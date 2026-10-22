@@ -110,9 +110,10 @@ func wait_signal(params: Dictionary) -> Dictionary:
 	}
 	if not catcher.fired:
 		answer["note"] = (
-			"If a call meant to set the signal off was sent beside this wait, it may have run only after"
-			+ " the wait answered, as a client can run its calls in turn: arm runtime_wait watch first,"
-			+ " make the call, then wait with signal and that watch"
+			"A wait hears the signal only from when it begins, so one that fired before it is not"
+			+ " counted. If a call meant to set the signal off was sent beside this wait, it may have run"
+			+ " only after the wait answered, as a client can run its calls in turn: arm runtime_wait"
+			+ " watch first, make the call, then wait with signal and that watch"
 		)
 	return answer
 
@@ -599,7 +600,7 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 		looks += 1
 		looked_usec += Time.get_ticks_usec() - last
 
-	return {
+	var answer: Dictionary = {
 		"type": "condition",
 		"path": node_path,
 		"says": said,
@@ -610,12 +611,24 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 		"looks": looks,
 		"looking_ms": looked_usec / 1000.0,
 	}
+	# Words that are there and cannot be read look, from a wait that ran out, like words that never
+	# came.
+	if not found and not include_hidden and _anything_says(node_path, said, true):
+		answer["unseen_note"] = (
+			(
+				"Something under %s says it, but is hidden or drawn outside the viewport or a"
+				+ " ScrollContainer, where the player cannot read it; includeHidden true counts it there too"
+			)
+			% node_path
+		)
+	return answer
 
 
-## Whether anything under [param node_path] says [param said], the node itself included, and shown
-## unless hidden ones are wanted too. Matched as a find and a click match `says`, a glob over the
-## whole text when it has `*` or `?`: read as literal words, a glob a click had just pressed by was
-## waited on for the whole timeout with its label on screen, and answered as words never arriving.
+## Whether anything under [param node_path] says [param said], the node itself included, and where
+## the player can read it unless hidden ones are wanted too. Matched as a find and a click match
+## `says`, a glob over the whole text when it has `*` or `?`: read as literal words, a glob a click
+## had just pressed by was waited on for the whole timeout with its label on screen, and answered as
+## words never arriving.
 func _anything_says(node_path: String, said: String, include_hidden: bool) -> bool:
 	var root: Node = _host.get_tree().root.get_node_or_null(node_path)
 	if root == null:
@@ -623,7 +636,7 @@ func _anything_says(node_path: String, said: String, include_hidden: bool) -> bo
 	var pending: Array[Node] = [root]
 	while not pending.is_empty():
 		var node: Node = pending.pop_back()
-		if GdhSays.says(node, said) and (include_hidden or GdhQueries.shown(node)):
+		if GdhSays.says(node, said) and (include_hidden or GdhQueries.readable(node)):
 			return true
 		pending.append_array(node.get_children(true))
 	return false

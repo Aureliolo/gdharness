@@ -5075,6 +5075,7 @@ async function main(): Promise<void> {
     runFixture(godotPath, projectDir, 'runtime_pad');
     runFixture(godotPath, projectDir, 'runtime_accessibility');
     runFixture(godotPath, projectDir, 'runtime_query');
+    runFixture(godotPath, projectDir, 'runtime_view');
     runFixture(godotPath, projectDir, 'runtime_change');
     runFixture(godotPath, projectDir, 'reload_script');
     runFixture(godotPath, projectDir, 'runtime_click');

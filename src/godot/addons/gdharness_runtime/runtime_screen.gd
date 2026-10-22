@@ -60,3 +60,25 @@ static func rect_in_window(viewport: Viewport, rect: Rect2) -> Rect2:
 	var start: Vector2 = in_window(viewport, rect.position)
 	var end: Vector2 = in_window(viewport, rect.end)
 	return Rect2(start.min(end), (end - start).abs())
+
+
+## Whether any of [param node] is drawn where the player can see it: inside its viewport, and inside
+## every ScrollContainer between it and the viewport, each of which clips what it holds. A label
+## placed past the window's edge was read out as written on the screen. Only a Control has a box to
+## ask about, so anything else is in view.
+static func in_view(node: Node) -> bool:
+	var control: Control = node as Control
+	if control == null:
+		return true
+	var drawn: Rect2 = control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size)
+	if not control.get_viewport().get_visible_rect().intersects(drawn, true):
+		return false
+	var walking: Node = control.get_parent()
+	while walking != null and not (walking is Viewport):
+		var holder: ScrollContainer = walking as ScrollContainer
+		if holder != null:
+			var clip: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
+			if not clip.intersects(drawn, true):
+				return false
+		walking = walking.get_parent()
+	return true
