@@ -38419,9 +38419,14 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-command-'));
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
   try {
+    // The Compatibility renderer, since the windowed cases are about where suites run and not about
+    // rendering: on a GitHub macOS runner, whose GPU is virtual, Godot's Metal driver under Forward+
+    // printed "timeout waiting for fence" in eight of ten windowed runs drawing thirty frames, and
+    // Mobile, Compatibility and Vulkan in none of ten each. That error fails a run, as it should.
     writeTree(project, {
       'project.godot':
-        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="TestCommand"\n',
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="TestCommand"\n\n' +
+        '[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
       'tests/ok_test.gd':
         'extends GdUnitTestSuite\n\nfunc test_one() -> void:\n\tassert_int(1).is_equal(1)\n\n\nfunc test_two() -> void:\n\tawait get_tree().process_frame\n\tassert_int(2).is_equal(2)\n',
       'tests/declared_test.gd': [

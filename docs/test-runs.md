@@ -140,6 +140,12 @@ every other test engine. On Windows it runs on a desktop of its own, so its wind
 on the desktop in use or takes its focus. Elsewhere it uses the display there is; on a CI runner
 with none, run it under `xvfb-run`.
 
+On a GitHub macOS runner, whose GPU is virtual, Godot's Metal driver under the Forward+ renderer
+prints `timeout waiting for fence` as a windowed engine draws, and that engine error fails the run.
+It was measured in eight of ten windowed runs drawing thirty frames, and in none of ten under the
+Mobile or Compatibility renderer or with the Vulkan driver. A project rendering with Forward+ that
+runs windowed suites there can set `rendering/rendering_device/driver.macos` to `vulkan`.
+
 ## Silence and memory
 
 An engine that prints nothing for 300 seconds, or for four times its slowest unit's last time when
