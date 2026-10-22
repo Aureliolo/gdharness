@@ -854,7 +854,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'array',
         items: { type: 'string' },
         description:
-          'Run only these cases of the suites under path, each "test_name" or "suite_name:test_name", the suite by its file name without .gd or its res:// path. Only the suites holding them run, with their other cases left out. A name no suite there declares as a top-level func is refused before the engine starts, with the nearest names; a case asked for that gdUnit4 did not report comes back under testsNotRun, and the run is not called passed.',
+          'Run only these cases of the suites under path, each "test_name" or "suite_name:test_name", the suite by its file name without .gd or its res:// path. Only the suites holding them run, with their other cases left out. A name no suite there declares as a top-level func is refused before the engine starts, with the nearest names, or the cases there when none is near; a case asked for that gdUnit4 did not report comes back under testsNotRun, and the run is not called passed.',
       },
       engineArgs: {
         type: 'array',
@@ -2233,7 +2233,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['click', 'choose'],
         description:
-          'click: the Control to click, at its centre, or the 3D node to click, where it is drawn; with says, where to look for the control instead, default the whole tree. choose: the PopupMenu, or the OptionButton or MenuButton in front of one.',
+          'click: the Control to click, at its centre, or at the middle of the part on screen when no scroll brings its centre into view (said under pressed_on), or the 3D node to click, where it is drawn; with says, where to look for the control instead, default the whole tree. choose: the PopupMenu, or the OptionButton or MenuButton in front of one.',
       },
       says: {
         type: 'string',

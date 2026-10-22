@@ -190,17 +190,22 @@ export function parseProcessTable(printed: string, started = false): ProcessTree
  * link to a parent that began later is to the number and not to the process. Only judged where
  * the listing says when each began; POSIX hands an orphan to init the moment its parent goes, so
  * its links are never stale and its listing carries no times.
+ *
+ * A parent that has gone is not listed, so its start is [param since] when the caller knows it: a
+ * run's game is asked about after it ended, and without a start to hold them against, the orphans
+ * of an earlier holder of its number were listed as the run's, which they had been refused as
+ * while it lived.
  */
-function linked(tree: ProcessTree, child: number, parent: number): boolean {
+function linked(tree: ProcessTree, child: number, parent: number, since?: number): boolean {
   const from = tree.get(child);
-  const to = tree.get(parent);
+  const began = tree.get(parent)?.startedAt ?? since;
   if (from === undefined || from.parent !== parent) {
     return false;
   }
-  if (from.startedAt === undefined || to?.startedAt === undefined) {
+  if (from.startedAt === undefined || began === undefined) {
     return true;
   }
-  return from.startedAt >= to.startedAt;
+  return from.startedAt >= began;
 }
 
 /**
@@ -225,11 +230,14 @@ function isConsoleHost(listed: ListedProcess): boolean {
   );
 }
 
-/** The processes whose parent is [param pid], as [param tree] has them, console hosts aside. */
-function childrenIn(tree: ProcessTree, pid: number): number[] {
+/**
+ * The processes whose parent is [param pid], as [param tree] has them, console hosts aside, with
+ * [param since] as [method linked] takes it.
+ */
+function childrenIn(tree: ProcessTree, pid: number, since?: number): number[] {
   const children: number[] = [];
   for (const [child, listed] of tree) {
-    if (linked(tree, child, pid) && !isConsoleHost(listed)) {
+    if (linked(tree, child, pid, since) && !isConsoleHost(listed)) {
       children.push(child);
     }
   }
@@ -243,9 +251,10 @@ function childrenIn(tree: ProcessTree, pid: number): number[] {
  * lives: ending it reparents them, to init on POSIX, so the tree has to be read while the parent
  * is still there. To any depth because the process a run holds is not always the game: a console
  * wrapper on Windows starts the engine as its child, and the engine's workers are the wrapper's
- * grandchildren.
+ * grandchildren. [param since] is when [param pid] began, for when it may have gone; every process
+ * below it was found listed, with its own start.
  */
-export function descendantsIn(tree: ProcessTree, pid: number): number[] {
+export function descendantsIn(tree: ProcessTree, pid: number, since?: number): number[] {
   const found: number[] = [];
   const queue = [pid];
   const seen = new Set<number>([pid]);
@@ -254,7 +263,7 @@ export function descendantsIn(tree: ProcessTree, pid: number): number[] {
     if (next === undefined) {
       break;
     }
-    for (const child of childrenIn(tree, next)) {
+    for (const child of childrenIn(tree, next, next === pid ? since : undefined)) {
       if (!seen.has(child)) {
         seen.add(child);
         found.push(child);
@@ -287,10 +296,13 @@ export function ancestorsIn(tree: ProcessTree, pid: number, root: number): numbe
   return chain;
 }
 
-/** The processes whose parent is [param pid] right now, or undefined when the platform will not say. */
-export async function childrenOf(pid: number): Promise<number[] | undefined> {
+/**
+ * The processes whose parent is [param pid] right now, or undefined when the platform will not say,
+ * with [param since] as [method descendantsIn] takes it.
+ */
+export async function childrenOf(pid: number, since?: number): Promise<number[] | undefined> {
   const tree = await processTree();
-  return tree === undefined ? undefined : childrenIn(tree, pid);
+  return tree === undefined ? undefined : childrenIn(tree, pid, since);
 }
 
 /** What a command line says a process is: the executable it runs and the project it was pointed at. */

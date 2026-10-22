@@ -263,6 +263,7 @@ import {
 import {
   aboveTheRunner,
   autoloadNotCompiledNote,
+  beganBy,
   captureDestinationRefusal,
   captureDetail,
   editorsOfProjectIn,
@@ -34113,6 +34114,30 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
     [30],
     'and a chain up through a stale link stops at the process that was really there',
   );
+
+  // The wrapper gone, as a run's process is once the run is over: the listing has no start of its
+  // own to hold the links against, so the one the caller knows is used, and the orphan of the
+  // earlier 10 is refused as it was while the wrapper lived. Without one there is nothing to judge
+  // by, and every link to the number stands.
+  const gone = new Map([...dated].filter(([pid]) => pid !== 10));
+  assert.deepEqual(
+    descendantsIn(gone, 10, 1000),
+    [11, 40, 12],
+    'a gone parent is held to the start its caller knows',
+  );
+  assert.deepEqual(descendantsIn(gone, 10), [11, 30, 40, 12, 31], 'and with none, to nothing');
+  assert.deepEqual(
+    descendantsIn(dated, 10, 0),
+    [11, 40, 12],
+    "a parent still listed is held to its own start, not the caller's",
+  );
+  // What the server hands in for a run: when its start was asked for, and nothing for a run found
+  // rather than started, whose processes can be older than the moment it was found.
+  assert.deepEqual(
+    [beganBy({ startedAt: 1000 }), beganBy({ startedAt: 1000, startedAtFound: true })],
+    [1000, undefined],
+    'a run found holds no start its processes began after',
+  );
 }
 
 /**
@@ -34224,6 +34249,9 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
     assert.ok(child > 0 && alive(child), 'the grandchild is there to be listed');
     const alive_ = await childrenOf(parent.pid);
     assert.deepEqual(alive_, [child], `listed under the living parent: ${JSON.stringify(alive_)}`);
+    // Read while it lives, as a run's start is known after it ends: once gone, an orphan of an
+    // earlier holder of its number is listed under it too unless held to when it began.
+    const began = (await processTree())?.get(parent.pid)?.startedAt;
 
     parent.kill();
     assert.ok(
@@ -34231,7 +34259,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
       'the parent should have ended',
     );
     assert.ok(alive(child), 'the orphan is still there');
-    const afterwards = await childrenOf(parent.pid);
+    const afterwards = await childrenOf(parent.pid, began);
     assert.ok(afterwards !== undefined, 'the platform still answers about a number that is gone');
     if (process.platform === 'win32') {
       assert.deepEqual(

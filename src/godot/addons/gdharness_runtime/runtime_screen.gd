@@ -68,17 +68,24 @@ static func rect_in_window(viewport: Viewport, rect: Rect2) -> Rect2:
 ## ask about, so anything else is in view.
 static func in_view(node: Node) -> bool:
 	var control: Control = node as Control
-	if control == null:
-		return true
-	var drawn: Rect2 = control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size)
-	if not control.get_viewport().get_visible_rect().intersects(drawn, true):
-		return false
+	return control == null or shown_part(control) != null
+
+
+## The part of [param control] the player can see, in its viewport's canvas, or null when there is
+## none: its drawn box cut to the viewport and to every ScrollContainer between, each cut taken from
+## what the last one left. A control in view of an inner list and of the outer one can still sit
+## where the two do not overlap.
+static func shown_part(control: Control) -> Variant:
+	var part: Rect2 = control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size)
+	var clips: Array[Rect2] = [control.get_viewport().get_visible_rect()]
 	var walking: Node = control.get_parent()
 	while walking != null and not (walking is Viewport):
 		var holder: ScrollContainer = walking as ScrollContainer
 		if holder != null:
-			var clip: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
-			if not clip.intersects(drawn, true):
-				return false
+			clips.append(holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size))
 		walking = walking.get_parent()
-	return true
+	for clip: Rect2 in clips:
+		if not part.intersects(clip, true):
+			return null
+		part = part.intersection(clip)
+	return part

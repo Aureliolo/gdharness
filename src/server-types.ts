@@ -37,6 +37,12 @@ export interface GodotProcess {
   projectPath: string | null;
   startedAt: number;
   /**
+   * True when `startedAt` is when this server found the run rather than when its start was asked
+   * for: a game picked up from its announcement, or a played run with no note. Its processes can
+   * have begun before then, so it says nothing of which processes are too old to be the run's.
+   */
+  startedAtFound?: boolean;
+  /**
    * When the pid was handed back, by which time the game had started, however long the launch took.
    *
    * What a process's own start is held against, since `startedAt` is when the start was asked for.

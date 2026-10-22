@@ -5177,6 +5177,7 @@ async function main(): Promise<void> {
     runFixture(godotPath, projectDir, 'runtime_change');
     runFixture(godotPath, projectDir, 'reload_script');
     runFixture(godotPath, projectDir, 'runtime_click');
+    runFixture(godotPath, projectDir, 'runtime_click_part');
     runFixture(godotPath, projectDir, 'runtime_items');
     runFixture(godotPath, projectDir, 'runtime_hidden');
     runFixture(godotPath, projectDir, 'runtime_toggle');

@@ -1328,6 +1328,14 @@ function engineNamesOf(executable: string): string[] {
 }
 
 /**
+ * A time [param run]'s processes all began after, for judging the links of one that has gone: when
+ * its start was asked for, or undefined when the run was found rather than started.
+ */
+export function beganBy(run: Pick<GodotProcess, 'startedAt' | 'startedAtFound'>): number | undefined {
+  return run.startedAtFound === true ? undefined : run.startedAt;
+}
+
+/**
  * Whether one of [param games] stands between [param pid] and [param root] in [param tree], the
  * two ends excluded.
  */
@@ -11101,6 +11109,7 @@ class GodotServer {
       readOffset: 0,
       projectPath: project,
       startedAt: note?.startedAt ?? Date.now(),
+      ...(note?.startedAt === undefined ? { startedAtFound: true } : {}),
       exitCode: null,
       exitSignal: null,
       throughEditor: true,
@@ -11338,7 +11347,8 @@ class GodotServer {
       this.tie(run, own);
       return own.pid;
     }
-    const under = new Set(descendantsIn(tree, root));
+    // The run's own process can have ended by now; the editor's has not, while it plays the run.
+    const under = new Set(descendantsIn(tree, root, root === run.pid ? beganBy(run) : undefined));
     const nearest = announced.filter((one) => under.has(one.pid) && !gameBetween(tree, one.pid, root, games));
     const theOne = nearest.length === 1 ? nearest[0] : undefined;
     if (theOne !== undefined) {
@@ -12739,6 +12749,7 @@ class GodotServer {
       readOffset: 0,
       projectPath: game.project.path,
       startedAt: game.announcedAt ?? Date.now(),
+      startedAtFound: true,
       exitCode: null,
       exitSignal: null,
       throughEditor: false,
@@ -12838,7 +12849,8 @@ class GodotServer {
     if (roots.length === 0) {
       return { unknown: 'no process' };
     }
-    const under = new Set(roots.flatMap((root) => descendantsIn(tree, root)));
+    // Either can have ended by now, and both began after the run was asked for.
+    const under = new Set(roots.flatMap((root) => descendantsIn(tree, root, beganBy(run))));
     for (const root of roots) {
       under.delete(root);
     }
@@ -12925,7 +12937,7 @@ class GodotServer {
       return undefined;
     }
     const isEngine = (pid: number): boolean => this.theProjectsEngine(run, tree, pid, [root]) !== null;
-    const nearest = descendantsIn(tree, root).filter(
+    const nearest = descendantsIn(tree, root, root === run.pid ? beganBy(run) : undefined).filter(
       (pid) => isEngine(pid) && !ancestorsIn(tree, pid, root).some((one) => one !== root && isEngine(one)),
     );
     return nearest.length === 1 ? nearest[0] : undefined;

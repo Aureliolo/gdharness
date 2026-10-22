@@ -535,6 +535,7 @@ func click(params: Dictionary) -> Dictionary:
 	# other words, a link among them. Said either way, so a press on the middle is never read as one
 	# on the words.
 	var aim: Vector2 = control.size * 0.5
+	var at_centre: bool = true
 	var item_scrolled: bool = false
 	if item != null:
 		var found_by_words: Dictionary = found
@@ -544,6 +545,7 @@ func click(params: Dictionary) -> Dictionary:
 		if placed_item.has("message"):
 			return placed_item
 		aim = placed_item["point"]
+		at_centre = false
 		item_scrolled = placed_item["scrolled"]
 	var rich: RichTextLabel = control as RichTextLabel
 	if found != null and rich != null:
@@ -551,6 +553,7 @@ func click(params: Dictionary) -> Dictionary:
 		var found_here: Dictionary = found
 		if placed.has("point"):
 			aim = placed["point"]
+			at_centre = false
 			found_here["pressedOn"] = "the words"
 		elif placed.has("unplaced"):
 			found_here["pressedOn"] = "the middle of the label"
@@ -586,6 +589,20 @@ func click(params: Dictionary) -> Dictionary:
 				)
 			}
 		local = control.get_global_transform_with_canvas() * aim
+
+	# A control taller or wider than what shows it has its centre out of sight at every scroll, and
+	# a player clicks the part they can see. Refused, it was called a control nothing could click.
+	var on_part: bool = false
+	if at_centre and not _in_sight(control, own, local):
+		var part: Variant = GdhScreen.shown_part(control)
+		if part is Rect2:
+			var seen: Rect2 = part
+			var middle: Vector2 = seen.get_center()
+			# The box of a turned control is wider than the control, so its middle may be off it.
+			var back: Vector2 = control.get_global_transform_with_canvas().affine_inverse() * middle
+			if seen.has_area() and Rect2(Vector2.ZERO, control.size).has_point(back):
+				local = middle
+				on_part = true
 
 	var reached: Dictionary = GdhScreen.reach(own, local)
 	var viewport: Viewport = reached["viewport"]
@@ -665,6 +682,8 @@ func click(params: Dictionary) -> Dictionary:
 		"control_afterwards": afterwards,
 		"scrolled_into_view": scrolled,
 	}
+	if on_part:
+		answer["pressed_on"] = "the middle of the part on screen, since no scroll brings its centre into view"
 	# A Label and a TextureRect ignore the pointer unless told otherwise, so the click goes to what is
 	# under them, and landed false with that control as hovered said nothing of why.
 	if not landed and control.mouse_filter == Control.MOUSE_FILTER_IGNORE:
