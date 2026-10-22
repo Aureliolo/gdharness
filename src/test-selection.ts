@@ -36,6 +36,20 @@ function casesIn(projectPath: string, suite: string): string[] {
   return [...text.matchAll(/^func\s+(test_\w*)\s*\(/gm)].map((match) => match[1] ?? '');
 }
 
+/**
+ * The scripts among [param asked], each a res:// path of a file in the project, that declare no
+ * case. Named on their own, they give gdUnit4 nothing to run: it started an engine for seconds to
+ * say so, and the answer was its whole console with exit code 0 beside passed false.
+ */
+export function scriptsWithoutCases(projectPath: string, asked: readonly string[]): string[] {
+  return asked.filter(
+    (path) =>
+      path.endsWith('.gd') &&
+      existsSync(join(projectPath, path.slice('res://'.length))) &&
+      casesIn(projectPath, path).length === 0,
+  );
+}
+
 /** The suite files under [param asked], res:// paths of files or directories in the project. */
 function suitesUnder(projectPath: string, asked: readonly string[]): string[] {
   const scripts = projectFiles(projectPath, ['.gd']).map((path) => `res://${path}`);

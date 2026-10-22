@@ -272,6 +272,7 @@ import {
   endedWithoutACode,
   exportAnswer,
   exportPresetRefusal,
+  failedVerdict,
   finishedBeforeTheEnd,
   foldedScriptErrors,
   leftRunningNote,
@@ -36507,6 +36508,31 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
 }
 
 /**
+ * A run gdUnit4 exits 100 for is named for what its report counts. gdUnit4 gives the one code to a
+ * failed assertion and to a case a script error ended, and a run of only the second was called one
+ * of failures beside failures 0. Hooks count with the cases, and no report reads as before.
+ */
+function testAFailedRunIsNamedForWhatFailed(): void {
+  const counts = (failures: number, errors: number, hookFailures = 0, hookErrors = 0) => ({
+    failures,
+    errors,
+    hookFailures,
+    hookErrors,
+  });
+  assert.deepEqual(
+    [
+      failedVerdict(counts(2, 0)),
+      failedVerdict(counts(0, 1)),
+      failedVerdict(counts(1, 1)),
+      failedVerdict(counts(0, 0, 0, 1)),
+      failedVerdict(counts(0, 1, 1, 0)),
+      failedVerdict(null),
+    ],
+    ['failures', 'errors', 'failures and errors', 'errors', 'failures and errors', 'failures'],
+  );
+}
+
+/**
  * A test run the timeout ends is called hung only when it had stopped printing.
  *
  * Hung sends a reader looking for a deadlock in the last suite named, and a run printing a passing
@@ -38551,6 +38577,9 @@ function testAnEngineRunIsReadCaseByCase(): void {
       '   at: push_error (core/variant/variant_utility.cpp:1023)',
       caseLine(S_TEST, 'test_a', 'STARTED'),
       'ERROR: the store is closed',
+      'WARNING: Detected 1 possible orphan nodes.',
+      '    No orphan details available.',
+      'WARNING: the store is low',
       caseLine(S_TEST, 'test_a', 'PASSED', '74ms'),
       '',
       caseLine(S_TEST, 'test_b', 'STARTED'),
@@ -38566,6 +38595,7 @@ function testAnEngineRunIsReadCaseByCase(): void {
       'SCRIPT ERROR: row said',
       caseLine(S_TEST, 'test_p:1 (2)', 'FAILED (retry 2)', '1s 21ms'),
       'ERROR: said in after',
+      'WARNING: Detected 2 orphan nodes.',
       'Statistics: 4 test cases | 0 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans | FAILED 1min 2s 30ms',
       'Executed test cases : (4/4)',
     ].join('\n'),
@@ -38592,12 +38622,13 @@ function testAnEngineRunIsReadCaseByCase(): void {
       ['printed before any suite', null, null],
       ['said in before', S_TEST, 'before'],
       ['the store is closed', S_TEST, 'test_a'],
+      ['the store is low', S_TEST, 'test_a'],
       ['left for a later frame', S_TEST, 'test_b'],
       ['row said', S_TEST, 'test_p:0 (1)'],
       ['row said', S_TEST, 'test_p:1 (2)'],
       ['said in after', S_TEST, 'after'],
     ],
-    'each error credited to what was running as it printed',
+    "each error credited to what was running as it printed, and gdUnit4's own orphan report left to the orphan count",
   );
   assert.equal(printed.executed, 4, 'the summary count');
   assert.equal(printed.stoppedIn, null, 'a closed run stopped in nothing');
@@ -41668,26 +41699,28 @@ async function testGdUnitRunner(): Promise<void> {
         );
 
         // Nothing ran, two ways: every suite ignored, and a suite with no cases in it. Measured with the
-        // pinned gdUnit4 on 4.7.2, neither writes a report, so both reach the no-report answer; the
+        // pinned gdUnit4 on 4.7.2, an ignored run writes no report, so it reaches the no-report answer;
         // one with a report of no cases is refused as passed by the same rule should a runner write it.
+        // A suite with no cases named on its own is refused before an engine starts.
         writeFileSync(join(projectDir, 'test', 'hollow_test.gd'), 'extends GdUnitTestSuite\n');
-        for (const [how, asked] of [
-          [
-            'every suite ignored',
-            { ignore: ['sums_test', 'summary_lies_test', 'quiet_test', 'hollow_test'] },
-          ],
-          ['a suite with no cases', { path: 'test/hollow_test.gd' }],
-        ] as const) {
-          const none = await call(
-            'project_test',
-            { projectPath: projectDir, ...asked },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          );
-          const noneAnswer: unknown = JSON.parse(none.slice(none.indexOf('{')));
-          assert.match(none, /^No tests ran: no test cases found at /, none);
-          assert.equal(get(noneAnswer, 'passed'), false, `${how} did not pass: ${none}`);
-          assert.equal(get(noneAnswer, 'tests'), 0, none);
-        }
+        const ignored = await call(
+          'project_test',
+          {
+            projectPath: projectDir,
+            ignore: ['sums_test', 'summary_lies_test', 'quiet_test', 'hollow_test'],
+          },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const ignoredAnswer: unknown = JSON.parse(ignored.slice(ignored.indexOf('{')));
+        assert.match(ignored, /^No tests ran: no test cases found at /, ignored);
+        assert.equal(get(ignoredAnswer, 'passed'), false, `every suite ignored did not pass: ${ignored}`);
+        assert.equal(get(ignoredAnswer, 'tests'), 0, ignored);
+        const hollow = await call(
+          'project_test',
+          { projectPath: projectDir, path: 'test/hollow_test.gd' },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        assert.match(hollow, /^res:\/\/test\/hollow_test\.gd declares no case: /, hollow);
         rmSync(join(projectDir, 'test', 'hollow_test.gd'));
 
         writeFileSync(
@@ -45820,6 +45853,11 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
       join(project, 'test', 'helper.gd'),
       'extends RefCounted\n\n\nfunc test_fixture() -> void:\n\tpass\n',
     );
+    // And a script that is no suite at all, which a caller can name by mistake.
+    writeFileSync(
+      join(project, 'test', 'wallet.gd'),
+      'extends RefCounted\n\n\nfunc spend() -> void:\n\tpass\n',
+    );
     await withStdioServer(async (_call, request) => {
       const run = async (args: Record<string, unknown>): Promise<{ text: string; answer: unknown }> => {
         const response = await request(
@@ -45865,6 +45903,17 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
         /^No suite under res:\/\/test has a case math_extra_test:test_halves\. The nearest /m,
         elsewhere.text,
       );
+      // A script named on its own that declares no case is refused before an engine starts, rather
+      // than run to gdUnit4 finding nothing; a directory holding one runs the suites beside it, as
+      // every run here shows.
+      const plain = await run({ path: 'res://test/wallet.gd' });
+      assert.match(
+        plain.text,
+        /^res:\/\/test\/wallet\.gd declares no case: gdUnit4 runs the functions named test_ at the top level of a script that extends GdUnitTestSuite, and it has none\.$/m,
+        plain.text,
+      );
+      const named = await run({ path: 'res://test/math_test.gd' });
+      assert.deepEqual([get(named.answer, 'tests'), get(named.answer, 'failures')], [3, 1], named.text);
       // A case read off a file gdUnit4 never ran is named, and the run is not called passed.
       const unrun = await run({ tests: ['test_fixture', 'math_test:test_adds'] });
       assert.deepEqual(
@@ -55881,6 +55930,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineGdharnessStartsCanHaveItsCrashReported,
   testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,
+  testAFailedRunIsNamedForWhatFailed,
   testATestRunWhoseAutoloadDidNotCompileStops,
   testAStackOverflowIsNotAPass,
   testARunawayTestRunAnswersASizeTheClientTakes,

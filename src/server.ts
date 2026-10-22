@@ -310,7 +310,7 @@ import {
 import { runHidden as run, spawnHidden } from './spawn.js';
 import { declaringAdvice, readExpected, readRun, unexpectedErrors, withNestedErrors } from './suite-judge.js';
 import { ProjectScripts, TEST_DIRECTORIES } from './suite-plan.js';
-import { selectTests } from './test-selection.js';
+import { scriptsWithoutCases, selectTests } from './test-selection.js';
 import {
   asParams,
   readArray,
@@ -2709,6 +2709,24 @@ export function repeatingScriptError(
   return times >= LOOPING_AFTER
     ? { text: last.text, where: where?.replace(/^at: /, '') ?? null, times }
     : null;
+}
+
+/**
+ * What a run gdUnit4 exited 100 for is called, from its report's counts, hooks included.
+ *
+ * gdUnit4 exits 100 for a failed assertion and for a case a script error ended alike. A run whose
+ * only fault was a script error was called one of failures beside failures 0, and the reader went
+ * looking among the assertions.
+ */
+export function failedVerdict(
+  report: Pick<TestReport, 'failures' | 'errors' | 'hookFailures' | 'hookErrors'> | null,
+): string {
+  if (report === null) {
+    return 'failures';
+  }
+  const failed = report.failures + report.hookFailures > 0;
+  const erred = report.errors + report.hookErrors > 0;
+  return failed && erred ? 'failures and errors' : erred ? 'errors' : 'failures';
 }
 
 /**
@@ -6961,6 +6979,13 @@ class GodotServer {
         `${unusable.missing ? 'Install' : 'Update'} gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4`,
       ]);
     }
+    const caseless = scriptsWithoutCases(project.value.path, asked);
+    if (caseless.length > 0) {
+      const one = caseless.length === 1;
+      return this.createErrorResponse(
+        `${caseless.join(' and ')} ${one ? 'declares' : 'declare'} no case: gdUnit4 runs the functions named test_ at the top level of a script that extends GdUnitTestSuite, and ${one ? 'it has' : 'they have'} none.`,
+      );
+    }
     const selection = selectTests(project.value.path, asked, args['tests']);
     if (!selection.ok) {
       return this.createErrorResponse(selection.reason);
@@ -7149,7 +7174,7 @@ class GodotServer {
     const engineEntriesShown = engineEntries.slice(-MOST_ENGINE_ENTRIES);
     const verdicts: Readonly<Record<number, string>> = {
       0: 'passed',
-      100: 'failures',
+      100: failedVerdict(report),
       // Named rather than left as the bare word: with no errors and no failures, gdUnit4 reaches
       // this state for orphan nodes and nothing else, and "warnings" on its own sent a session
       // guessing and re-running a tier that takes minutes to find out which kind it meant.

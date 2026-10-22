@@ -82,6 +82,10 @@ const EXECUTED = /^Executed test cases\s*:\s*\((\d+)\//;
 // is the engine probing a driver: a windowed engine on a machine without a Vulkan surface prints
 // two and then runs its cases on Direct3D 12 or OpenGL.
 const DRIVER_FALLBACK = /^\s*WARNING: Your video card drivers .*, switching to /;
+// gdUnit4's own report of the orphans a case or suite left, printed with a WARNING prefix. The
+// orphans are reported from the suite's statistics; read as a warning no suite declared, the line
+// came back as one more fault, with advice to declare it rather than free the nodes.
+const ORPHANS_REPORTED = /^\s*WARNING: Detected \d+ (?:possible )?orphan nodes\.\s*$/;
 // The allocator's null, in its error line and the location under it, and an image decode the same
 // pressure made fail. Both are the machine running out, not the case being wrong.
 const STARVED = [
@@ -168,6 +172,9 @@ export function readRun(printed: string): RunPrinted {
     }
     if (EXIT_LEAK.test(line)) {
       leaks.push(line.trim());
+      continue;
+    }
+    if (ORPHANS_REPORTED.test(line)) {
       continue;
     }
     if (DRIVER_FALLBACK.test(line)) {
