@@ -9210,14 +9210,26 @@ class GodotServer {
       return asked;
     }
     const began = Date.now();
-    const gone = await this.waitForBridge(() => !alive(pid), began + editorRestartTimeoutMs());
-    if (!gone) {
+    // The process ending and the bridge hearing its connection close are two events, and a call
+    // answered between them was told the editor just closed was still connected.
+    const holding = (): boolean => {
+      const now = this.godotBridge.getStatus();
+      return now.connected && now.editorPid === pid;
+    };
+    const gone = await this.waitForBridge(() => !alive(pid) && !holding(), began + editorRestartTimeoutMs());
+    if (!gone && alive(pid)) {
       return this.createErrorResponse(
         `The editor saved and was asked to go, and pid ${pid} is still running after ${editorRestartTimeoutMs() / 1000}s.`,
         [
           'It may be asking what to do about unsaved changes, or a script may be holding up its exit',
           'editor_status says whether it is still connected',
         ],
+      );
+    }
+    if (!gone) {
+      return this.createErrorResponse(
+        `The editor saved and was asked to go, and pid ${pid} has exited, but its connection to the bridge was still open after ${editorRestartTimeoutMs() / 1000}s.`,
+        ['editor_status says whether it is still connected'],
       );
     }
     this.closedHere = { editorPid: pid, at: new Date().toISOString() };

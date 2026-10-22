@@ -68,7 +68,9 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": holding}
 	var frames: int = holding
 
-	Input.parse_input_event(_button(button, device, whole or held))
+	var focused: String = GdhValues.focus_path(_host)
+	var event: InputEventJoypadButton = _button(button, device, whole or held)
+	Input.parse_input_event(event)
 	var lasted: Variant = null
 	if whole:
 		# A frame between the halves at least, as a key has, so a game that acts on the press and one
@@ -77,7 +79,7 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 		Input.parse_input_event(_button(button, device, false))
 		await _host.get_tree().process_frame
 
-	return {
+	var answer: Dictionary = {
 		"type": "input_injected",
 		"input_type": "joypad_button",
 		"held_frames": GdhValues.held_answer(whole, frames),
@@ -85,9 +87,11 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 		"button": button,
 		"button_name": _name_of(button, JOY_BUTTONS),
 		"device": device,
+		"actions": GdhValues.actions_of(event),
 		"pressed": held and not whole,
 		"whole": whole,
 	}
+	return GdhValues.focus_noted(answer, focused)
 
 
 ## Moves a stick or trigger axis to a value, where it stays until another motion moves it, as a
@@ -110,16 +114,19 @@ func inject_joypad_motion(params: Dictionary) -> Dictionary:
 	event.axis = axis as JoyAxis
 	event.axis_value = value
 	event.device = device
+	var focused: String = GdhValues.focus_path(_host)
 	Input.parse_input_event(event)
 
-	return {
+	var answer: Dictionary = {
 		"type": "input_injected",
 		"input_type": "joypad_motion",
 		"axis": axis,
 		"axis_name": _name_of(axis, JOY_AXES),
 		"value": value,
 		"device": device,
+		"actions": GdhValues.actions_of(event),
 	}
+	return GdhValues.focus_noted(answer, focused)
 
 
 static func _button(button: int, device: int, down: bool) -> InputEventJoypadButton:

@@ -1,10 +1,11 @@
 extends SceneTree
 
 ## What the runtime offers beside an input or a refusal, so a caller can act on it without a second
-## look: the Control a key or an action reached first, and the methods a node has when the one asked
-## for is not among them. Each absence is checked beside the case that fills it.
+## look: the Control a key, an action or a pad's event reached first, and the methods a node has when
+## the one asked for is not among them. Each absence is checked beside the case that fills it.
 
 const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const GdhPad = preload("res://addons/gdharness_runtime/runtime_pad.gd")
 const GdhPaths = preload("res://addons/gdharness_runtime/runtime_paths.gd")
 const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 const Checked = preload("checked.gd")
@@ -27,6 +28,7 @@ func _run() -> void:
 	var input: GdhInputCommands = GdhInputCommands.new(host, GdhValues.new())
 
 	await _check_focus(input)
+	await _check_pad_focus(host)
 	_check_methods_offered(input)
 
 	host.queue_free()
@@ -65,6 +67,51 @@ func _check_focus(input: GdhInputCommands) -> void:
 	if free_action.get("type", "") != "input_injected" or free_action.has("focused"):
 		_fail("and nor does an action: %s" % JSON.stringify(free_action))
 	button.queue_free()
+
+
+## A stick or a dpad goes to the focused Control first as well, and a direction there moves the
+## control's selection or the focus, so the game's _unhandled_input never hears it. The answer names
+## that Control and the actions the event pressed, which is what explains the silence.
+func _check_pad_focus(host: Node) -> void:
+	var pad: GdhPad = GdhPad.new(host)
+	var list: ItemList = ItemList.new()
+	for named: String in ["Sword", "Shield", "Bow"]:
+		var _at: int = list.add_item(named)
+	root.add_child(list)
+	list.select(0)
+	list.grab_focus()
+	Input.flush_buffered_events()
+
+	var pushed: Dictionary = pad.inject_joypad_motion({"axis": "left_y", "value": 0.75})
+	Input.flush_buffered_events()
+	if list.get_selected_items() != PackedInt32Array([1]):
+		_fail("a stick pushed down moves a focused list's selection: %s" % str(list.get_selected_items()))
+	if str(pushed.get("focused", "")) != str(list.get_path()):
+		_fail("a motion should name the Control that had the focus: %s" % JSON.stringify(pushed))
+	if JSON.stringify(pushed.get("actions")) != '["ui_down"]':
+		_fail("and the one action its direction pressed, not ui_up: %s" % JSON.stringify(pushed))
+
+	var eased: Dictionary = pad.inject_joypad_motion({"axis": "left_y", "value": 0.2})
+	Input.flush_buffered_events()
+	if JSON.stringify(eased.get("actions")) != "[]" or str(eased.get("focused", "")) != str(list.get_path()):
+		_fail("a motion inside the deadzone presses nothing: %s" % JSON.stringify(eased))
+
+	var dpad: Dictionary = await pad.inject_joypad_button({"button": "dpad_down"})
+	if list.get_selected_items() != PackedInt32Array([2]):
+		_fail("the dpad moves it on as well: %s" % str(list.get_selected_items()))
+	if (
+		JSON.stringify(dpad.get("actions")) != '["ui_down"]'
+		or str(dpad.get("focused", "")) != str(list.get_path())
+	):
+		_fail("a button names the focused Control and the action it pressed: %s" % JSON.stringify(dpad))
+
+	list.release_focus()
+	var free_motion: Dictionary = pad.inject_joypad_motion({"axis": "left_y", "value": 0.75})
+	if JSON.stringify(free_motion.get("actions")) != '["ui_down"]' or free_motion.has("focused"):
+		_fail("with nothing focused a motion names nothing: %s" % JSON.stringify(free_motion))
+	var _settled: Dictionary = pad.inject_joypad_motion({"axis": "left_y", "value": 0.0})
+	Input.flush_buffered_events()
+	list.queue_free()
 
 
 ## The nearest methods an object has, its script's and the engine's alike, or the script's own when

@@ -230,11 +230,32 @@ static func no_action(action: String) -> String:
 ## counting the action counted the key, and the answer had said only that a key went in.
 static func actions_of(event: InputEvent) -> Array[String]:
 	var named: Array[String] = []
+	# A motion matches every action on its axis, either way and at any distance, which would name
+	# ui_left for a stick held right; Input presses only those its direction reaches past their
+	# deadzone.
+	var moved: bool = event is InputEventJoypadMotion
 	for action: StringName in InputMap.get_actions():
-		if InputMap.event_is_action(event, action):
+		if event.is_action_pressed(action) if moved else InputMap.event_is_action(event, action):
 			named.append(str(action))
 	named.sort()
 	return named
+
+
+## The path of the Control holding the keyboard focus in [param host]'s viewport, or "" when none
+## does. Read before an event goes in, since pressing a focused button can move the focus.
+static func focus_path(host: Node) -> String:
+	var holding: Control = host.get_viewport().gui_get_focus_owner()
+	return "" if holding == null else str(holding.get_path())
+
+
+## [param said] with [param focused], the Control that had the focus, under focused. A key, an action
+## or a pad's event reaches that Control before the game's _unhandled_input: Space on a focused Button
+## pressed it and the game's own handler counted the key as well, and a stick pushed down moved a
+## focused list's selection and never reached the game, with nothing in the answer saying why.
+static func focus_noted(said: Dictionary, focused: String) -> Dictionary:
+	if not focused.is_empty():
+		said["focused"] = focused
+	return said
 
 
 ## Presses the buttons under [param root] whose Shortcut [param action] matches, as the player's key

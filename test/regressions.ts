@@ -6814,7 +6814,7 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
 
   const closeWith = async (
     pid: number,
-    onQuit: () => void,
+    onQuit: (socket: WebSocket) => void,
   ): Promise<{ answer: string; asked: string[]; after: unknown; rebind: string }> => {
     const port = await reservePort();
     const server = new ServerProcess({
@@ -6846,7 +6846,7 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
               : { ok: true };
           socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
           if (message['tool'] === 'quit_editor') {
-            onQuit();
+            onQuit(socket);
           }
         }
       });
@@ -6908,9 +6908,11 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
       `an editor that stays is not answered as closed: ${refused.answer}`,
     );
 
-    const closed = await closeWith(leaving, () => {
+    const closed = await closeWith(leaving, (socket) => {
       writeFileSync(join(project, 'project.godot'), settings);
       goes.kill();
+      // An editor's connection ends with its process, and the close waits for both.
+      socket.terminate();
     });
     const answered: unknown = JSON.parse(closed.answer);
     assert.equal(get(answered, 'closed'), true, closed.answer);
@@ -11195,6 +11197,14 @@ async function testAGoneEditorsConsoleIsStillRead(): Promise<void> {
       const message: unknown = JSON.parse(String(raw));
       if (isRecord(message) && message['type'] === 'tool_invoke') {
         socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: {} }));
+        // Its process is already gone, so only the connection is left to end, later than the quit
+        // is answered: a close answered on the process alone would leave a connected editor for
+        // the read that follows.
+        if (message['tool'] === 'quit_editor') {
+          void delay(500).then(() => {
+            socket.close();
+          });
+        }
       }
     });
     socket.send(JSON.stringify(greeting(project, { editor_pid: pid, opened_by_a_server: true })));
@@ -11281,7 +11291,6 @@ async function testAGoneEditorsConsoleIsStillRead(): Promise<void> {
     editor = await greet(pid);
     const closing = await callOn(server, 'editor_launch', { op: 'close' });
     assert.equal(get(jsonOf(closing, 'editor_launch close'), 'closed'), true, closing);
-    editor.close();
     editor = null;
     const closed = await consoleOf(server);
     const at = text(get(closed.read, 'closedAt'));
