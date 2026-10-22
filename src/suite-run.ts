@@ -724,7 +724,7 @@ async function runEngine(
     '--html-report-off',
     '--junit-report-off',
     '--compile-together',
-    '--expected-errors-out',
+    '--expected-out',
     expectedFile,
   ];
   const held = new Set(plan.suites.map((suite) => suite.path));

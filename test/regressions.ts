@@ -37632,7 +37632,8 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
       join(projectDir, 'tests', 'b_test.gd'),
       suite(
         ['test_three'],
-        'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_three": ["the store is closed"]}\n',
+        'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_three": ["the store is closed"]}\n' +
+          'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_three": ["the till is open"]}\n',
       ),
     );
     writeFileSync(join(projectDir, 'tests', 'c_test.gd'), suite(['test_never']));
@@ -37687,12 +37688,7 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
       };
     };
 
-    const first = run('quiet', [
-      '--html-report-off',
-      '--junit-report-off',
-      '--expected-errors-out',
-      expected,
-    ]);
+    const first = run('quiet', ['--html-report-off', '--junit-report-off', '--expected-out', expected]);
     assert.equal(first.status, 0, first.said);
     const opened = [...first.said.matchAll(/Run Test Suite: (res:\/\/\S+\.gd)/g)].map((match) => match[1]);
     assert.deepEqual(
@@ -37713,8 +37709,11 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
     assert.ok(existsSync(expected), 'the expected errors are written where asked');
     assert.deepEqual(
       JSON.parse(readFileSync(expected, 'utf8')) as unknown,
-      { 'res://tests/b_test.gd': { test_three: ['the store is closed'] } },
-      'the expected errors as the suite declares them',
+      {
+        errors: { 'res://tests/b_test.gd': { test_three: ['the store is closed'] } },
+        warnings: { 'res://tests/b_test.gd': { test_three: ['the till is open'] } },
+      },
+      'the expected errors and warnings as the suite declares them',
     );
     const written = (reports: string): { junit: boolean; html: boolean } => {
       const files = existsSync(reports) ? readdirSync(reports, { recursive: true }).map(String) : [];
@@ -37873,9 +37872,13 @@ function testAnEngineRunIsReadCaseByCase(): void {
  */
 function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   const clean = { code: 0, signal: null, ended: null };
-  const handed = (cases: readonly string[], expected: Record<string, readonly string[]> = {}) => ({
+  const handed = (
+    cases: readonly string[],
+    expected: Record<string, readonly string[]> = {},
+    warned: Record<string, readonly string[]> = {},
+  ) => ({
     suites: [{ path: S_TEST, cases }],
-    expected: { [S_TEST]: expected },
+    expected: { errors: { [S_TEST]: expected }, warnings: { [S_TEST]: warned } },
   });
   const rows = (printedPerRow: readonly number[]): string =>
     cannedRun([
@@ -37966,6 +37969,82 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     judgeEngine(readRun(lateNotice), handed(['test_a', 'test_p']), clean).faults,
     [`an engine error in ${S_TEST} > test_p:0 (1): row said${declareIt}`],
     'a notice printed once the suites run excuses nothing',
+  );
+
+  // A warning a case prints is judged as an error is, against its own declarations: Godot answers
+  // some refused changes with nothing else, and the run that printed this one passed while the root
+  // went on embedding windows for every later suite.
+  const refused =
+    'Can\'t change "gui_embed_subwindows" while a child window is displayed. Consider hiding all child windows before changing this value.';
+  const warnedRun = (body: readonly string[]): string =>
+    cannedRun([caseLine(S_TEST, 'test_a', 'STARTED'), ...body, caseLine(S_TEST, 'test_a', 'PASSED', '5ms')]);
+  const refusedLines = [
+    `WARNING: ${refused}`,
+    '   at: set_embedding_subwindows (scene/main/viewport.cpp:4331)',
+    '   GDScript backtrace (most recent call first):',
+    `       [0] after_test (${S_TEST}:24)`,
+  ];
+  const warnIt = `; if the suite prints it on purpose, list its text under "test_a" in the suite's GDHARNESS_EXPECTED_WARNINGS`;
+  const warnedUndeclared = judgeEngine(readRun(warnedRun(refusedLines)), handed(['test_a']), clean);
+  assert.deepEqual(
+    warnedUndeclared.faults,
+    [`an engine warning in ${S_TEST} > test_a: ${refused}${warnIt}`],
+    'a warning nothing declared fails a passing case',
+  );
+  assert.deepEqual(warnedUndeclared.passedSuites, [], 'and its suite');
+  assert.match(warnedUndeclared.shown.join('\n'), /^WARNING: Can't change "gui_embed_subwindows"/m, 'shown');
+  assert.match(warnedUndeclared.shown.join('\n'), /at: set_embedding_subwindows/, 'with where it came from');
+  assert.deepEqual(
+    judgeEngine(readRun(warnedRun(refusedLines)), handed(['test_a'], {}, { test_a: [refused] }), clean)
+      .faults,
+    [],
+    'a declared warning',
+  );
+  assert.deepEqual(
+    judgeEngine(readRun(warnedRun(refusedLines)), handed(['test_a'], { test_a: [refused] }), clean).faults,
+    [
+      `an engine warning in ${S_TEST} > test_a: ${refused}${warnIt}`,
+      `${S_TEST} > test_a declares the error "${refused}", which it never printed`,
+    ],
+    'a warning declared as an error is neither',
+  );
+  assert.deepEqual(
+    judgeEngine(readRun(warnedRun([])), handed(['test_a'], {}, { test_a: ['the till is open'] }), clean)
+      .faults,
+    [`${S_TEST} > test_a declares the warning "the till is open", which it never printed`],
+    'a declared warning the case stopped printing',
+  );
+  assert.deepEqual(
+    judgeEngine(readRun(warnedRun(['USER WARNING: pushed from the case'])), handed(['test_a']), clean).faults,
+    [`an engine warning in ${S_TEST} > test_a: pushed from the case${warnIt}`],
+    'a warning a script pushes',
+  );
+  // Outside every suite a warning is the engine's own, starting or exiting.
+  const engineOwn = warnedRun([]).replace(
+    'https://godotengine.org',
+    'https://godotengine.org\nWARNING: the engine said this as it started',
+  );
+  assert.deepEqual(
+    judgeEngine(readRun(`${engineOwn}\r\nWARNING: and this as it exited`), handed(['test_a']), clean).faults,
+    [],
+    'warnings outside every suite',
+  );
+  // Credited as an error is: one printed after a case's verdict is that case's while another follows.
+  const afterVerdict = cannedRun([
+    caseLine(S_TEST, 'test_a', 'STARTED'),
+    caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+    'WARNING: left for a later frame',
+    caseLine(S_TEST, 'test_b', 'STARTED'),
+    caseLine(S_TEST, 'test_b', 'PASSED', '5ms'),
+  ]);
+  assert.deepEqual(
+    judgeEngine(
+      readRun(afterVerdict),
+      handed(['test_a', 'test_b'], {}, { test_a: ['left for a later frame'] }),
+      clean,
+    ).faults,
+    [],
+    'a warning a case left for a later frame',
   );
 
   assert.deepEqual(
@@ -38097,7 +38176,11 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   );
   assert.doesNotMatch(failing.shown.join('\n'), /unrelated|Godot Engine/, 'the failure, not the whole run');
 
-  const nothing = judgeEngine(readRun(cannedRun([], 'PASSED', 0)), { suites: [], expected: {} }, clean);
+  const nothing = judgeEngine(
+    readRun(cannedRun([], 'PASSED', 0)),
+    { suites: [], expected: { errors: {}, warnings: {} } },
+    clean,
+  );
   assert.deepEqual(nothing.faults, ['the run executed no test case at all, whatever it exited with']);
 
   const unloadable = judgeEngine(
@@ -38109,7 +38192,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
         'Executed test cases : (0/0)',
       ].join('\n'),
     ),
-    { suites: [], expected: {} },
+    { suites: [], expected: { errors: {}, warnings: {} } },
     { code: 105, signal: null, ended: null },
   );
   assert.deepEqual(unloadable.faults, [
@@ -38841,6 +38924,26 @@ function testTheTestCommandReadsItsOwnOptions(): void {
  * `gdharness test` runs a real project's suites and judges them, keeps the times and what passed,
  * and leaves out what passed unchanged only when asked to.
  */
+const EMBED_REFUSED =
+  'Can\'t change "gui_embed_subwindows" while a child window is displayed. Consider hiding all child windows before changing this value.';
+
+/** A suite whose one case shows a window and then changes the root's embedding, which is refused. */
+function windowSuite(declared: string): string {
+  return [
+    'extends GdUnitTestSuite',
+    '',
+    declared,
+    '',
+    'func test_window() -> void:',
+    '\tvar shown: Window = auto_free(Window.new())',
+    '\tget_tree().root.add_child(shown)',
+    '\tshown.show()',
+    '\tget_tree().root.gui_embed_subwindows = not get_tree().root.gui_embed_subwindows',
+    '\tassert_bool(shown.visible).is_true()',
+    '',
+  ].join('\n');
+}
+
 function testTheTestCommandRunsAndJudgesAProject(): void {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
@@ -38868,6 +38971,7 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
         'extends GdUnitTestSuite',
         '',
         'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"before": ["said in before"], "test_rows": ["row said"]}',
+        'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_rows": ["row warned"]}',
         '',
         'func before() -> void:',
         '\tpush_error("said in before")',
@@ -38876,6 +38980,7 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
         '@warning_ignore("unused_parameter")',
         'func test_rows(value: int, test_parameters := [[1], [2]]) -> void:',
         '\tpush_error("row said")',
+        '\tpush_warning("row warned")',
         '\tassert_int(value).is_greater(0)',
         '',
       ].join('\n'),
@@ -38883,6 +38988,11 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
         'extends GdUnitTestSuite\n\nfunc test_noisy() -> void:\n\tpush_error("nobody said this")\n\tassert_bool(true).is_true()\n',
       'tests/hang_test.gd':
         'extends GdUnitTestSuite\n\nfunc test_hangs() -> void:\n\tawait get_tree().create_timer(60.0).timeout\n',
+      // The root refuses a change of embedding while a window is up, and says so only in a warning.
+      'tests/window_test.gd': windowSuite(''),
+      'tests/window_declared_test.gd': windowSuite(
+        `const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_window": [${JSON.stringify(EMBED_REFUSED)}]}\n`,
+      ),
     });
     cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
     const env = { ...process.env, GODOT_PATH: godotPath };
@@ -38956,6 +39066,18 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       noisy.said,
     );
 
+    const embedRefused = test('tests/window_test.gd');
+    assert.equal(embedRefused.status, 1, embedRefused.said);
+    assert.ok(
+      embedRefused.said.includes(
+        `  an engine warning in res://tests/window_test.gd > test_window: ${EMBED_REFUSED}; if the suite prints it on purpose, list its text under "test_window" in the suite's GDHARNESS_EXPECTED_WARNINGS\n`,
+      ),
+      embedRefused.said,
+    );
+    const windowDeclared = test('tests/window_declared_test.gd');
+    assert.equal(windowDeclared.status, 0, windowDeclared.said);
+    assert.match(windowDeclared.said, /^Passed: 1 case in 1 suite across 1 engine, /m, windowDeclared.said);
+
     const nowhere = test('tests/nothing_test.gd');
     assert.equal(nowhere.status, 2, nowhere.said);
     assert.match(
@@ -38969,7 +39091,7 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     >;
     assert.deepEqual(
       Object.keys(passedAfter).sort(),
-      ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
+      ['res://tests/declared_test.gd', 'res://tests/ok_test.gd', 'res://tests/window_declared_test.gd'],
       'a failing suite is not kept as passed, so the next run asks it again',
     );
 
@@ -39193,10 +39315,12 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         'extends GdUnitTestSuite',
         '',
         'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_meant": ["meant to say this"]}',
+        'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_meant": ["meant to warn"]}',
         '',
         '',
         'func test_meant() -> void:',
         '\tpush_error("meant to say this")',
+        '\tpush_warning("meant to warn")',
         '\tassert_bool(true).is_true()',
         '',
         '',
@@ -39205,10 +39329,13 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         '\tassert_bool(true).is_true()',
         '',
       ].join('\n'),
+      'tests/warned_test.gd':
+        'extends GdUnitTestSuite\n\n\nfunc test_warned() -> void:\n\tpush_warning("a warning nobody declared")\n\tassert_bool(true).is_true()\n',
       'tests/promised_test.gd': [
         'extends GdUnitTestSuite',
         '',
         'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_quiet": ["Could not parse broken.json"]}',
+        'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_quiet": ["the till is open"]}',
         '',
         '',
         'func test_quiet() -> void:',
@@ -39222,7 +39349,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         const said = await call('project_test', { projectPath: project }, ENGINE_CALL_TIMEOUT_MS * 3);
         const answer = jsonOf(said, 'project_test');
         assert.equal(get(answer, 'passed'), false, said);
-        assert.equal(get(answer, 'tests'), 6, `every suite under tests, where gdharness test looks: ${said}`);
+        assert.equal(get(answer, 'tests'), 7, `every suite under tests, where gdharness test looks: ${said}`);
         assert.equal(
           get(answer, 'notRun'),
           undefined,
@@ -39230,8 +39357,16 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         );
         assert.deepEqual(
           get(answer, 'undeclaredErrors'),
-          [{ suite: 'res://tests/noisy_test.gd', case: 'test_unmeant', text: 'nobody declared this' }],
-          `the declared one is the run going as written: ${said}`,
+          [
+            { suite: 'res://tests/noisy_test.gd', case: 'test_unmeant', text: 'nobody declared this' },
+            {
+              suite: 'res://tests/warned_test.gd',
+              case: 'test_warned',
+              text: 'a warning nobody declared',
+              warning: true,
+            },
+          ],
+          `the declared ones are the run going as written: ${said}`,
         );
         assert.deepEqual(
           get(answer, 'declaredNotPrinted'),
@@ -39241,12 +39376,18 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
               case: 'test_quiet',
               text: 'Could not parse broken.json',
             },
+            {
+              suite: 'res://tests/promised_test.gd',
+              case: 'test_quiet',
+              text: 'the till is open',
+              warning: true,
+            },
           ],
           said,
         );
         assert.match(
           text(get(answer, 'verdict')),
-          /one engine error no suite declared; one declared error never printed/,
+          /one engine error no suite declared; one engine warning no suite declared; one declared error never printed; one declared warning never printed/,
         );
         assert.doesNotMatch(
           text(get(answer, 'verdict')),
@@ -39255,7 +39396,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         );
         assert.match(
           text(get(answer, 'note')),
-          /list its text under "test_unmeant" in the suite's GDHARNESS_EXPECTED_ERRORS/,
+          /list its text under "test_unmeant" in the suite's GDHARNESS_EXPECTED_ERRORS, once for each time it prints it, and a warning in its GDHARNESS_EXPECTED_WARNINGS\./,
           said,
         );
         assert.deepEqual(
@@ -39267,12 +39408,17 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
           ]),
           [
             ['res://tests/noisy_test.gd', 2, 1, undefined],
-            ['res://tests/promised_test.gd', 1, undefined, 1],
+            ['res://tests/promised_test.gd', 1, undefined, 2],
+            ['res://tests/warned_test.gd', 1, 1, undefined],
           ],
           said,
         );
         assert.equal(get(answer, 'suitesPassed'), 2, said);
-        assert.equal(get(answer, 'engineErrors'), 1, `the declared error is not counted: ${said}`);
+        assert.equal(
+          get(answer, 'engineErrors'),
+          1,
+          `the declared error is not counted, and the warnings are no errors: ${said}`,
+        );
 
         // One past the most an answer names, each its own text.
         writeTree(project, {
@@ -39379,7 +39525,8 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         // Each on its own, since either fails the run and the run above holds both.
         for (const [path, verdict] of [
           ['tests/noisy_test.gd', 'one engine error no suite declared'],
-          ['tests/promised_test.gd', 'one declared error never printed'],
+          ['tests/warned_test.gd', 'one engine warning no suite declared'],
+          ['tests/promised_test.gd', 'one declared error never printed; one declared warning never printed'],
         ] as const) {
           const alone = await call(
             'project_test',
@@ -39391,6 +39538,13 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
             [false, verdict],
             alone,
           );
+          if (path === 'tests/warned_test.gd') {
+            assert.match(
+              text(get(jsonOf(alone, path), 'note')),
+              /list its text under "test_warned" in the suite's GDHARNESS_EXPECTED_WARNINGS, once for each time it prints it\./,
+              `a warning alone is told where warnings are declared: ${alone}`,
+            );
+          }
         }
       },
       { GODOT_PATH: godotPath },

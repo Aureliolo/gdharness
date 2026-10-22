@@ -101,7 +101,7 @@ last lines count the problems and name the run's directory. A run that passes le
 the next run removes the logs of runs that have ended; `--print-output` prints every engine's
 output before the verdict, whether the run passed or not.
 
-## Errors a suite expects
+## Errors and warnings a suite expects
 
 A suite that prints an engine error on purpose declares it, with its exact text, in a constant:
 
@@ -118,9 +118,19 @@ printing it twice lists it twice, and a parameterised case declares what one row
 declared text the case does not print fails the run too, since the case no longer reaches what it
 was written to test. There is no way to accept errors across a whole run: gdUnit4's own
 `report/godot/script_error` setting decides only which errors fail a case, and an error a case meant
-to raise with `assert_error` is declared like any other. `project_test` judges a
-run's errors by the same declarations, and names what fails it under `undeclaredErrors` and
-`declaredNotPrinted`.
+to raise with `assert_error` is declared like any other.
+
+An engine warning printed while a suite runs fails the run the same way, since Godot answers some
+refused changes with nothing but a warning: an `after_test` setting the root's
+`gui_embed_subwindows` while a window it had shown was still up was refused, the root went on
+embedding windows for every later suite, and the run passed. A suite that prints one on purpose
+declares it in `GDHARNESS_EXPECTED_WARNINGS`, keyed the same way, with the text after `WARNING:` and
+its space. A text declared as an error does not accept a warning, or the reverse. A warning printed
+outside every suite, as the engine starts or exits, is not judged, and neither is the one Godot
+prints when it falls back to another rendering driver.
+
+`project_test` judges a run's errors and warnings by the same declarations, and names what fails it
+under `undeclaredErrors` and `declaredNotPrinted`, a warning marked `warning: true`.
 
 An error counts as the case's that was running when it was printed. One printed after a case's
 verdict counts as that case's while another case follows, since what a case leaves for a later
@@ -219,4 +229,5 @@ gdUnit4's own options, then after `--`:
 - `--html-report-off` and `--junit-report-off`: no HTML report, and no JUnit report.
 - `--compile-together`: compile the suites together beside every class of the game before running
   them, so every script that does not compile is named.
-- `--expected-errors-out FILE`: write each suite's `GDHARNESS_EXPECTED_ERRORS` there, as JSON.
+- `--expected-out FILE`: write each suite's `GDHARNESS_EXPECTED_ERRORS` and
+  `GDHARNESS_EXPECTED_WARNINGS` there, as JSON under `errors` and `warnings`.

@@ -6983,7 +6983,7 @@ class GodotServer {
       '--skipping-in',
       skippingFile,
       '--html-report-off',
-      '--expected-errors-out',
+      '--expected-out',
       expectedFile,
     ];
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 600000;
@@ -7288,16 +7288,23 @@ class GodotServer {
     const undeclaredPrinted = judgedErrors.printed.filter((error) => !uncaughtTexts.has(error.text));
     const undeclaredFolded = new Map<
       string,
-      { suite: string | undefined; case: string | undefined; text: string; times: number }
+      {
+        suite: string | undefined;
+        case: string | undefined;
+        text: string;
+        warning: true | undefined;
+        times: number;
+      }
     >();
     for (const error of undeclaredPrinted) {
-      const key = `${error.suite ?? ''}\n${error.during ?? ''}\n${error.text}`;
+      const key = `${error.suite ?? ''}\n${error.during ?? ''}\n${String(error.warning)}\n${error.text}`;
       const seen = undeclaredFolded.get(key);
       if (seen === undefined) {
         undeclaredFolded.set(key, {
           suite: error.suite ?? undefined,
           case: error.during ?? undefined,
           text: error.text,
+          warning: error.warning ? true : undefined,
           times: 1,
         });
       } else {
@@ -7315,6 +7322,7 @@ class GodotServer {
       suite: missing.suite,
       case: missing.during,
       text: missing.text,
+      warning: missing.warning ? true : undefined,
       printedInstead: judgedErrors.printed.find(
         (error) =>
           error.suite === missing.suite &&
@@ -7326,7 +7334,10 @@ class GodotServer {
       undeclared: undeclaredPrinted.filter((error) => error.suite === path).length,
       notPrinted: judgedErrors.neverPrinted.filter((missing) => missing.suite === path).length,
     });
-    const declaredAndPrinted = casePrinted.errors.length - judgedErrors.printed.length;
+    // Errors only, since what this is taken from is the log's count of errors.
+    const declaredAndPrinted =
+      casePrinted.errors.filter((error) => !error.warning).length -
+      judgedErrors.printed.filter((error) => !error.warning).length;
     // Read off the console, which prints a case a suite inherits under that suite: gdUnit4's report
     // writes it under the suite declaring it, so the inheriting one read a case short of what it
     // discovered, and that case was answered as never run beside a run that ran it.
@@ -7426,12 +7437,20 @@ class GodotServer {
         verdict === 'passed' && undeclaredPrinted.length + declaredNotPrinted.length > 0
           ? undefined
           : verdict,
-        undeclaredPrinted.length > 0
-          ? `${undeclaredPrinted.length === 1 ? 'one engine error' : `${String(undeclaredPrinted.length)} engine errors`} no suite declared`
-          : undefined,
-        declaredNotPrinted.length > 0
-          ? `${declaredNotPrinted.length === 1 ? 'one declared error' : `${String(declaredNotPrinted.length)} declared errors`} never printed`
-          : undefined,
+        ...[false, true].map((warning) => {
+          const count = undeclaredPrinted.filter((error) => error.warning === warning).length;
+          const word = warning ? 'warning' : 'error';
+          return count > 0
+            ? `${count === 1 ? `one engine ${word}` : `${String(count)} engine ${word}s`} no suite declared`
+            : undefined;
+        }),
+        ...[false, true].map((warning) => {
+          const count = declaredNotPrinted.filter((missing) => (missing.warning === true) === warning).length;
+          const word = warning ? 'warning' : 'error';
+          return count > 0
+            ? `${count === 1 ? `one declared ${word}` : `${String(count)} declared ${word}s`} never printed`
+            : undefined;
+        }),
         testsNotRun.length > 0 ? `not run: ${testsNotRun.join(', ')}` : undefined,
       ]
         .filter((part) => part !== undefined)
@@ -7486,10 +7505,10 @@ class GodotServer {
             : undefined,
           uncaughtNote(uncaught),
           undeclaredErrors.length > 0
-            ? `An engine error a suite does not declare fails the run, as gdharness test judges it; ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name')}, once for each time it prints it.`
+            ? `An engine error or warning a suite does not declare fails the run, as gdharness test judges it; ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name', undeclaredErrors[0]?.warning === true)}, once for each time it prints it${undeclaredErrors.some((error) => error.warning !== undeclaredErrors[0]?.warning) ? (undeclaredErrors[0]?.warning === true ? ', and an error in its GDHARNESS_EXPECTED_ERRORS' : ', and a warning in its GDHARNESS_EXPECTED_WARNINGS') : ''}.`
             : undefined,
           declaredNotPrinted.length > 0
-            ? 'A declared error the case did not print fails the run too, since the case no longer reaches what it was written to test.'
+            ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'
             : undefined,
           ranAs.startsWith('warnings') && warnings.length === 0
             ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
