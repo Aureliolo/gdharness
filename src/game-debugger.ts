@@ -49,6 +49,7 @@ export type DebugRequest =
   | { readonly op: 'resume'; readonly how: 'continue' | 'next' | 'step' | 'out' }
   | { readonly op: 'stack' }
   | { readonly op: 'variables'; readonly frame: number }
+  | { readonly op: 'evaluate'; readonly frame: number; readonly expression: string }
   | { readonly op: 'output' }
   | { readonly op: 'state' };
 
@@ -86,6 +87,8 @@ const REPLIES: ReadonlySet<string> = new Set([
   'stack_dump',
   'stack_frame_vars',
   'stack_frame_var',
+  'evaluation_return',
+  'scene:inspect_object',
 ]);
 /** The most unread replies kept, which a frame of a few thousand globals stays under. */
 const INBOX_KEPT = 10_000;
@@ -176,6 +179,14 @@ export function shownValue(value: GodotValue, typeHint = ''): string {
     return `<${typeHint === '' ? 'Object' : typeHint}#${String(value.values[0])}>`;
   }
   return `${value.kind}(${value.values.join(', ')})`;
+}
+
+/** The type of a value the game sent: its class when it named one, else its Variant type. */
+function typeNamed(type: GodotValue | undefined, hint: GodotValue | undefined): string {
+  if (typeof hint === 'string' && hint !== '') {
+    return hint;
+  }
+  return typeof type === 'number' ? (TYPE_NAMES[type] ?? String(type)) : 'Variant';
 }
 
 /** A held game's stack from a `stack_dump`: its size, then file, line and function per frame. */
@@ -466,7 +477,7 @@ export class GameDebugger {
           [request.script, request.line, request.set],
           this.held?.thread ?? MAIN_THREAD,
         );
-        return { sent: true };
+        return { sent: true, taken: await this.taken() };
       case 'pause':
         return await this.pause();
       case 'resume':
@@ -488,6 +499,8 @@ export class GameDebugger {
       }
       case 'variables':
         return await this.variables(request.frame);
+      case 'evaluate':
+        return await this.evaluate(request.frame, request.expression);
       default:
         return { refused: `Nothing here answers ${JSON.stringify(request)}.` };
     }
@@ -680,13 +693,9 @@ export class GameDebugger {
     if (frames === null) {
       return { refused: `The game did not send its stack within ${READ_MS / 1000}s.` };
     }
-    if (frames.find((each) => each.id === frame) === undefined) {
-      return {
-        refused:
-          frames.length === 0
-            ? 'The game is held where no script runs, so it has no frames: debug_control step_over takes it to the next line of script.'
-            : `The stack has no frame ${frame}; its frames are ${frames.map((each) => each.id).join(', ')}.`,
-      };
+    const missing = GameDebugger.noFrame(frames, frame);
+    if (missing !== null) {
+      return missing;
     }
     this.forget('stack_frame_vars');
     this.forget('stack_frame_var');
@@ -710,19 +719,91 @@ export class GameDebugger {
         };
       }
       const [name, scope, type, value, hint] = one.data;
-      const into = scopes[typeof scope === 'number' ? scope : 0];
-      into?.variables.push({
-        name: typeof name === 'string' ? name : shownValue(name ?? null),
+      const named = typeof name === 'string' ? name : shownValue(name ?? null);
+      // The compiler's own locals, such as the position a for loop keeps as @counter_pos, which no
+      // source names and no expression can read.
+      if (named.startsWith('@')) {
+        continue;
+      }
+      scopes[typeof scope === 'number' ? scope : 0]?.variables.push({
+        name: named,
         value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
-        type:
-          typeof hint === 'string' && hint !== ''
-            ? hint
-            : typeof type === 'number'
-              ? (TYPE_NAMES[type] ?? String(type))
-              : 'Variant',
+        type: typeNamed(type, hint),
       });
     }
     return { held: this.heldState(), frame, scopes };
+  }
+
+  /**
+   * What [param expression] comes to at [param frame], worked out by the game itself with the
+   * frame's locals, the globals and every global class in scope and the frame's instance as self.
+   * Values come back as text, and an object as its class and id only, so this is what reads into
+   * one: `wave.spawned` where the frame's variables show `wave` as `<RefCounted#…>`.
+   */
+  private async evaluate(frame: number, expression: string): Promise<DebugAnswer> {
+    const held = this.held;
+    if (held === null) {
+      return this.notHeld();
+    }
+    // The engine evaluates on the frame's instance, and in a frame with none, a static function's,
+    // it leaves its debug loop instead of answering, which lets the game go on. A frame with an
+    // instance lists it as self among its members, so that is asked first.
+    const read = await this.variables(frame);
+    if (!Array.isArray(read['scopes'])) {
+      return read;
+    }
+    const members = (read['scopes'] as readonly DebugScope[]).find((scope) => scope.name === 'Members');
+    if (members?.variables.some((variable) => variable.name === 'self') !== true) {
+      return {
+        refused: `Frame ${frame} has no instance of its script to evaluate on, as a static function called on its class has none, and the engine lets the game go on rather than answer one there, so it was not asked. Evaluate in a frame below it, or read this one's locals with debug_state variables.`,
+      };
+    }
+    this.forget('evaluation_return');
+    this.send('evaluate', [expression, frame], held.thread);
+    const answered = await this.next(GameDebugger.named('evaluation_return'), READ_MS);
+    if (answered === null || !('data' in answered)) {
+      return {
+        refused: `The game worked out nothing for ${expression} within ${READ_MS / 1000}s. Ask again.`,
+      };
+    }
+    const [, , type, value, hint] = answered.data;
+    return {
+      held: this.heldState(),
+      frame,
+      expression,
+      value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
+      type: typeNamed(type, hint),
+      ...(value === null || value === undefined
+        ? {
+            note: 'null is also what an expression comes to when it does not parse or fails as it runs. The game prints why as an error, which editor_output reads, since its debugger hands errors over apart from the console debug_state output keeps.',
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * Whether the game has taken what was last sent it. A running game reads its debugger when it next
+   * polls, between frames or every 2048 lines of script, and answers nothing for a breakpoint, so a
+   * call sent at once ran a static function straight past the line it had been told. An inspection
+   * of no object is answered, and is read after everything sent before it on the same connection.
+   */
+  private async taken(): Promise<boolean> {
+    this.forget('scene:inspect_object');
+    this.send('scene:inspect_object', [0], this.held?.thread ?? MAIN_THREAD);
+    return (await this.next(GameDebugger.named('scene:inspect_object'), READ_MS)) !== null;
+  }
+
+  /** The refusal for [param frame] when [param frames] has no such frame, or null when it does. */
+  private static noFrame(frames: readonly DebugFrame[], frame: number): DebugAnswer | null {
+    if (frames.find((each) => each.id === frame) !== undefined) {
+      return null;
+    }
+    return {
+      refused:
+        frames.length === 0
+          ? 'The game is held where no script runs, so it has no frames: debug_control step_over takes it to the next line of script.'
+          : `The stack has no frame ${frame}; its frames are ${frames.map((each) => each.id).join(', ')}.`,
+    };
   }
 
   close(): void {

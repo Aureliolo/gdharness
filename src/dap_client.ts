@@ -89,6 +89,19 @@ export interface StoppedAt {
   readonly text: string;
 }
 
+/**
+ * [param variables] without the compiler's own locals, such as the position a for loop keeps as
+ * `@counter_pos`, which no source names and no expression can read.
+ */
+function sourceNamed(variables: DAPArrayItem[] | null): DAPArrayItem[] | null {
+  return (
+    variables?.filter((variable) => {
+      const named = variable['name'];
+      return typeof named !== 'string' || !named.startsWith('@');
+    }) ?? null
+  );
+}
+
 /** The breakpoints on one file, as this side spells the file: the path the adapter takes. */
 export interface HeldBreakpoint {
   readonly scriptPath: string;
@@ -111,6 +124,7 @@ interface ToolArgs {
   scriptPath?: unknown;
   line?: unknown;
   frameId?: unknown;
+  expression?: unknown;
 }
 
 export class GodotDAPClient {
@@ -938,10 +952,60 @@ export class GodotDAPClient {
       const reference = scope['variablesReference'];
       named.push({
         name: typeof scope['name'] === 'string' ? scope['name'] : 'scope',
-        variables: typeof reference === 'number' ? await this.variablesWhenReady(reference, deadline) : [],
+        variables:
+          typeof reference === 'number'
+            ? sourceNamed(await this.variablesWhenReady(reference, deadline))
+            : [],
       });
     }
     return named;
+  }
+
+  /**
+   * What [param expression] comes to at the frame [param frameId], or the innermost, worked out by
+   * the game on the frame's instance.
+   *
+   * The adapter answers an evaluate the way it answers an object's variables: the request that
+   * sends the expression to the game answers nothing, and one asked after the game's reply has come
+   * answers with it, once. An expression already sent is not sent again while it is waited on, so
+   * asking again runs it once.
+   */
+  async evaluate(
+    expression: string,
+    frameId?: number,
+  ): Promise<{ frame: number; value: string; type?: string }> {
+    const scopes = await this.getScopes(frameId);
+    const frames = await this.getStackTrace();
+    const frame = frameId ?? (typeof frames[0]?.['id'] === 'number' ? frames[0]['id'] : 0);
+    // The game evaluates on the frame's instance and, in a frame with none, leaves its debug loop
+    // instead of answering, which lets the game go on. A frame with an instance lists it as self.
+    const members = scopes.find((scope) => scope.name === 'Members');
+    if (members?.variables?.some((variable) => variable['name'] === 'self') !== true) {
+      throw new ReadRefusal(
+        `Frame ${frame} has no instance of its script to evaluate on, as a static function called on its class has none, and the engine lets the game go on rather than answer one there, so it was not asked. Evaluate in a frame below it, or read this one's locals with debug_state variables`,
+      );
+    }
+    const deadline = Date.now() + this.scopesPatienceMs;
+    while (Date.now() < deadline) {
+      try {
+        const answered = await this.sendRequest(
+          'evaluate',
+          { expression, frameId: frame, context: 'watch' },
+          VARIABLES_POLL_TIMEOUT_MS,
+        );
+        const value = answered['result'];
+        if (typeof value === 'string') {
+          const type = answered['type'];
+          return { frame, value, ...(typeof type === 'string' ? { type } : {}) };
+        }
+      } catch {
+        // Unanswered: the game's reply has not reached the adapter yet.
+      }
+      await delay(200);
+    }
+    throw new ReadRefusal(
+      `What ${expression} comes to did not arrive from the game within ${this.scopesPatienceMs / 1000}s. It comes from the game through the editor: ask again`,
+    );
   }
 
   isConnected(): boolean {
@@ -1098,6 +1162,25 @@ export async function handleDAPTool(
               };
         return {
           content: [{ type: 'text', text: answerJson(answer) }],
+        };
+      }
+
+      case 'dap_evaluate': {
+        const frameId = typeof safeArgs.frameId === 'number' ? safeArgs.frameId : undefined;
+        const expression = typeof safeArgs.expression === 'string' ? safeArgs.expression : '';
+        const evaluated = await client.evaluate(expression, frameId);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: answerJson({
+                frame: evaluated.frame,
+                expression,
+                value: evaluated.value,
+                ...(evaluated.type === undefined ? {} : { type: evaluated.type }),
+              }),
+            },
+          ],
         };
       }
 

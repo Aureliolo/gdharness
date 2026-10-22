@@ -103,7 +103,7 @@ import {
   type LogEntry,
   type Severity,
 } from './game-log.js';
-import { isIdentifier } from './gdscript-source.js';
+import { codeOf, isIdentifier } from './gdscript-source.js';
 import {
   AddonOfAnotherRelease,
   anEditorIsStillComing,
@@ -655,9 +655,16 @@ function keptGameRequest(tool: string, op: string, args: OperationParams): Debug
     if (op === 'output') {
       return { op: 'output' };
     }
+    const frame = args['frameId'];
     if (op === 'variables') {
-      const frame = args['frameId'];
       return { op: 'variables', frame: typeof frame === 'number' ? frame : 0 };
+    }
+    if (op === 'evaluate') {
+      return {
+        op: 'evaluate',
+        frame: typeof frame === 'number' ? frame : 0,
+        expression: readString(args, 'expression') ?? '',
+      };
     }
     return { op: 'stack' };
   }
@@ -1528,17 +1535,26 @@ interface AfterWaiting {
 }
 
 /**
- * The refusal for a breakpoint on [param line] of the script at [param absolutePath] when the line
- * is past the script's end, or null. Lines are counted as an editor counts them, without one for
- * the newline that ends the last.
+ * The refusal for a breakpoint on [param line] of the script at [param absolutePath] when nothing
+ * can stop there, or null: a line past the script's end, or one holding no code. Lines are counted
+ * as an editor counts them, without one for the newline that ends the last. The engine stops only on
+ * the lines its compiler marks, which a statement's are and a blank or comment line never is, and
+ * neither the adapter nor a game refuses one: it was answered verified and never stopped anything.
  */
-function lineBeyondScript(absolutePath: string, relativePath: string, line: number): string | null {
+function lineNothingStopsOn(absolutePath: string, relativePath: string, line: number): string | null {
   const text = readFileSync(absolutePath, 'utf8');
   const lines = text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
-  if (line <= lines) {
+  if (line > lines) {
+    return `res://${relativePath} has ${lines} line${lines === 1 ? '' : 's'}, so there is no line ${line} to stop on.`;
+  }
+  const code = codeOf(text).split('\n');
+  if ((code[line - 1] ?? '').trim() !== '') {
     return null;
   }
-  return `res://${relativePath} has ${lines} line${lines === 1 ? '' : 's'}, so there is no line ${line} to stop on.`;
+  const next = code.findIndex((each, at) => at >= line && each.trim() !== '');
+  return `res://${relativePath} line ${line} holds no code, so nothing stops there${
+    next === -1 ? ', and no line after it holds any' : `; the next line holding code is ${next + 1}`
+  }.`;
 }
 
 /** What the runtime addon prints once it is listening, which a run's output is read for. */
@@ -2834,6 +2850,7 @@ const DEBUG_STATE_CALLS: Readonly<Record<string, string>> = dictionary({
   stack: 'dap_get_stack_trace',
   output: 'dap_get_output',
   variables: 'dap_get_variables',
+  evaluate: 'dap_evaluate',
 });
 
 type Section = { operation: string; params: (args: OperationParams, detailed: boolean) => OperationParams };
@@ -3555,6 +3572,10 @@ class GodotServer {
   private readonly operationsScript = join(__dirname, 'godot', 'operations', 'godot_operations.gd');
   /** The options of each platform's presets, by engine and platform, read once in an editor. */
   private readonly exportOptionsRead = new Map<string, ExportOptions>();
+  /** The pending calls answered while the kept game was held, whose timing counts the hold. */
+  private readonly heldWhilePending = new Set<number>();
+  // The game hands the errors an evaluate raises to whatever call it is held inside.
+  private readonly evaluatedWhilePending = new Set<number>();
   private readonly listedRunner = shippedListedRunner();
   private readonly godotBridge: GodotBridge;
   private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
@@ -5124,16 +5145,16 @@ class GodotServer {
         if (line === undefined) {
           return this.createErrorResponse('line is required: the one-based line to stop on.');
         }
-        // Neither the adapter nor a game refuses a line nothing is on, and a breakpoint held there
+        // Neither the adapter nor a game refuses a line nothing stops on, and a breakpoint held there
         // is kept in the project's set and never stops anything. Removing one is left alone, so a
         // breakpoint on a script since deleted or shortened can still be taken off.
         if (op === 'set') {
           if (!existsSync(located.absolutePath)) {
             return this.missingScript(project.value.path, located.relativePath);
           }
-          const beyond = lineBeyondScript(located.absolutePath, located.relativePath, line);
-          if (beyond !== null) {
-            return this.createErrorResponse(beyond);
+          const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
+          if (nothing !== null) {
+            return this.createErrorResponse(nothing);
           }
         }
         const editor = this.godotBridge.isConnected();
@@ -5203,7 +5224,10 @@ class GodotServer {
                   runningGame: `The game this server started is running, and its debugger was not told: ${String('unreached' in told ? told.unreached : told['refused'])}. It takes the line when it is started again.`,
                 }
               : {
-                  runningGame: `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started.`,
+                  runningGame:
+                    told['taken'] === false
+                      ? `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and not taken by it within ${READ_MS / 1000}s: a game reads its debugger between frames and every 2048 lines of script, so one inside a long frame takes the line once that frame ends.`
+                      : `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and taken by it: anything it runs from now on stops there.`,
                 }),
           note: editor
             ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
@@ -5213,6 +5237,13 @@ class GodotServer {
       }
       case 'debug_control':
       case 'debug_state': {
+        if (op === 'evaluate') {
+          for (const requestId of this.heldWhilePending) {
+            if (lateAnswer(requestId)?.state === 'waiting') {
+              this.evaluatedWhilePending.add(requestId);
+            }
+          }
+        }
         // A game this server started has its keeper for a debugger, which answers everything the
         // editor's adapter does and also breaks into a game and steps out of a function.
         const kept = this.keptRun();
@@ -9873,7 +9904,9 @@ class GodotServer {
             : this.godotBridge.isConnected() && editorWouldPlay && silentOnlyHere
               ? ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
                 `started here, silent as every run is unless asked otherwise, and silent: false plays it through the editor, with sound.${OWN_DEBUGGER}`
-              : '';
+              : this.godotBridge.isConnected() && !editorWouldPlay
+                ? ` The editor plays this project's games with a window, so a headless run was started here. With --headless in the project's editor/run/main_run_args, which project_settings sets, the editor plays it headless.${OWN_DEBUGGER}`
+                : '';
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
     // in `ended`, because ending a run goes through the sweep that drops these, so the start left
@@ -14696,6 +14729,9 @@ class GodotServer {
       if (!reply.ok && reply.requestId !== undefined) {
         // The call itself can be what reached the breakpoint, which no check before it could see.
         const heldSince = await this.keptHoldOn(choice.endpoint);
+        if (heldSince !== null) {
+          this.heldWhilePending.add(reply.requestId);
+        }
         return this.jsonTextResponse({
           pending: true,
           requestId: reply.requestId,
@@ -14800,10 +14836,27 @@ class GodotServer {
       );
     }
     const { id: _id, ...payload } = reply.payload;
+    // The game times a call from its start to its end, and a breakpoint the call reached held the
+    // game in between, so a call of three lines read as fourteen seconds.
+    const held = this.heldWhilePending.delete(requestId) && payload['elapsed_usec'] !== undefined;
+    // The game leaves errors out of an answer that raised none.
+    const evaluated = this.evaluatedWhilePending.delete(requestId) && payload['errors'] !== undefined;
     return this.jsonTextResponse({
       ...payload,
       requestId,
       answeredAfterMs: late.answeredAt - late.sentAt,
+      ...(held
+        ? {
+            elapsedNote:
+              'The game was held by its debugger while this call ran, and elapsed_usec runs from the start of the call to its end, so it counts the time held as well as the call.',
+          }
+        : {}),
+      ...(evaluated
+        ? {
+            errorsNote:
+              "debug_state evaluate ran while the game was held inside this call, and the game counts what an evaluate raises as raised by the call it is held in, so errors can hold an expression's failure as well as the call's own.",
+          }
+        : {}),
     });
   }
 

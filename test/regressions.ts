@@ -3826,6 +3826,101 @@ async function testAVariablesReadSaysWhatItCouldNotRead(): Promise<void> {
 }
 
 /**
+ * An evaluate through the editor's adapter is asked only of a frame with an instance, and is asked
+ * again until the game's answer has come (probe 159).
+ *
+ * Godot's adapter answers an evaluate the way it answers an object's variables: the request that
+ * sends it to the game is never answered, and one after the game's reply answers with it. The game
+ * evaluates on the frame's instance and, in a frame with none, leaves its debug loop instead of
+ * answering, which lets it run on. The stand-in answers the second evaluate, gives frame 1 no self,
+ * and puts a for loop's compiler local beside frame 0's own.
+ */
+async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
+  const evaluated: number[] = [];
+  const adapter: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    const answer = (body: Record<string, unknown>): void => {
+      socket.write(
+        frameJsonRpc({ seq: 1, type: 'response', request_seq: message['seq'], command, success: true, body }),
+      );
+    };
+    const args = message['arguments'];
+    if (command === 'threads') {
+      answer({ threads: [{ id: 1, name: 'Main' }] });
+    } else if (command === 'stackTrace') {
+      answer({
+        stackFrames: [
+          { id: 0, name: 'add', line: 11 },
+          { id: 1, name: 'tripled', line: 38 },
+        ],
+      });
+    } else if (command === 'scopes') {
+      const base = Number(get(args, 'frameId')) * 2;
+      answer({
+        scopes: [
+          { name: 'Locals', variablesReference: base + 1 },
+          { name: 'Members', variablesReference: base + 2 },
+        ],
+      });
+    } else if (command === 'variables') {
+      const reference = Number(get(args, 'variablesReference'));
+      answer({
+        variables:
+          reference === 1
+            ? [
+                { name: 'amount', value: '5' },
+                { name: '@counter_pos', value: '0' },
+              ]
+            : reference === 2
+              ? [{ name: 'self', value: 'Main' }]
+              : [],
+      });
+    } else if (command === 'evaluate') {
+      evaluated.push(Number(get(args, 'frameId')));
+      if (evaluated.length > 1) {
+        answer({ result: '15', type: 'int', variablesReference: 0 });
+      }
+    } else {
+      answer({});
+    }
+  };
+  await withFramedPeer(adapter, async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1', { scopesMs: 6000 });
+    try {
+      const read = await handleDAPTool(client, 'dap_get_variables', {});
+      const scopes = get(JSON.parse(textOf({ jsonrpc: '2.0', result: read }) ?? '{}') as unknown, 'scopes');
+      assert.deepEqual(
+        get(scopes, 0, 'variables'),
+        [{ name: 'amount', value: '5' }],
+        `the compiler's own locals are left out: ${JSON.stringify(scopes)}`,
+      );
+
+      const worked = await handleDAPTool(client, 'dap_evaluate', { expression: 'amount * 3' });
+      const workedSaid = textOf({ jsonrpc: '2.0', result: worked }) ?? '';
+      assert.notEqual(worked.isError, true, workedSaid);
+      assert.deepEqual(
+        JSON.parse(workedSaid),
+        { frame: 0, expression: 'amount * 3', value: '15', type: 'int' },
+        'asked again once the game had answered',
+      );
+      assert.deepEqual(evaluated, [0, 0], 'on the frame asked for');
+
+      const static_ = await handleDAPTool(client, 'dap_evaluate', { expression: 'value', frameId: 1 });
+      const said = textOf({ jsonrpc: '2.0', result: static_ }) ?? '';
+      assert.equal(static_.isError, true, said);
+      assert.match(
+        said,
+        /: Frame 1 has no instance of its script to evaluate on, as a static function called on its class has none/,
+        said,
+      );
+      assert.deepEqual(evaluated, [0, 0], `and the game is not asked there: ${said}`);
+    } finally {
+      await client.abandon();
+    }
+  });
+}
+
+/**
  * A step answers where the game stopped after it, and says so when it has not stopped.
  *
  * Godot's adapter answers `next` at once and the step lands after, told as a `stopped` event. A
@@ -7719,7 +7814,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 151;
+const READ_IN_WORDS = 152;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -7812,6 +7907,11 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
     assert.equal(classOf('scene_node'), 'destructive', 'scene_node can delete a node');
     assert.equal(classOf('resource_edit'), 'destructive', 'resource_edit writes over a resource');
     assert.equal(classOf('editor_run'), 'destructive', 'editor_run stop ends a process');
+    assert.equal(
+      classOf('debug_state'),
+      'destructive',
+      'an expression debug_state evaluates can call any method',
+    );
 
     const counts = { read: 0, additive: 0, destructive: 0 };
     for (const name of hints.keys()) {
@@ -7819,7 +7919,7 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
     }
     assert.deepEqual(
       counts,
-      { read: 13, additive: 4, destructive: 13 },
+      { read: 12, additive: 4, destructive: 14 },
       'each class holds what the table holds',
     );
 
@@ -26815,6 +26915,81 @@ async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
 }
 
 /**
+ * A headless run of a project whose editor plays its games with a window is started by this
+ * server, and the answer says why and what lets the editor play it (probe 159).
+ *
+ * The editor plays a game headless only with --headless in the project's run arguments, so a
+ * headless start against a connected editor was started here and said nothing of it: a caller who
+ * had opened an editor to debug through it read the debug tools' answers as the editor's. Against
+ * a project whose editor plays headless, the same start goes through the editor.
+ */
+async function testAHeadlessRunTheEditorWouldShowIsStartedHere(): Promise<void> {
+  for (const one of [
+    { how: 'an editor playing with a window', playsWindowed: true, spawned: true },
+    { how: 'an editor playing headless', playsWindowed: false, spawned: false },
+  ]) {
+    let plays = 0;
+    let playing = false;
+    await withAPlayingEditor(
+      ({ adapter }) =>
+        (tool) => {
+          if (tool === 'play_scene') {
+            plays += 1;
+            playing = true;
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'stop_playing') {
+            const was = playing;
+            playing = false;
+            return { ok: true, wasPlaying: was, playing: false };
+          }
+          if (tool === 'playing_status') {
+            return { ok: true, playing, scenePath: '', debugPort: adapter };
+          }
+          return { ok: true };
+        },
+      async ({ server, project }) => {
+        const answer = parseTextContent(
+          await server.request(
+            'tools/call',
+            {
+              name: 'editor_run',
+              arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 500 },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        const said = JSON.stringify(answer);
+        if (one.spawned) {
+          assert.deepEqual(
+            [
+              get(answer, 'through'),
+              asArray(get(answer, 'arguments')).map(text).includes('--headless'),
+              plays,
+            ],
+            ['gdharness', true, 0],
+            `${one.how}: started here, headless, and the editor not asked: ${said}`,
+          );
+          assert.match(
+            text(get(answer, 'message')),
+            / The editor plays this project's games with a window, so a headless run was started here\. With --headless in the project's editor\/run\/main_run_args, which project_settings sets, the editor plays it headless\. Its debugger is the keeper/,
+            `${one.how}: and says why: ${said}`,
+          );
+        } else {
+          assert.deepEqual(
+            [get(answer, 'through'), plays],
+            ['editor', 1],
+            `${one.how}: played by the editor: ${said}`,
+          );
+        }
+        await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
+      },
+      { playsWindowed: one.playsWindowed },
+    );
+  }
+}
+
+/**
  * A run given engine flags is started by this server, with the flags where the engine reads them,
  * and a flag outside the list is refused before anything is asked of the editor.
  *
@@ -29604,12 +29779,13 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
     join(project, 'project.godot'),
     '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Debugged"\nrun/main_scene="res://main.tscn"\n',
   );
-  // Line 8 is the breakpoint, and lines 9 to 11 the loop the game never leaves.
+  // Line 8 is the breakpoint, lines 9 to 11 the loop the game never leaves, and lines 2 and 4 hold no
+  // code.
   writeFileSync(
     join(project, 'main.gd'),
     [
       'extends Node',
-      '',
+      '# Waits for a file nobody writes.',
       'var waited: int = 0',
       '',
       '',
@@ -29652,6 +29828,22 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       line: 12,
     });
     assert.equal(beyond.said, 'res://main.gd has 11 lines, so there is no line 12 to stop on.');
+    // A comment or a blank line has nothing the engine stops on, and was answered verified.
+    for (const [line, next] of [
+      [2, 3],
+      [4, 6],
+    ]) {
+      const empty = await call('debug_breakpoint', {
+        projectPath: project,
+        op: 'set',
+        scriptPath: 'main.gd',
+        line,
+      });
+      assert.equal(
+        empty.said,
+        `res://main.gd line ${line} holds no code, so nothing stops there; the next line holding code is ${next}.`,
+      );
+    }
     const nowhere = await call('debug_breakpoint', {
       projectPath: project,
       op: 'set',
@@ -29868,8 +30060,9 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
       'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
   );
-  // Line 7 is the only script line a frame runs, line 11 the breakpoint inside add, and line 17 the
-  // script error that ends explode.
+  // Line 7 is the only script line a frame runs, line 11 the breakpoint inside add, line 17 the
+  // script error that ends explode, line 27 the line after noted's push_error, and line 38 the loop
+  // inside tripled, a static function.
   writeFileSync(
     join(project, 'main.gd'),
     [
@@ -29905,6 +30098,13 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       'func load() -> int:',
       '\tvar _gone: Resource = ResourceLoader.load("res://nope.tres")',
       '\treturn 4',
+      '',
+      '',
+      'static func tripled(value: int) -> int:',
+      '\tvar sum: int = 0',
+      '\tfor step: int in value:',
+      '\t\tsum += 3',
+      '\treturn sum',
       '',
     ].join('\n'),
   );
@@ -29965,6 +30165,28 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       ['add', 11],
       `held inside the call: ${held.said}`,
     );
+    // Worked out by the held game on the frame's instance, with its locals: amount is the 5 given.
+    const evaluated = await call('debug_state', {
+      op: 'evaluate',
+      expression: 'amount * 3 + get_child_count()',
+    });
+    assert.deepEqual(
+      [get(evaluated.answer, 'value'), get(evaluated.answer, 'type'), get(evaluated.answer, 'frame')],
+      ['15', 'int', 0],
+      evaluated.said,
+    );
+    const unparsed = await call('debug_state', { op: 'evaluate', expression: 'amount +' });
+    assert.deepEqual(
+      [get(unparsed.answer, 'value'), get(unparsed.answer, 'note')],
+      [
+        'null',
+        'null is also what an expression comes to when it does not parse or fails as it runs. The game prints why as an error, which editor_output reads, since its debugger hands errors over apart from the console debug_state output keeps.',
+      ],
+      unparsed.said,
+    );
+    // Where the note sends a caller: the error is not in the console debug_state output keeps.
+    const why = await call('editor_output', { op: 'run', severity: 'error', contains: 'parse error' });
+    assert.match(why.said, /There was previously a parse error: Expected expression/, why.said);
     const beside = await call('runtime_inspect', {
       op: 'property',
       nodePath: '/root/Main',
@@ -29990,6 +30212,111 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
     assert.ok(
       Number(get(collected, 'result')) >= 10,
       `and answered once let go: ${JSON.stringify(collected)}`,
+    );
+    assert.equal(
+      get(collected, 'elapsedNote'),
+      'The game was held by its debugger while this call ran, and elapsed_usec runs from the start of the call to its end, so it counts the time held as well as the call.',
+      JSON.stringify(collected),
+    );
+    // add itself raises nothing; the unparsed expression's error is handed to the call it was held in.
+    assert.deepEqual(
+      [
+        asArray(get(collected, 'errors')).some((one) => String(one).includes('parse error')),
+        get(collected, 'errorsNote'),
+      ],
+      [
+        true,
+        "debug_state evaluate ran while the game was held inside this call, and the game counts what an evaluate raises as raised by the call it is held in, so errors can hold an expression's failure as well as the call's own.",
+      ],
+      JSON.stringify(collected),
+    );
+
+    // A call held and let go answers with its own error, and is left uncollected while the next
+    // hold below evaluates: that evaluate was not raised inside it.
+    await call('debug_breakpoint', { projectPath: project, op: 'set', scriptPath: 'main.gd', line: 27 });
+    const noting = await call('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'noted',
+      timeoutMs: 2_000,
+    });
+    assert.equal(get(noting.answer, 'pending'), true, noting.said);
+    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 27 });
+    await call('debug_control', { op: 'continue' });
+    const goneOn = await call('runtime_inspect', {
+      op: 'property',
+      nodePath: '/root/Main',
+      property: 'frames',
+    });
+    assert.notEqual(goneOn.answer, null, `the game answers again once let go: ${goneOn.said}`);
+    await delay(500);
+
+    // A static function called on its class runs with no instance, and the engine evaluating in its
+    // frame lets the game go on instead of answering, so it is refused and the game stays held. Its
+    // loop keeps compiler locals that no source names.
+    const inTripled = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 38,
+    });
+    // Taken before the set answers: a call sent at once ran tripled straight past the line.
+    assert.match(
+      text(get(inTripled.answer, 'runningGame')),
+      /^Told to the running game \(pid \d+\), which this server started, and taken by it: anything it runs from now on stops there\.$/,
+      inTripled.said,
+    );
+    const tripling = await call('runtime_invoke', {
+      op: 'call',
+      nodePath: 'res://main.gd',
+      method: 'tripled',
+      args: [4],
+      timeoutMs: 2_000,
+    });
+    assert.equal(get(tripling.answer, 'pending'), true, tripling.said);
+    const inStatic = await call('debug_state', { op: 'variables' });
+    assert.deepEqual(
+      asArray(get(asArray(get(inStatic.answer, 'scopes'))[0], 'variables'))
+        .map((one) => String(get(one, 'name')))
+        .sort(),
+      ['step', 'sum', 'value'],
+      inStatic.said,
+    );
+    const noSelf = await call('debug_state', { op: 'evaluate', expression: 'value' });
+    assert.equal(
+      noSelf.said,
+      "Frame 0 has no instance of its script to evaluate on, as a static function called on its class has none, and the engine lets the game go on rather than answer one there, so it was not asked. Evaluate in a frame below it, or read this one's locals with debug_state variables.",
+    );
+    const stillHeld = await call('debug_state', { op: 'stack' });
+    assert.deepEqual(
+      [get(stillHeld.answer, 'stack', 0, 'name'), get(stillHeld.answer, 'stack', 0, 'line')],
+      ['tripled', 38],
+      `and the game is still held where it was: ${stillHeld.said}`,
+    );
+    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 38 });
+    await call('debug_control', { op: 'continue' });
+    let triple: unknown = null;
+    for (let waited = 0; waited < 20_000; waited += 250) {
+      triple = (await call('runtime_invoke', { op: 'result', requestId: get(tripling.answer, 'requestId') }))
+        .answer;
+      if (get(triple, 'pending') !== true) {
+        break;
+      }
+      await delay(250);
+    }
+    // The evaluate in tripled was refused before the game saw it, so nothing was handed to the call.
+    assert.deepEqual(
+      [get(triple, 'result'), get(triple, 'errorsNote')],
+      [12, undefined],
+      JSON.stringify(triple),
+    );
+    const notedLate = (
+      await call('runtime_invoke', { op: 'result', requestId: get(noting.answer, 'requestId') })
+    ).answer;
+    assert.deepEqual(
+      [get(notedLate, 'result'), get(notedLate, 'errors'), get(notedLate, 'errorsNote')],
+      [3, ['noted on the way'], undefined],
+      JSON.stringify(notedLate),
     );
 
     // A script error ends the function it is raised in, which returns its type's default: explode's
@@ -50682,16 +51009,16 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     );
     const heldStats = get(holderRead, 'properties', 'stats');
     assert.deepEqual(
-      [get(heldStats, '_type'), get(heldStats, 'script', 'path'), get(heldStats, 'max_hp')],
-      ['Resource', 'res://stats.gd', 20],
-      `a resource built into the scene is read with what it holds: ${JSON.stringify(holderRead)}`,
+      [get(heldStats, '_type'), get(heldStats, 'max_hp')],
+      ['Stats', 20],
+      `a resource built into the scene is read by its script's class, with what it holds: ${JSON.stringify(holderRead)}`,
     );
     assert.deepEqual(
       Object.keys(asObject(heldStats)).sort(),
-      ['_type', 'hp', 'max_hp', 'script'],
+      ['_type', 'hp', 'max_hp'],
       `and only what it holds away from its script's defaults: ${JSON.stringify(heldStats)}`,
     );
-    // A scripted resource tagged Resource is built from the read, not taken as the empty reference.
+    // The class a read names is one a write builds, so the read goes back as the resource it was.
     await written('scene_node', {
       op: 'set',
       scenePath: 'holder.tscn',
@@ -54969,6 +55296,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEngineFlagsAreAListNotAPassage,
   testWhatThisServerStartsIsSilentUnlessAsked,
   testASilentRunIsStartedHereAndSaysWhy,
+  testAHeadlessRunTheEditorWouldShowIsStartedHere,
   testARunGivenEngineFlagsIsStartedHere,
   testEngineFlagsReachTheEngine,
   testACrashedRunIsNeverClean,
@@ -55245,6 +55573,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectGodotMultilineValues,
   testLettingGoOfTheAdapterSendsItNothing,
   testAVariablesReadSaysWhatItCouldNotRead,
+  testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer,
   testAStepAnswersWhereItLanded,
   testTheAdaptersConsoleSaysWhatItNoLongerHolds,
   testAStopIsKnownToTheConnectionItWasSentTo,

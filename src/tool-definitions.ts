@@ -1620,7 +1620,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['start', 'check'],
         description: `The engine's own flags, before the separator, such as ["--verbose"] or ["--fixed-fps", "60"], a value going as the next entry. Only those that change what the engine logs, draws for debugging, checks on the GPU, which renderer draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's --write-movie: ${Object.keys(ENGINE_FLAGS).join(', ')}. Any other is refused, since the engine's command line can also run scripts, open other projects and write files. --rendering-driver takes vulkan, d3d12, metal, opengl3, opengl3_es, opengl3_angle or dummy, and --rendering-method forward_plus, mobile or gl_compatibility, so the same scene can be measured on another driver and a project's OpenGL fallback exercised on a machine that has Vulkan; they choose what draws a run with a window. --accessibility always has the game build the tree a screen reader reads, as the project's accessibility/general/accessibility_support at Always Active does, so runtime_inspect accessibility can read it; otherwise the engine builds it only when a screen reader is running. --write-movie takes an absolute path outside the project, in a directory that exists, ending in .avi (one file, video and sound) or .png (one numbered PNG per frame and a .wav beside them), where nothing it would write is there already; it needs a start with headless: false, since the engine crashes writing a movie headless, and it records at the project's editor/movie_writer/fps unless --fixed-fps says otherwise. A run with any is started by this server, as one with args is. A check given --verbose answers with everything printed rather than only errors and warnings, since what verbose adds, the instances leaked at exit among it, is printed as ordinary lines.`,
       },
-      headless: { type: 'boolean', ops: ['start'], description: 'start: force a window or no window.' },
+      headless: {
+        type: 'boolean',
+        ops: ['start'],
+        description:
+          "start: force a window or no window. The editor plays a game headless only when the project's editor/run/main_run_args holds --headless, so a headless start of a project whose editor plays with a window is started by this server instead, and the answer says so.",
+      },
       visible: {
         type: 'boolean',
         ops: ['start'],
@@ -2512,7 +2517,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'debug_breakpoint',
     title: 'Breakpoints',
     description:
-      "Sets, removes or lists breakpoints. A set on a script that is not there, or past its last line, is refused, as nothing would ever stop there; a remove takes any line, and with no editor connected answers removed false, saying why, when none was held there. Set them first, then editor_run, and the game stops where you asked. With the editor connected it goes through the editor's debug adapter; with none, it is held here. A game this server starts itself, which editor_run start does for a run given args, savesIn, env or silent, or with no editor, is handed every breakpoint held here as it starts, and one set while that game runs reaches it at once (runningGame says so). The editor keeps a breakpoint set this way for one play, so every breakpoint this server holds is sent again before each play editor_run starts, and the start answer lists them under breakpoints. The set is also kept in the project, for the server that comes after a reconnect: a breakpoint stays until it is removed here, whichever server set it. Every answer lists the whole set under held, and the breakpoints the user set in the editor's own gutter under setInEditor; setting one here never takes those away, and removing a line here clears it whoever set it. Godot clears every breakpoint in the editor when a debug session opens unless network/debug_adapter/sync_breakpoints is on, which the addon turns on as it loads; an editor where it was turned off again is said so under breakpointsAtRisk, here and in editor_status.",
+      "Sets, removes or lists breakpoints. A set on a script that is not there, past its last line, or on a line holding no code, blank or only a comment, is refused, as nothing would ever stop there; a remove takes any line, and with no editor connected answers removed false, saying why, when none was held there. Set them first, then editor_run, and the game stops where you asked. With the editor connected it goes through the editor's debug adapter; with none, it is held here. A game this server starts itself, which editor_run start does for a run given args, savesIn, env or silent, for a headless run of a project whose editor plays its games with a window, or with no editor, is handed every breakpoint held here as it starts, and one set while that game runs reaches it, and the set answers once the game has taken it, which it does between frames, so a call made after the answer stops there (runningGame says so). The editor keeps a breakpoint set this way for one play, so every breakpoint this server holds is sent again before each play editor_run starts, and the start answer lists them under breakpoints. The set is also kept in the project, for the server that comes after a reconnect: a breakpoint stays until it is removed here, whichever server set it. Every answer lists the whole set under held, and the breakpoints the user set in the editor's own gutter under setInEditor; setting one here never takes those away, and removing a line here clears it whoever set it. Godot clears every breakpoint in the editor when a debug session opens unless network/debug_adapter/sync_breakpoints is on, which the addon turns on as it loads; an editor where it was turned off again is said so under breakpointsAtRisk, here and in editor_status.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: { ...SCRIPT_PATH, ops: ['set', 'remove'] },
@@ -2554,7 +2559,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       step_out: {
         effect: 'additive',
         summary:
-          'run to the end of the current function and stop in its caller; a game this server started only',
+          "run to the end of the current function and stop at the next line run at its caller's depth: in its caller, or, when the call was the last thing its caller did, wherever script runs next, such as the caller's next call; a game this server started only",
         requires: [],
       },
     },
@@ -2563,13 +2568,19 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'debug_state',
     title: 'Debugger state',
     description:
-      "Where the debugged game is stopped: the stack trace, what is in scope at a frame with the values, or the debugger's console output so far, its last thousand lines, with any earlier ones counted under notShown. For a game this server started, its keeper's debugger answers: each frame names its script as the project spells it under script and on this machine under path, and held says which thread stopped and why. For a game the editor plays, the editor's debug adapter answers. A stop is reported by the editor's adapter only to the sessions connected when it happened, so a server that connected afterwards, which is every server after a reconnect, is shown a thread and no frames about a game still sitting at its breakpoint. That server asks the runtime instead: a held game accepts a connection and never answers, and the refusal then says held rather than running, and that the stack cannot be read from here. debug_control continue lets it go, and the next stop is one this session is told about, with its stack.",
+      "Where the debugged game is stopped: the stack trace, what is in scope at a frame with the values, or the debugger's console output so far, its last thousand lines, with any earlier ones counted under notShown. For a game this server started, its keeper's debugger answers: each frame names its script as the project spells it under script and on this machine under path, and held says which thread stopped and why. For a game the editor plays, the editor's debug adapter answers. A stop is reported by the editor's adapter only to the sessions connected when it happened, so a server that connected afterwards, which is every server after a reconnect, is shown a thread and no frames about a game still sitting at its breakpoint. That server asks the runtime instead: a held game accepts a connection and never answers, and the refusal then says held rather than running, and that the stack cannot be read from here. debug_control continue lets it go, and the next stop is one this session is told about, with its stack. A function that awaited is resumed with no caller below it, since the call that started it returned at the await, so its frame is the only one. The variables give an object as its class and id only, and evaluate reads into it: an expression worked out by the game at a frame, with the frame's locals, the globals and every global class in scope and the frame's instance as self, such as wave.spawned or wave.spawned.size(). The game runs what the expression calls, so a call that changes something changes the game. A frame with no instance, a static function's called on its class, is refused, since the engine lets the game go on rather than evaluate there; the frame below it has one. The compiler's own locals, named with @ such as a for loop's @counter_pos, are left out.",
     parameters: {
       frameId: {
         type: 'number',
-        ops: ['variables'],
+        ops: ['variables', 'evaluate'],
         description:
-          'variables: which frame, from a stack answer. Default the innermost. A frame the stack no longer holds is refused, and a scope whose values did not arrive in time answers variables null and is named under valuesMissing.',
+          'variables, evaluate: which frame, from a stack answer. Default the innermost. A frame the stack no longer holds is refused, and a scope whose values did not arrive in time answers variables null and is named under valuesMissing.',
+      },
+      expression: {
+        type: 'string',
+        ops: ['evaluate'],
+        description:
+          "evaluate: a GDScript expression, as Godot's Expression class parses it: members of self by name, locals, autoloads and global classes, operators, indexing and calls, such as wave.spawned[0] or Ledger.entries.size(). An expression that does not parse, or fails as it runs, comes to null, and the game prints why as an error, which editor_output reads for a game this server started. The game reports what an expression raises while it is held inside a runtime_invoke call as raised by that call, and the call's answer says so under errorsNote.",
       },
     },
     requires: [],
@@ -2579,6 +2590,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         effect: 'read',
         summary: 'locals, members and globals at a frame, with their values',
         requires: [],
+      },
+      evaluate: {
+        effect: 'destructive',
+        summary: 'what an expression comes to at a frame, worked out by the held game',
+        requires: ['expression'],
       },
       output: { effect: 'read', summary: 'console output captured through the debug adapter', requires: [] },
     },
