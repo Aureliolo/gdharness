@@ -323,7 +323,48 @@ func export_options(params: Dictionary) -> Dictionary:
 				state.set(name, fitted)
 				came = true
 		listed = _options_shown(state, fresh)
-	return {"platform": platform, "options": listed.values()}
+	# Every asked option the preset would not list, including one an earlier round listed and a later
+	# one hid, as turning codesign/enable off in the same call hides codesign/identity.
+	var hidden: Dictionary = {}
+	for key: Variant in asked:
+		if listed.has(str(key)):
+			continue
+		var shown_by: String = _shown_by(state, str(key), listed)
+		if not shown_by.is_empty():
+			hidden[str(key)] = shown_by
+	return {"platform": platform, "options": listed.values(), "hidden": hidden}
+
+
+## Which one change to a listed true-or-false or enum option of [param state] would list
+## [param name], as "codesign/enable is true", or an empty string when none would.
+static func _shown_by(state: Object, name: String, listed: Dictionary) -> String:
+	for option: Dictionary in listed.values():
+		var other: String = option["name"]
+		var held: Variant = state.get(other)
+		var tries: Dictionary = {}
+		if option["type"] == TYPE_BOOL:
+			tries[not held] = str(not held)
+		elif option["type"] == TYPE_INT and option["hint"] == PROPERTY_HINT_ENUM:
+			var choices: PackedStringArray = str(option["hintString"]).split(",", false)
+			for at: int in choices.size():
+				var label: String = choices[at].get_slice(":", 0)
+				tries[int(choices[at].get_slice(":", 1)) if choices[at].contains(":") else at] = label
+		for value: Variant in tries:
+			if _same(value, held):
+				continue
+			state.set(other, value)
+			var shows: bool = _lists(state, name)
+			state.set(other, held)
+			if shows:
+				return "%s is %s" % [other, tries[value]]
+	return ""
+
+
+static func _lists(state: Object, name: String) -> bool:
+	for property: Dictionary in state.get_property_list():
+		if str(property.get("name", "")) == name:
+			return true
+	return false
 
 
 ## Each option [param state] lists, by name, described with the default [param fresh] holds, and
@@ -407,7 +448,10 @@ func set_export_preset(params: Dictionary) -> Dictionary:
 		return _log.failure("options is an object of option names and values.")
 	var asked: Dictionary = options
 	var known: Variant = params.get("known_options", [])
-	var written: Variant = _options_for(platform, asked, known)
+	var hidden: Dictionary = {}
+	if params.get("hidden_options") is Dictionary:
+		hidden = params["hidden_options"]
+	var written: Variant = _options_for(platform, asked, known, hidden)
 	if written is String:
 		return _log.failure(str(written))
 	var values: Dictionary = written
@@ -437,6 +481,7 @@ func set_export_preset(params: Dictionary) -> Dictionary:
 	var _no_credentials: Error = credentials.load(CREDENTIALS_FILE)
 	var secrets: Array[String] = []
 	var missing: Array[String] = []
+	var missing_secrets: Array[String] = []
 	for name: String in values:
 		var option: Dictionary = described.get(name, {})
 		var secret: bool = GdhRead.as_bool(option.get("secret", false))
@@ -455,7 +500,9 @@ func set_export_preset(params: Dictionary) -> Dictionary:
 		else:
 			changed[name] = {"before": held, "now": values[name]}
 		var gone: String = _missing_path(values[name], option)
-		if not gone.is_empty():
+		if not gone.is_empty() and secret:
+			missing_secrets.append(name)
+		elif not gone.is_empty():
 			missing.append(gone)
 	var answer: Dictionary = {
 		"preset": config.get_value(section, "name"),
@@ -491,18 +538,24 @@ func set_export_preset(params: Dictionary) -> Dictionary:
 	if saving != OK:
 		return _log.failure("Failed to save export_presets.cfg: " + error_string(saving))
 	# Written as given, since the file can come after the preset names it; said, since an export can
-	# fail on it until it does.
+	# fail on it until it does. A secret's path is a secret too, so only its option is named.
 	if not missing.is_empty():
 		answer["missing_files"] = missing
+	if not missing_secrets.is_empty():
+		answer["secretsNamingNoFile"] = missing_secrets
+	var absent: Array[String] = missing.duplicate()
+	for name: String in missing_secrets:
+		absent.append("the file %s names" % name)
+	if not absent.is_empty():
 		answer["note"] = (
 			(
 				"%s %s not exist, and an exporter can refuse the preset until %s, as the Windows "
 				+ "exporter refuses a missing icon as an invalid icon path."
 			)
 			% [
-				_and_joined(missing),
-				"does" if missing.size() == 1 else "do",
-				"it does" if missing.size() == 1 else "they do",
+				_and_joined(absent),
+				"does" if absent.size() == 1 else "do",
+				"it does" if absent.size() == 1 else "they do",
 			]
 		)
 	return answer
@@ -541,6 +594,7 @@ func remove_export_preset(params: Dictionary) -> Dictionary:
 		answer["credentials"] = CREDENTIALS_FILE
 	if str(config.get_value(RUNNABLE_SECTION, platform, "")) == preset_name:
 		config.set_value(RUNNABLE_SECTION, platform, null)
+		answer["runnableNow"] = null
 		var at: int = 0
 		while config.has_section("preset." + str(at)):
 			if str(config.get_value("preset." + str(at), "platform", "")) == platform:
@@ -626,8 +680,9 @@ static func _files_for(filter: String, given: Variant) -> Variant:
 
 
 ## The values [param asked] gives [param platform]'s options, each fitted to the option's type in
-## [param known], or why one is refused.
-static func _options_for(platform: String, asked: Dictionary, known: Variant) -> Variant:
+## [param known], or why one is refused. [param hidden] says, for an option the preset has and does
+## not list as it would stand, what would list it.
+static func _options_for(platform: String, asked: Dictionary, known: Variant, hidden: Dictionary) -> Variant:
 	var values: Dictionary = {}
 	if asked.is_empty():
 		return values
@@ -639,6 +694,14 @@ static func _options_for(platform: String, asked: Dictionary, known: Variant) ->
 				by_name[str(described.get("name", ""))] = described
 	for key: Variant in asked:
 		var name: String = str(key)
+		if not by_name.has(name) and hidden.has(name):
+			return (
+				(
+					"A %s preset lists %s only while %s, as the Export dialog shows it, and this one "
+					+ "would not: give %s in the same call, or set it first."
+				)
+				% [platform, name, hidden[name], str(hidden[name]).replace(" is ", " ")]
+			)
 		if not by_name.has(name):
 			return (
 				GdhRead.offered("A %s preset has no option %s" % [platform, name], name, by_name.keys()) + "."
@@ -682,7 +745,8 @@ static func _missing_path(value: Variant, option: Dictionary) -> String:
 
 
 ## Each file the preset [param preset_name] names that is not there, as the option or list naming
-## it and the path: an option's res:// path or custom template, or a file export_files lists.
+## it and the path: an option's res:// path or custom template, or a file export_files lists. A
+## secret's path is left out, as every answer leaves out a secret's value.
 static func missing_named(preset_name: String) -> Array[String]:
 	var missing: Array[String] = []
 	var loaded: Variant = _preset_named(preset_name)
@@ -691,11 +755,20 @@ static func missing_named(preset_name: String) -> Array[String]:
 	var found: Dictionary = loaded
 	var config: ConfigFile = found["config"]
 	var section: String = found["section"]
-	if config.has_section(section + ".options"):
-		for key: String in config.get_section_keys(section + ".options"):
+	# A secret can name a file too, as an Android preset's keystore does.
+	var credentials: ConfigFile = ConfigFile.new()
+	var _no_credentials: Error = credentials.load(CREDENTIALS_FILE)
+	for holder: ConfigFile in [config, credentials]:
+		if not holder.has_section(section + ".options"):
+			continue
+		for key: String in holder.get_section_keys(section + ".options"):
 			var option: Dictionary = {"hint": PROPERTY_HINT_GLOBAL_FILE} if key in TEMPLATE_OPTIONS else {}
-			var gone: String = _missing_path(config.get_value(section + ".options", key), option)
-			if not gone.is_empty():
+			var gone: String = _missing_path(holder.get_value(section + ".options", key), option)
+			if gone.is_empty():
+				continue
+			if holder == credentials:
+				missing.append("%s (a secret, so its path is left out)" % key)
+			else:
 				missing.append("%s: %s" % [key, gone])
 	var listed: Variant = config.get_value(section, "export_files", PackedStringArray())
 	if listed is PackedStringArray:

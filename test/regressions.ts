@@ -24892,8 +24892,10 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       options: { 'codesign/identity': 'ABC' },
     });
     assert.ok(
-      hidden.includes('A Windows Desktop preset has no option codesign/identity'),
-      `an option stays hidden while what shows it is off: ${hidden}`,
+      hidden.startsWith(
+        'A Windows Desktop preset lists codesign/identity only while codesign/enable is true, as the Export dialog shows it, and this one would not: give codesign/enable true in the same call, or set it first.',
+      ),
+      `an option hidden while what shows it is off is refused naming what shows it: ${hidden}`,
     );
     const signed = await set({
       preset: 'Win',
@@ -24928,20 +24930,51 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       'http://t.test',
       `an option shown by what the preset already holds is taken alone: ${JSON.stringify(shown)}`,
     );
-    const validated = parseTextContent(
-      await server.request(
-        'tools/call',
-        { name: 'project_info', arguments: { projectPath: project, include: ['validation'], preset: 'Win' } },
-        300_000,
+    const signing = file();
+    const turnedOff = await refused({
+      op: 'set_preset',
+      preset: 'Win',
+      options: { 'codesign/enable': false, 'codesign/identity': 'XYZ' },
+    });
+    assert.ok(
+      turnedOff.startsWith(
+        'A Windows Desktop preset lists codesign/identity only while codesign/enable is true',
       ),
+      `a call that hides an option it also sets is refused naming what shows it: ${turnedOff}`,
     );
-    assert.deepEqual(
-      asArray(get(validated, 'validation', 'warnings'))
+    assert.equal(file(), signing, 'and nothing is written');
+
+    const warned = async (preset: string): Promise<unknown[]> => {
+      const validated = parseTextContent(
+        await server.request(
+          'tools/call',
+          { name: 'project_info', arguments: { projectPath: project, include: ['validation'], preset } },
+          300_000,
+        ),
+      );
+      return asArray(get(validated, 'validation', 'warnings'))
         .filter((warning) => get(warning, 'check') === 'export_preset_files')
-        .map((warning) => get(warning, 'message')),
-      ['The preset Win names files that are not there: application/icon: res://nope.ico'],
-      JSON.stringify(validated),
+        .map((warning) => get(warning, 'message'));
+    };
+    assert.deepEqual(await warned('Win'), [
+      'The preset Win names files that are not there: application/icon: res://nope.ico',
+    ]);
+    const keyed = await set({
+      preset: 'Droid',
+      options: { 'keystore/release': 'res://keys/none.keystore', 'keystore/release_password': 'droid-pw' },
+    });
+    assert.deepEqual(
+      [get(keyed, 'secretsNamingNoFile'), get(keyed, 'missing_files')],
+      [['keystore/release'], undefined],
+      `a secret naming no file is named by its option: ${JSON.stringify(keyed)}`,
     );
+    assert.ok(
+      !JSON.stringify(keyed).includes('none.keystore'),
+      `and its path is not answered: ${JSON.stringify(keyed)}`,
+    );
+    assert.deepEqual(await warned('Droid'), [
+      'The preset Droid names files that are not there: keystore/release (a secret, so its path is left out)',
+    ]);
 
     const written = file();
     for (const [args, expected] of [
@@ -25045,7 +25078,12 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       /\[preset\.1\.options\][^[]*codesign\/password="pw-kept-out"/,
       `Win's secrets move down with it: ${credentials()}`,
     );
-    assert.doesNotMatch(credentials(), /\[preset\.2/, credentials());
+    assert.match(
+      credentials(),
+      /\[preset\.2\.options\][^[]*keystore\/release_password="droid-pw"/,
+      credentials(),
+    );
+    assert.doesNotMatch(credentials(), /\[preset\.3/, credentials());
     const listed = parseTextContent(await call({ op: 'list' }));
     assert.deepEqual(
       asArray(get(listed, 'presets')).map((preset) => [get(preset, 'name'), get(preset, 'runnable')]),
@@ -25081,6 +25119,15 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       await refused({ op: 'run', preset: 'Tux', outputPath: 'build/tux.x86_64', pack: true }),
       /^A pack is written as a \.pck or a \.zip, and build\/tux\.x86_64 is neither/,
     );
+
+    const last = parseTextContent(await call({ op: 'remove_preset', preset: 'Droid' }));
+    assert.deepEqual(
+      [get(last, 'runnableNow'), get(last, 'presets')],
+      [null, ['Tux', 'Win']],
+      `a platform's last preset leaves it nothing to run: ${JSON.stringify(last)}`,
+    );
+    assert.doesNotMatch(credentials(), /keystore/, `its secrets go with it: ${credentials()}`);
+    assert.match(credentials(), /codesign\/password="pw-kept-out"/, `and Win's stay: ${credentials()}`);
   } finally {
     await server.stop();
     sweep(project, runtimeDir);

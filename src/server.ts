@@ -1993,6 +1993,15 @@ function presetsIn(projectPath: string): { name: string; platform: string }[] | 
   return presets;
 }
 
+/**
+ * The options a preset of one platform lists, as the engine's exporter describes them, and for an
+ * option asked for that the preset has but would not list, what would list it.
+ */
+interface ExportOptions {
+  readonly options: unknown[];
+  readonly hidden: unknown;
+}
+
 /** The platform of the preset called [param preset], or null when the project has none by that name. */
 function presetPlatform(projectPath: string, preset: string): string | null {
   return presetsIn(projectPath)?.find((held) => held.name === preset)?.platform ?? null;
@@ -3544,7 +3553,7 @@ class GodotServer {
   private readonly locator = new GodotLocator();
   private readonly operationsScript = join(__dirname, 'godot', 'operations', 'godot_operations.gd');
   /** The options of each platform's presets, by engine and platform, read once in an editor. */
-  private readonly exportOptionsRead = new Map<string, unknown[]>();
+  private readonly exportOptionsRead = new Map<string, ExportOptions>();
   private readonly listedRunner = shippedListedRunner();
   private readonly godotBridge: GodotBridge;
   private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
@@ -6511,7 +6520,7 @@ class GodotServer {
       if (typeof known === 'string') {
         return this.createErrorResponse(known);
       }
-      knownOptions = known;
+      knownOptions = known.options;
     }
     const outcome = await this.operation(
       'add_export_preset',
@@ -6562,6 +6571,7 @@ class GodotServer {
     }
     const options = args['options'];
     let knownOptions: unknown[] = [];
+    let hiddenOptions: unknown = {};
     if (options !== undefined && options !== null && Object.keys(options).length > 0) {
       const platform = presetPlatform(project.value.path, preset);
       if (platform !== null) {
@@ -6573,10 +6583,11 @@ class GodotServer {
         if (typeof known === 'string') {
           return this.createErrorResponse(known);
         }
-        knownOptions = known;
+        knownOptions = known.options;
+        hiddenOptions = known.hidden;
       }
     }
-    const params: OperationParams = { preset, knownOptions };
+    const params: OperationParams = { preset, knownOptions, hiddenOptions };
     if (given !== undefined) {
       params['outputPath'] = output?.relativePath ?? '';
     }
@@ -6620,7 +6631,7 @@ class GodotServer {
   private async exportOptions(
     platform: string,
     standing?: { presetsFile: string; preset: string; asked: unknown },
-  ): Promise<unknown[] | string> {
+  ): Promise<ExportOptions | string> {
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response.content.map((block) => block.text).join(' ');
@@ -6643,7 +6654,7 @@ class GodotServer {
       if (!Array.isArray(options)) {
         return `The ${platform} export options could not be read from the engine: ${outcome.ok ? 'it named none' : outcome.message}`;
       }
-      const read: unknown[] = options;
+      const read: ExportOptions = { options, hidden: outcome.ok ? outcome.payload['hidden'] : undefined };
       if (standing === undefined) {
         this.exportOptionsRead.set(key, read);
       }
