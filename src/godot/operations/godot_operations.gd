@@ -191,7 +191,8 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 				GdhFileReads.scene_tree(
 					str(params.get("scene_path", "")),
 					GdhRead.as_int(params.get("depth", -1), -1),
-					GdhRead.as_bool(params.get("include_properties", false))
+					GdhRead.as_bool(params.get("include_properties", false)),
+					GdhRead.as_bool(params.get("include_defaults", false))
 				)
 			)
 		"read_resource":

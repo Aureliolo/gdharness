@@ -219,10 +219,11 @@ func list_scene_nodes(args: Dictionary) -> Dictionary:
 	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	var depth: int = GdhRead.as_int(args.get("depth", -1), -1)
 	var include_properties: bool = GdhRead.as_bool(args.get("includeProperties", false))
+	var include_defaults: bool = GdhRead.as_bool(args.get("includeDefaults", false))
 
 	# Read as a headless engine reads it with no editor connected, so the answer does not depend on
 	# whether one is.
-	var read: Dictionary = GdhFileReads.scene_tree(scene_path, depth, include_properties)
+	var read: Dictionary = GdhFileReads.scene_tree(scene_path, depth, include_properties, include_defaults)
 	if read.get("ok", false):
 		read["unsavedInEditor"] = GdhSceneFile.unsaved(scene_path)
 	return read

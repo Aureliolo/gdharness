@@ -948,7 +948,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       includeProperties: {
         type: 'boolean',
         description:
-          "Include each node's properties, and on a node another scene makes (an instance, a node inside one, or a node of the scene this one inherits) setHere, the properties this scene's own file sets on it, since the values read the same either way. A TileMapLayer or TileMap whose cells the file sets also answers cellCount, since tile_map_data keeps them as packed bytes, and cellsListedBy, the scene_node get call that lists them. Default false.",
+          "Include each node's properties: what the file sets and every value that differs from a new node of its class and script, with defaultsLeftOut counting the defaults left out. On a node another scene makes (an instance, a node inside one, or a node of the scene this one inherits) setHere names the properties this scene's own file sets on it, since the values read the same either way. A TileMapLayer or TileMap whose cells the file sets also answers cellCount, since tile_map_data keeps them as packed bytes, and cellsListedBy, the scene_node get call that lists them. Default false.",
+      },
+      includeDefaults: {
+        type: 'boolean',
+        description:
+          'With includeProperties, list every stored property, defaults included: a Control has about a hundred, and ten of them ran to fifty-seven thousand characters. Default false.',
       },
     },
     requires: ['projectPath', 'scenePath'],

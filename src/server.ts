@@ -4903,6 +4903,7 @@ class GodotServer {
             scenePath: file,
             depth: readNumber(args, 'depth') ?? -1,
             includeProperties: readBoolean(args, 'includeProperties') ?? false,
+            includeDefaults: readBoolean(args, 'includeDefaults') ?? false,
           }),
           async () => await bridge('list_scene_nodes'),
         );

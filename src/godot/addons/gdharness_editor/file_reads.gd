@@ -16,16 +16,19 @@ const GdhSerialisation = preload("serialisation.gd")
 
 
 ## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
-## editableChildren on a node that instances another scene and every stored property when
+## editableChildren on a node that instances another scene and its stored properties when
 ## [param include_properties] is set, the file's value or the default where it sets none, and on a
-## node another file makes setHere, the properties this file sets on it.
+## node another file makes setHere, the properties this file sets on it. Defaults the file leaves
+## alone are counted as defaultsLeftOut rather than listed unless [param include_defaults] is set.
 ## [param depth] -1 reads every level.
-static func scene_tree(scene_path: String, depth: int, include_properties: bool) -> Dictionary:
+static func scene_tree(
+	scene_path: String, depth: int, include_properties: bool, include_defaults: bool
+) -> Dictionary:
 	var laid: Dictionary = _laid(scene_path)
 	if not laid.get("ok", false):
 		return laid
 	var nodes: Dictionary = laid["nodes"]
-	return {"ok": true, "tree": _entry(nodes, ".", include_properties, depth, 0)}
+	return {"ok": true, "tree": _entry(nodes, ".", include_properties, include_defaults, depth, 0)}
 
 
 ## The node at [param node_path] in [param scene_path] as {ok, name, type, properties}, laid as
@@ -328,7 +331,12 @@ static func _joined(prefix: String, given: String) -> String:
 
 
 static func _entry(
-	nodes: Dictionary, path: String, include_properties: bool, depth: int, current_depth: int
+	nodes: Dictionary,
+	path: String,
+	include_properties: bool,
+	include_defaults: bool,
+	depth: int,
+	current_depth: int
 ) -> Dictionary:
 	var node: Dictionary = nodes[path]
 	var children: Array[Dictionary] = []
@@ -351,7 +359,10 @@ static func _entry(
 		data["groups"] = sorted
 	if include_properties:
 		var given: Dictionary = node["properties"]
-		data["properties"] = _stored(str(node["type"]), given)
+		var stored: Dictionary = _stored(str(node["type"]), given, include_defaults)
+		data["properties"] = stored["properties"]
+		if stored["left_out"] > 0:
+			data["defaultsLeftOut"] = stored["left_out"]
 		var cells: int = _cell_count(str(node["type"]), given)
 		if cells >= 0:
 			data["cellCount"] = cells
@@ -370,7 +381,7 @@ static func _entry(
 			data["childrenNotListed"] = below.size()
 		return data
 	for child: String in below:
-		children.append(_entry(nodes, child, include_properties, depth, current_depth + 1))
+		children.append(_entry(nodes, child, include_properties, include_defaults, depth, current_depth + 1))
 	return data
 
 
@@ -407,14 +418,19 @@ static func _cell_count(type: String, given: Dictionary) -> int:
 
 
 ## Every property a node of [param type] stores, with the value [param given] sets or the default,
-## read as a node holding those values would answer them.
+## read as a node holding those values would answer them, as {properties, left_out}.
 ##
 ## The engine's half is read off a bare node of the class with the file's values set on it, which
 ## runs no script: what a node lists depends on its values (a thread group's settings appear only
 ## once it has one) and some setters set others (a Control's anchors preset sets how it grows), so
 ## the class's defaults and the file's entries alone answered neither. The script's half is its
 ## declared defaults under the file's values.
-static func _stored(type: String, given: Dictionary) -> Dictionary:
+##
+## Without [param include_defaults], properties keeps only what the file sets and what differs from
+## a node of the class holding none of its values, and left_out counts the rest. Every Control
+## carries a hundred properties, and ten of them came to 57 KB of defaults around the few values a
+## menu scene set.
+static func _stored(type: String, given: Dictionary, include_defaults: bool) -> Dictionary:
 	var attached: Variant = given.get("script")
 	var script: Script = attached if attached is Script else null
 	var scripted: Dictionary = {}
@@ -424,8 +440,10 @@ static func _stored(type: String, given: Dictionary) -> Dictionary:
 			if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
 				scripted[property] = script.get_property_default_value(property)
 	var values: Dictionary = {}
+	var defaults: Dictionary = {}
 	if ClassDB.class_exists(type) and ClassDB.can_instantiate(type):
 		var bare: Object = ClassDB.instantiate(type)
+		var plain: Object = ClassDB.instantiate(type)
 		for property: Variant in given:
 			if property != "script" and not scripted.has(property):
 				bare.set(str(property), given[property])
@@ -433,18 +451,30 @@ static func _stored(type: String, given: Dictionary) -> Dictionary:
 			var property: String = str(declared.get("name", ""))
 			if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
 				values[property] = bare.get(property)
-		if bare is Node:
-			bare.free()
+				defaults[property] = plain.get(property)
+		for made: Object in [bare, plain]:
+			if made is Node:
+				made.free()
 	for property: String in scripted:
 		values[property] = scripted[property]
+		defaults[property] = scripted[property]
 	# Given last, which keeps what a bare node cannot hold: the script itself, and a path to a node
 	# for a property that holds the node once it is in a tree.
 	values.merge(given, true)
 	var serialiser: GdhSerialisation = GdhSerialisation.new()
 	var answered: Dictionary = {}
+	var left_out: int = 0
 	for property: Variant in values:
+		var as_default: bool = (
+			not given.has(property)
+			and defaults.has(property)
+			and GdhSame.same(values[property], defaults[property])
+		)
+		if as_default and not include_defaults:
+			left_out += 1
+			continue
 		answered[property] = serialiser.serialize_value(values[property])
-	return answered
+	return {"properties": answered, "left_out": left_out}
 
 
 ## What a resource file holds, in the form modify takes, so a value read here can be written back.

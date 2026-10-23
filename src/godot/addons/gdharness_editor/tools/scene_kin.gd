@@ -179,7 +179,7 @@ static func follow(changed: String, old_path: String, new_path: String, carried:
 		var moves: Dictionary = {}
 		if _inherits(scene_path, changed, texts):
 			moves[old_path] = new_path
-		var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false)
+		var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false, false)
 		if not read.get("ok", false):
 			not_followed.append({"scenePath": scene_path, "reason": str(read.get("error", ""))})
 			continue

@@ -51720,9 +51720,33 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
     );
     assert.deepEqual(get(at(shown, 'Pet'), 'properties', 'position'), { x: 9, y: 9, _type: 'Vector2' });
     assert.equal(get(at(shown, 'Pet/Body'), 'properties', 'visible'), false, 'the inherited scene hides it');
-    assert.equal(get(at(shown, 'Pet/Body/Tail'), 'properties', 'visible'), true, 'a default is listed');
     assert.equal(get(at(shown, 'Loud'), 'properties', 'speed'), 9, 'a script property the file sets');
     assert.equal(get(at(shown, '.'), 'properties', 'grow_horizontal'), 2, 'what the anchors preset set');
+    // A default is counted rather than listed: a Control carries about a hundred, and ten of them
+    // ran to fifty-seven thousand characters around the few values a menu scene set.
+    const tail = at(shown, 'Pet/Body/Tail');
+    assert.equal(
+      get(tail, 'properties', 'visible'),
+      undefined,
+      `a default is left out: ${JSON.stringify(tail)}`,
+    );
+    assert.ok(Number(get(tail, 'defaultsLeftOut')) > 10, JSON.stringify(tail));
+    assert.equal(get(at(shown, '.'), 'properties', 'size_flags_vertical'), undefined, 'a Control default');
+    const everything = get(
+      parseTextContent(
+        await call('scene_tree', { scenePath: 'world.tscn', includeProperties: true, includeDefaults: true }),
+      ),
+      'tree',
+    );
+    const tailEverything = at(everything, 'Pet/Body/Tail');
+    assert.equal(get(tailEverything, 'properties', 'visible'), true, 'includeDefaults lists a default');
+    assert.equal(get(tailEverything, 'defaultsLeftOut'), undefined, 'nothing is left out to count');
+    assert.equal(
+      Object.keys(asObject(get(tailEverything, 'properties'))).length,
+      Object.keys(asObject(get(tail, 'properties'))).length + Number(get(tail, 'defaultsLeftOut')),
+      'the count is what was left out',
+    );
+    assert.equal(get(at(everything, 'Loud'), 'properties', 'speed'), 9);
     // Which of those values this file sets, said on the nodes another file makes and on no other:
     // the values alone read the same whether this scene changed them or the instanced one gave them.
     assert.deepEqual(
@@ -54799,7 +54823,13 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     );
     assert.match(fileOf('parts/plank.tscn'), /\[node name="Knot" type="Sprite2D" parent="\." unique_id=12\]/);
     const wide = get(
-      parseTextContent(await call('scene_tree', { scenePath: 'wide_plank.tscn', includeProperties: true })),
+      parseTextContent(
+        await call('scene_tree', {
+          scenePath: 'wide_plank.tscn',
+          includeProperties: true,
+          includeDefaults: true,
+        }),
+      ),
       'tree',
     );
     const knot = asArray(get(wide, 'children'));
