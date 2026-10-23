@@ -12,6 +12,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -13122,7 +13123,33 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     });
     const one = await start(first);
     const going = await output(first);
-    assert.equal(get(going.answer, 'running'), true, `the run goes on in the successor: ${going.said}`);
+    // What the keeper's search met, read once it has answered, for a run that was not followed: the
+    // engines listed with their starts, and where the successor writes its output.
+    const searched = (): string => {
+      if (process.platform === 'win32') {
+        return '';
+      }
+      const listed = spawnSyncHidden('ps', ['-e', '-o', 'pid=,lstart=,args='], {
+        encoding: 'utf8',
+        env: { ...process.env, LC_ALL: 'C' },
+      }).stdout;
+      const engines = listed
+        .split('\n')
+        .filter((line) => line.includes(basename(godotPath)))
+        .join('\n');
+      let writing = 'unread';
+      try {
+        writing = readlinkSync(`/proc/${String(one.successor)}/fd/1`);
+      } catch (error) {
+        writing = String(error);
+      }
+      return `\nengines listed at ${new Date().toISOString()}:\n${engines}\nthe successor writes to ${writing}`;
+    };
+    assert.equal(
+      get(going.answer, 'running'),
+      true,
+      `the run goes on in the successor: ${going.said}${get(going.answer, 'running') === true ? '' : searched()}`,
+    );
     assert.equal(get(going.answer, 'pid'), one.successor, going.said);
     assert.deepEqual(
       asArray(get(going.answer, 'restartedFrom')).map((before) => [
@@ -33487,6 +33514,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'var done_at: Array[int] = []\nvar tally: Dictionary[String, int] = {}\nvar board: Array[int] = []\n' +
           'var ledger: Dictionary = {"zeta": 1, "alpha": 2, "mid": 3}\n' +
           'var names: PackedStringArray = PackedStringArray(["Ada", "Bram"])\n' +
+          'var sign: String = "in\\u00a02"\n' +
           'var locked: int = 5:\n\tset(value):\n\t\tpass\n\n\n' +
           'func _ready() -> void:\n' +
           '\tfor index: int in 4:\n\t\tvar piece: Gear = Gear.new()\n' +
@@ -33952,6 +33980,36 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       assert.equal(get((await read('names:size()')).parsed, 'value'), 2, 'a packed list answers its size');
       assert.match((await read('names:9')).said, /names is a packed list of 2, so there is no 9 in it/);
       assert.match((await read('names:sort()')).said, /not one of the calls a path makes on one.*size\(\)/);
+      // A string answers calls that read it, its code points among them, which tell a non-breaking
+      // space from the space the answer's JSON shows in its place.
+      assert.deepEqual(
+        get((await read('sign:to_utf32_buffer():to_int32_array()')).parsed, 'value'),
+        [105, 110, 160, 50],
+        (await read('sign:to_utf32_buffer():to_int32_array()')).said,
+      );
+      assert.equal(get((await read('sign:length()')).parsed, 'value'), 4, (await read('sign:length()')).said);
+      assert.match(
+        (await read('sign:0')).said,
+        /sign is a string, so a path makes only calls on it, which read it and take no arguments: length\(\), /,
+      );
+      assert.match(
+        (await read('sign:sort()')).said,
+        /sign is a string, and sort\(\) is not one of the calls/,
+      );
+      // A packed list of bytes is offered the calls it has: it has no to_byte_array().
+      const bytes = (await read('sign:to_utf8_buffer():to_byte_array()')).said;
+      assert.match(
+        bytes,
+        /is a packed list, and to_byte_array\(\) is not one of the calls .*to_int32_array\(\)/,
+        bytes,
+      );
+      assert.doesNotMatch(bytes, /: [^;]*to_byte_array\(\)/, bytes);
+      const upper = await tool('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'sign:to_upper()',
+      });
+      assert.equal(get(upper.parsed, 'result'), 'IN 2', upper.said);
       const renamed = await tool('runtime_invoke', {
         op: 'set',
         nodePath: '/root/Main',
@@ -46140,8 +46198,14 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
     });
     assert.deepEqual(
       [get(made, 'resourceType'), get(made, 'script'), get(made, 'scriptClass')],
-      ['Item', 'res://item.gd', 'Item'],
-      `a create names the script it attached: ${JSON.stringify(made)}`,
+      ['Resource', 'res://item.gd', 'Item'],
+      `a create names the engine class and the script it attached, as a read does: ${JSON.stringify(made)}`,
+    );
+    const madeRead = await answered({ op: 'read', resourcePath: 'res://sword.tres' });
+    assert.deepEqual(
+      [get(madeRead, 'resourceType'), get(madeRead, 'scriptClass')],
+      [get(made, 'resourceType'), get(made, 'scriptClass')],
+      `a read of the file names the class the create named: ${JSON.stringify(madeRead)}`,
     );
     // Godot never frees item.gd, which exports a list of its own class, and says so at exit.
     assert.match(
@@ -46254,6 +46318,122 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       readFileSync(join(project, 'shop.tres'), 'utf8'),
       /^title = "Shield"$/m,
       'and the read form writes back',
+    );
+
+    // A list of new built-in resources replacing the file's. Every headless engine hands out the ids
+    // of one sequence, so the third new item is saved under the id the file had kept for the first
+    // old one; read as the same resource, it was taken for that one changed by its script and given
+    // the old title back.
+    const titled = (...titles: string[]): Record<string, unknown> => ({
+      items: titles.map((title) => ({ _type: 'Item', title })),
+    });
+    await answered({
+      op: 'create',
+      resourcePath: 'res://stall.tres',
+      resourceType: 'Shop',
+      properties: titled('a', 'b', 'c'),
+    });
+    const rewritten = await answered({
+      op: 'modify',
+      resourcePath: 'res://stall.tres',
+      properties: titled('a', 'B', 'c'),
+    });
+    const titlesOf = (answer: unknown): unknown[] =>
+      asArray(get(answer, 'properties', 'items')).map((item) => get(item, 'title'));
+    assert.deepEqual(titlesOf(rewritten), ['a', 'B', 'c'], JSON.stringify(rewritten));
+    assert.deepEqual(
+      titlesOf(await answered({ op: 'read', resourcePath: 'res://stall.tres' })),
+      ['a', 'B', 'c'],
+      readFileSync(join(project, 'stall.tres'), 'utf8'),
+    );
+    // A scene is settled the same way after its save.
+    writeFileSync(join(project, 'holder.gd'), 'extends Node\n\n@export var items: Array[Item] = []\n');
+    writeFileSync(
+      join(project, 'stall.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://holder.gd" id="1_holder"]\n\n' +
+        '[node name="Stall" type="Node"]\nscript = ExtResource("1_holder")\n',
+    );
+    const onTheStall = async (args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request(
+        'tools/call',
+        {
+          name: 'scene_node',
+          arguments: { projectPath: project, scenePath: 'res://stall.tscn', nodePath: '.', ...args },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const answer = parseTextContent(response);
+      assert.ok(answer !== null, `${JSON.stringify(args)}: ${textOf(response) ?? JSON.stringify(response)}`);
+      return answer;
+    };
+    await onTheStall({ op: 'set', properties: titled('a', 'b', 'c') });
+    await onTheStall({ op: 'set', properties: titled('a', 'B', 'c') });
+    assert.deepEqual(
+      titlesOf(await onTheStall({ op: 'get' })),
+      ['a', 'B', 'c'],
+      readFileSync(join(project, 'stall.tscn'), 'utf8'),
+    );
+
+    // One element of a list of built-in resources, by its index after a slash, in a resource and in a
+    // scene, the others left as they were.
+    const third = await answered({
+      op: 'modify',
+      resourcePath: 'res://stall.tres',
+      properties: { 'items/2/title': 'C' },
+    });
+    assert.deepEqual(get(third, 'properties'), { 'items/2/title': 'C' }, JSON.stringify(third));
+    assert.deepEqual(
+      titlesOf(await answered({ op: 'read', resourcePath: 'res://stall.tres' })),
+      ['a', 'B', 'C'],
+      readFileSync(join(project, 'stall.tres'), 'utf8'),
+    );
+    await onTheStall({ op: 'set', properties: { 'items/0/title': 'A' } });
+    assert.deepEqual(
+      titlesOf(await onTheStall({ op: 'get' })),
+      ['A', 'B', 'c'],
+      readFileSync(join(project, 'stall.tscn'), 'utf8'),
+    );
+    const stallRefusal = async (properties: Record<string, unknown>): Promise<string> =>
+      textOf(
+        await server.request(
+          'tools/call',
+          {
+            name: 'resource_edit',
+            arguments: { projectPath: project, op: 'modify', resourcePath: 'res://stall.tres', properties },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      ) ?? '';
+    assert.match(
+      await stallRefusal({ 'items/3/title': 'D' }),
+      /Shop\.items holds 3 elements, so items\/3\/title names none: an index goes from 0 to 2\./,
+    );
+    assert.match(
+      await stallRefusal({ 'items/first/title': 'D' }),
+      /Shop\.items is a list, so the step after it is the index of one of its elements, from 0 to 2, not first\./,
+    );
+    assert.match(
+      await stallRefusal({ 'items:1:title': 'D' }),
+      /A property of a resource in it is reached with slashes and the element's index: items\/1\/title\./,
+    );
+    assert.match(
+      await stallRefusal({ 'items/1': 'D' }),
+      /items\/1 is an element of Shop\.items, which a path does not replace alone: give items a whole list, or write a property of the element, as items\/1\/<property>\./,
+    );
+    // An element kept in a file of its own is written there.
+    await answered({
+      op: 'modify',
+      resourcePath: 'res://stall.tres',
+      properties: { items: ['res://sword.tres'] },
+    });
+    assert.match(
+      await stallRefusal({ 'items/0/title': 'D' }),
+      /Shop\.items\/0 is res:\/\/sword\.tres, a file of its own, so title is written there, with resource_edit modify on res:\/\/sword\.tres\./,
+    );
+    assert.doesNotMatch(
+      readFileSync(join(project, 'sword.tres'), 'utf8'),
+      /"D"/,
+      'and nothing was written to it',
     );
 
     const broken = await answered({
@@ -52706,7 +52886,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       resourceType: 'Stats',
       properties: { max_hp: 50 },
     });
-    assert.equal(get(made, 'resourceType'), 'Stats', JSON.stringify(made));
+    assert.deepEqual(
+      [get(made, 'resourceType'), get(made, 'scriptClass')],
+      ['Resource', 'Stats'],
+      JSON.stringify(made),
+    );
     assert.deepEqual(
       get(made, 'properties'),
       { max_hp: 50 },
@@ -55637,9 +55821,10 @@ async function testAControlIsLaidOutAsTheEditorLaysItOut(): Promise<void> {
       'anchor_right = 1.0\nanchor_bottom = 1.0\n\n[node name="Margin" type="MarginContainer" parent="."]\n\n' +
       '[node name="Column" type="VBoxContainer" parent="Margin"]\nlayout_mode = 2\n\n' +
       '[node name="Score" type="Label" parent="Margin/Column"]\nlayout_mode = 2\n\n' +
-      '[node name="Corner" type="Panel" parent="."]\n\n[node name="Spell" type="Node" parent="."]\n' +
-      'script = ExtResource("1_spell")\n',
+      '[node name="Corner" type="Panel" parent="."]\n\n[node name="Strip" type="Panel" parent="."]\n\n' +
+      '[node name="Spell" type="Node" parent="."]\nscript = ExtResource("1_spell")\n',
   );
+  writeFileSync(join(project, 'strip.gd'), 'extends Panel\n\n@export var title: String = ""\n');
   // Flags named without their values take the bit of their place.
   writeFileSync(
     join(project, 'spell.gd'),
@@ -55676,6 +55861,17 @@ async function testAControlIsLaidOutAsTheEditorLaysItOut(): Promise<void> {
     await set('Corner', { anchor_left: 1, anchor_top: 1, anchor_right: 1, anchor_bottom: 1 });
     const corner = parseTextContent(await node({ op: 'get', nodePath: 'Corner' }));
     assert.equal(get(corner, 'properties', 'anchors_preset'), 3, JSON.stringify(corner));
+
+    // Given with a script that is not a tool. A headless write puts back what such a script changed
+    // and the call did not name, and the Anchors mode the preset needs was taken for its doing: the
+    // panel went back to Position mode, where none of its anchors is stored.
+    const striped = await set('Strip', { script: 'res://strip.gd', anchors_preset: 12 });
+    assert.equal(get(parseTextContent(striped), 'notStored'), undefined, textOf(striped) ?? '');
+    assert.match(
+      hud(),
+      /\[node name="Strip"[^\n]*\]\nlayout_mode = 1\nanchors_preset = 12\nanchor_top = 1\.0\nanchor_right = 1\.0\nanchor_bottom = 1\.0\n/,
+      hud(),
+    );
 
     assert.equal(
       textOf(await set('Margin/Column/Score', { position: { x: 40, y: 30 } })),

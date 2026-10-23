@@ -291,6 +291,7 @@ func add_node(args: Dictionary) -> Dictionary:
 		return scene.refuse("Nothing was written: " + unsettled)
 	scene.asked(new_node, properties.keys())
 	var unwritten: String = _properties.write_all(new_node, properties)
+	scene.asked(new_node, _properties.moved_by_engine.keys())
 	if not unwritten.is_empty():
 		unwritten = GdhHeadlessCheck.setter_ran(new_node, _properties.unheld, unwritten)
 	if unwritten.is_empty():
@@ -625,6 +626,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var old_path: String = scene.path_of(node)
 	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
+	scene.asked(node, _properties.moved_by_engine.keys())
 	if not refused_property.is_empty():
 		return scene.refuse(
 			GdhHeadlessCheck.setter_ran(

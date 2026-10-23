@@ -5,6 +5,8 @@ extends RefCounted
 ##
 ## This file is the one beside the operations, and `bun run sync:gd` copies it into each addon.
 
+const GdhRead = preload("reading.gd")
+
 ## What each packed array holds, one value of which every element is fitted to.
 const PACKED_ELEMENTS: Dictionary = {
 	TYPE_PACKED_BYTE_ARRAY: TYPE_INT,
@@ -139,6 +141,34 @@ static func _is_number(held: Variant) -> bool:
 	if held is Dictionary:
 		var tagged: Dictionary = held
 		return str(tagged.get("_type", "")) in ["float", "int"] and tagged.has("value")
+	return false
+
+
+## Whether [param value] holds a number with a fractional part where an integer is wanted, in a
+## list or a dictionary as much as bare. The conversion would cut 2.7 to 2 without a word, and a
+## dictionary key arrives as the text "2.7", which reads as the same number.
+static func fraction(value: Variant, type: int, elements: Array = []) -> bool:
+	if type == TYPE_INT:
+		var number: Variant = value
+		if typeof(value) == TYPE_STRING:
+			number = GdhRead.json_or_null(str(value))
+		if typeof(number) != TYPE_FLOAT:
+			return false
+		var whole: float = number
+		return is_finite(whole) and whole != floorf(whole)
+	var element: int = GdhRead.as_int(PACKED_ELEMENTS.get(type, TYPE_NIL), TYPE_NIL)
+	if type == TYPE_ARRAY and not elements.is_empty():
+		element = GdhRead.as_int(elements[0], TYPE_NIL)
+	if value is Array and element != TYPE_NIL:
+		var items: Array = value
+		return items.any(func(item: Variant) -> bool: return fraction(item, element))
+	if type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
+		var entries: Dictionary = value
+		var key_type: int = GdhRead.as_int(elements[0], TYPE_NIL)
+		var value_type: int = GdhRead.as_int(elements[1], TYPE_NIL)
+		for key: Variant in entries:
+			if fraction(key, key_type) or fraction(entries[key], value_type):
+				return true
 	return false
 
 

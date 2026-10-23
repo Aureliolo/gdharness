@@ -96,10 +96,13 @@ func _load_theme(theme_path: String) -> Theme:
 ## Read back because a property can be set and still not be saved: one without storage, a
 ## script variable that is not exported. Both were answered as changed.
 func _save_checked(resource: Resource, path: String, names: Array, previous: Variant) -> String:
+	var carried: Dictionary = GdhHeadlessCheck.embedded_in(GdhHeadlessCheck.stored(resource).values(), {})
 	var saving: Error = GdhSceneFile.save_keeping_uid(resource, path)
 	if saving != OK:
 		return "Failed to save %s: %s" % [path, error_string(saving)]
-	var unkept: String = _unkept_headless(resource, path, names, previous)
+	var unkept: String = _unkept_headless(
+		resource, path, names + _properties.moved_by_engine.keys(), previous, carried
+	)
 	if not unkept.is_empty():
 		return "Nothing was written: " + unkept + GdhHeadlessCheck.put_back(path, previous)
 	var loaded: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
@@ -127,8 +130,11 @@ func _save_checked(resource: Resource, path: String, names: Array, previous: Var
 
 ## Outside the editor, puts back in the file just saved at [param path] what a script that is not a
 ## tool changed and the call did not ask for, [param names] being what it asked for, and answers ""
-## or why that did not hold. See [GdhHeadlessCheck].
-func _unkept_headless(resource: Resource, path: String, names: Array, previous: Variant) -> String:
+## or why that did not hold. [param carried] is what each embedded id named before the save. See
+## [GdhHeadlessCheck].
+func _unkept_headless(
+	resource: Resource, path: String, names: Array, previous: Variant, carried: Dictionary
+) -> String:
 	if Engine.is_editor_hint():
 		return ""
 	var script: Script = resource.get_script()
@@ -164,6 +170,7 @@ func _unkept_headless(resource: Resource, path: String, names: Array, previous: 
 		resource if scripted else null,
 		asked,
 		reached,
+		carried,
 		func() -> Error: return GdhSceneFile.save_keeping_uid(resource, path)
 	)
 
@@ -171,7 +178,6 @@ func _unkept_headless(resource: Resource, path: String, names: Array, previous: 
 func create_resource(args: Dictionary) -> Dictionary:
 	var res_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	var resource_type: String = str(args.get("resourceType", "Resource"))
-	var asked_type: String = resource_type
 	if res_path == "res://":
 		return {"ok": false, "error": "resourcePath is required"}
 	var taken: String = _taken(res_path, "resource_edit op=create")
@@ -225,9 +231,10 @@ func create_resource(args: Dictionary) -> Dictionary:
 	var folder: String = GdhSceneFile.make_folder_for(res_path)
 	if not folder.is_empty():
 		return {"ok": false, "error": folder}
-	var answer: Dictionary = {"ok": true, "resourcePath": res_path, "resourceType": asked_type}
-	# As a read names it, since a create given resourceType Resource and a script answered nothing of
-	# the class it had made.
+	# As a read names it, the engine class under resourceType and the script's class beside it, since
+	# a create given resourceType Resource and a script answered nothing of the class it had made, and
+	# one given a class_name answered it where a read of the same file answers Resource.
+	var answer: Dictionary = {"ok": true, "resourcePath": res_path, "resourceType": resource_type}
 	var scripted: Variant = resource.get_script()
 	if scripted is Script:
 		var attached: Script = scripted
@@ -417,10 +424,11 @@ class GdhShaderErrors:
 ## Saves [param theme] over [param theme_path] with [param items] changed, answering "" or why not.
 func _save_theme(theme: Theme, theme_path: String, items: Array) -> String:
 	var previous: PackedByteArray = FileAccess.get_file_as_bytes(theme_path)
+	var carried: Dictionary = GdhHeadlessCheck.embedded_in(GdhHeadlessCheck.stored(theme).values(), {})
 	var saving: Error = GdhSceneFile.save_keeping_uid(theme, theme_path)
 	if saving != OK:
 		return "Failed to save %s: %s" % [theme_path, error_string(saving)]
-	var unkept: String = _unkept_headless(theme, theme_path, items, previous)
+	var unkept: String = _unkept_headless(theme, theme_path, items, previous, carried)
 	if not unkept.is_empty():
 		return "Nothing was written: " + unkept + GdhHeadlessCheck.put_back(theme_path, previous)
 	_written(theme_path)

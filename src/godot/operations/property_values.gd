@@ -50,6 +50,14 @@ const PLACED_BY_A_CONTAINER: Array[String] = ["position", "size", "global_positi
 ## The property the last write_all refused because it did not hold what it was given, or "".
 var unheld: String = ""
 
+## The stored properties the last write_all's own writes moved beside the ones they were given, as a
+## set: the Anchors mode an anchor needs, and what an engine setter keeps in step, such as the
+## anchors an anchor preset sets. Only writes no script code runs for count. A headless write that
+## attaches a script that is not a tool puts back whatever the call did not name, as that script's
+## doing, which put a panel given a script and a bottom-wide preset back in Position mode, where its
+## anchors are not stored.
+var moved_by_engine: Dictionary = {}
+
 var _values: GdhSerialisation = GdhSerialisation.new()
 
 # Why the value being parsed cannot be written, when the parse is what found out. A resource is
@@ -191,6 +199,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	_also_changed = {}
 	_outside_declared = {}
 	_names_no_node = {}
+	moved_by_engine = {}
 	unheld = ""
 	var named: Dictionary = {}
 	for key: Variant in properties:
@@ -229,6 +238,9 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			var elsewhere: String = GdhPropertyPaths.held_elsewhere(holder, name, home)
 			if not elsewhere.is_empty():
 				return elsewhere + unwritten
+			var unlisted: String = GdhPropertyPaths.unlisted(holder, name)
+			if not unlisted.is_empty():
+				return unlisted + unwritten
 			var ungrown: String = GdhPropertyPaths.grow(holder, name, GdhPropertyPaths.class_called(holder))
 			if not ungrown.is_empty():
 				return ungrown + unwritten
@@ -241,6 +253,9 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			return GdhDeclared.no_uniform(holder as ShaderMaterial, name) + unwritten
 		if declared.is_empty():
 			return no_property(holder, name) + unwritten
+		var unscripted: Variant = null
+		if holder == target and not GdhDeclared.runs_script_code(target, name):
+			unscripted = _stored(target, {})
 		if holder is Control:
 			var unplaced: String = _laid_out(holder as Control, name)
 			if not unplaced.is_empty():
@@ -252,6 +267,12 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		if not outside.is_empty():
 			_outside_declared[property] = outside
 		_write(target, property, value[1])
+		if unscripted is Dictionary:
+			var was: Dictionary = unscripted
+			var now: Dictionary = _stored(target, {})
+			for moved: String in now:
+				if moved != name.get_slice(":", 0) and not GdhSame.same(now[moved], was.get(moved)):
+					moved_by_engine[moved] = true
 		writes += 1
 		written_at[property] = writes
 		_note_undone(target, property, given, undone_by)
@@ -437,6 +458,11 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 					" A property of the resource it holds is reached with a slash: %s/%s."
 					% [walked, ":".join(steps.slice(index))]
 				)
+			elif value is Array and index + 1 < steps.size():
+				refused += (
+					" A property of a resource in it is reached with slashes and the element's index: %s/%s/%s."
+					% [walked, step, ":".join(steps.slice(index + 1))]
+				)
 			return {"refused": refused}
 		if not step in has:
 			return {
@@ -481,7 +507,7 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 				var typed: Array = current
 				if typed.is_typed() and typed.get_typed_builtin() != TYPE_OBJECT:
 					elements = [typed.get_typed_builtin()]
-		if _fraction(raw, expected_type, elements):
+		if GdhShapes.fraction(raw, expected_type, elements):
 			return [false, _fraction_refusal(target, property, raw)]
 		var rounded: String = GdhSerialisation.inexact(raw, expected_type)
 		if not rounded.is_empty():
@@ -652,34 +678,6 @@ func _object_item(target: Object, given: Variant, kind: Array, holding: String, 
 		return [true, item]
 	var named: String = object.get_class() if object != null else shown(item)
 	return [false, "%s, and %s is %s." % [holding, place[0], named]]
-
-
-## Whether [param value] holds a number with a fractional part where an integer is wanted, in a
-## list or a dictionary as much as bare. The conversion would cut 2.7 to 2 without a word, and a
-## dictionary key arrives as the text "2.7", which reads as the same number.
-func _fraction(value: Variant, type: int, elements: Array = []) -> bool:
-	if type == TYPE_INT:
-		var number: Variant = value
-		if typeof(value) == TYPE_STRING:
-			number = GdhRead.json_or_null(str(value))
-		if typeof(number) != TYPE_FLOAT:
-			return false
-		var whole: float = number
-		return is_finite(whole) and whole != floorf(whole)
-	var element: int = GdhRead.as_int(PACKED_ELEMENTS.get(type, TYPE_NIL), TYPE_NIL)
-	if type == TYPE_ARRAY and not elements.is_empty():
-		element = GdhRead.as_int(elements[0], TYPE_NIL)
-	if value is Array and element != TYPE_NIL:
-		var items: Array = value
-		return items.any(func(item: Variant) -> bool: return _fraction(item, element))
-	if type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
-		var entries: Dictionary = value
-		var key_type: int = GdhRead.as_int(elements[0], TYPE_NIL)
-		var value_type: int = GdhRead.as_int(elements[1], TYPE_NIL)
-		for key: Variant in entries:
-			if _fraction(key, key_type) or _fraction(entries[key], value_type):
-				return true
-	return false
 
 
 func _fraction_refusal(target: Object, property: String, raw: Variant) -> String:

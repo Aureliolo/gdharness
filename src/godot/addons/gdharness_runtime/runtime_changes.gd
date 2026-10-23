@@ -438,7 +438,11 @@ func call_method(params: Dictionary) -> Dictionary:
 		# A vector or a transform has no element to call a method on, so a call it does not answer is
 		# refused without the advice about elements below.
 		var answers: bool = GdhPaths.can_read(reached["holder"], spelled)
-		if GdhPaths.composite(reached["holder"]) and not (args.is_empty() and answers):
+		var called_on: Variant = reached["holder"]
+		if (
+			(GdhPaths.composite(called_on) or GdhPaths.textual(called_on))
+			and not (args.is_empty() and answers)
+		):
 			return {
 				"type": "error",
 				"message":

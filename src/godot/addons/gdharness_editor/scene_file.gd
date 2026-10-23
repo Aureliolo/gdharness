@@ -594,15 +594,23 @@ func write(check: Callable = Callable()) -> Dictionary:
 	if FileAccess.file_exists(path):
 		previous = FileAccess.get_file_as_bytes(path)
 	written_pack = packed
-	var written: Dictionary = save_packed(packed, path)
-	if not written.is_empty() or not headless or not path.ends_with(".tscn"):
-		return written
 	var state: SceneState = packed.get_state()
 	var values: Array = []
 	for index: int in state.get_node_count():
 		values.append_array(_stored_at(state, index).values())
+	var carried: Dictionary = GdhHeadlessCheck.embedded_in(values, {})
+	var written: Dictionary = save_packed(packed, path)
+	if not written.is_empty() or not headless or not path.ends_with(".tscn"):
+		return written
 	var unkept: String = GdhHeadlessCheck.settle_saved(
-		path, _text, values, null, {}, _reached, func() -> Error: return save_keeping_uid(packed, path)
+		path,
+		_text,
+		values,
+		null,
+		{},
+		_reached,
+		carried,
+		func() -> Error: return save_keeping_uid(packed, path)
 	)
 	if unkept.is_empty():
 		return {}

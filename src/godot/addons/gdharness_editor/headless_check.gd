@@ -366,8 +366,14 @@ static func embedded_changes(before: String, after: String, reached_ids: Diction
 ## Compares the file just saved at [param path] with [param before], what it held, and puts back
 ## what a script that is not a tool changed in it: in its embedded resources, which [param values]
 ## reach, and in [param main], its main resource, unless that is null. [param asked] and
-## [param reached_ids] are what the call changed. Saved again through [param resave], which answers
-## an Error, and answers "" or why the file still does not hold what it should.
+## [param reached_ids] are what the call changed, and [param carried] is [method embedded_in] of
+## [param values] taken before the save. Saved again through [param resave], which answers an Error,
+## and answers "" or why the file still does not hold what it should.
+##
+## An id is compared only where the resource holding it after the save held it before. Each headless
+## engine hands out the ids of one sequence, so a resource the call added can be saved under the id
+## the file had kept for one it dropped. Read as one resource, the new third line of a dialogue was
+## taken for the old first one changed by its script, and given the old one's text back.
 static func settle_saved(
 	path: String,
 	before: String,
@@ -375,6 +381,7 @@ static func settle_saved(
 	main: Object,
 	asked: Dictionary,
 	reached_ids: Dictionary,
+	carried: Dictionary,
 	resave: Callable
 ) -> String:
 	for attempt: int in 2:
@@ -383,6 +390,8 @@ static func settle_saved(
 		var embedded: Array[Array] = []
 		for found: Array in embedded_changes(before, after, reached_ids):
 			var holder: Resource = by_id.get(found[0])
+			if not carried.has(found[0]) or (holder != null and not is_same(holder, carried[found[0]])):
+				continue
 			if holder != null and _unchanged(holder, found.slice(1)):
 				continue
 			if found[2] or holder == null or not at_default(holder, str(found[1])):

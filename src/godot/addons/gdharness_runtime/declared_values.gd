@@ -421,6 +421,23 @@ static func is_a(value: Object, name: String) -> bool:
 	return false
 
 
+## Whether writing [param name] on [param target] runs code of its script: the script itself, a
+## property it declares, or any property once it takes sets through [code]_set[/code].
+static func runs_script_code(target: Object, name: String) -> bool:
+	var script: Script = target.get_script()
+	if name == "script":
+		return true
+	if script == null:
+		return false
+	for method: Dictionary in script.get_script_method_list():
+		if str(method.get("name", "")) == "_set":
+			return true
+	for declared: Dictionary in script.get_script_property_list():
+		if str(declared.get("name", "")) == name:
+			return true
+	return false
+
+
 ## Why [param property] of a [param holder], an [param engine_class], declared as [param declared],
 ## holds [param held], as shown, after it was given [param given], the value and how it is shown. A
 ## text property with a list of names holds only one of them, and its getter answers its default
