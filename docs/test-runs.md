@@ -219,8 +219,12 @@ way:
 6. When done, remove the lock, but only if it still names your pid.
 
 The start time is what tells a holder from a later process given its pid. Windows reports a
-process's creation time to the millisecond, and `ps -o lstart` elsewhere only to the second, which
-is why the tolerance is two seconds.
+process's creation time to the millisecond, and `ps -o lstart` on macOS only to the second, which
+is why the tolerance is two seconds. On Linux, read it from /proc as gdharness does: the boot
+instant, which is the current time less the first number in `/proc/uptime`, plus the 22nd field of
+`/proc/<pid>/stat` divided by `getconf CLK_TCK`, in seconds. `ps -o lstart` and the `btime` in
+`/proc/stat` count from the boot time in whole seconds, and read a start up to two seconds early
+there, which is the whole tolerance.
 
 ## Starting the runner yourself
 

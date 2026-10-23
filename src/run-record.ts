@@ -27,7 +27,7 @@ import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync } from
 import { basename, join, resolve } from 'node:path';
 import { errorMessage } from './errors.js';
 import { isSameDirectory, realAsFarAsItExists } from './paths.js';
-import { type CommandLineRead, readCommandLine } from './process-children.js';
+import { type CommandLineRead, linuxStartTimes, readCommandLine } from './process-children.js';
 import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 import { runHidden } from './spawn.js';
 import { writeWhole } from './whole-file.js';
@@ -634,6 +634,9 @@ async function startedAt(pid: number, windowsAnswer: string | null): Promise<num
     // every signal.
     const when = Date.parse(windowsAnswer?.split('\n')[0]?.trim() ?? '');
     return Number.isNaN(when) ? null : when;
+  }
+  if (process.platform === 'linux') {
+    return (await linuxStartTimes([pid])).get(pid) ?? null;
   }
   try {
     const said = (

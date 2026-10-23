@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { runHidden as run } from './spawn.js';
 import { askWindows, WindowsAskFailure } from './windows-ask.js';
@@ -29,6 +30,9 @@ export async function startTimesOf(pids: readonly number[]): Promise<Map<number,
       }
       return began;
     }
+    if (process.platform === 'linux') {
+      return await linuxStartTimes(pids);
+    }
     // Read whatever ps printed rather than its exit status: a pid among these that has gone makes
     // ps exit non-zero after printing the rest, and the rest is the answer. In the C locale, since
     // lstart is a date in words and the words are the ones Date.parse reads.
@@ -48,6 +52,87 @@ export async function startTimesOf(pids: readonly number[]): Promise<Map<number,
   }
   return began;
 }
+
+/**
+ * When each of [param pids] started, on Linux, as milliseconds on the clock `Date.now()` reads, for
+ * the ones whose entry under /proc can be read.
+ *
+ * Not from `ps`, which dates a start as the boot time in whole seconds plus the process's age, then
+ * cuts the sum to the second: up to two seconds early. On a CI runner the process a game restarted
+ * itself into was dated before the run that made it had begun, and refused as older than the run.
+ * The age is exact, the start counted in ticks from boot, so it is added to the boot's own instant,
+ * read as now less the uptime.
+ */
+export async function linuxStartTimes(pids: readonly number[]): Promise<Map<number, number>> {
+  const began = new Map<number, number>();
+  const hertz = await ticksPerSecond();
+  const booted = bootedAt();
+  if (hertz === null || booted === null) {
+    return began;
+  }
+  for (const pid of pids) {
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
+    } catch {
+      continue;
+    }
+    // After the name, which is in brackets and can hold spaces and brackets of its own; the start is
+    // the twenty-second field, and the state after the name the third.
+    const ticks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]);
+    if (Number.isInteger(ticks) && ticks >= 0) {
+      began.set(pid, booted + Math.round((ticks * 1000) / hertz));
+    }
+  }
+  return began;
+}
+
+let ticksAnswered: number | undefined;
+
+/** The ticks a second /proc counts starts in, asked once it has been answered. */
+async function ticksPerSecond(): Promise<number | null> {
+  if (ticksAnswered !== undefined) {
+    return ticksAnswered;
+  }
+  try {
+    const hertz = Number((await run('getconf', ['CLK_TCK'], { timeout: ASK_TIMEOUT_MS })).stdout.trim());
+    if (Number.isInteger(hertz) && hertz > 0) {
+      ticksAnswered = hertz;
+      return hertz;
+    }
+  } catch {
+    // Not answered, which is asked again next time.
+  }
+  return null;
+}
+
+let bootKept: number | undefined;
+
+/**
+ * The instant this machine booted, on the clock `Date.now()` reads, or null where /proc/uptime
+ * cannot be read. Kept while a fresh reading agrees with it, so two reads of one process give one
+ * start, as a lock naming its holder's start needs; the uptime is to the hundredth of a second and
+ * read a moment apart from the clock. A clock stepped since moves it.
+ */
+function bootedAt(): number | null {
+  let uptime: number;
+  try {
+    uptime = Number.parseFloat(readFileSync('/proc/uptime', 'utf8').split(' ')[0] ?? '');
+  } catch {
+    return null;
+  }
+  if (!Number.isFinite(uptime)) {
+    return null;
+  }
+  const fresh = Math.round(Date.now() - uptime * 1000);
+  if (bootKept === undefined || Math.abs(fresh - bootKept) > BOOT_AGREES_WITHIN_MS) {
+    bootKept = fresh;
+  }
+  return bootKept;
+}
+
+/** How far a fresh reading of the boot may stray from the kept one before the clock was stepped. */
+const BOOT_AGREES_WITHIN_MS = 50;
 
 /** What [param command] printed to stdout, whatever it exited with. */
 function printedBy(command: string, args: readonly string[], env: NodeJS.ProcessEnv): Promise<string> {

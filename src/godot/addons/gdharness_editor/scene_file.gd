@@ -60,6 +60,10 @@ var _copied_from: Dictionary = {}
 var _reached: Dictionary = {}
 ## The file as it was opened, to compare its embedded resources with what the write saves.
 var _text: String = ""
+## The engine properties a put back did not take on a node, as "id:name": the engine derives them
+## from where the node is, as it keeps layout_mode at Container under a container, and stores the
+## same from an editor.
+var _engine_kept: Dictionary = {}
 
 
 ## Opens [param scene_path], answering a refusal, or {} with [member root] set.
@@ -818,7 +822,11 @@ func _settled(packed: PackedScene) -> Array:
 		for found: Array in stray:
 			var node: Node = found[0]
 			var name: String = found[1]
-			node.set(name, found[3] if found[2] else _unset_value(node, name))
+			var wanted: Variant = found[3] if found[2] else _unset_value(node, name)
+			var held: Variant = node.get(name)
+			node.set(name, wanted)
+			if GdhHeadlessCheck.kept_by_engine(node, name, wanted, held):
+				_engine_kept["%d:%s" % [node.get_instance_id(), name]] = true
 		for found: Array in moved:
 			var node: Node = found[0]
 			var before: Dictionary = _before[node.get_instance_id()]
@@ -887,6 +895,8 @@ func _strays(state: SceneState) -> Array[Array]:
 			if held == stored.has(name) and (not held or GdhSame.same(stored[name], filed[name])):
 				continue
 			if not held and GdhHeadlessCheck.at_default(node, name):
+				continue
+			if _engine_kept.has("%d:%s" % [id, name]):
 				continue
 			stray.append([node, name, held, filed.get(name)])
 	return stray

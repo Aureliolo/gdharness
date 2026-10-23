@@ -10017,6 +10017,16 @@ async function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): Promise<void
       at >= before - STARTED_AFTER_ANNOUNCING_MS && at <= Date.now() + STARTED_AFTER_ANNOUNCING_MS,
       `and the start it gives is the one just seen, to the second the platform rounds to: ${at} against ${before}`,
     );
+    // Finer where the platform dates a start finer, and on the clock Date.now() reads. ps dated a
+    // Linux start from the boot time in whole seconds and cut it to the second, up to two seconds
+    // early, and a game's restart was refused as having begun before the run that made it.
+    if (process.platform !== 'darwin') {
+      const after = Date.now();
+      assert.ok(
+        at >= before - 50 && at <= after + 50,
+        `dated to the tick on this process's clock: ${at} against ${before} to ${after}`,
+      );
+    }
     const own = said.get(process.pid);
     assert.ok(own !== undefined, 'this process is answered about in the same question');
     assert.ok(own <= at, 'and began no later than the child it just started');
@@ -55872,6 +55882,40 @@ async function testAControlIsLaidOutAsTheEditorLaysItOut(): Promise<void> {
       /\[node name="Strip"[^\n]*\]\nlayout_mode = 1\nanchors_preset = 12\nanchor_top = 1\.0\nanchor_right = 1\.0\nanchor_bottom = 1\.0\n/,
       hud(),
     );
+
+    // Added under a container with a script that is not a tool, as an instance and as a node. The
+    // engine keeps a container's child in Container mode whatever it is set to, and the editor saves
+    // it so; putting back what the script was taken to have done never settled, and every such add
+    // was refused.
+    writeFileSync(
+      join(project, 'cell.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://strip.gd" id="1_strip"]\n\n' +
+        '[node name="Cell" type="Panel"]\nscript = ExtResource("1_strip")\n',
+    );
+    for (const name of ['CellA', 'CellB']) {
+      const added = await node({
+        op: 'add',
+        parentNodePath: 'Margin/Column',
+        nodeName: name,
+        instancePath: 'res://cell.tscn',
+      });
+      assert.equal(get(parseTextContent(added), 'nodePath'), `Margin/Column/${name}`, textOf(added) ?? '');
+    }
+    const banner = await node({
+      op: 'add',
+      parentNodePath: 'Margin/Column',
+      nodeName: 'Banner',
+      nodeType: 'Panel',
+      properties: { script: 'res://strip.gd', title: 'Hi' },
+    });
+    assert.equal(get(parseTextContent(banner), 'nodePath'), 'Margin/Column/Banner', textOf(banner) ?? '');
+    for (const placed of [
+      /\[node name="CellA" parent="Margin\/Column"[^\n]*instance=ExtResource\("[^"]+"\)\]\nlayout_mode = 2\n/,
+      /\[node name="CellB" parent="Margin\/Column"[^\n]*instance=ExtResource\("[^"]+"\)\]\nlayout_mode = 2\n/,
+      /\[node name="Banner" type="Panel" parent="Margin\/Column"[^\n]*\]\nlayout_mode = 2\nscript = ExtResource\("[^"]+"\)\ntitle = "Hi"\n/,
+    ]) {
+      assert.match(hud(), placed, hud());
+    }
 
     assert.equal(
       textOf(await set('Margin/Column/Score', { position: { x: 40, y: 30 } })),

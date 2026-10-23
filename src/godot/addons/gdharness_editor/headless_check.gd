@@ -68,6 +68,18 @@ static func through_script(object: Object, names: Dictionary) -> bool:
 	return false
 
 
+## Whether [param object] still holds [param held] for [param name] once set to [param wanted]
+## because the engine derives it, as it keeps layout_mode at Container under a container: an engine
+## property, so no script code ran for the set, and an editor saves the same.
+static func kept_by_engine(object: Object, name: String, wanted: Variant, held: Variant) -> bool:
+	return (
+		not GdhSame.same(object.get(name), wanted)
+		and GdhSame.same(object.get(name), held)
+		and name != "script"
+		and not through_script(object, {name: true})
+	)
+
+
 ## The stored properties of [param object] that are not in [param names] and no longer hold what
 ## [param before] recorded. One the object did not have before, which a script set on it declares,
 ## counts once it holds anything but its default; one it no longer has went with the old script.

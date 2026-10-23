@@ -2,7 +2,7 @@ import { readlinkSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
-import { readCommandLine } from './process-children.js';
+import { linuxStartTimes, readCommandLine } from './process-children.js';
 import { runHidden, spawnHidden } from './spawn.js';
 
 /**
@@ -32,7 +32,7 @@ const POLL_MS = 250;
 /** A process listed as a candidate for the one a game restarted itself into. */
 export interface ListedSuccessor {
   readonly pid: number;
-  /** When it started, in milliseconds. To the second on POSIX, where `ps` lists no finer. */
+  /** When it started, in milliseconds. To the second on macOS, where `ps` lists no finer. */
   readonly startedAt: number;
   readonly command: string;
 }
@@ -195,10 +195,13 @@ async function followOnPosix(
   exitedAt: number,
   transcript: string,
 ): Promise<Followed | null> {
+  // Linux dates a start from /proc, to the tick and on the clock exitedAt is read on, where ps
+  // dates it up to two seconds early; see linuxStartTimes. macOS's ps cuts it to the second.
+  const linux = process.platform === 'linux';
   let printed: string;
   try {
     // In the C locale, since lstart is a date in words and the words are the ones Date.parse reads.
-    ({ stdout: printed } = await runHidden('ps', ['-e', '-o', 'pid=,lstart=,args='], {
+    ({ stdout: printed } = await runHidden('ps', ['-e', '-o', linux ? 'pid=,args=' : 'pid=,lstart=,args='], {
       timeout: LIST_WITHIN_MS,
       maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, LC_ALL: 'C' },
@@ -207,16 +210,29 @@ async function followOnPosix(
     return null;
   }
   const listed: ListedSuccessor[] = [];
-  for (const line of printed.split('\n')) {
-    const fields = /^\s*(\d+)\s+(\w+\s+\w+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/.exec(line);
-    const startedAt = Date.parse(fields?.[2] ?? '');
-    if (fields?.[1] !== undefined && !Number.isNaN(startedAt)) {
-      listed.push({ pid: Number(fields[1]), startedAt, command: (fields[3] ?? '').trim() });
+  if (linux) {
+    const commands = new Map<number, string>();
+    for (const line of printed.split('\n')) {
+      const fields = /^\s*(\d+)\s+(.*)$/.exec(line);
+      if (fields?.[1] !== undefined) {
+        commands.set(Number(fields[1]), (fields[2] ?? '').trim());
+      }
+    }
+    for (const [pid, startedAt] of await linuxStartTimes([...commands.keys()])) {
+      listed.push({ pid, startedAt, command: commands.get(pid) ?? '' });
+    }
+  } else {
+    for (const line of printed.split('\n')) {
+      const fields = /^\s*(\d+)\s+(\w+\s+\w+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/.exec(line);
+      const startedAt = Date.parse(fields?.[2] ?? '');
+      if (fields?.[1] !== undefined && !Number.isNaN(startedAt)) {
+        listed.push({ pid: Number(fields[1]), startedAt, command: (fields[3] ?? '').trim() });
+      }
     }
   }
   // Asked of the engines that started in time only, since each answer is a look at another process.
   const timely = listed.filter(
-    (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, true) !== null,
+    (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, !linux) !== null,
   );
   const ours = canonical(transcript);
   const candidates: ListedSuccessor[] = [];
@@ -226,7 +242,7 @@ async function followOnPosix(
       candidates.push(one);
     }
   }
-  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, true);
+  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, !linux);
   if (successor === null) {
     return null;
   }
