@@ -13615,12 +13615,19 @@ class GodotServer {
         said: `It failed again after ${reloaded.map((one) => one.scriptPath).join(', ')} ${reloaded.length === 1 ? 'was' : 'were'} reloaded from ${reloaded.length === 1 ? 'its file' : 'their files'}, so what it compiles against is current and the errors are its own.`,
       };
     }
+    const classOf = new Map(
+      [...(cachedClasses(projectPath) ?? declaredClasses(projectPath))].map(([name, path]) => [path, name]),
+    );
+    const checked = against.map((path) => {
+      const name = classOf.get(path);
+      return name === undefined ? path : `${name} (${path})`;
+    });
     return {
       reloaded,
       said:
         against.length === 0
           ? 'It names no other script of the project.'
-          : `The editor holds none of the ${against.length} script${against.length === 1 ? '' : 's'} it is compiled against behind ${against.length === 1 ? 'its file' : 'their files'}, so no stale copy is what it fails on.`,
+          : `The editor holds none of what it is compiled against, ${checked.join(', ')}, behind ${against.length === 1 ? 'its file' : 'their files'}, so no stale copy is what it fails on.`,
     };
   }
 

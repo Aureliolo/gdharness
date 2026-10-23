@@ -4739,8 +4739,8 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   );
   assert.match(
     String(get(refused, 'reloadProblem')),
-    /a member of Peal that its file declares/,
-    'and the class it names',
+    /The editor holds none of what it is compiled against, [^.]*Peal \(res:\/\/peal\.gd\)[^.]*, so no stale copy is what it fails on\./,
+    'and the class it names, which was checked and is not behind',
   );
   assert.equal(get(refused, 'reloadedMethods'), undefined, 'and nothing claimed as reloaded');
 

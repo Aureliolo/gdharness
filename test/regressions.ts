@@ -9201,11 +9201,12 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
  * way it treats gdUnit4, is then one line away from a clone that boots with a missing script.
  * Nothing said so at the moment it was created, on either of the two projects it happened to.
  *
- * Three states, because the question is what a clone gets and only one of the three is about
- * .gitignore: a file a rule ignores, a file nobody ever added, and a file a rule ignores that
- * somebody added anyway. Asking git whether a path is ignored gets the middle one wrong in one
- * direction and the last one wrong in the other, and the middle one is every project between
- * installing an addon and committing it.
+ * Three states, because the question is what a clone gets: a file a rule ignores, a file nobody
+ * ever added, and a file a rule ignores that somebody added anyway. Only the middle one is a fault.
+ * It is every project between installing an addon and committing it. A rule ignoring a file is the
+ * project deciding the repository does not carry it, with an install step putting it there before
+ * setup runs, so it is said and not failed: failing it failed every fresh clone of such a project,
+ * since setup ends on this report.
  *
  * Engine-free, like the doctor cases: this is git and project.godot and nothing else.
  */
@@ -9213,21 +9214,19 @@ function testAnAutoloadGitWillNotCarry(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
   const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
     spawnSyncHidden('git', gitArgs, { cwd: project, encoding: 'utf8', timeout: 60000 });
-  const troubles = (where: string): string[] => {
-    const run = spawnSyncHidden(
-      process.execPath,
-      [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'],
-      {
-        encoding: 'utf8',
-        cwd: where,
-        timeout: 60000,
-        env: withHome(process.env, join(project, '.home')),
-      },
-    );
-    return asArray(get(JSON.parse(run.stdout), 'problems'))
+  const doctor = (where: string, ...more: string[]): SpawnSyncReturns<string> =>
+    spawnSyncHidden(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor', ...more], {
+      encoding: 'utf8',
+      cwd: where,
+      timeout: 60000,
+      env: withHome(process.env, join(project, '.home')),
+    });
+  const report = (where: string): unknown => JSON.parse(doctor(where, '--json').stdout);
+  const troubles = (where: string): string[] =>
+    asArray(get(report(where), 'problems'))
       .map(text)
       .filter((problem) => problem.includes('autoload names'));
-  };
+  const ignoredOf = (where: string): unknown => get(report(where), 'ignoredAutoloads');
   try {
     if (git('init').status !== 0) {
       console.log('autoload tracking regression skipped (no git)');
@@ -9248,10 +9247,27 @@ function testAnAutoloadGitWillNotCarry(): void {
     assert.equal(git('add', 'scripts/loader.gd').status, 0);
 
     const said = troubles(project);
-    assert.equal(said.length, 2, `two of the three are lost, not one and not all: ${said.join(' | ')}`);
-    assert.match(said.join(' '), /Ignored autoload names res:\/\/addons\/thing\/autoload\.gd/);
-    assert.match(said.join(' '), /NeverAdded autoload names res:\/\/scripts\/forgotten\.gd/);
-    assert.doesNotMatch(said.join(' '), /Committed/, 'a file in the index is carried');
+    assert.deepEqual(
+      said,
+      [
+        'the NeverAdded autoload names res://scripts/forgotten.gd, which git does not carry, so a clone boots with a missing script; commit that file, or point the autoload at one the project tracks',
+      ],
+      'the one nobody added is the fault, and neither the ignored nor the committed one is',
+    );
+    assert.deepEqual(ignoredOf(project), [{ name: 'Ignored', path: 'addons/thing/autoload.gd' }]);
+    // Said in the text doctor prints, and in none of the problems that fail the report setup ends on.
+    const read = doctor(project);
+    assert.match(
+      read.stdout,
+      /^autoload Ignored: res:\/\/addons\/thing\/autoload\.gd is ignored by git, so a clone has it only once the project's own install step has put it there$/m,
+    );
+    const problems = asArray(get(report(project), 'problems')).map(text);
+    assert.ok(problems.length > 0, 'the fixture has its other problems, so the report was read');
+    assert.deepEqual(
+      problems.filter((problem) => problem.includes('addons/thing')),
+      [],
+      problems.join(' | '),
+    );
 
     // And a rule matching a file somebody added anyway is not the question either: -f puts it in
     // the index, a clone gets it, and doctor has nothing to say about it.
@@ -9259,6 +9275,7 @@ function testAnAutoloadGitWillNotCarry(): void {
     const forced = troubles(project);
     assert.equal(forced.length, 1, `only the one nobody added is left: ${forced.join(' | ')}`);
     assert.match(forced[0] ?? '', /NeverAdded/);
+    assert.deepEqual(ignoredOf(project), [], 'a file in the index is not one git ignores');
 
     // Outside a repository there is no answer, and a missing answer is not a clean bill: doctor
     // says nothing rather than reporting every autoload as lost. Every file the entries name is
@@ -9278,6 +9295,7 @@ function testAnAutoloadGitWillNotCarry(): void {
         writeFileSync(join(elsewhere, 'scripts', 'forgotten.gd'), 'extends Node\n');
         writeFileSync(join(elsewhere, 'scripts', 'loader.gd'), 'extends Node\n');
         assert.deepEqual(troubles(elsewhere), [], 'no repository is no verdict');
+        assert.deepEqual(ignoredOf(elsewhere), [], 'and nothing is ignored where nothing is asked');
       }
     } finally {
       sweep(elsewhere);
@@ -47942,7 +47960,7 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
     assert.deepEqual(reloadsAskedFor, ['res://kit/loader.gd'], broken.said);
     assert.match(
       text(get(broken.answer, 'reloadProblem')),
-      / The editor holds none of the 2 scripts it is compiled against behind their files, so no stale copy is what it fails on\.$/,
+      / The editor holds none of what it is compiled against, KitManifest \(res:\/\/kit\/manifest\.gd\), KitMenu \(res:\/\/kit\/menu\.gd\), behind their files, so no stale copy is what it fails on\.$/,
       broken.said,
     );
     assert.equal(get(broken.answer, 'reloadedFirst'), undefined, broken.said);

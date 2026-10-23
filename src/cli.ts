@@ -614,6 +614,11 @@ function doctorReport(projectPath: string): void {
         ? `class cache: ${report.staleClasses.length === 0 ? 'current' : `stale for ${report.staleClasses.join(', ')}`}`
         : 'class cache: missing',
     );
+    for (const { name, path } of report.ignoredAutoloads) {
+      console.log(
+        `autoload ${name}: res://${path} is ignored by git, so a clone has it only once the project's own install step has put it there`,
+      );
+    }
     for (const problem of report.problems) {
       console.log(`problem: ${problem}`);
     }

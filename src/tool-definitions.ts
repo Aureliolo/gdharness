@@ -312,7 +312,7 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
       varType: {
         type: 'string',
         description:
-          'Variables and constants: the type annotation; without one, the type the value evaluates to.',
+          'Variables and constants: the type annotation; without one, the type the value evaluates to, written out (var score: int = 0) rather than inferred with :=, so the line parses in a project that treats an inferred declaration as an error.',
       },
       defaultValue: {
         type: 'string',
