@@ -26639,11 +26639,21 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
       // is among them.
       const misspelt = await read('/root/Main/Room', 'sizee:x');
       assert.equal(misspelt, '/root/Main/Room has no property sizee; the nearest it has is size');
-      const called = await read('/root/Main/Room', 'size:length()');
+      // A vector answers the calls that read it, by its own type: an integer vector has no normalized().
+      assert.equal(await value('/root/Main', 'cell:length()'), 5, "an integer vector's length");
+      assert.equal(await value('/root/Main', 'cell:length_squared()'), 25, 'answered in its own type');
+      assert.equal(await value('/root/Main', 'placed:get_origin():y'), 6, 'and walked on into what it gave');
+      const unlisted = await read('/root/Main', 'cell:normalized()');
       assert.match(
-        called,
-        /size is a Vector2, which a path reads by its components, x, y, and makes no call on/,
-        called,
+        unlisted,
+        /cell is a Vector2i, and normalized\(\) is not one of the calls a path makes on one, which read it and take no arguments: length\(\), length_squared\(\), abs\(\), sign\(\), aspect\(\), max_axis_index\(\), min_axis_index\(\); its components are x, y/,
+        unlisted,
+      );
+      const argued = await read('/root/Main', 'cell:length(2)');
+      assert.match(
+        argued,
+        /cell is a Vector2i, and a path calls length\(\) on one with no arguments/,
+        argued,
       );
 
       // Waited on, one axis, read every frame: the pointer travels ten a frame.
@@ -26657,6 +26667,17 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
       });
       assert.equal(get(JSON.parse(waited), 'met'), true, `a wait on one axis is met: ${waited}`);
       assert.ok(asNumber(await value('/root/Main', 'pointer:x')) >= 300, waited);
+      // And on its length, which is how a wait sees a thing come to rest or get far enough.
+      const far = await call('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'pointer:length()',
+        compare: '>=',
+        value: 500,
+        timeoutMs: 20_000,
+      });
+      assert.equal(get(JSON.parse(far), 'met'), true, `a wait on a vector's length is met: ${far}`);
+      assert.ok(asNumber(await value('/root/Main', 'pointer:x')) >= 498, far);
 
       // Written: one axis alone, through the setter, and a copy inside a copy.
       const moved = await call('runtime_invoke', {
@@ -26771,14 +26792,28 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
       const onAVector = await call('runtime_invoke', {
         op: 'call',
         nodePath: '/root/Main/Room',
-        method: 'position:normalized',
+        method: 'size:length_squared',
+      });
+      assert.equal(get(JSON.parse(onAVector), 'result'), 130_000, onAVector);
+      const notOnAVector = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main/Room',
+        method: 'position:rotated',
       });
       assert.match(
-        onAVector,
-        /position is a Vector2, which a path reads by its components, x, y, and makes no call on/,
-        onAVector,
+        notOnAVector,
+        /position is a Vector2, and rotated\(\) is not one of the calls a path makes on one, which read it and take no arguments: length\(\), /,
+        notOnAVector,
       );
-      assert.doesNotMatch(onAVector, /element/, onAVector);
+      assert.doesNotMatch(notOnAVector, /element/, notOnAVector);
+      const withArguments = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main/Room',
+        method: 'size:length',
+        args: [1],
+      });
+      assert.match(withArguments, /size:length\(\) takes no arguments/, withArguments);
+      assert.doesNotMatch(withArguments, /element/, withArguments);
       await call('editor_run', { op: 'stop' });
     },
     { realAddon: true, engine },

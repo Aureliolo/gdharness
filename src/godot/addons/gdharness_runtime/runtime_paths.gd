@@ -66,6 +66,108 @@ const PACKED: Array[int] = [
 	TYPE_PACKED_COLOR_ARRAY,
 	TYPE_PACKED_VECTOR4_ARRAY,
 ]
+## The calls a path makes on a vector, a colour, a rectangle or a transform, by its type: those that
+## take no arguments, as the engine has them on 4.7.2. Named for the reason the list calls are, and
+## none can change what it is called on, since such a value is a copy wherever it is read from. A
+## wait for something to come to rest reads "linear_velocity:length()".
+const VALUE_CALLS: Dictionary = {
+	TYPE_VECTOR2:
+	[
+		"length",
+		"length_squared",
+		"normalized",
+		"abs",
+		"sign",
+		"floor",
+		"ceil",
+		"round",
+		"angle",
+		"aspect",
+		"is_normalized",
+		"is_zero_approx",
+		"is_finite",
+		"orthogonal",
+		"max_axis_index",
+		"min_axis_index",
+	],
+	TYPE_VECTOR2I: ["length", "length_squared", "abs", "sign", "aspect", "max_axis_index", "min_axis_index"],
+	TYPE_VECTOR3:
+	[
+		"length",
+		"length_squared",
+		"normalized",
+		"abs",
+		"sign",
+		"floor",
+		"ceil",
+		"round",
+		"is_normalized",
+		"is_zero_approx",
+		"is_finite",
+		"max_axis_index",
+		"min_axis_index",
+		"inverse",
+	],
+	TYPE_VECTOR3I: ["length", "length_squared", "abs", "sign", "max_axis_index", "min_axis_index"],
+	TYPE_VECTOR4:
+	[
+		"length",
+		"length_squared",
+		"normalized",
+		"abs",
+		"sign",
+		"floor",
+		"ceil",
+		"round",
+		"is_normalized",
+		"is_zero_approx",
+		"is_finite",
+		"max_axis_index",
+		"min_axis_index",
+		"inverse",
+	],
+	TYPE_VECTOR4I: ["length", "length_squared", "abs", "sign", "max_axis_index", "min_axis_index"],
+	TYPE_COLOR: ["get_luminance", "inverted", "to_html"],
+	TYPE_RECT2: ["abs", "is_finite", "get_area", "get_center", "has_area"],
+	TYPE_RECT2I: ["abs", "get_area", "get_center", "has_area"],
+	TYPE_TRANSFORM2D:
+	[
+		"is_finite",
+		"get_origin",
+		"get_rotation",
+		"get_scale",
+		"get_skew",
+		"inverse",
+		"determinant",
+		"orthonormalized",
+	],
+	TYPE_TRANSFORM3D: ["is_finite", "inverse", "orthonormalized"],
+	TYPE_BASIS:
+	[
+		"is_finite",
+		"get_scale",
+		"inverse",
+		"determinant",
+		"orthonormalized",
+		"get_euler",
+		"get_rotation_quaternion",
+	],
+	TYPE_QUATERNION:
+	[
+		"length",
+		"length_squared",
+		"normalized",
+		"is_normalized",
+		"is_finite",
+		"inverse",
+		"get_euler",
+		"get_angle",
+		"get_axis",
+	],
+	TYPE_PLANE: ["normalized", "is_finite", "get_center"],
+	TYPE_AABB: ["abs", "is_finite", "get_center", "get_volume", "get_longest_axis", "get_shortest_axis"],
+	TYPE_PROJECTION: ["inverse", "determinant"],
+}
 ## The calls an empty list has nothing to answer, which the engine reports as an error when asked.
 const NEEDS_AN_ELEMENT: Array[String] = ["front", "back", "pick_random"]
 
@@ -97,7 +199,8 @@ const READS_ONLY: String = ", and a path, which a wait reads every frame, only c
 ##
 ## A step into a vector, a colour, a rectangle or a transform reads one of its components,
 ## "size:x" or "global_transform:origin:y", by the names GDScript gives them; see
-## [method GdhSerialisation.components_of].
+## [method GdhSerialisation.components_of]. It answers the calls in [constant VALUE_CALLS] too,
+## "linear_velocity:length()".
 ##
 ## Answers with a `message` instead when a step along the way is not there or holds something that
 ## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
@@ -189,6 +292,11 @@ static func composite(value: Variant) -> bool:
 	return not GdhSerialisation.components_of(value).is_empty()
 
 
+## The calls a path makes on [param value], a vector, a colour, a rectangle or a transform.
+static func value_calls(value: Variant) -> Array:
+	return VALUE_CALLS.get(typeof(value), [])
+
+
 ## Whether [param value] is a packed list. Stepped into the way a list is, by index, and a write into
 ## one reaches the game's own copy, since packed lists share their storage until one is duplicated.
 static func packed(value: Variant) -> bool:
@@ -236,7 +344,9 @@ static func can_read(holder: Variant, named: String) -> bool:
 			return args.is_empty() and method in MAP_CALLS
 		return not _key_in(map, named).is_empty()
 	if composite(holder):
-		return method.is_empty() and named in GdhSerialisation.components_of(holder)
+		if not method.is_empty():
+			return args.is_empty() and method in value_calls(holder)
+		return named in GdhSerialisation.components_of(holder)
 	if holder is Object:
 		var object: Object = holder
 		if not method.is_empty():
@@ -573,7 +683,10 @@ static func write_back(chain: Array[Dictionary], changed: Variant) -> void:
 ## What [param holder] holds under [param named], or answers to it when [param named] is a call.
 ## Only ever called once [method can_read] agrees.
 static func read_under(holder: Variant, named: String) -> Variant:
-	if (holder is Array or holder is Dictionary or packed(holder)) and not method_of(named).is_empty():
+	if (
+		(holder is Array or holder is Dictionary or packed(holder) or composite(holder))
+		and not method_of(named).is_empty()
+	):
 		return Callable.create(holder, method_of(named)).call()
 	if holder is Array:
 		var items: Array = holder
@@ -659,9 +772,21 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 		var sort: String = ("an " if kind.left(1) in ["A", "E", "I", "O", "U"] else "a ") + kind
 		var has: String = ", ".join(GdhSerialisation.components_of(holder))
 		if not container_call.is_empty():
+			var calls: Array = value_calls(holder)
+			if given_count > 0 and container_call in calls:
+				return (
+					"%s is %s, and a path calls %s() on one with no arguments"
+					% [called_as, sort, container_call]
+				)
+			var spelled: Array[String] = []
+			for each: Variant in calls:
+				spelled.append(str(each) + "()")
 			return (
-				"%s is %s, which a path reads by its components, %s, and makes no call on"
-				% [called_as, sort, has]
+				(
+					"%s is %s, and %s() is not one of the calls a path makes on one, which read it"
+					+ " and take no arguments: %s; its components are %s"
+				)
+				% [called_as, sort, container_call, ", ".join(spelled), has]
 			)
 		return "%s is %s, so it has no %s; it has %s" % [called_as, sort, named, has]
 	if not holder is Object:

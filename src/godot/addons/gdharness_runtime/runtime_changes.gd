@@ -435,13 +435,20 @@ func call_method(params: Dictionary) -> Dictionary:
 		var spelled: String = str(reached["name"])
 		if GdhPaths.method_of(spelled).is_empty():
 			spelled += "()"
-		# A vector or a transform has no element to call a method on: it is read by its components.
-		if GdhPaths.composite(reached["holder"]):
+		# A vector or a transform has no element to call a method on, so a call it does not answer is
+		# refused without the advice about elements below.
+		var answers: bool = GdhPaths.can_read(reached["holder"], spelled)
+		if GdhPaths.composite(reached["holder"]) and not (args.is_empty() and answers):
 			return {
 				"type": "error",
-				"message": GdhPaths.nothing_there(reached["holder"], spelled, str(reached["called"]))
+				"message":
+				(
+					"%s:%s takes no arguments" % [reached["called"], spelled]
+					if answers
+					else GdhPaths.nothing_there(reached["holder"], spelled, str(reached["called"]))
+				)
 			}
-		if args.is_empty() and GdhPaths.can_read(reached["holder"], spelled):
+		if args.is_empty() and answers:
 			var read_from: int = Time.get_ticks_usec()
 			var answered: Variant = GdhPaths.read_under(reached["holder"], spelled)
 			var read_for: int = Time.get_ticks_usec() - read_from
