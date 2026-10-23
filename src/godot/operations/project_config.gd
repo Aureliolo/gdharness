@@ -82,6 +82,14 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	if had_value and typeof(old_value) == typeof(final_value) and old_value == final_value:
 		answer["saved"] = false
 		answer["unchanged"] = true
+		if was_default:
+			answer["note"] = (
+				(
+					"%s is already this setting's default, which project.godot holds no line for:"
+					+ " the engine reads it wherever %s is asked for, so nothing was written."
+				)
+				% [JSON.stringify(_values.serialize_value(final_value)), setting_path]
+			)
 		return answer
 
 	var near: PackedStringArray = []

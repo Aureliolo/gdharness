@@ -1396,6 +1396,22 @@ function testOperations(godotPath: string, projectDir: string): void {
     `a setting given the value it holds is not saved: ${JSON.stringify(unchanged)}`,
   );
   assert.equal(readFileSync(projectFile, 'utf8'), handOrdered, 'and the file is left byte for byte');
+  assert.equal(get(unchanged, 'note'), undefined, 'a value the file holds needs no word on defaults');
+  // A default the file has no line for is unchanged too, and said, since a caller looked for the line.
+  const atDefault = operation('set_project_setting', {
+    setting: 'internationalization/locale/fallback',
+    value: 'en',
+  });
+  assert.deepEqual(
+    [get(atDefault, 'saved'), get(atDefault, 'unchanged'), get(atDefault, 'note')],
+    [
+      false,
+      true,
+      '"en" is already this setting\'s default, which project.godot holds no line for: the engine reads it wherever internationalization/locale/fallback is asked for, so nothing was written.',
+    ],
+    JSON.stringify(atDefault),
+  );
+  assert.equal(readFileSync(projectFile, 'utf8'), handOrdered, 'and nothing is written for it');
   const redescribed = operation('set_project_setting', {
     setting: 'application/config/description',
     value: 'Another fixture',
