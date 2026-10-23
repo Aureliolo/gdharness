@@ -1660,7 +1660,12 @@ export function runtimeVerdict(
   after: AfterWaiting,
 ): Record<string, unknown> {
   if (endpoint !== null) {
-    return { listening: true, pid: endpoint.pid, port: endpoint.port };
+    return {
+      listening: true,
+      pid: endpoint.pid,
+      port: endpoint.port,
+      ...(endpoint.userDir === undefined ? {} : { userDir: endpoint.userDir }),
+    };
   }
   if (!after.addon) {
     return {
@@ -8969,6 +8974,7 @@ class GodotServer {
           // whatever that game started for itself, carries the editor's process id; a game
           // another server started carries none. Absent when the game announced none.
           editorPid: endpoint.editorPid,
+          userDir: endpoint.userDir,
           // The runtime addon the game loaded, null for a copy with no markers, which cannot say.
           addonVersion: endpoint.addon.version === '' ? null : endpoint.addon.version,
           ...(unknown ? {} : { addonIsStale: staleNote !== undefined }),
@@ -12326,7 +12332,8 @@ class GodotServer {
    * the server that started a run and the one that picked it up answer its exit alike.
    */
   private async untilTheExitIsRecorded(run: GodotProcess): Promise<boolean> {
-    let until = Date.now() + EXIT_REPORTED_WITHIN_MS;
+    const asked = Date.now();
+    let until = asked + EXIT_REPORTED_WITHIN_MS;
     for (;;) {
       // Or the process the game restarted itself into, which carries the run on.
       if (followTheRestart(run) && alive(run.pid)) {
@@ -12349,6 +12356,16 @@ class GodotServer {
       // The keeper looking for a process the game restarted itself into, which takes a listing.
       if (record !== null && record.pid === run.pid && record.endingAt !== undefined) {
         until = Math.max(until, record.endingAt + SUCCESSOR_SOUGHT_WITHIN_MS);
+      }
+      // A keeper still alive is on its way to writing the exit, however late it heard of it; one that
+      // has gone will write nothing, and the run is settled as the two seconds say.
+      if (
+        record !== null &&
+        record.pid === run.pid &&
+        record.keeperPid !== undefined &&
+        alive(record.keeperPid)
+      ) {
+        until = Math.max(until, asked + SUCCESSOR_SOUGHT_WITHIN_MS);
       }
       if (Date.now() >= until) {
         return false;

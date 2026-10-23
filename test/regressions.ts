@@ -29729,6 +29729,26 @@ async function testARunCanBeGivenItsOwnEnvironment(): Promise<void> {
               `and nothing claims otherwise: ${JSON.stringify(started)}`,
             );
           }
+          // Where the game's user:// is, as its own engine says, both where it is started and where
+          // the running games are listed, since no tool reads a user:// path and a caller checking a
+          // save it wrote has to read it there.
+          assert.equal(get(started, 'runtime', 'userDir'), printed, JSON.stringify(started));
+          const listed = asArray(get(await call('editor_status', {}), 'game', 'runtimes')).find(
+            (one) => get(one, 'pid') === get(started, 'runtime', 'pid'),
+          );
+          assert.equal(get(listed, 'userDir'), printed, JSON.stringify(listed));
+          const userPath = await server.request(
+            'tools/call',
+            {
+              name: 'resource_edit',
+              arguments: { projectPath: project, op: 'read', resourcePath: 'user://settings.cfg' },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+          assert.match(
+            textOf(userPath) ?? '',
+            /uses the 'user:\/\/' scheme, .* a running game's is under userDir in editor_status runtimes/,
+          );
         } finally {
           await server.request(
             'tools/call',
@@ -36723,6 +36743,82 @@ async function testARestartBeingLookedForIsWaitedFor(): Promise<void> {
 }
 
 /**
+ * A run whose keeper is alive and has not yet written the exit is waited for; one whose keeper has
+ * gone is settled after the two seconds an exit takes to be written.
+ *
+ * On Windows a keeper starting its game through the desktop helper hears of the exit only once the
+ * helper's PowerShell has gone as well, which a loaded machine took more than two seconds for, and
+ * a game that had quit cleanly was answered as ended with no code and a keeper ended before it. The
+ * stand-in keeper here writes the code four seconds after the game is gone.
+ */
+async function testAnExitTheKeeperIsStillWritingIsWaitedFor(): Promise<void> {
+  const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
+  const goneKeeper: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], {
+    encoding: 'utf8',
+  });
+  const keeper = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exit-written-'));
+  try {
+    for (const [keeperPid, writtenAfter] of [
+      [keeper.pid ?? 0, 4_000],
+      [goneKeeper.pid, null],
+    ] as const) {
+      const project = join(runtimeDir, `project-${String(keeperPid)}`);
+      const runs = join(runtimeDir, 'runs');
+      mkdirSync(runs, { recursive: true });
+      const transcript = join(runs, `run-${String(keeperPid)}.log`);
+      writeFileSync(transcript, 'the game quits\n');
+      const startedAt = Date.now() - 10_000;
+      const note = {
+        pid: ended.pid,
+        transcript,
+        startedAt,
+        startedBy: startedAt,
+        projectPath: project,
+        keeperPid,
+        arguments: ['--headless', '--path', project],
+        command: process.execPath,
+      };
+      const where = runRecordPath(project, runtimeDir);
+      writeFileSync(where, JSON.stringify(note), 'utf8');
+      await withStdioServer(
+        async (call) => {
+          const written =
+            writtenAfter === null
+              ? Promise.resolve()
+              : delay(writtenAfter).then(() => {
+                  writeFileSync(where, JSON.stringify({ ...note, exitCode: 3, endedAt: Date.now() }), 'utf8');
+                });
+          const asked = Date.now();
+          const output: unknown = jsonOf(await call('editor_output', {}), 'editor_output');
+          const took = Date.now() - asked;
+          await written;
+          if (writtenAfter === null) {
+            assert.deepEqual(
+              [get(output, 'running'), get(output, 'exitCode'), get(output, 'endedUnwatched')],
+              [false, null, true],
+              `a keeper that has gone writes nothing, and the run is settled: ${JSON.stringify(output)}`,
+            );
+            assert.ok(took < 10_000, `without waiting the twenty seconds out: ${String(took)}ms`);
+          } else {
+            assert.deepEqual(
+              [get(output, 'running'), get(output, 'exitCode'), get(output, 'endedUnwatched')],
+              [false, 3, undefined],
+              `the exit the live keeper wrote late: ${JSON.stringify(output)}`,
+            );
+          }
+        },
+        { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+      );
+    }
+  } finally {
+    keeper.kill();
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A run whose server went away is answered with what it printed, not with "No game is running".
  *
  * The MCP server reconnects on its own schedule. A run that lives in that process goes with it: a
@@ -38627,7 +38723,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       );
       assert.ok(
         burstRows.length > 1000 && burstRows.length <= frameFunctionsFor(queuedMessagesOf(null)),
-        `the totals carry as many functions as were asked for: ${burstRows.length}, ${burstShown}`,
+        `the totals carry as many functions as were asked for: ${burstRows.length}, note: ${String(get(burst, 'note'))}, ${burstShown}`,
       );
       // A sentence of the note rather than its start: the notes before it depend on timing, and on a
       // fast runner a runtime function called a dozen times in two microseconds is mostly overhead.
@@ -57234,6 +57330,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPickedUpRunKeepsItsProfile,
   testARecordedEndingIsReadBack,
   testARestartBeingLookedForIsWaitedFor,
+  testAnExitTheKeeperIsStillWritingIsWaitedFor,
   testARuntimeCallAfterOurRunEndedSaysSo,
   testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,

@@ -622,6 +622,9 @@ func _identity(bind_address: String) -> Dictionary:
 			"path": ProjectSettings.globalize_path("res://").rstrip("/")
 		},
 		"godot": Engine.get_version_info().get("string", ""),
+		# Where user:// is for this run, which only the engine can say: it follows the project's
+		# name and settings and the environment the run was started in.
+		"user_dir": OS.get_user_data_dir(),
 		"addon_version": _loaded_version,
 		"addon_digest": _loaded_digest,
 	}

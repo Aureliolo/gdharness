@@ -376,6 +376,7 @@ async function keep(): Promise<void> {
           startedAt: run.startedAt,
           startedBy: Date.now(),
           projectPath: run.projectPath,
+          keeperPid: process.pid,
           ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
           ...(run.profile === undefined ? {} : { profile: run.profile }),
           arguments: toStart.args,

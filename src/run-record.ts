@@ -65,6 +65,13 @@ export interface RunRecord {
    */
   readonly keeper?: string;
   /**
+   * The keeper's own process, which is the one that writes the game's exit here. Its exit comes a
+   * moment after the game's, and on Windows a keeper starting the game through the desktop helper
+   * hears of it only once that helper has gone too: a server that gave the keeper a fixed two
+   * seconds settled a run as ended with no code while the keeper was still on its way to writing it.
+   */
+  readonly keeperPid?: number;
+  /**
    * The file the keeper sums the run's script profile into, for a run started with one. The keeper
    * is the game's debugger and outlives the server, so any later server reads the profile from here.
    */
@@ -426,6 +433,11 @@ function recordAt(path: string): RunRecord | null {
       ? { servedBy: fields['servedBy'] }
       : {}),
     ...(typeof fields['keeper'] === 'string' && fields['keeper'] !== '' ? { keeper: fields['keeper'] } : {}),
+    ...(typeof fields['keeperPid'] === 'number' &&
+    Number.isInteger(fields['keeperPid']) &&
+    fields['keeperPid'] > 0
+      ? { keeperPid: fields['keeperPid'] }
+      : {}),
     ...(typeof fields['profile'] === 'string' && fields['profile'] !== ''
       ? { profile: fields['profile'] }
       : {}),
