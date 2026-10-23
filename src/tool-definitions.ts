@@ -2050,19 +2050,19 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       text: {
         effect: 'read',
         summary:
-          "every line of text under nodePath, the values in its fields included, in reading order, leaving out what is hidden and everything under it, and a control drawn wholly outside the viewport or scrolled out of a ScrollContainer, which the player cannot read. Every line reads as drawn: rich text without tags, text only as far as it is typed out, a translation rather than its key, an upper-case label in capitals and a secret field as its mask. Tab titles, menu bar titles, list items, a tree's column titles and rows, and an open menu's items and the titles of its separators read a line each",
+          "every line of text under nodePath, the values in its fields included, in reading order, leaving out what is hidden and everything under it, and a control drawn wholly outside the viewport or scrolled out of a ScrollContainer, which the player cannot read. Every line reads as drawn: rich text without tags, text only as far as it is typed out, a translation rather than its key, an upper-case label in capitals and a secret field as its mask. Tab titles, menu bar titles, list items, a tree's column titles and rows, and an open menu's items and the titles of its separators read a line each. A line drawn as a copy under a node saying the same words, as an outline or a glow is, reads once, counted under copies",
         requires: [],
       },
       find: {
         effect: 'read',
         summary:
-          'the paths of every node matching className, script, namePattern, group or says, with property read off each, hidden ones included unless includeHidden says otherwise; with it false, a control drawn wholly outside the viewport or a ScrollContainer is left out too',
+          'the paths of every node matching className, script, namePattern, group or says, with property read off each, hidden ones included unless includeHidden says otherwise; with it false, a control drawn wholly outside the viewport or a ScrollContainer is left out too. A match drawn under a matching node saying the same words, as an outline or a glow copy is, names that node under copyOf, and the answer counts the rest under distinct',
         requires: [],
       },
       rect: {
         effect: 'read',
         summary:
-          "one node's rectangle or position, in canvas and in window pixels, and for a Control whether it is in view. Canvas is the node's own viewport; window is where it is drawn in the game's window, through any embedded dialog or SubViewport it sits in, which is what runtime_input mouse_click and mouse_motion take. A 3D node answers with the point to aim at, which is the middle of what it draws rather than the origin it stands on, the rectangle it covers under covers, the camera that drew it, and behind_camera when it is not in front of one",
+          "one node's rectangle or position, in canvas and in window pixels, and for a Control whether it is in view. Canvas is the node's own viewport; window is where it is drawn in the game's window, through any embedded dialog or SubViewport it sits in, which is what runtime_input mouse_click and mouse_motion take. A 2D node answers where it stands, and a sprite, collision shape, polygon or line also the rectangle it covers under covers. A 3D node answers with the point to aim at, which is the middle of what it draws rather than the origin it stands on, the rectangle it covers under covers, the camera that drew it, and behind_camera when it is not in front of one",
         requires: ['nodePath'],
       },
       property: {

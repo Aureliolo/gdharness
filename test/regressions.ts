@@ -32382,6 +32382,169 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
 }
 
 /**
+ * A word drawn with an outline is one sign, and a 2D node answers the rectangle it covers.
+ *
+ * A label drawn with outline and glow copies of itself as children was answered by `find` as four
+ * matches for one word, and `text` read the word four times. Every match stays listed, since a
+ * caller may mean any of them, and each copy names the label it copies; `text` reads the word
+ * once. A copy of a copy names the outermost, and a sibling saying the same words is a second sign,
+ * as is the same word inside a sign saying something else.
+ * A copy whose original is out of view is the one the player reads, so it is read.
+ *
+ * `rect` on a Node2D answered only its position, so the extent of a floor to aim inside took a read
+ * of its shape and some arithmetic. A collision shape, a sprite and a polygon answer what they
+ * cover, through the node's transform, scale and polygon offset included.
+ */
+async function testALayeredWordIsOneSignAndAShapeHasExtent(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('layered word regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      const label = (name: string, parent: string, words: string, left: number, top: number): string =>
+        `[node name="${name}" type="Label" parent="${parent}"]\noffset_left = ${String(left)}.0\n` +
+        `offset_top = ${String(top)}.0\noffset_right = ${String(left + 80)}.0\n` +
+        `offset_bottom = ${String(top + 20)}.0\ntext = "${words}"\n\n`;
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=3 format=3]\n\n' +
+          '[sub_resource type="RectangleShape2D" id="floor"]\nsize = Vector2(800, 40)\n\n' +
+          '[sub_resource type="PlaceholderTexture2D" id="picture"]\nsize = Vector2(64, 32)\n\n' +
+          '[node name="Main" type="Control"]\nlayout_mode = 3\nanchors_preset = 0\n' +
+          'offset_right = 1000.0\noffset_bottom = 600.0\n\n' +
+          label('Back', '.', 'Zurück', 10, 10) +
+          label('Shadow', 'Back', 'Zurück', 2, 2) +
+          label('Glow', 'Back', 'Zurück', -1, -1) +
+          label('Edge', 'Back/Glow', 'Zurück', 1, 1) +
+          label('Again', '.', 'Zurück', 10, 100) +
+          label('Help', 'Again', 'Hilfe', 0, 30) +
+          label('Deep', 'Again/Help', 'Zurück', 0, 0) +
+          label('Away', '.', 'Weiter', -3000, 200) +
+          label('Peek', 'Away', 'Weiter', 3010, 0) +
+          '[node name="Floor" type="StaticBody2D" parent="."]\nposition = Vector2(400, 500)\n\n' +
+          '[node name="Shape" type="CollisionShape2D" parent="Floor"]\nshape = SubResource("floor")\n\n' +
+          '[node name="Picture" type="Sprite2D" parent="."]\nposition = Vector2(100, 100)\n' +
+          'scale = Vector2(2, 2)\ntexture = SubResource("picture")\n\n' +
+          '[node name="Wedge" type="Polygon2D" parent="."]\nposition = Vector2(200, 200)\n' +
+          'offset = Vector2(5, 5)\npolygon = PackedVector2Array(0, 0, 10, 0, 10, 20)\n\n' +
+          '[node name="Marker" type="Node2D" parent="."]\nposition = Vector2(300, 300)\n',
+      );
+      const started = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      try {
+        assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+        const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+          parseTextContent(
+            await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+          );
+        const back = '/root/Main/Back';
+        const found = await call('runtime_inspect', { op: 'find', says: 'Zurück' });
+        assert.deepEqual(
+          asArray(get(found, 'nodes')).map((node) => [text(get(node, 'path')), get(node, 'copyOf') ?? null]),
+          [
+            [back, null],
+            [`${back}/Shadow`, back],
+            [`${back}/Glow`, back],
+            [`${back}/Glow/Edge`, back],
+            ['/root/Main/Again', null],
+            ['/root/Main/Again/Help/Deep', null],
+          ],
+          `every match listed, each copy naming the label it copies: ${JSON.stringify(found)}`,
+        );
+        assert.equal(get(found, 'distinct'), 3, JSON.stringify(found));
+        assert.match(
+          text(get(found, 'note')),
+          /3 of the 6 matches are copies drawn under a match saying the same words, as an outline or a glow is drawn, and name it under copyOf: 3 distinct/,
+          JSON.stringify(found),
+        );
+        const alone = await call('runtime_inspect', { op: 'find', says: 'Zurück', nodePath: `${back}/Glow` });
+        assert.deepEqual(
+          asArray(get(alone, 'nodes')).map((node) => [text(get(node, 'path')), get(node, 'copyOf') ?? null]),
+          [
+            [`${back}/Glow`, null],
+            [`${back}/Glow/Edge`, `${back}/Glow`],
+          ],
+          `with the original outside the search, a copy names the match it sits under: ${JSON.stringify(alone)}`,
+        );
+        const single = await call('runtime_inspect', { op: 'find', says: 'Weiter', includeHidden: false });
+        assert.deepEqual(
+          asArray(get(single, 'nodes')).map((node) => [text(get(node, 'path')), get(node, 'copyOf') ?? null]),
+          [['/root/Main/Away/Peek', null]],
+          `a copy whose original is left out of view is the one sign: ${JSON.stringify(single)}`,
+        );
+        assert.equal(get(single, 'distinct'), undefined, JSON.stringify(single));
+
+        const read = await call('runtime_inspect', { op: 'text', nodePath: '/root/Main' });
+        assert.deepEqual(
+          get(read, 'lines'),
+          ['Zurück', 'Zurück', 'Hilfe', 'Zurück', 'Weiter'],
+          `each sign once, and a word inside a different sign its own: ${JSON.stringify(read)}`,
+        );
+        assert.equal(get(read, 'copies'), 3, JSON.stringify(read));
+        assert.equal(get(read, 'out_of_view'), 1, JSON.stringify(read));
+        assert.match(
+          text(get(read, 'note')),
+          /3 lines drawn as a copy under a node saying the same words, as an outline or a glow is drawn, read once with the words they copy/,
+          JSON.stringify(read),
+        );
+        const everything = await call('runtime_inspect', {
+          op: 'text',
+          nodePath: '/root/Main',
+          includeHidden: true,
+        });
+        assert.deepEqual(
+          [get(everything, 'lines'), get(everything, 'copies')],
+          [['Zurück', 'Zurück', 'Hilfe', 'Zurück', 'Weiter'], 4],
+          `with the original out of view read too, its copy reads once with it: ${JSON.stringify(everything)}`,
+        );
+
+        const covers = async (path: string): Promise<number[] | null> => {
+          const rect = await call('runtime_inspect', { op: 'rect', nodePath: `/root/Main/${path}` });
+          assert.equal(get(rect, 'type'), 'point', JSON.stringify(rect));
+          if (get(rect, 'covers') === undefined) {
+            return null;
+          }
+          return ['canvas', 'window'].flatMap((space) =>
+            ['position', 'size'].flatMap((part) =>
+              ['x', 'y'].map((axis) => Math.round(Number(get(rect, 'covers', space, part, axis)))),
+            ),
+          );
+        };
+        assert.deepEqual(await covers('Floor/Shape'), [0, 480, 800, 40, 0, 480, 800, 40]);
+        assert.deepEqual(await covers('Picture'), [36, 68, 128, 64, 36, 68, 128, 64]);
+        assert.deepEqual(await covers('Wedge'), [205, 205, 10, 20, 205, 205, 10, 20]);
+        assert.equal(await covers('Marker'), null, 'a Node2D drawing nothing covers nothing');
+      } finally {
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { realAddon: true, engine, playsWindowed: true },
+  );
+}
+
+/**
  * What a game the editor plays reports reaches editor_output and the transcript.
  *
  * The editor's game prints to the editor's own stderr, which nobody reads, and the debug adapter
@@ -56342,6 +56505,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testABreakpointOnADeletedScriptIsTakenOff,
   testARunningGamesEnumIsSetByName,
   testAWrittenLineBreakMatchesATwoLineLabel,
+  testALayeredWordIsOneSignAndAShapeHasExtent,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,
   testAPickedUpRunReadsItsReportOnFromTheTranscript,
