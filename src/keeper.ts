@@ -336,10 +336,15 @@ async function keep(): Promise<void> {
     run === undefined || run.debugged === false
       ? null
       : await GameDebugger.open(run.breakpoints ?? [], profiled === null ? [] : [profiled.observer]);
+  const exitNotes = run === undefined ? null : mkdtempSync(join(tmpdir(), 'gdharness-exit-'));
+  const noted =
+    exitNotes === null
+      ? spec
+      : { ...spec, envChanges: { ...spec.envChanges, [EXIT_NOTES_VARIABLE]: exitNotes } };
   const toStart =
     debuggerPeer === null
-      ? spec
-      : { ...spec, args: withEngineArguments(spec.args, debuggerPeer.engineArguments) };
+      ? noted
+      : { ...noted, args: withEngineArguments(noted.args, debuggerPeer.engineArguments) };
   const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
   // Private to this keeper, for the file a helper watches for its stop.
   const own =
@@ -426,7 +431,10 @@ async function keep(): Promise<void> {
   end = () => 'gone';
   // Looked for at once, beside the drain: a successor that ends before the listing sees it is not
   // followed, and the run ends with the first process's exit.
-  let looked = note === null ? null : followSuccessor(pid, spec.command, spawnedAt, exitedAt);
+  let looked =
+    note === null || restartSaid(exitNotes, pid) === false
+      ? null
+      : followSuccessor(pid, spec.command, spawnedAt, exitedAt, run?.transcript);
   // The profile is finished from everything the game sent, which is read after its exit is told.
   if (debuggerPeer !== null) {
     await debuggerPeer.drained(DRAIN_MS);
@@ -472,7 +480,10 @@ async function keep(): Promise<void> {
     notTold = ended.code === null;
     exitedAt = Date.now();
     writeNoteIfItCan({ ...note, endingAt: exitedAt });
-    looked = followSuccessor(next.pid, spec.command, next.startedAt, exitedAt);
+    looked =
+      restartSaid(exitNotes, next.pid) === false
+        ? null
+        : followSuccessor(next.pid, spec.command, next.startedAt, exitedAt, run?.transcript);
   }
   // After the profile, so a server told the run ended reads the profile it ended with.
   if (run !== undefined) {
@@ -484,10 +495,39 @@ async function keep(): Promise<void> {
   }
   debuggerPeer?.close();
   listening?.close();
-  if (own !== null) {
-    rmSync(own, { recursive: true, force: true });
+  for (const made of [own, exitNotes]) {
+    if (made !== null) {
+      rmSync(made, { recursive: true, force: true });
+    }
   }
   process.exit(0);
+}
+
+/**
+ * Where the runtime addon in a game this keeper holds says, once its tree has gone, whether it set
+ * a restart. Kept in step with `EXIT_NOTES_VARIABLE` in the runtime addon.
+ */
+const EXIT_NOTES_VARIABLE = 'GDHARNESS_EXIT_NOTES';
+
+/**
+ * Whether [param pid] said as it exited that it restarts, or null when it said nothing: a game with
+ * no runtime addon, or one that did not end its tree, and the successor is then looked for by what
+ * the platform lists alone. Only a game can tell a restart from a worker it started in its last
+ * moments: one of those was taken for a successor, and the stop that asked the game to close ended
+ * the worker as the run.
+ */
+function restartSaid(notes: string | null, pid: number): boolean | null {
+  if (notes === null) {
+    return null;
+  }
+  try {
+    const said: unknown = JSON.parse(readFileSync(join(notes, `exit-${String(pid)}.json`), 'utf8'));
+    return typeof said === 'object' && said !== null && 'restart' in said && typeof said.restart === 'boolean'
+      ? said.restart
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 await letWindowsReportCrashes();

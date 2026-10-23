@@ -77,7 +77,8 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 		# that acts on the release each get a frame to do it in.
 		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		Input.parse_input_event(_button(button, device, false))
-		await _host.get_tree().process_frame
+	# The engine hands a parsed event on at the next frame, so the focus is read after one.
+	await _host.get_tree().process_frame
 
 	var answer: Dictionary = {
 		"type": "input_injected",
@@ -91,7 +92,7 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 		"pressed": held and not whole,
 		"whole": whole,
 	}
-	return GdhValues.focus_noted(answer, focused)
+	return GdhValues.focus_noted(answer, focused, _host)
 
 
 ## Moves a stick or trigger axis to a value, where it stays until another motion moves it, as a
@@ -116,6 +117,7 @@ func inject_joypad_motion(params: Dictionary) -> Dictionary:
 	event.device = device
 	var focused: String = GdhValues.focus_path(_host)
 	Input.parse_input_event(event)
+	await _host.get_tree().process_frame
 
 	var answer: Dictionary = {
 		"type": "input_injected",
@@ -126,7 +128,7 @@ func inject_joypad_motion(params: Dictionary) -> Dictionary:
 		"device": device,
 		"actions": GdhValues.actions_of(event),
 	}
-	return GdhValues.focus_noted(answer, focused)
+	return GdhValues.focus_noted(answer, focused, _host)
 
 
 static func _button(button: int, device: int, down: bool) -> InputEventJoypadButton:

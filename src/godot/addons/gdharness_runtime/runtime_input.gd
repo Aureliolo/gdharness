@@ -159,7 +159,8 @@ func inject_action(params: Dictionary) -> Dictionary:
 		# a listener that acts on the release both get their own frame to do it in.
 		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		_say_action(action, false, strength)
-		await _host.get_tree().process_frame
+	# The engine hands a parsed event on at the next frame, so the focus is read after one.
+	await _host.get_tree().process_frame
 
 	var answer: Dictionary = {
 		"type": "input_injected",
@@ -172,7 +173,7 @@ func inject_action(params: Dictionary) -> Dictionary:
 		"held_frames": GdhValues.held_answer(whole, frames),
 		"held_for": lasted,
 	}
-	return GdhValues.focus_noted(answer, focused)
+	return GdhValues.focus_noted(answer, focused, _host)
 
 
 func _say_action(action: String, down: bool, strength: float) -> void:
@@ -236,7 +237,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 		var up: InputEventKey = event.duplicate()
 		up.pressed = false
 		Input.parse_input_event(up)
-		await _host.get_tree().process_frame
+	await _host.get_tree().process_frame
 
 	var answer: Dictionary = {
 		"type": "input_injected",
@@ -253,7 +254,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 		"pressed": held and not whole,
 		"whole": whole,
 	}
-	return GdhValues.focus_noted(answer, focused)
+	return GdhValues.focus_noted(answer, focused, _host)
 
 
 ## Clicks a mouse button at a position, and lets go of it again unless asked to hold it.

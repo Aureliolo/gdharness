@@ -252,9 +252,18 @@ static func focus_path(host: Node) -> String:
 ## or a pad's event reaches that Control before the game's _unhandled_input: Space on a focused Button
 ## pressed it and the game's own handler counted the key as well, and a stick pushed down moved a
 ## focused list's selection and never reached the game, with nothing in the answer saying why.
-static func focus_noted(said: Dictionary, focused: String) -> Dictionary:
+##
+## Where the focus is once the event has been handled goes under focused_after when it moved, null
+## when nothing holds it then: ui_down on a focused button hands the focus to its neighbour, and an
+## answer naming only the button that took the press read as the focus never having moved.
+static func focus_noted(said: Dictionary, focused: String, host: Node) -> Dictionary:
 	if not focused.is_empty():
 		said["focused"] = focused
+	var now: String = focus_path(host)
+	if now.is_empty() and not focused.is_empty():
+		said["focused_after"] = null
+	elif now != focused:
+		said["focused_after"] = now
 	return said
 
 

@@ -13015,6 +13015,8 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
   const first = new ServerProcess({ env });
   let second: ServerProcess | null = null;
   const successors: number[] = [];
+  const decoyProject = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-decoy-'));
+  let decoy: ReturnType<typeof spawnHidden> | null = null;
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -13033,6 +13035,18 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
         '\t\tvar mark := FileAccess.open("res://successor_pid", FileAccess.WRITE)',
         '\t\tmark.store_string(str(OS.get_process_id()))',
         '\t\tmark.close()',
+        '\t\treturn',
+        '\tif "--worker" in OS.get_cmdline_user_args():',
+        '\t\treturn',
+        '\tif FileAccess.file_exists("res://worker_on_start"):',
+        '\t\tvar worker := OS.create_process(',
+        '\t\t\tOS.get_executable_path(),',
+        '\t\t\t["--headless", "--path", ProjectSettings.globalize_path("res://"), "--", "--worker"]',
+        '\t\t)',
+        '\t\tvar noted := FileAccess.open("res://worker_pid", FileAccess.WRITE)',
+        '\t\tnoted.store_string(str(worker))',
+        '\t\tnoted.close()',
+        '\t\tget_tree().quit.call_deferred()',
         '\t\treturn',
         '\tprint("the first process restarts")',
         '\tvar again: PackedStringArray = [',
@@ -13085,6 +13099,27 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     };
 
     await first.initialize('regression-test');
+    // The closest thing to the successor that is not it: the same engine, started in the same
+    // moments, writing its output somewhere else. Taken for it, it is one of two and neither is
+    // followed.
+    writeFileSync(
+      join(decoyProject, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Decoy"\n' +
+        'run/main_scene="res://decoy.tscn"\n',
+    );
+    writeFileSync(
+      join(decoyProject, 'decoy.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tawait get_tree().create_timer(30.0).timeout\n\tget_tree().quit()\n',
+    );
+    writeFileSync(
+      join(decoyProject, 'decoy.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://decoy.gd" id="1"]\n\n' +
+        '[node name="Decoy" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    decoy = spawnHidden(godotPath, ['--headless', '--path', decoyProject], {
+      detached: true,
+      stdio: 'ignore',
+    });
     const one = await start(first);
     const going = await output(first);
     assert.equal(get(going.answer, 'running'), true, `the run goes on in the successor: ${going.said}`);
@@ -13115,8 +13150,10 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
         `and on Windows none of the successor's, as the note says: ${going.said}`,
       );
     } else {
-      console.log(
-        `restarted run: the successor's line ${printed.some((line) => line.includes('the successor is up')) ? 'reached' : 'did not reach'} the transcript on ${process.platform}`,
+      // The output it inherited is what ties the successor to the run there.
+      assert.ok(
+        printed.some((line) => line.includes('the successor is up')),
+        `and elsewhere the successor's as well, into the run's transcript: ${going.said}`,
       );
     }
     const status = parseTextContent(
@@ -13287,12 +13324,51 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
       restartedAnyway === null || !isAlive(restartedAnyway),
       `nothing of the run is left after the stop: ${JSON.stringify(killed)}`,
     );
+
+    // A worker the game started in its last moments is the same engine, started in the same window,
+    // writing into the same transcript, and the only candidate there is; the game says as it exits
+    // that it set no restart, so the run ends with it and the worker is left to the game's own.
+    rmSync(join(project, 'restart_on_close'), { force: true });
+    writeFileSync(join(project, 'worker_on_start'), '');
+    const workerMark = join(project, 'worker_pid');
+    const working = parseTextContent(
+      await second.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    const worked = asNumber(get(working, 'pid'), JSON.stringify(working));
+    for (let waited = 0; waited < 30_000 && !existsSync(workerMark); waited += 250) {
+      await delay(250);
+    }
+    assert.ok(existsSync(workerMark), `the game started its worker: ${JSON.stringify(working)}`);
+    const worker = Number(readFileSync(workerMark, 'utf8'));
+    successors.push(worker);
+    let left = await output(second);
+    for (let waited = 0; waited < 30_000 && get(left.answer, 'running') !== false; waited += 500) {
+      await delay(500);
+      left = await output(second);
+    }
+    assert.deepEqual(
+      [get(left.answer, 'running'), get(left.answer, 'pid'), get(left.answer, 'restartedFrom')],
+      [false, worked, undefined],
+      `the run ends with the game, not in its worker: ${left.said}`,
+    );
+    assert.ok(isAlive(worker), `and nothing ended the worker: ${left.said}`);
   } finally {
     for (const pid of successors) {
       if (isAlive(pid)) {
         process.kill(pid);
       }
     }
+    if (decoy?.pid !== undefined && isAlive(decoy.pid)) {
+      process.kill(decoy.pid);
+    }
+    sweep(decoyProject);
     await first.stop().catch(() => undefined);
     await second?.stop();
     sweep(project);
@@ -46247,6 +46323,41 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     assert.equal(
       await axis({ 'position:z': 1, visible: false }),
       'Node2D.position is a Vector2, so it has no z; it has x, y. None of the 2 properties given was written.',
+    );
+
+    // A list the engine numbers, such as an OptionButton's items, has no property by its name, only
+    // a count and each entry's fields under a prefix, so the refusal names those; read from a fresh
+    // one when the node has no entries yet, and from the node once it has. Following it writes them.
+    const choice = async (op: 'add' | 'set', properties: Record<string, unknown>): Promise<JsonRpcMessage> =>
+      await request('scene_node', {
+        op,
+        scenePath: 'res://speaker.tscn',
+        ...(op === 'add'
+          ? { parentNodePath: '.', nodeType: 'OptionButton', nodeName: 'Quality' }
+          : { nodePath: 'Quality' }),
+        properties,
+      });
+    const keptAs = (count: string, label: string, prefix: string): string =>
+      `it keeps its ${label} as ${count}, how many there are, and each one's text, icon, id, disabled, separator under ${prefix}0/ for the first, ${prefix}1/ for the second and so on: give ${count} before the fields of the entries it makes.`;
+    assert.equal(
+      textOf(await choice('add', { items: ['Low', 'High'], selected: 1 })),
+      `OptionButton has no property items; ${keptAs('item_count', 'items', 'popup/item_')} None of the 2 properties given was written.`,
+    );
+    const chosen = await choice('add', {
+      item_count: 2,
+      'popup/item_0/text': 'Low',
+      'popup/item_1/text': 'High',
+      'popup/item_1/id': 1,
+      selected: 1,
+    });
+    assert.equal(get(chosen, 'result', 'isError'), undefined, textOf(chosen) ?? '');
+    const options = readFileSync(join(project, 'speaker.tscn'), 'utf8');
+    for (const line of [/^item_count = 2$/m, /^popup\/item_1\/text = "High"$/m, /^selected = 1$/m]) {
+      assert.match(options, line, options);
+    }
+    assert.equal(
+      textOf(await choice('set', { Items: [] })),
+      `OptionButton has no property Items; ${keptAs('item_count', 'items', 'popup/item_')}`,
     );
 
     // An enum by the name of a value, as written and in another case, and by its number.

@@ -222,6 +222,10 @@ static func near_property(said: String, target: Object, property: String) -> Str
 	var scripted: Array[String] = []
 	for declared: Dictionary in target.get_property_list():
 		var usage: int = as_int(declared.get("usage", 0))
+		if usage & PROPERTY_USAGE_ARRAY:
+			var listed: String = _list_called(target, declared, property)
+			if not listed.is_empty():
+				return "%s; %s" % [said, listed]
 		if not usage & headings:
 			names.append(str(declared.get("name", "")))
 		if usage & PROPERTY_USAGE_SCRIPT_VARIABLE and not usage & headings:
@@ -233,6 +237,46 @@ static func near_property(said: String, target: Object, property: String) -> Str
 		return said
 	scripted.sort()
 	return "%s; its script declares %s" % [said, ", ".join(PackedStringArray(scripted))]
+
+
+## How [param target] keeps the list [param property] names, when that is the label of one of the
+## engine's numbered lists, such as an OptionButton's Items; empty when it is not. The engine has no
+## property by that name, only a count and each entry's fields under a numbered prefix, so "items"
+## was refused with nothing near it to offer.
+static func _list_called(target: Object, count: Dictionary, property: String) -> String:
+	var parts: PackedStringArray = str(count.get("class_name", "")).split(",")
+	if parts.size() != 2 or _bare(parts[0]) != _bare(property):
+		return ""
+	var counted: String = str(count.get("name", ""))
+	var first: String = parts[1] + "0/"
+	var fields: PackedStringArray = _fields_at(target, first)
+	if fields.is_empty() and ClassDB.can_instantiate(target.get_class()):
+		var fresh: Object = ClassDB.instantiate(target.get_class())
+		fresh.set(counted, 1)
+		fields = _fields_at(fresh, first)
+		if not fresh is RefCounted:
+			fresh.free()
+	var each: String = "each one's fields" if fields.is_empty() else "each one's %s" % ", ".join(fields)
+	return (
+		(
+			"it keeps its %s as %s, how many there are, and %s under %s for the first, %s for the second and so on: "
+			+ "give %s before the fields of the entries it makes"
+		)
+		% [parts[0].to_lower(), counted, each, first, parts[1] + "1/", counted]
+	)
+
+
+static func _fields_at(target: Object, prefix: String) -> PackedStringArray:
+	var fields: PackedStringArray = PackedStringArray()
+	for declared: Dictionary in target.get_property_list():
+		var name: String = str(declared.get("name", ""))
+		if name.begins_with(prefix):
+			var _added: bool = fields.append(name.trim_prefix(prefix))
+	return fields
+
+
+static func _bare(word: String) -> String:
+	return word.to_lower().replace("_", "").replace(" ", "")
 
 
 ## The signals [param object] has that a caller can connect, its own class's first: the engine

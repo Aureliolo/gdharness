@@ -28,6 +28,7 @@ func _run() -> void:
 	var input: GdhInputCommands = GdhInputCommands.new(host, GdhValues.new())
 
 	await _check_focus(input)
+	await _check_focus_moves(input)
 	await _check_pad_focus(host)
 	_check_methods_offered(input)
 
@@ -66,7 +67,43 @@ func _check_focus(input: GdhInputCommands) -> void:
 	var free_action: Dictionary = await input.inject_action({"action": "ui_accept"})
 	if free_action.get("type", "") != "input_injected" or free_action.has("focused"):
 		_fail("and nor does an action: %s" % JSON.stringify(free_action))
+	if spaced.has("focused_after") or unfocused.has("focused_after"):
+		_fail("a press that leaves the focus where it was names nowhere it went: %s" % JSON.stringify(spaced))
 	button.queue_free()
+
+
+## ui_down on a focused button hands the focus to its neighbour, which the answer names under
+## focused_after beside the button that took the press: a held press as well as a whole one, and
+## null when the press leaves nothing focused.
+func _check_focus_moves(input: GdhInputCommands) -> void:
+	var upper: Button = Button.new()
+	var lower: Button = Button.new()
+	root.add_child(upper)
+	root.add_child(lower)
+	upper.focus_neighbor_bottom = upper.get_path_to(lower)
+	lower.focus_neighbor_top = lower.get_path_to(upper)
+	upper.grab_focus()
+	Input.flush_buffered_events()
+
+	var down: Dictionary = await input.inject_action({"action": "ui_down"})
+	if (
+		str(down.get("focused", "")) != str(upper.get_path())
+		or str(down.get("focused_after", "")) != str(lower.get_path())
+	):
+		_fail("ui_down names the button it left and the one it reached: %s" % JSON.stringify(down))
+	var up: Dictionary = await input.inject_key({"keycode": "Up", "pressed": true})
+	if str(up.get("focused_after", "")) != str(upper.get_path()):
+		_fail("a key held down names where the focus went as well: %s" % JSON.stringify(up))
+	var let_go: Dictionary = await input.inject_key({"keycode": "Up", "pressed": false})
+	if let_go.has("focused_after"):
+		_fail("and letting go of it moves nothing: %s" % JSON.stringify(let_go))
+
+	Checked.done(upper.pressed.connect(upper.hide), "hiding the button on its press")
+	var hidden: Dictionary = await input.inject_action({"action": "ui_accept"})
+	if not hidden.has("focused_after") or hidden["focused_after"] != null:
+		_fail("a press that leaves nothing focused answers null: %s" % JSON.stringify(hidden))
+	upper.queue_free()
+	lower.queue_free()
 
 
 ## A stick or a dpad goes to the focused Control first as well, and a direction there moves the
@@ -82,17 +119,15 @@ func _check_pad_focus(host: Node) -> void:
 	list.grab_focus()
 	Input.flush_buffered_events()
 
-	var pushed: Dictionary = pad.inject_joypad_motion({"axis": "left_y", "value": 0.75})
-	Input.flush_buffered_events()
+	var pushed: Dictionary = await pad.inject_joypad_motion({"axis": "left_y", "value": 0.75})
 	if list.get_selected_items() != PackedInt32Array([1]):
 		_fail("a stick pushed down moves a focused list's selection: %s" % str(list.get_selected_items()))
-	if str(pushed.get("focused", "")) != str(list.get_path()):
-		_fail("a motion should name the Control that had the focus: %s" % JSON.stringify(pushed))
+	if str(pushed.get("focused", "")) != str(list.get_path()) or pushed.has("focused_after"):
+		_fail("a motion should name the Control that had the focus and kept it: %s" % JSON.stringify(pushed))
 	if JSON.stringify(pushed.get("actions")) != '["ui_down"]':
 		_fail("and the one action its direction pressed, not ui_up: %s" % JSON.stringify(pushed))
 
-	var eased: Dictionary = pad.inject_joypad_motion({"axis": "left_y", "value": 0.2})
-	Input.flush_buffered_events()
+	var eased: Dictionary = await pad.inject_joypad_motion({"axis": "left_y", "value": 0.2})
 	if JSON.stringify(eased.get("actions")) != "[]" or str(eased.get("focused", "")) != str(list.get_path()):
 		_fail("a motion inside the deadzone presses nothing: %s" % JSON.stringify(eased))
 
@@ -106,11 +141,10 @@ func _check_pad_focus(host: Node) -> void:
 		_fail("a button names the focused Control and the action it pressed: %s" % JSON.stringify(dpad))
 
 	list.release_focus()
-	var free_motion: Dictionary = pad.inject_joypad_motion({"axis": "left_y", "value": 0.75})
+	var free_motion: Dictionary = await pad.inject_joypad_motion({"axis": "left_y", "value": 0.75})
 	if JSON.stringify(free_motion.get("actions")) != '["ui_down"]' or free_motion.has("focused"):
 		_fail("with nothing focused a motion names nothing: %s" % JSON.stringify(free_motion))
-	var _settled: Dictionary = pad.inject_joypad_motion({"axis": "left_y", "value": 0.0})
-	Input.flush_buffered_events()
+	var _settled: Dictionary = await pad.inject_joypad_motion({"axis": "left_y", "value": 0.0})
 	list.queue_free()
 
 

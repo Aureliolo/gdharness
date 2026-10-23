@@ -645,8 +645,14 @@ ended.
 
 A game that restarts itself with `OS.set_restart_on_exit` is still the same run. Once the game has
 exited, its keeper looks for the engine started again in the last two seconds of its life: on Windows
-among the processes that still name it as their parent, and on POSIX in its process group, which
-the game leads and which outlives it. The keeper writes `endingAt` into the note while it looks,
+among the processes that still name it as their parent. On POSIX the engine starts the successor
+in a session of its own and init takes it as its parent, so the keeper looks for the engine
+writing its output into the run's transcript, which it inherited and which belongs to this run
+alone. From outside, a worker the game started in its last moments looks the same, so the
+runtime addon writes a note once the game's tree has gone, into a directory the keeper names in
+the game's environment, saying whether a restart is set. Where it says none, nothing is looked
+for; a game without the addon is judged by the listing alone. The keeper writes `endingAt` into
+the note while it looks,
 and a server waits that out rather than settling the run as ended. When the keeper finds the
 successor, it writes it into the note in the game's place, with `restartedFrom`. It then follows
 the successor, ends it on a stop, and records its end as the run's. On Windows the exit code is

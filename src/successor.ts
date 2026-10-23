@@ -1,3 +1,4 @@
+import { readlinkSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
@@ -82,20 +83,26 @@ export function successorAmong(
  * number can be handed on between the two. A successor that a separate process opened afterwards
  * had often gone by then, and its code with it.
  *
- * On POSIX it is handed to init as its parent goes, but stays in the process group it was started
- * in, which is the game's own: the game is started as the leader of a group of its own, and a
- * group's number is not handed out again while anything is in it. Only the parent is told an exit
- * code there, and that is init by now, so it is watched until it has gone.
+ * On POSIX it is handed to init as its parent goes, and the engine starts it in a session of its
+ * own, so neither its parent nor its process group leads back to the game. What it keeps is the
+ * output it inherited, which is [param transcript], a file opened for this run alone; without one
+ * nothing ties a process to this run, and an engine somebody else started in the same moment would
+ * be taken for it. Only the parent is told an exit code there, and that is init by now, so it is
+ * watched until it has gone.
  */
 export async function followSuccessor(
   exitedPid: number,
   engine: string,
   notBefore: number,
   exitedAt: number,
+  transcript: string | undefined,
 ): Promise<Followed | null> {
-  return process.platform === 'win32'
-    ? await followOnWindows(exitedPid, engine, notBefore, exitedAt)
-    : await followOnPosix(exitedPid, engine, notBefore, exitedAt);
+  if (process.platform === 'win32') {
+    return await followOnWindows(exitedPid, engine, notBefore, exitedAt);
+  }
+  return transcript === undefined
+    ? null
+    : await followOnPosix(exitedPid, engine, notBefore, exitedAt, transcript);
 }
 
 async function followOnWindows(
@@ -186,11 +193,12 @@ async function followOnPosix(
   engine: string,
   notBefore: number,
   exitedAt: number,
+  transcript: string,
 ): Promise<Followed | null> {
   let printed: string;
   try {
     // In the C locale, since lstart is a date in words and the words are the ones Date.parse reads.
-    ({ stdout: printed } = await runHidden('ps', ['-e', '-o', 'pid=,pgid=,lstart=,args='], {
+    ({ stdout: printed } = await runHidden('ps', ['-e', '-o', 'pid=,lstart=,args='], {
       timeout: LIST_WITHIN_MS,
       maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, LC_ALL: 'C' },
@@ -198,12 +206,24 @@ async function followOnPosix(
   } catch {
     return null;
   }
-  const candidates: ListedSuccessor[] = [];
+  const listed: ListedSuccessor[] = [];
   for (const line of printed.split('\n')) {
-    const fields = /^\s*(\d+)\s+(\d+)\s+(\w+\s+\w+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/.exec(line);
-    const startedAt = Date.parse(fields?.[3] ?? '');
-    if (fields?.[1] !== undefined && Number(fields[2]) === exitedPid && !Number.isNaN(startedAt)) {
-      candidates.push({ pid: Number(fields[1]), startedAt, command: (fields[4] ?? '').trim() });
+    const fields = /^\s*(\d+)\s+(\w+\s+\w+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/.exec(line);
+    const startedAt = Date.parse(fields?.[2] ?? '');
+    if (fields?.[1] !== undefined && !Number.isNaN(startedAt)) {
+      listed.push({ pid: Number(fields[1]), startedAt, command: (fields[3] ?? '').trim() });
+    }
+  }
+  // Asked of the engines that started in time only, since each answer is a look at another process.
+  const timely = listed.filter(
+    (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, true) !== null,
+  );
+  const ours = canonical(transcript);
+  const candidates: ListedSuccessor[] = [];
+  for (const one of timely) {
+    const writing = await outputOf(one.pid);
+    if (writing !== null && canonical(writing) === ours) {
+      candidates.push(one);
     }
   }
   const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, true);
@@ -217,4 +237,33 @@ async function followOnPosix(
     return { code: null };
   })();
   return { successor, ended };
+}
+
+/** The file [param pid] writes its standard output to, or null where it cannot be read. */
+async function outputOf(pid: number): Promise<string | null> {
+  if (process.platform === 'linux') {
+    try {
+      return readlinkSync(`/proc/${String(pid)}/fd/1`);
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const { stdout } = await runHidden('lsof', ['-a', '-p', String(pid), '-d', '1', '-Fn'], {
+      timeout: LIST_WITHIN_MS,
+    });
+    const named = stdout.split('\n').find((line) => line.startsWith('n'));
+    return named === undefined ? null : named.slice(1);
+  } catch {
+    return null;
+  }
+}
+
+/** [param path] with its links resolved, since macOS lists /var/folders as /private/var/folders. */
+function canonical(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }

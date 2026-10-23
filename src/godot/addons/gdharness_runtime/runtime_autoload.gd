@@ -80,6 +80,12 @@ const SCENE_EXTENSIONS: PackedStringArray = ["tscn", "scn", "escn", "res", "tres
 ## `EDITOR_PID_VARIABLE` in the editor addon's bridge client.
 const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
 
+## The directory the keeper holding this run reads, once the game has exited, to learn whether it
+## set a restart with OS.set_restart_on_exit. The engine starts the process it restarts into after
+## the tree has gone, and from outside that looks like a worker the game started in its last moments,
+## so only the game can say which it was. Kept in step with `EXIT_NOTES_VARIABLE` in src/keeper.ts.
+const EXIT_NOTES_VARIABLE: String = "GDHARNESS_EXIT_NOTES"
+
 ## The file the engine's error reports go to, beside the announcement and named the same way,
 ## which is where the server reads them for a run the editor plays. Kept in step with
 ## `errorReportPath` in src/runtime-client.ts.
@@ -245,8 +251,23 @@ func _ready() -> void:
 	var watched: int = get_tree().root.tree_exiting.connect(_send_the_profile)
 	if watched != OK:
 		push_error("gdharness could not watch for the game quitting: %d" % watched)
+	if not OS.get_environment(EXIT_NOTES_VARIABLE).is_empty():
+		var noted: int = get_tree().root.tree_exited.connect(_note_the_exit)
+		if noted != OK:
+			push_error("gdharness could not watch for the game's tree ending: %d" % noted)
 	_report_errors()
 	_start_server()
+
+
+## Says whether this game restarts as it exits, once the whole tree has gone, so a game's own
+## _exit_tree and every autoload's have had their say.
+func _note_the_exit() -> void:
+	var path: String = OS.get_environment(EXIT_NOTES_VARIABLE).path_join("exit-%d.json" % OS.get_process_id())
+	var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return
+	var _written: bool = file.store_string(JSON.stringify({"restart": OS.is_restart_on_exit_set()}))
+	file.close()
 
 
 func _exit_tree() -> void:
