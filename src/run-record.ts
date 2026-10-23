@@ -87,6 +87,32 @@ export interface RunRecord {
   readonly exitSignal?: string;
   /** When it ended, written beside the code by the same keeper at the same moment. */
   readonly endedAt?: number;
+  /**
+   * True when the run ended in a process its game restarted itself into, on a platform that tells a
+   * process's exit code only to its parent: the keeper saw it go and was told nothing more.
+   */
+  readonly exitNotTold?: true;
+  /**
+   * The processes that carried the run before `pid`, oldest first, each of which restarted itself
+   * into the next as it exited (`OS.set_restart_on_exit`). The run is one run to whoever started it:
+   * a game switching its renderer at the next start is the same game. `startedBy` is then the
+   * successor's own start, since that is the process it is held against.
+   */
+  readonly restartedFrom?: readonly RestartedFrom[];
+  /**
+   * When `pid` exited, written while its keeper looks for a process it restarted itself into, which
+   * takes a process listing. Without it, a server asking in that moment read a process gone with
+   * nothing recorded, and settled the run as ended with no code.
+   */
+  readonly endingAt?: number;
+}
+
+/** A process that carried a run and restarted itself into the next one. */
+export interface RestartedFrom {
+  readonly pid: number;
+  readonly exitCode?: number;
+  readonly exitSignal?: string;
+  readonly endedAt: number;
 }
 
 /** Where a run's note and its transcript are kept, beside the runtime's own announcements. */
@@ -296,17 +322,23 @@ function editorNoteAt(path: string): EditorRunNote | null {
 export function recordRunEnded(
   projectPath: string,
   pid: number,
-  ending: { readonly exitCode: number | null; readonly exitSignal: string | null },
+  ending: {
+    readonly exitCode: number | null;
+    readonly exitSignal: string | null;
+    readonly notTold?: boolean;
+  },
 ): void {
   const path = runRecordPath(projectPath);
   const record = recordAt(path);
   if (record === null || record.pid !== pid) {
     return;
   }
+  const { endingAt: _looked, ...kept } = record;
   const written = {
-    ...record,
+    ...kept,
     ...(ending.exitCode === null ? {} : { exitCode: ending.exitCode }),
     ...(ending.exitSignal === null ? {} : { exitSignal: ending.exitSignal }),
+    ...(ending.notTold === true ? { exitNotTold: true } : {}),
     endedAt: Date.now(),
   };
   // Unwritable leaves the note as it was, a run with no recorded end, which every reader handles.
@@ -402,7 +434,31 @@ function recordAt(path: string): RunRecord | null {
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
     ...(typeof fields['exitSignal'] === 'string' ? { exitSignal: fields['exitSignal'] } : {}),
     ...(typeof fields['endedAt'] === 'number' ? { endedAt: fields['endedAt'] } : {}),
+    ...(fields['exitNotTold'] === true ? { exitNotTold: true } : {}),
+    ...(Array.isArray(fields['restartedFrom'])
+      ? { restartedFrom: fields['restartedFrom'].flatMap(restartedFromAt) }
+      : {}),
+    ...(typeof fields['endingAt'] === 'number' ? { endingAt: fields['endingAt'] } : {}),
   };
+}
+
+function restartedFromAt(value: unknown): RestartedFrom[] {
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+  const fields = value as Record<string, unknown>;
+  const { pid, endedAt, exitCode, exitSignal } = fields;
+  if (typeof pid !== 'number' || typeof endedAt !== 'number') {
+    return [];
+  }
+  return [
+    {
+      pid,
+      endedAt,
+      ...(typeof exitCode === 'number' ? { exitCode } : {}),
+      ...(typeof exitSignal === 'string' ? { exitSignal } : {}),
+    },
+  ];
 }
 
 /**
@@ -736,8 +792,20 @@ export function whyNotTheRun(
       ? null
       : `the operating system named only its executable and not its command line (${running.unread ?? 'no reason given'}), which is not enough to signal it on`;
   }
-  const project = process.platform === 'win32' ? record.projectPath.toLowerCase() : record.projectPath;
-  return said.includes(project) ? null : `that process's command line does not name ${record.projectPath}`;
+  // Compared as a path where the line names one, rather than searched for as text: a game restarting
+  // itself names the project as `ProjectSettings.globalize_path` gives it, with forward slashes and
+  // one at the end on Windows, and was refused as a process of another project; and searched for, a
+  // project's path is found inside the path of every project whose name begins with it.
+  const spelt = (path: string): string => {
+    const forward = path.replaceAll('\\', '/').replace(/\/+$/, '');
+    return process.platform === 'win32' ? forward.toLowerCase() : forward;
+  };
+  const named = readCommandLine(running.text).projectPath;
+  const names =
+    named === null
+      ? spelt(said).includes(spelt(record.projectPath))
+      : spelt(named) === spelt(record.projectPath);
+  return names ? null : `that process's command line does not name ${record.projectPath}`;
 }
 
 /** Whether [param pid] is still the game that announced itself for [param projectPath]: see `judgeAnnouncedGame`. */

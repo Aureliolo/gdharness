@@ -47,6 +47,7 @@ export const REGRESSION_SECONDS: Readonly<Record<string, number>> = {
   testThePhysicsRateIsTheStepsTaken: 27,
   testAnEditorThisServerStartsIsSilentUnlessAsked: 26,
   testAReadWithNoEditorAnswersFromTheFile: 25,
+  testARunFollowsTheGamesRestart: 28,
   testWhatTheGameTellsAScreenReaderIsRead: 25,
   testAPointerOnTheHiddenDesktopIsNoted: 24,
   testTheShippedRunnerRunsAFileOfSuites: 22,

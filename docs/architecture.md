@@ -641,7 +641,21 @@ the run first, which on Windows is a PowerShell query and `tasklist`: a windowed
 software on a runner with no GPU loaded the machine until neither started in time, and the stop
 refused its own game three times in a day. The pid and that proof remain for a keeper that does not
 answer. Whatever the keeper says, the stop waits on the process itself before it calls the run
-ended. One run is one process: what the
+ended.
+
+A game that restarts itself with `OS.set_restart_on_exit` is still the same run. Once the game has
+exited, its keeper looks for the engine started again in the last two seconds of its life: on Windows
+among the processes that still name it as their parent, and on POSIX in its process group, which
+the game leads and which outlives it. The keeper writes `endingAt` into the note while it looks,
+and a server waits that out rather than settling the run as ended. When the keeper finds the
+successor, it writes it into the note in the game's place, with `restartedFrom`. It then follows
+the successor, ends it on a stop, and records its end as the run's. On Windows the exit code is
+read through a handle a PowerShell opened as it listed the process. POSIX tells only a process's
+parent its exit code, so there the run ends with `exitNotTold`. A stop that closes the game like a
+player can set off the restart itself, and then goes on to end the successor. A successor that ends
+before the keeper's listing sees it is not followed.
+
+Otherwise one run is one process: what the
 game started for itself is not signalled and the answer says so, unless the stop is asked for
 `andChildren`, and then every process under the run's, to any depth,
 that is a game of the project goes with it, listed before the run is ended because ending it is

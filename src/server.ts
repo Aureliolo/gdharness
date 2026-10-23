@@ -736,16 +736,81 @@ function describeHalt(halt: StoppedAt): string {
   }
 }
 
-/** Whether the process has exited, with a code or to a signal. */
-function exited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): boolean {
-  return run.exitCode !== null || run.exitSignal !== null;
+/**
+ * Whether the process has exited, with a code or to a signal, or with neither where the platform
+ * would not tell the keeper how a process the game restarted into ended.
+ */
+function exited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal' | 'exitNotTold'>): boolean {
+  return run.exitCode !== null || run.exitSignal !== null || run.exitNotTold === true;
 }
 
 /** How a process that has exited ended, for a sentence. */
-function howItExited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): string {
+function howItExited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal' | 'exitNotTold'>): string {
+  if (run.exitNotTold === true && run.exitCode === null && run.exitSignal === null) {
+    return `ended with an exit code this platform tells only the parent of a process the game restarted itself into`;
+  }
   return run.exitSignal === null
     ? exitCodeText(run.exitCode)
     : `ended by ${run.exitSignal}, with no exit code`;
+}
+
+/** A process that carried a run before it restarted itself, as an answer names it. */
+interface RestartNamed {
+  readonly pid: number;
+  readonly exitCode: number | null;
+  readonly exitSignal?: string;
+  readonly endedAt: string;
+}
+
+/** The processes that carried [param run] before its current one, oldest first, or undefined. */
+function restartsOf(run: GodotProcess): RestartNamed[] | undefined {
+  if (run.restartedFrom === undefined || run.restartedFrom.length === 0) {
+    return undefined;
+  }
+  return run.restartedFrom.map((one) => ({
+    pid: one.pid,
+    exitCode: one.exitCode ?? null,
+    ...(one.exitSignal === undefined ? {} : { exitSignal: one.exitSignal }),
+    endedAt: new Date(one.endedAt).toISOString(),
+  }));
+}
+
+/**
+ * Moves [param run] onto the process its game restarted itself into (`OS.set_restart_on_exit`),
+ * when the keeper holding it has written one into the run's note, and says whether it moved.
+ *
+ * The keeper finds the successor once the game has exited and follows it, so the run goes on in it:
+ * a game switching its renderer at its next start is the same run to whoever started it. Without
+ * this, the run was reported over with the first process's clean exit, and nothing could stop the
+ * successor, which once sat on a hidden desktop for hours holding a file a later export needed.
+ */
+function followTheRestart(run: GodotProcess): boolean {
+  if (run.throughEditor || run.pid === null || run.projectPath === null) {
+    return false;
+  }
+  const record = readRunRecord(run.projectPath);
+  const from = record?.restartedFrom ?? [];
+  const at = from.findIndex((one) => one.pid === run.pid);
+  if (record === null || record.startedAt !== run.startedAt || record.pid === run.pid || at === -1) {
+    return false;
+  }
+  for (const [index, one] of from.slice(at).entries()) {
+    const into = from[at + index + 1]?.pid ?? record.pid;
+    const unread =
+      process.platform === 'win32'
+        ? ` What pid ${into} prints does not reach this run's transcript, since on Windows the engine gives the process it restarts into no copy of its output.`
+        : '';
+    run.log.record(
+      'info',
+      `The game restarted itself: pid ${one.pid} ended (${howItExited({ exitCode: one.exitCode ?? null, exitSignal: one.exitSignal ?? null })}) having started pid ${into}, which carries the run on.${unread}`,
+    );
+  }
+  run.pid = record.pid;
+  run.startedBy = record.startedBy;
+  run.restartedFrom = from;
+  delete run.announcedPid;
+  delete run.gamePid;
+  return true;
 }
 
 /**
@@ -792,7 +857,7 @@ function stillRunning(run: GodotProcess | null): boolean {
   // it was started or picked up, or a bench that finished an hour ago goes on being reported as
   // running and whoever is polling for it to end never hears that it has.
   if (!run.throughEditor && run.pid !== null) {
-    return alive(run.pid);
+    return alive(run.pid) || (followTheRestart(run) && alive(run.pid));
   }
   // A played run that announced itself, asked of the operating system. The editor is the usual
   // source for these and it is not always there and not always current: it went on reporting a game
@@ -934,6 +999,13 @@ const KEEPER_DEBUG_MS = PAUSE_MS + STEP_MS + 2 * READ_MS;
  * Milliseconds in practice; bounded because every answer about the run waits on it.
  */
 const EXIT_REPORTED_WITHIN_MS = 2_000;
+
+/**
+ * How long a keeper whose game exited is given to say whether it restarted itself into another
+ * process: one process listing, which a loaded Windows machine is allowed fifteen seconds for, and
+ * the PowerShell it is asked through.
+ */
+const SUCCESSOR_SOUGHT_WITHIN_MS = 20_000;
 
 /**
  * Whether every process in [param pids] is gone, waited for up to [param withinMs].
@@ -8845,13 +8917,16 @@ class GodotServer {
     pid: number | null;
     project?: string;
     adopted?: true;
+    restartedFrom?: RestartNamed[];
     startedAt: string;
     endedAt?: string;
   } {
+    const restarts = restartsOf(run);
     return {
       pid: run.pid ?? this.announcedPidOf(run) ?? run.announcedPid ?? null,
       ...(run.throughEditor || run.projectPath === null ? {} : { project: run.projectPath }),
       ...(run.pickedUp === true ? { adopted: true as const } : {}),
+      ...(restarts === undefined ? {} : { restartedFrom: restarts }),
       startedAt: new Date(run.startedAt).toISOString(),
       ...(run.endedAt === undefined ? {} : { endedAt: new Date(run.endedAt).toISOString() }),
     };
@@ -10657,10 +10732,16 @@ class GodotServer {
               running.throughEditor || running.pid === null ? [] : [running.pid],
               project,
             );
-      if (why === null) {
+      const spawned = !running.throughEditor && running.pid !== null;
+      if (why === null && spawned) {
+        await this.untilTheExitIsRecorded(running);
+      }
+      // A game set to restart on exit restarts as it closes, and the run goes on in what it started,
+      // which is ended as a run that would not close is.
+      const restarted = why === null && spawned && !exited(running) && alive(running.pid);
+      if (why === null && !restarted) {
         running.endedThrough = 'close';
-        if (!running.throughEditor && running.pid !== null) {
-          await this.untilTheExitIsRecorded(running);
+        if (spawned) {
           clearTheRecord();
         }
         running.endedAt ??= Date.now();
@@ -10670,7 +10751,8 @@ class GodotServer {
         );
         return 'gone';
       }
-      running.notClosedBecause = why;
+      running.notClosedBecause =
+        why ?? `it restarted itself as it closed, into pid ${running.pid ?? 'unknown'}`;
     }
     if (running.throughEditor) {
       // The editor's answer read rather than thrown away: a bridge that was down, or a stop that
@@ -10834,7 +10916,12 @@ class GodotServer {
    * The keeper is already running and ends the game through the handle it holds. Whatever answers,
    * the process itself is waited on, so an answer cannot make a running game read as ended.
    */
-  private async endThroughTheKeeper(run: GodotProcess, pid: number, keeper: string): Promise<Ending | null> {
+  private async endThroughTheKeeper(
+    run: GodotProcess,
+    pid: number,
+    keeper: string,
+    again = true,
+  ): Promise<Ending | null> {
     const asked = await askTheKeeperToStop(keeper, KEEPER_ANSWER_MS);
     if (typeof asked !== 'string') {
       this.logDebug(`The keeper of pid ${pid} could not be asked to end it (${asked.unreached})`);
@@ -10846,6 +10933,14 @@ class GodotServer {
     const gone = await untilGone([pid]);
     if (gone) {
       await this.untilTheExitIsRecorded(run);
+    }
+    // Followed into a process the game restarted itself into as it went, which the keeper ends too.
+    if (gone && again && run.pid !== null && run.pid !== pid && !exited(run) && alive(run.pid)) {
+      run.log.record(
+        'info',
+        `gdharness had the keeper end pid ${pid}, which restarted itself into pid ${run.pid}.`,
+      );
+      return await this.endThroughTheKeeper(run, run.pid, keeper, false);
     }
     if (asked === 'signalled' && gone) {
       run.exitCode = null;
@@ -11016,7 +11111,12 @@ class GodotServer {
     sweepTranscripts();
     // Written by the keeper before it handed the pid back.
     const noted = readRunRecord(projectPath);
-    const keeper = noted?.pid === launched.pid ? noted.keeper : undefined;
+    // Or the note of a game that has already restarted itself, which names the keeper all the same.
+    const keeper =
+      noted?.startedAt === startedAt &&
+      (noted.pid === launched.pid || (noted.restartedFrom ?? []).some((one) => one.pid === launched.pid))
+        ? noted.keeper
+        : undefined;
     return {
       pid: launched.pid,
       log: new GameLog(),
@@ -11475,7 +11575,12 @@ class GodotServer {
             null,
           )
         : (found.find(
-            (one) => one !== null && one.pid === latest.pid && one.startedAt === latest.startedAt,
+            (one) =>
+              one !== null &&
+              one.startedAt === latest.startedAt &&
+              // Or a process that pid restarted itself into, which the keeper wrote in its place.
+              (one.pid === latest.pid ||
+                (one.restartedFrom ?? []).some((before) => before.pid === latest.pid)),
           ) ?? null);
     if (
       record === null ||
@@ -11499,6 +11604,7 @@ class GodotServer {
       throughEditor: false,
       brokeOn: null,
       pickedUp: true,
+      ...(record.restartedFrom === undefined ? {} : { restartedFrom: record.restartedFrom }),
     };
     this.drainTranscript(adopted);
     // Alive, and still the run this record describes. The second half is asked once, here, where
@@ -11511,6 +11617,7 @@ class GodotServer {
       // unknown rather than guessed at.
       adopted.exitCode = record.exitCode ?? null;
       adopted.exitSignal = record.exitSignal ?? null;
+      adopted.exitNotTold = record.exitNotTold === true;
       if (record.endedAt !== undefined) {
         adopted.endedAt = record.endedAt;
       }
@@ -12191,7 +12298,8 @@ class GodotServer {
       ) {
         run.endedUnwatched = true;
       }
-      return going;
+      // Asked again, since the wait may have followed the game into the process it restarted into.
+      return going || stillRunning(run);
     }
     const announced = this.announcedPidOf(run);
     if (announced !== undefined && !alive(announced)) {
@@ -12218,20 +12326,29 @@ class GodotServer {
    * the server that started a run and the one that picked it up answer its exit alike.
    */
   private async untilTheExitIsRecorded(run: GodotProcess): Promise<boolean> {
-    const until = Date.now() + EXIT_REPORTED_WITHIN_MS;
+    let until = Date.now() + EXIT_REPORTED_WITHIN_MS;
     for (;;) {
+      // Or the process the game restarted itself into, which carries the run on.
+      if (followTheRestart(run) && alive(run.pid)) {
+        return true;
+      }
       const record = run.projectPath === null ? null : readRunRecord(run.projectPath);
       if (
         record !== null &&
         record.pid === run.pid &&
-        (record.exitCode !== undefined || record.exitSignal !== undefined)
+        (record.exitCode !== undefined || record.exitSignal !== undefined || record.exitNotTold === true)
       ) {
         run.exitCode = record.exitCode ?? null;
         run.exitSignal = record.exitSignal ?? null;
+        run.exitNotTold = record.exitNotTold === true;
         if (record.endedAt !== undefined) {
           run.endedAt = record.endedAt;
         }
         return true;
+      }
+      // The keeper looking for a process the game restarted itself into, which takes a listing.
+      if (record !== null && record.pid === run.pid && record.endingAt !== undefined) {
+        until = Math.max(until, record.endingAt + SUCCESSOR_SOUGHT_WITHIN_MS);
       }
       if (Date.now() >= until) {
         return false;
@@ -12500,8 +12617,25 @@ class GodotServer {
     // question when a bench dies mid-measurement: one of them is this tool's doing and is on the
     // record here, and the other sends the reader to look at their own machine. Said before why
     // there is no code, since who ended it is what that sentence then leans on.
+    const restarts = run.restartedFrom ?? [];
+    if (restarts.length > 0) {
+      const chain = [...restarts.map((one) => one.pid), run.pid].join(' into ');
+      notes.push(
+        `The game restarted itself with OS.set_restart_on_exit (pid ${chain}), so the run went on in the process it started; restartedFrom says how each one before it ended, and editor_run stop ends the one carrying it.${process.platform === 'win32' ? ' On Windows the engine gives that process no copy of its output, so what it printed is not below.' : ''}`,
+      );
+    }
     if (typeof run.endedHere === 'string') {
       notes.push(`This run was ended here, by ${run.endedHere}.`);
+    } else if (
+      !stillRunning(run) &&
+      !run.throughEditor &&
+      run.exitNotTold === true &&
+      run.exitCode === null &&
+      run.exitSignal === null
+    ) {
+      notes.push(
+        `This run ended in pid ${run.pid ?? 'unknown'}, which its game restarted itself into, and this platform tells a process's exit code only to its parent, which by then was not gdharness's keeper: so it has none.`,
+      );
     } else if (!stillRunning(run) && !run.throughEditor && exited(run)) {
       // A zero exit is not one of the two silences: nothing kills a process into exiting cleanly,
       // so the game reached its own end and said so. Reported as the same open question it used to
@@ -12590,6 +12724,8 @@ class GodotServer {
       // run that ended while nothing was watching printed everything below and then stopped
       // being there, and no exit code was collected because nobody was waiting on it.
       endedUnwatched: run.endedUnwatched === true ? true : undefined,
+      exitNotTold: run.exitNotTold === true ? true : undefined,
+      restartedFrom: restartsOf(run),
       // What ended it, when that was this server. Null says the run was not ended here, which is
       // an answer rather than the absence of one.
       endedBy: stillRunning(run) ? undefined : (run.endedHere ?? null),
@@ -12687,6 +12823,9 @@ class GodotServer {
       readBoolean(args, 'graceful') !== false,
     );
     const refused = ending === 'refused' || ending === 'unreached';
+    // The process the run was in when it ended, which is another than the one it was in before the
+    // stop when the game restarted itself as it closed.
+    const endedIn = stopped.throughEditor ? endedPid : (stopped.pid ?? endedPid);
     // Nothing under a pid that is not the run's is the run's to end either.
     const ended = children === null || refused ? null : endChildrenAmong(children);
     // The announcement of the game just ended goes with it, here rather than on the next sweep,
@@ -12697,7 +12836,7 @@ class GodotServer {
     // with it. Measured: the child was listed under the wrapper and gone two seconds after the
     // wrapper was killed.
     if (wasRunning && !refused) {
-      for (const pid of new Set([endedPid, announcedPid])) {
+      for (const pid of new Set([endedPid, endedIn, announcedPid])) {
         if (pid !== null) {
           await announcementEnded(pid);
         }
@@ -12706,7 +12845,7 @@ class GodotServer {
     const verdict = stopVerdict({
       wasRunning,
       ending,
-      endedPid,
+      endedPid: endedIn,
       throughEditor: stopped.throughEditor,
       exitSignal: stopped.exitSignal,
       clean: cleanVerdict(stopped),

@@ -1,0 +1,220 @@
+import { basename } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { alive } from './alive.js';
+import { readCommandLine } from './process-children.js';
+import { runHidden, spawnHidden } from './spawn.js';
+
+/**
+ * The process a game restarts itself into with `OS.set_restart_on_exit`, found and followed by the
+ * keeper holding the run once the game has exited, since nothing says beforehand that it will.
+ *
+ * The run is one run to whoever started it: a game switching its renderer at its next start is the
+ * same game. Left untracked, the successor was reported as a run over with a clean exit, and no stop
+ * could reach it.
+ */
+
+/**
+ * How long before a game's exit the process it restarts itself into is started. The engine starts it
+ * near the end of its teardown, once the scene tree is gone: measured on 4.7.2 at 51ms before the exit
+ * reached the game's parent. The rest is room for a loaded machine. A worker the game started for
+ * itself is older than this, unless the game started it in its last moments, and then it is one of
+ * two candidates and neither is taken.
+ */
+export const RESTARTED_WITHIN_MS = 2000;
+
+/** Long enough for the operating system to list a process's children on a machine that is busy. */
+const LIST_WITHIN_MS = 15_000;
+
+/** How often the end of a successor is looked for where nothing can wait on it. */
+const POLL_MS = 250;
+
+/** A process listed as a candidate for the one a game restarted itself into. */
+export interface ListedSuccessor {
+  readonly pid: number;
+  /** When it started, in milliseconds. To the second on POSIX, where `ps` lists no finer. */
+  readonly startedAt: number;
+  readonly command: string;
+}
+
+/** A successor found, and how it ended: its exit code where the platform tells one, null otherwise. */
+export interface Followed {
+  readonly successor: ListedSuccessor;
+  readonly ended: Promise<{ readonly code: number | null }>;
+}
+
+/**
+ * The one process in [param listed] that [param exitedPid] restarted itself into as it exited, or
+ * null when there is not exactly one: the engine [param engine] run again, started after
+ * [param notBefore] (before the exited process existed, a number its orphans kept is not a link to
+ * it) and no earlier than [param RESTARTED_WITHIN_MS] before [param exitedAt]. [param secondsOnly]
+ * for a listing whose starts are cut to the second.
+ */
+export function successorAmong(
+  listed: readonly ListedSuccessor[],
+  exitedPid: number,
+  engine: string,
+  notBefore: number,
+  exitedAt: number,
+  secondsOnly: boolean,
+): ListedSuccessor | null {
+  const slack = secondsOnly ? 1000 : 0;
+  const fold = (name: string): string => (process.platform === 'win32' ? name.toLowerCase() : name);
+  const wanted = fold(basename(engine.replaceAll('\\', '/')));
+  const found = listed.filter(
+    (one) =>
+      one.pid !== exitedPid &&
+      fold(readCommandLine(one.command).executable) === wanted &&
+      one.startedAt + slack >= notBefore &&
+      one.startedAt + slack >= exitedAt - RESTARTED_WITHIN_MS,
+  );
+  return found.length === 1 ? (found[0] ?? null) : null;
+}
+
+/**
+ * The process [param exitedPid], a game of [param engine] started no earlier than
+ * [param notBefore], restarted itself into as it exited at [param exitedAt], followed until it ends;
+ * or null when it restarted into none, or the platform would not list its processes.
+ *
+ * On Windows the successor still names the exited process as its parent, and Windows tells an exit
+ * code to whoever holds a handle to the process. So one PowerShell lists the children and opens a
+ * handle to each as it lists it, which also keeps their numbers from going to anything else, then
+ * waits on the one chosen. Opened only once each process's start matches the one listed, since a
+ * number can be handed on between the two. A successor that a separate process opened afterwards
+ * had often gone by then, and its code with it.
+ *
+ * On POSIX it is handed to init as its parent goes, but stays in the process group it was started
+ * in, which is the game's own: the game is started as the leader of a group of its own, and a
+ * group's number is not handed out again while anything is in it. Only the parent is told an exit
+ * code there, and that is init by now, so it is watched until it has gone.
+ */
+export async function followSuccessor(
+  exitedPid: number,
+  engine: string,
+  notBefore: number,
+  exitedAt: number,
+): Promise<Followed | null> {
+  return process.platform === 'win32'
+    ? await followOnWindows(exitedPid, engine, notBefore, exitedAt)
+    : await followOnPosix(exitedPid, engine, notBefore, exitedAt);
+}
+
+async function followOnWindows(
+  exitedPid: number,
+  engine: string,
+  notBefore: number,
+  exitedAt: number,
+): Promise<Followed | null> {
+  const script = [
+    '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
+    '$held = @{}',
+    `foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=${exitedPid}" -Property ProcessId,CreationDate,CommandLine)) {`,
+    '  if (-not $c.CreationDate) { continue }',
+    '  $began = ([DateTimeOffset]$c.CreationDate).ToUnixTimeMilliseconds()',
+    '  $p = Get-Process -Id $c.ProcessId -ErrorAction SilentlyContinue',
+    '  if ($null -eq $p -or [Math]::Abs(([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds() - $began) -gt 1000) { continue }',
+    // Asked for now, or the handle the exit code is read through is not kept.
+    '  $null = $p.Handle',
+    '  $held[[int]$c.ProcessId] = $p',
+    '  "$($c.ProcessId) $began $($c.CommandLine)"',
+    '}',
+    "'listed'",
+    '$chosen = [Console]::In.ReadLine()',
+    "if ($chosen -and $held.ContainsKey([int]$chosen)) { $p = $held[[int]$chosen]; $p.WaitForExit(); 'exit ' + $p.ExitCode }",
+  ].join('\n');
+  const holder = spawnHidden(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64'),
+    ],
+    { stdio: ['pipe', 'pipe', 'ignore'] },
+  );
+  let said = '';
+  const closed = new Promise<void>((resolve) => {
+    holder.once('close', () => {
+      resolve();
+    });
+    holder.once('error', () => {
+      resolve();
+    });
+  });
+  const listed = await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      resolve(false);
+    }, LIST_WITHIN_MS);
+    holder.stdout.on('data', (chunk: Buffer) => {
+      said += chunk.toString('utf8');
+      if (/^listed\r?$/m.test(said)) {
+        clearTimeout(timer);
+        resolve(true);
+      }
+    });
+    void closed.then(() => {
+      clearTimeout(timer);
+      resolve(/^listed\r?$/m.test(said));
+    });
+  });
+  if (!listed) {
+    holder.kill();
+    return null;
+  }
+  const candidates: ListedSuccessor[] = [];
+  for (const line of said.split(/\r?\n/)) {
+    const fields = /^(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (fields?.[1] !== undefined && fields[2] !== undefined && fields[3] !== undefined) {
+      candidates.push({ pid: Number(fields[1]), startedAt: Number(fields[2]), command: fields[3].trim() });
+    }
+  }
+  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, false);
+  holder.stdin.end(successor === null ? '\n' : `${String(successor.pid)}\n`);
+  if (successor === null) {
+    return null;
+  }
+  const ended = closed.then(() => {
+    const told = /^exit (-?\d+)\r?$/m.exec(said);
+    return { code: told?.[1] === undefined ? null : Number(told[1]) };
+  });
+  return { successor, ended };
+}
+
+async function followOnPosix(
+  exitedPid: number,
+  engine: string,
+  notBefore: number,
+  exitedAt: number,
+): Promise<Followed | null> {
+  let printed: string;
+  try {
+    // In the C locale, since lstart is a date in words and the words are the ones Date.parse reads.
+    ({ stdout: printed } = await runHidden('ps', ['-e', '-o', 'pid=,pgid=,lstart=,args='], {
+      timeout: LIST_WITHIN_MS,
+      maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, LC_ALL: 'C' },
+    }));
+  } catch {
+    return null;
+  }
+  const candidates: ListedSuccessor[] = [];
+  for (const line of printed.split('\n')) {
+    const fields = /^\s*(\d+)\s+(\d+)\s+(\w+\s+\w+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/.exec(line);
+    const startedAt = Date.parse(fields?.[3] ?? '');
+    if (fields?.[1] !== undefined && Number(fields[2]) === exitedPid && !Number.isNaN(startedAt)) {
+      candidates.push({ pid: Number(fields[1]), startedAt, command: (fields[4] ?? '').trim() });
+    }
+  }
+  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, true);
+  if (successor === null) {
+    return null;
+  }
+  const ended = (async () => {
+    while (alive(successor.pid)) {
+      await delay(POLL_MS);
+    }
+    return { code: null };
+  })();
+  return { successor, ended };
+}

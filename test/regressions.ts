@@ -339,6 +339,7 @@ import {
   spawnShown,
   spawnSyncHidden,
 } from '../src/spawn.js';
+import { RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import { SuiteFingerprints } from '../src/suite-fingerprint.js';
 import { exitNamed, funcOf, judgeEngine, readRun, secondsOf } from '../src/suite-judge.js';
 import {
@@ -12414,6 +12415,22 @@ function testAGamesOwnArgumentsDoNotMakeItAnEditor(): void {
   assert.equal(judgeRun(record, line(' -e'), 'confirmed'), false, 'the engine given -e is the editor');
   assert.equal(judgeRun(record, line(' --editor -- x'), 'confirmed'), false, 'before the separator too');
 
+  // The project as a path rather than as text: as globalize_path spells it, which is how a game that
+  // restarts itself names it, and not a project whose name merely begins with this one's.
+  const named = (path: string) =>
+    ({ kind: 'commandLine', text: `${record.command} --path ${path}` }) as const;
+  const forward = `${project.replaceAll('\\', '/')}/`;
+  assert.equal(judgeRun(record, named(forward), 'confirmed'), true, `${forward} is the project`);
+  if (process.platform === 'win32') {
+    assert.equal(judgeRun(record, named(forward.toUpperCase()), 'confirmed'), true, 'in any case on Windows');
+  }
+  assert.equal(judgeRun(record, named(`${project}-other`), 'confirmed'), false, 'a project beside it is not');
+  assert.equal(
+    judgeRun(record, { kind: 'commandLine', text: `${record.command} ${project}` }, 'confirmed'),
+    true,
+    'a line without --path is still searched',
+  );
+
   // The same reading where a command line is taken apart rather than searched.
   assert.equal(
     readCommandLine(`godot --path ${project} -- -e`).editor,
@@ -12900,6 +12917,381 @@ async function testARunOutlivesItsServersTree(): Promise<void> {
   } finally {
     if (game > 0 && isAlive(game)) {
       process.kill(game);
+    }
+    await first.stop().catch(() => undefined);
+    await second?.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
+ * The process a game restarts itself into is picked out by when it started and what it runs.
+ *
+ * `OS.set_restart_on_exit` has the engine start itself again at the end of its teardown, so the
+ * successor starts moments before its parent exits; a worker the game started earlier is not it,
+ * nor a process of another executable, nor an orphan of an earlier holder of the number, which
+ * started before the game existed. Two candidates are one too many to choose between. On POSIX the
+ * listing gives starts to the second, cut down, so a successor listed up to a second early is kept.
+ */
+function testASuccessorIsTheEngineStartedAsTheGameExited(): void {
+  const engine = process.platform === 'win32' ? 'C:\\Godot\\Godot_v4.exe' : '/opt/godot/godot';
+  const run = (rest: string): string =>
+    process.platform === 'win32' ? `"C:\\Godot\\Godot_v4.exe" ${rest}` : `/opt/godot/godot ${rest}`;
+  const exitedAt = 1_000_000;
+  const notBefore = 900_000;
+  const restarted = { pid: 22, startedAt: exitedAt - 50, command: run('--path /p -- --restarted') };
+  const worker = { pid: 23, startedAt: exitedAt - 30_000, command: run('--path /p -- --worker') };
+  const other = { pid: 24, startedAt: exitedAt - 40, command: 'node helper.js' };
+  const orphan = { pid: 25, startedAt: notBefore - 5, command: run('--path /p') };
+  assert.deepEqual(
+    successorAmong([worker, restarted, other, orphan], 11, engine, notBefore, exitedAt, false),
+    restarted,
+    'the engine started as the game exited',
+  );
+  assert.equal(
+    successorAmong([worker, other], 11, engine, notBefore, exitedAt, false),
+    null,
+    'a worker started long before the exit is not the successor',
+  );
+  const late = { ...worker, startedAt: exitedAt - RESTARTED_WITHIN_MS };
+  assert.deepEqual(
+    successorAmong([late], 11, engine, notBefore, exitedAt, false),
+    late,
+    'the edge of the window',
+  );
+  assert.equal(
+    successorAmong([{ ...late, startedAt: late.startedAt - 1 }], 11, engine, notBefore, exitedAt, false),
+    null,
+    'and one before it',
+  );
+  const close = { ...orphan, startedAt: exitedAt - 10 };
+  assert.equal(
+    successorAmong([{ ...close, startedAt: notBefore - 1 }], 11, engine, notBefore, notBefore + 100, false),
+    null,
+    'a process older than the game is no successor of it, however near its exit',
+  );
+  assert.equal(
+    successorAmong([restarted, { ...restarted, pid: 26 }], 11, engine, notBefore, exitedAt, false),
+    null,
+    'two candidates are not chosen between',
+  );
+  assert.equal(
+    successorAmong([{ ...restarted, pid: 11 }], 11, engine, notBefore, exitedAt, false),
+    null,
+    'the exited process is not its own successor',
+  );
+  const cut = { ...restarted, startedAt: exitedAt - RESTARTED_WITHIN_MS - 900 };
+  assert.equal(successorAmong([cut], 11, engine, notBefore, exitedAt, false), null, 'to the millisecond');
+  assert.deepEqual(
+    successorAmong([cut], 11, engine, notBefore, exitedAt, true),
+    cut,
+    'and a second of slack where starts are cut to the second',
+  );
+}
+
+/**
+ * A game that restarts itself with `OS.set_restart_on_exit` stays one run, which a stop ends.
+ *
+ * The keeper saw the first process exit 0 and recorded the run as over, cleanly. The process it had
+ * restarted into went on untracked: `editor_run stop` answered that the run was over before the
+ * stop, `andChildren` listed nothing, and one such successor sat on a hidden desktop for hours
+ * holding a file a later export needed. The keeper now follows the successor: the run reads as going
+ * in it, a replacement server picks it up there, a stop ends it, and an end of its own is the run's
+ * end, with its exit code where the platform tells the keeper one.
+ */
+async function testARunFollowsTheGamesRestart(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('restarted run regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-runtime-'));
+  const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
+  const first = new ServerProcess({ env });
+  let second: ServerProcess | null = null;
+  const successors: number[] = [];
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Restarts"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tif "--restarted" in OS.get_cmdline_user_args():',
+        '\t\tprint("the successor is up")',
+        '\t\tvar mark := FileAccess.open("res://successor_pid", FileAccess.WRITE)',
+        '\t\tmark.store_string(str(OS.get_process_id()))',
+        '\t\tmark.close()',
+        '\t\treturn',
+        '\tprint("the first process restarts")',
+        '\tvar again: PackedStringArray = [',
+        '\t\t"--headless", "--path", ProjectSettings.globalize_path("res://"), "--", "--restarted"',
+        '\t]',
+        '\tOS.set_restart_on_exit(true, again)',
+        '\tif FileAccess.file_exists("res://restart_on_close"):',
+        '\t\treturn',
+        '\tget_tree().quit.call_deferred()',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\tif FileAccess.file_exists("res://quit_now"):',
+        '\t\tget_tree().quit(5)',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    const mark = join(project, 'successor_pid');
+    const start = async (server: ServerProcess): Promise<{ first: number; successor: number }> => {
+      rmSync(mark, { force: true });
+      const started = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      const firstPid = asNumber(get(started, 'pid'));
+      for (let waited = 0; waited < 30_000 && !existsSync(mark); waited += 250) {
+        await delay(250);
+      }
+      assert.ok(existsSync(mark), `the game should have restarted itself: ${JSON.stringify(started)}`);
+      await delay(250);
+      const successor = Number(readFileSync(mark, 'utf8'));
+      successors.push(successor);
+      assert.notEqual(successor, firstPid, 'into another process');
+      return { first: firstPid, successor };
+    };
+    const output = async (server: ServerProcess): Promise<{ answer: unknown; said: string }> => {
+      const read = await server.request('tools/call', { name: 'editor_output', arguments: {} });
+      return { answer: parseTextContent(read), said: textOf(read) ?? '' };
+    };
+
+    await first.initialize('regression-test');
+    const one = await start(first);
+    const going = await output(first);
+    assert.equal(get(going.answer, 'running'), true, `the run goes on in the successor: ${going.said}`);
+    assert.equal(get(going.answer, 'pid'), one.successor, going.said);
+    assert.deepEqual(
+      asArray(get(going.answer, 'restartedFrom')).map((before) => [
+        get(before, 'pid'),
+        get(before, 'exitCode'),
+      ]),
+      [[one.first, 0]],
+      `naming the first process and its clean exit: ${going.said}`,
+    );
+    assert.match(
+      text(get(going.answer, 'note')),
+      new RegExp(
+        `restarted itself with OS\\.set_restart_on_exit \\(pid ${String(one.first)} into ${String(one.successor)}\\)`,
+      ),
+      going.said,
+    );
+    const printed = asArray(get(going.answer, 'entries')).map((entry) => text(get(entry, 'text')));
+    assert.ok(
+      printed.some((line) => line.includes('the first process restarts')),
+      `the first process's lines are read: ${going.said}`,
+    );
+    if (process.platform === 'win32') {
+      assert.ok(
+        !printed.some((line) => line.includes('the successor is up')),
+        `and on Windows none of the successor's, as the note says: ${going.said}`,
+      );
+    } else {
+      console.log(
+        `restarted run: the successor's line ${printed.some((line) => line.includes('the successor is up')) ? 'reached' : 'did not reach'} the transcript on ${process.platform}`,
+      );
+    }
+    const status = parseTextContent(
+      await first.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(get(status, 'game', 'processActive'), true, JSON.stringify(status));
+    assert.equal(get(status, 'game', 'run', 'pid'), one.successor, JSON.stringify(status));
+    assert.equal(get(status, 'game', 'run', 'restartedFrom', 0, 'pid'), one.first, JSON.stringify(status));
+
+    // A replacement server picks the run up in the successor and ends it there.
+    await first.stop();
+    second = new ServerProcess({ env });
+    await second.initialize('regression-test');
+    const picked = await output(second);
+    assert.equal(get(picked.answer, 'running'), true, `picked up going: ${picked.said}`);
+    assert.equal(get(picked.answer, 'pid'), one.successor, picked.said);
+    const stopped = parseTextContent(
+      await second.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop', graceful: false } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(
+      get(stopped, 'endedPid'),
+      one.successor,
+      `the stop ends the successor: ${JSON.stringify(stopped)}`,
+    );
+    assert.notEqual(get(stopped, 'exitedBeforeStop'), true, JSON.stringify(stopped));
+    for (let waited = 0; waited < 10_000 && isAlive(one.successor); waited += 250) {
+      await delay(250);
+    }
+    assert.equal(isAlive(one.successor), false, `pid ${String(one.successor)} should be gone after the stop`);
+
+    // An end of the successor's own is the run's end.
+    // Once the run is in the successor: a successor gone before the keeper's listing saw it is not
+    // followed, and the run then ends with the first process's exit.
+    const two = await start(second);
+    let carried = await output(second);
+    for (let waited = 0; waited < 30_000 && get(carried.answer, 'pid') !== two.successor; waited += 250) {
+      await delay(250);
+      carried = await output(second);
+    }
+    assert.equal(get(carried.answer, 'pid'), two.successor, carried.said);
+    writeFileSync(join(project, 'quit_now'), '');
+    let ended = await output(second);
+    for (let waited = 0; waited < 30_000 && get(ended.answer, 'running') !== false; waited += 500) {
+      await delay(500);
+      ended = await output(second);
+    }
+    assert.equal(get(ended.answer, 'running'), false, `the run ends with its successor: ${ended.said}`);
+    assert.equal(isAlive(two.successor), false, ended.said);
+    if (process.platform === 'win32') {
+      assert.equal(get(ended.answer, 'exitCode'), 5, `with the successor's own exit code: ${ended.said}`);
+      assert.match(
+        text(get(ended.answer, 'note')),
+        /quit on its own|Nothing here ended this run/,
+        ended.said,
+      );
+    } else {
+      assert.equal(get(ended.answer, 'exitNotTold'), true, ended.said);
+      assert.match(
+        text(get(ended.answer, 'note')),
+        /this platform tells a process's exit code only to its parent/,
+        ended.said,
+      );
+    }
+    assert.equal(get(ended.answer, 'endedUnwatched'), undefined, ended.said);
+
+    // A game that restarts as it is asked to close, as a stop asks first: the close starts the
+    // successor, and the stop goes on to end that.
+    rmSync(join(project, 'quit_now'), { force: true });
+    rmSync(mark, { force: true });
+    writeFileSync(join(project, 'restart_on_close'), '');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Restarts"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    const closing = parseTextContent(
+      await second.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(closing, 'runtime', 'listening'), true, JSON.stringify(closing));
+    const closedFirst = asNumber(get(closing, 'pid'));
+    const closed = parseTextContent(
+      await second.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    // The keeper can end the successor before its script has run, so its mark is not required;
+    // a successor that lived long enough to write one must be the process the stop ended.
+    const closedSuccessor = asNumber(get(closed, 'endedPid'));
+    successors.push(closedSuccessor);
+    assert.notEqual(
+      closedSuccessor,
+      closedFirst,
+      `the stop ended the process the close restarted it into: ${JSON.stringify(closed)}`,
+    );
+    assert.equal(isAlive(closedFirst), false, JSON.stringify(closed));
+    assert.equal(get(closed, 'stopped'), true, JSON.stringify(closed));
+    for (let waited = 0; waited < 10_000 && isAlive(closedSuccessor); waited += 250) {
+      await delay(250);
+    }
+    assert.equal(isAlive(closedSuccessor), false, `pid ${String(closedSuccessor)} should be gone`);
+    await delay(5000);
+    if (existsSync(mark)) {
+      const marked = Number(readFileSync(mark, 'utf8'));
+      successors.push(marked);
+      assert.equal(
+        marked,
+        closedSuccessor,
+        `the successor that ran is the one ended: ${JSON.stringify(closed)}`,
+      );
+      assert.equal(isAlive(marked), false, `pid ${String(marked)} should be gone`);
+    }
+    assert.match(
+      text(get(closed, 'note')),
+      /restarted itself as it closed/,
+      `the answer says why the close did not end it: ${JSON.stringify(closed)}`,
+    );
+
+    // Ended without the close: whatever the engine makes of the keeper's signal, nothing of the
+    // run is left. Where a signal ends the engine at once there is no restart; where the engine
+    // treats it as a quit, it restarts, and the stop ends that too.
+    rmSync(mark, { force: true });
+    const killing = parseTextContent(
+      await second.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(killing, 'runtime', 'listening'), true, JSON.stringify(killing));
+    const killed = parseTextContent(
+      await second.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop', graceful: false } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(killed, 'stopped'), true, JSON.stringify(killed));
+    await delay(3_000);
+    const restartedAnyway = existsSync(mark) ? Number(readFileSync(mark, 'utf8')) : null;
+    if (restartedAnyway !== null) {
+      successors.push(restartedAnyway);
+    }
+    assert.ok(
+      restartedAnyway === null || !isAlive(restartedAnyway),
+      `nothing of the run is left after the stop: ${JSON.stringify(killed)}`,
+    );
+  } finally {
+    for (const pid of successors) {
+      if (isAlive(pid)) {
+        process.kill(pid);
+      }
     }
     await first.stop().catch(() => undefined);
     await second?.stop();
@@ -36180,6 +36572,81 @@ async function testARecordedEndingIsReadBack(): Promise<void> {
 }
 
 /**
+ * A run whose keeper is still looking for the process its game restarted itself into is waited for.
+ *
+ * The keeper writes `endingAt` as the game exits and then lists processes, which a loaded Windows
+ * machine is allowed fifteen seconds for. A server asking meanwhile met a process gone with nothing
+ * recorded, waited the two seconds an exit takes to be written, and settled the run as ended with no
+ * code while the successor carried it on. Here the keeper's answer comes three seconds after the
+ * exit, which is past those two.
+ */
+async function testARestartBeingLookedForIsWaitedFor(): Promise<void> {
+  const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-sought-'));
+  const project = join(runtimeDir, 'project');
+  const successor = spawnHidden(
+    process.execPath,
+    ['-e', 'setInterval(() => {}, 1000)', '--', '--path', project],
+    {
+      stdio: 'ignore',
+    },
+  );
+  try {
+    const pid = successor.pid ?? 0;
+    assert.ok(pid > 0, 'the stand-in successor should have started');
+    const began = (await startTimesOf([pid])).get(pid);
+    assert.ok(began !== undefined, 'the platform should date the stand-in successor');
+    const runs = join(runtimeDir, 'runs');
+    mkdirSync(runs, { recursive: true });
+    const transcript = join(runs, 'run-1.log');
+    writeFileSync(transcript, 'the first process restarts\n');
+    const startedAt = Date.now() - 10_000;
+    const note = {
+      pid: ended.pid,
+      transcript,
+      startedAt,
+      startedBy: startedAt,
+      projectPath: project,
+      arguments: ['--headless', '--path', project],
+      command: process.execPath,
+    };
+    const where = runRecordPath(project, runtimeDir);
+    const exitedAt = Date.now();
+    writeFileSync(where, JSON.stringify({ ...note, endingAt: exitedAt }), 'utf8');
+    await withStdioServer(
+      async (call) => {
+        const answered = delay(3_000).then(() => {
+          writeFileSync(
+            where,
+            JSON.stringify({
+              ...note,
+              pid,
+              startedBy: began,
+              restartedFrom: [{ pid: ended.pid, exitCode: 0, endedAt: exitedAt }],
+            }),
+            'utf8',
+          );
+        });
+        const output: unknown = jsonOf(await call('editor_output', {}), 'editor_output');
+        await answered;
+        assert.equal(
+          get(output, 'running'),
+          true,
+          `waited for the keeper's answer: ${JSON.stringify(output)}`,
+        );
+        assert.equal(get(output, 'pid'), pid, JSON.stringify(output));
+        assert.equal(get(output, 'endedUnwatched'), undefined, JSON.stringify(output));
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    );
+  } finally {
+    successor.kill();
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A run whose server went away is answered with what it printed, not with "No game is running".
  *
  * The MCP server reconnects on its own schedule. A run that lives in that process goes with it: a
@@ -56435,6 +56902,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,
   testARunOutlivesItsServersTree,
+  testASuccessorIsTheEngineStartedAsTheGameExited,
+  testARunFollowsTheGamesRestart,
   testAnotherProjectsRunLeavesOursStoppable,
   testAGameNoNoteNamesIsStoppedByItsNumber,
   testARunsEnvironmentStaysOffCommandLines,
@@ -56653,6 +57122,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheRunAdoptedIsTheLatestStarted,
   testAPickedUpRunKeepsItsProfile,
   testARecordedEndingIsReadBack,
+  testARestartBeingLookedForIsWaitedFor,
   testARuntimeCallAfterOurRunEndedSaysSo,
   testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,

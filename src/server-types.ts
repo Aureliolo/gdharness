@@ -1,6 +1,6 @@
 import type { McpServer, Tool } from '@modelcontextprotocol/server';
 import type { GameLog } from './game-log.js';
-import type { EditorPlay } from './run-record.js';
+import type { EditorPlay, RestartedFrom } from './run-record.js';
 import type { ChildProcess } from './spawn.js';
 
 /** How a stop or a start ended a run: see `GodotProcess.endedThrough`. */
@@ -105,6 +105,16 @@ export interface GodotProcess {
    * finished its work. `endedWithoutACode` says which of the two it was.
    */
   endedUnwatched?: boolean;
+  /**
+   * True for a run that ended in a process its game restarted itself into, on a platform that tells
+   * an exit code only to a process's parent: the keeper saw it go and was told nothing more.
+   */
+  exitNotTold?: boolean;
+  /**
+   * The processes that carried a spawned run before `pid`, oldest first, each of which restarted
+   * itself into the next (`OS.set_restart_on_exit`), as the keeper wrote them into the run's note.
+   */
+  restartedFrom?: readonly RestartedFrom[];
   /**
    * Read back from the note another server left rather than started by this one, which is what
    * `endedWithoutACode` needs to say whose the missing exit code was.
