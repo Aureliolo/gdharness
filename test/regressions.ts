@@ -14294,6 +14294,15 @@ async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
   // out; and the stack it holds now, [0] where no script runs.
   let stops: SentValue[][] = [];
   let now: SentValue[] = [0];
+  // The addon's last line in a frame, found by its text: a continue with a breakpoint there stops on
+  // it, unless the frame stops short of it on one of these first.
+  const frameEnd =
+    readFileSync('src/godot/addons/gdharness_runtime/runtime_autoload.gd', 'utf8')
+      .split('\n')
+      .findIndex((line) => line.includes('if what == NOTIFICATION_WM_CLOSE_REQUEST')) + 1;
+  assert.ok(frameEnd > 0, 'the runtime addon has its frame end');
+  const armed = new Set<string>();
+  let short: SentValue[][] = [];
   let accepted: () => void = () => undefined;
   const taken = new Promise<void>((resolve) => {
     accepted = resolve;
@@ -14323,8 +14332,24 @@ async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
           game.write(framedCommand('debug_enter', [true, '', now.length > 1]));
         } else if (received.message === 'get_stack_dump') {
           game.write(framedCommand('stack_dump', now));
+        } else if (received.message === 'breakpoint') {
+          const [script, line, set] = received.data;
+          const where = `${typeof script === 'string' ? script : ''}:${String(Number(line))}`;
+          moved.push(`${set === true ? 'set' : 'clear'} ${String(Number(line))}`);
+          if (set === true) {
+            armed.add(where);
+          } else {
+            armed.delete(where);
+          }
+        } else if (received.message === 'scene:inspect_object') {
+          game.write(framedCommand('scene:inspect_object', []));
         } else if (received.message === 'continue') {
           game.write(framedCommand('debug_exit', []));
+          if (armed.has(`${addon}:${String(frameEnd)}`)) {
+            moved.push('continue');
+            now = short.shift() ?? [3, addon, frameEnd, '_notification'];
+            game.write(framedCommand('debug_enter', [true, '', true]));
+          }
         }
       }
     });
@@ -14332,10 +14357,9 @@ async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
     const top = (answer: unknown): string =>
       `${text(get(answer, 'stack', 0, 'script'))}:${String(get(answer, 'stack', 0, 'line'))}`;
 
-    // Caught in the addon partway through its frame, then stepped through the rest of it.
+    // Caught in the addon partway through its frame, let go to the end of it, then stepped once.
     stops = [
       [6, addon, 677, 'note_frame', addon, 364, '_process'],
-      [3, addon, 365, '_process'],
       [3, 'res://main.gd', 7, '_process'],
     ];
     const paused = await peer.ask({ op: 'pause' });
@@ -14344,22 +14368,70 @@ async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
       'res://main.gd:7',
       `the pause shows the game's own line: ${JSON.stringify(paused)}`,
     );
-    assert.deepEqual(moved, ['break', 'step', 'step'], 'stepped on through the addon to get there');
+    assert.deepEqual(
+      moved,
+      ['break', `set ${String(frameEnd)}`, 'continue', `clear ${String(frameEnd)}`, 'step'],
+      'let go to the frame end and stepped from there',
+    );
     assert.equal(get(paused, 'note'), undefined, JSON.stringify(paused));
     await peer.ask({ op: 'resume', how: 'continue' });
 
-    // A game with no script of its own each frame is stepped through the addon until the budget goes.
+    // Caught at the frame end itself, which is outside _process: a step is all it takes.
+    moved.length = 0;
+    stops = [
+      [3, addon, frameEnd, '_notification'],
+      [3, 'res://main.gd', 7, '_process'],
+    ];
+    assert.equal(top(await peer.ask({ op: 'pause' })), 'res://main.gd:7');
+    assert.deepEqual(moved, ['break', 'step'], 'stepped from the frame end');
+    await peer.ask({ op: 'resume', how: 'continue' });
+
+    // A breakpoint in what the frame runs stops it short of the end, and that is where it is held.
     moved.length = 0;
     stops = [[3, addon, 362, '_process']];
+    short = [[6, 'res://main.gd', 11, 'add', addon, 380, '_process']];
+    const held = await peer.ask({ op: 'pause' });
+    assert.equal(top(held), 'res://main.gd:11', JSON.stringify(held));
+    assert.deepEqual(
+      moved,
+      ['break', `set ${String(frameEnd)}`, 'continue', `clear ${String(frameEnd)}`],
+      'not stepped on from where it stopped short',
+    );
+    assert.equal(get(held, 'note'), undefined, JSON.stringify(held));
+    await peer.ask({ op: 'resume', how: 'continue' });
+
+    // A caller's own breakpoint on that line is left where it is.
+    assert.equal(
+      get(await peer.ask({ op: 'breakpoint', script: addon, line: frameEnd, set: true }), 'sent'),
+      true,
+    );
+    moved.length = 0;
+    stops = [
+      [3, addon, 362, '_process'],
+      [3, 'res://main.gd', 7, '_process'],
+    ];
+    assert.equal(top(await peer.ask({ op: 'pause' })), 'res://main.gd:7');
+    assert.deepEqual(moved, ['break', 'continue', 'step'], 'the caller keeps their breakpoint');
+    await peer.ask({ op: 'breakpoint', script: addon, line: frameEnd, set: false });
+    await peer.ask({ op: 'resume', how: 'continue' });
+
+    // A game with no script of its own each frame is taken through a few of the addon's frames: the
+    // break and every step from the frame end land at the start of the next.
+    moved.length = 0;
+    stops = Array.from({ length: 6 }, () => [3, addon, 362, '_process']);
     const idle = await peer.ask({ op: 'pause' });
     assert.equal(top(idle), `${addon}:362`, JSON.stringify(idle));
-    assert.match(
-      text(get(idle, 'note')),
-      /^The game is held in gdharness's runtime addon, whose _process runs first in every frame: 5s of stepping reached no line of the game's own script/,
+    assert.equal(
+      get(idle, 'note'),
+      "The game is held in gdharness's runtime addon, whose _process runs first in every frame: 5 frames went by without a line of the game's own script, so it runs none from frame to frame. A breakpoint in the game's script stops it there.",
       JSON.stringify(idle),
     );
     assert.equal(get(idle, 'paused'), true, JSON.stringify(idle));
-    assert.ok(moved.length > 2 && moved.slice(1).every((one) => one === 'step'), moved.join(', '));
+    assert.deepEqual(
+      [moved.filter((one) => one === 'continue').length, moved.filter((one) => one === 'step').length],
+      [5, 5],
+      moved.join(', '),
+    );
     await peer.ask({ op: 'resume', how: 'continue' });
 
     // Held where no script runs, by a pause the game took on its own time: a step over goes in.
@@ -17256,7 +17328,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 46, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 47, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -47715,6 +47787,331 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
 }
 
 /**
+ * A script that fails to compile against a class the editor holds behind its file has that class
+ * reloaded first, and is tried again.
+ *
+ * Reported downstream: an addon update added KitMenu and gave KitManifest a constant and a static
+ * method, both used by the loader. The rescan brought KitMenu in, the loader would not reload, and
+ * the answer said the loader named the new classes and could not be reloaded, which sent the caller
+ * after classes that were fine. The editor still held KitManifest as it was before the update, and
+ * reloading it and then the loader cleared it, four calls later.
+ *
+ * The fixture editor holds manifest.gd behind its file until it is reloaded, and fails the loader
+ * while it does. A loader broken in itself is still refused, and its problem says no script it is
+ * compiled against was held behind, so a pass that reloads nothing first and blames nothing fails.
+ */
+async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot') },
+  });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-behind-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    mkdirSync(join(project, 'kit'), { recursive: true });
+    writeFileSync(
+      join(project, 'kit', 'manifest.gd'),
+      'class_name KitManifest\nextends RefCounted\n\nconst REFUSED := 1\n\n\nstatic func who_of() -> int:\n\treturn 0\n',
+    );
+    writeFileSync(join(project, 'kit', 'menu.gd'), 'class_name KitMenu\nextends RefCounted\n');
+    writeFileSync(
+      join(project, 'kit', 'loader.gd'),
+      'extends Node\n\nvar menu: KitMenu\n\n\nfunc _ready() -> void:\n\tprint(KitManifest.REFUSED, KitManifest.who_of())\n',
+    );
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    const entry = (name: string, path: string): string => `{\n"class": &"${name}",\n"path": "${path}"\n}`;
+    writeFileSync(cache, `list=[${entry('KitManifest', 'res://kit/manifest.gd')}]\n`);
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    let holds = ['KitManifest'];
+    let manifestBehind = true;
+    let loaderBroken = false;
+    const reloadsAskedFor: string[] = [];
+    const behindAskedOf: string[][] = [];
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      let result: Record<string, unknown>;
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        holds = ['KitManifest', 'KitMenu'];
+        writeFileSync(
+          cache,
+          `list=[${entry('KitManifest', 'res://kit/manifest.gd')}, ${entry('KitMenu', 'res://kit/menu.gd')}]\n`,
+        );
+        result = { ok: true, scanning: false, importing: false, pending: false };
+      } else if (tool === 'rescan_filesystem' || tool === 'scan_status') {
+        result = { ok: true, scanning: false, importing: false, pending: false };
+      } else if (tool === 'scripts_behind') {
+        const asked = asArray(args['scriptPaths']).map(String);
+        behindAskedOf.push(asked);
+        result = {
+          ok: true,
+          behind: manifestBehind ? asked.filter((path) => path === 'res://kit/manifest.gd') : [],
+          unsavedInEditor: [],
+        };
+      } else if (tool === 'reload_script') {
+        const scriptPath = String(args['scriptPath']);
+        reloadsAskedFor.push(scriptPath);
+        if (scriptPath === 'res://kit/manifest.gd') {
+          manifestBehind = false;
+          result = {
+            ok: true,
+            script: scriptPath,
+            heldBefore: [],
+            methods: ['who_of'],
+            heldConstantsBefore: [],
+            constants: ['REFUSED'],
+          };
+        } else if (manifestBehind || loaderBroken) {
+          result = {
+            ok: true,
+            script: scriptPath,
+            failed: 43,
+            failedAs: 'Parse error',
+            restored: true,
+            heldBefore: ['_ready'],
+            methods: ['_ready'],
+            heldConstantsBefore: [],
+            constants: [],
+          };
+        } else {
+          result = { ok: true, script: scriptPath, heldBefore: ['_ready'], methods: ['_ready'] };
+        }
+      } else {
+        result = { ok: true, classes: holds };
+      }
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(JSON.stringify(greeting(project)));
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+    const rescan = async (more: Record<string, unknown> = {}): Promise<{ said: string; answer: unknown }> => {
+      const response = await server.request('tools/call', {
+        name: 'editor_rescan',
+        arguments: { projectPath: project, ...more },
+      });
+      return { said: textOf(response) ?? JSON.stringify(response), answer: parseTextContent(response) };
+    };
+    const manifestFirst = {
+      scriptPath: 'res://kit/manifest.gd',
+      reloadedFor: 'res://kit/loader.gd',
+      methodsAdded: ['who_of'],
+      constantsAdded: ['REFUSED'],
+    };
+
+    const scanned = await rescan();
+    assert.deepEqual(
+      reloadsAskedFor,
+      ['res://kit/loader.gd', 'res://kit/manifest.gd', 'res://kit/loader.gd'],
+      `the loader, then the class it is compiled against, then the loader again: ${scanned.said}`,
+    );
+    assert.deepEqual(
+      behindAskedOf,
+      [['res://kit/manifest.gd', 'res://kit/menu.gd']],
+      `the editor is asked about every script the loader is compiled against: ${scanned.said}`,
+    );
+    assert.deepEqual(get(scanned.answer, 'reloadedFirst'), [manifestFirst], scanned.said);
+    assert.deepEqual(get(scanned.answer, 'dependentsReloaded'), ['res://kit/loader.gd'], scanned.said);
+    assert.equal(get(scanned.answer, 'dependentsNotReloaded'), undefined, scanned.said);
+    assert.equal(get(scanned.answer, 'ok'), true, scanned.said);
+
+    // A loader broken in itself, with nothing held behind: still refused, and nothing blamed.
+    loaderBroken = true;
+    reloadsAskedFor.length = 0;
+    const broken = await rescan({ reloadScript: 'res://kit/loader.gd' });
+    assert.deepEqual(reloadsAskedFor, ['res://kit/loader.gd'], broken.said);
+    assert.match(
+      text(get(broken.answer, 'reloadProblem')),
+      / The editor holds none of the 2 scripts it is compiled against behind their files, so no stale copy is what it fails on\.$/,
+      broken.said,
+    );
+    assert.equal(get(broken.answer, 'reloadedFirst'), undefined, broken.said);
+    assert.equal(get(broken.answer, 'ok'), false, broken.said);
+
+    // And by name, with the class behind again: reloaded first, then the loader.
+    loaderBroken = false;
+    manifestBehind = true;
+    reloadsAskedFor.length = 0;
+    const byName = await rescan({ reloadScript: 'res://kit/loader.gd' });
+    assert.deepEqual(
+      reloadsAskedFor,
+      ['res://kit/loader.gd', 'res://kit/manifest.gd', 'res://kit/loader.gd'],
+      byName.said,
+    );
+    assert.deepEqual(get(byName.answer, 'reloadedFirst'), [manifestFirst], byName.said);
+    assert.deepEqual(
+      [get(byName.answer, 'ok'), get(byName.answer, 'reloadProblem')],
+      [true, undefined],
+      byName.said,
+    );
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * project_import refresh_classes says what its own engine could not know, and what the editor holds
+ * behind its files.
+ *
+ * Reported downstream: the rebuild's engine loaded the old class list when it started and compiled
+ * the autoloads against it after answering, so an autoload depending on a class the rebuild had just
+ * added failed there, and the answer said that correct autoload did not compile and every run would
+ * start without it until it was fixed. A fresh engine compiled it cleanly. The same answer said
+ * nothing of a changed class the editor still held in its old shape.
+ *
+ * guard.gd uses the class the rebuild adds and broken.gd names nothing that exists, so the second
+ * engine has to clear the one and keep the other: a note that drops every "did not compile" passes
+ * the first and fails the second.
+ */
+async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('rebuild engine staleness regression skipped (Godot not found)');
+    return;
+  }
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: godotPath } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rebuild-stale-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[autoload]\n\nGuard="*res://boot/guard.gd"\nBroken="*res://boot/broken.gd"\n',
+    );
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    mkdirSync(join(project, 'kit'), { recursive: true });
+    mkdirSync(join(project, 'boot'), { recursive: true });
+    writeFileSync(join(project, 'kit', 'manifest.gd'), 'class_name KitManifest\nextends RefCounted\n');
+    writeFileSync(join(project, 'kit', 'menu.gd'), 'class_name KitMenu\nextends RefCounted\n');
+    writeFileSync(
+      join(project, 'boot', 'guard.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint(KitMenu.new())\n',
+    );
+    writeFileSync(
+      join(project, 'boot', 'broken.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint(NoSuchThing)\n',
+    );
+    writeFileSync(
+      join(project, '.godot', 'global_script_class_cache.cfg'),
+      'list=[{\n"base": &"RefCounted",\n"class": &"KitManifest",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://kit/manifest.gd"\n}]\n',
+    );
+    await server.initialize('regression-test');
+    const refresh = async (): Promise<{ said: string; answer: unknown }> => {
+      const response = await server.request(
+        'tools/call',
+        { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+        180_000,
+      );
+      return { said: textOf(response) ?? JSON.stringify(response), answer: parseTextContent(response) };
+    };
+
+    const rebuilt = await refresh();
+    assert.deepEqual(get(rebuilt.answer, 'staleInThisEngine'), ['KitMenu'], rebuilt.said);
+    const note = text(get(rebuilt.answer, 'engine_messages_after_answer_note'));
+    assert.match(
+      note,
+      /^The engine that rebuilt the class list loaded the old one when it started, which did not hold KitMenu, and compiled the autoloads against it after answering, so its errors naming that class are its own and not the scripts'\. A second engine started on the rebuilt list ran the autoloads and reported what is under autoloadsOnTheRebuiltList\./,
+      rebuilt.said,
+    );
+    assert.match(note, /res:\/\/boot\/broken\.gd did not compile/, rebuilt.said);
+    assert.doesNotMatch(note, /res:\/\/boot\/guard\.gd did not compile/, rebuilt.said);
+    const recompiled = asArray(get(rebuilt.answer, 'autoloadsOnTheRebuiltList')).map((one) =>
+      text(get(one, 'text')),
+    );
+    assert.ok(
+      recompiled.some((line) => line.includes('NoSuchThing')),
+      `the second engine still reports what is broken: ${rebuilt.said}`,
+    );
+    assert.ok(
+      !recompiled.some((line) => line.includes('KitMenu')),
+      `and not the class it now knows: ${rebuilt.said}`,
+    );
+
+    // With an editor holding KitManifest compiled from an older text: no change to the list, and
+    // named all the same.
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      const result =
+        tool === 'scripts_behind'
+          ? {
+              ok: true,
+              behind: asArray(args['scriptPaths'])
+                .map(String)
+                .filter((path) => path === 'res://kit/manifest.gd'),
+              unsavedInEditor: [],
+            }
+          : tool === 'global_classes'
+            ? { ok: true, classes: ['KitManifest', 'KitMenu'] }
+            : { ok: true, scanning: false, importing: false, pending: false };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(JSON.stringify(greeting(project)));
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+    const withEditor = await refresh();
+    assert.deepEqual(
+      get(withEditor.answer, 'heldBehindInEditor'),
+      [{ className: 'KitManifest', scriptPath: 'res://kit/manifest.gd' }],
+      withEditor.said,
+    );
+    assert.match(
+      text(get(withEditor.answer, 'note')),
+      /The editor holds KitManifest compiled from a text its file no longer has.*editor_rescan with reloadScript on res:\/\/kit\/manifest\.gd reloads it/,
+      withEditor.said,
+    );
+    // The list the second rebuild started with held KitMenu, so nothing is its engine's own.
+    assert.equal(get(withEditor.answer, 'staleInThisEngine'), undefined, withEditor.said);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A rescan the editor does not answer in time is a busy editor, and what its scan brings in is
  * reloaded by the next rescan.
  *
@@ -55828,6 +56225,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
   testARescanReloadsWhatNamesAClassItBroughtIn,
+  testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt,
+  testARebuildSaysWhatItsOwnEngineCouldNotKnow,
   testARescanTheEditorDidNotAnswerIsFinishedByTheNext,
   testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList,
   testAShortenedCacheIsRebuilt,

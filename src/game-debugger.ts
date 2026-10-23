@@ -13,7 +13,9 @@
  * commands addressed to it, so every command to a held game goes to the thread that stopped.
  */
 
+import { readFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
+import { join } from 'node:path';
 import {
   type DebuggerMessage,
   DebuggerStream,
@@ -22,6 +24,7 @@ import {
   MAIN_THREAD,
   type SentValue,
 } from './godot-variant.js';
+import { shippedAddonsDirectory } from './setup.js';
 
 /** One frame of a held game's stack, innermost first. */
 export interface DebugFrame {
@@ -71,13 +74,39 @@ export const PAUSE_MS = 30_000;
 /** How long a step waits for the game to stop again, as the editor's adapter is given. */
 export const STEP_MS = 10_000;
 /**
- * How long a pause that stopped in the runtime addon steps on looking for a line of the game's own
- * script. A frame of the addon is a few dozen lines, so a game with any script of its own each frame
- * gets there well inside it, and one with none would otherwise be stepped through frame after frame.
+ * How many of the runtime addon's frames a pause that stopped in it goes through looking for a line
+ * of the game's own script. Counted in frames rather than time: stepping a frame through a line at a
+ * time took under a second here and over five on a macOS runner.
  */
-const ADDON_STEP_MS = 5000;
+const ADDON_FRAMES = 5;
+/**
+ * How many lines of the runtime addon outside its _process are stepped through before giving up,
+ * which nothing it runs comes near: it has no other per-frame code.
+ */
+const ADDON_LINES = 200;
 /** Where setup installs the runtime addon, whose scripts run in the game on gdharness's behalf. */
 export const RUNTIME_ADDON = 'res://addons/gdharness_runtime/';
+const RUNTIME_AUTOLOAD = `${RUNTIME_ADDON}runtime_autoload.gd`;
+let frameEnd: number | null = null;
+
+/**
+ * The line of the runtime autoload's _notification, the last it runs in a frame, read off the shipped
+ * copy: a game is started only on this release's addon, so that is the copy it runs.
+ */
+function frameEndLine(): number {
+  if (frameEnd === null) {
+    const lines = readFileSync(
+      join(shippedAddonsDirectory(), 'gdharness_runtime', 'runtime_autoload.gd'),
+      'utf8',
+    ).split('\n');
+    const declared = lines.findIndex((line) => line.startsWith('func _notification('));
+    if (declared === -1) {
+      throw new Error(`The shipped ${RUNTIME_AUTOLOAD} declares no _notification.`);
+    }
+    frameEnd = declared + 2;
+  }
+  return frameEnd;
+}
 /** How long a read of a held game waits for its answer, which comes from the same thread at once. */
 export const READ_MS = 5000;
 /** The messages that answer a command, which wait in the inbox when no request is reading yet. */
@@ -574,40 +603,65 @@ export class GameDebugger {
     }
     // The runtime addon is an autoload, so its _process runs first in every frame, and a pause taken
     // every 2048 lines falls wherever they do: an idle game stopped in gdharness's code, not its own.
-    const frames = await this.pastTheAddon();
-    if (frames === 'lost') {
+    const past = await this.pastTheAddon();
+    if (past === 'lost') {
       return {
         paused: false,
-        note: `The game stopped in gdharness's runtime addon and was stepped on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs; debug_state stack reads it then.`,
+        note: `The game stopped in gdharness's runtime addon and was let go on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs; debug_state stack reads it then.`,
       };
     }
     this.stoppedBy('Paused');
-    const stack = frames ?? [];
+    const stack = past.frames ?? [];
     return {
       paused: true,
       held: this.heldState(),
       stack,
-      ...(stack[0]?.script.startsWith(RUNTIME_ADDON) === true
+      ...(past.gaveUp === 'frames'
         ? {
-            note: `The game is held in gdharness's runtime addon, whose _process runs first in every frame: ${ADDON_STEP_MS / 1000}s of stepping reached no line of the game's own script, so it runs none from frame to frame. A breakpoint in the game's script stops it there.`,
+            note: `The game is held in gdharness's runtime addon, whose _process runs first in every frame: ${ADDON_FRAMES} frames went by without a line of the game's own script, so it runs none from frame to frame. A breakpoint in the game's script stops it there.`,
           }
-        : {}),
+        : past.gaveUp === 'lines'
+          ? {
+              note: `The game is held in gdharness's runtime addon, which ran ${ADDON_LINES} lines outside its _process without reaching a line of the game's own script. debug_control step_over goes on from here, and a breakpoint in the game's script stops it there.`,
+            }
+          : {}),
     };
   }
 
   /**
-   * The held game's stack, stepped on into while its top frame is gdharness's runtime addon, for at
-   * most {@link ADDON_STEP_MS}; `lost` when a step did not stop again.
+   * The held game's stack, taken on while its top frame is gdharness's runtime addon; `lost` when the
+   * game did not stop again, and `gaveUp` naming the budget that ran out when it is still there.
+   *
+   * A stop inside the autoload's _process is let go to a breakpoint on its _notification, the last
+   * line it runs in the frame, and stepped once from there into whatever runs next. Stepping the
+   * frame a line at a time costs two round trips for each of a few dozen lines. What the game runs
+   * inside that _process, a call a caller queued, is passed over unless a breakpoint holds it.
    */
-  private async pastTheAddon(): Promise<DebugFrame[] | null | 'lost'> {
+  private async pastTheAddon(): Promise<
+    { readonly frames: DebugFrame[] | null; readonly gaveUp?: 'frames' | 'lines' } | 'lost'
+  > {
     let frames = await this.stack();
-    const stepping = Date.now();
-    while (
-      frames !== null &&
-      this.held !== null &&
-      (frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false) &&
-      Date.now() - stepping < ADDON_STEP_MS
-    ) {
+    let framesLeft = ADDON_FRAMES;
+    let linesLeft = ADDON_LINES;
+    while (frames !== null && this.held !== null && (frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false)) {
+      if (frames.some((frame) => frame.script === RUNTIME_AUTOLOAD && frame.name === '_process')) {
+        if (framesLeft === 0) {
+          return { frames, gaveUp: 'frames' };
+        }
+        framesLeft -= 1;
+        // Where it stops is looked at again: the frame end is stepped from, and a stop short of it,
+        // on a breakpoint or an error in what the frame ran, is where the game is.
+        const reached = await this.toTheFrameEnd();
+        if (reached === 'lost') {
+          return 'lost';
+        }
+        frames = reached;
+        continue;
+      }
+      if (linesLeft === 0) {
+        return { frames, gaveUp: 'lines' };
+      }
+      linesLeft -= 1;
       this.forget('debug_enter');
       this.send('step', [], this.held.thread);
       if ((await this.next(GameDebugger.named('debug_enter'), STEP_MS)) === null) {
@@ -615,7 +669,27 @@ export class GameDebugger {
       }
       frames = await this.stack();
     }
-    return frames;
+    return { frames };
+  }
+
+  /** The stack where the held game next stops once let go towards the runtime autoload's frame end. */
+  private async toTheFrameEnd(): Promise<DebugFrame[] | null | 'lost'> {
+    const held = this.held;
+    if (held === null) {
+      return null;
+    }
+    const line = frameEndLine();
+    const theirs = this.breakpointLines.has(`${RUNTIME_AUTOLOAD}:${String(line)}`);
+    if (!theirs) {
+      this.send('breakpoint', [RUNTIME_AUTOLOAD, line, true], held.thread);
+    }
+    this.forget('debug_enter');
+    this.send('continue', [], held.thread);
+    const stopped = await this.next(GameDebugger.named('debug_enter'), STEP_MS);
+    if (!theirs) {
+      this.send('breakpoint', [RUNTIME_AUTOLOAD, line, false], this.held?.thread ?? MAIN_THREAD);
+    }
+    return stopped === null ? 'lost' : await this.stack();
   }
 
   /**
@@ -662,16 +736,16 @@ export class GameDebugger {
     }
     // The step into a function's last line goes on into whatever runs next, which in an idle frame
     // is the runtime addon's _process, the first thing every frame runs.
-    const frames = await this.pastTheAddon();
-    if (frames === 'lost') {
+    const past = await this.pastTheAddon();
+    if (past === 'lost') {
       return {
         stepped: true,
         heldAgain: false,
-        note: `The step stopped in gdharness's runtime addon and was stepped on to reach the game's own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script the game runs; debug_state stack reads it then.`,
+        note: `The step stopped in gdharness's runtime addon and was let go on to reach the game's own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script the game runs; debug_state stack reads it then.`,
       };
     }
     this.stoppedBy('Stepped');
-    const stack = frames ?? [];
+    const stack = past.frames ?? [];
     const top = stack[0];
     // The engine names every stop Breakpoint, so a step that ran into one cannot be told from a step
     // that ended on its line; the line is what can be said.

@@ -43,6 +43,7 @@ import {
   cachedClasses,
   cacheWrittenAt,
   classesNamedIn,
+  classesStartedWithout,
   contradictedDiagnostics,
   declaredClasses,
   declaredClassLines,
@@ -57,6 +58,7 @@ import {
   type NamingScript,
   type NotReloaded,
   notReloadedNote,
+  type ReloadedFirst,
   reloadDifference,
   scriptsNaming,
   staleAnalysisNote,
@@ -123,6 +125,7 @@ import {
   librariesNotCopied,
   runImport,
   runOperation,
+  withNotCompiled,
 } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { staleImports } from './import-freshness.js';
@@ -13195,6 +13198,8 @@ class GodotServer {
       as?: string;
       unsaved?: string;
     } = {};
+    const reloadedFirst: ReloadedFirst[] = [];
+    let builtOn: string | undefined;
     // A @tool script is refused for the reason reloadDependents gives: it runs inside the editor, and
     // reloading one from inside a call the editor is serving can take the editor down.
     const reloadingSource =
@@ -13205,9 +13210,23 @@ class GodotServer {
       };
     } else if (reloading !== undefined) {
       try {
-        const answer = asParams(
-          await this.godotBridge.invokeTool('reload_script', { ...args, scriptPath: reloading }),
-        );
+        const reloadAsked = async (): Promise<OperationParams> =>
+          asParams(await this.godotBridge.invokeTool('reload_script', { ...args, scriptPath: reloading }));
+        let answer = await reloadAsked();
+        // A script compiled against a class the editor holds behind its file fails on what the file
+        // has gained, and keeps failing however often it alone is reloaded, so that class goes first.
+        const failedFirst = answer['failed'];
+        if (typeof failedFirst === 'number' && failedFirst !== 0 && projectPath !== '') {
+          const first = await this.reloadWhatItIsBuiltOn(
+            projectPath,
+            readString(answer, 'script') ?? reloading,
+          );
+          reloadedFirst.push(...first.reloaded);
+          if (first.reloaded.length > 0) {
+            answer = await reloadAsked();
+          }
+          builtOn = first.said;
+        }
         const methods = readArray(answer, 'methods');
         const listed = (field: string): Record<string, string[]> => {
           const found = readArray(answer, field);
@@ -13237,6 +13256,7 @@ class GodotServer {
               names: projectPath === '' ? [] : this.classesAScriptNames(projectPath, script),
               restored: answer['restored'] === true,
               restoredAs: readString(answer, 'restoredAs') ?? '',
+              ...(builtOn === undefined ? {} : { builtOn }),
             }),
           };
         } else {
@@ -13347,6 +13367,10 @@ class GodotServer {
           }
         : {}),
       reloadProblem: reloaded.problem,
+      reloadedFirst: (() => {
+        const all = [...reloadedFirst, ...(dependents?.reloadedFirst ?? [])];
+        return all.length > 0 ? all : undefined;
+      })(),
       unsavedInEditorNote: reloaded.unsaved,
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
       broughtIn: broughtIn.length > 0 ? broughtIn : undefined,
@@ -13378,8 +13402,8 @@ class GodotServer {
   private async reloadDependents(
     projectPath: string,
     classes: readonly string[],
-  ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[] }> {
-    return await this.reloadInEditor(scriptsNaming(projectPath, classes));
+  ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[]; reloadedFirst: ReloadedFirst[] }> {
+    return await this.reloadInEditor(scriptsNaming(projectPath, classes), projectPath);
   }
 
   /**
@@ -13388,10 +13412,17 @@ class GodotServer {
    */
   private async reloadInEditor(
     scripts: readonly NamingScript[],
-  ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[]; unsavedInEditor: string[] }> {
+    projectPath = '',
+  ): Promise<{
+    reloaded: string[];
+    notReloaded: NotReloaded[];
+    unsavedInEditor: string[];
+    reloadedFirst: ReloadedFirst[];
+  }> {
     const reloaded: string[] = [];
     const notReloaded: NotReloaded[] = [];
     const unsavedInEditor: string[] = [];
+    const reloadedFirst: ReloadedFirst[] = [];
     for (const { script: scriptPath, tool } of scripts) {
       // A @tool script is running in the editor, and reloading one from inside a call the editor is
       // serving can take the editor down: it did on Linux, reloading the addon's own tool executor.
@@ -13404,35 +13435,193 @@ class GodotServer {
         });
         continue;
       }
-      try {
-        const answer = asParams(await this.godotBridge.invokeTool('reload_script', { scriptPath }));
-        if (answer['unsavedInEditor'] === true) {
-          unsavedInEditor.push(scriptPath);
+      let attempt = await this.reloadOnce(scriptPath);
+      if (attempt.failedToCompile && projectPath !== '') {
+        const first = await this.reloadWhatItIsBuiltOn(projectPath, scriptPath);
+        reloadedFirst.push(...first.reloaded);
+        if (first.reloaded.length > 0) {
+          attempt = await this.reloadOnce(scriptPath);
         }
-        const failed = answer['failed'];
-        if (typeof failed === 'number' && failed !== 0) {
-          // What the failed compile left, for the reason failedReloadNote gives.
-          const left =
-            answer['restored'] === true
-              ? ''
-              : '; compiling it again from the text it was built from failed too, so the editor holds it unusable until it compiles';
-          notReloaded.push({
-            scriptPath,
-            problem: `it did not compile: Godot answered error ${failed}${readString(answer, 'failedAs') ? `, ${readString(answer, 'failedAs')}` : ''}${left}`,
-          });
-        } else if (readArray(answer, 'methods') === undefined) {
-          notReloaded.push({
-            scriptPath,
-            problem: 'the editor would not say what it has after reloading it',
-          });
-        } else {
-          reloaded.push(scriptPath);
+        if (attempt.problem !== undefined && first.said !== undefined) {
+          attempt = { ...attempt, problem: `${attempt.problem}. ${first.said}` };
         }
-      } catch (error) {
-        notReloaded.push({ scriptPath, problem: errorMessage(error) });
+      }
+      if (attempt.unsaved) {
+        unsavedInEditor.push(scriptPath);
+      }
+      if (attempt.problem === undefined) {
+        reloaded.push(scriptPath);
+      } else {
+        notReloaded.push({ scriptPath, problem: attempt.problem });
       }
     }
-    return { reloaded, notReloaded, unsavedInEditor };
+    return { reloaded, notReloaded, unsavedInEditor, reloadedFirst };
+  }
+
+  /** One reload_script in the editor, as what went wrong when it did not reload, and its answer. */
+  private async reloadOnce(scriptPath: string): Promise<{
+    answer: OperationParams;
+    problem?: string;
+    failedToCompile: boolean;
+    unsaved: boolean;
+  }> {
+    try {
+      const answer = asParams(await this.godotBridge.invokeTool('reload_script', { scriptPath }));
+      const unsaved = answer['unsavedInEditor'] === true;
+      const failed = answer['failed'];
+      if (typeof failed === 'number' && failed !== 0) {
+        // What the failed compile left, for the reason failedReloadNote gives.
+        const left =
+          answer['restored'] === true
+            ? ''
+            : '; compiling it again from the text it was built from failed too, so the editor holds it unusable until it compiles';
+        return {
+          answer,
+          problem: `it did not compile: Godot answered error ${failed}${readString(answer, 'failedAs') ? `, ${readString(answer, 'failedAs')}` : ''}${left}`,
+          failedToCompile: true,
+          unsaved,
+        };
+      }
+      if (readArray(answer, 'methods') === undefined) {
+        return {
+          answer,
+          problem: 'the editor would not say what it has after reloading it',
+          failedToCompile: false,
+          unsaved,
+        };
+      }
+      return { answer, failedToCompile: false, unsaved };
+    } catch (error) {
+      return { answer: {}, problem: errorMessage(error), failedToCompile: false, unsaved: false };
+    }
+  }
+
+  /**
+   * The project's scripts [param scriptPath] is compiled against: the global classes its file names,
+   * at the paths the class list records, and the scripts it preloads or loads by path.
+   */
+  private scriptsCompiledAgainst(projectPath: string, scriptPath: string): string[] {
+    const resourcePath = scriptPath.startsWith('res://')
+      ? scriptPath
+      : `res://${scriptPath.replace(/^\/+/, '')}`;
+    const source = this.sourceOfClass(projectPath, resourcePath);
+    if (source === null) {
+      return [];
+    }
+    const known = cachedClasses(projectPath) ?? declaredClasses(projectPath);
+    const named = classesNamedIn(codeOf(source), known).map((name) => known.get(name) ?? '');
+    const loaded = [...source.matchAll(/\b(?:pre)?load\(\s*"(res:\/\/[^"]+\.gd)"\s*\)/g)].map(
+      (found) => found[1] ?? '',
+    );
+    return [...new Set([...named, ...loaded])].filter((path) => path !== '' && path !== resourcePath).sort();
+  }
+
+  /**
+   * Which of [param scriptPaths] the editor holds compiled from a text that is not the file's, and
+   * which of those are open with unsaved edits, or null when the editor would not say.
+   */
+  private async scriptsHeldBehind(
+    scriptPaths: readonly string[],
+  ): Promise<{ behind: string[]; unsaved: string[] } | null> {
+    if (scriptPaths.length === 0) {
+      return { behind: [], unsaved: [] };
+    }
+    try {
+      const answer = asParams(await this.godotBridge.invokeTool('scripts_behind', { scriptPaths }));
+      const behind = readArray(answer, 'behind');
+      return behind === undefined
+        ? null
+        : { behind: behind.map(String), unsaved: (readArray(answer, 'unsavedInEditor') ?? []).map(String) };
+    } catch (error) {
+      this.logDebug(
+        `The editor would not say which scripts it holds behind their files: ${errorMessage(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Reloads, ahead of [param scriptPath], whichever scripts it is compiled against that the editor
+   * holds behind their files, with what each gained, and what is left to say when that does not
+   * clear it.
+   *
+   * A script that names a class the editor holds in an older shape fails to compile on what the file
+   * has added, and a reload of the script alone fails the same way. Downstream, a rescan reloading a
+   * loader that took a constant and a method from such a class answered that the loader named the
+   * new classes the scan brought in, which were fine; reloading the class and then the loader
+   * cleared it, four calls later.
+   */
+  private async reloadWhatItIsBuiltOn(
+    projectPath: string,
+    scriptPath: string,
+  ): Promise<{ reloaded: ReloadedFirst[]; said?: string }> {
+    const against = this.scriptsCompiledAgainst(projectPath, scriptPath);
+    const held = await this.scriptsHeldBehind(against);
+    if (held === null) {
+      return { reloaded: [] };
+    }
+    const reloadedFor = scriptPath.startsWith('res://')
+      ? scriptPath
+      : `res://${scriptPath.replace(/^\/+/, '')}`;
+    const reloaded: ReloadedFirst[] = [];
+    const left: string[] = [];
+    for (const path of held.behind) {
+      const source = this.sourceOfClass(projectPath, path);
+      if (source !== null && isToolScript(source)) {
+        left.push(
+          `It is compiled against ${path}, which the editor holds behind its file and which is a @tool script, so it is not reloaded from here: editor_launch restart recompiles both.`,
+        );
+        continue;
+      }
+      const attempt = await this.reloadOnce(path);
+      if (attempt.problem !== undefined) {
+        left.push(
+          `It is compiled against ${path}, which the editor holds behind its file and which did not reload either: ${attempt.problem}.`,
+        );
+        continue;
+      }
+      const lists: Record<string, string[]> = {};
+      for (const field of ['methods', 'heldBefore', 'constants', 'heldConstantsBefore']) {
+        const found = readArray(attempt.answer, field);
+        if (found !== undefined) {
+          lists[field] = found.map(String);
+        }
+      }
+      const difference = reloadDifference(lists);
+      const added = (field: string): readonly string[] | undefined => {
+        const names = difference[field];
+        return Array.isArray(names) && names.length > 0 ? names.map(String) : undefined;
+      };
+      const methodsAdded = added('methodsAdded');
+      const constantsAdded = added('constantsAdded');
+      reloaded.push({
+        scriptPath: path,
+        reloadedFor,
+        ...(methodsAdded === undefined ? {} : { methodsAdded }),
+        ...(constantsAdded === undefined ? {} : { constantsAdded }),
+      });
+    }
+    for (const path of held.unsaved) {
+      left.push(
+        `It is compiled against ${path}, which is open in the script editor with unsaved edits, so the editor compiles it from those rather than from the file.`,
+      );
+    }
+    if (left.length > 0) {
+      return { reloaded, said: left.join(' ') };
+    }
+    if (reloaded.length > 0) {
+      return {
+        reloaded,
+        said: `It failed again after ${reloaded.map((one) => one.scriptPath).join(', ')} ${reloaded.length === 1 ? 'was' : 'were'} reloaded from ${reloaded.length === 1 ? 'its file' : 'their files'}, so what it compiles against is current and the errors are its own.`,
+      };
+    }
+    return {
+      reloaded,
+      said:
+        against.length === 0
+          ? 'It names no other script of the project.'
+          : `The editor holds none of the ${against.length} script${against.length === 1 ? '' : 's'} it is compiled against behind ${against.length === 1 ? 'its file' : 'their files'}, so no stale copy is what it fails on.`,
+    };
   }
 
   /**
@@ -13487,6 +13676,21 @@ class GodotServer {
     if (after === null) {
       return rebuilt;
     }
+    const startedWithout = classesStartedWithout(rebuilt.afterAnswerMessages ?? [], before, after);
+    const rechecked =
+      startedWithout.length === 0 ? null : await this.autoloadsOnTheRebuiltList(projectPath, startedWithout);
+    const answered: HeadlessOutcome =
+      rechecked === null
+        ? rebuilt
+        : {
+            ...rebuilt,
+            afterAnswerNote: rechecked.note,
+            payload: {
+              ...rebuilt.payload,
+              staleInThisEngine: startedWithout,
+              ...(rechecked.messages === undefined ? {} : { autoloadsOnTheRebuiltList: rechecked.messages }),
+            },
+          };
     const lost =
       noted === null || before === null
         ? []
@@ -13512,15 +13716,52 @@ class GodotServer {
       );
     }
     if (notes.length === 0) {
-      return rebuilt;
+      return answered;
     }
     return {
-      ...rebuilt,
+      ...answered,
       payload: {
-        ...rebuilt.payload,
+        ...answered.payload,
         lostSinceLastRebuild: lost,
         note: notes.join(' '),
       },
+    };
+  }
+
+  /**
+   * What the project's autoloads report when compiled against the rebuilt class list, read from a
+   * second engine, with the note on what the rebuild's own engine printed about [param names].
+   *
+   * The rebuild's engine loaded the old list when it started and compiles the autoloads against it
+   * after answering, so [param names], which the rebuild added, are unknown to them there. Taking
+   * those errors for the scripts' told a caller a correct autoload would be left out of every run
+   * until it was fixed; whether it compiles is a question for an engine that starts on the new list.
+   */
+  private async autoloadsOnTheRebuiltList(
+    projectPath: string,
+    names: readonly string[],
+  ): Promise<{ note: string; messages?: readonly LogEntry[] }> {
+    const one = names.length === 1;
+    const said = `The engine that rebuilt the class list loaded the old one when it started, which did not hold ${names.join(', ')}, and compiled the autoloads against it after answering, so its errors naming ${one ? 'that class' : 'those classes'} are its own and not the scripts'.`;
+    const checked = await this.operation('list_autoloads', {}, projectPath);
+    if (!checked.ok) {
+      return {
+        note: `${said} A second engine started on the rebuilt list to compile them did not answer: ${checked.message}`,
+      };
+    }
+    const printed = [...(checked.beforeOperationMessages ?? []), ...(checked.afterAnswerMessages ?? [])];
+    if (printed.length === 0) {
+      return {
+        note: `${said} A second engine started on the rebuilt list ran the autoloads and reported nothing.`,
+      };
+    }
+    const errors = printed.filter((entry) => entry.severity === 'error').length;
+    return {
+      note: withNotCompiled(
+        `${said} A second engine started on the rebuilt list ran the autoloads and reported what is under autoloadsOnTheRebuiltList${errors === 0 ? ', none of it an error' : ''}.`,
+        printed,
+      ),
+      messages: printed,
     };
   }
 
@@ -13590,9 +13831,10 @@ class GodotServer {
     }
     const answer = asParams(JSON.parse(written.content[0]?.text ?? '{}'));
     const source = this.sourceOfClass(project.value.path, scriptPath);
-    const done = await this.reloadInEditor([
-      { script: scriptPath, tool: source !== null && isToolScript(source) },
-    ]);
+    const done = await this.reloadInEditor(
+      [{ script: scriptPath, tool: source !== null && isToolScript(source) }],
+      project.value.path,
+    );
     const problem = done.notReloaded[0]?.problem;
     const notes = [
       ...(problem === undefined
@@ -13605,6 +13847,7 @@ class GodotServer {
     return this.jsonTextResponse({
       ...answer,
       editorReloaded: done.reloaded.length > 0,
+      ...(done.reloadedFirst.length > 0 ? { reloadedFirst: done.reloadedFirst } : {}),
       ...(done.unsavedInEditor.length > 0 ? { unsavedInEditor: true } : {}),
       ...(notes.length > 0 ? { editorNote: notes.join(' ') } : {}),
     });
@@ -14097,7 +14340,7 @@ class GodotServer {
         toReload.push({ script, tool: source !== null && isToolScript(source) });
       }
     }
-    const done = await this.reloadInEditor(toReload);
+    const done = await this.reloadInEditor(toReload, projectPath);
     const notReloaded = done.notReloaded;
     const reloaded = [...reloadedByTheScan, ...done.reloaded].sort();
 
@@ -14214,7 +14457,23 @@ class GodotServer {
     }
     const checked = await this.classesTheEditorCannotSee(args);
     const stillHeld = checked.stillHeld ?? [];
-    if (checked.unseen.length === 0 && stillHeld.length === 0 && checked.unchecked === undefined) {
+    const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
+    // A class whose file changed is no change to the list, so the rebuild answers it nowhere, and
+    // the editor goes on compiling everything naming it against the copy it held before.
+    const listed = projectPath === '' ? null : cachedClasses(projectPath);
+    const held = listed === null ? null : await this.scriptsHeldBehind([...new Set(listed.values())]);
+    const behind =
+      listed === null || held === null
+        ? []
+        : [...listed]
+            .filter(([, path]) => held.behind.includes(path))
+            .map(([className, scriptPath]) => ({ className, scriptPath }));
+    if (
+      checked.unseen.length === 0 &&
+      stillHeld.length === 0 &&
+      checked.unchecked === undefined &&
+      behind.length === 0
+    ) {
       return answered;
     }
     const payload = asParams(JSON.parse(first.text));
@@ -14223,7 +14482,6 @@ class GodotServer {
     const said = readString(payload, 'note');
     const notes: string[] = said === undefined ? [] : [said];
     if (checked.unseen.length > 0) {
-      const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
       // The same fork as the diagnostics' remedy: on an editor whose scan writes a shorter list
       // than the file, the rescan is the call that loses classes rather than the one that loads.
       notes.push(
@@ -14237,10 +14495,18 @@ class GodotServer {
         `The editor is still holding ${stillHeld.join(', ')}, which this project no longer declares, and it will write that list back over the cache this call just corrected. The entry returns pointing at a script that is gone, and the next engine to walk get_global_class_list() dies on "File not found". A rescan does not clear this one: it picks up a class that has appeared and does not drop one that has gone. editor_launch restart does.`,
       );
     }
+    if (behind.length > 0) {
+      const one = behind.length === 1;
+      const scripts = behind.map((entry) => entry.scriptPath);
+      notes.push(
+        `The editor holds ${behind.map((entry) => entry.className).join(', ')} compiled from ${one ? 'a text its file no longer has' : 'texts their files no longer have'}, so a script it compiles against ${one ? 'that class' : 'them'} fails on whatever the file has gained, as a member not found or an identifier not declared, while the files are right and a new engine compiles them. editor_rescan with reloadScript on ${scripts.join(', ')} reloads ${one ? 'it' : 'each'}, and a rescan reloads such a class before a dependent compiled against it.`,
+      );
+    }
     return this.jsonTextResponse({
       ...payload,
       unseenByEditor: checked.unseen.length > 0 ? checked.unseen : undefined,
       stillHeldByEditor: stillHeld.length > 0 ? stillHeld : undefined,
+      heldBehindInEditor: behind.length > 0 ? behind : undefined,
       classesUnchecked: checked.unchecked,
       note: notes.length > 0 ? notes.join(' ') : undefined,
     });

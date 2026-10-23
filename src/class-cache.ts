@@ -541,6 +541,40 @@ export function classesNamedIn(source: string, known: ReadonlyMap<string, string
   return [...named].sort();
 }
 
+/** The ways an engine says a script names a class it does not know. */
+const UNKNOWN_CLASS = [
+  /Identifier "([A-Za-z_][A-Za-z0-9_]*)" not declared/,
+  /Could not find type "([A-Za-z_][A-Za-z0-9_]*)"/,
+  /Could not find base class "([A-Za-z_][A-Za-z0-9_]*)"/,
+  /Could not resolve class "([A-Za-z_][A-Za-z0-9_]*)"/,
+];
+
+/**
+ * The classes [param messages] call unknown that [param after] lists and [param before] did not,
+ * in order of name: classes an engine started with the list [param before] could not have known.
+ *
+ * A rebuild of the class list runs in an engine that loaded the old list when it started, and the
+ * autoloads it starts after answering are compiled against that one. A class the rebuild added is
+ * unknown to them, and the answer told a caller their correct autoload did not compile and had to
+ * be fixed. A list that was not there at all knew no class.
+ */
+export function classesStartedWithout(
+  messages: readonly { readonly text: string }[],
+  before: ReadonlyMap<string, string> | null,
+  after: ReadonlyMap<string, string>,
+): string[] {
+  const named = new Set<string>();
+  for (const { text } of messages) {
+    for (const shape of UNKNOWN_CLASS) {
+      const name = shape.exec(text)?.[1];
+      if (name !== undefined && after.has(name) && before?.has(name) !== true) {
+        named.add(name);
+      }
+    }
+  }
+  return [...named].sort();
+}
+
 /** A diagnostic the file on disk disproves, and the script that disproves it. */
 export interface Contradicted extends MissingMember {
   readonly declaredIn: string;
@@ -805,7 +839,7 @@ export function notReloadedNote(broughtIn: readonly string[], notReloaded: reado
       `For ${tools.join(', ')}, ${tools.length === 1 ? 'a @tool script' : '@tool scripts'}, which ${tools.length === 1 ? 'runs' : 'run'} inside the editor and ${tools.length === 1 ? 'is' : 'are'} not reloaded from inside a call: editor_launch restart.`,
     );
   }
-  return `The scan brought in ${broughtIn.join(', ')}, and ${all.join(', ')} ${all.length === 1 ? 'names one of them and' : 'name them and'} could not be reloaded, so the editor still holds what it compiled while it could not see the class and reports that to the language server. ${remedies.join(' ')}`;
+  return `The scan brought in ${broughtIn.join(', ')}, and ${all.join(', ')} ${all.length === 1 ? 'names one of them and' : 'name them and'} could not be reloaded, so the editor still holds the copy it compiled before and reports what that copy has to the language server; dependentsNotReloaded says what each failed on. ${remedies.join(' ')}`;
 }
 
 /** A reload the editor refused, and what the copy it holds had before and has now. */
@@ -827,6 +861,20 @@ export interface FailedReload {
   readonly restored: boolean;
   /** Godot's own name for why that compile failed too, when it did. */
   readonly restoredAs: string;
+  /**
+   * What the editor said of the scripts this one is compiled against being held behind their files,
+   * once that was asked, in place of the advice to find such a class by reading the errors.
+   */
+  readonly builtOn?: string;
+}
+
+/** A script reloaded ahead of one that failed to compile against the copy of it the editor held. */
+export interface ReloadedFirst {
+  readonly scriptPath: string;
+  /** The script that failed against the old copy, and was compiled again after. */
+  readonly reloadedFor: string;
+  readonly methodsAdded?: readonly string[];
+  readonly constantsAdded?: readonly string[];
 }
 
 /**
@@ -904,9 +952,11 @@ export function failedReloadNote(failed: FailedReload): string {
     copy = `The copy the editor holds was compiled again from the text it was built from and changed even so${lost.length === 0 ? '' : `, and has lost ${lost.join(', ')}`}: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it.`;
   }
   const order =
-    failed.names.length === 0
-      ? ''
-      : ` If they deny a member of ${failed.names.join(' or ')} that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.`;
+    failed.builtOn !== undefined
+      ? ` ${failed.builtOn}`
+      : failed.names.length === 0
+        ? ''
+        : ` If they deny a member of ${failed.names.join(' or ')} that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.`;
   return (
     `${failed.script} did not compile: Godot answered ${answered}. ${copy} ` +
     `script_diagnostics on it gives the errors.${order}`

@@ -160,7 +160,7 @@ function digestMarker(projectPath: string, addon: string): string | null {
 }
 
 /** Where the shipped addons are, beside this module in the build and in the source tree alike. */
-function shippedAddonsDirectory(): string {
+export function shippedAddonsDirectory(): string {
   return join(dirname(fileURLToPath(import.meta.url)), 'godot', 'addons');
 }
 

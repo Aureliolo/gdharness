@@ -40,6 +40,12 @@ interface Reported {
   /** What was reported once the answer was written, which is not the operation's. */
   readonly afterAnswerMessages?: readonly LogEntry[];
   readonly afterAnswerOmitted?: number;
+  /**
+   * What those messages mean when the caller knows better than the default note, which takes an
+   * autoload that failed to compile as broken: a rebuild of the class list compiles the autoloads
+   * against the list the engine started with, and that list lacks every class the rebuild added.
+   */
+  readonly afterAnswerNote?: string;
   /** The project's scripts the engine never frees, when it reported at exit what it still held. */
   readonly exitLeakNote?: string;
   /** What the autoloads reported while an operation waited for them, which is not its own either. */
@@ -102,7 +108,10 @@ export function engineExtras(
     ...(after.length > 0
       ? {
           engine_messages_after_answer: after,
-          engine_messages_after_answer_note: notes(withNotCompiled(AFTER_ANSWER_NOTE, after), leakIn(after)),
+          engine_messages_after_answer_note: notes(
+            outcome.afterAnswerNote ?? withNotCompiled(AFTER_ANSWER_NOTE, after),
+            leakIn(after),
+          ),
         }
       : {}),
     ...(outcome.afterAnswerOmitted === undefined
@@ -130,7 +139,7 @@ const AFTER_ANSWER_NOTE =
  * the operation and left a caller who had just registered a broken autoload with `saved: true` to
  * guess that every run of the project now starts without it.
  */
-function withNotCompiled(note: string, entries: readonly LogEntry[]): string {
+export function withNotCompiled(note: string, entries: readonly LogEntry[]): string {
   const path = entries.map(notCompiledIn).find((found) => found !== undefined);
   return path === undefined
     ? note

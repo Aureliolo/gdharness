@@ -126,6 +126,7 @@ func _init_tools() -> void:
 		"files_moved": [_filesystem_tools, "files_moved"],
 		"global_classes": [_class_tools, "global_classes"],
 		"reload_script": [_class_tools, "reload_script"],
+		"scripts_behind": [_class_tools, "scripts_behind"],
 		# Settings, for a caller that asked the editor rather than the file on disk
 		"get_project_setting": [_settings_tools, "get_project_setting"],
 		"adopt_project_settings": [_settings_tools, "adopt_project_settings"],

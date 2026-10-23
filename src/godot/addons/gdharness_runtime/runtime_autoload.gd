@@ -723,11 +723,17 @@ func _send_error(client: StreamPeerTCP, request_id: Variant, message: String) ->
 ## auto_accept_quit off and decides for itself, and one whose player answered No went on running
 ## with no runtime and no announcement, so every later call said no game was running. A quit it
 ## does take ends the tree, which [method _exit_tree] cleans up after.
+##
+## One line for every notification, and the last this node runs in a frame, after [method _process]:
+## a pause that stops in this addon is let go to a breakpoint here and stepped once into the game's
+## own script, rather than stepped through the frame a line at a time.
 func _notification(what: int) -> void:
-	if what != NOTIFICATION_WM_CLOSE_REQUEST:
-		return
-	if not is_inside_tree() or get_tree().auto_accept_quit:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST and _takes_the_close():
 		_cleanup()
+
+
+func _takes_the_close() -> bool:
+	return not is_inside_tree() or get_tree().auto_accept_quit
 
 
 func _cleanup() -> void:
