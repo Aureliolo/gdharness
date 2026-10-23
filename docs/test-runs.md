@@ -220,11 +220,10 @@ way:
 
 The start time is what tells a holder from a later process given its pid. Windows reports a
 process's creation time to the millisecond, and `ps -o lstart` on macOS only to the second, which
-is why the tolerance is two seconds. On Linux, read it from /proc as gdharness does: the boot
-instant, which is the current time less the first number in `/proc/uptime`, plus the 22nd field of
-`/proc/<pid>/stat` divided by `getconf CLK_TCK`, in seconds. `ps -o lstart` and the `btime` in
-`/proc/stat` count from the boot time in whole seconds, and read a start up to two seconds early
-there, which is the whole tolerance.
+is why the tolerance is two seconds. On Linux, read it as gdharness and psutil's `create_time()` do:
+the `btime` line of `/proc/stat`, plus the 22nd field of `/proc/<pid>/stat` divided by
+`getconf CLK_TCK`, in seconds. That is up to a second early; `ps -o lstart` there cuts the same sum
+to the second again and reads up to two seconds early, which is the whole tolerance.
 
 ## Starting the runner yourself
 

@@ -32,7 +32,7 @@ const POLL_MS = 250;
 /** A process listed as a candidate for the one a game restarted itself into. */
 export interface ListedSuccessor {
   readonly pid: number;
-  /** When it started, in milliseconds. To the second on macOS, where `ps` lists no finer. */
+  /** When it started, in milliseconds. Up to a second early on POSIX, which dates no finer. */
   readonly startedAt: number;
   readonly command: string;
 }
@@ -195,8 +195,8 @@ async function followOnPosix(
   exitedAt: number,
   transcript: string,
 ): Promise<Followed | null> {
-  // Linux dates a start from /proc, to the tick and on the clock exitedAt is read on, where ps
-  // dates it up to two seconds early; see linuxStartTimes. macOS's ps cuts it to the second.
+  // Linux dates a start from /proc, up to a second early, where its ps dates it up to two seconds
+  // early, past the slack; see linuxStartTimes. macOS's ps cuts it to the second.
   const linux = process.platform === 'linux';
   let printed: string;
   try {
@@ -232,7 +232,7 @@ async function followOnPosix(
   }
   // Asked of the engines that started in time only, since each answer is a look at another process.
   const timely = listed.filter(
-    (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, !linux) !== null,
+    (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, true) !== null,
   );
   const ours = canonical(transcript);
   const candidates: ListedSuccessor[] = [];
@@ -242,7 +242,7 @@ async function followOnPosix(
       candidates.push(one);
     }
   }
-  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, !linux);
+  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, true);
   if (successor === null) {
     return null;
   }

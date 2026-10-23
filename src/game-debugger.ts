@@ -637,15 +637,20 @@ export class GameDebugger {
    * frame a line at a time costs two round trips for each of a few dozen lines. What the game runs
    * inside that _process, a call a caller queued, is passed over unless a breakpoint holds it.
    */
-  private async pastTheAddon(): Promise<
-    { readonly frames: DebugFrame[] | null; readonly gaveUp?: 'frames' | 'lines' } | 'lost'
+  private async pastTheAddon(
+    until?: number,
+  ): Promise<
+    { readonly frames: DebugFrame[] | null; readonly gaveUp?: 'frames' | 'lines' | 'time' } | 'lost'
   > {
     let frames = await this.stack();
     let framesLeft = ADDON_FRAMES;
     let linesLeft = ADDON_LINES;
     while (frames !== null && this.held !== null && (frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false)) {
+      if (until !== undefined && Date.now() >= until) {
+        return { frames, gaveUp: 'time' };
+      }
       if (frames.some((frame) => frame.script === RUNTIME_AUTOLOAD && frame.name === '_process')) {
-        if (framesLeft === 0) {
+        if (until === undefined && framesLeft === 0) {
           return { frames, gaveUp: 'frames' };
         }
         framesLeft -= 1;
@@ -658,7 +663,7 @@ export class GameDebugger {
         frames = reached;
         continue;
       }
-      if (linesLeft === 0) {
+      if (until === undefined && linesLeft === 0) {
         return { frames, gaveUp: 'lines' };
       }
       linesLeft -= 1;
@@ -735,8 +740,10 @@ export class GameDebugger {
       };
     }
     // The step into a function's last line goes on into whatever runs next, which in an idle frame
-    // is the runtime addon's _process, the first thing every frame runs.
-    const past = await this.pastTheAddon();
+    // is the runtime addon's _process, the first thing every frame runs. Taken on for as long as the
+    // step may wait rather than for a few frames, since the next line of the game's own script can
+    // be a timer's second away: five frames in, a step was answered with the addon's stack.
+    const past = await this.pastTheAddon(Date.now() + STEP_MS);
     if (past === 'lost') {
       return {
         stepped: true,
@@ -755,6 +762,11 @@ export class GameDebugger {
       heldAgain: true,
       held: { ...this.heldState(), ...(onBreakpoint ? { onBreakpoint: true } : {}) },
       stack,
+      ...(past.gaveUp === undefined
+        ? {}
+        : {
+            note: `The step went on through gdharness's runtime addon, whose _process runs first in every frame, for ${STEP_MS / 1000}s without the game running a line of its own script, and is held in the addon. debug_control continue lets the game go, and a breakpoint in its script stops it there.`,
+          }),
     };
   }
 

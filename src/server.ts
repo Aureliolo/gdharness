@@ -14951,23 +14951,38 @@ class GodotServer {
     if (kept === null || this.announcedPidOf(kept) !== endpoint.pid) {
       return null;
     }
-    const answered = await askTheKeepersDebugger(kept.keeper, { op: 'stack' }, KEEPER_DEBUG_MS);
+    return (await this.keptHold(kept.keeper))?.description ?? null;
+  }
+
+  /**
+   * Where the game that [param keeper] keeps is held by its debugger, in the shape the editor's
+   * session reports a stop in; null when it is running, or its debugger does not answer.
+   */
+  private async keptHold(keeper: string): Promise<StoppedAt | null> {
+    const answered = await askTheKeepersDebugger(keeper, { op: 'stack' }, KEEPER_DEBUG_MS);
     if ('unreached' in answered || !Array.isArray(answered['stack'])) {
       return null;
     }
     const top: unknown = answered['stack'][0];
     const held: unknown = answered['held'];
-    const reason =
+    // The error that stopped it, Breakpoint, Paused or Stepped, or nothing for a stop asked for.
+    const said =
       typeof held === 'object' &&
       held !== null &&
       typeof (held as Record<string, unknown>)['reason'] === 'string'
-        ? ` (${String((held as Record<string, unknown>)['reason'])})`
+        ? String((held as Record<string, unknown>)['reason'])
         : '';
-    if (typeof top !== 'object' || top === null) {
-      return `held by its debugger between frames${reason}`;
-    }
-    const frame = top as Record<string, unknown>;
-    return `held by its debugger at ${String(frame['script'])}:${String(frame['line'])} in ${String(frame['name'])}${reason}`;
+    const reason = { '': 'pause', Paused: 'pause', Breakpoint: 'breakpoint', Stepped: 'step' }[said];
+    const frame = typeof top === 'object' && top !== null ? (top as Record<string, unknown>) : null;
+    const where =
+      frame === null
+        ? 'between frames'
+        : `at ${String(frame['script'])}:${String(frame['line'])} in ${String(frame['name'])}`;
+    return {
+      reason: reason ?? 'exception',
+      description: `held by its debugger ${where}${said === '' ? '' : ` (${said})`}`,
+      text: reason === undefined ? said : '',
+    };
   }
 
   /**
@@ -15000,8 +15015,13 @@ class GodotServer {
     // that has just asked hands the answer in rather than asking twice: the record alone says a
     // played run is going for as long as it lasts, and editor_status carried that note beside
     // its own `processActive: false`.
-    if (!run.throughEditor || !(going ?? (await this.runStillGoing(run)))) {
+    if (!(going ?? (await this.runStillGoing(run)))) {
       return { heldAt: null };
+    }
+    // A run started here is held by the debugger its keeper holds, which no session of the editor's
+    // sees: a game sitting at a breakpoint was answered heldAt null while debug_state read its stack.
+    if (!run.throughEditor) {
+      return { heldAt: run.keeper === undefined ? null : await this.keptHold(run.keeper) };
     }
     const session = this.dapClient;
     if (session?.holdIsKnown()) {

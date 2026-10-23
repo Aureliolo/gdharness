@@ -10017,16 +10017,15 @@ async function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): Promise<void
       at >= before - STARTED_AFTER_ANNOUNCING_MS && at <= Date.now() + STARTED_AFTER_ANNOUNCING_MS,
       `and the start it gives is the one just seen, to the second the platform rounds to: ${at} against ${before}`,
     );
-    // Finer where the platform dates a start finer, and on the clock Date.now() reads. ps dated a
-    // Linux start from the boot time in whole seconds and cut it to the second, up to two seconds
-    // early, and a game's restart was refused as having begun before the run that made it.
-    if (process.platform !== 'darwin') {
-      const after = Date.now();
-      assert.ok(
-        at >= before - 50 && at <= after + 50,
-        `dated to the tick on this process's clock: ${at} against ${before} to ${after}`,
-      );
-    }
+    // And within the second POSIX dates a start to, and never late. ps dated a Linux start from the
+    // boot time in whole seconds and then cut it to the second, up to two seconds early, and a
+    // game's restart was refused as having begun before the run that made it.
+    const after = Date.now();
+    const early = process.platform === 'win32' ? 50 : 1000;
+    assert.ok(
+      at >= before - early && at <= after,
+      `dated no more than ${early} ms early and never late: ${at} against ${before} to ${after}`,
+    );
     const own = said.get(process.pid);
     assert.ok(own !== undefined, 'this process is answered about in the same question');
     assert.ok(own <= at, 'and began no later than the child it just started');
@@ -14977,6 +14976,31 @@ async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
     const again = await peer.ask({ op: 'resume', how: 'next' });
     assert.deepEqual(moved, ['step', 'next'], 'held on a line, a step over is sent as asked');
     assert.equal(top(again), 'res://main.gd:8', JSON.stringify(again));
+
+    // A step off a function's last line goes on into the addon's next frame, and through as many
+    // frames as the game takes to run a line of its own, as a timer a second away does: five frames
+    // in, a step was answered with the addon's stack.
+    stops = [
+      ...Array.from({ length: 8 }, () => [3, addon, 362, '_process']),
+      [3, 'res://main.gd', 23, '_on_customer'],
+    ];
+    const onward = await peer.ask({ op: 'resume', how: 'next' });
+    assert.equal(top(onward), 'res://main.gd:23', JSON.stringify(onward));
+    assert.equal(get(onward, 'note'), undefined, JSON.stringify(onward));
+    // A game that runs none of its own script is held in the addon once the step's wait is spent.
+    stops = [[3, addon, 362, '_process']];
+    const spent = await peer.ask({ op: 'resume', how: 'next' });
+    assert.deepEqual([get(spent, 'stepped'), get(spent, 'heldAgain')], [true, true], JSON.stringify(spent));
+    assert.equal(
+      get(spent, 'note'),
+      "The step went on through gdharness's runtime addon, whose _process runs first in every frame, for 10s without the game running a line of its own script, and is held in the addon. debug_control continue lets the game go, and a breakpoint in its script stops it there.",
+      JSON.stringify(spent),
+    );
+    assert.match(
+      top(spent),
+      /^res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd:/,
+      JSON.stringify(spent),
+    );
   } finally {
     game.destroy();
     peer.close();
@@ -30931,6 +30955,15 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       [8, 'res://main.gd', 'Breakpoint'],
       `the breakpoint set before the start stops the game on its line: ${stopped.said}`,
     );
+    // And the run's output says where it is held, as it does for a game the editor plays: it said
+    // heldAt null while the stack above was read.
+    const heldOutput = await call('editor_output', { projectPath: project, op: 'run' });
+    assert.equal(get(heldOutput.answer, 'heldAt', 'reason'), 'breakpoint', heldOutput.said);
+    assert.match(
+      text(get(heldOutput.answer, 'heldAt', 'description')),
+      /^held by its debugger at res:\/\/main\.gd:8 in _ready \(Breakpoint\)$/,
+      heldOutput.said,
+    );
     const scopes = await call('debug_state', { op: 'variables' });
     const locals = asArray(get(asArray(get(scopes.answer, 'scopes'))[0], 'variables'));
     assert.deepEqual(
@@ -30953,6 +30986,12 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       running.said,
       /The game is running, not held/,
       `a game let go has no stack: ${running.said}`,
+    );
+    const goingOutput = await call('editor_output', { projectPath: project, op: 'run' });
+    assert.deepEqual(
+      [get(goingOutput.answer, 'running'), get(goingOutput.answer, 'heldAt')],
+      [true, null],
+      goingOutput.said,
     );
 
     // The hang itself: a main thread that never returns from _ready, broken into where it spins.
