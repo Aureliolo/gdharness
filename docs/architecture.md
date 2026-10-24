@@ -159,7 +159,7 @@ addons, installed into your project
 |-- gdharness_editor      the bridge: scenes, resources, running the game
 |-- gdharness_runtime     an autoload: the running game answers through it
 |-- auto_reload           reloads the open scene when a file changes
-`-- gdharness_tests       GdhShare, which a bench under gdharness spread plays through
+`-- gdharness_tests       GdhShare, for benches under gdharness spread
 ```
 
 The CLI half never loads the MCP SDK, and the server half never reads the harness table. They share

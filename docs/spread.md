@@ -6,10 +6,13 @@ table the bench prints when it runs alone, to the last digit. A bench whose runs
 worker, and the outcomes of every run are gathered back in run order before the bench folds them.
 
 ```text
-gdharness spread res://bench/balance.tscn                  as many workers as the machine has room for
+gdharness spread res://bench/balance.tscn
 gdharness spread res://bench/balance.tscn --workers 4
-gdharness spread res://bench/balance.tscn -- --seed=3       --seed=3 goes to every engine
+gdharness spread res://bench/balance.tscn -- --seed=3
 ```
+
+The first takes as many workers as the machine has room for, and the last hands `--seed=3` to
+every engine.
 
 It exits 0 when every worker played its whole share and the gathering run printed no error, 1
 when anything went wrong, and 2 when the command line itself is wrong.
