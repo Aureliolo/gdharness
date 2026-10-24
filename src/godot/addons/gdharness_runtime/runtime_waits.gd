@@ -35,6 +35,28 @@ const MOST_WATCHES: int = 16
 ## kept still ends on the latest value.
 const MOST_CHANGES: int = 1000
 
+## The commands that can change the game, by the tool call that sends each, which a property watch
+## notes as they arrive.
+const CALLS_NAMED: Dictionary[String, String] = {
+	"set_property": "runtime_invoke set",
+	"call_method": "runtime_invoke call",
+	"click": "runtime_input click",
+	"choose": "runtime_input choose",
+	"inject_action": "runtime_input action",
+	"inject_key": "runtime_input key",
+	"inject_text": "runtime_input text",
+	"inject_mouse_click": "runtime_input mouse_click",
+	"inject_mouse_motion": "runtime_input mouse_motion",
+	"inject_mouse_drag": "runtime_input mouse_drag",
+	"inject_joypad_button": "runtime_input joypad_button",
+	"inject_joypad_motion": "runtime_input joypad_motion",
+}
+
+## What a call noted by a property watch carries of its parameters, when it was given them.
+const CALL_FIELDS: Array[String] = [
+	"path", "method", "property", "action", "keycode", "button", "pressed", "says"
+]
+
 var _host: Node
 var _values: GdhValues
 var _watches: Dictionary[int, GdhWatch] = {}
@@ -295,6 +317,27 @@ func _record(trace: GdhTrace) -> void:
 			return
 
 
+## Notes [param command] in every property watch still recording, beside the last reading taken
+## before it ran, so a recording shows where the call that started a change landed. A call two
+## round trips apart from another lands dozens of frames later, which only this tells apart from
+## the game's own delay.
+func saw_call(command: String, params: Dictionary) -> void:
+	var named: String = CALLS_NAMED.get(command, "")
+	if named.is_empty():
+		return
+	for trace: GdhTrace in _traces.values():
+		if trace.collected or not trace.ended.is_empty():
+			continue
+		if trace.calls.size() >= MOST_CHANGES:
+			trace.calls_dropped += 1
+			continue
+		var noted: Dictionary = {"frame": trace.frames, "call": named}
+		for field: String in CALL_FIELDS:
+			if params.has(field):
+				noted[field] = params[field]
+		trace.calls.append(noted)
+
+
 ## What a property watch recorded, each change with the frame, the time and the game time it was
 ## read at. The watch goes with the answer.
 func recorded(params: Dictionary) -> Dictionary:
@@ -329,9 +372,12 @@ func recorded(params: Dictionary) -> Dictionary:
 		"path": trace.node_path,
 		"property": trace.property,
 		"changes": trace.changes,
+		"calls": trace.calls,
 		"frames": trace.frames,
 		"elapsed_ms": trace.elapsed_ms,
 	}
+	if trace.calls_dropped > 0:
+		answer["calls_dropped"] = trace.calls_dropped
 	if trace.dropped > 0:
 		answer["dropped"] = (
 			(
@@ -819,6 +865,8 @@ class GdhTrace:
 	var property: String
 	var changes: Array[Dictionary] = []
 	var dropped: int = 0
+	var calls: Array[Dictionary] = []
+	var calls_dropped: int = 0
 	var frames: int = 0
 	var elapsed_ms: int = 0
 	var ended: String = ""

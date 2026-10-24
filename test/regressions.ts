@@ -16073,6 +16073,23 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
       // frame.
       assert.ok(Math.abs(rate + 280) < 14, `frame ${one.frame} moved at ${rate} a second: ${slide.said}`);
     }
+    // The call that started the slide is noted beside the last reading before it ran, and the tween
+    // it made steps in that frame, so the first move is the very next reading. The watch, the wait
+    // and the collection are not calls on the game.
+    assert.deepEqual(
+      asArray(get(slide.parsed, 'calls')).map((one) => [
+        get(one, 'call'),
+        get(one, 'path'),
+        get(one, 'method'),
+      ]),
+      [['runtime_invoke call', '/root/Main', 'slide']],
+      slide.said,
+    );
+    assert.equal(
+      asNumber(get(slide.parsed, 'calls', 0, 'frame')) + 1,
+      moving[0]?.frame,
+      `the slide moves on the reading after the call: ${slide.said}`,
+    );
     const again = await recorded(slid);
     assert.match(
       again.said,
@@ -16093,8 +16110,28 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
         `Watch ${clocked} records /root/Main:clock, a property, and is collected with runtime_wait recorded`,
       ),
     );
-    const clock = changesOf((await recorded(clocked)).parsed);
+    const clockAnswer = await recorded(clocked);
+    const clock = changesOf(clockAnswer.parsed);
     assert.ok(clock.length >= 20, JSON.stringify(clock));
+    // Both sets came after the twenty frames waited, one after the other, and Engine is a path too.
+    const sets = asArray(get(clockAnswer.parsed, 'calls')).map((one) => ({
+      call: get(one, 'call'),
+      path: get(one, 'path'),
+      property: get(one, 'property'),
+      frame: asNumber(get(one, 'frame')),
+    }));
+    assert.deepEqual(
+      sets.map(({ call: made, path, property }) => [made, path, property]),
+      [
+        ['runtime_invoke set', '/root/Main', 'jolting'],
+        ['runtime_invoke set', 'Engine', 'time_scale'],
+      ],
+      clockAnswer.said,
+    );
+    assert.ok(
+      (sets[0]?.frame ?? 0) >= 20 && (sets[1]?.frame ?? 0) >= (sets[0]?.frame ?? Infinity),
+      clockAnswer.said,
+    );
     const atArming = asNumber(clock[0]?.value);
     for (const one of clock) {
       assert.ok(

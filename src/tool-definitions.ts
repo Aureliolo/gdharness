@@ -2454,7 +2454,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       'Lets the running game get on with it and answers when something has happened: a number of frames, a signal, a property reaching a value, or words appearing on a screen. Records a signal or a property from before the call that sets it off, so a change over before the next call arrives is still seen. Needs the game running with the runtime addon.',
     answer:
-      'recorded: changes, each with frame (frames since the watch was armed, 0 the reading at arming), elapsed_ms, game_time (the seconds of process time the game had been given by that frame, scaled by Engine.time_scale as a tween is) and value; frames and elapsed_ms say how long it recorded. dropped says so when more than 1000 changes came, and ended when recording stopped before it was collected: the node was freed, the path stopped reading, or 120000 ms passed.',
+      'recorded: changes, each with frame (frames since the watch was armed, 0 the reading at arming), elapsed_ms, game_time (the seconds of process time the game had been given by that frame, scaled by Engine.time_scale as a tween is) and value; frames and elapsed_ms say how long it recorded. calls lists each runtime_invoke set or call and runtime_input sent while it recorded, in order, with call (the tool and op), what it was given of path, method, property, action, keycode, button, pressed and says, and frame, the last reading taken before it ran, so what it changed shows from the next reading at the earliest. Two calls sent one after the other arrive frames apart, which frame tells apart from a delay in the game itself; calls_dropped counts any past 1000. dropped says so when more than 1000 changes came, and ended when recording stopped before it was collected: the node was freed, the path stopped reading, or 120000 ms passed.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
@@ -2541,7 +2541,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       recorded: {
         effect: 'read',
         summary:
-          'answer what a watch of a property recorded since it was armed, at once: changes holds the reading at arming and every later one that differed, each with the frame, elapsed_ms and game_time it was read at',
+          'answer what a watch of a property recorded since it was armed, at once: changes holds the reading at arming and every later one that differed, each with the frame, elapsed_ms and game_time it was read at, and calls every runtime_invoke set or call and runtime_input sent while it recorded, each with the frame of the last reading before it ran',
         requires: ['watch'],
       },
       until: {
