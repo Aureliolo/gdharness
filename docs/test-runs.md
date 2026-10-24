@@ -119,7 +119,13 @@ an allocation fails at the commit limit however much physical memory is free.
   exports an array or dictionary typed with its own class, such as `@export var parts: Array[Item]`
   in the script declaring `Item`, so a run that loads one always ends this way; the verdict names
   each such script in the project. Typed with a class it extends instead, as `Array[Resource]`, it
-  is freed.
+  is freed. Below 4.8 the engine's shutdown can stop part way through its scripts, when releasing one
+  frees the next (godot#117991, fixed in 4.8 by godot#120976), and it then reports as held
+  everything it never reached. On those engines the runner keeps every script loaded from a file
+  alive until that walk is over, which keeps it whole, and prints a line as the walk starts and
+  another as it ends. A run whose walk still stopped part way lists what the engine reported under
+  "not counted against the run" instead of failing on it. What a test leaks itself, a script it
+  holds included, still holds what it reaches, so it is still reported and still fails the run.
 - An exit code other than 0, named by its meaning: a Windows status such as
   `0xC0000005 (STATUS_ACCESS_VIOLATION)`, or one of gdUnit4's, such as 101 for orphan nodes. gdUnit4's
   100, which it exits with when a case failed, is left out beside that case's own line. An engine

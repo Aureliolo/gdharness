@@ -753,6 +753,13 @@ function report(
     }
     console.log(`everything it printed: ${engine.log}`);
   }
+  for (const engine of ran.filter((one) => one.verdict.notes.length > 0)) {
+    console.log('');
+    console.log(`--- engine ${String(engine.index)}, not counted against the run:`);
+    for (const note of engine.verdict.notes) {
+      console.log(`  ${note}`);
+    }
+  }
   if (across.length > 0) {
     console.log('');
     console.log('--- the cases dealt by their rows, over every engine holding them:');

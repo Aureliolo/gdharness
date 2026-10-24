@@ -104,7 +104,13 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from './editor-log.js';
-import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
+import {
+  EXIT_LEAK,
+  projectSelfTypedExports,
+  selfTypedSentence,
+  WALK_STOPPED_SENTENCE,
+  walkStoppedPartWay,
+} from './engine-leaks.js';
 import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
@@ -7637,6 +7643,9 @@ class GodotServer {
     const leakedAtExit = [
       ...new Set(run.log.all.filter((entry) => EXIT_LEAK.test(entry.text)).map((entry) => entry.text)),
     ];
+    // Listed all the same, and not counted: the engine's shutdown stopped before freeing them.
+    const walkStopped = leakedAtExit.length > 0 && walkStoppedPartWay(run.log.all.map((entry) => entry.text));
+    const countedLeaks = walkStopped ? [] : leakedAtExit;
     // A declared text matches the whole line, so one declaring the start of a message that ends in
     // a number reads as both never printed and undeclared, and nothing said the two were one line.
     const declaredNotPrinted = judgedErrors.neverPrinted.map((missing) => ({
@@ -7751,12 +7760,12 @@ class GodotServer {
         uncaught.length === 0 &&
         undeclaredPrinted.length === 0 &&
         declaredNotPrinted.length === 0 &&
-        leakedAtExit.length === 0 &&
+        countedLeaks.length === 0 &&
         missing.length === 0 &&
         testsNotRun.length === 0,
       verdict: [
         // gdUnit4's word for the exit, which is not the run's when something below fails it.
-        verdict === 'passed' && undeclaredPrinted.length + declaredNotPrinted.length + leakedAtExit.length > 0
+        verdict === 'passed' && undeclaredPrinted.length + declaredNotPrinted.length + countedLeaks.length > 0
           ? undefined
           : verdict,
         ...[false, true].map((warning) => {
@@ -7773,7 +7782,7 @@ class GodotServer {
             ? `${count === 1 ? `one declared ${word}` : `${String(count)} declared ${word}s`} never printed`
             : undefined;
         }),
-        leakedAtExit.length > 0 ? 'the engine exited holding what it should have freed' : undefined,
+        countedLeaks.length > 0 ? 'the engine exited holding what it should have freed' : undefined,
         testsNotRun.length > 0 ? `not run: ${testsNotRun.join(', ')}` : undefined,
       ]
         .filter((part) => part !== undefined)
@@ -7835,7 +7844,8 @@ class GodotServer {
           declaredNotPrinted.length > 0
             ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'
             : undefined,
-          leakedAtExit.length > 0
+          walkStopped ? WALK_STOPPED_SENTENCE : undefined,
+          countedLeaks.length > 0
             ? [
                 'What the engine still held as it exited fails the run, as gdharness test judges it; engineArgs ["--verbose"] names each instance and resource under engineEntries.',
                 selfTypedSentence(projectSelfTypedExports(project.value.path)),

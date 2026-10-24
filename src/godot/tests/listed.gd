@@ -55,6 +55,13 @@ const GDUNIT: String = "--gdh-gdunit"
 ## low-processor pause, 6.8 ms measured, which a run of suites awaiting frames spends thousands of
 ## times; zero makes a frame's delta round to nothing, and a tween then never moves.
 const FRAME_SLEEP_USEC: int = 1000
+## What the engine's shutdown prints as it clears the newest script and the oldest, on an engine
+## whose walk [GdhShutdownWalk] guards. Kept in step with the server's engine-leaks.ts, which reads
+## a run printing the first and not the second as a walk that stopped part way.
+const WALK_BEGAN: String = "gdharness: the engine's shutdown began clearing scripts"
+const WALK_ENDED: String = "gdharness: the engine's shutdown cleared every script"
+## The meta of the theme database holding the scripts [method GdhShutdownWalk.hold] keeps.
+const WALK_HOLD: StringName = &"gdharness_scripts_held_past_the_shutdown_walk"
 
 var _runner: GdhRunner = null
 
@@ -75,6 +82,22 @@ class GdhRunner:
 	var row_shares: Dictionary[String, GdhRowShare] = {}
 	## The cases gdUnit4 said it finished, which [GdhSessionCheck] holds the session's lookups against.
 	var cases_ended: int = 0
+	## The marker of the shutdown walk's oldest end, made as the run starts.
+	var walk_scripts: Array[GDScript] = []
+
+	## As the run ends, the marker of the walk's newest end, and every script held past the walk, on
+	## an engine whose walk can stop part way ([GdhShutdownWalk]).
+	func _notification(what: int) -> void:
+		if what != NOTIFICATION_EXIT_TREE or not GdhShutdownWalk.guarded():
+			return
+		var also: Array[GDScript] = walk_scripts.duplicate()
+		also.append_array(GdhShutdownWalk.marker(WALK_BEGAN))
+		if together != null:
+			also.append(together)
+		var own: GDScript = ResourceLoader.get_cached_ref(own_path) as GDScript
+		if own != null:
+			also.append(own)
+		GdhShutdownWalk.hold(also)
 
 	func get_cmdline_args() -> PackedStringArray:
 		if not given.is_empty():
@@ -211,6 +234,67 @@ class GdhSessionCheck:
 		)
 
 
+## The engine's shutdown walk over its scripts, on an engine below 4.8. It clears them from the
+## newest, and a script whose release frees the next one, as the last reference to its base can,
+## leaves the walk on freed memory, where it ends (godot#117991, fixed in 4.8 by godot#120976).
+## Every script it never reached keeps what it holds, which the engine then reports as leaked at
+## exit, so a run of suites that leaked nothing failed on it.
+class GdhShutdownWalk:
+	extends RefCounted
+
+	## Whether the engine of [param version] is one whose walk can stop part way.
+	static func guarded(version: Dictionary = Engine.get_version_info()) -> bool:
+		var major: int = version.get("major", 0)
+		var minor: int = version.get("minor", 0)
+		return major == 4 and minor < 8
+
+	## A script the walk clears as it passes it, printing [param said] then, made now so it takes
+	## this place in the walk. It holds an instance of itself, which keeps it alive past the engine
+	## dropping its cache of scripts until the walk clears it, and the instance that prints, whose
+	## script is older and so is not cleared yet.
+	static func marker(said: String) -> Array[GDScript]:
+		var printing: GDScript = GDScript.new()
+		printing.source_code = (
+			'extends RefCounted\n\nvar said: String = ""\n\n\nfunc _notification(what: int) -> void:\n'
+			+ "\tif what == NOTIFICATION_PREDELETE:\n\t\tprint(said)\n"
+		)
+		var marking: GDScript = GDScript.new()
+		marking.source_code = (
+			"extends RefCounted\n\nstatic var kept: RefCounted = null\n"
+			+ "static var printing: RefCounted = null\n"
+		)
+		if printing.reload() != OK or marking.reload() != OK:
+			push_error("gdharness test could not make the marker of the engine's shutdown: " + said)
+			return []
+		var instance: Object = printing.new()
+		instance.set("said", said)
+		marking.set("kept", marking.new())
+		marking.set("printing", instance)
+		return [printing, marking]
+
+	## Every script loaded from a file under res://, and [param also], held until the theme database
+	## goes, which is after the walk and before the GDScript language does. Freed in the walk, a
+	## script can take the next one with it and end the walk; held, none is freed there, so the walk
+	## reaches every script and what the engine reports at exit is only what was leaked. A script a
+	## run leaks is held by what leaked it as well, and is still reported.
+	static func hold(also: Array[GDScript]) -> void:
+		var held: Array[GDScript] = also.duplicate()
+		var pending: PackedStringArray = ["res://"]
+		while not pending.is_empty():
+			var directory: String = pending[pending.size() - 1]
+			pending.remove_at(pending.size() - 1)
+			for file: String in DirAccess.get_files_at(directory):
+				var path: String = directory.path_join(file)
+				if file.ends_with(".gd") and ResourceLoader.has_cached(path):
+					var script: GDScript = ResourceLoader.get_cached_ref(path) as GDScript
+					if script != null:
+						held.append(script)
+			for inner: String in DirAccess.get_directories_at(directory):
+				if not inner.begins_with("."):
+					var _inner: bool = pending.append(directory.path_join(inner))
+		ThemeDB.set_meta(WALK_HOLD, held)
+
+
 func _initialize() -> void:
 	_runner = started(OS.get_cmdline_user_args())
 	_runner.own_path = get_script().resource_path
@@ -229,6 +313,10 @@ func _finalize() -> void:
 ## by this script and the suites scene of the tests addon, which loads this file from where the
 ## server ships it and calls this, since the addon itself names no gdUnit4 class.
 static func started(given: PackedStringArray) -> GdhRunner:
+	# First, so the marker is older than every script the run loads.
+	var oldest: Array[GDScript] = []
+	if GdhShutdownWalk.guarded():
+		oldest = GdhShutdownWalk.marker(WALK_ENDED)
 	OS.low_processor_usage_mode_sleep_usec = FRAME_SLEEP_USEC
 	var at: int = given.find(GDUNIT)
 	var asked: PackedStringArray = given if at < 0 else given.slice(0, at)
@@ -251,6 +339,7 @@ static func started(given: PackedStringArray) -> GdhRunner:
 			)
 	var suites: PackedStringArray = listed(asked, LISTED)
 	var runner: GdhRunner = GdhRunner.new()
+	runner.walk_scripts = oldest
 	if at >= 0:
 		runner.given = given.slice(at + 1)
 	if asked.has(TOGETHER):

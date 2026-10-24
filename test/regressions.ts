@@ -101,7 +101,14 @@ import {
   roomFor,
   windowsCommitLeft,
 } from '../src/engine-launch.js';
-import { selfTypedExports, selfTypedSentence } from '../src/engine-leaks.js';
+import {
+  selfTypedExports,
+  selfTypedSentence,
+  WALK_BEGAN,
+  WALK_ENDED,
+  WALK_STOPPED_SENTENCE,
+  walkStoppedPartWay,
+} from '../src/engine-leaks.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import {
   EngineSlots,
@@ -39134,9 +39141,14 @@ async function testSuitesPlayInASceneTheProfilerSees(): Promise<void> {
         '\treturn sum',
         '',
         '',
+        // Work the clock can measure: the engine's totals keep the busiest functions up to a cap,
+        // and a step taking no time lost its place to compiled functions that never ran.
         'func step() -> bool:',
         '\t_stepped += 1',
-        '\treturn _stepped < 4',
+        '\tvar spent: int = 0',
+        '\tfor i: int in 20000:',
+        '\t\tspent += i % 3',
+        '\treturn _stepped < 4 and spent > 0',
         '',
         '',
         'func test_churns() -> void:',
@@ -40935,6 +40947,51 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     judgeEngine(readRun(rows([1])), { ...declaredRows, selfTyped: looped }, clean).faults,
     [],
     'and a run that reported nothing held at exit says nothing of it',
+  );
+
+  // Below 4.8 the runner's markers say whether the engine's shutdown cleared every script. One that
+  // stopped part way reports what it never reached, so its leaks are noted and not counted; a walk
+  // that went whole, or a run without the markers, as on 4.8, counts them as before.
+  const leakLines =
+    'WARNING: 1331 ObjectDB instances were leaked at exit (run with `--verbose` for details).\nERROR: 391 resources still in use at exit (run with --verbose for details).';
+  const stopped = judgeEngine(readRun(`${rows([1])}\n${WALK_BEGAN}\n${leakLines}`), declaredRows, clean);
+  assert.deepEqual(
+    [stopped.passed, stopped.faults, stopped.notes],
+    [
+      true,
+      [],
+      [
+        `${WALK_STOPPED_SENTENCE} It said: WARNING: 1331 ObjectDB instances were leaked at exit (run with \`--verbose\` for details). ERROR: 391 resources still in use at exit (run with --verbose for details).`,
+      ],
+    ],
+    'a walk that stopped part way notes its leaks',
+  );
+  assert.match(WALK_STOPPED_SENTENCE, /godot#117991, fixed in 4\.8 by godot#120976/);
+  for (const [said, around] of [
+    ['a walk that cleared every script', `${WALK_BEGAN}\n${leakLines}\n${WALK_ENDED}`],
+    ['a run without the markers', leakLines],
+    ['the oldest marker alone', `${leakLines}\n${WALK_ENDED}`],
+  ] as const) {
+    const judged = judgeEngine(readRun(`${rows([1])}\n${around}`), declaredRows, clean);
+    assert.deepEqual(
+      [judged.passed, judged.faults.length, judged.notes],
+      [false, 2, []],
+      `${said} counts its leaks: ${judged.faults.join('\n')}`,
+    );
+  }
+  assert.deepEqual(
+    judgeEngine(readRun(`${rows([1])}\n${WALK_BEGAN}`), declaredRows, clean).notes,
+    [],
+    'and a stopped walk with nothing reported notes nothing',
+  );
+  assert.deepEqual(
+    [
+      walkStoppedPartWay([WALK_BEGAN]),
+      walkStoppedPartWay([WALK_BEGAN, WALK_ENDED]),
+      walkStoppedPartWay([WALK_ENDED, WALK_BEGAN]),
+      walkStoppedPartWay([]),
+    ],
+    [true, false, false, false],
   );
 
   const shortOfCases = judgeEngine(readRun(rows([1])), handed(['test_a', 'test_c'], {}), clean);
@@ -42877,6 +42934,121 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     } else {
       console.log(`test command windowed case skipped: ${windowed}`);
     }
+  } finally {
+    sweep(project, slots);
+  }
+}
+
+/**
+ * Below 4.8 the runner holds the project's scripts past the engine's shutdown walk, and a leak of a
+ * run's own still fails it.
+ *
+ * Godot 4.7's walk over its scripts ends on freed memory when releasing one frees the next
+ * (godot#117991), and reports everything it never reached as leaked at exit: a game's run of suites
+ * that freed what it made ended with 1331 instances and 391 resources reported. The hold keeps every
+ * script loaded from a file alive until the theme database goes, after the walk. What a test keeps
+ * in a cycle holds what it reaches as well, a script resource included, so that is still reported:
+ * the hold must not make a real leak pass. The runner's markers bracket the walk, and 4.8 and later
+ * get neither the hold nor the markers, so nothing there is excused.
+ */
+function testTheShutdownWalkIsHeldAndARealLeakStillFails(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('shutdown walk regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-walk-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-walk-slots-'));
+  const runner = resolve('build', 'godot', 'tests', 'listed.gd').replaceAll('\\', '/');
+  const cycle = (keeps: string): string =>
+    [
+      'extends GdUnitTestSuite',
+      '',
+      '',
+      'func test_keeps_a_cycle() -> void:',
+      '\tvar kept: RefCounted = RefCounted.new()',
+      '\tkept.set_meta("me", kept)',
+      keeps,
+      '\tassert_object(kept).is_not_null()',
+      '',
+    ].join('\n');
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Walk"\n',
+      'core/base.gd': 'class_name WalkBase\nextends RefCounted\n\nvar parts: Array = []\n',
+      'core/part.gd': 'class_name WalkPart\nextends WalkBase\n\nfunc named() -> String:\n\treturn "part"\n',
+      'clean/clean_test.gd':
+        'extends GdUnitTestSuite\n\n\nfunc test_frees_what_it_makes() -> void:\n\tassert_str(WalkPart.new().named()).is_equal("part")\n',
+      'cycle/cycle_test.gd': cycle(''),
+      'script/script_test.gd': cycle('\tkept.set_meta("script", load("res://core/part.gd"))'),
+      'gate.gd': [
+        'extends SceneTree',
+        '',
+        '',
+        'func _initialize() -> void:',
+        `\tvar walk: Variant = load(${JSON.stringify(runner)}).get("GdhShutdownWalk")`,
+        '\tfor version: Dictionary in [',
+        '\t\t{"major": 4, "minor": 6}, {"major": 4, "minor": 7}, {"major": 4, "minor": 8},',
+        '\t\t{"major": 4, "minor": 9}, {"major": 5, "minor": 0}, {"major": 3, "minor": 7},',
+        '\t]:',
+        '\t\tprint("walk guarded %d.%d: %s" % [version["major"], version["minor"], walk.guarded(version)])',
+        '\tquit()',
+        '',
+      ].join('\n'),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const env = { ...process.env, GODOT_PATH: godotPath };
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, ...args],
+        { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const printedBy = (said: string): string => {
+      const log = /^everything it printed: (.+)$/m.exec(said)?.[1];
+      assert.ok(log !== undefined, `the run names its engine's log: ${said}`);
+      return readFileSync(log.trim(), 'utf8');
+    };
+
+    const clean = test('--import', 'clean');
+    assert.equal(clean.status, 0, clean.said);
+    assert.match(clean.said, /^Passed: 1 case in 1 suite across 1 engine, /m, clean.said);
+
+    // Both leaks are judged with the walk whole: the markers bracket it, and the leak is a fault.
+    for (const [suite, holding] of [
+      ['cycle', /ObjectDB instances? (?:was|were) leaked at exit/],
+      ['script', /resources? still in use at exit/],
+    ] as const) {
+      const leaked = test(suite);
+      assert.equal(leaked.status, 1, leaked.said);
+      assert.match(leaked.said, /the engine exited holding what it should have freed: /, leaked.said);
+      assert.match(leaked.said, holding, leaked.said);
+      assert.doesNotMatch(leaked.said, /not counted against the run/, leaked.said);
+      const printed = printedBy(leaked.said);
+      const began = printed.indexOf(WALK_BEGAN);
+      const ended = printed.indexOf(WALK_ENDED);
+      assert.ok(began >= 0 && ended > began, `${suite}: the walk went whole: ${printed}`);
+    }
+    // The cycle alone holds no resource, so the script's leak is the one that holds its script.
+    assert.doesNotMatch(test('cycle').said, /resources? still in use at exit/);
+
+    const gate = spawnSyncHidden(godotPath, ['--headless', '--path', project, '-s', 'res://gate.gd'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    const gated = `${gate.stdout}${gate.stderr}`;
+    assert.deepEqual(
+      [...gated.matchAll(/^walk guarded (\d+\.\d+): (\w+)$/gm)].map((match) => `${match[1]} ${match[2]}`),
+      ['4.6 true', '4.7 true', '4.8 false', '4.9 false', '5.0 false', '3.7 false'],
+      gated,
+    );
   } finally {
     sweep(project, slots);
   }
@@ -60041,6 +60213,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testTheTestCommandRunsAndJudgesAProject,
+  testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,

@@ -29,4 +29,6 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 	var runner: Node = listed.call("started", asked.slice(at + 2))
+	# The runner holds its own script past the engine's shutdown by this path.
+	runner.set("own_path", path)
 	add_child(runner)
