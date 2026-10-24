@@ -25,6 +25,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive, exitOf } from './alive.js';
+import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
   DESKTOP_VARIABLE,
   ensureHelperCompiled,
@@ -35,9 +36,10 @@ import {
 } from './desktop.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, ownStart } from './engine-slots.js';
-import { crashesReported } from './error-mode.js';
 import { Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
+import { staleImports } from './import-freshness.js';
+import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { SuiteFingerprints } from './suite-fingerprint.js';
@@ -45,12 +47,14 @@ import {
   type EngineAssignment,
   type EngineEnd,
   type EngineVerdict,
+  exitNamed,
   judgeEngine,
   named,
   type RunPrinted,
   readExpected,
   readRun,
   rowsAcross,
+  versionFault,
 } from './suite-judge.js';
 import {
   type CasesBySuite,
@@ -85,6 +89,14 @@ export interface TestOptions {
   readonly slotsDirectory: string | null;
   readonly slotCount: number | null;
   readonly silenceSeconds: number;
+  /** The most seconds one engine may run, the import's included, or null for no limit. */
+  readonly deadlineSeconds: number | null;
+  /** The engine `--godot` names, or null for the one gdharness finds. */
+  readonly godotPath: string | null;
+  /** How many processors, the first ones, every engine of the run is held to, or null for all. */
+  readonly cores: number | null;
+  /** The version every engine must say it is as it starts, such as `4.7.2`, or null for any. */
+  readonly godotVersion: string | null;
   /** The directories suites are looked for in, as `res://` paths, or none for `tests` and `test`. */
   readonly roots: readonly string[];
   readonly changedOnly: boolean;
@@ -96,6 +108,10 @@ export interface TestOptions {
   readonly printOutput: boolean;
 }
 
+/** The least exit code that is a Windows exception status, such as 0xC0000005, read unsigned. */
+const WINDOWS_EXCEPTION = 0xc0000000;
+/** How many of the slowest suites the run names at its end. */
+const SLOWEST_NAMED = 5;
 /** Most engines a run starts, whatever the machine has. */
 const MOST_ENGINES = 4;
 /** Memory left to the rest of the machine, and what each engine is taken to need. */
@@ -121,6 +137,10 @@ const VALUED = new Set([
   '--slots',
   '--slot-count',
   '--silence',
+  '--deadline',
+  '--godot',
+  '--godot-version',
+  '--cores',
   '--tests',
   '--reach-also',
   '--order',
@@ -165,6 +185,10 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     slotsDirectory: last('--slots') === undefined ? null : resolve(cwd, last('--slots') ?? ''),
     slotCount: whole(last('--slot-count'), '--slot-count'),
     silenceSeconds: whole(last('--silence'), '--silence') ?? SILENCE_FLOOR_SECONDS,
+    deadlineSeconds: whole(last('--deadline'), '--deadline'),
+    godotPath: godotNamed(last('--godot'), cwd),
+    godotVersion: versionNamed(last('--godot-version')),
+    cores: coresNamed(last('--cores')),
     roots: (valued.get('--tests') ?? []).map((root) => resPathOf(root, projectPath, cwd).replace(/\/$/, '')),
     changedOnly: switches.has('--changed-only'),
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
@@ -183,6 +207,40 @@ function whole(value: string | undefined, flag: string): number | null {
     throw new TestUsageError(`${flag} takes a whole number above 0, not ${value}.`);
   }
   return number;
+}
+
+function godotNamed(value: string | undefined, cwd: string): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  const path = resolve(cwd, value);
+  if (!existsSync(path) || statSync(path).isDirectory()) {
+    throw new TestUsageError(`--godot names ${path}, which is not an engine executable.`);
+  }
+  return path;
+}
+
+function coresNamed(value: string | undefined): number | null {
+  const cores = whole(value, '--cores');
+  // A Windows affinity mask is one bit a processor of one group, which holds 64.
+  const most = Math.min(availableParallelism(), 64);
+  if (cores !== null && cores > most) {
+    throw new TestUsageError(
+      `--cores ${String(cores)} is more than the ${String(most)} processors a run can be held to here.`,
+    );
+  }
+  return cores;
+}
+
+function versionNamed(value: string | undefined): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  const version = value.replace(/^v/, '');
+  if (!/^\d+\.\d+(?:\.\d+)?(?:\.[\w-]+)*$/.test(version)) {
+    throw new TestUsageError(`--godot-version takes a version such as 4.7.2 or 4.7.2.stable, not ${value}.`);
+  }
+  return version;
 }
 
 function seedOf(value: string): number {
@@ -286,6 +344,7 @@ export function roomFor(
   processors: number,
   available: number,
   said = 'of memory free',
+  processorsSaid = `the machine has ${plural(processors, 'processor')}`,
 ): { engines: number; held: string | undefined } {
   const byMemory = Math.floor((available - MEMORY_KEPT) / MEMORY_PER_ENGINE);
   const engines = Math.max(1, Math.min(most, processors, byMemory));
@@ -298,7 +357,7 @@ export function roomFor(
     held:
       byMemory < processors
         ? `the machine has ${gigabytes(Math.max(0, available))} ${said}, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(MEMORY_PER_ENGINE)} taken for each engine`
-        : `the machine has ${plural(processors, 'processor')}`,
+        : processorsSaid,
   };
 }
 
@@ -408,6 +467,8 @@ interface EngineRan {
   readonly verdict: EngineVerdict;
   readonly log: string;
   readonly seconds: number;
+  /** Whether this is the engine run again alone after one ran out of memory. */
+  readonly again: boolean;
 }
 
 /** What starting engines needs, the same for every engine of a run. */
@@ -417,8 +478,28 @@ interface Launch {
   readonly runDirectory: string;
   readonly slots: EngineSlots;
   readonly silenceFloorSeconds: number;
+  /** The most seconds one engine may run, printing or not, or null for no limit. */
+  readonly deadlineSeconds: number | null;
   readonly running: Set<() => void>;
   readonly selfTyped: readonly SelfTypedExport[];
+  readonly godotVersion: string | null;
+  readonly cores: number | null;
+}
+
+/**
+ * [param command] and [param args] held to the first [param cores] processors on Linux, through
+ * taskset, which execs the command in its own place so the pid is the engine's; as they are
+ * elsewhere, since Windows holds a process through the helper and macOS cannot.
+ */
+export function heldToCores(
+  cores: number | null,
+  command: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[] } {
+  return cores === null || platform !== 'linux'
+    ? { command, args: [...args] }
+    : { command: 'taskset', args: ['-c', `0-${String(cores - 1)}`, command, ...args] };
 }
 
 /** Runs the suites [param options] asks for with the engine at [param godotPath], answering the exit code. */
@@ -462,8 +543,11 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     runDirectory,
     slots,
     silenceFloorSeconds: options.silenceSeconds,
+    deadlineSeconds: options.deadlineSeconds,
     running,
     selfTyped: selfTypedExports(scripts.sources),
+    godotVersion: options.godotVersion,
+    cores: options.cores,
   };
   try {
     if (options.importFirst) {
@@ -508,7 +592,21 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         `Windows did not say how much memory it can still commit (${memory.unread}), so engines are sized by the physical memory free.`,
       );
     }
-    const room = roomFor(options.engines, availableParallelism(), memory.bytes, memory.said);
+    const room =
+      options.cores === null
+        ? roomFor(options.engines, availableParallelism(), memory.bytes, memory.said)
+        : roomFor(
+            options.engines,
+            options.cores,
+            memory.bytes,
+            memory.said,
+            `--cores holds it to ${plural(options.cores, 'processor')}`,
+          );
+    if (options.cores !== null && process.platform === 'darwin') {
+      console.log(
+        'macOS offers no way to hold a process to some processors, so --cores holds only the number of engines here.',
+      );
+    }
     const plans =
       options.order === null
         ? dealt(units, declared, room.engines)
@@ -691,23 +789,55 @@ function sweepRunDirectories(testRuns: string): void {
   }
 }
 
-/** Imports the project once before the suites, as its own engine in a slot, answering why it failed or null. */
+/**
+ * Imports the project once before the suites, as its own engine in a slot, answering why it failed
+ * or null. Skipped when every imported file is current and the class cache lists every class the
+ * scripts declare, which is all an import would change for the suites.
+ */
 async function importProject(launch: Launch): Promise<string | null> {
+  const seeded = seedExtensionList(launch.projectPath);
+  if (seeded !== null && seeded.length > 0) {
+    console.log(`Wrote .godot/extension_list.cfg naming ${named(seeded)}, so the import loads them.`);
+  }
+  const cached = cachedClasses(launch.projectPath);
+  if (
+    (seeded === null || seeded.length === 0) &&
+    cached !== null &&
+    staleAgainst(cached, launch.projectPath).length === 0 &&
+    staleImports(launch.projectPath).length === 0
+  ) {
+    console.log('The import was skipped: every imported file and the class cache are current.');
+    return null;
+  }
   const directory = join(launch.runDirectory, 'import');
   mkdirSync(join(directory, 'user'), { recursive: true });
   const log = join(directory, 'import.log');
   const lock = await launch.slots.take();
   try {
+    // An editor open on the project holds the copies of its extension libraries, and an import
+    // that cannot copy one runs without the extension.
+    freeLibraryCopies(launch.projectPath);
     const ended = await watched(
       launch,
       ['--headless', '--audio-driver', 'Dummy', '--path', launch.projectPath, '--import'],
       directory,
       log,
-      false,
       launch.silenceFloorSeconds,
     );
     if (ended.ended !== null || ended.code !== 0) {
-      return `${ended.ended ?? `the engine exited ${String(ended.code)}`}; everything it printed is in ${log}`;
+      return `${ended.ended ?? `the engine exited ${exitNamed(ended.code ?? 0)}`}; everything it printed is in ${log}`;
+    }
+    // Godot's import exits 0 whatever it printed, and a suite run on a failed import reads what
+    // the import left behind.
+    const printed = readRun(readFileSync(log, 'utf8'));
+    const wrongEngine =
+      launch.godotVersion === null ? null : versionFault(printed.engineVersion, launch.godotVersion);
+    if (wrongEngine !== null) {
+      return `${wrongEngine}; everything it printed is in ${log}`;
+    }
+    const errors = printed.errors.filter((error) => !error.warning);
+    if (errors.length > 0) {
+      return `it printed ${errors.length === 1 ? 'an engine error' : `${String(errors.length)} engine errors`}, the first ${JSON.stringify(errors[0]?.text ?? '')}; everything it printed is in ${log}`;
     }
     return null;
   } finally {
@@ -812,7 +942,7 @@ async function runEngine(
   const began = Date.now();
   let end: EngineEnd;
   try {
-    end = await watched(launch, args, directory, log, plan.windowed, silence);
+    end = await watched(launch, args, directory, log, silence);
   } finally {
     if (slot === null) {
       launch.slots.release(lock);
@@ -823,6 +953,7 @@ async function runEngine(
     suites: plan.suites,
     expected: readExpected(expectedFile),
     selfTyped: launch.selfTyped,
+    godotVersion: launch.godotVersion,
   };
   return {
     index,
@@ -831,20 +962,20 @@ async function runEngine(
     verdict: judgeEngine(printed, assignment, end),
     log,
     seconds: (Date.now() - began) / 1000,
+    again: again !== '',
   };
 }
 
 /**
  * Starts the engine with [param args], both its streams into [param log] through one handle so
  * their lines stay in the order printed, and waits for it, ending it once it has printed nothing for
- * [param silenceSeconds] or an autoload has failed to start.
+ * [param silenceSeconds], has run past the run's deadline, or an autoload has failed to start.
  */
 async function watched(
   launch: Launch,
   args: readonly string[],
   directory: string,
   log: string,
-  windowed: boolean,
   silenceSeconds: number,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
@@ -860,10 +991,11 @@ async function watched(
     readonly step: string;
   } | null = null;
   try {
-    // Through the helper on Windows for a desktop of its own, and also wherever this process could
-    // not clear the bit that keeps a crash from being reported, since the helper clears it in itself.
-    if (process.platform === 'win32' && (windowed || !crashesReported())) {
-      const where = windowed ? 'on a desktop of its own' : 'through the desktop helper';
+    // On Windows every engine on a desktop of its own, headless too: an engine that fails to start
+    // shows a modal alert even with --headless, and on the desktop in use that takes the keyboard of
+    // whoever is working there. The helper also clears the bit that keeps a crash from being reported.
+    if (process.platform === 'win32') {
+      const where = 'on a desktop of its own';
       const compiled = await ensureHelperCompiled();
       if (compiled !== null) {
         return { code: null, signal: null, ended: `the engine could not be started ${where}: ${compiled}` };
@@ -871,9 +1003,11 @@ async function watched(
       const stopFile = join(directory, 'stop');
       const error = join(directory, 'error');
       helper = { error, how: where, pid: join(directory, 'pid'), step: join(directory, 'step') };
-      const how = windowed
-        ? { desktop: HIDDEN_DESKTOP, directory: launch.projectPath }
-        : { directory: launch.projectPath };
+      const how = {
+        desktop: HIDDEN_DESKTOP,
+        directory: launch.projectPath,
+        ...(launch.cores === null ? {} : { affinity: (1n << BigInt(launch.cores)) - 1n }),
+      };
       const wrapper = throughHelper(how, launch.godotPath, args, {
         spec: join(directory, 'spec'),
         pid: helper.pid,
@@ -883,18 +1017,19 @@ async function watched(
       });
       child = spawnHidden(wrapper.command, wrapper.args, {
         stdio: ['ignore', output, output],
-        env: windowed ? { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP } : env,
+        env: { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
         cwd: directory,
       });
       stop = () => {
         writeFileSync(stopFile, '');
       };
     } else {
-      child = spawnHidden(launch.godotPath, args, {
+      const held = heldToCores(launch.cores, launch.godotPath, args);
+      child = spawnHidden(held.command, held.args, {
         stdio: ['ignore', output, output],
         env,
         cwd: launch.projectPath,
-        detached: process.platform !== 'win32',
+        detached: true,
       });
       stop = () => {
         endTree(child);
@@ -921,10 +1056,18 @@ async function watched(
   const reading = openSync(log, 'r');
   try {
     let size = 0;
-    let lastGrowth = Date.now();
+    const started = Date.now();
+    let lastGrowth = started;
     let text = '';
     while (!finished.now) {
       await delay(LOOK_MS);
+      // Silence alone never ends an engine that keeps printing, such as a case warning every frame.
+      const deadline = launch.deadlineSeconds;
+      if (ended === null && deadline !== null && Date.now() - started > deadline * 1000) {
+        const stoppedIn = readRun(text).stoppedIn;
+        ended = `the engine ran past the ${String(deadline)} s deadline${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
+        stop();
+      }
       const now = fstatSync(reading).size;
       if (now > size) {
         const chunk = Buffer.alloc(now - size);
@@ -952,12 +1095,14 @@ async function watched(
     launch.running.delete(stop);
   }
   const { code, signal } = await exited;
+  // Read as soon as it is known, while the machine is still as the engine left it.
+  const freeBytes = code !== null && code >>> 0 >= WINDOWS_EXCEPTION ? freemem() : undefined;
   // The helper's own failure reaches only its file, and the exit code it leaves says nothing.
   const failed = helper === null ? null : helperFailure(helper.error);
   if (failed !== null && helper !== null) {
     ended ??= `the engine could not be started ${helper.how}: ${failed}`;
   }
-  return { code, signal, ended };
+  return { code, signal, ended, ...(freeBytes === undefined ? {} : { freeBytes }) };
 }
 
 /** Ends [param child] and everything it started: Godot's console build is a wrapper around the engine. */
@@ -1002,12 +1147,19 @@ function report(
   }
   const failed = ran.filter((engine) => !engine.verdict.passed);
   for (const engine of failed) {
+    const heading = `--- engine ${String(engine.index)}: ${plural(engine.plan.suites.length, 'suite')}, ${engine.seconds.toFixed(1)} s${engine.again ? ', run again alone after an engine ran out of memory, and failed again' : ''}`;
     console.log('');
-    console.log(
-      `--- engine ${String(engine.index)}: ${plural(engine.plan.suites.length, 'suite')}, ${engine.seconds.toFixed(1)} s`,
-    );
+    console.log(heading);
     for (const fault of engine.verdict.faults) {
       console.log(`  ${fault}`);
+    }
+    // At the top of the kept log, so the file says why on its own, even when the engine printed nothing.
+    if (existsSync(engine.log)) {
+      const verdict = [
+        `gdharness: ${heading.slice(4)}`,
+        ...engine.verdict.faults.map((fault) => `  ${fault}`),
+      ];
+      writeFileSync(engine.log, `${verdict.join('\n')}\n---\n${readFileSync(engine.log, 'utf8')}`);
     }
     if (engine.verdict.shown.length > 0) {
       console.log('');
@@ -1031,6 +1183,26 @@ function report(
   const suites = new Set(ran.flatMap((engine) => engine.plan.suites.map((suite) => suite.path))).size;
   const longest = Math.max(0, ...ran.map((engine) => engine.seconds));
   const took = (Date.now() - startedAt) / 1000;
+  // What each engine took beside what it was dealt, so an uneven deal is told from a slow suite.
+  if (ran.length > 1) {
+    console.log('');
+    console.log(
+      `The engines took ${ran.map((engine) => `${engine.seconds.toFixed(1)} s`).join(', ')}, dealt ${ran.map((engine) => `${engine.plan.cost.toFixed(1)} s`).join(', ')}.`,
+    );
+  }
+  const slowest = ran
+    .flatMap((engine) =>
+      [...engine.printed.suites.values()].flatMap((suite) =>
+        suite.closed === null ? [] : [{ path: suite.path, seconds: suite.closed.seconds }],
+      ),
+    )
+    .sort((a, b) => b.seconds - a.seconds)
+    .slice(0, SLOWEST_NAMED);
+  if (slowest.length > 1) {
+    console.log(
+      `The slowest suites: ${slowest.map((suite) => `${suite.path} ${suite.seconds.toFixed(1)} s`).join(', ')}.`,
+    );
+  }
   const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s; the longest engine took ${longest.toFixed(1)} s.`;
   console.log('');
   if (failed.length === 0 && across.length === 0) {

@@ -7119,7 +7119,10 @@ class GodotServer {
     const missing = paths.value.filter(
       (path) => !existsSync(join(project.value.path, path.slice('res://'.length))),
     );
-    const asked = paths.value.filter((path) => !missing.includes(path));
+    // gdUnit4 searches a directory it is handed itself, into the folders the project keeps out of
+    // every search, so a directory holding one is handed as the suites gdharness test finds in it.
+    const projectScripts = new ProjectScripts(project.value.path);
+    const asked = projectScripts.searchedAsTold(paths.value.filter((path) => !missing.includes(path)));
     const unusable = gdUnit4Unusable(project.value.path);
     if (asked.length === 0) {
       const verdict = `nothing at ${missing.join(' and ')}`;
@@ -7165,7 +7168,7 @@ class GodotServer {
     // the window it was given there: a scene that sets itself up only off the headless display
     // server answered six errors pointing at the game. A suite left out whole by ignore is not run.
     const leftOut = new Set(readStringArray(args, 'ignore') ?? []);
-    const needs = windowNeedsOf(project.value.path, selection.value?.suites ?? asked);
+    const needs = windowNeedsOf(projectScripts, selection.value?.suites ?? asked);
     const needing = needs.needing.filter((path) => !leftOut.has(basename(path, '.gd')));
     const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
     const windowed = needing.length > 0 && !noDisplay;
