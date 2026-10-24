@@ -28,6 +28,7 @@ export const REGRESSION_SECONDS: Readonly<Record<string, number>> = {
   testANodeKeepsItsGroupsAndItsPlace: 45,
   testARunImportsWhatChangedFirst: 44,
   testACallWaitsForTheEditorThisServerOpened: 44,
+  testAParameterisedCaseIsDealtByItsRows: 44,
   testAGameHeldInACallHasTheCall: 43,
   testAnEditorWritesItsConsoleWhereTheServerLooks: 42,
   testARealBenchTakesItsWorkerWithIt: 36,

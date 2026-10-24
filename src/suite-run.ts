@@ -50,6 +50,7 @@ import {
   type RunPrinted,
   readExpected,
   readRun,
+  rowsAcross,
 } from './suite-judge.js';
 import {
   type CasesBySuite,
@@ -530,11 +531,21 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       );
     }
     const split = [...new Set(units.map((unit) => unit.suite))].filter(
-      (path) => units.filter((unit) => unit.suite === path).length > 1,
+      (path) => units.filter((unit) => unit.suite === path && unit.row === undefined).length > 1,
     );
     if (plans.length > 1 && split.length > 0) {
       console.log(
         `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(split)}.`,
+      );
+    }
+    const byRows = [
+      ...new Set(
+        units.flatMap((unit) => (unit.row === undefined ? [] : [`${unit.suite} > ${unit.cases[0] ?? ''}`])),
+      ),
+    ];
+    if (plans.length > 1 && byRows.length > 0) {
+      console.log(
+        `Dealt out row by row, since ${byRows.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(byRows)}.`,
       );
     }
     const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
@@ -560,10 +571,24 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         wholeSuites,
         ran.map((engine) => engine.printed),
         (path) => scripts.suite(path),
+        new Set(
+          ran.flatMap((engine) =>
+            engine.plan.suites
+              .filter((suite) => (engine.printed.suites.get(suite.path)?.closed ?? null) === null)
+              .flatMap((suite) => suite.cases.map((func) => `${suite.path}:${func}`)),
+          ),
+        ),
       ),
     );
-    recordPassed(passedFile, ran, printsOf);
-    return report(ran, startedAt, runDirectory, options.printOutput);
+    const across = rowsAcross(ran.map((engine) => ({ handed: engine.plan.suites, printed: engine.printed })));
+    recordPassed(passedFile, ran, printsOf, new Set(across.map((fault) => fault.suite)));
+    return report(
+      ran,
+      across.map((fault) => fault.fault),
+      startedAt,
+      runDirectory,
+      options.printOutput,
+    );
   } finally {
     process.off('SIGINT', interrupted);
     process.off('SIGTERM', interrupted);
@@ -631,9 +656,10 @@ function recordPassed(
   file: string,
   ran: readonly EngineRan[],
   printsOf: ReadonlyMap<string, string | null>,
+  failedAcross: ReadonlySet<string>,
 ): void {
   const passed = readRecord(file);
-  const failedSomewhere = new Set<string>();
+  const failedSomewhere = new Set<string>(failedAcross);
   const passedSomewhere = new Set<string>();
   for (const engine of ran) {
     const passing = new Set(engine.verdict.passedSuites);
@@ -726,9 +752,23 @@ async function runEngine(
   mkdirSync(join(directory, 'user'), { recursive: true });
   const suitesFile = join(directory, 'suites.txt');
   const skippingFile = join(directory, 'skipping.txt');
+  const rowsFile = join(directory, 'rows.txt');
   const expectedFile = join(directory, 'expected.json');
   writeFileSync(suitesFile, `${plan.suites.map((suite) => suite.path).join('\n')}\n`);
   writeFileSync(skippingFile, `${plan.skipping.join('\n')}\n`);
+  writeFileSync(
+    rowsFile,
+    `${plan.suites
+      .flatMap((suite) =>
+        Object.entries(suite.rows ?? {}).map(([func, share]) =>
+          [
+            `${suite.path}:${func}`,
+            ...('only' in share ? ['only', ...share.only] : ['besides', ...share.besides]),
+          ].join('\t'),
+        ),
+      )
+      .join('\n')}\n`,
+  );
   const viewport = viewportOf(launch.projectPath);
   const display = plan.windowed
     ? viewport === null
@@ -756,6 +796,8 @@ async function runEngine(
     suitesFile,
     '--skipping-in',
     skippingFile,
+    '--rows-in',
+    rowsFile,
     '--html-report-off',
     '--junit-report-off',
     '--compile-together',
@@ -939,6 +981,7 @@ function endTree(child: ChildProcess): void {
 /** Prints how the run went and answers the exit code: what failed, in full, then one line of totals. */
 function report(
   ran: readonly EngineRan[],
+  across: readonly string[],
   startedAt: number,
   runDirectory: string,
   printOutput: boolean,
@@ -974,6 +1017,13 @@ function report(
     }
     console.log(`everything it printed: ${engine.log}`);
   }
+  if (across.length > 0) {
+    console.log('');
+    console.log('--- the cases dealt by their rows, over every engine holding them:');
+    for (const fault of across) {
+      console.log(`  ${fault}`);
+    }
+  }
   const cases = ran.reduce(
     (sum, engine) => sum + [...engine.printed.suites.values()].reduce((n, s) => n + s.cases.length, 0),
     0,
@@ -983,12 +1033,12 @@ function report(
   const took = (Date.now() - startedAt) / 1000;
   const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s; the longest engine took ${longest.toFixed(1)} s.`;
   console.log('');
-  if (failed.length === 0) {
+  if (failed.length === 0 && across.length === 0) {
     rmSync(runDirectory, { recursive: true, force: true });
     console.log(`Passed: ${totals}`);
     return 0;
   }
-  const problems = failed.reduce((sum, engine) => sum + engine.verdict.faults.length, 0);
+  const problems = failed.reduce((sum, engine) => sum + engine.verdict.faults.length, across.length);
   console.log(`Failed: ${plural(problems, 'problem')}, listed above. Ran ${totals}`);
   console.log(`Every engine's output is kept under ${runDirectory} until the next run.`);
   return 1;

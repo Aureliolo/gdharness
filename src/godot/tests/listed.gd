@@ -15,6 +15,16 @@ extends SceneTree
 
 const LISTED: String = "--suites-in"
 const SKIPPING: String = "--skipping-in"
+## The file of the parameterised cases dealt by their rows, one a line and tab-separated:
+## `res://suite.gd:test_case`, then `only` and the rows this engine runs, or `besides` and the rows
+## it leaves to the others, for the engine that takes every row dealt nowhere else. Apart from
+## [constant SKIPPING], since gdUnit4 reads `suite:case:row` there as the case and leaves out every
+## row of it.
+const ROWS: String = "--rows-in"
+## Printed before each row an engine leaves out, as `res://suite.gd > test_case:row`, -1 for a case
+## that is not parameterised. gdUnit4 prints nothing for a case it skips, and the caller needs every
+## row an engine found to tell one that no engine ran.
+const LEFT_OUT: String = "gdharness left out"
 ## The flags turning off a report, with the gdUnit4 hook that writes it. A gate reads what a run
 ## prints, and each report finds every case it hears of in the session to write them all out as the
 ## run ends; project_test reads the JUnit one and turns off only the HTML one.
@@ -54,9 +64,22 @@ class GdhRunner:
 	extends GdUnitTestCIRunner
 
 	var own_path: String = ""
+	## The cases dealt by their rows, by `res://suite.gd:test_case`.
+	var row_shares: Dictionary[String, GdhRowShare] = {}
 
 	func get_cmdline_args() -> PackedStringArray:
 		return options_of(OS.get_cmdline_args(), own_path)
+
+	## gdUnit4 asks this of every case it finds, a parameterised case once a row, each row carrying
+	## its index.
+	func is_skipped(test: GdUnitTestCase) -> bool:
+		if super(test):
+			return true
+		var share: GdhRowShare = row_shares.get("%s:%s" % [test.suite_resource_path, test.test_name], null)
+		if share == null or not share.leaves_out(test.attribute_index):
+			return false
+		print("%s %s > %s:%d" % [LEFT_OUT, test.suite_resource_path, test.test_name, test.attribute_index])
+		return true
 
 	## The session gdUnit4 has just made, swapped for a [GdhIndexedSession] of the same cases as it
 	## is announced: everything that reads the session, the hooks, the cases and the console printing
@@ -85,6 +108,19 @@ class GdhRunner:
 	static func spelt(path: String) -> String:
 		var forward: String = path.replace("\\", "/")
 		return forward.to_lower() if OS.get_name() == "Windows" else forward
+
+
+## The rows of one parameterised case an engine runs: those named, or every row but those.
+class GdhRowShare:
+	extends RefCounted
+
+	var only: bool = true
+	var rows: PackedInt32Array = []
+
+	## Whether the engine leaves out [param row], which is -1 for a case that is not parameterised
+	## and so runs only in the engine taking the rows besides.
+	func leaves_out(row: int) -> bool:
+		return rows.has(row) != only
 
 
 ## gdUnit4's session finding a case by its id in a dictionary, where its own walks every case of the
@@ -132,6 +168,7 @@ func _initialize() -> void:
 	_runner.own_path = get_script().resource_path
 	_runner.add_test_suites(suites)
 	_runner.skip_test_suites(listed(asked, SKIPPING))
+	_runner.row_shares = row_shares_of(listed(asked, ROWS))
 	root.add_child(_runner)
 
 
@@ -211,6 +248,22 @@ static func listed(args: PackedStringArray, flag: String) -> PackedStringArray:
 		if not line.strip_edges().is_empty():
 			var _named: bool = named.append(line.strip_edges())
 	return named
+
+
+## The row shares [param lines] of a [constant ROWS] file give, by case.
+static func row_shares_of(lines: PackedStringArray) -> Dictionary[String, GdhRowShare]:
+	var shares: Dictionary[String, GdhRowShare] = {}
+	for line: String in lines:
+		var parts: PackedStringArray = line.split("\t")
+		if parts.size() < 2:
+			continue
+		var share: GdhRowShare = GdhRowShare.new()
+		share.only = parts[1] == "only"
+		for row: String in parts.slice(2):
+			if row.is_valid_int():
+				var _added: bool = share.rows.append(row.to_int())
+		shares[parts[0]] = share
+	return shares
 
 
 ## The argument after [param flag] in [param args], or "" when there is none.

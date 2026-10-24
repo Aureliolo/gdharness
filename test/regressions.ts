@@ -344,8 +344,18 @@ import {
 } from '../src/spawn.js';
 import { RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import { SuiteFingerprints } from '../src/suite-fingerprint.js';
-import { exitNamed, funcOf, judgeEngine, readRun, secondsOf } from '../src/suite-judge.js';
 import {
+  exitNamed,
+  funcOf,
+  type HandedSuite,
+  judgeEngine,
+  type RowShare,
+  readRun,
+  rowsAcross,
+  secondsOf,
+} from '../src/suite-judge.js';
+import {
+  type DeclaredSuite,
   dealt,
   type EnginePlan,
   headlessInAWindow,
@@ -353,6 +363,7 @@ import {
   lanesOf,
   ProjectScripts,
   SPLIT_PAST_SECONDS,
+  type SuiteTimes,
   timesAfter,
   type Unit,
   unitsOf,
@@ -41337,8 +41348,8 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     );
     assert.deepEqual(
       after[small.path],
-      { seconds: 0.6, cases: { test_s: 0.5 } },
-      'the rows of a case together',
+      { seconds: 0.6, cases: { test_s: 0.5 }, rows: { test_s: [0.2, 0.3] } },
+      'the rows of a case together, and each on its own',
     );
     assert.deepEqual(after[edge.path], times[edge.path], 'a suite that did not run keeps its times');
     assert.deepEqual(
@@ -41351,6 +41362,236 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       timesAfter(times, [], [], (path) => (path === edge.path ? suite(edge.path, ['test_e']) : null)),
       { [edge.path]: { seconds: SPLIT_PAST_SECONDS - 5, cases: { test_e: 5 } } },
       'a case no longer declared is dropped from a suite that did not run',
+    );
+
+    // A parameterised case too slow for one engine, dealt out by its rows.
+    const matrix = suite('res://tests/matrix_test.gd', ['test_face', 'test_plain']);
+    const lone_ = suite('res://tests/lone_test.gd', ['test_only']);
+    const rowTimes = {
+      [matrix.path]: {
+        seconds: 26,
+        cases: { test_face: 24, test_plain: 1 },
+        rows: { test_face: [6, 6, 6, 6] },
+      },
+      // One case, so case by case it would stay whole: a single case of 110 to 400 s set a run's length.
+      [lone_.path]: { seconds: 12, cases: { test_only: 12 }, rows: { test_only: [4, 4, 4] } },
+      // Rows under the split stay one unit.
+      [small.path]: { seconds: 2, cases: { test_s: 2 }, rows: { test_s: [1, 1] } },
+    };
+    const rowUnits = unitsOf([matrix, lone_, small], rowTimes);
+    assert.deepEqual(
+      rowUnits.map((unit) => [unit.suite, unit.cases, unit.row ?? null, unit.cost]),
+      [
+        [matrix.path, ['test_face'], { index: 0, rest: false }, 7],
+        [matrix.path, ['test_face'], { index: 1, rest: false }, 7],
+        [matrix.path, ['test_face'], { index: 2, rest: false }, 7],
+        [matrix.path, ['test_face'], { index: 3, rest: true }, 7],
+        [matrix.path, ['test_plain'], null, 2],
+        [lone_.path, ['test_only'], { index: 0, rest: false }, 4],
+        [lone_.path, ['test_only'], { index: 1, rest: false }, 4],
+        [lone_.path, ['test_only'], { index: 2, rest: true }, 4],
+        [small.path, ['test_s'], null, 2],
+      ],
+      'a row a unit past the split, the last also taking any rows grown since, and a case under it whole',
+    );
+    const rowDeclared = new Map([matrix, lone_, small].map((s) => [s.path, s.cases]));
+    const rowPlans = dealt(rowUnits, rowDeclared, 4);
+    type Shares = [readonly string[], Readonly<Record<string, RowShare>> | null];
+    const sharesOf = (plans: readonly EnginePlan[], path: string): Shares[] =>
+      plans.flatMap((plan) =>
+        plan.suites.filter((s) => s.path === path).map((s): Shares => [s.cases, s.rows ?? null]),
+      );
+    assert.deepEqual(
+      sharesOf(rowPlans, matrix.path),
+      [
+        [['test_face'], { test_face: { only: [0] } }],
+        [['test_face'], { test_face: { only: [1] } }],
+        [['test_face'], { test_face: { only: [2] } }],
+        [['test_face', 'test_plain'], { test_face: { besides: [0, 1, 2] } }],
+      ],
+      'each engine runs the rows it holds, and the one holding the last row every row the others do not',
+    );
+    for (const plan of rowPlans) {
+      assert.ok(
+        !plan.skipping.some((entry) => entry.replace(/^res:\/\//, '').split(':').length > 2),
+        `no row reaches gdUnit4's own skipping, which reads it as the whole case: ${plan.skipping.join(', ')}`,
+      );
+    }
+    assert.deepEqual(
+      sharesOf(rowPlans, lone_.path).map(([, rows]) => rows),
+      [{ test_only: { only: [0] } }, { test_only: { only: [1] } }, { test_only: { besides: [0, 1] } }],
+      'and a suite of one case is dealt by its rows too',
+    );
+    assert.deepEqual(
+      sharesOf(dealt(rowUnits, rowDeclared, 1), matrix.path),
+      [[['test_face', 'test_plain'], null]],
+      'every row in one engine is the case whole there',
+    );
+    assert.deepEqual(
+      sharesOf([inOneEngine(rowUnits, rowDeclared)], lone_.path),
+      [[['test_only'], null]],
+      'as in an ordered run',
+    );
+
+    // The times after a run that dealt rows: added up over the engines, each row its own.
+    const rowRun = (
+      path: string,
+      rows: Array<[number, string]>,
+      closed = true,
+      leftOut: number[] = [],
+    ): ReturnType<typeof readRun> =>
+      readRun(
+        [
+          ...leftOut.map((row) => `gdharness left out ${path} > test_only:${String(row)}`),
+          `Run Test Suite: ${path}`,
+          ...rows.map(([row, time]) =>
+            caseLine(path, `test_only:${String(row)} (${String(row)})`, 'PASSED', time),
+          ),
+          ...(closed ? [`Statistics: ${String(rows.length)} test cases | PASSED 3s 0ms`] : []),
+        ].join('\n'),
+      );
+    const declaredNow = (path: string): DeclaredSuite | null => (path === lone_.path ? lone_ : null);
+    assert.deepEqual(
+      timesAfter(
+        rowTimes,
+        [lone_],
+        [
+          rowRun(lone_.path, [[0, '1s 0ms']]),
+          rowRun(lone_.path, [
+            [1, '2s 0ms'],
+            [2, '1s 0ms'],
+            [3, '1s 0ms'],
+          ]),
+        ],
+        declaredNow,
+      )[lone_.path],
+      // Each engine closed its suite at 3 s, so 2 s around the cases in the first.
+      { seconds: 7, cases: { test_only: 5 }, rows: { test_only: [1, 2, 1, 1] } },
+      'a row grown since is timed, and the case is its rows added up',
+    );
+    assert.deepEqual(
+      timesAfter(rowTimes, [lone_], [rowRun(lone_.path, [[0, '1s 0ms']])], declaredNow)[lone_.path],
+      { seconds: 3, cases: { test_only: 1 }, rows: { test_only: [1] } },
+      'every engine holding it having finished, a case with fewer rows is timed as it is now',
+    );
+    assert.deepEqual(
+      timesAfter(
+        rowTimes,
+        [lone_],
+        [rowRun(lone_.path, [[0, '1s 0ms']]), rowRun(lone_.path, [[1, '2s 0ms']], false)],
+        declaredNow,
+        new Set([`${lone_.path}:test_only`]),
+      )[lone_.path],
+      { seconds: 11, cases: { test_only: 9 }, rows: { test_only: [1, 4, 4] } },
+      'and an engine holding some of its rows that never closed its suite leaves the rows it did not reach their old times',
+    );
+
+    // Judged over every engine holding the case: each row once, from row 0 up.
+    const holding = (rows: RowShare): HandedSuite[] => [
+      { path: lone_.path, cases: ['test_only'], rows: { test_only: rows } },
+    ];
+    const across = (...engines: Array<[RowShare, Array<[number, string]>]>): string[] =>
+      rowsAcross(
+        engines.map(([share, rows]) => ({ handed: holding(share), printed: rowRun(lone_.path, rows) })),
+      ).map((fault) => fault.fault);
+    assert.deepEqual(
+      across(
+        [{ only: [0] }, [[0, '1s 0ms']]],
+        [
+          { besides: [0] },
+          [
+            [1, '1s 0ms'],
+            [2, '1s 0ms'],
+          ],
+        ],
+      ),
+      [],
+      'every row once',
+    );
+    assert.deepEqual(
+      across(
+        [{ only: [3] }, []],
+        [
+          { besides: [3] },
+          [
+            [0, '1s 0ms'],
+            [1, '1s 0ms'],
+          ],
+        ],
+      ),
+      [],
+      'a case with fewer rows than last time, its missing row dealt to an engine that then ran none',
+    );
+    assert.deepEqual(
+      across(
+        [
+          { only: [0, 1] },
+          [
+            [0, '1s 0ms'],
+            [1, '1s 0ms'],
+          ],
+        ],
+        [
+          { besides: [0] },
+          [
+            [1, '1s 0ms'],
+            [2, '1s 0ms'],
+          ],
+        ],
+      ),
+      [`${lone_.path} > test_only ran row 1 in more than one engine`],
+      'a row run twice',
+    );
+    assert.deepEqual(
+      across([{ only: [0, 1] }, [[0, '1s 0ms']]], [{ besides: [0, 1] }, [[2, '1s 0ms']]]),
+      [`${lone_.path} > test_only did not run row 1 in any of the 2 engines its rows were dealt to`],
+      'a row no engine ran',
+    );
+    const leaving = (share: RowShare, ran: number, left: number[]) =>
+      ({ handed: holding(share), printed: rowRun(lone_.path, [[ran, '1s 0ms']], true, left) }) as const;
+    assert.deepEqual(
+      rowsAcross([leaving({ only: [0] }, 0, [1, 2]), leaving({ only: [1] }, 1, [0, 2])]).map(
+        (fault) => fault.fault,
+      ),
+      [`${lone_.path} > test_only did not run row 2 in any of the 2 engines its rows were dealt to`],
+      'a row past the last one run, which only the engines leaving it out found',
+    );
+    assert.deepEqual(
+      rowsAcross([leaving({ only: [0] }, 0, [1, -1]), leaving({ besides: [0] }, 1, [0])]).map(
+        (fault) => fault.fault,
+      ),
+      [],
+      'every row found ran somewhere, and a case left out whole is no row',
+    );
+    assert.deepEqual(
+      across([{ only: [0] }, []], [{ besides: [0] }, []]),
+      [`${lone_.path} > test_only ran in none of the 2 engines its rows were dealt to`],
+      'a case that ran nowhere',
+    );
+    const stray = judgeEngine(
+      rowRun(lone_.path, [
+        [0, '1s 0ms'],
+        [1, '1s 0ms'],
+      ]),
+      { suites: holding({ only: [0] }), expected: { errors: {}, warnings: {} } },
+      { code: 0, signal: null, ended: null },
+    );
+    assert.ok(
+      stray.faults.includes(`${lone_.path} > test_only ran row 1, which was dealt to another engine`),
+      `an engine running a row it was not dealt says so: ${stray.faults.join(' | ')}`,
+    );
+    const shrunk = judgeEngine(
+      rowRun(lone_.path, []),
+      { suites: holding({ only: [5] }), expected: { errors: {}, warnings: {} } },
+      {
+        code: 0,
+        signal: null,
+        ended: null,
+      },
+    );
+    assert.ok(
+      !shrunk.faults.some((fault) => fault.includes('closed without running')),
+      `and one dealt rows the case no longer has is not faulted for running none: ${shrunk.faults.join(' | ')}`,
     );
   } finally {
     sweep(project);
@@ -41849,6 +42090,116 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     } else {
       console.log(`test command windowed case skipped: ${windowed}`);
     }
+  } finally {
+    sweep(project, slots);
+  }
+}
+
+/**
+ * A parameterised case too slow for one engine is dealt out by its rows, and each row runs once.
+ *
+ * The games write their matrices as parameterised cases, single cases of 110 to 408 s, which no
+ * number of engines brought down while each ran whole. Each row prints the engine it ran in. The
+ * times are set by hand after a first run, since six rows of nothing are too quick to be dealt; and
+ * a row the case gains after they were taken runs once all the same, in the engine holding the last.
+ */
+function testAParameterisedCaseIsDealtByItsRows(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('row dealing regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rows-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rows-slots-'));
+  const matrix = (rows: number): string =>
+    [
+      'extends GdUnitTestSuite',
+      '',
+      `func test_face(value: int, test_parameters := [${Array.from({ length: rows }, (_, row) => `[${String(row)}]`).join(', ')}]) -> void:`,
+      '\tprint("ROW %d IN %d" % [value, OS.get_process_id()])',
+      '\tassert_int(value).is_greater_equal(0)',
+      '',
+      '',
+      'func test_plain() -> void:',
+      '\tassert_bool(true).is_true()',
+      '',
+    ].join('\n');
+  const path = 'res://tests/matrix_test.gd';
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Rows"\n',
+      'tests/matrix_test.gd': matrix(6),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, ...args],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, GODOT_PATH: godotPath },
+          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+        },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const timesFile = join(project, '.godot', 'gdharness', 'suite-times.json');
+    const rowsTimed = (): number | undefined =>
+      (JSON.parse(readFileSync(timesFile, 'utf8')) as SuiteTimes)[path]?.rows?.['test_face']?.length;
+    const first = test('--import', '--engines', '1');
+    assert.equal(first.status, 0, first.said);
+    assert.equal(rowsTimed(), 6, `each row is timed on its own: ${readFileSync(timesFile, 'utf8')}`);
+
+    // Which engine ran each row, by the process each printed.
+    const ranIn = (said: string): Map<number, number[]> => {
+      const ran = new Map<number, number[]>();
+      for (const [, row, pid] of said.matchAll(/^ROW (\d+) IN (\d+)\s*$/gm)) {
+        ran.set(Number(row), [...(ran.get(Number(row)) ?? []), Number(pid)]);
+      }
+      return ran;
+    };
+    const slowed = (rows: number): string =>
+      JSON.stringify({
+        [path]: {
+          seconds: 5 * rows + 1,
+          cases: { test_face: 5 * rows, test_plain: 0.5 },
+          rows: { test_face: Array.from({ length: rows }, () => 5) },
+        },
+      });
+    for (const [rows, what] of [
+      [6, 'the rows the times know'],
+      [7, 'a row added since the times were taken'],
+    ] as const) {
+      writeTree(project, { 'tests/matrix_test.gd': matrix(rows) });
+      writeFileSync(timesFile, slowed(6));
+      const run = test('--engines', '2', '--print-output');
+      assert.equal(run.status, 0, `${what}: ${run.said}`);
+      const ran = ranIn(run.said);
+      assert.deepEqual(
+        [...ran].map(([row, pids]) => [row, pids.length]).sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
+        Array.from({ length: rows }, (_, row) => [row, 1]),
+        `${what}: every row once: ${run.said}`,
+      );
+      // Two engines need about seven gigabytes free, which the macOS runner does not have; held to
+      // one, the case runs whole there, and the run says why it was held.
+      if (run.said.includes('over 1 engine, of the 2 asked for, since')) {
+        console.log(`row dealing: held to one engine, so the rows ran in one (${what})`);
+        continue;
+      }
+      assert.match(
+        run.said,
+        /^Dealt out row by row, since it took more than 10 s last time: res:\/\/tests\/matrix_test\.gd > test_face\.$/m,
+        `${what}: ${run.said}`,
+      );
+      assert.equal(new Set([...ran.values()].flat()).size, 2, `${what}: over both engines: ${run.said}`);
+      assert.equal(rowsTimed(), rows, `${what}: and every row is timed afterwards`);
+    }
+    assert.deepEqual(readdirSync(slots), [], 'every slot given back');
   } finally {
     sweep(project, slots);
   }
@@ -58503,6 +58854,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
   testTheTestCommandRunsAndJudgesAProject,
+  testAParameterisedCaseIsDealtByItsRows,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,
   testATestRunSaysHowFarItHasGot,
