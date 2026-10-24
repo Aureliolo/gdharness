@@ -41,7 +41,7 @@ import { NOT_INHERITED, RESOLVED_ELSEWHERE } from '../src/rename.js';
 import { readLatestRun } from '../src/run-record.js';
 import { frameFunctionsFor, queuedMessagesOf } from '../src/script-profile.js';
 import { SERVER_VERSION } from '../src/server-version.js';
-import { installAddons, RUNTIME_AUTOLOAD } from '../src/setup.js';
+import { installAddons, RUNTIME_AUTOLOAD, writeLoader } from '../src/setup.js';
 import { type ChildProcess, spawnHidden, spawnSyncHidden } from '../src/spawn.js';
 import { endEnginesUnder } from './support/engines.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
@@ -701,6 +701,7 @@ function createProject(): string {
   // Installed as setup installs them, markers and digests included: a copy without them is one
   // gdharness did not put there, and its editor is asked nothing but to quit.
   installAddons(dir);
+  writeLoader(dir);
 
   writeFileSync(
     join(dir, 'project.godot'),
@@ -737,9 +738,9 @@ function createProject(): string {
       '',
       'limits/debugger/max_queued_messages=3072',
       '',
-      // The runtime addon, registered the way an install registers it. A game the editor plays
-      // then serves the runtime tools, which is the only way to drive them against a real one:
-      // its own guard is the debug build, not the display, so a headless game answers.
+      // The runtime addon, registered through the loader the way an install registers it. A game
+      // the editor plays then serves the runtime tools, which is the only way to drive them against
+      // a real one: its own guard is the debug build, not the display, so a headless game answers.
       '[autoload]',
       '',
       `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"`,
