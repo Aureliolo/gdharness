@@ -732,7 +732,7 @@ Usage:
   gdharness classes [project]        Rebuild .godot/global_script_class_cache.cfg from disk
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--deadline S] [--tests DIR] [--changed-only] [--reach-also PATH]
-                 [--import]
+                 [--import] [--godot PATH] [--godot-version V]
                  [--order reversed|SEED] [--print-output] [--runner]
                                      Run the project's gdUnit4 suites over several engines and
                                      judge every line they print: exit 1 on a failing case, an
@@ -778,7 +778,7 @@ async function test(): Promise<void> {
     return;
   }
   const options = testOptionsOf(rest, process.cwd());
-  const { godotPath } = await engine(options.projectPath);
+  const godotPath = options.godotPath ?? (await engine(options.projectPath)).godotPath;
   process.exitCode = await runTestCommand(options, godotPath);
 }
 

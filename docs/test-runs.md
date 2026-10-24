@@ -26,6 +26,9 @@ command line itself is wrong.
 - `--silence S`: the shortest silence that ends an engine, in seconds; 300 by default.
 - `--deadline S`: the most seconds one engine may run, printing or not, the import's included. No
   limit by default.
+- `--godot PATH`: the engine to run, in place of the one `GODOT_PATH` or the usual places give.
+- `--godot-version V`: fail every engine, the import's included, whose banner names another
+  version. `4.7.2` holds for `4.7.2.stable.official`, and `4.7` for every patch of it.
 - `--tests DIR`: where to look for suites, `tests` and `test` by default. May be given more than
   once.
 - `--import`: import the project in an engine of its own before the suites.

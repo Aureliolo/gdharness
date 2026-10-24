@@ -353,6 +353,7 @@ import {
   readRun,
   rowsAcross,
   secondsOf,
+  versionFault,
 } from '../src/suite-judge.js';
 import {
   type DeclaredSuite,
@@ -41610,6 +41611,30 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       [`${lone_.path} > test_only ran in none of the 2 engines its rows were dealt to`],
       'a case that ran nowhere',
     );
+
+    // The engine's version from its banner, and whether it is the one asked for.
+    assert.equal(
+      readRun(
+        'Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org\nGodot Engine v9.9.9\n',
+      ).engineVersion,
+      '4.7.2.stable.official.ed1daf0bf',
+      'the first banner, without the address',
+    );
+    assert.equal(readRun('Godot Engine v4.8.dev1.custom_build\n').engineVersion, '4.8.dev1.custom_build');
+    assert.equal(readRun('Run Test Suite: res://a_test.gd\n').engineVersion, null);
+    const bannered = '4.7.2.stable.official.ed1daf0bf';
+    assert.equal(versionFault(bannered, '4.7.2'), null);
+    assert.equal(versionFault(bannered, '4.7.2.stable'), null);
+    assert.equal(versionFault(bannered, '4.7'), null, 'a shorter version holds for every patch of it');
+    assert.equal(
+      versionFault(bannered, '4.7.20'),
+      `the engine that ran is Godot ${bannered}, not the 4.7.20 --godot-version asks for`,
+      'a version is matched part by part, not by its first characters',
+    );
+    assert.equal(
+      versionFault(null, '4.7.2'),
+      'the engine printed no version as it started, so it cannot be told to be Godot 4.7.2',
+    );
     const stray = judgeEngine(
       rowRun(lone_.path, [
         [0, '1s 0ms'],
@@ -42058,6 +42083,29 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
         ? /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since the machine has \d+\.\d GB of memory free, 4\.0 GB of it kept for everything else and 1\.5 GB taken for each engine\.$/m
         : /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than 10 s last time: res:\/\/tests\/ok_test\.gd\.$/m,
       split.said,
+    );
+
+    // The engine named on the command line, held to the version asked for by what it prints.
+    const version = spawnSyncHidden(godotPath, ['--version'], { encoding: 'utf8' }).stdout.trim();
+    const minor = version.split('.').slice(0, 2).join('.');
+    assert.match(minor, /^\d+\.\d+$/, version);
+    const pinned = test('--godot', godotPath, '--godot-version', minor, 'tests/ok_test.gd');
+    assert.equal(pinned.status, 0, pinned.said);
+    assert.match(pinned.said, /^Passed: 2 cases in 1 suite across 1 engine, /m, pinned.said);
+    const otherVersion = test('--godot', godotPath, '--godot-version', '3.0.0', 'tests/ok_test.gd');
+    assert.equal(otherVersion.status, 1, otherVersion.said);
+    assert.ok(
+      otherVersion.said.includes(
+        `  the engine that ran is Godot ${version}, not the 3.0.0 --godot-version asks for\n`,
+      ),
+      otherVersion.said,
+    );
+    const noEngine = test('--godot', join(project, 'no-godot.exe'), 'tests/ok_test.gd');
+    assert.equal(noEngine.status, 2, noEngine.said);
+    assert.match(
+      noEngine.said,
+      /--godot names .*no-godot\.exe, which is not an engine executable\./,
+      noEngine.said,
     );
 
     // A case printing all the while is never silent, so only the deadline ends it.

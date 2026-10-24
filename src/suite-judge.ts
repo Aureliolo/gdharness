@@ -73,6 +73,8 @@ export interface RunPrinted {
    * row. gdUnit4 prints nothing for them, so without these a row no engine was dealt goes unseen.
    */
   readonly leftOut: ReadonlyMap<string, readonly (number | null)[]>;
+  /** The version the engine's banner gives, such as `4.7.2.stable.official.ed1daf0bf`, or null. */
+  readonly engineVersion: string | null;
 }
 
 const SUITE_OPENED = /^Run Test Suite:\s*(res:\/\/.+?\.gd)\s*$/;
@@ -84,6 +86,8 @@ const STATISTICS = new RegExp(String.raw`^Statistics:.*\|\s*([A-Z]+)(?:\s+\(.*?\
 const ERROR_LINE = /^\s*(?:SCRIPT |USER )?ERROR: (.*?)\s*$/;
 const WARNING_LINE = /^\s*(?:SCRIPT |USER )?WARNING: (.*?)\s*$/;
 const EXECUTED = /^Executed test cases\s*:\s*\((\d+)\//;
+// The engine's first line, `Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org`.
+const BANNER = /^\s*Godot Engine v(\S+?)(?:\s+-\s+\S+)?\s*$/;
 // Printed by the runner in src/godot/tests/listed.gd as it leaves a row out, -1 for a case whole.
 const LEFT_OUT = /^gdharness left out (res:\/\/.+?\.gd) > ([^:\s]+):(-?\d+)\s*$/;
 // Godot giving up on a rendering driver it could not start, and starting the next. The display
@@ -157,7 +161,13 @@ export function readRun(printed: string): RunPrinted {
     afterCase = [];
   };
   const leftOut = new Map<string, (number | null)[]>();
+  let engineVersion: string | null = null;
   for (const [at, line] of lines.entries()) {
+    const banner: RegExpExecArray | null = engineVersion === null ? BANNER.exec(line) : null;
+    if (banner !== null) {
+      engineVersion = banner[1] ?? null;
+      continue;
+    }
     const left = LEFT_OUT.exec(line);
     if (left !== null) {
       const key = `${left[1] ?? ''} > ${left[2] ?? ''}`;
@@ -254,7 +264,7 @@ export function readRun(printed: string): RunPrinted {
   const unloadable = scriptErrorsPrinted(lines).map(
     (error) => `${error.path}${error.line === null ? '' : `:${String(error.line)}`}: ${error.message}`,
   );
-  return { lines, suites, errors, leaks, starved, executed, unloadable, stoppedIn, leftOut };
+  return { lines, suites, errors, leaks, starved, executed, unloadable, stoppedIn, leftOut, engineVersion };
 }
 
 // What Godot prints before an error raised while it was printing another. It writes the pair
@@ -308,6 +318,21 @@ export interface EngineAssignment {
   readonly expected: Expected;
   /** The project's scripts the engine never frees once loaded, which its report at exit counts. */
   readonly selfTyped?: readonly SelfTypedExport[];
+  /** The version the engine must say it is as it starts, as `--godot-version` gives it. */
+  readonly godotVersion?: string | null;
+}
+
+/**
+ * Why the version [param said] in an engine's banner is not [param wanted], or null when it is:
+ * the same, or [param wanted] followed by more of it, so 4.7.2 holds for 4.7.2.stable.official.
+ */
+export function versionFault(said: string | null, wanted: string): string | null {
+  if (said === null) {
+    return `the engine printed no version as it started, so it cannot be told to be Godot ${wanted}`;
+  }
+  return said === wanted || said.startsWith(`${wanted}.`)
+    ? null
+    : `the engine that ran is Godot ${said}, not the ${wanted} --godot-version asks for`;
 }
 
 /** What each suite declares, as the runner's `--expected-out` wrote it, or nothing. */
@@ -481,6 +506,13 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   }
   if (printed.unloadable.length > 0) {
     faults.push(`gdUnit4 could not load ${named(printed.unloadable)}, so it ran nothing`);
+  }
+  const wrongEngine =
+    handed.godotVersion === undefined || handed.godotVersion === null
+      ? null
+      : versionFault(printed.engineVersion, handed.godotVersion);
+  if (wrongEngine !== null) {
+    faults.push(wrongEngine);
   }
   if (printed.executed === null || printed.executed === 0) {
     faults.push(

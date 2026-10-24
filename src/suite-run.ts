@@ -54,6 +54,7 @@ import {
   readExpected,
   readRun,
   rowsAcross,
+  versionFault,
 } from './suite-judge.js';
 import {
   type CasesBySuite,
@@ -90,6 +91,10 @@ export interface TestOptions {
   readonly silenceSeconds: number;
   /** The most seconds one engine may run, the import's included, or null for no limit. */
   readonly deadlineSeconds: number | null;
+  /** The engine `--godot` names, or null for the one gdharness finds. */
+  readonly godotPath: string | null;
+  /** The version every engine must say it is as it starts, such as `4.7.2`, or null for any. */
+  readonly godotVersion: string | null;
   /** The directories suites are looked for in, as `res://` paths, or none for `tests` and `test`. */
   readonly roots: readonly string[];
   readonly changedOnly: boolean;
@@ -127,6 +132,8 @@ const VALUED = new Set([
   '--slot-count',
   '--silence',
   '--deadline',
+  '--godot',
+  '--godot-version',
   '--tests',
   '--reach-also',
   '--order',
@@ -172,6 +179,8 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     slotCount: whole(last('--slot-count'), '--slot-count'),
     silenceSeconds: whole(last('--silence'), '--silence') ?? SILENCE_FLOOR_SECONDS,
     deadlineSeconds: whole(last('--deadline'), '--deadline'),
+    godotPath: godotNamed(last('--godot'), cwd),
+    godotVersion: versionNamed(last('--godot-version')),
     roots: (valued.get('--tests') ?? []).map((root) => resPathOf(root, projectPath, cwd).replace(/\/$/, '')),
     changedOnly: switches.has('--changed-only'),
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
@@ -190,6 +199,28 @@ function whole(value: string | undefined, flag: string): number | null {
     throw new TestUsageError(`${flag} takes a whole number above 0, not ${value}.`);
   }
   return number;
+}
+
+function godotNamed(value: string | undefined, cwd: string): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  const path = resolve(cwd, value);
+  if (!existsSync(path) || statSync(path).isDirectory()) {
+    throw new TestUsageError(`--godot names ${path}, which is not an engine executable.`);
+  }
+  return path;
+}
+
+function versionNamed(value: string | undefined): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  const version = value.replace(/^v/, '');
+  if (!/^\d+\.\d+(?:\.\d+)?(?:\.[\w-]+)*$/.test(version)) {
+    throw new TestUsageError(`--godot-version takes a version such as 4.7.2 or 4.7.2.stable, not ${value}.`);
+  }
+  return version;
 }
 
 function seedOf(value: string): number {
@@ -428,6 +459,7 @@ interface Launch {
   readonly deadlineSeconds: number | null;
   readonly running: Set<() => void>;
   readonly selfTyped: readonly SelfTypedExport[];
+  readonly godotVersion: string | null;
 }
 
 /** Runs the suites [param options] asks for with the engine at [param godotPath], answering the exit code. */
@@ -474,6 +506,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     deadlineSeconds: options.deadlineSeconds,
     running,
     selfTyped: selfTypedExports(scripts.sources),
+    godotVersion: options.godotVersion,
   };
   try {
     if (options.importFirst) {
@@ -741,7 +774,13 @@ async function importProject(launch: Launch): Promise<string | null> {
     }
     // Godot's import exits 0 whatever it printed, and a suite run on a failed import reads what
     // the import left behind.
-    const errors = readRun(readFileSync(log, 'utf8')).errors.filter((error) => !error.warning);
+    const printed = readRun(readFileSync(log, 'utf8'));
+    const wrongEngine =
+      launch.godotVersion === null ? null : versionFault(printed.engineVersion, launch.godotVersion);
+    if (wrongEngine !== null) {
+      return `${wrongEngine}; everything it printed is in ${log}`;
+    }
+    const errors = printed.errors.filter((error) => !error.warning);
     if (errors.length > 0) {
       return `it printed ${errors.length === 1 ? 'an engine error' : `${String(errors.length)} engine errors`}, the first ${JSON.stringify(errors[0]?.text ?? '')}; everything it printed is in ${log}`;
     }
@@ -859,6 +898,7 @@ async function runEngine(
     suites: plan.suites,
     expected: readExpected(expectedFile),
     selfTyped: launch.selfTyped,
+    godotVersion: launch.godotVersion,
   };
   return {
     index,
