@@ -8,6 +8,7 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { serverServing } from './bridge-announce.js';
+import { EngineUsageError } from './engine-launch.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
@@ -54,7 +55,8 @@ import {
   shippedOperationsScript,
 } from './setup.js';
 import { everySkillDirectory, removeSkill, skillDirectories, writeSkill } from './skill.js';
-import { runTestCommand, TestUsageError, testOptionsOf } from './suite-run.js';
+import { runSpreadCommand, spreadOptionsOf } from './spread-run.js';
+import { runTestCommand, testOptionsOf } from './suite-run.js';
 import { getLocalVersion } from './version.js';
 
 const args = process.argv.slice(2);
@@ -779,6 +781,14 @@ Usage:
                                      prints what every engine printed, for a
                                      benchmark run by hand. --runner prints the shipped runner's
                                      path. docs/test-runs.md has the rest.
+  gdharness spread [project] SCENE [--workers N] [--slots DIR] [--slot-count N] [--silence S]
+                   [--deadline S] [--godot PATH] [--godot-version V] [--cores N] [-- ARGS]
+                                     Play a bench scene's runs over several headless engines,
+                                     each in an engine slot, then gather every run's outcome in
+                                     run order and print the bench's table: exit 1 when a worker
+                                     failed or did not play its whole share. The bench asks
+                                     GdhShare.outcomes for each arm's runs. ARGS go to every
+                                     engine. docs/spread.md has the rest.
   gdharness version                  Show the installed version
   gdharness help                     Show this help
 
@@ -817,10 +827,21 @@ async function test(): Promise<void> {
   process.exitCode = await runTestCommand(options, godotPath);
 }
 
+/** `gdharness spread`, whose options are its own, read by {@link spreadOptionsOf}. */
+async function spread(): Promise<void> {
+  const options = spreadOptionsOf(args.slice(1), process.cwd());
+  const godotPath = options.godotPath ?? (await engine(options.projectPath)).godotPath;
+  process.exitCode = await runSpreadCommand(options, godotPath);
+}
+
 async function main(): Promise<void> {
   await letWindowsReportCrashes();
   if (command === 'test') {
     await test();
+    return;
+  }
+  if (command === 'spread') {
+    await spread();
     return;
   }
   checkFlags();
@@ -870,7 +891,7 @@ async function main(): Promise<void> {
 await main().catch((error: unknown) => {
   if (error instanceof Refusal) {
     console.error('gdharness:', error.message);
-    process.exit(error instanceof UsageError || error instanceof TestUsageError ? 2 : 1);
+    process.exit(error instanceof UsageError || error instanceof EngineUsageError ? 2 : 1);
   }
   // Nothing anticipated this, so the person in front of it is owed more than the exception's
   // message: what broke, that it is not theirs to fix, and what to do with it if they want to.

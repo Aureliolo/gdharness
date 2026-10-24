@@ -26,7 +26,7 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 
 	var entries: Array = []
 	var skipped: Array[Dictionary] = []
-	for path: String in _files.find_files("res://", ".gd"):
+	for path: String in _files.find_files("res://", ".gd", true):
 		var entry: Dictionary = _entry_for(path, skipped)
 		if not entry.is_empty():
 			entries.append(entry)

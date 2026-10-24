@@ -158,7 +158,8 @@ gdharness
 addons, installed into your project
 |-- gdharness_editor      the bridge: scenes, resources, running the game
 |-- gdharness_runtime     an autoload: the running game answers through it
-`-- auto_reload           reloads the open scene when a file changes
+|-- auto_reload           reloads the open scene when a file changes
+`-- gdharness_tests       GdhShare, which a bench under gdharness spread plays through
 ```
 
 The CLI half never loads the MCP SDK, and the server half never reads the harness table. They share
@@ -172,6 +173,12 @@ the runner `project_test` starts as well. Both read what the engine printed with
 from one file holding both of its streams in order, so a suite the tool passes is one the gate
 passes: the tool looks in the same directories and judges engine errors against the same
 declarations.
+
+`gdharness spread` plays a bench scene over several engines, each holding one of the same slots,
+and [Spread benches](spread.md) describes it. Both commands start and watch their engines through
+`engine-launch.ts`. The bench asks the tests addon's GdhShare for its outcomes: in a worker it plays
+every Nth run and writes the outcomes with `store_var`, and in the one engine started after the
+workers it reads them back, so the bench folds the same values in the same order as it does alone.
 
 Every tool is declared in one table and dispatched from it, so a tool the server answers is a tool
 the documentation lists and a fixture drives. The reference on this site is rendered from that same

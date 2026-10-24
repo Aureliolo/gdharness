@@ -116,7 +116,7 @@ parse is refused rather than replaced.
 
 ## Committing what it installed
 
-The three addons land in `addons/`, and they are yours to commit like any other Godot addon.
+The four addons land in `addons/`, and they are yours to commit like any other Godot addon.
 Neither Godot's version-control page nor GitHub's `Godot.gitignore` excludes `addons/`, so a
 project that has not chosen otherwise commits them and everybody on the team has the same version
 without running anything.

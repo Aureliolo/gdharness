@@ -30,7 +30,7 @@ import { spawnSyncHidden } from './spawn.js';
 import { readString } from './tool-args.js';
 
 /** The addons the package ships, by directory name under addons/. */
-export const ADDONS = ['gdharness_editor', 'gdharness_runtime', 'auto_reload'] as const;
+export const ADDONS = ['gdharness_editor', 'gdharness_runtime', 'auto_reload', 'gdharness_tests'] as const;
 
 /** The addons that are editor plugins and are enabled by setup. */
 export const EDITOR_PLUGINS = ['gdharness_editor', 'auto_reload'] as const;
@@ -95,6 +95,17 @@ export const PORT_SETTING = 'gdharness/runtime/port';
 const DIGEST_MARKER = '.gdharness-digest';
 
 const RUNTIME_ADDON = 'gdharness_runtime';
+
+/** The script of the tests addon that a bench under `gdharness spread` asks for its outcomes. */
+export const SHARE_SCRIPT = 'addons/gdharness_tests/share.gd';
+
+/** The file that says an addon of the package is all there: an editor plugin's plugin.cfg, else its script. */
+function addonMarking(name: string): string {
+  if (name === RUNTIME_ADDON) {
+    return 'runtime_autoload.gd';
+  }
+  return name === 'gdharness_tests' ? 'share.gd' : 'plugin.cfg';
+}
 
 /** The digest of the editor plugins in `from`, which is what an open editor has loaded of ours. */
 function editorAddonDigest(from: string = shippedAddonsDirectory()): string {
@@ -262,7 +273,7 @@ export function installAddons(
   const installed: InstalledAddon[] = [];
   for (const name of ADDONS) {
     const source = join(from, name);
-    if (!existsSync(join(source, name === RUNTIME_ADDON ? 'runtime_autoload.gd' : 'plugin.cfg'))) {
+    if (!existsSync(join(source, addonMarking(name)))) {
       throw new Error(`The package holds no ${name} addon at ${source}.`);
     }
     const target = join(projectPath, 'addons', name);

@@ -77,10 +77,13 @@ func is_installed_by_gdharness(path: String) -> bool:
 	return FileAccess.file_exists(path + ".gdharness-version")
 
 
-# Files under `path` whose name ends with `extension`, which is passed with its dot.
-func find_files(path: String, extension: String) -> Array[String]:
+# Files under `path` whose name ends with `extension`, which is passed with its dot. An addon
+# gdharness installed is walked into when [param with_ours] is set, for a caller rebuilding what
+# the engine itself would: the engine lists the global classes of every addon, and a list rebuilt
+# without ours dropped the one class the tests addon declares.
+func find_files(path: String, extension: String, with_ours: bool = false) -> Array[String]:
 	var files: Array[String] = []
-	if is_stepped_over(path) or is_installed_by_gdharness(path):
+	if is_stepped_over(path) or (not with_ours and is_installed_by_gdharness(path)):
 		return files
 
 	var dir: DirAccess = DirAccess.open(path)
@@ -92,7 +95,7 @@ func find_files(path: String, extension: String) -> Array[String]:
 
 		while file_name != "":
 			if dir.current_is_dir() and not file_name.begins_with("."):
-				files.append_array(find_files(path + file_name + "/", extension))
+				files.append_array(find_files(path + file_name + "/", extension, with_ours))
 			elif file_name.ends_with(extension):
 				files.append(path + file_name)
 

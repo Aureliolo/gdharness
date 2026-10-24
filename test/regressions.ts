@@ -92,6 +92,15 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from '../src/editor-log.js';
+import {
+  EngineUsageError,
+  heldToCores,
+  inTurns,
+  macMemoryLevel,
+  memoryRoomOf,
+  roomFor,
+  windowsCommitLeft,
+} from '../src/engine-launch.js';
 import { selfTypedExports, selfTypedSentence } from '../src/engine-leaks.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import {
@@ -346,6 +355,7 @@ import {
   spawnShown,
   spawnSyncHidden,
 } from '../src/spawn.js';
+import { type ArmPlayed, armsPlayed, shareFaults, shareOf } from '../src/spread-run.js';
 import { RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import { SuiteFingerprints } from '../src/suite-fingerprint.js';
 import {
@@ -376,17 +386,7 @@ import {
   unitsOf,
   windowedSaid,
 } from '../src/suite-plan.js';
-import {
-  heldToCores,
-  inTurns,
-  macMemoryLevel,
-  memoryRoomOf,
-  roomFor,
-  roomSaid,
-  TestUsageError,
-  testOptionsOf,
-  windowsCommitLeft,
-} from '../src/suite-run.js';
+import { roomSaid, testOptionsOf } from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -41889,7 +41889,7 @@ function testTheTestCommandReadsItsOwnOptions(): void {
     ] as const) {
       assert.throws(
         () => testOptionsOf(args, project),
-        (error: unknown) => error instanceof TestUsageError && said.test(String(error)),
+        (error: unknown) => error instanceof EngineUsageError && said.test(String(error)),
         String(args),
       );
     }
@@ -41935,6 +41935,250 @@ function windowSuite(declared: string): string {
     '\tassert_bool(shown.visible).is_true()',
     '',
   ].join('\n');
+}
+
+/**
+ * `gdharness spread` against the same bench played on its own: the same table to the last digit,
+ * floats included, from three workers and a gathering engine, none of which announces itself as
+ * the game. Then each way a fan-out can half work, each refused before or after the gathering with
+ * the fault named: a worker that played no arm, one that went another way through the arms, one
+ * that printed an error, a gathering run that skipped an arm, and an outcome that is an object.
+ */
+function testASpreadBenchGathersTheTableItPlaysAlone(): void {
+  // The share each worker plays and the faults read from what they say they played, without an engine.
+  assert.deepEqual(
+    [0, 1, 2].map((index) => shareOf(10, index, 3)),
+    [4, 3, 3],
+    'every third run from the worker index, the first worker taking the remainder',
+  );
+  assert.deepEqual(
+    [0, 1, 2, 3].map((index) => shareOf(2, index, 4)),
+    [1, 1, 0, 0],
+    'workers past the last run play none of it',
+  );
+  const arms = (index: number, workers: number): ArmPlayed[] => [
+    { arm: 'a', runs: 10, played: shareOf(10, index, workers) },
+    { arm: 'b', runs: 7, played: shareOf(7, index, workers) },
+  ];
+  assert.deepEqual(shareFaults([arms(0, 2), arms(1, 2)]), [], 'two workers each playing their own share');
+  assert.deepEqual(
+    shareFaults([arms(0, 2), [{ arm: 'a', runs: 10, played: 4 }, ...arms(1, 2).slice(1)]]),
+    ["worker 1 played 4 of a's 10 runs, and its share is 5"],
+    'a worker that played one run fewer than its share',
+  );
+  assert.deepEqual(
+    shareFaults([arms(0, 2), []]),
+    ['worker 1 played no arm: the scene never asked GdhShare.outcomes for one, or quit before it did'],
+    'a worker that played nothing',
+  );
+  assert.deepEqual(
+    shareFaults([arms(0, 2), arms(1, 2).slice(0, 1)]),
+    [
+      'worker 1 played a (10 runs), and worker 0 played a (10 runs), b (7 runs): which arms a bench plays must depend on its command line alone',
+    ],
+    'a worker that went another way through the arms',
+  );
+  assert.deepEqual(
+    shareFaults([arms(0, 2), null]),
+    ['worker 1 left a line about its arms that cannot be read'],
+    'a line that does not read',
+  );
+  assert.deepEqual(
+    armsPlayed('{"arm":"a","runs":10,"played":4}\n\n{"arm":"b c","runs":7,"played":3}\n'),
+    [
+      { arm: 'a', runs: 10, played: 4 },
+      { arm: 'b c', runs: 7, played: 3 },
+    ],
+    'one arm a line, blank lines passed over',
+  );
+  assert.equal(armsPlayed('{"arm":"a","runs":"10","played":4}'), null, 'a count that is not a number');
+
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names nothing usable.');
+    }
+    console.log('spread regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-slots-'));
+  const runtimeDirectory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-runtime-'));
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Spread"\n',
+      'bench/bench.tscn':
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://bench/bench.gd" id="1"]\n\n[node name="Bench" type="Node"]\nscript = ExtResource("1")\n',
+      'bench/bench.gd': [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar mode: String = ""',
+        '\tvar me: int = -1',
+        '\tfor given: String in OS.get_cmdline_user_args():',
+        '\t\tif given.begins_with("--break="):',
+        '\t\t\tmode = given.trim_prefix("--break=")',
+        '\t\telif given.begins_with("--gdh-share="):',
+        '\t\t\tme = given.trim_prefix("--gdh-share=").get_slice("/", 0).to_int()',
+        '\tif mode == "none" and me == 1:',
+        '\t\tget_tree().quit()',
+        '\t\treturn',
+        '\tvar a: Array = GdhShare.outcomes("a", 10, func(run: int) -> Dictionary: return {"won": run % 3, "most_x": run})',
+        '\tvar b: Array = []',
+        '\tif not (mode == "skip" and GdhShare.gathering()):',
+        '\t\tvar second: String = "c" if mode == "other" and me == 1 else "b"',
+        '\t\tb = GdhShare.outcomes(second, 7, func(run: int) -> Variant: return _played(run, mode))',
+        '\tif mode == "error" and me == 2:',
+        '\t\tpush_error("worker two broke")',
+        '\tif not GdhShare.working():',
+        '\t\tprint("a=", var_to_str(a).replace("\\n", ""))',
+        '\t\tprint("b=", var_to_str(b).replace("\\n", ""))',
+        '\t\tprint("added=", GdhShare.added(a, ["most_x"]))',
+        '\tget_tree().quit()',
+        '',
+        '',
+        'func _played(run: int, mode: String) -> Variant:',
+        '\tif mode == "object" and run == 4:',
+        '\t\treturn RefCounted.new()',
+        '\treturn sqrt(float(run)) / 7.0',
+        '',
+      ].join('\n'),
+    });
+    const env = { ...process.env, GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDirectory };
+    const cli = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(process.execPath, [resolve('build', 'cli.js'), ...args], {
+        encoding: 'utf8',
+        env,
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      });
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const setUp = cli('setup', project, '--no-connect', '--no-skill', '--yes');
+    assert.equal(setUp.status, 0, setUp.said);
+    assert.match(
+      setUp.said,
+      /^class list rebuilt: 1 classes$/m,
+      `GdhShare, from the tests addon: ${setUp.said}`,
+    );
+    const alone = spawnSyncHidden(
+      godotPath,
+      ['--headless', '--audio-driver', 'Dummy', '--path', project, 'res://bench/bench.tscn'],
+      { encoding: 'utf8', env, timeout: ENGINE_CALL_TIMEOUT_MS },
+    );
+    const aloneSaid = `${alone.stdout}${alone.stderr}`;
+    assert.equal(alone.status, 0, aloneSaid);
+    assert.match(
+      aloneSaid,
+      /\[gdharness\] runtime listening on/,
+      `the runtime is up in this project: ${aloneSaid}`,
+    );
+    const table = (said: string): string[] =>
+      said.split(/\r?\n/).filter((line) => /^(a|b|added)=/.test(line));
+    assert.deepEqual(
+      table(aloneSaid).map((line) => line.split('=')[0]),
+      ['a', 'b', 'added'],
+      `the bench prints its table alone: ${aloneSaid}`,
+    );
+    assert.match(aloneSaid, /^added=\{ "won": 9, "most_x": 9 \}$/m, aloneSaid);
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+    mkdirSync(runtimeDirectory);
+
+    const spread = cli('spread', project, 'bench/bench.tscn', '--workers', '3', '--slots', slots);
+    assert.equal(spread.status, 0, spread.said);
+    assert.deepEqual(
+      table(spread.said),
+      table(aloneSaid),
+      `the same table to the last digit: ${spread.said}`,
+    );
+    assert.match(spread.said, /^\[spread\] 3 of 3 workers done, worker \d in \d+\.\d s$/m, spread.said);
+    assert.match(
+      spread.said,
+      /^Spread: 17 runs in 2 arms over 3 workers, \d+\.\d s; the longest worker took \d+\.\d s\.$/m,
+      spread.said,
+    );
+    assert.doesNotMatch(
+      spread.said,
+      /runtime listening/,
+      `the gathering engine serves nothing: ${spread.said}`,
+    );
+    assert.deepEqual(
+      readdirSync(runtimeDirectory),
+      [],
+      'no engine of the spread announced itself as the game',
+    );
+    assert.deepEqual(
+      readdirSync(join(project, '.godot', 'gdharness', 'spread-runs')),
+      [],
+      'a run that passed leaves nothing behind',
+    );
+
+    const broken = (mode: string): string => {
+      const ran = cli(
+        'spread',
+        project,
+        'res://bench/bench.tscn',
+        '--workers',
+        '3',
+        '--slots',
+        slots,
+        '--',
+        `--break=${mode}`,
+      );
+      assert.equal(ran.status, 1, `${mode}: ${ran.said}`);
+      return ran.said;
+    };
+    const none = broken('none');
+    assert.match(
+      none,
+      /^Failed, so nothing was gathered:\n {2}worker 1 played no arm: the scene never asked GdhShare\.outcomes for one, or quit before it did$/m,
+      none,
+    );
+    assert.doesNotMatch(none, /^a=/m, `no table from a half-played run: ${none}`);
+    const other = broken('other');
+    assert.match(
+      other,
+      /^ {2}worker 1 played a \(10 runs\), c \(7 runs\), and worker 0 played a \(10 runs\), b \(7 runs\): which arms a bench plays must depend on its command line alone$/m,
+      other,
+    );
+    const error = broken('error');
+    assert.match(error, /^ {2}worker-2: it printed an engine error, the first "worker two broke"$/m, error);
+    assert.match(error, /^Every engine's output is kept under .+spread-runs.+ until the next run\.$/m, error);
+    const workerLog = /^what worker-0 printed: (.+)$/m.exec(error)?.[1] ?? '';
+    const workerSaid = readFileSync(workerLog.trim(), 'utf8');
+    assert.match(
+      workerSaid,
+      /^gdharness share: b 3 of 3 runs$/m,
+      `the worker played its share of b: ${workerSaid}`,
+    );
+    assert.doesNotMatch(workerSaid, /runtime listening/, `a worker serves nothing: ${workerSaid}`);
+    const skip = broken('skip');
+    assert.match(skip, /^a=/m, `the gathering run printed its table: ${skip}`);
+    assert.match(
+      skip,
+      /^Failed, so the table above is not to be trusted:\n {2}the gathering run never asked for b, which the workers played: it went another way through the arms than they did$/m,
+      skip,
+    );
+    const object = broken('object');
+    assert.match(
+      object,
+      /worker-1: it printed an engine error, the first "GdhShare: run 4 of b answered an object, which cannot be handed from one engine to another"/,
+      object,
+    );
+
+    const ours = cli('spread', project, 'bench/bench.tscn', '--', '--gdh-share=0/1');
+    assert.equal(ours.status, 2, ours.said);
+    assert.match(
+      ours.said,
+      /--gdh-share=0\/1 is gdharness spread's own to hand each engine, so it cannot be given\./,
+      ours.said,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
 }
 
 function testTheTestCommandRunsAndJudgesAProject(): void {
@@ -42275,7 +42519,7 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     writeFileSync(godotFile, projectText);
     assert.match(
       noAutoload.said,
-      /^ {2}an autoload did not start, so the suites were ended rather than run without it$/m,
+      /^ {2}an autoload did not start, so the engine was ended rather than run without it$/m,
       noAutoload.said,
     );
     assert.equal(noAutoload.status, 1, noAutoload.said);
@@ -59379,6 +59623,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
+  testASpreadBenchGathersTheTableItPlaysAlone,
   testTheTestCommandRunsAndJudgesAProject,
   testAParameterisedCaseIsDealtByItsRows,
   testAFreshCloneHasItsExtensionsListed,
