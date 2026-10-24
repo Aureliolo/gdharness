@@ -1211,6 +1211,10 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
     await body({ call, refusal, attempt, play, project, godotPath, lspPort, dapPort, server, serverEnv });
+    // A /proc that stopped answering would leave every later failure without its samples, unseen.
+    if (process.platform === 'linux') {
+      assert.notEqual(thread.account(), '', "the editor's main thread was sampled from /proc");
+    }
   } catch (failure) {
     // What the engine said on its way to failing, which is the half of the evidence a tool
     // answer does not carry: a fixture that reports only its own assertion sends whoever reads
