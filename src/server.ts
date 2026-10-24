@@ -2336,6 +2336,21 @@ function engineFlagsNote(args: readonly string[]): string | undefined {
   return `${named} ${among.length === 1 ? 'is a flag' : 'are flags'} the engine reads, and args goes to the game after --, where the engine does not read ${among.length === 1 ? 'it' : 'them'}. engineArgs hands the engine its own flags; ${among.length === 1 ? 'leave it' : 'leave them'} in args only for a game that reads ${among.length === 1 ? 'that flag' : 'those flags'} itself.`;
 }
 
+/**
+ * What a headless start given --fixed-fps among [param engineArgs] is told, or undefined. The flag
+ * stops holding frames to the clock, and headless there is no window's refresh to wait on: a game
+ * given --fixed-fps 60 ran 447,692 frames and 7,461 seconds of game time in one second, so a
+ * caller waiting 30 frames for an animation halfway through found it long over.
+ */
+function racingNote(headless: boolean, engineArgs: readonly string[]): string | undefined {
+  const at = engineArgs.indexOf('--fixed-fps');
+  if (!headless || at === -1) {
+    return undefined;
+  }
+  const fps = engineArgs[at + 1] ?? '';
+  return `--fixed-fps ${fps} gives every frame 1/${fps} of a second of game time and stops holding frames to the clock, and a headless game has no window's refresh to wait on, so its game time races ahead: one given --fixed-fps 60 ran about two hours of game time in a second, and an animation or timer is over before the next call reaches it. --max-fps does not hold it back. Start it without --fixed-fps to keep it to the clock, and with --max-fps alone to cap its frames.`;
+}
+
 /** What a script tab holding unsaved edits to each of [param scripts] does to what was written. */
 function unsavedInEditorNote(scripts: readonly string[]): string {
   const named = scripts.join(', ');
@@ -3317,11 +3332,20 @@ function cappedNotes(totals: ProfileTotals): string[] {
     // is missing, only the calls of functions too quick for the clock, if any were made. game-b's
     // totals reached 1536 with 324 functions counted and were read as having lost some of their time.
     const leastKept = Math.min(...Object.values(totals.functions).map((one) => one.totalSeconds));
+    // Counted, since functions that never ran tie with those too quick for the clock and the
+    // engine's order among them decides how many of each are kept: 2500 called once on macOS kept
+    // 1000 of them, on the same code where Windows and Linux kept more.
+    const unrun = Object.values(totals.functions).filter((one) => one.calls === 0).length;
     notes.push(
       leastKept > 0
         ? `The engine's totals carried the most functions the profiler asks for, ${most}, so the functions with the least time are not in them: ${why}`
-        : `The engine's totals carried the most functions the profiler asks for, ${most}, and the last of them took no measurable time, so neither did any left out: the time is all here, and only a function too quick for the clock can be missing, with its calls. The engine lists every function it has compiled, run or not, and sends them busiest first. ${why}`,
+        : `The engine's totals carried the most functions the profiler asks for, ${most}, and the last of them took no measurable time, so neither did any left out: the time is all here, and only a function too quick for the clock can be missing, with its calls. ${why}`,
     );
+    if (unrun > 0) {
+      notes.push(
+        `${unrun === 1 ? 'One' : String(unrun)} of the ${most} ${unrun === 1 ? 'is a function' : 'are functions'} counted as never called: the engine lists every function it has compiled, run or not, busiest first, so where the time runs out they take places that functions run too quickly to measure could have had.`,
+      );
+    }
   } else if (most !== undefined && !totals.complete && (totals.cappedFrames ?? 0) > 0) {
     const capped = totals.cappedFrames ?? 0;
     notes.push(
@@ -10193,6 +10217,7 @@ class GodotServer {
             : `res://${sceneArgument}`,
       arguments: cmdArgs,
       argsNote: engineFlagsNote(given),
+      framesNote: racingNote(headless, flags.value),
       // Named here rather than only by editor_output, because a caller who wants to watch the
       // file had to make a second call to learn it and a reconstructed name is worse than no
       // name: a tail on a path that does not exist reports nothing, which is exactly what a run

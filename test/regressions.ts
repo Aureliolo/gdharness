@@ -27985,6 +27985,71 @@ async function testAHeadlessRunTheEditorWouldShowIsStartedHere(): Promise<void> 
 }
 
 /**
+ * What a headless start given --fixed-fps is told, held to the engine: given it, a headless game's
+ * game time runs far ahead of the clock, --max-fps beside it does not hold it back, and without it
+ * the game keeps to the clock. Should the engine change, this fails and the note goes.
+ */
+function testAHeadlessGameGivenAFixedRateRacesTheClock(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names nothing usable.');
+    }
+    console.log('fixed rate regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-fixed-rate-'));
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Fixed rate"\nrun/main_scene="res://main.tscn"\n',
+      'main.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      'main.gd': [
+        'extends Node',
+        '',
+        'var game_time := 0.0',
+        'var began := 0',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tbegan = Time.get_ticks_msec()',
+        '',
+        '',
+        'func _process(delta: float) -> void:',
+        '\tgame_time += delta',
+        '\tif Time.get_ticks_msec() - began >= 1000:',
+        '\t\tprint("game seconds in one: %.2f" % game_time)',
+        '\t\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    });
+    const gameSeconds = (flags: readonly string[]): number => {
+      const ran = spawnSyncHidden(godotPath, ['--headless', '--path', project, ...flags], {
+        encoding: 'utf8',
+        timeout: 60000,
+      });
+      const said = /game seconds in one: ([\d.]+)/.exec(`${ran.stdout}${ran.stderr}`)?.[1];
+      assert.ok(said !== undefined, `the game said how far it got: ${ran.stdout}${ran.stderr}`);
+      return Number(said);
+    };
+    const kept = gameSeconds([]);
+    assert.ok(kept >= 0.9 && kept < 2, `without the flag the game keeps to the clock: ${kept}`);
+    const capped = gameSeconds(['--max-fps', '60']);
+    assert.ok(capped >= 0.9 && capped < 2, `--max-fps alone keeps it to the clock: ${capped}`);
+    for (const flags of [
+      ['--fixed-fps', '60'],
+      ['--fixed-fps', '60', '--max-fps', '60'],
+    ]) {
+      const raced = gameSeconds(flags);
+      assert.ok(raced > 60, `${flags.join(' ')}: more than a minute of game time in a second, got ${raced}`);
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * A run given engine flags is started by this server, with the flags where the engine reads them,
  * and a flag outside the list is refused before anything is asked of the editor.
  *
@@ -28034,6 +28099,21 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
         flagged.said,
       );
       assert.equal(get(flagged.answer, 'argsNote'), undefined, `nothing misplaced to say: ${flagged.said}`);
+      // A window's refresh holds its frames, so only a headless start is told its game time races.
+      assert.equal(
+        get(flagged.answer, 'framesNote'),
+        undefined,
+        `a windowed run waits on its window: ${flagged.said}`,
+      );
+      await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
+
+      const racing = await run({ headless: true, engineArgs: ['--fixed-fps', '60'], runtimeWaitMs: 15000 });
+      assert.equal(get(racing.answer, 'started'), true, racing.said);
+      assert.equal(
+        get(racing.answer, 'framesNote'),
+        "--fixed-fps 60 gives every frame 1/60 of a second of game time and stops holding frames to the clock, and a headless game has no window's refresh to wait on, so its game time races ahead: one given --fixed-fps 60 ran about two hours of game time in a second, and an animation or timer is over before the next call reaches it. --max-fps does not hold it back. Start it without --fixed-fps to keep it to the clock, and with --max-fps alone to cap its frames.",
+        racing.said,
+      );
       await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
 
       const misplaced = await run({ args: ['--verbose', '--level=2'] });
@@ -38828,9 +38908,19 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         [],
         `no function is left as a bare number: ${burstShown}`,
       );
+      // Every place in the totals is a row, an addon function, one never called or one of the two
+      // calibration functions. How many are rows is the engine's order among functions too quick to
+      // measure: on the same code macOS kept 1000 of the 2500 and Windows and Linux more.
+      const most = frameFunctionsFor(queuedMessagesOf(null));
+      const unrunSaid =
+        /(?:^|\. )(One|\d+) of the 1536 (?:is a function|are functions) counted as never called/.exec(
+          String(get(burst, 'note')),
+        )?.[1];
+      const unrun = unrunSaid === undefined ? 0 : unrunSaid === 'One' ? 1 : Number(unrunSaid);
+      const placed = burstRows.length + asNumber(get(burst, 'runtimeAddonFunctions')) + unrun;
       assert.ok(
-        burstRows.length > 1000 && burstRows.length <= frameFunctionsFor(queuedMessagesOf(null)),
-        `the totals carry as many functions as were asked for: ${burstRows.length}, note: ${String(get(burst, 'note'))}, ${burstShown}`,
+        burstRows.length > 0 && placed >= most - 2 && placed <= most,
+        `the totals' ${String(most)} places are all accounted for: ${burstRows.length} rows, ${String(get(burst, 'runtimeAddonFunctions'))} addon functions, ${String(unrun)} never called; note: ${String(get(burst, 'note'))}, ${burstShown}`,
       );
       // A sentence of the note rather than its start: the notes before it depend on timing, and on a
       // fast runner a runtime function called a dozen times in two microseconds is mostly overhead.
@@ -57480,6 +57570,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASilentRunIsStartedHereAndSaysWhy,
   testAHeadlessRunTheEditorWouldShowIsStartedHere,
   testARunGivenEngineFlagsIsStartedHere,
+  testAHeadlessGameGivenAFixedRateRacesTheClock,
   testEngineFlagsReachTheEngine,
   testACrashedRunIsNeverClean,
   testAPlayedRunWithNoReportGivesNoVerdict,
