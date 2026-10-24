@@ -46850,6 +46850,62 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
       undefined,
       `one axis of a property given is that property, not another: ${JSON.stringify(nudged)}`,
     );
+    for (const [answer, what] of [
+      [sized, 'an add to a file that loads as it reads'],
+      [filled, 'a set, whose own changes are under alsoChanged'],
+    ] as const) {
+      assert.equal(
+        get(answer, 'alsoSaved'),
+        undefined,
+        `${what} saves nothing else: ${JSON.stringify(answer)}`,
+      );
+    }
+
+    // A centred menu as a hand would write it (probe 183): anchors_preset gives it both grow
+    // directions as it loads, so a save names them on a node the call never touched, and a root
+    // Control written with no layout is saved with the one the engine gives it.
+    writeFileSync(
+      join(project, 'menu.tscn'),
+      '[gd_scene format=3]\n\n[node name="Main" type="Control"]\n\n' +
+        '[node name="Menu" type="VBoxContainer" parent="."]\nlayout_mode = 1\nanchors_preset = 8\n' +
+        'anchor_left = 0.5\nanchor_top = 0.5\nanchor_right = 0.5\nanchor_bottom = 0.5\n' +
+        'offset_left = -150.0\noffset_top = -80.0\noffset_right = 150.0\noffset_bottom = 80.0\n\n' +
+        '[node name="Title" type="Label" parent="Menu"]\nlayout_mode = 2\ntext = "Settings"\n',
+    );
+    const row = async (nodeName: string): Promise<unknown> =>
+      await call('scene_node', {
+        scenePath: 'res://menu.tscn',
+        op: 'add',
+        parentNodePath: 'Menu',
+        nodeType: 'HBoxContainer',
+        nodeName,
+      });
+    const first = await row('VolumeRow');
+    assert.equal(get(first, 'nodePath'), 'Menu/VolumeRow', JSON.stringify(first));
+    assert.deepEqual(
+      get(first, 'alsoSaved'),
+      [
+        { node: '.', property: 'layout_mode', saved: 3 },
+        { node: '.', property: 'anchors_preset', saved: 0 },
+        { node: 'Menu', property: 'grow_horizontal', saved: 2 },
+        { node: 'Menu', property: 'grow_vertical', saved: 2 },
+      ],
+      `the grow directions the preset gave the menu are named: ${JSON.stringify(first)}`,
+    );
+    const menu = readFileSync(join(project, 'menu.tscn'), 'utf8');
+    assert.match(
+      menu,
+      /type="Control"[^[]*layout_mode = 3\nanchors_preset = 0\n/,
+      'the file holds the root layout',
+    );
+    assert.match(menu, /parent="\."[^[]*grow_horizontal = 2\ngrow_vertical = 2\n/, 'and the grow directions');
+    const second = await row('SoundRow');
+    assert.equal(get(second, 'nodePath'), 'Menu/SoundRow', JSON.stringify(second));
+    assert.equal(
+      get(second, 'alsoSaved'),
+      undefined,
+      `once the file says them, a save names nothing else: ${JSON.stringify(second)}`,
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
