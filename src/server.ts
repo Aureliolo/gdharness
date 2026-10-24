@@ -112,6 +112,7 @@ import {
   walkStoppedPartWay,
 } from './engine-leaks.js';
 import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
+import { slotForCall } from './engine-slots.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
@@ -7286,7 +7287,7 @@ class GodotServer {
     const onDesktop = windowed && process.platform === 'win32';
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
-    const run = this.spawnGame(
+    const run = await this.spawnGame(
       engine.value,
       cmdArgs,
       userDataIn(userData),
@@ -11174,7 +11175,26 @@ class GodotServer {
    * asked, so a server that goes away mid-run takes the only reader with it; outliving it would
    * leave an engine nobody is reading and nobody will ever end.
    */
-  private spawnGame(
+  private async spawnGame(
+    godotPath: string,
+    cmdArgs: string[],
+    env?: NodeJS.ProcessEnv,
+    onDesktop?: { readonly directory: string; readonly files: HelperFiles },
+  ): Promise<SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void }> {
+    // In one of the machine's engine slots, taken before the engine starts and given back once its
+    // log is whole, so the caller's own limit counts the engine's time and not the wait.
+    const held = await slotForCall();
+    try {
+      const run = this.spawnHeld(godotPath, cmdArgs, env, onDesktop);
+      void run.settled.finally(held.release);
+      return run;
+    } catch (error) {
+      held.release();
+      throw error;
+    }
+  }
+
+  private spawnHeld(
     godotPath: string,
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
@@ -12131,7 +12151,7 @@ class GodotServer {
       userArgs,
       engineArgs,
     });
-    const boot = this.spawnGame(
+    const boot = await this.spawnGame(
       godotPath,
       cmdArgs,
       needsItsOwnProcess(asked)

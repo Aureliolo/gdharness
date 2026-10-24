@@ -32,7 +32,7 @@ import {
   wholeFlag,
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
-import { EngineSlots, ownStart } from './engine-slots.js';
+import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { staleImports } from './import-freshness.js';
 import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
@@ -299,11 +299,11 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
   sweepRunDirectories(testRuns);
   const runDirectory = join(testRuns, `${String(startedAt)}-${String(process.pid)}`);
   mkdirSync(runDirectory, { recursive: true });
-  const slots = new EngineSlots(
-    options.slotsDirectory ?? join(home, '.godot', 'gate', 'slots'),
-    options.slotCount ?? Math.min(MOST_ENGINES, availableParallelism()),
-    { pid: process.pid, started: await ownStart() },
-  );
+  const chosen = machineSlots({ directory: options.slotsDirectory, count: options.slotCount });
+  const slots = new EngineSlots(chosen.directory, chosen.count, {
+    pid: process.pid,
+    started: await ownStart(),
+  });
   const running = new Set<() => void>();
   const interrupted = (): void => {
     for (const end of running) {

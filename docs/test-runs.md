@@ -20,9 +20,10 @@ It exits 0 when every case passed and nothing else was wrong, 1 when anything fa
 command line itself is wrong.
 
 - `--engines N`: at most this many engines, 4 by default.
-- `--slots DIR`: the slot directory, `.godot/gate/slots` in the main checkout by default.
-- `--slot-count N`: how many slots that directory has; 4, or fewer on a machine with fewer
-  processors.
+- `--slots DIR`: the slot directory, the machine's own by default (see
+  [Engine slots](#engine-slots)).
+- `--slot-count N`: how many slots that directory has; by default a fifth of the processors, at
+  least one.
 - `--silence S`: the shortest silence that ends an engine, in seconds; 300 by default.
 - `--deadline S`: the most seconds one engine may run, printing or not, the import's included. No
   limit by default.
@@ -255,10 +256,26 @@ kept in `.godot/gdharness/suite-passed.json`, beside the times.
 
 ## Engine slots
 
-The slots are files in one directory, shared by every tool on the machine that starts a test engine
-for the project, so that a gate, a benchmark and a build running at once start no more engines
-between them than there are slots. A tool of a game's own that starts engines takes them the same
-way:
+The slots are files in one directory, shared by every tool on the machine that starts an engine,
+for every project, so that the gates of several games, a benchmark and a build running at once
+start no more engines between them than there are slots. The MCP server's own engines take them
+too: each headless operation, script check, export, `project_test` run and `editor_run check`
+waits for a slot before its engine starts. A game started with `editor_run start`, and one the
+editor plays, does not: someone is driving it for as long as it runs.
+
+The directory and the count are the same for every tool on the machine:
+
+- The directory is `GODOT_ENGINE_SLOTS` when that is set and not empty. Otherwise it is
+  `$XDG_CACHE_HOME/gdharness/slots` when `XDG_CACHE_HOME` is set and not empty, on any platform,
+  then `%LOCALAPPDATA%\gdharness\slots` on Windows, and `~/.cache/gdharness/slots` everywhere
+  else.
+- The count is `GODOT_ENGINE_SLOT_COUNT` when that is set, a whole number above 0. Otherwise it is
+  a fifth of the processors the machine offers, rounded down, and at least one.
+- A command's `--slots` and `--slot-count` come before both.
+
+`--engines` is how many engines one run would like, and is not the slot count: a gate given its
+share of the machine passes `--engines` for its share and the machine's directory and count for
+the slots. A tool of a game's own that starts engines takes them the same way:
 
 1. A slot is `<directory>/<n>.lock`, for `n` from 0 below the slot count.
 2. To take one, create the file exclusively (`O_CREAT | O_EXCL`, Python's `open(path, "x")`), and

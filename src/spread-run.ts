@@ -21,9 +21,7 @@ import {
   type EngineLaunch,
   EngineUsageError,
   godotNamed,
-  homeOf,
   inTurns,
-  MOST_ENGINES,
   memoryAvailable,
   plural,
   resPathOf,
@@ -34,7 +32,7 @@ import {
   watchedEngine,
   wholeFlag,
 } from './engine-launch.js';
-import { EngineSlots, ownStart } from './engine-slots.js';
+import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { SHARE_SCRIPT } from './setup.js';
 import { type EngineEnd, exitNamed, readRun, versionFault } from './suite-judge.js';
 
@@ -233,17 +231,14 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     );
   }
   const startedAt = Date.now();
-  const home = homeOf(options.projectPath);
   const spreadRuns = join(options.projectPath, '.godot', 'gdharness', 'spread-runs');
   sweepRunDirectories(spreadRuns);
   const runDirectory = join(spreadRuns, `${String(startedAt)}-${String(process.pid)}`);
   const shareDirectory = join(runDirectory, 'share');
   mkdirSync(shareDirectory, { recursive: true });
-  const slotCount = options.slotCount ?? Math.min(MOST_ENGINES, availableParallelism());
-  const slots = new EngineSlots(options.slotsDirectory ?? join(home, '.godot', 'gate', 'slots'), slotCount, {
-    pid: process.pid,
-    started: await ownStart(),
-  });
+  const chosen = machineSlots({ directory: options.slotsDirectory, count: options.slotCount });
+  const slotCount = chosen.count;
+  const slots = new EngineSlots(chosen.directory, slotCount, { pid: process.pid, started: await ownStart() });
   const launch: EngineLaunch = {
     godotPath,
     projectPath: options.projectPath,

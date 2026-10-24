@@ -22,7 +22,7 @@ import {
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -45,6 +45,7 @@ import {
 } from '../src/boot-note.js';
 import { breakpointNotePath, readBreakpointNote, writeBreakpointNote } from '../src/breakpoint-note.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
+import { callProgress, withCallSignal } from '../src/call-signal.js';
 import {
   type Contradicted,
   cachedClasses,
@@ -114,8 +115,10 @@ import {
   EngineSlots,
   holderOf,
   lockIsFree,
+  machineSlots,
   ownStart,
   START_TOLERANCE_MS,
+  slotWaitSaid,
   UNWRITTEN_MS,
 } from '../src/engine-slots.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
@@ -42159,6 +42162,208 @@ function windowSuite(declared: string): string {
 }
 
 /**
+ * One budget of engines for the whole machine, which every engine gdharness starts waits on.
+ *
+ * Each game's gate once took four slots of its own checkout's, so a machine running three gates and
+ * a session's tools ran twelve engines and every gate ran past its wall clock. The slots are now one
+ * directory and one count for the machine, worked out the same way by every tool that starts an
+ * engine, and the server's own engines take them too: a headless operation through `runEngine` and a
+ * boot check through the engine it holds. Both are held behind a slot this process took, and must
+ * still be waiting when it is given back.
+ */
+async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
+  const machine = (env: NodeJS.ProcessEnv, platform: NodeJS.Platform, processors = 32) => ({
+    env,
+    platform,
+    processors,
+    home: join(sep, 'home', 'me'),
+    cwd: join(sep, 'work'),
+  });
+  const none = { directory: null, count: null };
+  const cases: [string, ReturnType<typeof machine>, string, number][] = [
+    [
+      'the cache home on every platform',
+      machine({ XDG_CACHE_HOME: join(sep, 'cache'), LOCALAPPDATA: join(sep, 'local') }, 'win32'),
+      join(sep, 'cache', 'gdharness', 'slots'),
+      6,
+    ],
+    [
+      "Windows' local data without one",
+      machine({ XDG_CACHE_HOME: '', LOCALAPPDATA: join(sep, 'local') }, 'win32', 4),
+      join(sep, 'local', 'gdharness', 'slots'),
+      1,
+    ],
+    [
+      'the home cache elsewhere',
+      machine({ LOCALAPPDATA: join(sep, 'local') }, 'linux', 10),
+      join(sep, 'home', 'me', '.cache', 'gdharness', 'slots'),
+      2,
+    ],
+    [
+      'Windows with neither',
+      machine({}, 'win32', 1),
+      join(sep, 'home', 'me', '.cache', 'gdharness', 'slots'),
+      1,
+    ],
+    [
+      'the variables',
+      machine(
+        { GODOT_ENGINE_SLOTS: 'slots', GODOT_ENGINE_SLOT_COUNT: '3', XDG_CACHE_HOME: join(sep, 'c') },
+        'linux',
+      ),
+      resolve(sep, 'work', 'slots'),
+      3,
+    ],
+  ];
+  for (const [said, on, directory, count] of cases) {
+    assert.deepEqual(machineSlots(none, on), { directory, count }, said);
+  }
+  assert.deepEqual(
+    machineSlots(
+      { directory: join(sep, 'asked'), count: 2 },
+      machine({ GODOT_ENGINE_SLOTS: 'slots', GODOT_ENGINE_SLOT_COUNT: '3' }, 'linux'),
+    ),
+    { directory: join(sep, 'asked'), count: 2 },
+    "a command's own --slots and --slot-count come first",
+  );
+  for (const counted of ['0', 'four', '2.5']) {
+    assert.throws(
+      () => machineSlots(none, machine({ GODOT_ENGINE_SLOT_COUNT: counted }, 'linux')),
+      (error: unknown) =>
+        error instanceof EngineUsageError &&
+        error.message === `GODOT_ENGINE_SLOT_COUNT takes a whole number above 0, not ${counted}.`,
+      counted,
+    );
+  }
+  // The suites take slots of their own, which every server and command they start inherits.
+  assert.deepEqual(machineSlots().directory, join(tmpdir(), 'gdharness-test-slots'));
+  assert.equal(
+    slotWaitSaid(41_400, 6, 'slots'),
+    'Waiting 41 s so far for an engine: all 6 engine slots on this machine (slots) are in use, by a gate or another tool, and the engine starts when one is given back.',
+  );
+  // A wait reports from its own start and so does the run after it, and the client is sent numbers
+  // that rise all the same.
+  const sent: number[] = [];
+  await withCallSignal(
+    undefined,
+    () => {
+      for (const number of [5, 3, 3, 7]) {
+        callProgress()?.(number, 'said');
+      }
+      return Promise.resolve();
+    },
+    (number) => {
+      sent.push(number);
+    },
+  );
+  assert.deepEqual(sent, [5, 6, 7, 8]);
+
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names nothing usable.');
+    }
+    console.log('machine slot regression: engine half skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-machine-slot-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-machine-slots-'));
+  const ours = join(slots, '0.lock');
+  const hold = async (): Promise<void> => {
+    writeFileSync(ours, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+  };
+  // Who holds the one slot, read every 20 ms until [param pid] does or the time runs out.
+  const heldBy = async (pid: number | undefined, withinMs: number): Promise<boolean> => {
+    const until = Date.now() + withinMs;
+    while (Date.now() < until) {
+      try {
+        if (holderOf(readFileSync(ours, 'utf8'))?.pid === pid) {
+          return true;
+        }
+      } catch {
+        // Between its holders.
+      }
+      await delay(20);
+    }
+    return false;
+  };
+  const env = { GODOT_PATH: godotPath, GODOT_ENGINE_SLOTS: slots, GODOT_ENGINE_SLOT_COUNT: '1' };
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="MachineSlot"\nrun/main_scene="res://main.tscn"\n',
+      'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+    });
+
+    await hold();
+    const classes = spawnHidden(process.execPath, ['build/cli.js', 'classes', project], {
+      env: { ...process.env, ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let said = '';
+    classes.stdout.on('data', (chunk: Buffer) => {
+      said += String(chunk);
+    });
+    classes.stderr.on('data', (chunk: Buffer) => {
+      said += String(chunk);
+    });
+    const ended = new Promise<number | null>((resolveEnd) => {
+      classes.once('exit', (code) => {
+        resolveEnd(code);
+      });
+    });
+    await delay(3000);
+    assert.deepEqual(
+      [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, readdirSync(slots)],
+      [null, process.pid, ['0.lock']],
+      `the command waits behind the slot held, and takes no other: ${said}`,
+    );
+    rmSync(ours);
+    assert.ok(await heldBy(classes.pid, 30_000), `then takes the slot given back: ${said}`);
+    assert.equal(await ended, 0, said);
+    assert.match(said, /"path": "res:\/\/\.godot\/global_script_class_cache\.cfg"/, said);
+    assert.deepEqual(readdirSync(slots), [], `and gives it back: ${said}`);
+
+    await hold();
+    const server = new ServerProcess({ env });
+    try {
+      await server.initialize('regression-test');
+      const checking = server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { op: 'check', projectPath: project },
+          _meta: { progressToken: 'slot' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      await delay(3000);
+      assert.equal(holderOf(readFileSync(ours, 'utf8'))?.pid, process.pid, 'the boot check waits too');
+      // A client that asked for progress is told why nothing has started, rather than left silent.
+      const told = server.notifications
+        .filter((message) => message.method === 'notifications/progress')
+        .map((message) => text(get(message, 'params', 'message')));
+      assert.deepEqual(
+        told,
+        [
+          `Waiting for an engine: the one engine slot on this machine (${slots}) is in use, by a gate or another tool, and the engine starts when one is given back.`,
+        ],
+        JSON.stringify(server.notifications),
+      );
+      rmSync(ours);
+      assert.ok(await heldBy(server.child.pid, 30_000), 'then its engine runs in the slot given back');
+      const checked = JSON.parse(textOf(await checking) ?? '{}') as unknown;
+      assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
+      assert.deepEqual(readdirSync(slots), [], 'and the server gives it back once the run is read');
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project, slots);
+  }
+}
+
+/**
  * `gdharness lsp` finds the language server from what each editor of the project recorded.
  *
  * An editor gdharness opened beside another project's serves on a port of its own, which Godot
@@ -60343,6 +60548,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
   testTheLspCommandFindsTheEditorsPort,
+  testEveryEngineWaitsForAMachineSlot,
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testTheTestCommandRunsAndJudgesAProject,

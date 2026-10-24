@@ -19,9 +19,10 @@ when anything went wrong, and 2 when the command line itself is wrong.
 
 - `--workers N`: how many workers. By default as many as the engine slots allow, held lower when
   the machine has too few processors or too little memory, as `gdharness test` holds its engines.
-- `--slots DIR`, `--slot-count N`: the engine slots, shared with `gdharness test` and described in
-  [Test runs](test-runs.md#engine-slots). Each worker and the gathering engine hold one, so a
-  bench and a gate running at once start no more engines between them than there are slots.
+- `--slots DIR`, `--slot-count N`: the engine slots, the machine's own by default, shared with
+  `gdharness test` and described in [Test runs](test-runs.md#engine-slots). Each worker and the
+  gathering engine hold one, so a bench and a gate running at once start no more engines between
+  them than there are slots.
 - `--silence S`: the shortest silence that ends an engine, in seconds; 300 by default. A worker
   prints a line every tenth of each arm's share, so a long arm should print well inside it.
 - `--deadline S`, `--godot PATH`, `--godot-version V`, `--cores N`: as for `gdharness test`.
