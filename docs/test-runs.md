@@ -147,7 +147,10 @@ Each failure is printed with the lines that show it: a failing case's report, ea
 and the line after it, and the run's summary. When an engine was cut short and none of that explains
 it, its last 60 lines. The engine's whole output stays in
 `.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names and which
-opens with the engine's verdict, so the file says why even for an engine that printed nothing. Before
+opens with the engine's verdict, so the file says why even for an engine that printed nothing. A
+project that is a worktree of another checkout has the logs of a failed run copied to the same place
+under the main checkout, and the output names the copy, since a gate running in a worktree of the
+commit removes the worktree once the run ends. Before
 the verdict, a run over several engines says what each took beside what it was dealt, so an uneven
 deal is told from a slow suite, and a run of several suites names its five slowest. The last lines
 count the problems and name the run's directory. A run that passes leaves no logs, and
@@ -179,8 +182,10 @@ refused changes with nothing but a warning: an `after_test` setting the root's
 embedding windows for every later suite, and the run passed. A suite that prints one on purpose
 declares it in `GDHARNESS_EXPECTED_WARNINGS`, keyed the same way, with the text after `WARNING:` and
 its space. A text declared as an error does not accept a warning, or the reverse. A warning printed
-outside every suite, as the engine starts or exits, is not judged, and neither is the one Godot
-prints when it falls back to another rendering driver.
+outside every suite fails the run as an error there does, since a clean run prints none as the
+engine starts or exits: it comes from an autoload, a session hook or the game's own code, and no
+suite can declare it. So does one the `--import` engine prints. The one Godot prints when it falls
+back to another rendering driver is not judged.
 
 `project_test` judges a run's errors and warnings by the same declarations, and names what fails it
 under `undeclaredErrors` and `declaredNotPrinted`, a warning marked `warning: true`.

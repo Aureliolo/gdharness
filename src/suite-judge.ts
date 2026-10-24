@@ -238,9 +238,10 @@ export function readRun(printed: string): RunPrinted {
       continue;
     }
     const error = ERROR_LINE.exec(line);
-    // A warning counts only inside a suite. Outside every suite it is the engine's own as it starts
-    // or exits, which no suite can declare; the leaks it reports at exit are read above.
-    const warned = error === null && open !== null ? WARNING_LINE.exec(line) : null;
+    // Outside every suite too: a clean run prints none as the engine starts or exits, so one there
+    // is the project's own, from an autoload, a session hook or the import. The leaks it reports at
+    // exit are read above.
+    const warned = error === null ? WARNING_LINE.exec(line) : null;
     const found = error ?? warned;
     if (found === null) {
       continue;
@@ -612,7 +613,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   for (const error of unexpected.printed) {
     faults.push(
       error.suite === null
-        ? `an engine error outside every suite: ${error.text}`
+        ? `an engine ${error.warning ? 'warning' : 'error'} outside every suite: ${error.text}`
         : `an engine ${error.warning ? 'warning' : 'error'} in ${error.suite} > ${error.during ?? ''}: ${error.text}; ${declaringAdvice(error.during ?? '', error.warning)}`,
     );
     if (error.suite !== null) {
