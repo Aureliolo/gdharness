@@ -7,6 +7,7 @@ extends RefCounted
 const GdhFileReads = preload("../file_reads.gd")
 const GdhPaths = preload("scene_paths.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhSceneUids = preload("../scene_uids.gd")
 
 
 ## Why a create at [param scene_path] is refused when a file is there already, which saving over
@@ -87,14 +88,14 @@ static func inherit(scene_path: String, base_path: String, root_name: String, sc
 		"",
 		(
 			'[ext_resource type="PackedScene"%s path="%s" id="1_base"]'
-			% [GdhSceneFile.reference_uid(base_path), base_path]
+			% [GdhSceneUids.reference_uid(base_path), base_path]
 		),
 	]
 	if script != null:
 		var _resourced: bool = lines.append(
 			(
 				'[ext_resource type="Script"%s path="%s" id="2_script"]'
-				% [GdhSceneFile.reference_uid(script.resource_path), script.resource_path]
+				% [GdhSceneUids.reference_uid(script.resource_path), script.resource_path]
 			)
 		)
 	lines.append_array(["", '[node name="%s" instance=ExtResource("1_base")]' % name])

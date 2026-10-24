@@ -5,6 +5,7 @@ extends Node
 ## preloaded rather than looked up on disk at runtime, so a missing one fails to parse here
 ## instead of leaving a command silently unanswered.
 
+const GdhSceneFile = preload("scene_file.gd")
 const GdhSceneTools = preload("tools/scene_tools.gd")
 const GdhSignalTools = preload("tools/signal_tools.gd")
 const GdhResourceTools = preload("tools/resource_tools.gd")
@@ -177,8 +178,13 @@ func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 	if not node.has_method(method):
 		return {"ok": false, "error": "Tool method not found: %s.%s" % [node.name, method]}
 
+	GdhSceneFile.also_saved.clear()
 	var result: Variant = node.call(method, args)
 	if result is Dictionary:
-		return result
+		var answered: Dictionary = result
+		if not GdhSceneFile.also_saved.is_empty():
+			answered["alsoSaved"] = GdhSceneFile.also_saved.duplicate(true)
+			GdhSceneFile.also_saved.clear()
+		return answered
 
 	return {"ok": false, "error": "Invalid tool result from: " + tool_name}

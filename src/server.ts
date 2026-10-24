@@ -136,7 +136,7 @@ import {
   withNotCompiled,
 } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
-import { staleImports } from './import-freshness.js';
+import { importedIntoTheProject, staleImports } from './import-freshness.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
   failedCases,
@@ -6453,6 +6453,7 @@ class GodotServer {
       groups.set(key, group);
     }
     const notReimported = [...groups.values()];
+    let alsoImported: string[] = [];
     if (behindElsewhere.length > 0) {
       const whole = await this.operation('get_import_status', { includeUpToDate: true }, projectPath);
       if (whole.ok) {
@@ -6461,11 +6462,15 @@ class GodotServer {
             .filter((one) => one.status === 'up_to_date')
             .map((one) => one.path),
         );
-        const alsoImported = behindElsewhere.filter((path) => current.has(path));
+        alsoImported = behindElsewhere.filter((path) => current.has(path));
         if (alsoImported.length > 0) {
           extra['alsoImported'] = alsoImported;
         }
       }
+    }
+    const wroteInProject = importedIntoTheProject(projectPath, [...reimported, ...alsoImported]);
+    if (Object.keys(wroteInProject).length > 0) {
+      extra['wroteInProject'] = wroteInProject;
     }
     return {
       ok: true,

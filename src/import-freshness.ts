@@ -113,6 +113,34 @@ function listed(value: string | undefined): string[] {
   return [...(value ?? '').matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1] ?? '');
 }
 
+/**
+ * What the import of each of [param resPaths] wrote into the project itself rather than under
+ * `.godot`, by source, leaving out a source that wrote nothing there. A CSV's import writes one
+ * `.translation` per language beside it, which version control sees and
+ * internationalization/locale/translations has to name, and no answer said which files it made.
+ */
+export function importedIntoTheProject(
+  projectPath: string,
+  resPaths: readonly string[],
+): Record<string, string[]> {
+  const wrote: Record<string, string[]> = {};
+  for (const resPath of resPaths) {
+    let sidecar: string;
+    try {
+      sidecar = readFileSync(`${onDisk(projectPath, resPath)}.import`, 'utf8');
+    } catch {
+      continue;
+    }
+    const outputs = listed(sectionOf(sidecar, 'deps').get('dest_files')).filter(
+      (output) => output.startsWith('res://') && !output.startsWith('res://.godot/'),
+    );
+    if (outputs.length > 0) {
+      wrote[resPath] = outputs;
+    }
+  }
+  return wrote;
+}
+
 /** A `res://` path as a path on disk under [param projectPath]. */
 function onDisk(projectPath: string, resPath: string): string {
   return join(projectPath, resPath.slice('res://'.length));

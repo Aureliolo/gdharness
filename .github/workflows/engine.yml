@@ -34,7 +34,7 @@ jobs:
   regressions:
     name: regressions ${{ matrix.part }}
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 25
     permissions:
       contents: read # Reads the source it tests.
     strategy:
@@ -69,12 +69,17 @@ jobs:
         run: bun run build
 
       # The regressions that drive the scene tools through the engine skip without one, so they
-      # are run again here, where a skip is a failure.
+      # are run again here, where a skip is a failure. A job its own limit ends keeps no log, so
+      # the run is given twenty minutes, names what it was running and never reached when they
+      # run out, and ends itself; the step's limit after that keeps the log of a run so stuck it
+      # cannot, and the job's leaves the steps before it their time. A part takes about twelve.
       - name: Regressions that need the engine
         run: bun run test:regressions
+        timeout-minutes: 22
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
           GDHARNESS_REGRESSION_SHARD: ${{ matrix.part }}
+          GDHARNESS_REGRESSION_BUDGET_MS: '1200000'
 
   fixtures:
     name: ${{ matrix.part }}

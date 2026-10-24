@@ -31,13 +31,15 @@ const GdhHeadlessCheck = preload("headless_check.gd")
 const PUTTING_BACK_PASSES: int = 4
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
+const GdhSerialisation = preload("serialisation.gd")
+const GdhSceneUids = preload("scene_uids.gd")
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
 ## for the editor's files to settle has to wait through as well.
 static var scan_due: bool = false
-## The files a headless save named by path alone because the uid cache holds no uid for them,
-## gathered for the answer to the call that saved, the one call its engine runs.
-static var by_path: PackedStringArray = []
+## What the saves of a call wrote on nodes it did not ask to change, differently from their file,
+## gathered for that call's answer as [method _also_saved] finds them.
+static var also_saved: Array[Dictionary] = []
 
 var root: Node = null
 var path: String = ""
@@ -90,13 +92,14 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 	_state = packed.get_state()
 	_base_paths = makers(_state)
 	# On a read as well, which would otherwise answer what the scripts set as what the file holds.
-	if not Engine.is_editor_hint():
-		if for_writing:
-			_text = FileAccess.get_file_as_string(path)
+	if for_writing or not Engine.is_editor_hint():
 		for index: int in _state.get_node_count():
 			var node: Node = _node_at(str(_state.get_node_path(index)))
 			if node != null:
 				_filed[node.get_instance_id()] = _stored_at(_state, index)
+	if not Engine.is_editor_hint():
+		if for_writing:
+			_text = FileAccess.get_file_as_string(path)
 		var unsettled: String = settle()
 		if not unsettled.is_empty():
 			return refuse(("Nothing was written: " if for_writing else "Not read: ") + unsettled)
@@ -593,6 +596,7 @@ func write(check: Callable = Callable()) -> Dictionary:
 		saved.free()
 		if not missing.is_empty():
 			return refuse("Nothing was written: " + missing)
+	var also: Array[Dictionary] = _also_saved(packed.get_state())
 	close()
 	var previous: Variant = null
 	if FileAccess.file_exists(path):
@@ -605,6 +609,8 @@ func write(check: Callable = Callable()) -> Dictionary:
 	var carried: Dictionary = GdhHeadlessCheck.embedded_in(values, {})
 	var written: Dictionary = save_packed(packed, path)
 	if not written.is_empty() or not headless or not path.ends_with(".tscn"):
+		if written.is_empty():
+			also_saved.append_array(also)
 		return written
 	var unkept: String = GdhHeadlessCheck.settle_saved(
 		path,
@@ -614,13 +620,47 @@ func write(check: Callable = Callable()) -> Dictionary:
 		{},
 		_reached,
 		carried,
-		func() -> Error: return save_keeping_uid(packed, path)
+		func() -> Error: return GdhSceneUids.save_keeping_uid(packed, path)
 	)
 	if unkept.is_empty():
+		also_saved.append_array(also)
 		return {}
 	return {
 		"ok": false, "error": "Nothing was written: " + unkept + GdhHeadlessCheck.put_back(path, previous)
 	}
+
+
+## Each property [param state] stores differently from the file, on a node the file held and the call
+## did not ask to change, as {node, property, was, saved}: was left out where the file did not set it,
+## saved where the write does not. The engine writes a node as it holds it once the file has loaded,
+## and one property can set others as it loads, as anchors_preset gives a centred Control both grow
+## directions, so a file not written by the editor gains lines on nodes nobody named.
+func _also_saved(state: SceneState) -> Array[Dictionary]:
+	var noted: Array[Dictionary] = []
+	var values: GdhSerialisation = GdhSerialisation.new()
+	for index: int in state.get_node_count():
+		var node: Node = _node_at(str(state.get_node_path(index)))
+		if node == null:
+			continue
+		var id: int = node.get_instance_id()
+		if _asked.has(id) or not _filed.has(id):
+			continue
+		var filed: Dictionary = _filed[id]
+		var stored: Dictionary = _stored_at(state, index)
+		var names: Dictionary = filed.duplicate()
+		names.merge(stored)
+		for key: Variant in names:
+			var name: String = str(key)
+			var held: bool = filed.has(name)
+			if held == stored.has(name) and (not held or GdhSame.same(stored[name], filed[name])):
+				continue
+			var entry: Dictionary = {"node": path_of(node), "property": name}
+			if held:
+				entry["was"] = values.serialize_value(filed[name])
+			if stored.has(name):
+				entry["saved"] = values.serialize_value(stored[name])
+			noted.append(entry)
+	return noted
 
 
 func _holds_scripted_embedded() -> bool:
@@ -642,110 +682,11 @@ static func save_packed(packed: PackedScene, scene_path: String) -> Dictionary:
 		var made: Error = DirAccess.make_dir_recursive_absolute(directory)
 		if made != OK:
 			return {"ok": false, "error": "Could not create %s: %s" % [directory, error_string(made)]}
-	var saving: Error = save_keeping_uid(packed, scene_path)
+	var saving: Error = GdhSceneUids.save_keeping_uid(packed, scene_path)
 	if saving != OK:
 		return {"ok": false, "error": "Failed to save %s: %s" % [scene_path, error_string(saving)]}
 	refresh(scene_path)
 	return {}
-
-
-## Saves [param resource] at [param file_path], keeping the uid the file already has.
-##
-## The editor saves through its uid cache, which knows every file's. A headless engine that has not
-## imported the project has none, and a resave dropped the uid from the header, so every reference
-## made through it stopped resolving. Read from the file itself, since the loader does not answer it
-## for a text scene there, and a new file is given one as the editor gives it.
-static func save_keeping_uid(resource: Resource, file_path: String) -> Error:
-	if Engine.is_editor_hint():
-		return ResourceSaver.save(resource, file_path)
-	var uid: int = uid_in(file_path)
-	var saving: Error = ResourceSaver.save(resource, file_path)
-	if saving != OK:
-		return saving
-	if uid == ResourceUID.INVALID_ID:
-		uid = ResourceUID.create_id()
-	var marked: Error = ResourceSaver.set_uid(file_path, uid)
-	if marked != OK:
-		return marked
-	return _with_external_uids(file_path)
-
-
-## Puts back the uid on each external resource the text file at [param file_path] names. Only the
-## editor's file system tells the saver a path's uid, so a headless save writes every reference by
-## path alone, and each breaks when the file it names is moved.
-static func _with_external_uids(file_path: String) -> Error:
-	if not (file_path.ends_with(".tscn") or file_path.ends_with(".tres")):
-		return OK
-	var lines: PackedStringArray = FileAccess.get_file_as_string(file_path).split("\n")
-	var pattern: RegEx = RegEx.create_from_string(' path="([^"]+)"')
-	var changed: bool = false
-	for at: int in lines.size():
-		var line: String = lines[at]
-		if not line.begins_with("[ext_resource ") or line.contains(' uid="'):
-			continue
-		var named: RegExMatch = pattern.search(line)
-		if named == null:
-			continue
-		var uid: String = reference_uid(named.get_string(1))
-		if not uid.is_empty():
-			lines[at] = line.replace(' path="', uid + ' path="')
-			changed = true
-	if not changed:
-		return OK
-	var file: FileAccess = FileAccess.open(file_path, FileAccess.WRITE)
-	if file == null:
-		return FileAccess.get_open_error()
-	if not file.store_string("\n".join(lines)):
-		return ERR_FILE_CANT_WRITE
-	file.close()
-	return OK
-
-
-## [method uid_attribute] for a reference about to be written, noting [param named] under
-## [member by_path] when it is left to be named by path.
-static func reference_uid(named: String) -> String:
-	var uid: String = uid_attribute(named)
-	if uid.is_empty():
-		note_by_path(named)
-	return uid
-
-
-## Notes [param named], a reference just written by path alone, under [member by_path] when the uid
-## cache holds nothing for it: a file made since the project was last scanned, whose uid the cache
-## learns from the next scan. Not a file whose uid the cache gives to another, which a scan leaves.
-static func note_by_path(named: String) -> void:
-	if Engine.is_editor_hint() or not FileAccess.file_exists(named) or by_path.has(named):
-		return
-	var own: int = uid_in(named)
-	if own == ResourceUID.INVALID_ID and FileAccess.file_exists(named + ".uid"):
-		own = ResourceUID.text_to_id(FileAccess.get_file_as_string(named + ".uid").strip_edges())
-	if own == ResourceUID.INVALID_ID or not ResourceUID.has_id(own):
-		var _noted: bool = by_path.append(named)
-
-
-## The uid attribute a reference to [param named] is written with, as ' uid="uid://..."', or "".
-##
-## Only a uid the uid cache gives that path, which is what the loader resolves it by. A uid the cache
-## does not know (a file made with no editor since the last scan) is answered with a warning on every
-## load, and one it gives another file (a scene copied whole keeps its original's) loads that file.
-static func uid_attribute(named: String) -> String:
-	var id: int = ResourceLoader.get_resource_uid(named)
-	if id == ResourceUID.INVALID_ID or not ResourceUID.has_id(id) or ResourceUID.get_id_path(id) != named:
-		return ""
-	return ' uid="%s"' % ResourceUID.id_to_text(id)
-
-
-## The uid the file at [param file_path] declares, or [constant ResourceUID.INVALID_ID].
-static func uid_in(file_path: String) -> int:
-	if not FileAccess.file_exists(file_path):
-		return ResourceUID.INVALID_ID
-	var file: FileAccess = FileAccess.open(file_path, FileAccess.READ)
-	if file != null:
-		var header: RegExMatch = RegEx.create_from_string('uid="(uid://[a-z0-9]+)"').search(file.get_line())
-		file.close()
-		if header != null:
-			return ResourceUID.text_to_id(header.get_string(1))
-	return ResourceLoader.get_resource_uid(file_path)
 
 
 ## Brings the editor up to date with a scene file written under it: the cached copy anything holds,

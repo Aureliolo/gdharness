@@ -93,7 +93,7 @@ func create_tileset(args: Dictionary) -> Dictionary:
 	var folder: String = GdhSceneFile.make_folder_for(tileset_path)
 	if not folder.is_empty():
 		return {"ok": false, "error": folder}
-	var saving: Error = GdhSceneFile.save_keeping_uid(tileset, tileset_path)
+	var saving: Error = GdhSceneUids.save_keeping_uid(tileset, tileset_path)
 	if saving != OK:
 		return {"ok": false, "error": "Failed to save %s: %s" % [tileset_path, error_string(saving)]}
 

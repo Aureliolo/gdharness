@@ -1330,6 +1330,44 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
     ['.', 'Panel', 'Press'],
     'and a copy should hold the same nodes, in a directory the save made',
   );
+
+  // A centred menu as a hand would write it: the editor saves the grow directions anchors_preset
+  // gives it as it loads, on a node the call never touched, and says so.
+  writeFileSync(
+    join(project, 'menu.tscn'),
+    '[gd_scene format=3]\n\n[node name="Main" type="Control"]\nlayout_mode = 3\nanchors_preset = 0\n\n' +
+      '[node name="Menu" type="VBoxContainer" parent="."]\nlayout_mode = 1\nanchors_preset = 8\n' +
+      'anchor_left = 0.5\nanchor_top = 0.5\nanchor_right = 0.5\nanchor_bottom = 0.5\n' +
+      'offset_left = -150.0\noffset_top = -80.0\noffset_right = 150.0\noffset_bottom = 80.0\n',
+  );
+  const menu = { projectPath: project, scenePath: 'res://menu.tscn' };
+  const row = await call('scene_node', {
+    ...menu,
+    op: 'add',
+    parentNodePath: 'Menu',
+    nodeType: 'HBoxContainer',
+    nodeName: 'Row',
+  });
+  assert.deepEqual(
+    get(row, 'alsoSaved'),
+    [
+      { node: 'Menu', property: 'grow_horizontal', saved: 2 },
+      { node: 'Menu', property: 'grow_vertical', saved: 2 },
+    ],
+    `the editor names the grow directions it saved on the menu: ${JSON.stringify(row)}`,
+  );
+  const again = await call('scene_node', {
+    ...menu,
+    op: 'add',
+    parentNodePath: 'Menu',
+    nodeType: 'HBoxContainer',
+    nodeName: 'Other',
+  });
+  assert.equal(
+    get(again, 'alsoSaved'),
+    undefined,
+    `and nothing once the file says them: ${JSON.stringify(again)}`,
+  );
 }
 
 /**

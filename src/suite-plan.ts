@@ -190,13 +190,32 @@ export function writeJson(file: string, value: unknown): void {
   writeWhole(file, `${JSON.stringify(value, null, 1)}\n`);
 }
 
-/** [param times] with what [param runs] measured of [param suites] put in. */
+/**
+ * [param times] with what [param runs] measured of [param suites] put in, and with what [param now]
+ * no longer finds left out: a suite deleted or renamed, and a case its suite no longer declares.
+ * Nothing else took them out, so a project's file held 1709 suites for its 147, and a renamed suite
+ * went on being named among the slowest by whatever read the file.
+ */
 export function timesAfter(
   times: SuiteTimes,
   suites: readonly DeclaredSuite[],
   runs: readonly RunPrinted[],
+  now: (path: string) => DeclaredSuite | null,
 ): Record<string, SuiteTime> {
-  const next: Record<string, SuiteTime> = { ...times };
+  const next: Record<string, SuiteTime> = {};
+  for (const [path, time] of Object.entries(times)) {
+    const suite = now(path);
+    if (suite === null) {
+      continue;
+    }
+    const cases = Object.fromEntries(
+      Object.entries(time.cases).filter(([func]) => suite.cases.includes(func)),
+    );
+    const dropped = Object.entries(time.cases)
+      .filter(([func]) => !(func in cases))
+      .reduce((sum, [, seconds]) => sum + seconds, 0);
+    next[path] = { seconds: round(Math.max(0, time.seconds - dropped)), cases };
+  }
   const declared = new Map(suites.map((suite) => [suite.path, suite]));
   const measured = new Map<string, { cases: Map<string, number>; around: number }>();
   for (const run of runs) {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
@@ -7,11 +7,72 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type ChildProcess, spawnHidden } from '../../src/spawn.js';
 import { type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
-import { sweep } from './sweep.js';
+import { fixtureNow, sweep } from './sweep.js';
 
 /** A runtime directory nothing else on this machine is using. */
 function runtimeDirForTest(): string {
-  return mkdtempSync(join(tmpdir(), 'gdharness-test-runtime-'));
+  const directory = mkdtempSync(join(tmpdir(), 'gdharness-test-runtime-'));
+  runtimeDirsMade.push({ directory, during: fixtureNow() });
+  return directory;
+}
+
+/**
+ * Every runtime directory and server made, with the fixture each was made for. A fixture its
+ * deadline cut short never reaches its own stops and sweeps, and the engines it started name only
+ * their projects on their command lines; which projects those were is in the run and editor notes
+ * its servers kept in these directories.
+ */
+const runtimeDirsMade: { directory: string; during: string | null }[] = [];
+let serversStarted: { server: ServerProcess; during: string | null }[] = [];
+
+function started(server: ServerProcess): void {
+  // Each holds everything its server printed, and about ninety fixtures start one.
+  serversStarted = serversStarted.filter((entry) => !entry.server.exited);
+  serversStarted.push({ server, during: fixtureNow() });
+}
+
+/**
+ * Stops the servers [param fixture] started, so they start nothing more, and answers the runtime
+ * directories made for it with every project their notes name.
+ */
+export async function stopServersOf(fixture: string): Promise<string[]> {
+  const found = new Set<string>();
+  const ended = serversStarted.filter((entry) => entry.during === fixture).map(({ server }) => server);
+  await Promise.all(
+    ended.map(async (server) => {
+      await server.end();
+    }),
+  );
+  for (const { directory, during } of runtimeDirsMade) {
+    if (during !== fixture) {
+      continue;
+    }
+    found.add(directory);
+    let notes: string[];
+    try {
+      notes = readdirSync(join(directory, 'runs')).filter((entry) => entry.endsWith('.json'));
+    } catch {
+      continue;
+    }
+    for (const note of notes) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(join(directory, 'runs', note), 'utf8'));
+        const projectPath =
+          typeof parsed === 'object' && parsed !== null && 'projectPath' in parsed
+            ? parsed.projectPath
+            : null;
+        if (typeof projectPath === 'string') {
+          found.add(projectPath);
+        }
+      } catch {
+        // A note half written as its server was stopped names nothing yet.
+      }
+    }
+  }
+  for (const server of ended) {
+    sweep(server.runtimeDir);
+  }
+  return [...found];
 }
 
 /**
@@ -286,6 +347,7 @@ export class ServerProcess {
     refuseAStaleBuild(entry);
     const { env, runtimeDir } = testServerEnvironment(options.env);
     this.runtimeDir = runtimeDir;
+    started(this);
     this.child = spawnHidden(process.execPath, [resolvePath(entry), ...(options.args ?? [])], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
@@ -381,22 +443,27 @@ export class ServerProcess {
 
   async stop(): Promise<void> {
     try {
-      if (this.exited) return;
-      const gone = new Promise<void>((done) => {
-        this.child.once('exit', () => {
-          done();
-        });
-      });
-      this.child.stdin?.end();
-      this.child.kill('SIGTERM');
-      // Over as soon as it exits, and killed if it has not within the quarter second: about ninety
-      // fixtures start a server, and the whole wait on every stop was time spent on nothing.
-      await Promise.race([gone, delay(250)]);
-      // `exited` is a getter over the child, so it can have turned true during the wait.
-      if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGKILL');
+      await this.end();
     } finally {
       sweep(this.runtimeDir);
     }
+  }
+
+  /** The stop without the sweep, so what the server wrote in its runtime directory can be read. */
+  async end(): Promise<void> {
+    if (this.exited) return;
+    const gone = new Promise<void>((done) => {
+      this.child.once('exit', () => {
+        done();
+      });
+    });
+    this.child.stdin?.end();
+    this.child.kill('SIGTERM');
+    // Over as soon as it exits, and killed if it has not within the quarter second: about ninety
+    // fixtures start a server, and the whole wait on every stop was time spent on nothing.
+    await Promise.race([gone, delay(250)]);
+    // `exited` is a getter over the child, so it can have turned true during the wait.
+    if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGKILL');
   }
 
   private write(payload: unknown): void {

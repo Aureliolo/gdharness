@@ -15,6 +15,7 @@ const GdhSceneTools = preload("../addons/gdharness_editor/tools/scene_tools.gd")
 const GdhSignalTools = preload("../addons/gdharness_editor/tools/signal_tools.gd")
 const GdhTilesetTools = preload("../addons/gdharness_editor/tools/tileset_tools.gd")
 const GdhSceneFile = preload("../addons/gdharness_editor/scene_file.gd")
+const GdhSceneUids = preload("../addons/gdharness_editor/scene_uids.gd")
 
 const SCENE_COMMANDS: Array[String] = [
 	"create_scene",
@@ -80,7 +81,9 @@ static func run(params: Dictionary) -> Dictionary:
 	tools.free()
 	if answer is Dictionary:
 		var answered: Dictionary = answer
-		if not GdhSceneFile.by_path.is_empty():
+		if not GdhSceneFile.also_saved.is_empty():
+			answered["alsoSaved"] = GdhSceneFile.also_saved.duplicate(true)
+		if not GdhSceneUids.by_path.is_empty():
 			answered["namedByPath"] = (
 				(
 					"What this saved names %s by path rather than by uid. A uid in a file's own header is "
@@ -90,9 +93,9 @@ static func run(params: Dictionary) -> Dictionary:
 					+ "after it name %s by uid."
 				)
 				% [
-					", ".join(GdhSceneFile.by_path),
-					"it" if GdhSceneFile.by_path.size() == 1 else "them",
-					"it" if GdhSceneFile.by_path.size() == 1 else "them",
+					", ".join(GdhSceneUids.by_path),
+					"it" if GdhSceneUids.by_path.size() == 1 else "them",
+					"it" if GdhSceneUids.by_path.size() == 1 else "them",
 				]
 			)
 		return answered

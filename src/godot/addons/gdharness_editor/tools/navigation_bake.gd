@@ -12,6 +12,7 @@ extends RefCounted
 ## being edited, whose nodes would otherwise be read with it.
 
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhSceneUids = preload("../scene_uids.gd")
 
 ## The names NavigationPolygon.SourceGeometryMode and NavigationMesh.SourceGeometryMode give each
 ## mode, which share their values.
@@ -73,7 +74,7 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 
 	if not embedded:
 		scene.close()
-		var saving: Error = GdhSceneFile.save_keeping_uid(held, file)
+		var saving: Error = GdhSceneUids.save_keeping_uid(held, file)
 		if saving != OK:
 			return {"ok": false, "error": "Failed to save %s: %s" % [file, error_string(saving)]}
 		if Engine.is_editor_hint():
