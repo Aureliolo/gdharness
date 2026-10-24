@@ -671,6 +671,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Asset imports',
     description:
       'The import pipeline: what needs importing, how a resource is imported, reimports, UIDs, and the global class list the editor and the engine read.',
+    answer:
+      "reimport is answered from a second status read: reimported lists what is current now, notReimported what is not, one entry per status and reason with the paths sharing them, and via says which of the two did the work. importedByTheScan names what the editor's scan imported first, and alsoImported, on a reimport of one resourcePath, the others it imported. wroteInProject names, by source, what an import wrote into the project itself rather than under .godot, such as the .translation a CSV gives each language, which version control sees and internationalization/locale/translations names. When nothing needed reimporting, the two lists are empty, a note says so, and there is no via. A whole-project reimport also answers missingSource, the .import files whose source is not beside them, empty when there are none, even when nothing needed reimporting; one resourcePath leaves it out. stillImporting is an editor that had not finished within timeoutMs.",
     parameters: {
       projectPath: PROJECT_PATH,
       resourcePath: { ...RESOURCE_PATH, ops: ['status', 'options', 'set_options', 'uid', 'reimport'] },
@@ -722,7 +724,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       reimport: {
         effect: 'destructive',
         summary:
-          "reimport what status says is outdated or failed, one resource with resourcePath, or what is current as well with force. Through the open editor when one serves the project, so it reloads what it holds, waiting for it to finish; otherwise through the engine's own import pass. The editor scans first, since its reimport passes over a file it has not taken in, such as one an installer has just written; what that scan imported is named under importedByTheScan and is not imported again unless force asks. Answered from a second status read: reimported lists what is current now, notReimported what is not, one entry per status and reason with the paths sharing them, and via says which of the two did the work. Either takes in every file that is behind, so a reimport of one resourcePath names under alsoImported the others it imported. When nothing needs reimporting, nothing runs: the two lists are empty, a note says so, and there is no via. A whole-project reimport also answers missingSource, the .import files whose source is not beside them, empty when there are none, even when nothing needed reimporting; one resourcePath leaves it out. stillImporting is an editor that had not finished within timeoutMs",
+          "reimport what status says is outdated or failed, one resource with resourcePath, or what is current as well with force. Through the open editor when one serves the project, so it reloads what it holds, waiting for it to finish; otherwise through the engine's own import pass. The editor scans first, since its reimport passes over a file it has not taken in, such as one an installer has just written, and what that scan imported is not imported again unless force asks. Either takes in every file that is behind, not only the one asked for. When nothing needs reimporting, nothing runs",
         requires: [],
       },
       uid: {

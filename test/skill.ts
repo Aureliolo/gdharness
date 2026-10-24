@@ -92,6 +92,7 @@ function testTheReferenceIsTheServersOwnToolList(): void {
   assert.deepEqual(
     answered.map((tool) => tool.name),
     [
+      'project_import',
       'project_test',
       'scene_node',
       'editor_launch',

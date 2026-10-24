@@ -559,6 +559,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         readTimes(timesFile),
         wholeSuites,
         ran.map((engine) => engine.printed),
+        (path) => scripts.suite(path),
       ),
     );
     recordPassed(passedFile, ran, printsOf);
