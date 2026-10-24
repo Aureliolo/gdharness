@@ -313,7 +313,7 @@ import {
   inspectProject,
   installedAddonVersion,
   installedRuntimeDigest,
-  RUNTIME_AUTOLOAD,
+  RUNTIME_SCRIPT,
   shippedListedRunner,
   shippedRuntimeDigest,
 } from './setup.js';
@@ -10288,7 +10288,7 @@ class GodotServer {
     withArgs: boolean,
   ): Promise<Record<string, unknown>> {
     const budgetMs = budget.ms;
-    if (!existsSync(join(projectPath, RUNTIME_AUTOLOAD.path))) {
+    if (!existsSync(join(projectPath, RUNTIME_SCRIPT))) {
       return runtimeVerdict(null, {
         addon: false,
         budgetMs,
@@ -12822,7 +12822,7 @@ class GodotServer {
         endedWithoutACode({
           throughEditor: run.throughEditor,
           announced: announced !== undefined || run.announcedPid !== undefined,
-          couldAnnounce: run.projectPath !== null && existsSync(join(run.projectPath, RUNTIME_AUTOLOAD.path)),
+          couldAnnounce: run.projectPath !== null && existsSync(join(run.projectPath, RUNTIME_SCRIPT)),
           endedHere: typeof run.endedHere === 'string',
           pickedUp: run.pickedUp === true,
         }),
@@ -15230,7 +15230,7 @@ class GodotServer {
       project === null ||
       run.announcedPid !== undefined ||
       (run.projectPath !== null && !isSameDirectory(run.projectPath, project)) ||
-      !existsSync(join(project, RUNTIME_AUTOLOAD.path)) ||
+      !existsSync(join(project, RUNTIME_SCRIPT)) ||
       !(await this.runStillGoing(run))
     ) {
       return null;

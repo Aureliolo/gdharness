@@ -325,12 +325,16 @@ import {
   installAddons,
   installedEditorDigest,
   installedRuntimeDigest,
+  loaderState,
   QUIET_SCENES_SETTING,
   RUNTIME_AUTOLOAD,
+  RUNTIME_SCRIPT,
   removeAddons,
   SCRIPT_RUNS_SETTING,
   shippedEditorDigest,
+  shippedLoader,
   shippedRuntimeDigest,
+  writeLoader,
 } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
 import {
@@ -9364,7 +9368,7 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
       'config_version=5\n\n[autoload]\n\n' +
         'GdharnessLoader="*res://tools/gdharness_loader.gd"\n' +
         'Gone="*res://tools/not_here.gd"\n' +
-        `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n`,
+        `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`,
     );
 
     const json = doctor('--json');
@@ -9382,7 +9386,7 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
       'and so is any other entry naming nothing',
     );
     assert.equal(
-      said.filter((problem) => problem.includes(RUNTIME_AUTOLOAD.path)).length,
+      said.filter((problem) => problem.includes(RUNTIME_SCRIPT)).length,
       0,
       `our own script is covered by the addon line and not said twice: ${said.join(' | ')}`,
     );
@@ -17986,7 +17990,7 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
   const project = (autoload: 'runtime' | 'herald' | 'none'): string => {
     const dir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-came-and-went-'));
     const registered = {
-      runtime: `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n`,
+      runtime: `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`,
       herald: '\n[autoload]\n\nHerald="*res://herald.gd"\n',
       none: '',
     }[autoload];
@@ -18096,7 +18100,7 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
       join(project, 'project.godot'),
       '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ComingUp"\n' +
         'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
-        `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n`,
+        `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`,
     );
     writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
     cpSync(
@@ -19788,16 +19792,21 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
 }
 
 /**
- * Which autoload entries this tool may rewrite, which is only the one it wrote.
+ * Which autoload entries this tool may rewrite: the shipped loader, and the addon's own script that
+ * earlier versions wrote.
  *
  * Covered without an engine as well as through the CLI, because the engine-backed test is skipped
- * on any machine without Godot and this is the rule that decides whether a socket reaches a
- * shipped build. Nothing else in a project can see the difference: the wrapper stays on disk and
- * correct, and a suite that exercises the script rather than reading project.godot passes either
- * way.
+ * on any machine without Godot. Nothing else in a project can see the difference: a project's own
+ * loader stays on disk and correct, and a suite that exercises the script rather than reading
+ * project.godot passes either way.
  */
 function testOnlyOurOwnAutoloadIsRewritten(): void {
-  assert.equal(autoloadIsOurs('res://addons/gdharness_runtime/runtime_autoload.gd'), true);
+  assert.equal(autoloadIsOurs('res://gdharness/loader.gd'), true, 'the loader gdharness writes');
+  assert.equal(
+    autoloadIsOurs('res://addons/gdharness_runtime/runtime_autoload.gd'),
+    true,
+    'and the old entry',
+  );
   assert.equal(autoloadIsOurs(null), true, 'nothing registered is ours to register');
   assert.equal(
     autoloadIsOurs('res://boot/gdharness_loader.gd'),
@@ -45582,6 +45591,87 @@ function testUninstallLeavesAddonsItDidNotMake(): void {
 }
 
 /**
+ * The shipped loader brings the runtime up in a game that has the addon, before the main scene's
+ * `_ready`, and does nothing at all in one that does not.
+ *
+ * Before is the point of adding the runtime as the loader's child rather than deferring it to the
+ * root, which every project's own loader did: a deferred add runs only once the main scene's
+ * `_ready` has returned, so a scene doing its work there could not be reached while it did. The
+ * main scene here says what it finds, and the runtime's own line says it served. Without the addon
+ * the game prints no error and announces nothing, which is what a clone without `addons/` meets.
+ */
+function testTheShippedLoaderBringsTheRuntimeUpFirst(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('shipped loader regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-loader-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-loader-runtime-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Loader"\n' +
+        `run/main_scene="res://main.tscn"\n\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="res://${RUNTIME_AUTOLOAD.path}"\n`,
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar found: Node = get_node_or_null("/root/GdharnessRuntime/GdharnessRuntime")',
+        '\tprint("runtime before main: %s" % (found != null and found.is_node_ready()))',
+        '\tget_tree().quit.call_deferred()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    assert.equal(writeLoader(project), true, 'the loader is written into a project that has none');
+    assert.equal(loaderState(project), 'current');
+    assert.equal(writeLoader(project), false, 'and left alone once it is the shipped one');
+    const play = (): string => {
+      const ran = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--quit-after', '600'], {
+        encoding: 'utf8',
+        timeout: ENGINE_CALL_TIMEOUT_MS,
+        env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+      });
+      assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+      return stripVTControlCharacters(`${ran.stdout}${ran.stderr}`);
+    };
+
+    // A clone without the addon: the loader finds nothing to bring up, and says nothing about it.
+    const bare = play();
+    assert.match(bare, /^runtime before main: false$/m, bare);
+    assert.doesNotMatch(bare, /ERROR/, `nothing is missing when the addon is not there: ${bare}`);
+    assert.deepEqual(readdirSync(runtime), [], 'and no runtime announced');
+
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    const served = play();
+    assert.match(served, /^runtime before main: true$/m, served);
+    assert.doesNotMatch(served, /ERROR/, served);
+    // Printed once it serves; the announcement itself is taken back as the game quits.
+    assert.match(served, /\[gdharness\] runtime listening on [\d.]+:\d+, announced at /, served);
+  } finally {
+    sweep(project, runtime);
+  }
+}
+
+/**
  * The CLI against a real engine: setup puts the addons in and turns the editor ones on,
  * runtime on and off registers and removes the autoload, and doctor says so, then says what
  * is wrong once something is.
@@ -45624,27 +45714,76 @@ function testCommandLineSetup(): void {
     const written = readFileSync(join(projectDir, 'project.godot'), 'utf8');
     assert.match(written, /res:\/\/addons\/gdharness_editor\/plugin\.cfg/, 'the editor plugin is enabled');
     assert.match(written, /res:\/\/addons\/auto_reload\/plugin\.cfg/, 'and auto reload');
+    const loaderEntry = /^GdharnessRuntime="res:\/\/gdharness\/loader\.gd"$/m;
     assert.match(
       written,
-      /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
-      'the runtime autoload is registered, in this project and nowhere else',
+      loaderEntry,
+      'the runtime autoload names the shipped loader, in this project alone',
     );
-    assert.match(setup.stdout, /gdharness runtime off/, 'and setup says how to take it out of an export');
+    assert.equal(loaderState(projectDir), 'current', 'and the loader it names is the shipped one');
+    assert.match(
+      setup.stdout,
+      /Commit it with project\.godot/,
+      'and setup says the loader is to be committed',
+    );
+    assert.doesNotMatch(setup.stdout, /runtime off/, 'rather than to turn it off before an export');
 
     const healthy = cli('doctor', projectDir, '--json');
     assert.equal(healthy.status, 0, `doctor after setup:\n${healthy.stdout}${healthy.stderr}`);
     const report: unknown = JSON.parse(healthy.stdout);
     assert.deepEqual(get(report, 'problems'), []);
     assert.equal(get(report, 'runtimeAutoload'), true);
+    assert.match(
+      cli('doctor', projectDir).stdout,
+      /^runtime autoload: registered through res:\/\/gdharness\/loader\.gd, the loader gdharness ships$/m,
+    );
 
-    assert.equal(cli('runtime', 'off', projectDir).status, 0);
+    // A loader that has drifted from the shipped text is a problem, and setup writes it again.
+    const loaderFile = join(projectDir, 'gdharness', 'loader.gd');
+    writeFileSync(loaderFile, `${readFileSync(loaderFile, 'utf8')}\n# edited by hand\n`);
+    const drifted = cli('doctor', projectDir);
+    assert.equal(drifted.status, 1, drifted.stdout);
+    assert.match(
+      drifted.stdout,
+      /problem: res:\/\/gdharness\/loader\.gd is not the loader this gdharness ships/,
+    );
+    const rewritten = cli('runtime', 'on', projectDir);
+    assert.match(rewritten.stdout, /and the loader written again, since it differed/, rewritten.stdout);
+    assert.equal(loaderState(projectDir), 'current');
+    // CRLF, as git on Windows checks the file out, is the same loader.
+    writeFileSync(loaderFile, readFileSync(shippedLoader(), 'utf8').replaceAll('\n', '\r\n'));
+    assert.equal(cli('doctor', projectDir).status, 0, 'a checkout with CRLF endings is the shipped loader');
+
+    const turnedOff = cli('runtime', 'off', projectDir);
+    assert.equal(turnedOff.status, 0, turnedOff.stdout);
+    assert.match(turnedOff.stdout, /autoload removed, with res:\/\/gdharness\/loader\.gd/, turnedOff.stdout);
     assert.doesNotMatch(readFileSync(join(projectDir, 'project.godot'), 'utf8'), /GdharnessRuntime/);
+    assert.equal(
+      existsSync(join(projectDir, 'gdharness')),
+      false,
+      'the loader goes with the entry, and its folder',
+    );
     assert.equal(get(JSON.parse(cli('doctor', projectDir, '--json').stdout), 'runtimeAutoload'), false);
     assert.equal(cli('runtime', 'on', projectDir).status, 0);
-    assert.match(
-      readFileSync(join(projectDir, 'project.godot'), 'utf8'),
-      /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
+    assert.match(readFileSync(join(projectDir, 'project.godot'), 'utf8'), loaderEntry);
+
+    // The entry earlier versions wrote names the addon's own script. Doctor says so, and turning the
+    // runtime on points it at the loader.
+    const projectFile = join(projectDir, 'project.godot');
+    writeFileSync(
+      projectFile,
+      readFileSync(projectFile, 'utf8').replace(loaderEntry, `GdharnessRuntime="*res://${RUNTIME_SCRIPT}"`),
     );
+    const direct = cli('doctor', projectDir);
+    assert.equal(direct.status, 1, direct.stdout);
+    assert.match(
+      direct.stdout,
+      /problem: the GdharnessRuntime autoload names the addon's own script/,
+      direct.stdout,
+    );
+    const moved = cli('runtime', 'on', projectDir);
+    assert.match(moved.stdout, /autoload moved from the addon's own script to res:\/\/gdharness\/loader\.gd/);
+    assert.match(readFileSync(projectFile, 'utf8'), loaderEntry);
 
     // The opt-out, in its own project, because the flag only means anything on a fresh install.
     const bare = mkdtempSync(join(tmpdir(), 'gdharness-cli-bare-'));
@@ -45670,13 +45809,10 @@ function testCommandLineSetup(): void {
         .sort();
     // A project that brings the runtime up its own way keeps doing so across an upgrade.
     //
-    // project.godot is committed and addons/ often is not, so the install guide tells projects to
-    // point this entry at a script of their own that brings the addon up when it is there and does
-    // nothing when it is not. Repointing it at the addon takes away the one refusal the addon
-    // cannot make for itself, and does it to the file written to keep it. Nothing fails: the
-    // wrapper is still on disk and correct, and no gate asks what project.godot registers, so one
-    // project found it in git status after twelve green ones, having been told about five other
-    // replacements and not this.
+    // Repointing a project's own loader takes away whatever that file refuses, and does it to the
+    // file written to keep it. Nothing fails: the loader is still on disk and correct, and no gate
+    // asks what project.godot registers, so one project found it in git status after twelve green
+    // ones, having been told about five other replacements and not this.
     const guard = join(projectDir, 'boot');
     mkdirSync(guard, { recursive: true });
     writeFileSync(
@@ -45687,7 +45823,7 @@ function testCommandLineSetup(): void {
     writeFileSync(
       project,
       readFileSync(project, 'utf8').replace(
-        /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
+        loaderEntry,
         'GdharnessRuntime="*res://boot/gdharness_loader.gd"',
       ),
     );
@@ -45775,6 +45911,11 @@ function testCommandLineSetup(): void {
       'a loader registered under another name is not joined by a second entry',
     );
     assert.match(underAnotherName.stdout, /GdharnessLoader autoload already names/, underAnotherName.stdout);
+    assert.match(
+      underAnotherName.stdout,
+      /gdharness ships a loader that does the same: take the GdharnessLoader entry out of project\.godot's \[autoload\] and delete res:\/\/boot\/gdharness_loader\.gd, then run gdharness runtime on/,
+      `and it says how to use the shipped loader instead: ${underAnotherName.stdout}`,
+    );
 
     // And the doctor says the runtime is brought up, naming the file that does it. It used to
     // answer "not registered" about a runtime that was binding a port and serving queries, because
@@ -45824,13 +45965,18 @@ function testCommandLineSetup(): void {
       /that file is not in this project/,
       'and the answer says the entry names nothing, rather than reading as approval',
     );
+    assert.match(
+      orphaned.stdout,
+      /take the GdharnessRuntime entry out of project\.godot's \[autoload\] and delete res:\/\/boot\/gdharness_loader\.gd/,
+      orphaned.stdout,
+    );
 
     // Back to ours, so everything after this reads the project the rest of the test expects.
     writeFileSync(
       project,
       readFileSync(project, 'utf8').replace(
         /GdharnessRuntime="\*res:\/\/boot\/gdharness_loader\.gd"/,
-        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"',
+        `GdharnessRuntime="res://${RUNTIME_AUTOLOAD.path}"`,
       ),
     );
     assert.deepEqual(
@@ -45880,6 +46026,8 @@ function testCommandLineSetup(): void {
     assert.equal(existsSync(join(projectDir, 'addons')), false, 'and is gone, holding nothing else');
     const stripped = readFileSync(join(projectDir, 'project.godot'), 'utf8');
     assert.doesNotMatch(stripped, /GdharnessRuntime/, 'the autoload is gone');
+    assert.equal(existsSync(join(projectDir, 'gdharness')), false, 'with the loader it named');
+    assert.match(removed.stdout, /autoload removed, with res:\/\/gdharness\/loader\.gd/, removed.stdout);
     assert.doesNotMatch(stripped, /gdharness_editor\/plugin\.cfg/, 'and the editor plugin is off');
     assert.equal(existsSync(join(projectDir, '.agents')), false, 'the directory the skill made is gone');
     const theirs = JSON.parse(readFileSync(shared, 'utf8')) as Record<string, Record<string, unknown>>;
@@ -45908,16 +46056,14 @@ function testCommandLineSetup(): void {
     writeFileSync(join(guard, 'gdharness_loader.gd'), 'extends Node\n');
     writeFileSync(
       project,
-      readFileSync(project, 'utf8').replace(
-        /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
-        'GdharnessLoader="*res://boot/gdharness_loader.gd"',
-      ),
+      readFileSync(project, 'utf8').replace(loaderEntry, 'GdharnessLoader="*res://boot/gdharness_loader.gd"'),
     );
     assert.match(
       readFileSync(project, 'utf8'),
       /GdharnessLoader=/,
       'the fixture has the loader and not our entry',
     );
+    assert.equal(loaderState(projectDir), 'current', 'and the shipped loader, which nothing names now');
     const throughALoader = cli('uninstall', projectDir);
     assert.equal(
       throughALoader.status,
@@ -45925,6 +46071,8 @@ function testCommandLineSetup(): void {
       `uninstall beside a loader:\n${throughALoader.stdout}${throughALoader.stderr}`,
     );
     assert.equal(existsSync(join(projectDir, 'addons')), false, 'the addons are removed');
+    assert.equal(existsSync(join(projectDir, 'gdharness')), false, 'and the shipped loader nothing named');
+    assert.match(throughALoader.stdout, /removed res:\/\/gdharness\/loader\.gd, which no autoload named/);
     assert.doesNotMatch(throughALoader.stdout, /GdharnessRuntime autoload removed/, throughALoader.stdout);
     assert.match(
       readFileSync(project, 'utf8'),
@@ -59252,6 +59400,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProfileSinceAMarkAnswersForOneAction,
   testAProfileFromTheStartWaitsForTheProfiler,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
+  testTheShippedLoaderBringsTheRuntimeUpFirst,
   testCommandLineSetup,
   testUninstallLeavesAddonsItDidNotMake,
   testNoShippedScriptParsesJsonLoudly,

@@ -35,10 +35,21 @@ export const ADDONS = ['gdharness_editor', 'gdharness_runtime', 'auto_reload'] a
 /** The addons that are editor plugins and are enabled by setup. */
 export const EDITOR_PLUGINS = ['gdharness_editor', 'auto_reload'] as const;
 
-/** The runtime addon is an autoload and nothing else: registered by name, never by plugin.cfg. */
+/** The runtime addon's own script, which is an autoload and nothing else, never a plugin. */
+export const RUNTIME_SCRIPT = 'addons/gdharness_runtime/runtime_autoload.gd';
+
+/**
+ * The runtime's autoload entry, which names the loader gdharness ships rather than the addon.
+ *
+ * `addons/` is often not committed and exports leave it out, so an entry naming the addon's script
+ * boots a fresh clone and every exported build with a missing script. Every project that met this
+ * wrote a loader of its own, and the copies drifted apart. The loader is written outside `addons/`
+ * so it is committed with the entry naming it, and it brings the runtime up only in a debug build
+ * that has the addon.
+ */
 export const RUNTIME_AUTOLOAD = {
   name: 'GdharnessRuntime',
-  path: 'addons/gdharness_runtime/runtime_autoload.gd',
+  path: 'gdharness/loader.gd',
 } as const;
 
 /**
@@ -169,6 +180,51 @@ export function shippedOperationsScript(): string {
   return join(dirname(fileURLToPath(import.meta.url)), 'godot', 'operations', 'godot_operations.gd');
 }
 
+/** The loader the runtime's autoload entry names, laid out the same way. */
+export function shippedLoader(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), 'godot', 'loader', 'loader.gd');
+}
+
+/**
+ * Whether the project's copy of the loader is the one this gdharness ships. Line endings are left
+ * out of the comparison, because git on Windows checks a file out with CRLF and that copy is still
+ * the same script.
+ */
+export function loaderState(projectPath: string): 'current' | 'differs' | 'missing' {
+  const copy = join(projectPath, ...RUNTIME_AUTOLOAD.path.split('/'));
+  if (!existsSync(copy)) {
+    return 'missing';
+  }
+  const lines = (path: string): string => readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
+  return lines(copy) === lines(shippedLoader()) ? 'current' : 'differs';
+}
+
+/** The shipped loader written into [param projectPath], answering whether anything changed. */
+export function writeLoader(projectPath: string): boolean {
+  if (loaderState(projectPath) === 'current') {
+    return false;
+  }
+  const copy = join(projectPath, ...RUNTIME_AUTOLOAD.path.split('/'));
+  mkdirSync(dirname(copy), { recursive: true });
+  writeFileSync(copy, readFileSync(shippedLoader()));
+  return true;
+}
+
+/** The project's copy of the loader taken out, and its folder with it when nothing else is there. */
+export function removeLoader(projectPath: string): boolean {
+  const copy = join(projectPath, ...RUNTIME_AUTOLOAD.path.split('/'));
+  if (!existsSync(copy)) {
+    return false;
+  }
+  rmSync(copy);
+  rmSync(`${copy}.uid`, { force: true });
+  const folder = dirname(copy);
+  if (readdirSync(folder).length === 0) {
+    rmdirSync(folder);
+  }
+  return true;
+}
+
 /** The gdUnit4 runner over a file of suites, laid out the same way, which project_test and `test` start. */
 export function shippedListedRunner(): string {
   return join(dirname(fileURLToPath(import.meta.url)), 'godot', 'tests', 'listed.gd');
@@ -289,41 +345,49 @@ export async function enablePlugins(
 }
 
 /**
- * Whether an autoload entry is one gdharness wrote, and so one it may rewrite.
+ * Whether an autoload entry is one gdharness wrote, and so one it may rewrite: none, the shipped
+ * loader, or the addon's own script, which an earlier gdharness wrote and which boots a build
+ * without `addons/` with a missing script.
  *
- * A project is free to bring the runtime up through a script of its own, and the install guide
- * recommends exactly that: `project.godot` is committed and `addons/` often is not, so an entry
- * naming the addon directly boots a fresh clone, and every CI runner, with a missing script. A
- * wrapper is how a project says "only when it is there". Repointing the entry takes that away, and
- * takes it away from the one file the project wrote to keep it.
- *
- * Only that. The addon refuses to serve outside a debug build and refuses for a `-s` script run
- * unless the project asks, so a repointed entry does not put a socket into an export. The reporting
- * project believed it did and so did this comment, which is worth recording next to the fix.
- *
- * What makes it worth a check rather than a note is that nothing fails when it happens. The wrapper
- * is still on disk and still correct, every gate a project has goes on passing because they
- * exercise the script rather than ask what `project.godot` registers, and the state is only visible
- * in a diff. Found in `git status` after twelve green gates.
+ * An entry naming a script of the project's own is left alone. Repointing it once took away a
+ * loader the project wrote, and nothing failed: the loader was still on disk and still correct,
+ * every gate went on passing because they exercise the script rather than ask what `project.godot`
+ * registers, and the change was visible only in a diff, found in `git status` after twelve green
+ * gates.
  */
 export function autoloadIsOurs(named: string | null): boolean {
-  return named === null || named === `res://${RUNTIME_AUTOLOAD.path}`;
+  return named === null || named === `res://${RUNTIME_AUTOLOAD.path}` || named === `res://${RUNTIME_SCRIPT}`;
 }
 
-/** The runtime autoload registered or removed, through the engine. */
+/**
+ * The runtime autoload registered, with the shipped loader written for it to name, or removed with
+ * the loader, through the engine. Not a global name: nothing reaches the loader by name, and the
+ * runtime it brings up is its child.
+ */
 export async function setRuntime(
   engine: HeadlessEngine,
   projectPath: string,
   on: boolean,
 ): Promise<HeadlessOutcome> {
-  return on
-    ? await runOperation(
-        engine,
-        'add_autoload',
-        { name: RUNTIME_AUTOLOAD.name, path: `res://${RUNTIME_AUTOLOAD.path}`, global: true },
-        projectPath,
-      )
-    : await runOperation(engine, 'remove_autoload', { name: RUNTIME_AUTOLOAD.name }, projectPath);
+  if (!on) {
+    const removed = await runOperation(
+      engine,
+      'remove_autoload',
+      { name: RUNTIME_AUTOLOAD.name },
+      projectPath,
+    );
+    if (removed.ok) {
+      removeLoader(projectPath);
+    }
+    return removed;
+  }
+  writeLoader(projectPath);
+  return await runOperation(
+    engine,
+    'add_autoload',
+    { name: RUNTIME_AUTOLOAD.name, path: `res://${RUNTIME_AUTOLOAD.path}`, global: false },
+    projectPath,
+  );
 }
 
 interface AddonState {
@@ -398,7 +462,7 @@ function loaderAmong(
 ): { name: string; path: string; exists: boolean } | null {
   let byName: { name: string; path: string; exists: boolean } | null = null;
   for (const [entry, path] of named) {
-    if (entry === RUNTIME_AUTOLOAD.name || path === RUNTIME_AUTOLOAD.path) {
+    if (entry === RUNTIME_AUTOLOAD.name || path === RUNTIME_AUTOLOAD.path || path === RUNTIME_SCRIPT) {
       continue;
     }
     let source: string | null = null;
@@ -408,7 +472,7 @@ function loaderAmong(
       // A script the entry names and the project does not have. Only the filename can identify it
       // from here, and the answer carries that the file is gone so that doctor can say so.
     }
-    if (source?.includes(RUNTIME_AUTOLOAD.path)) {
+    if (source?.includes(RUNTIME_SCRIPT)) {
       return { name: entry, path, exists: true };
     }
     byName ??= path.toLowerCase().includes('gdharness')
@@ -524,13 +588,25 @@ export function inspectProject(projectPath: string): ProjectReport {
   const registered = autoload === undefined ? undefined : readString(autoload, RUNTIME_AUTOLOAD.name);
   // The star is the enabled marker the editor writes, not part of the path.
   const runtimeAutoloadPath = typeof registered === 'string' ? registered.replace(/^\*/, '') : null;
+  if (runtimeAutoloadPath === `res://${RUNTIME_SCRIPT}`) {
+    problems.push(
+      `the ${RUNTIME_AUTOLOAD.name} autoload names the addon's own script, which a clone or an export without addons/ boots as a missing script; run gdharness setup to point it at res://${RUNTIME_AUTOLOAD.path}, the loader it writes`,
+    );
+  } else if (
+    runtimeAutoloadPath === `res://${RUNTIME_AUTOLOAD.path}` &&
+    loaderState(projectPath) === 'differs'
+  ) {
+    problems.push(
+      `res://${RUNTIME_AUTOLOAD.path} is not the loader this gdharness ships; run gdharness setup to write it again`,
+    );
+  }
 
-  // project.godot is committed and what it names may not be. setup registers the runtime addon by
-  // its path under addons/, and a project that installs its addons rather than committing them, the
-  // way it treats gdUnit4, then carries a line pointing at a file the next clone will not have: the
-  // game boots with a missing script and nothing in the repository says why. Found on two projects,
-  // and nothing said so at the moment it was created. A file git ignores is said and not failed: a
-  // project ignoring it has an install step that puts it there, and setup runs in fresh clones.
+  // project.godot is committed and what it names may not be. A project that installs a file an
+  // autoload names rather than committing it, the way it treats gdUnit4, carries a line pointing at
+  // a file the next clone will not have: the game boots with a missing script and nothing in the
+  // repository says why. Found on two projects, and nothing said so at the moment it was created. A
+  // file git ignores is said and not failed: a project ignoring it has an install step that puts it
+  // there, and setup runs in fresh clones.
   const named = autoloadPaths(settings);
   const runtimeLoaderAutoload = loaderAmong(projectPath, named);
   // Whether the runtime is brought up at all, which is the question the name asks. It used to mean

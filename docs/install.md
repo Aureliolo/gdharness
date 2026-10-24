@@ -137,31 +137,14 @@ one and no editor has to invent it.
 for, keep the version somewhere committed and install from it instead. Each addon records its own
 at `addons/<name>/.gdharness-version`, which is what `gdharness doctor` reads.
 
-Then mind the autoload, which is the half that breaks quietly. `project.godot` is committed and
-names `res://addons/gdharness_runtime/runtime_autoload.gd`, so a clone or a CI runner boots with a
-missing script. `gdharness doctor` asks git which of the files your autoloads name are in the
+The runtime autoload does not stand in the way. `project.godot` is committed, and its runtime
+entry names `res://gdharness/loader.gd` rather than the addon, so a clone or a CI runner without
+`addons/` boots cleanly: the loader is committed with it and does nothing until the addon is there.
+Commit the loader. `gdharness doctor` asks git which of the files your autoloads name are in the
 index, which is what a clone gets. A file nobody added is a problem, which fails `setup` and
 `doctor`. A file your `.gitignore` matches is named on a line of its own and is not a problem,
-because ignoring it says your own install step puts it there before `setup` runs; make sure it
-does, or point the autoload at a script of your own that brings the addon up when it is there and
-does nothing when it is not. Outside a repository, or with no git on the machine, it says nothing
-rather than guessing.
-
-Such a script usually adds the addon with `add_child.call_deferred`, because the root is still
-adding its own children while autoloads get `_ready`. A deferred add runs only once the main
-scene's `_ready` has returned, so the runtime announces after it: a scene that does its work in
-`_ready` cannot be reached with `runtime_*` calls until that work is over, and `editor_status` lists
-no runtime meanwhile. A profile still covers that time, since the profiler is on from the engine's
-start. The addon's own autoload entry, which `setup` writes, comes up before the main scene.
-
-An entry naming a script of your own is left where you put it. `setup`, `upgrade` and
-`runtime on` rewrite that line only when it names the addon's own script, and each of them says
-which of the two it did. An upgrade once repointed a wrapper and mentioned five other replacements
-but not that one, and nothing failed: the wrapper was still on disk and still correct, so every
-gate the project had went on passing while `project.godot` no longer named it.
-
-**The runtime autoload is the one to think about before you ship**, whichever way you go: it is an
-autoload rather than an editor plugin, so an export instantiates it. See
+because ignoring it says your own install step puts it there before `setup` runs. Outside a
+repository, or with no git on the machine, it says nothing rather than guessing. See
 [the runtime autoload](#the-runtime-autoload).
 
 ## Check it works
@@ -287,8 +270,21 @@ everything else `setup` installs it belongs to that project alone: its own copy 
 own entry in that project's `project.godot`. Twenty Godot projects means twenty independent
 installs, each pinned to its own version and its own engine. `--no-runtime` leaves it out.
 
-It is an autoload, so an export ships it unless it is removed. It refuses to serve outside a debug
-build, so it is not a server on a player's machine, but turn it off before you ship.
+The entry names `res://gdharness/loader.gd`, a loader `setup` writes there, outside `addons/`, so
+that it is committed with `project.godot`. The loader brings the runtime up only in a debug build
+that has the addon, as a child of its own node, and does nothing anywhere else: a release export
+carries it and nothing comes up, and the runtime itself also refuses to serve outside a debug build.
+The runtime comes up before the main scene's `_ready`, so a scene that does its work there can be
+reached while it does. `gdharness doctor` says when the loader differs from the one this gdharness
+ships, and `setup` and `upgrade` write it again.
+
+An entry naming the addon's own script, which earlier versions wrote, boots a build without
+`addons/` with a missing script, so `setup`, `upgrade` and `runtime on` point it at the loader. An
+entry naming a loader of your own is left where you put it, and each of them says so and how to use
+the shipped one instead: take your entry out of `[autoload]`, delete your loader, and run
+`gdharness runtime on`. An upgrade once repointed such a loader and mentioned five other
+replacements but not that one, and nothing failed: the loader was still on disk and still correct,
+so every gate the project had went on passing while `project.godot` no longer named it.
 
 Autoloads come up for `godot -s` too, which is how a test tier and most batch tools are run. It
 refuses to serve those as well: a script run has no game in it to answer about, and a project whose

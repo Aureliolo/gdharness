@@ -76,7 +76,7 @@ function resolveGodotPath(): string | null {
 
 /** Every GDScript file the package ships, as the engine will see it inside the fixture project. */
 function shippedScripts(): string[] {
-  return ['operations', 'addons'].flatMap((root) => scriptsUnder(join('src', 'godot', root), root));
+  return ['operations', 'addons', 'loader'].flatMap((root) => scriptsUnder(join('src', 'godot', root), root));
 }
 
 /** Every fixture script, as the engine will see it once the typed gate copies them to res://fixtures. */
@@ -203,6 +203,7 @@ function createProject(godotPath: string): string {
 
   cpSync('src/godot/addons', join(dir, 'addons'), { recursive: true });
   cpSync('src/godot/operations', join(dir, 'operations'), { recursive: true });
+  cpSync('src/godot/loader', join(dir, 'loader'), { recursive: true });
 
   writeFileSync(
     join(dir, 'project.godot'),

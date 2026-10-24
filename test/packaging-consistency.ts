@@ -113,6 +113,7 @@ for (const requiredFile of [
   'package/build/godot/addons/auto_reload/plugin.cfg',
   'package/build/godot/addons/gdharness_editor/plugin.cfg',
   'package/build/godot/addons/gdharness_runtime/runtime_autoload.gd',
+  'package/build/godot/loader/loader.gd',
   'package/README.md',
   'package/LICENSE',
 ]) {
