@@ -762,9 +762,12 @@ static func _moved_by(node: Node, moves: Dictionary[ScrollContainer, Vector2]) -
 ## target's own viewport, a confirmation over a settings dialog did not cover the dialog's OK, and
 ## a click by words tied it with the confirmation's own.
 static func _window_over(target: Control, point: Vector2, window: Window) -> bool:
-	if window.get_parent() == null or window.is_ancestor_of(target):
+	# Not passed over for holding the target in the tree: a window under an embedded window is
+	# embedded beside it, not in it, so the one holding it can be stacked over it. The target's own
+	# window is the step out below, and is never over it.
+	if window.get_parent() == null:
 		return false
-	var host: Viewport = window.get_parent().get_viewport()
+	var host: Viewport = GdhScreen.embedder_of(window)
 	for step: Dictionary in GdhScreen.steps_out(target.get_viewport(), point):
 		if step["viewport"] != host:
 			continue

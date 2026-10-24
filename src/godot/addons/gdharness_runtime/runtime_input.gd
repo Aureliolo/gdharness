@@ -647,6 +647,8 @@ func click(params: Dictionary) -> Dictionary:
 	if hovered != null:
 		hovered_path = str(hovered.get_path())
 	var landed: bool = hovered == control or (hovered != null and control.is_ancestor_of(hovered))
+	# Asked only of a miss, before the press restacks windows: hovered missed a window over it.
+	var cover: Node = null if landed else GdhTargets.drawn_over(control)
 
 	# The link a rich label says was pressed, which is its own word for what the press reached.
 	var links: Array = []
@@ -694,6 +696,8 @@ func click(params: Dictionary) -> Dictionary:
 		answer["why_not_landed"] = (
 			"%s's mouse_filter is ignore, so the pointer passes through it to what is under it" % node_path
 		)
+	elif cover != null:
+		answer["why_not_landed"] = "%s is drawn over it at the point clicked" % cover.get_path()
 	if found != null:
 		answer["found"] = found
 	if was_pressed != null:

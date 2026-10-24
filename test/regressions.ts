@@ -15809,6 +15809,151 @@ async function testADoubleClickPressesTwice(): Promise<void> {
 }
 
 /**
+ * A control in an embedded window with a content scale is placed and clicked where the window
+ * draws it.
+ *
+ * Reported as #1219: a point was carried out of an embedded window by its position alone, so a
+ * button in a window at content_scale_factor 4 was clicked at a quarter of where it is drawn, and
+ * its rect in the window's pixels was its rect in the window's own canvas.
+ */
+async function testAClickReachesAControlInAScaledWindow(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('scaled window click regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scaled-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scaled-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Scaled"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Control\n\nvar pressed: Dictionary[String, int] = {}\n\n\n' +
+        'func _ready() -> void:\n' +
+        '\tfor button: Button in [$Scaled/Press, $Scaled/Inner/Deep, $Plain/Flat, $Box/View/Boxed/Held]:\n' +
+        '\t\tbutton.pressed.connect(func() -> void: pressed[button.name] = pressed.get(button.name, 0) + 1)\n',
+    );
+    // Scaled at 3 holds a button, and a window of its own at 2. An embedded window embeds none, even
+    // given gui_embed_subwindows (it reads false in the game), so Inner is embedded in the root
+    // beside Scaled rather than drawn in it, and a point carried out of it goes to the root without
+    // Scaled's scale. Plain at 1 is the shape that worked.
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\nscript = ExtResource("1")\n\n' +
+        '[node name="Scaled" type="Window" parent="."]\nposition = Vector2i(30, 30)\nsize = Vector2i(600, 900)\n' +
+        'content_scale_factor = 3.0\n\n' +
+        '[node name="Press" type="Button" parent="Scaled"]\noffset_left = 50.0\noffset_top = 20.0\noffset_right = 90.0\noffset_bottom = 36.0\n\n' +
+        '[node name="Inner" type="Window" parent="Scaled"]\nposition = Vector2i(10, 150)\nsize = Vector2i(100, 80)\ncontent_scale_factor = 2.0\n\n' +
+        '[node name="Deep" type="Button" parent="Scaled/Inner"]\noffset_left = 5.0\noffset_top = 5.0\noffset_right = 25.0\noffset_bottom = 15.0\n\n' +
+        '[node name="Plain" type="Window" parent="."]\nposition = Vector2i(700, 30)\nsize = Vector2i(200, 100)\n\n' +
+        '[node name="Flat" type="Button" parent="Plain"]\noffset_left = 10.0\noffset_top = 10.0\noffset_right = 50.0\noffset_bottom = 26.0\n\n' +
+        '[node name="Box" type="SubViewportContainer" parent="."]\noffset_left = 900.0\noffset_top = 300.0\noffset_right = 1100.0\noffset_bottom = 500.0\n\n' +
+        '[node name="View" type="SubViewport" parent="Box"]\nsize = Vector2i(200, 200)\ngui_embed_subwindows = true\nhandle_input_locally = false\n\n' +
+        '[node name="Boxed" type="Window" parent="Box/View"]\nposition = Vector2i(20, 60)\nsize = Vector2i(100, 100)\ncontent_scale_factor = 2.0\n\n' +
+        '[node name="Held" type="Button" parent="Box/View/Boxed"]\noffset_left = 5.0\noffset_top = 5.0\noffset_right = 25.0\noffset_bottom = 15.0\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const call = async (
+      name: string,
+      args: Record<string, unknown>,
+    ): Promise<{ parsed: unknown; said: string }> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return { parsed: parseTextContent(response), said: textOf(response) ?? '' };
+    };
+    const started = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.equal(get(started.parsed, 'runtime', 'listening'), true, started.said);
+
+    // Where each window is, read off the game rather than off the scene: the engine moves an embedded
+    // window down until its title bar is inside what embeds it, so the scene's y 30 reads 36.
+    const at = async (nodePath: string): Promise<{ x: number; y: number }> => {
+      const read = await call('runtime_inspect', { op: 'property', nodePath, property: 'position' });
+      return { x: asNumber(get(read.parsed, 'value', 'x')), y: asNumber(get(read.parsed, 'value', 'y')) };
+    };
+    const scaled = await at('/root/Main/Scaled');
+    const inner = await at('/root/Main/Scaled/Inner');
+    const plain = await at('/root/Main/Plain');
+    // A window in a SubViewport that embeds is embedded there, and placed in the SubViewport's pixels.
+    const boxed = await at('/root/Main/Box/View/Boxed');
+    // Deep first, while Inner is stacked over Scaled, which reaches over Deep's centre from x 30.
+    const cases: [string, string, Record<string, number>][] = [
+      ['/root/Main/Scaled/Inner/Deep', 'Deep', { x: inner.x + 10, y: inner.y + 10, w: 40, h: 20 }],
+      ['/root/Main/Scaled/Press', 'Press', { x: scaled.x + 150, y: scaled.y + 60, w: 120, h: 48 }],
+      ['/root/Main/Plain/Flat', 'Flat', { x: plain.x + 10, y: plain.y + 10, w: 40, h: 16 }],
+      [
+        '/root/Main/Box/View/Boxed/Held',
+        'Held',
+        { x: 900 + boxed.x + 10, y: 300 + boxed.y + 10, w: 40, h: 20 },
+      ],
+    ];
+    for (const [nodePath, name, drawn] of cases) {
+      const rect = await call('runtime_inspect', { op: 'rect', nodePath });
+      const read: Record<string, unknown> = {
+        x: get(rect.parsed, 'window', 'position', 'x'),
+        y: get(rect.parsed, 'window', 'position', 'y'),
+        w: get(rect.parsed, 'window', 'size', 'x'),
+        h: get(rect.parsed, 'window', 'size', 'y'),
+      };
+      for (const [side, wanted] of Object.entries(drawn)) {
+        assert.ok(
+          Math.abs(asNumber(read[side], rect.said) - wanted) < 0.5,
+          `${nodePath} is drawn with ${side} ${wanted} in the window's pixels: ${rect.said}`,
+        );
+      }
+      const clicked = await call('runtime_input', { op: 'click', nodePath });
+      assert.equal(get(clicked.parsed, 'landed'), true, clicked.said);
+      const counted = await call('runtime_inspect', {
+        op: 'property',
+        nodePath: '/root/Main',
+        property: 'pressed',
+      });
+      assert.equal(get(counted.parsed, 'value', name), 1, `${nodePath} pressed once: ${counted.said}`);
+    }
+    // Pressing Press brought Scaled to the top, over Deep's centre, though Scaled holds Inner in the
+    // tree: passed over as Deep's own window, it went unnamed, and the miss said only hovered null.
+    const covered = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Scaled/Inner/Deep' });
+    assert.equal(get(covered.parsed, 'landed'), false, covered.said);
+    assert.equal(
+      get(covered.parsed, 'why_not_landed'),
+      '/root/Main/Scaled is drawn over it at the point clicked',
+      covered.said,
+    );
+    const after = await call('runtime_inspect', {
+      op: 'property',
+      nodePath: '/root/Main',
+      property: 'pressed',
+    });
+    assert.equal(get(after.parsed, 'value', 'Deep'), 1, `and Deep was not pressed again: ${after.said}`);
+    await stopItsRun(server);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A watch of a property records it every frame from before the call that changes it, with the game
  * time each reading was taken at.
  *
@@ -58139,6 +58284,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClickThatDoesNotProcessSaysWhy,
   testADoubleClickPressesTwice,
   testAWatchRecordsAPropertyEveryFrame,
+  testAClickReachesAControlInAScaledWindow,
   testAClickInAWindowNothingEnteredPresses,
   testAHeadlessGameSaysItHasNoWindow,
   testTheKeeperAnswersAStop,

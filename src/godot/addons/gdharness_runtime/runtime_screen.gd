@@ -29,9 +29,13 @@ static func steps_out(viewport: Viewport, point: Vector2) -> Array[Dictionary]:
 	var out: Array[Dictionary] = [{"viewport": viewport, "point": point, "through": null}]
 	while true:
 		var window: Window = viewport as Window
-		if window != null and window.is_embedded() and window.get_parent() != null:
-			point += Vector2(window.position)
-			viewport = window.get_parent().get_viewport()
+		var host: Viewport = embedder_of(window) if window != null and window.is_embedded() else null
+		if host != null:
+			# A window's canvas is drawn into its embedder through its own final transform, which is
+			# where a content scale goes: one at 4 drew a button at four times the point it was clicked
+			# at, and the click missed it.
+			point = Vector2(window.position) + window.get_final_transform() * point
+			viewport = host
 			out.append({"viewport": viewport, "point": point, "through": window})
 			continue
 		var shown_by: SubViewportContainer = viewport.get_parent() as SubViewportContainer
@@ -43,6 +47,19 @@ static func steps_out(viewport: Viewport, point: Vector2) -> Array[Dictionary]:
 			continue
 		break
 	return out
+
+
+## The viewport [param window] is embedded in and placed by, found as the engine finds it, which
+## does not offer it to scripts: the nearest viewport above that embeds subwindows. That is not
+## always its parent's: a window under a window that does not embed is embedded in the one above.
+static func embedder_of(window: Window) -> Viewport:
+	var above: Node = window.get_parent()
+	# A viewport's get_viewport is itself, so a window's parent that is one is asked first.
+	var viewport: Viewport = above.get_viewport() if above != null else null
+	while viewport != null and not viewport.is_embedding_subwindows():
+		above = viewport.get_parent()
+		viewport = above.get_viewport() if above != null else null
+	return viewport
 
 
 ## Where [param point], in [param viewport]'s own coordinates, is in the pixels of the window the
