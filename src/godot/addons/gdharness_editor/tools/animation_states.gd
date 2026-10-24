@@ -73,9 +73,36 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 	var to_state: String = str(args.get("toState", ""))
 	var transition_type: String = str(args.get("transitionType", "immediate"))
 	var advance_condition: String = str(args.get("advanceCondition", ""))
+	# Auto where it is the only mode that does what was asked: a condition is checked only on an auto
+	# transition, and a machine leaves Start only through one. Written as the default enabled, both
+	# did nothing, and the machine sat in Start with its conditions true.
+	var auto: bool = not advance_condition.is_empty() or from_state == "Start"
+	var advance_mode: String = str(args.get("advanceMode", "auto" if auto else "enabled"))
 
 	if from_state.is_empty() or to_state.is_empty():
 		return {"ok": false, "error": "Missing fromState or toState"}
+	var advances: Dictionary = {
+		"auto": AnimationNodeStateMachineTransition.ADVANCE_MODE_AUTO,
+		"enabled": AnimationNodeStateMachineTransition.ADVANCE_MODE_ENABLED,
+		"disabled": AnimationNodeStateMachineTransition.ADVANCE_MODE_DISABLED,
+	}
+	if not advances.has(advance_mode):
+		return {
+			"ok": false,
+			"error": "Unsupported advanceMode: %s; it is auto, enabled or disabled" % advance_mode
+		}
+	if not advance_condition.is_empty() and advance_mode != "auto":
+		return {
+			"ok": false,
+			"error":
+			(
+				(
+					"advanceCondition %s would never advance a transition whose advanceMode is %s: the engine"
+					+ " checks a condition only on an auto one. Leave advanceMode out, or give auto"
+				)
+				% [advance_condition, advance_mode]
+			)
+		}
 	var modes: Dictionary = {
 		"sync": AnimationNodeStateMachineTransition.SWITCH_MODE_SYNC,
 		"at_end": AnimationNodeStateMachineTransition.SWITCH_MODE_AT_END,
@@ -86,6 +113,9 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 	var transition: AnimationNodeStateMachineTransition = AnimationNodeStateMachineTransition.new()
 	transition.switch_mode = (
 		GdhRead.as_int(modes[transition_type]) as AnimationNodeStateMachineTransition.SwitchMode
+	)
+	transition.advance_mode = (
+		GdhRead.as_int(advances[advance_mode]) as AnimationNodeStateMachineTransition.AdvanceMode
 	)
 	if not advance_condition.is_empty():
 		transition.advance_condition = StringName(advance_condition)
@@ -103,7 +133,12 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 	if not sm.has_transition(StringName(from_state), StringName(to_state)):
 		return scene.refuse("The state machine did not take the transition.")
 	var files: Dictionary = found[2]
-	return _finish(scene, Callable(), files, {"ok": true, "from": from_state, "to": to_state})
+	return _finish(
+		scene,
+		Callable(),
+		files,
+		{"ok": true, "from": from_state, "to": to_state, "advanceMode": advance_mode}
+	)
 
 
 ## Why [param sm] cannot take a transition from [param from_state] to [param to_state], or "".

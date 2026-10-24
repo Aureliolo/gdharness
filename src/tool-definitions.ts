@@ -1224,7 +1224,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       advanceCondition: {
         type: 'string',
         ops: ['connect_states'],
-        description: 'connect_states: the condition parameter that advances.',
+        description:
+          'connect_states: the condition parameter that advances it, set as parameters/conditions/<name> on the AnimationTree. Taken only with advanceMode auto, since the engine checks a condition on no other.',
+      },
+      advanceMode: {
+        type: 'string',
+        ops: ['connect_states'],
+        enum: ['auto', 'enabled', 'disabled'],
+        description:
+          'connect_states: auto advances by itself, on its advanceCondition when it has one; enabled is taken only by travel() on the playback; disabled never. Default auto for a transition with advanceCondition or one leaving Start, which the machine leaves only through an auto one, and enabled otherwise.',
       },
     },
     requires: ['projectPath', 'scenePath'],

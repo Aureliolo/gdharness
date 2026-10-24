@@ -2430,12 +2430,12 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
   );
   assert.deepEqual(
     asArray(get(machine, 'transitions'), 'transitions').find((one) => get(one, 'from') === 'idle'),
-    { from: 'idle', to: 'walk', transitionType: 'immediate' },
+    { from: 'idle', to: 'walk', transitionType: 'immediate', advanceMode: 'enabled' },
     JSON.stringify(machine),
   );
   assert.deepEqual(
     asArray(get(machine, 'transitions'), 'transitions').find((one) => get(one, 'from') === 'walk'),
-    { from: 'walk', to: 'idle', transitionType: 'at_end', advanceCondition: 'stopped' },
+    { from: 'walk', to: 'idle', transitionType: 'at_end', advanceMode: 'auto', advanceCondition: 'stopped' },
     JSON.stringify(machine),
   );
   assert.match(

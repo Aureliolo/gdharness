@@ -29,6 +29,11 @@ const SWITCH_MODE_NAMES: Dictionary[int, String] = {
 	AnimationNodeStateMachineTransition.SWITCH_MODE_SYNC: "sync",
 	AnimationNodeStateMachineTransition.SWITCH_MODE_AT_END: "at_end",
 }
+const ADVANCE_MODE_NAMES: Dictionary[int, String] = {
+	AnimationNodeStateMachineTransition.ADVANCE_MODE_DISABLED: "disabled",
+	AnimationNodeStateMachineTransition.ADVANCE_MODE_ENABLED: "enabled",
+	AnimationNodeStateMachineTransition.ADVANCE_MODE_AUTO: "auto",
+}
 
 
 ## [method animations] of the AnimationPlayer at [param player_path] in the file [param scene_path].
@@ -258,9 +263,30 @@ static func states(
 			"from": str(sm.get_transition_from(index)),
 			"to": str(sm.get_transition_to(index)),
 			"transitionType": SWITCH_MODE_NAMES.get(transition.switch_mode, str(transition.switch_mode)),
+			"advanceMode": ADVANCE_MODE_NAMES.get(transition.advance_mode, str(transition.advance_mode)),
 		}
-		if not str(transition.advance_condition).is_empty():
-			shaped["advanceCondition"] = str(transition.advance_condition)
+		var condition: String = str(transition.advance_condition)
+		if not condition.is_empty():
+			shaped["advanceCondition"] = condition
+		# A condition is checked only on an auto transition, and the default is enabled: a machine
+		# with its conditions set true stayed where it was, and nothing said why.
+		if not condition.is_empty() and transition.advance_mode != transition.ADVANCE_MODE_AUTO:
+			shaped["conditionNote"] = (
+				(
+					"advanceMode is %s, so %s never advances it: the engine checks a condition only on an"
+					+ " auto transition%s. disconnect_states and connect_states again with the condition"
+					+ " write it as auto"
+				)
+				% [
+					shaped["advanceMode"],
+					condition,
+					(
+						", and travel() still takes this one"
+						if transition.advance_mode == transition.ADVANCE_MODE_ENABLED
+						else ""
+					)
+				]
+			)
 		transitions.append(shaped)
 	return {"ok": true, "states": listed, "transitions": transitions}
 

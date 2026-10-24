@@ -7820,7 +7820,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 152;
+const READ_IN_WORDS = 153;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -15989,7 +15989,7 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
       'extends Control\n\nvar clock: float = 0.0\nvar jolting: bool = false\nvar found: Array[int] = []\n\n\n' +
         'func _process(delta: float) -> void:\n\tclock += delta\n' +
         '\tif jolting:\n\t\tEngine.time_scale = 3.0 if Engine.time_scale == 1.0 else 1.0\n\n\n' +
-        'func slide() -> void:\n\tcreate_tween().tween_property($Toast, "position:x", 700.0, 0.3)\n\n\n' +
+        'func slide() -> void:\n\tcreate_tween().tween_property($Toast, "position:x", 700.0, 1.0)\n\n\n' +
         'func drop() -> void:\n\t$Gone.queue_free()\n\n\n' +
         'func find_one() -> void:\n\tfound.append(found.size() + 1)\n',
     );
@@ -16049,13 +16049,29 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
     const along = changesOf(slide.parsed).map((one) => asNumber(one.value));
     assert.equal(along[0], 980, `the reading at arming comes first: ${slide.said}`);
     assert.equal(along.at(-1), 700, slide.said);
-    const partway = along.filter((x) => x < 980 && x > 700);
-    assert.ok(partway.length >= 5, `the slide is seen partway, frame by frame: ${slide.said}`);
-    assert.deepEqual(
-      along,
-      [...along].sort((a, b) => b - a),
-      'and in the order it went',
+    // How many frames a second of sliding takes is the runner's: a loaded macOS one gave about ten.
+    // What holds on any is a reading on every frame from the first move to the last, each where a
+    // linear slide of 280 in a second puts it at that reading's game time.
+    const moving = changesOf(slide.parsed).slice(1);
+    assert.ok(
+      moving.filter((one) => asNumber(one.value) > 700).length >= 3,
+      `the slide is seen partway: ${slide.said}`,
     );
+    assert.deepEqual(
+      moving.map((one) => one.frame - asNumber(moving[0]?.frame)),
+      moving.map((_, index) => index),
+      `one reading a frame, none skipped: ${slide.said}`,
+    );
+    for (const [index, one] of moving.entries()) {
+      const before = moving[index - 1];
+      if (before === undefined || asNumber(one.value) === 700) {
+        continue;
+      }
+      const rate = (asNumber(one.value) - asNumber(before.value)) / (one.game_time - before.game_time);
+      // Game time is answered to a ten-thousandth of a second, a twentieth of the rate over a short
+      // frame.
+      assert.ok(Math.abs(rate + 280) < 14, `frame ${one.frame} moved at ${rate} a second: ${slide.said}`);
+    }
     const again = await recorded(slid);
     assert.match(
       again.said,
@@ -52536,7 +52552,7 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       '\tFileAccess.open("res://init_ran.txt", FileAccess.WRITE).store_string("ran")\n',
     // Everything the player and the tree play is kept inside the scene, as the editor saves it.
     'moves.tscn':
-      '[gd_scene load_steps=9 format=3]\n\n' +
+      '[gd_scene load_steps=10 format=3]\n\n' +
       '[ext_resource type="Script" path="res://loud_player.gd" id="1_loud"]\n\n' +
       '[sub_resource type="Animation" id="Animation_idle"]\n\n' +
       '[sub_resource type="Animation" id="Animation_jump"]\nlength = 0.5\n' +
@@ -52550,10 +52566,14 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       '[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_jump"]\nanimation = &"jump"\n\n' +
       '[sub_resource type="AnimationNodeStateMachineTransition" id="AnimationNodeStateMachineTransition_up"]\n' +
       'advance_mode = 2\nadvance_condition = &"jumped"\n\n' +
+      // Enabled, the default, which the engine never checks a condition on.
+      '[sub_resource type="AnimationNodeStateMachineTransition" id="AnimationNodeStateMachineTransition_down"]\n' +
+      'advance_condition = &"landed"\n\n' +
       '[sub_resource type="AnimationNodeStateMachine" id="AnimationNodeStateMachine_root"]\n' +
       'states/idle/node = SubResource("AnimationNodeAnimation_idle")\n' +
       'states/jump/node = SubResource("AnimationNodeAnimation_jump")\n' +
-      'transitions = ["idle", "jump", SubResource("AnimationNodeStateMachineTransition_up")]\n\n' +
+      'transitions = ["idle", "jump", SubResource("AnimationNodeStateMachineTransition_up"), ' +
+      '"jump", "idle", SubResource("AnimationNodeStateMachineTransition_down")]\n\n' +
       '[node name="Hero" type="Node2D"]\n\n[node name="Sprite" type="Sprite2D" parent="."]\n\n' +
       '[node name="Anim" type="AnimationPlayer" parent="."]\nscript = ExtResource("1_loud")\n' +
       'libraries/ = SubResource("AnimationLibrary_moves")\n\n' +
@@ -52818,7 +52838,24 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
     );
     assert.deepEqual(
       get(machine, 'transitions'),
-      [{ from: 'idle', to: 'jump', transitionType: 'immediate', advanceCondition: 'jumped' }],
+      [
+        {
+          from: 'idle',
+          to: 'jump',
+          transitionType: 'immediate',
+          advanceMode: 'auto',
+          advanceCondition: 'jumped',
+        },
+        {
+          from: 'jump',
+          to: 'idle',
+          transitionType: 'immediate',
+          advanceMode: 'enabled',
+          advanceCondition: 'landed',
+          conditionNote:
+            'advanceMode is enabled, so landed never advances it: the engine checks a condition only on an auto transition, and travel() still takes this one. disconnect_states and connect_states again with the condition write it as auto',
+        },
+      ],
       JSON.stringify(machine),
     );
     assert.deepEqual(answerKeys(machine), ['readBy', 'states', 'transitions'], JSON.stringify(machine));
@@ -54306,6 +54343,23 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       '[node name="Player" type="AnimationPlayer" parent="Body"]\nlibraries = {\n&"moves": ExtResource("1_library")\n}\n\n' +
       '[node name="Rig" type="Node2D" parent="."]\n\n[node name="Tree" type="AnimationTree" parent="Rig"]\n' +
       'tree_root = SubResource("StateMachine_1")\nanim_player = NodePath("../../Body/Player")\n',
+    // Says where its machine is before setting the condition and after, as warnings, which a boot
+    // check answers with.
+    'machine.gd':
+      'extends Node2D\n\nvar _frames: int = 0\n\n\nfunc _process(_delta: float) -> void:\n\t_frames += 1\n' +
+      '\tvar tree: AnimationTree = $Tree\n' +
+      '\tvar playback: AnimationNodeStateMachinePlayback = tree.get("parameters/playback")\n' +
+      '\tif _frames == 4:\n\t\tpush_warning("in %s" % playback.get_current_node())\n' +
+      '\t\ttree.set("parameters/conditions/jumped", true)\n' +
+      '\telif _frames == 8:\n\t\tpush_warning("then in %s" % playback.get_current_node())\n',
+    'machine.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="res://library.tres" id="1_library"]\n' +
+      '[ext_resource type="Script" path="res://machine.gd" id="2_machine"]\n\n' +
+      '[sub_resource type="AnimationNodeStateMachine" id="StateMachine_1"]\n\n' +
+      '[node name="Root" type="Node2D"]\nscript = ExtResource("2_machine")\n\n' +
+      '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {\n&"moves": ExtResource("1_library")\n}\n\n' +
+      '[node name="Tree" type="AnimationTree" parent="."]\ntree_root = SubResource("StateMachine_1")\n' +
+      'anim_player = NodePath("../Player")\n',
     // A tree whose player is the root, which the joined path names as nothing at all.
     'held.tscn':
       '[gd_scene format=3]\n\n[sub_resource type="AnimationNodeAnimation" id="Plays_gone"]\nanimation = &"gone"\n\n' +
@@ -55072,6 +55126,76 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       /"args": \[1\.0\]/,
       `unless it takes a float: ${fileOf('moves.tscn')}`,
     );
+
+    // A machine written here is run, since the mode the engine reads is what decides whether it
+    // moves: written as the default enabled, it sat in Start with its condition true.
+    const machine = { scenePath: 'machine.tscn', animTreePath: 'Tree' };
+    for (const stateName of ['Idle', 'Hop']) {
+      await written({ ...machine, op: 'add_state', stateName, animationName: 'moves/idle' });
+    }
+    const started = await written({ ...machine, op: 'connect_states', fromState: 'Start', toState: 'Idle' });
+    assert.equal(get(started, 'advanceMode'), 'auto', JSON.stringify(started));
+    const conditioned = await written({
+      ...machine,
+      op: 'connect_states',
+      fromState: 'Idle',
+      toState: 'Hop',
+      advanceCondition: 'jumped',
+    });
+    assert.equal(get(conditioned, 'advanceMode'), 'auto', JSON.stringify(conditioned));
+    const kept = await written({
+      ...machine,
+      op: 'connect_states',
+      fromState: 'Hop',
+      toState: 'Idle',
+      advanceMode: 'disabled',
+    });
+    assert.equal(get(kept, 'advanceMode'), 'disabled', JSON.stringify(kept));
+    assert.equal(
+      textOf(
+        await call({
+          ...machine,
+          op: 'connect_states',
+          fromState: 'Hop',
+          toState: 'Idle',
+          advanceMode: 'often',
+        }),
+      ),
+      'scene_animation takes advanceMode as one of auto, enabled, disabled, not "often".',
+    );
+    assert.equal(
+      textOf(
+        await call({
+          ...machine,
+          op: 'connect_states',
+          fromState: 'Idle',
+          toState: 'Hop',
+          advanceCondition: 'jumped',
+          advanceMode: 'enabled',
+        }),
+      ),
+      'advanceCondition jumped would never advance a transition whose advanceMode is enabled: the engine checks a condition only on an auto one. Leave advanceMode out, or give auto',
+    );
+    const modes = parseTextContent(await call({ ...machine, op: 'read_states' }));
+    assert.deepEqual(
+      asArray(get(modes, 'transitions')).map(
+        (one) => `${text(get(one, 'from'))} to ${text(get(one, 'to'))} ${text(get(one, 'advanceMode'))}`,
+      ),
+      ['Start to Idle auto', 'Idle to Hop auto', 'Hop to Idle disabled'],
+      JSON.stringify(modes),
+    );
+    const ran = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'check', scene: 'machine.tscn', frames: 12 },
+        },
+        240_000,
+      ),
+    );
+    const said = JSON.stringify(get(ran, 'entries'));
+    assert.match(said, /in Idle.*then in Hop/, JSON.stringify(ran));
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
