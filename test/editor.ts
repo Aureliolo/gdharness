@@ -49,6 +49,7 @@ import { parseTextContent, textOf } from './support/json-rpc.js';
 import { pixelPng, solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
 import { sweep } from './support/sweep.js';
+import { sampleThread } from './support/thread-samples.js';
 
 /** Long enough for a cold editor to finish its first filesystem scan on a slow runner. */
 const CONNECT_TIMEOUT_MS = 120_000;
@@ -1193,6 +1194,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   const engineOutput: string[] = [];
   editor.stdout?.on('data', (chunk: Buffer) => engineOutput.push(chunk.toString()));
   editor.stderr?.on('data', (chunk: Buffer) => engineOutput.push(chunk.toString()));
+  const thread = sampleThread(editor.pid);
 
   try {
     await server.initialize('editor-fixture');
@@ -1223,10 +1225,12 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
         : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
     // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
     // failed is the last thing in it.
+    const sampled = thread.account();
     throw new Error(
-      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}`,
+      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
     );
   } finally {
+    thread.stop();
     // The game first: it is the editor's child and outlives it, so a run that failed part way
     // through would otherwise leave an engine behind holding the fixture project.
     await invoke('editor_run', { op: 'stop' }).catch(() => undefined);

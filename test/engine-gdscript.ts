@@ -4026,7 +4026,9 @@ function testValidationSaysHowMuchItRead(godotPath: string): void {
   const dir = createProject(godotPath);
   try {
     mkdirSync(join(dir, 'many'));
-    for (let index = 0; index < 60; index++) {
+    // Past the limit by these alone: validation passes over installed addons, so the fixture's own
+    // scripts count for nothing.
+    for (let index = 0; index < 110; index++) {
       writeFileSync(join(dir, 'many', `s${index}.gd`), 'extends Node\n');
     }
     const validated = runOperation(godotPath, dir, 'validate_project', {});
