@@ -17,7 +17,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { exitOf } from './alive.js';
-import { DESKTOP_VARIABLE, ensureHelperCompiled, helperFailure, throughHelper } from './desktop.js';
+import {
+  DESKTOP_VARIABLE,
+  ensureHelperCompiled,
+  helperFailure,
+  helperStep,
+  throughHelper,
+} from './desktop.js';
 import { crashesReported, letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
@@ -100,6 +106,7 @@ async function startThroughHelper(
   const scratch = scratchDirectory('desktop');
   const pidFile = join(scratch, 'pid');
   const errorFile = join(scratch, 'error');
+  const stepFile = join(scratch, 'step');
   const where =
     spec.desktop !== undefined
       ? `on the ${spec.desktop} desktop`
@@ -118,6 +125,7 @@ async function startThroughHelper(
       pid: pidFile,
       error: errorFile,
       stop: stopFile,
+      step: stepFile,
     });
     // The helper's environment is what it starts inherits, since the start names no other.
     const envChanges =
@@ -152,7 +160,9 @@ async function startThroughHelper(
       await delay(50);
     }
     started.child.kill();
-    return { error: `it was not started ${where} within ${DESKTOP_START_MS} ms` };
+    return {
+      error: `it was not started ${where} within ${DESKTOP_START_MS} ms, and ${helperStep(stepFile)}`,
+    };
   } finally {
     discard(scratch);
   }

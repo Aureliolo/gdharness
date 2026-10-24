@@ -30,6 +30,7 @@ import {
   ensureHelperCompiled,
   HIDDEN_DESKTOP,
   helperFailure,
+  helperStep,
   throughHelper,
 } from './desktop.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
@@ -777,7 +778,12 @@ async function watched(
   const output = openSync(log, 'w');
   let child: ChildProcess;
   let stop: () => void;
-  let helper: { readonly error: string; readonly how: string } | null = null;
+  let helper: {
+    readonly error: string;
+    readonly how: string;
+    readonly pid: string;
+    readonly step: string;
+  } | null = null;
   try {
     // Through the helper on Windows for a desktop of its own, and also wherever this process could
     // not clear the bit that keeps a crash from being reported, since the helper clears it in itself.
@@ -789,15 +795,16 @@ async function watched(
       }
       const stopFile = join(directory, 'stop');
       const error = join(directory, 'error');
-      helper = { error, how: where };
+      helper = { error, how: where, pid: join(directory, 'pid'), step: join(directory, 'step') };
       const how = windowed
         ? { desktop: HIDDEN_DESKTOP, directory: launch.projectPath }
         : { directory: launch.projectPath };
       const wrapper = throughHelper(how, launch.godotPath, args, {
-        spec: join(directory, 'spec.json'),
-        pid: join(directory, 'pid'),
+        spec: join(directory, 'spec'),
+        pid: helper.pid,
         error,
         stop: stopFile,
+        step: helper.step,
       });
       child = spawnHidden(wrapper.command, wrapper.args, {
         stdio: ['ignore', output, output],
@@ -856,7 +863,12 @@ async function watched(
         }
       } else if (ended === null && Date.now() - lastGrowth > silenceSeconds * 1000) {
         const stoppedIn = readRun(text).stoppedIn;
-        ended = `the engine printed nothing for ${String(silenceSeconds)} s${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
+        // A helper that never wrote the pid never started the engine, which is a start that hung.
+        const unstarted =
+          helper !== null && !existsSync(helper.pid)
+            ? `, and it never started ${helper.how}: ${helperStep(helper.step)}`
+            : '';
+        ended = `the engine printed nothing for ${String(silenceSeconds)} s${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended${unstarted}`;
         stop();
       }
     }

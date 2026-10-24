@@ -89,6 +89,7 @@ import {
   type HelperFiles,
   HIDDEN_DESKTOP,
   helperFailure,
+  helperStep,
   throughHelper,
 } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
@@ -7261,20 +7262,20 @@ class GodotServer {
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 600000;
     this.logDebug(`Running tests: ${engine.value} ${cmdArgs.join(' ')}`);
     const helperFiles: HelperFiles = {
-      spec: join(userData, 'spec.json'),
+      spec: join(userData, 'spec'),
       pid: join(userData, 'pid'),
       error: join(userData, 'error'),
       stop: join(userData, 'stop'),
+      step: join(userData, 'step'),
     };
+    const onDesktop = windowed && process.platform === 'win32';
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
     const run = this.spawnGame(
       engine.value,
       cmdArgs,
       userDataIn(userData),
-      windowed && process.platform === 'win32'
-        ? { directory: project.value.path, files: helperFiles }
-        : undefined,
+      onDesktop ? { directory: project.value.path, files: helperFiles } : undefined,
     );
     // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
     // marks which characters of a failing string were there, and its report drops them.
@@ -7328,7 +7329,11 @@ class GodotServer {
     }
     await run.settled;
     // The helper's own failure reaches only its file, and the exit it leaves says nothing.
-    const helperFailed = helperFailure(helperFiles.error);
+    // Or its pid never came, which is a helper that hung until the run's limit ended it.
+    const helperFailed = onDesktop
+      ? (helperFailure(helperFiles.error) ??
+        (existsSync(helperFiles.pid) ? null : `it never started, and ${helperStep(helperFiles.step)}`))
+      : null;
     if (helperFailed !== null) {
       discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
       return this.createErrorResponse(

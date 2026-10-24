@@ -144,10 +144,25 @@ public static class GdharnessDesktop {
   // it did not start itself: a handle names one process, where a pid can name the next one too. The
   // process starts in directory rather than in this one's, which is a temporary directory: Windows
   // PowerShell saves its module cache relative to where it runs when the profile does not resolve.
-  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory) {
+  // The spec is one field a line, each base64 of its UTF-8, read with no PowerShell cmdlet: a cmdlet
+  // has PowerShell prepare its modules first, on every start.
+  public static int RunSpec(string specFile) {
+    string[] lines = File.ReadAllLines(specFile);
+    Func<int, string> field = delegate(int index) { return Encoding.UTF8.GetString(Convert.FromBase64String(lines[index])); };
+    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6));
+  }
+
+  static void Step(string stepFile, string step) {
+    if (stepFile.Length > 0) {
+      File.WriteAllText(stepFile, step);
+    }
+  }
+
+  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     if (desktop.Length > 0) {
+      Step(stepFile, "creating the " + desktop + " desktop");
       IntPtr held = CreateDesktopW(desktop, IntPtr.Zero, IntPtr.Zero, 0, GenericAll, IntPtr.Zero);
       if (held == IntPtr.Zero) {
         throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateDesktopW " + desktop);
@@ -172,6 +187,7 @@ public static class GdharnessDesktop {
       LockSetForegroundWindow(LockForeground);
     }
     try {
+    Step(stepFile, "starting the process");
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, DetachedProcess, IntPtr.Zero, directory, ref startup, out started)) {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
     }
@@ -377,6 +393,25 @@ export interface HelperFiles {
   readonly error: string;
   /** Empty for a start nothing will be asked to end. */
   readonly stop: string;
+  /** The step the helper last reached, which a start that waited in vain reads with `helperStep`. */
+  readonly step: string;
+}
+
+/**
+ * Where the helper behind [param stepFile] stood, as a clause: a start waiting for its pid in vain
+ * otherwise said only that it waited, and a Windows CI runner's one such minute left nothing behind
+ * to say which step took it.
+ */
+export function helperStep(stepFile: string): string {
+  let step: string | null = null;
+  try {
+    step = readFileSync(stepFile, 'utf8').trim();
+  } catch {
+    // Never written: the helper's script had not begun.
+  }
+  return step === null || step === ''
+    ? 'Windows PowerShell had not begun running the helper'
+    : `the helper was ${step}`;
 }
 
 /**
@@ -392,6 +427,10 @@ export interface HelperFiles {
  *
  * [param assembly] is the compiled helper, which {@link ensureHelperCompiled} makes first: loading
  * it is all this does, so the start's own time is spent on the start.
+ *
+ * The script calls no cmdlet. ConvertFrom-Json and Add-Type had Windows PowerShell prepare its
+ * modules on every start, measured at 60 to 200 ms on a machine with few of them, and a start on a
+ * Windows CI runner, whose module path is large, waited a minute for a pid that never came.
  */
 export function throughHelper(
   how: { readonly desktop?: string; readonly noActivate?: boolean; readonly directory: string },
@@ -400,23 +439,27 @@ export function throughHelper(
   files: HelperFiles,
   assembly = helperAssembly(),
 ): { command: string; args: string[] } {
-  const spec = {
-    desktop: how.desktop ?? '',
-    noActivate: how.noActivate === true,
-    commandLine: windowsCommandLine(command, args),
-    pidFile: files.pid,
-    stopFile: files.stop,
-    directory: how.directory,
-    assembly,
-  };
-  writeFileSync(files.spec, JSON.stringify(spec), 'utf8');
+  const fields = [
+    how.desktop ?? '',
+    windowsCommandLine(command, args),
+    files.pid,
+    how.noActivate === true ? '1' : '0',
+    files.stop,
+    how.directory,
+    files.step,
+  ];
+  writeFileSync(
+    files.spec,
+    fields.map((field) => Buffer.from(field, 'utf8').toString('base64')).join('\n'),
+    'utf8',
+  );
   const literal = (path: string): string => `'${path.replaceAll("'", "''")}'`;
   const script = [
     "$ErrorActionPreference = 'Stop'",
     'try {',
-    `  $spec = [IO.File]::ReadAllText(${literal(files.spec)}, [Text.Encoding]::UTF8) | ConvertFrom-Json`,
-    '  Add-Type -LiteralPath $spec.assembly',
-    '  $code = [GdharnessDesktop]::Run($spec.desktop, $spec.commandLine, $spec.pidFile, [bool]$spec.noActivate, $spec.stopFile, $spec.directory)',
+    `  [IO.File]::WriteAllText(${literal(files.step)}, 'loading its assembly')`,
+    `  $null = [Reflection.Assembly]::LoadFrom(${literal(assembly)})`,
+    `  $code = [GdharnessDesktop]::RunSpec(${literal(files.spec)})`,
     '} catch {',
     `  [IO.File]::WriteAllText(${literal(files.error)}, $_.Exception.Message)`,
     '  exit 1',

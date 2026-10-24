@@ -76,6 +76,8 @@ import {
   HIDDEN_DESKTOP,
   helperAssembly,
   helperFailure,
+  helperStep,
+  throughHelper,
   windowsCommandLine,
 } from '../src/desktop.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
@@ -12011,6 +12013,34 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
         `under the pid the launch answered: ${hidden.said}`,
       );
     }
+    // The helper's script calls no cmdlet, so Windows PowerShell prepares no modules as it starts
+    // one, and writes no account of that among what the run printed.
+    const helperScript = Buffer.from(
+      throughHelper({ directory: scratch }, 'godot.exe', [], {
+        spec: join(scratch, 'spec'),
+        pid: join(scratch, 'pid'),
+        error: join(scratch, 'error'),
+        stop: join(scratch, 'stop'),
+        step: join(scratch, 'step'),
+      }).args.at(-1) ?? '',
+      'base64',
+    ).toString('utf16le');
+    assert.match(helperScript, /\[GdharnessDesktop\]::RunSpec\(/, helperScript);
+    const ran = spawnSyncHidden(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        Buffer.from(helperScript.replace(/\[GdharnessDesktop\]::RunSpec\([^)]*\)/, '0'), 'utf16le').toString(
+          'base64',
+        ),
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+    assert.equal(readFileSync(join(scratch, 'step'), 'utf8'), 'loading its assembly', 'the script ran');
+    assert.doesNotMatch(`${ran.stdout}${ran.stderr}`, /Preparing modules/, `${ran.stdout}${ran.stderr}`);
   } finally {
     sweep(scratch);
   }
@@ -16171,6 +16201,14 @@ async function testARelativeEnginePathIsMadeWhole(): Promise<void> {
     assert.equal(helperFailure(written), null, 'nor is an empty one');
     writeFileSync(written, 'Exception calling "Run": CreateProcessW godot.exe\r\n');
     assert.equal(helperFailure(written), 'Exception calling "Run": CreateProcessW godot.exe');
+    const step = join(scratch, 'step');
+    assert.equal(
+      helperStep(step),
+      'Windows PowerShell had not begun running the helper',
+      'no step is no start',
+    );
+    writeFileSync(step, 'creating the gdharness desktop');
+    assert.equal(helperStep(step), 'the helper was creating the gdharness desktop');
   } finally {
     process.chdir(directory);
     if (before === undefined) {
