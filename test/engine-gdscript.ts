@@ -202,6 +202,12 @@ function createProject(godotPath: string): string {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-engine-'));
 
   cpSync('src/godot/addons', join(dir, 'addons'), { recursive: true });
+  // Marked as an install marks them, so what the operations step over as gdharness's own is what
+  // they step over in a game: unmarked, the tests addon's suites scene was offered as a scene of
+  // the project's.
+  for (const addon of readdirSync('src/godot/addons')) {
+    writeFileSync(join(dir, 'addons', addon, '.gdharness-version'), '0.0.0\n');
+  }
   cpSync('src/godot/operations', join(dir, 'operations'), { recursive: true });
   cpSync('src/godot/loader', join(dir, 'loader'), { recursive: true });
 
