@@ -47160,9 +47160,9 @@ function testEveryToolNamedInProseIsATool(): void {
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
   // editor caches its class reference in, the name every resource stores, and the gdUnit4 call a
-  // suite that drives a scene makes, which is what puts it in the windowed engine. Named one
-  // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
-  // and called a tool or called vocabulary.
+  // suite that drives a scene makes, which is what puts it in the windowed engine, and the project
+  // setting that turns that guess off. Named one by one rather than matched by a pattern, so a new
+  // word of this shape has to be looked at once and called a tool or called vocabulary.
   const notTools = new Set([
     'project_path',
     'project_classes',
@@ -47193,6 +47193,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'resource_name',
     'editor_servers',
     'scene_runner',
+    'scene_runner_needs_window',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
