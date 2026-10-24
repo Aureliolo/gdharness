@@ -9392,8 +9392,8 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
     );
     assert.equal(
       said.filter((problem) => problem.includes('is not installed')).length,
-      3,
-      'which is the line that covers it',
+      ADDONS.length,
+      'which is the line that covers it, one for each addon',
     );
     const loader = get(report, 'runtimeLoaderAutoload');
     assert.equal(get(loader, 'exists'), false, 'and the loader entry says its file is not there');
@@ -47513,11 +47513,12 @@ const HABIT_PHRASES = [
  * What [param text] holds that the project's prose may not, by rule.
  *
  * An em dash anywhere, and an en dash standing between spaces as one. In [param prose], also a
- * spaced double hyphen standing in for a dash, outside backticks, where a command line's own `--`
- * lives, and the habit phrases.
+ * spaced double hyphen standing in for a dash, outside backticks and fenced blocks, where a command
+ * line's own `--` lives, and the habit phrases.
  */
 function proseFaults(text: string, prose: boolean): string[] {
   const faults: string[] = [];
+  let fenced = false;
   for (const [index, line] of text.split('\n').entries()) {
     const at = `line ${index + 1}`;
     if (line.includes(EM_DASH)) {
@@ -47526,7 +47527,11 @@ function proseFaults(text: string, prose: boolean): string[] {
     if (line.includes(` ${EN_DASH} `)) {
       faults.push(`${at}: an en dash used as a dash`);
     }
-    if (!prose) {
+    if (line.trimStart().startsWith('```')) {
+      fenced = !fenced;
+      continue;
+    }
+    if (!prose || fenced) {
       continue;
     }
     const outsideCode = line.replace(/`[^`]*`/g, '');
@@ -47564,6 +47569,11 @@ function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
   ]);
   assert.deepEqual(proseFaults('godot `--path p -- -e` and `HEAD -- package.json`', true), []);
   assert.deepEqual(proseFaults('wait -- then go', false), [], 'a test line may hold a command line');
+  assert.deepEqual(
+    proseFaults(`\`\`\`text\ngdharness spread a.tscn -- --seed=3\n\`\`\`\nwait -- then go\n\`\`\`\n${EM_DASH}\n\`\`\``, true),
+    ['line 4: a double hyphen used as a dash', 'line 6: an em dash'],
+    'a fenced command line may hold its separator, and the prose after the fence is read again',
+  );
 
   const read: { where: string; text: string; prose: boolean }[] = [];
   const kinds = /\.(ts|gd|md|yml|yaml|json|jsonc|cfg|tscn|sh|ps1|mjs)$/;
