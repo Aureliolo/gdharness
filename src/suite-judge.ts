@@ -20,6 +20,8 @@ interface CaseRan {
   readonly name: string;
   /** The function the case is, which is what a suite declares and a skipping file names. */
   readonly func: string;
+  /** Which row of a parameterised case it is, or null for a case that is not one. */
+  readonly row: number | null;
   /** PASSED, FAILED, FLAKY, SKIPPED or WARNING, without the retry count gdUnit4 prints after some. */
   readonly verdict: string;
   readonly seconds: number;
@@ -66,6 +68,11 @@ export interface RunPrinted {
   readonly unloadable: readonly string[];
   /** What was running as the printed lines end: a case, a suite's hook, or null outside every suite. */
   readonly stoppedIn: string | null;
+  /**
+   * The rows the engine found and left to the others, by `path > func`; null for a case that is no
+   * row. gdUnit4 prints nothing for them, so without these a row no engine was dealt goes unseen.
+   */
+  readonly leftOut: ReadonlyMap<string, readonly (number | null)[]>;
 }
 
 const SUITE_OPENED = /^Run Test Suite:\s*(res:\/\/.+?\.gd)\s*$/;
@@ -77,6 +84,8 @@ const STATISTICS = new RegExp(String.raw`^Statistics:.*\|\s*([A-Z]+)(?:\s+\(.*?\
 const ERROR_LINE = /^\s*(?:SCRIPT |USER )?ERROR: (.*?)\s*$/;
 const WARNING_LINE = /^\s*(?:SCRIPT |USER )?WARNING: (.*?)\s*$/;
 const EXECUTED = /^Executed test cases\s*:\s*\((\d+)\//;
+// Printed by the runner in src/godot/tests/listed.gd as it leaves a row out, -1 for a case whole.
+const LEFT_OUT = /^gdharness left out (res:\/\/.+?\.gd) > ([^:\s]+):(-?\d+)\s*$/;
 // Godot giving up on a rendering driver it could not start, and starting the next. The display
 // server is made before any script of the project runs, so every error printed before this line
 // is the engine probing a driver: a windowed engine on a machine without a Vulkan surface prints
@@ -109,6 +118,26 @@ export function funcOf(name: string): string {
   return colon < 0 ? name : name.slice(0, colon);
 }
 
+/** The row a printed case name is, `test_params:3 (…)` being row 3, or null when it is no row. */
+function rowOf(name: string): number | null {
+  const row = /^[^:]+:(\d+)(?: |$)/.exec(name)?.[1];
+  return row === undefined ? null : Number(row);
+}
+
+/**
+ * The rows of one parameterised case an engine runs: those in `only`, or every row but those in
+ * `besides`, for the engine taking whatever rows were dealt nowhere else. A case that has stopped
+ * being parameterised runs only in that one.
+ */
+export type RowShare = { readonly only: readonly number[] } | { readonly besides: readonly number[] };
+
+/** Whether an engine given [param share] runs [param row], null for a case that is no row. */
+function rowRuns(share: RowShare, row: number | null): boolean {
+  return 'only' in share
+    ? row !== null && share.only.includes(row)
+    : row === null || !share.besides.includes(row);
+}
+
 /** [param printed], both streams in the order they came, read into suites, cases and errors. */
 export function readRun(printed: string): RunPrinted {
   const lines = stripVTControlCharacters(printed).replaceAll('\r\n', '\n').split('\n');
@@ -127,7 +156,15 @@ export function readRun(printed: string): RunPrinted {
     }
     afterCase = [];
   };
+  const leftOut = new Map<string, (number | null)[]>();
   for (const [at, line] of lines.entries()) {
+    const left = LEFT_OUT.exec(line);
+    if (left !== null) {
+      const key = `${left[1] ?? ''} > ${left[2] ?? ''}`;
+      const row = Number(left[3]);
+      leftOut.set(key, [...(leftOut.get(key) ?? []), row < 0 ? null : row]);
+      continue;
+    }
     const opened = SUITE_OPENED.exec(line);
     if (opened?.[1] !== undefined) {
       settleAfterCase('after');
@@ -147,6 +184,7 @@ export function readRun(printed: string): RunPrinted {
         open.cases.push({
           name,
           func: funcOf(name),
+          row: rowOf(name),
           verdict: caseLine[3] ?? '',
           seconds: secondsOf(caseLine[4] ?? ''),
           at,
@@ -216,7 +254,7 @@ export function readRun(printed: string): RunPrinted {
   const unloadable = scriptErrorsPrinted(lines).map(
     (error) => `${error.path}${error.line === null ? '' : `:${String(error.line)}`}: ${error.message}`,
   );
-  return { lines, suites, errors, leaks, starved, executed, unloadable, stoppedIn };
+  return { lines, suites, errors, leaks, starved, executed, unloadable, stoppedIn, leftOut };
 }
 
 // What Godot prints before an error raised while it was printing another. It writes the pair
@@ -252,10 +290,21 @@ export interface Expected {
   readonly warnings: Declared;
 }
 
+/** One suite an engine is handed. */
+export interface HandedSuite {
+  readonly path: string;
+  readonly cases: readonly string[];
+  /** By function, the rows this engine runs of each case dealt by its rows. */
+  readonly rows?: Readonly<Record<string, RowShare>>;
+}
+
 /** What one engine was handed, which is what its run is judged against. */
 export interface EngineAssignment {
-  /** Each suite, with the functions this engine is to run of it. */
-  readonly suites: ReadonlyArray<{ readonly path: string; readonly cases: readonly string[] }>;
+  /**
+   * Each suite, with the functions this engine is to run of it, and of a parameterised one dealt
+   * over several engines the rows.
+   */
+  readonly suites: ReadonlyArray<HandedSuite>;
   readonly expected: Expected;
   /** The project's scripts the engine never frees once loaded, which its report at exit counts. */
   readonly selfTyped?: readonly SelfTypedExport[];
@@ -334,6 +383,67 @@ export function exitNamed(code: number): string {
   return gdunit === undefined ? String(code) : `${String(code)} (${gdunit})`;
 }
 
+/**
+ * What is wrong with the cases dealt by their rows, read over every engine that held one: each row
+ * printed by exactly one engine, from row 0 up to the last any engine found, with none missing. Judged over all of them rather than
+ * in each, since an engine dealt rows a case no longer has rightly runs none of them; and only once
+ * every engine holding the case closed its suite, since one that did not is a fault already and says
+ * why.
+ */
+export function rowsAcross(
+  engines: ReadonlyArray<{ readonly handed: readonly HandedSuite[]; readonly printed: RunPrinted }>,
+): { readonly suite: string; readonly fault: string }[] {
+  const dealtOut = new Map<string, { path: string; func: string; holders: RunPrinted[] }>();
+  for (const { handed, printed } of engines) {
+    for (const suite of handed) {
+      for (const func of Object.keys(suite.rows ?? {})) {
+        const key = `${suite.path} > ${func}`;
+        const entry = dealtOut.get(key) ?? { path: suite.path, func, holders: [] };
+        entry.holders.push(printed);
+        dealtOut.set(key, entry);
+      }
+    }
+  }
+  const faults: { suite: string; fault: string }[] = [];
+  for (const [key, { path, func, holders }] of dealtOut) {
+    const suites = holders.map((printed) => printed.suites.get(path));
+    if (suites.some((suite) => suite?.closed === null || suite?.closed === undefined)) {
+      continue;
+    }
+    const counts = new Map<number | null, number>();
+    for (const ran of suites.flatMap((suite) => suite?.cases ?? []).filter((ran) => ran.func === func)) {
+      counts.set(ran.row, (counts.get(ran.row) ?? 0) + 1);
+    }
+    const said = (row: number | null): string => (row === null ? 'the case whole' : `row ${String(row)}`);
+    if (counts.size === 0) {
+      faults.push({
+        suite: path,
+        fault: `${key} ran in none of the ${String(holders.length)} engines its rows were dealt to`,
+      });
+      continue;
+    }
+    const twice = [...counts].filter(([, times]) => times > 1).map(([row]) => said(row));
+    if (twice.length > 0) {
+      faults.push({ suite: path, fault: `${key} ran ${named(twice)} in more than one engine` });
+    }
+    const rows = [...counts.keys()].filter((row) => row !== null);
+    if (rows.length > 0 && counts.has(null)) {
+      faults.push({ suite: path, fault: `${key} ran both whole and by its rows` });
+    }
+    // A row past the last one run is known only from an engine that found it and left it out.
+    const left = holders.flatMap((printed) => printed.leftOut.get(key) ?? []).filter((row) => row !== null);
+    const top = Math.max(-1, ...rows, ...left);
+    const gaps = Array.from({ length: top + 1 }, (_, row) => row).filter((row) => !counts.has(row));
+    if (gaps.length > 0) {
+      faults.push({
+        suite: path,
+        fault: `${key} did not run ${named(gaps.map(said))} in any of the ${String(holders.length)} engines its rows were dealt to`,
+      });
+    }
+  }
+  return faults;
+}
+
 /** How many lines of a run's end are shown when nothing in it says what went wrong. */
 const TAIL = 60;
 /** How many cases are named in one sentence before the rest are counted. */
@@ -379,7 +489,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
         : 'the run executed no test case at all, whatever it exited with',
     );
   }
-  for (const { path, cases } of handed.suites) {
+  for (const { path, cases, rows = {} } of handed.suites) {
     const suite = printed.suites.get(path);
     if (suite === undefined) {
       faults.push(`${path} never started`);
@@ -397,10 +507,23 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
       failing.add(path);
     }
     const finished = new Set(suite.cases.map((ran) => ran.func));
-    const missing = cases.filter((func) => !finished.has(func));
+    // A case dealt by its rows can rightly run none here, when it has fewer rows than last time;
+    // whether every row ran once is judged over all the engines, by rowsAcross.
+    const missing = cases.filter((func) => !finished.has(func) && rows[func] === undefined);
     if (missing.length > 0 && suite.closed !== null) {
       faults.push(`${path} closed without running ${named(missing)}`);
       failing.add(path);
+    }
+    for (const [func, share] of Object.entries(rows)) {
+      const strays = suite.cases
+        .filter((ran) => ran.func === func && !rowRuns(share, ran.row))
+        .map((ran) => (ran.row === null ? 'the case whole' : `row ${String(ran.row)}`));
+      if (strays.length > 0) {
+        faults.push(
+          `${path} > ${func} ran ${named(strays)}, which ${strays.length === 1 ? 'was' : 'were'} dealt to another engine`,
+        );
+        failing.add(path);
+      }
     }
     const wanted = new Set(cases);
     const unasked = [...finished].filter((func) => !wanted.has(func));
