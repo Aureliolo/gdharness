@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, posix } from 'node:path';
 import { declaredClassOf, eachScript } from './class-cache.js';
 import { codeOf, shapeOf } from './gdscript-source.js';
-import type { RunPrinted } from './suite-judge.js';
+import type { HandedSuite, RowShare, RunPrinted } from './suite-judge.js';
 import { writeWhole } from './whole-file.js';
 
 /** The class every gdUnit4 suite extends, by name. */
@@ -166,6 +166,11 @@ export interface SuiteTime {
   readonly seconds: number;
   /** Each case function's own time, the rows of a parameterised one together. */
   readonly cases: Readonly<Record<string, number>>;
+  /**
+   * Each row's own time, by its index, for a parameterised case whose rows a run printed: what a
+   * case too slow for one engine is dealt out by.
+   */
+  readonly rows?: Readonly<Record<string, readonly number[]>>;
 }
 
 export type SuiteTimes = Readonly<Record<string, SuiteTime>>;
@@ -201,6 +206,7 @@ export function timesAfter(
   suites: readonly DeclaredSuite[],
   runs: readonly RunPrinted[],
   now: (path: string) => DeclaredSuite | null,
+  cutShort: ReadonlySet<string> = new Set(),
 ): Record<string, SuiteTime> {
   const next: Record<string, SuiteTime> = {};
   for (const [path, time] of Object.entries(times)) {
@@ -214,24 +220,44 @@ export function timesAfter(
     const dropped = Object.entries(time.cases)
       .filter(([func]) => !(func in cases))
       .reduce((sum, [, seconds]) => sum + seconds, 0);
-    next[path] = { seconds: round(Math.max(0, time.seconds - dropped)), cases };
+    const rows = Object.fromEntries(
+      Object.entries(time.rows ?? {}).filter(([func]) => suite.cases.includes(func)),
+    );
+    next[path] = {
+      seconds: round(Math.max(0, time.seconds - dropped)),
+      cases,
+      ...(Object.keys(rows).length > 0 ? { rows } : {}),
+    };
   }
   const declared = new Map(suites.map((suite) => [suite.path, suite]));
-  const measured = new Map<string, { cases: Map<string, number>; around: number }>();
+  const measured = new Map<
+    string,
+    { cases: Map<string, number>; rows: Map<string, Map<number, number>>; around: number }
+  >();
   for (const run of runs) {
     for (const printed of run.suites.values()) {
       if (printed.closed === null || !declared.has(printed.path)) {
         continue;
       }
-      const entry = measured.get(printed.path) ?? { cases: new Map<string, number>(), around: 0 };
+      const entry = measured.get(printed.path) ?? {
+        cases: new Map<string, number>(),
+        rows: new Map<string, Map<number, number>>(),
+        around: 0,
+      };
       const own = new Map<string, number>();
       for (const ran of printed.cases) {
         own.set(ran.func, (own.get(ran.func) ?? 0) + ran.seconds);
+        if (ran.row !== null) {
+          const rows = entry.rows.get(ran.func) ?? new Map<number, number>();
+          rows.set(ran.row, ran.seconds);
+          entry.rows.set(ran.func, rows);
+        }
       }
       const inCases = [...own.values()].reduce((sum, seconds) => sum + seconds, 0);
       entry.around = Math.max(entry.around, printed.closed.seconds - inCases);
+      // Added rather than set: a case dealt by its rows ran some of them in each of several engines.
       for (const [func, seconds] of own) {
-        entry.cases.set(func, seconds);
+        entry.cases.set(func, (entry.cases.get(func) ?? 0) + seconds);
       }
       measured.set(printed.path, entry);
     }
@@ -239,16 +265,50 @@ export function timesAfter(
   for (const [path, entry] of measured) {
     const suite = declared.get(path);
     const cases: Record<string, number> = {};
+    const rows: Record<string, number[]> = {};
     for (const func of suite?.cases ?? []) {
-      const seconds = entry.cases.get(func) ?? times[path]?.cases[func];
+      const measuredRows = entry.rows.get(func);
+      const keptRows =
+        measuredRows === undefined
+          ? times[path]?.rows?.[func]
+          : rowsAfter(times[path]?.rows?.[func], measuredRows, cutShort.has(`${path}:${func}`));
+      if (keptRows !== undefined) {
+        rows[func] = keptRows.map(round);
+      }
+      const seconds =
+        measuredRows === undefined || keptRows === undefined
+          ? (entry.cases.get(func) ?? times[path]?.cases[func])
+          : keptRows.reduce((sum, row) => sum + row, 0);
       if (seconds !== undefined) {
         cases[func] = round(seconds);
       }
     }
     const inCases = Object.values(cases).reduce((sum, seconds) => sum + seconds, 0);
-    next[path] = { seconds: round(entry.around + inCases), cases };
+    next[path] = {
+      seconds: round(entry.around + inCases),
+      cases,
+      ...(Object.keys(rows).length > 0 ? { rows } : {}),
+    };
   }
   return next;
+}
+
+/**
+ * A case's row times after a run that printed [param measured] of its rows. Every row from 0 up,
+ * with each engine holding the case having finished it, is the case as it is now, whatever it had
+ * before. When [param cutShort], an engine holding some of its rows having stopped before the end,
+ * the rows printed replace their old times and the rest keep theirs: the rows that engine never
+ * reached may be the last ones, which the printed rows alone cannot tell from a case that shrank.
+ */
+function rowsAfter(
+  before: readonly number[] | undefined,
+  measured: ReadonlyMap<number, number>,
+  cutShort: boolean,
+): number[] {
+  const count = Math.max(...measured.keys()) + 1;
+  const whole = !cutShort && measured.size === count;
+  const length = whole ? count : Math.max(count, before?.length ?? 0);
+  return Array.from({ length }, (_, row) => measured.get(row) ?? before?.[row] ?? 0);
 }
 
 function round(seconds: number): number {
@@ -270,6 +330,11 @@ const ENGINE_START_SECONDS = 5;
 export interface Unit {
   readonly suite: string;
   readonly cases: readonly string[];
+  /**
+   * For one row of a parameterised case, the only case in [member cases]: which row, and whether
+   * this is its last known row, whose engine also takes every row the case has grown since.
+   */
+  readonly row?: { readonly index: number; readonly rest: boolean };
   readonly cost: number;
   readonly windowed: boolean;
   readonly headless: boolean;
@@ -286,8 +351,10 @@ function median(values: readonly number[]): number | undefined {
 
 /**
  * [param suites] as units: each suite whole, or case by case when it costs more than
- * [param splitPast] seconds and has more than one case. A suite needing a window stays whole, since
- * all of those go to the one windowed engine anyway.
+ * [param splitPast] seconds and has more than one case, and a parameterised case costing more than
+ * that row by row, once a run has printed its rows. A single case of 110 to 400 s otherwise set
+ * the length of a whole run, however many engines it had. A suite needing a window stays whole,
+ * since all of those go to the one windowed engine anyway.
  */
 export function unitsOf(
   suites: readonly DeclaredSuite[],
@@ -306,30 +373,45 @@ export function unitsOf(
         ? aroundCost
         : Math.max(0, time.seconds - Object.values(time.cases).reduce((sum, s) => sum + s, 0));
     const whole = around + suite.cases.reduce((sum, func) => sum + costOf(func), 0);
-    if (suite.windowed || whole <= splitPast || suite.cases.length < 2) {
-      return [
-        {
-          suite: suite.path,
-          cases: suite.cases,
-          cost: whole,
-          windowed: suite.windowed,
-          headless: suite.headless,
-        },
-      ];
-    }
-    return suite.cases.map((func) => ({
+    const wholly: Unit = {
       suite: suite.path,
-      cases: [func],
-      cost: around + costOf(func),
-      windowed: false,
+      cases: suite.cases,
+      cost: whole,
+      windowed: suite.windowed,
       headless: suite.headless,
-    }));
+    };
+    if (suite.windowed || whole <= splitPast) {
+      return [wholly];
+    }
+    const units = suite.cases.flatMap((func): Unit[] => {
+      const rows = time?.rows?.[func] ?? [];
+      if (rows.length < 2 || around + costOf(func) <= splitPast) {
+        return [
+          {
+            suite: suite.path,
+            cases: [func],
+            cost: around + costOf(func),
+            windowed: false,
+            headless: suite.headless,
+          },
+        ];
+      }
+      return rows.map((seconds, index) => ({
+        suite: suite.path,
+        cases: [func],
+        row: { index, rest: index === rows.length - 1 },
+        cost: around + seconds,
+        windowed: false,
+        headless: suite.headless,
+      }));
+    });
+    return units.length < 2 ? [wholly] : units;
   });
 }
 
 /** What one engine is handed. */
 export interface EnginePlan {
-  readonly suites: ReadonlyArray<{ readonly path: string; readonly cases: readonly string[] }>;
+  readonly suites: readonly HandedSuite[];
   /** `res://suite.gd:test_case` for each case of a suite it holds part of that it is not to run. */
   readonly skipping: readonly string[];
   readonly cost: number;
@@ -363,7 +445,8 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
       (a, b) =>
         b.cost - a.cost ||
         a.suite.localeCompare(b.suite) ||
-        (a.cases[0] ?? '').localeCompare(b.cases[0] ?? ''),
+        (a.cases[0] ?? '').localeCompare(b.cases[0] ?? '') ||
+        (a.row?.index ?? 0) - (b.row?.index ?? 0),
     );
   // The windowed units stay together, so for the count they are one unit as slow as all of them.
   const together = windowed.reduce((sum, unit) => sum + unit.cost, 0);
@@ -387,8 +470,8 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
     loads[lightest] = (loads[lightest] ?? 0) + unit.cost;
   }
   return [
-    ...(windowed.length > 0 ? [planOf(windowed, declared, true, 0)] : []),
-    ...bins.flatMap((bin, lane) => (bin.length === 0 ? [] : [planOf(bin, declared, false, lane)])),
+    ...(windowed.length > 0 ? [planOf(windowed, declared, true, 0, units)] : []),
+    ...bins.flatMap((bin, lane) => (bin.length === 0 ? [] : [planOf(bin, declared, false, lane, units)])),
   ];
 }
 
@@ -430,19 +513,57 @@ export function inOneEngine(units: readonly Unit[], declared: CasesBySuite): Eng
     declared,
     units.some((unit) => unit.windowed),
     0,
+    units,
   );
 }
 
-function planOf(bin: readonly Unit[], declared: CasesBySuite, windowed: boolean, lane: number): EnginePlan {
+/**
+ * The engine [param bin] makes, among [param all] the units dealt. Of a case dealt by its rows it
+ * runs only the rows it holds, unless it holds the case's last known row, when it runs every row
+ * the other engines were not dealt: a row the case has grown since then runs there, and once.
+ */
+function planOf(
+  bin: readonly Unit[],
+  declared: CasesBySuite,
+  windowed: boolean,
+  lane: number,
+  all: readonly Unit[],
+): EnginePlan {
   const held = new Map<string, string[]>();
   for (const unit of bin) {
-    held.set(unit.suite, [...(held.get(unit.suite) ?? []), ...unit.cases]);
+    // A case dealt by its rows comes in a unit a row, and is one case.
+    const cases = held.get(unit.suite) ?? [];
+    held.set(unit.suite, [...cases, ...unit.cases.filter((func) => !cases.includes(func))]);
   }
   const skipping = [...held].flatMap(([path, cases]) =>
     (declared.get(path) ?? []).filter((func) => !cases.includes(func)).map((func) => `${path}:${func}`),
   );
+  const rowsOf = (units: readonly Unit[], path: string, func: string): number[] =>
+    units.flatMap((unit) =>
+      unit.suite === path && unit.cases[0] === func && unit.row !== undefined ? [unit.row.index] : [],
+    );
+  const sharesOf = (path: string, cases: readonly string[]): Record<string, RowShare> => {
+    const shares: Record<string, RowShare> = {};
+    for (const func of cases) {
+      const mine = rowsOf(bin, path, func);
+      const dealtOut = rowsOf(all, path, func);
+      if (mine.length === 0 || mine.length === dealtOut.length) {
+        continue;
+      }
+      const rest = bin.some(
+        (unit) => unit.suite === path && unit.cases[0] === func && unit.row?.rest === true,
+      );
+      shares[func] = rest
+        ? { besides: dealtOut.filter((row) => !mine.includes(row)) }
+        : { only: mine.sort((a, b) => a - b) };
+    }
+    return shares;
+  };
   return {
-    suites: [...held].map(([path, cases]) => ({ path, cases: [...cases].sort() })),
+    suites: [...held].map(([path, cases]) => {
+      const rows = sharesOf(path, cases);
+      return { path, cases: [...cases].sort(), ...(Object.keys(rows).length > 0 ? { rows } : {}) };
+    }),
     skipping,
     cost: bin.reduce((sum, unit) => sum + unit.cost, 0),
     windowed,

@@ -53,19 +53,27 @@ project is a git worktree of one:
 {
   "res://tests/a_test.gd": {
     "seconds": 12.4,
-    "cases": { "test_x": 5.1, "test_y": 7.0 }
+    "cases": { "test_x": 5.1, "test_y": 7.0 },
+    "rows": { "test_y": [3.4, 3.6] }
   }
 }
 ```
 
 `seconds` is the suite run whole, with its `before` and `after`; `cases` holds each function, with
-the rows of a parameterised one added together. A case never timed is taken to cost the median of
-the cases that have been, and 0.02 s when nothing has. Each run that writes the file leaves out a
-suite the project no longer has, deleted or renamed, and a case its suite no longer declares, with
-its seconds taken off the suite's.
+the rows of a parameterised one added together, and `rows` what each row of a parameterised case
+took, from row 0. A case never timed is taken to cost the median of the cases that have been, and
+0.02 s when nothing has. Each run that writes the file leaves out a suite the project no longer has,
+deleted or renamed, and a case its suite no longer declares, with its seconds taken off the suite's.
+A run that printed only some rows of a case, because it was dealt them or cut short, keeps the old
+times of the rest.
 
 A suite costing more than 10 seconds, with more than one case, is dealt out case by case, and an
-engine holding part of it skips the rest; the run names each suite it dealt out that way. Units are
+engine holding part of it skips the rest; the run names each suite it dealt out that way. A
+parameterised case that costs more than 10 seconds by itself, with at least two rows timed, is dealt
+out row by row, in a suite of any number of cases. Each engine holding some of its rows runs only
+those, and the one holding the last row also runs any row the times do not know, so a row added
+since they were taken still runs once. The run names each case it dealt out that way, and fails
+when a row that any engine found ran in none of them or in more than one. Units are
 dealt slowest first, each to the engine with the least so far. A run starts no more engines than
 `--engines`, the machine's processors, or its
 free memory allows once 4 GB is left for everything else at 1.5 GB an engine, and no more than it
