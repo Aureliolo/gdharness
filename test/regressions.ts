@@ -21,7 +21,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -145,7 +145,7 @@ import {
   savesStayPut,
   userDataIn,
 } from '../src/launch.js';
-import { freeLibraryCopies } from '../src/library-copies.js';
+import { freeLibraryCopies, seedExtensionList } from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import {
   GodotLSPClient,
@@ -353,14 +353,17 @@ import {
   readRun,
   rowsAcross,
   secondsOf,
+  versionFault,
 } from '../src/suite-judge.js';
 import {
   type DeclaredSuite,
   dealt,
   type EnginePlan,
+  GUESS_WINDOW_SETTING,
   headlessInAWindow,
   inOneEngine,
   lanesOf,
+  NOT_SEARCHED_SETTING,
   ProjectScripts,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
@@ -370,6 +373,7 @@ import {
   windowedSaid,
 } from '../src/suite-plan.js';
 import {
+  heldToCores,
   inTurns,
   macMemoryLevel,
   memoryRoomOf,
@@ -40270,6 +40274,65 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
       /Executed test cases\s*:\s*\(2\//,
       `and the listed suites run beside it: ${together.said}`,
     );
+    for (const healthy of [first, second, third, together]) {
+      assert.doesNotMatch(healthy.said, /gdharness test: gdUnit4/, 'the checks say nothing on this gdUnit4');
+    }
+
+    // The checks on the gdUnit4 installed, each met by a copy changed the way a release could change
+    // it. The run goes on and passes as gdUnit4 judges it, so the line is what fails it.
+    const changed = (file: string, from: string, to: string): (() => void) => {
+      const path = join(projectDir, 'addons', 'gdUnit4', 'src', 'core', ...file.split('/'));
+      const source = readFileSync(path, 'utf8');
+      assert.ok(source.includes(from), `${file} still reads ${from}`);
+      writeFileSync(path, source.replace(from, to));
+      return () => {
+        writeFileSync(path, source);
+      };
+    };
+    const announcedLate = changed(
+      'runners/GdUnitTestSessionRunner.gd',
+      '\t\t\tGdUnitSignals.instance().gdunit_event.emit(GdUnitSessionStart.new())\n\t\t\t# process next test suite\n\t\t\tset_process(false)\n\t\t\tvar result := await _hooks.execute_startup(_test_session)\n',
+      '\t\t\tset_process(false)\n\t\t\tvar result := await _hooks.execute_startup(_test_session)\n\t\t\tGdUnitSignals.instance().gdunit_event.emit(GdUnitSessionStart.new())\n',
+    );
+    const late = run('late', ['--html-report-off', '--junit-report-off']);
+    announcedLate();
+    assert.match(
+      late.said,
+      /gdharness test: gdUnit4 \S+ handed its session hooks the session before announcing it/,
+      late.said,
+    );
+    assert.match(late.said, /Executed test cases\s*:\s*\(2\//, `the suites still ran: ${late.said}`);
+
+    const consoleElsewhere = changed(
+      'runners/GdUnitTestCIRunner.gd',
+      '_console_reporter.test_session = _test_session',
+      '_console_reporter.test_session = GdUnitTestSession.new(_test_session._test_cases, _test_session.report_path)',
+    );
+    const elsewhere = run('elsewhere', ['--html-report-off', '--junit-report-off']);
+    consoleElsewhere();
+    assert.match(
+      elsewhere.said,
+      /gdharness test: gdUnit4 \S+ ran 2 cases without looking one up in the runner's indexed session/,
+      elsewhere.said,
+    );
+
+    const noJunitHook = changed(
+      'hooks/GdUnitTestSessionHookService.gd',
+      'service.register(GdUnitXMLReporterTestSessionHook.new())',
+      'pass',
+    );
+    const unhooked = run('unhooked', ['--html-report-off', '--junit-report-off']);
+    noJunitHook();
+    assert.match(
+      unhooked.said,
+      /gdharness test: gdUnit4 \S+ registers no session hook res:\/\/addons\/gdUnit4\/src\/core\/hooks\/GdUnitXMLReporterTestSessionHook\.gd/,
+      unhooked.said,
+    );
+    assert.doesNotMatch(
+      unhooked.said,
+      /GdUnitHtmlReporterTestSessionHook/,
+      'the hook it found is turned off',
+    );
   } finally {
     sweep(projectDir, scratch);
   }
@@ -40463,6 +40526,22 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
       ]),
     ]);
   const declaredRows = handed(['test_a', 'test_p'], { test_p: ['row said'] });
+
+  // An engine that printed nothing says so, and one that died on a Windows exception says how much
+  // memory was free as it ended, which tells a machine that ran out from a fault in the engine.
+  const mute = judgeEngine(readRun('\n\n'), handed(['test_a']), clean).faults;
+  assert.ok(mute.includes('the engine printed nothing at all'), mute.join('\n'));
+  const crashed = judgeEngine(readRun(rows([1, 1, 1])), declaredRows, {
+    code: 0xc0000005,
+    signal: null,
+    ended: null,
+    freeBytes: 2.5 * 1024 ** 3,
+  }).faults;
+  assert.deepEqual(
+    crashed,
+    ['the engine exited 0xC0000005 (STATUS_ACCESS_VIOLATION), with 2.5 GB of memory free as it ended'],
+    crashed.join('\n'),
+  );
 
   const passing = judgeEngine(readRun(rows([1, 1, 1])), declaredRows, clean);
   assert.deepEqual(passing.faults, [], 'a declared error once a row passes');
@@ -41011,6 +41090,46 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         ['res://tests/window_test.gd', ['test_w'], true, false],
       ],
       'every suite under the root, its cases own and inherited, which need a window and which say they run headless',
+    );
+    assert.deepEqual(scripts.searchedAsTold(['res://tests', 'res://other/']), [
+      'res://tests',
+      'res://other/',
+    ]);
+
+    // A project keeping its benches out of every search, and its scene runner suites headless.
+    writeTree(project, {
+      'project.godot': [
+        'config_version=5',
+        '',
+        '[gdharness]',
+        '',
+        `${NOT_SEARCHED_SETTING.slice('gdharness/'.length)}=PackedStringArray("res://tests/deep/", "res://other")`,
+        `${GUESS_WINDOW_SETTING.slice('gdharness/'.length)}=false`,
+        '',
+      ].join('\n'),
+    });
+    const told = new ProjectScripts(project);
+    const paths = (suites: DeclaredSuite[]): string[] => suites.map((one) => one.path);
+    const under = paths(told.suitesUnder(['res://tests']));
+    assert.deepEqual(
+      under,
+      paths(found).filter((path) => path !== 'res://tests/deep/path_test.gd'),
+      'a search leaves the folders the project names out',
+    );
+    assert.deepEqual(paths(told.suitesUnder(['res://tests/deep'])), ['res://tests/deep/path_test.gd']);
+    assert.deepEqual(paths(told.suitesUnder(['res://other/'])), ['res://other/outside_test.gd']);
+    assert.deepEqual(
+      told
+        .suitesUnder(['res://tests'])
+        .map((one) => [one.path, one.windowed])
+        .filter(([, windowed]) => windowed),
+      [['res://tests/window_test.gd', true]],
+      'with the guess off, only a suite saying so needs a window',
+    );
+    assert.deepEqual(
+      told.searchedAsTold(['res://tests/', 'res://tests/a_test.gd', 'res://tests/deep', 'res://other']),
+      [...under, 'res://tests/deep', 'res://other'],
+      'a directory holding a folder left out is handed as its suites, and one named inside it as it is',
     );
 
     const suite = (path: string, names: string[], windowed = false, headless = false) => ({
@@ -41568,6 +41687,30 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       [`${lone_.path} > test_only ran in none of the 2 engines its rows were dealt to`],
       'a case that ran nowhere',
     );
+
+    // The engine's version from its banner, and whether it is the one asked for.
+    assert.equal(
+      readRun(
+        'Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org\nGodot Engine v9.9.9\n',
+      ).engineVersion,
+      '4.7.2.stable.official.ed1daf0bf',
+      'the first banner, without the address',
+    );
+    assert.equal(readRun('Godot Engine v4.8.dev1.custom_build\n').engineVersion, '4.8.dev1.custom_build');
+    assert.equal(readRun('Run Test Suite: res://a_test.gd\n').engineVersion, null);
+    const bannered = '4.7.2.stable.official.ed1daf0bf';
+    assert.equal(versionFault(bannered, '4.7.2'), null);
+    assert.equal(versionFault(bannered, '4.7.2.stable'), null);
+    assert.equal(versionFault(bannered, '4.7'), null, 'a shorter version holds for every patch of it');
+    assert.equal(
+      versionFault(bannered, '4.7.20'),
+      `the engine that ran is Godot ${bannered}, not the 4.7.20 --godot-version asks for`,
+      'a version is matched part by part, not by its first characters',
+    );
+    assert.equal(
+      versionFault(null, '4.7.2'),
+      'the engine printed no version as it started, so it cannot be told to be Godot 4.7.2',
+    );
     const stray = judgeEngine(
       rowRun(lone_.path, [
         [0, '1s 0ms'],
@@ -41719,7 +41862,16 @@ function testTheTestCommandReadsItsOwnOptions(): void {
     );
     assert.equal(testOptionsOf(['--order', 'reversed'], project).order, 'reversed');
     assert.equal(testOptionsOf([], project).projectPath, project, 'the directory you are in');
+    assert.equal(testOptionsOf(['--cores', '1'], project).cores, 1);
+    assert.equal(testOptionsOf([], project).cores, null, 'every processor unless asked');
+    const most = Math.min(availableParallelism(), 64);
+    assert.equal(testOptionsOf(['--cores', String(most)], project).cores, most, 'up to every processor');
     for (const [args, said] of [
+      [
+        ['--cores', String(most + 1)],
+        new RegExp(`--cores ${String(most + 1)} is more than the ${String(most)} processors`),
+      ],
+      [['--cores', '0'], /whole number above 0/],
       [['--bogus'], /Unknown option --bogus/],
       [['--engines'], /--engines needs a value/],
       [['--engines', '0'], /whole number above 0/],
@@ -41843,6 +41995,13 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     const first = test('--import', 'tests/ok_test.gd', 'tests/declared_test.gd');
     assert.equal(first.status, 0, first.said);
     assert.match(first.said, /^Passed: 4 cases in 2 suites across 1 engine, /m, first.said);
+    assert.doesNotMatch(first.said, /The import was skipped/, 'a project never imported is imported');
+    assert.match(
+      first.said,
+      /^The slowest suites: res:\/\/tests\/(?:ok|declared)_test\.gd \d+\.\d s, res:\/\/tests\/(?:ok|declared)_test\.gd \d+\.\d s\.$/m,
+      first.said,
+    );
+    assert.ok(existsSync(join(project, '.godot', 'global_script_class_cache.cfg')), first.said);
     const state = join(project, '.godot', 'gdharness');
     const times = JSON.parse(readFileSync(join(state, 'suite-times.json'), 'utf8')) as Record<
       string,
@@ -41874,6 +42033,33 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       'a passing run keeps no logs',
     );
 
+    // Nothing changed since, so nothing to import; then a new file to import, then one that fails.
+    const unchanged = test('--import', 'tests/ok_test.gd');
+    assert.match(
+      unchanged.said,
+      /^The import was skipped: every imported file and the class cache are current\.$/m,
+      unchanged.said,
+    );
+    assert.equal(unchanged.status, 0, unchanged.said);
+    writeTree(project, {
+      'dot.svg':
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4"/></svg>\n',
+    });
+    const changed = test('--import', 'tests/ok_test.gd');
+    assert.doesNotMatch(changed.said, /The import was skipped/, changed.said);
+    assert.equal(changed.status, 0, changed.said);
+    assert.ok(existsSync(join(project, 'dot.svg.import')), `the new file was imported: ${changed.said}`);
+    writeTree(project, { 'broken.svg': 'not an image\n' });
+    const failing = test('--import', 'tests/ok_test.gd');
+    rmSync(join(project, 'broken.svg'));
+    rmSync(join(project, 'broken.svg.import'), { force: true });
+    assert.match(
+      failing.said,
+      /^The import failed, so no suite ran: it printed (?:an engine error|\d+ engine errors), the first ".+"; everything it printed is in .+import\.log$/m,
+      failing.said,
+    );
+    assert.equal(failing.status, 1, failing.said);
+
     const noisy = test('tests/ok_test.gd', 'tests/declared_test.gd', 'tests/noisy_test.gd', '--changed-only');
     assert.equal(noisy.status, 1, noisy.said);
     assert.match(
@@ -41887,6 +42073,16 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       noisy.said,
     );
     assert.match(noisy.said, /^everything it printed: .*engine\.log$/m, 'the log is kept and named');
+    const kept = readFileSync(
+      /^everything it printed: (.*engine\.log)$/m.exec(noisy.said)?.[1] ?? '',
+      'utf8',
+    );
+    assert.match(
+      kept,
+      /^gdharness: engine \d+: 1 suite, \d+\.\d s\n {2}an engine error in res:\/\/tests\/noisy_test\.gd > test_noisy: nobody said this;.*\n---\n/,
+      `the kept log opens with the verdict: ${kept.slice(0, 400)}`,
+    );
+    assert.match(kept, /^Godot Engine v/m, 'and goes on with what the engine printed');
     assert.match(
       noisy.said,
       /^Failed: 1 problem, listed above\. Ran 1 case in 1 suite across 1 engine, /m,
@@ -41969,13 +42165,11 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
 
     const timesFile = join(state, 'suite-times.json');
     const timed = readFileSync(timesFile, 'utf8');
-    writeFileSync(
-      timesFile,
-      JSON.stringify({
-        ...(JSON.parse(timed) as object),
-        'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
-      }),
-    );
+    const slowTimes = JSON.stringify({
+      ...(JSON.parse(timed) as object),
+      'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
+    });
+    writeFileSync(timesFile, slowTimes);
     const split = test('tests/ok_test.gd', 'tests/declared_test.gd', '--engines', '2');
     assert.equal(split.status, 0, split.said);
     // Two engines need about seven gigabytes free, which the macOS runner does not have, so there
@@ -41988,6 +42182,60 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
         : /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than 10 s last time: res:\/\/tests\/ok_test\.gd\.$/m,
       split.said,
     );
+    // The same run held to one processor starts one engine and says so; a machine short of memory
+    // for even one engine names that instead, since memory is what the room is checked against first.
+    // The split run kept what the suite took, so it is made slow again to want two engines.
+    writeFileSync(timesFile, slowTimes);
+    const cored = test('tests/ok_test.gd', 'tests/declared_test.gd', '--engines', '2', '--cores', '1');
+    assert.equal(cored.status, 0, cored.said);
+    assert.match(
+      cored.said,
+      /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since (--cores holds it to 1 processor|the machine has \d+\.\d GB of memory free, .*)\.$/m,
+      cored.said,
+    );
+    assert.equal(
+      cored.said.includes('macOS offers no way to hold a process to some processors'),
+      process.platform === 'darwin',
+      cored.said,
+    );
+
+    // The engine named on the command line, held to the version asked for by what it prints.
+    const version = spawnSyncHidden(godotPath, ['--version'], { encoding: 'utf8' }).stdout.trim();
+    const minor = version.split('.').slice(0, 2).join('.');
+    assert.match(minor, /^\d+\.\d+$/, version);
+    const pinned = test('--godot', godotPath, '--godot-version', minor, 'tests/ok_test.gd');
+    assert.equal(pinned.status, 0, pinned.said);
+    assert.match(pinned.said, /^Passed: 2 cases in 1 suite across 1 engine, /m, pinned.said);
+    const otherVersion = test('--godot', godotPath, '--godot-version', '3.0.0', 'tests/ok_test.gd');
+    assert.equal(otherVersion.status, 1, otherVersion.said);
+    assert.ok(
+      otherVersion.said.includes(
+        `  the engine that ran is Godot ${version}, not the 3.0.0 --godot-version asks for\n`,
+      ),
+      otherVersion.said,
+    );
+    const noEngine = test('--godot', join(project, 'no-godot.exe'), 'tests/ok_test.gd');
+    assert.equal(noEngine.status, 2, noEngine.said);
+    assert.match(
+      noEngine.said,
+      /--godot names .*no-godot\.exe, which is not an engine executable\./,
+      noEngine.said,
+    );
+
+    // A case printing all the while is never silent, so only the deadline ends it.
+    writeTree(project, {
+      'tests/chatty_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_chatters() -> void:\n\tfor tick: int in 600:\n\t\tprint("tick %d" % tick)\n\t\tawait get_tree().create_timer(0.1).timeout\n',
+    });
+    const chatty = test('tests/chatty_test.gd', '--silence', '4', '--deadline', '12');
+    rmSync(join(project, 'tests', 'chatty_test.gd'));
+    assert.match(
+      chatty.said,
+      /^ {2}the engine ran past the 12 s deadline while running res:\/\/tests\/chatty_test\.gd > test_chatters, so it was ended$/m,
+      chatty.said,
+    );
+    assert.doesNotMatch(chatty.said, /printed nothing for/, chatty.said);
+    assert.equal(chatty.status, 1, chatty.said);
 
     const hung = test('tests/hang_test.gd', '--silence', '4');
     assert.match(
@@ -42096,6 +42344,128 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
 }
 
 /**
+ * `--cores` holds what an engine is started as to the first processors: through the desktop helper
+ * on Windows, which starts the process suspended and sets its affinity before it runs, and through
+ * taskset on Linux. Each is read from a real process.
+ */
+async function testAnEngineIsHeldToTheProcessorsAsked(): Promise<void> {
+  assert.deepEqual(heldToCores(3, 'godot', ['--headless'], 'linux'), {
+    command: 'taskset',
+    args: ['-c', '0-2', 'godot', '--headless'],
+  });
+  assert.deepEqual(heldToCores(3, 'godot', ['--headless'], 'darwin'), {
+    command: 'godot',
+    args: ['--headless'],
+  });
+  assert.deepEqual(heldToCores(null, 'godot', [], 'linux'), { command: 'godot', args: [] });
+  if (process.platform === 'linux') {
+    const held = heldToCores(1, 'grep', ['Cpus_allowed_list', '/proc/self/status']);
+    const ran = spawnSyncHidden(held.command, held.args, { encoding: 'utf8' });
+    assert.match(ran.stdout, /^Cpus_allowed_list:\s*0\s*$/m, `${ran.stdout}${ran.stderr}`);
+    return;
+  }
+  if (process.platform !== 'win32') {
+    console.log('processor hold regression: macOS cannot hold a process to some processors');
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cores-'));
+  try {
+    // Windows PowerShell started without a console exits before running its command, so the held
+    // process is a waiting runtime, asked from outside while it runs.
+    const affinityOf = async (affinity: bigint | undefined, name: string): Promise<string> => {
+      const files = {
+        spec: join(scratch, `${name}.spec`),
+        pid: join(scratch, `${name}.pid`),
+        error: join(scratch, `${name}.error`),
+        stop: join(scratch, `${name}.stop`),
+        step: join(scratch, `${name}.step`),
+      };
+      // Written once the process runs, which a start left suspended never reaches.
+      const ran = join(scratch, `${name}.ran`);
+      const wrapper = throughHelper(
+        { directory: scratch, ...(affinity === undefined ? {} : { affinity }) },
+        process.execPath,
+        ['-e', `require('node:fs').writeFileSync(${JSON.stringify(ran)}, ''); setTimeout(() => {}, 120000)`],
+        files,
+      );
+      const helper = spawnHidden(wrapper.command, wrapper.args, { stdio: 'ignore' });
+      const ended = new Promise<number | null>((settle) => helper.once('exit', settle));
+      try {
+        const until = Date.now() + 60_000;
+        while (!existsSync(ran) && !existsSync(files.error) && Date.now() < until) {
+          await delay(100);
+        }
+        const error = existsSync(files.error) ? readFileSync(files.error, 'utf8') : '';
+        assert.ok(existsSync(ran), `the process it started runs: ${error}${helperStep(files.step)}`);
+        const pid = Number(readFileSync(files.pid, 'utf8'));
+        const asked = spawnSyncHidden(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).ProcessorAffinity`],
+          { encoding: 'utf8', timeout: 60_000 },
+        );
+        assert.equal(asked.status, 0, `${asked.stdout}${asked.stderr}`);
+        return asked.stdout.trim();
+      } finally {
+        writeFileSync(files.stop, '');
+        await ended;
+      }
+    };
+    assert.equal(await affinityOf(1n, 'one'), '1', 'held to the first processor');
+    assert.equal(await affinityOf(3n, 'two'), '3', 'held to the first two');
+    const all = (1n << BigInt(Math.min(availableParallelism(), 64))) - 1n;
+    assert.equal(
+      await affinityOf(undefined, 'every'),
+      all.toString(),
+      'and to every processor when none is asked',
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * A project with no extension list, as a fresh clone has, is given one naming every manifest the
+ * editor's scan would find, so the import that follows loads the extensions; one with a list keeps it.
+ */
+function testAFreshCloneHasItsExtensionsListed(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-extensions-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'addons/sandbox/sandbox.gdextension': '[configuration]\n',
+      'native/b.gdextension': '[configuration]\n',
+      'skipped/.gdignore': '',
+      'skipped/c.gdextension': '[configuration]\n',
+      '.hidden/d.gdextension': '[configuration]\n',
+      'native/notes.txt': 'not a manifest\n',
+    });
+    const list = join(project, '.godot', 'extension_list.cfg');
+    assert.deepEqual(seedExtensionList(project), [
+      'res://addons/sandbox/sandbox.gdextension',
+      'res://native/b.gdextension',
+    ]);
+    assert.equal(
+      readFileSync(list, 'utf8'),
+      'res://addons/sandbox/sandbox.gdextension\nres://native/b.gdextension\n',
+    );
+    writeFileSync(list, 'res://native/b.gdextension\n');
+    assert.equal(seedExtensionList(project), null, 'a list already there is left as the editor wrote it');
+    assert.equal(readFileSync(list, 'utf8'), 'res://native/b.gdextension\n');
+    const bare = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-extensions-none-'));
+    try {
+      writeTree(bare, { 'project.godot': 'config_version=5\n' });
+      assert.deepEqual(seedExtensionList(bare), []);
+      assert.equal(existsSync(join(bare, '.godot', 'extension_list.cfg')), false, 'no manifest, no list');
+    } finally {
+      sweep(bare);
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * A parameterised case too slow for one engine is dealt out by its rows, and each row runs once.
  *
  * The games write their matrices as parameterised cases, single cases of 110 to 408 s, which no
@@ -42197,6 +42567,11 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
         `${what}: ${run.said}`,
       );
       assert.equal(new Set([...ran.values()].flat()).size, 2, `${what}: over both engines: ${run.said}`);
+      assert.match(
+        run.said,
+        /^The engines took \d+\.\d s, \d+\.\d s, dealt \d+\.\d s, \d+\.\d s\.$/m,
+        `${what}: what each took beside what it was dealt: ${run.said}`,
+      );
       assert.equal(rowsTimed(), rows, `${what}: and every row is timed afterwards`);
     }
     assert.deepEqual(readdirSync(slots), [], 'every slot given back');
@@ -42816,7 +43191,9 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
       const exited = exitOf(run);
       const pid = await readyPid(ready, what);
       assertReportable(pid, what);
-      await assertStartedBy(pid, runtimeName === 'Bun' ? /cli\.js"? test/ : /powershell/i, what);
+      // Every engine of a test run is on the hidden desktop, so it goes through the helper under
+      // either runtime, which is what makes its error mode the helper's to set.
+      await assertStartedBy(pid, /powershell/i, what);
       writeFileSync(read, '');
       const { code } = await exited;
       assert.equal(code, 0, `${what}: the suite was let go and passed: ${printed}`);
@@ -46785,9 +47162,9 @@ function testEveryToolNamedInProseIsATool(): void {
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
   // editor caches its class reference in, the name every resource stores, and the gdUnit4 call a
-  // suite that drives a scene makes, which is what puts it in the windowed engine. Named one
-  // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
-  // and called a tool or called vocabulary.
+  // suite that drives a scene makes, which is what puts it in the windowed engine, and the project
+  // setting that turns that guess off. Named one by one rather than matched by a pattern, so a new
+  // word of this shape has to be looked at once and called a tool or called vocabulary.
   const notTools = new Set([
     'project_path',
     'project_classes',
@@ -46818,6 +47195,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'resource_name',
     'editor_servers',
     'scene_runner',
+    'scene_runner_needs_window',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
@@ -58855,6 +59233,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTestCommandReadsItsOwnOptions,
   testTheTestCommandRunsAndJudgesAProject,
   testAParameterisedCaseIsDealtByItsRows,
+  testAFreshCloneHasItsExtensionsListed,
+  testAnEngineIsHeldToTheProcessorsAsked,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,
   testATestRunSaysHowFarItHasGot,

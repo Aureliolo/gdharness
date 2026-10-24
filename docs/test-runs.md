@@ -24,6 +24,15 @@ command line itself is wrong.
 - `--slot-count N`: how many slots that directory has; 4, or fewer on a machine with fewer
   processors.
 - `--silence S`: the shortest silence that ends an engine, in seconds; 300 by default.
+- `--deadline S`: the most seconds one engine may run, printing or not, the import's included. No
+  limit by default.
+- `--godot PATH`: the engine to run, in place of the one `GODOT_PATH` or the usual places give.
+- `--godot-version V`: fail every engine, the import's included, whose banner names another
+  version. `4.7.2` holds for `4.7.2.stable.official`, and `4.7` for every patch of it.
+- `--cores N`: hold every engine, the import's included, to the first N processors, and start no
+  more engines than N. On Linux this goes through `taskset`, and on Windows the engine is held
+  before it starts running. macOS has no way to hold a process to some processors, so there it
+  holds only the number of engines.
 - `--tests DIR`: where to look for suites, `tests` and `test` by default. May be given more than
   once.
 - `--import`: import the project in an engine of its own before the suites.
@@ -43,6 +52,17 @@ A suite is a script under one of the test directories whose chain of `extends` r
 `GdUnitTestSuite`, by class name, by `res://` path or by a path relative to the script, and which
 declares a function starting `test_` or inherits one from a script of the project. Those functions
 are the cases it is expected to run, which is how a case that never ran is noticed.
+
+A project keeps folders out of every search by listing them in `gdharness/tests/not_searched`, a
+`PackedStringArray` of `res://` paths in `project.godot`; benches written as suites and run by hand
+go there. A suite in such a folder still runs when it, or a folder at or inside the listed one, is
+named. project_test reads the same setting.
+
+```ini
+[gdharness]
+
+tests/not_searched=PackedStringArray("res://test/bench")
+```
 
 ## How they are dealt to engines
 
@@ -75,7 +95,7 @@ those, and the one holding the last row also runs any row the times do not know,
 since they were taken still runs once. The run names each case it dealt out that way, and fails
 when a row that any engine found ran in none of them or in more than one. Units are
 dealt slowest first, each to the engine with the least so far. A run starts no more engines than
-`--engines`, the machine's processors, or its
+`--engines`, the machine's processors (or `--cores`), or its
 free memory allows once 4 GB is left for everything else at 1.5 GB an engine, and no more than it
 takes to keep each one busy for as long as the slowest unit or 5 seconds, whichever is longer. A
 run held below `--engines` by processors or memory says which on its first line. On macOS the free
@@ -102,14 +122,28 @@ an allocation fails at the commit limit however much physical memory is free.
   is freed.
 - An exit code other than 0, named by its meaning: a Windows status such as
   `0xC0000005 (STATUS_ACCESS_VIOLATION)`, or one of gdUnit4's, such as 101 for orphan nodes. gdUnit4's
-  100, which it exits with when a case failed, is left out beside that case's own line.
-- An engine ended for its silence, or because an autoload did not start.
+  100, which it exits with when a case failed, is left out beside that case's own line. An engine
+  that died on a Windows exception status also says how much memory was free as it ended.
+- An engine that printed nothing at all.
+- An engine ended for its silence or its deadline, or because an autoload did not start.
+- An engine whose banner names another version than `--godot-version` asks for.
+- A gdUnit4 that no longer works the way the runner relies on. The runner swaps the session gdUnit4
+  makes for one that finds each case by its id in a dictionary, since gdUnit4's own walks every case
+  of the session for each lookup, which grows with the square of a run's cases. The swap holds only
+  while gdUnit4 announces a session before it hands it to its hooks and its console, so a session
+  hook of the runner's own fails the run, with gdUnit4's version, when it is handed another session
+  or when the cases ran without one lookup reaching it. A report turned off by an option that
+  gdUnit4 no longer registers a hook for fails the run the same way. These checks run in the gdUnit4
+  the project installs, on every run.
 
 Each failure is printed with the lines that show it: a failing case's report, each unexpected error
 and the line after it, and the run's summary. When an engine was cut short and none of that explains
 it, its last 60 lines. The engine's whole output stays in
-`.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names, and the
-last lines count the problems and name the run's directory. A run that passes leaves no logs, and
+`.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names and which
+opens with the engine's verdict, so the file says why even for an engine that printed nothing. Before
+the verdict, a run over several engines says what each took beside what it was dealt, so an uneven
+deal is told from a slow suite, and a run of several suites names its five slowest. The last lines
+count the problems and name the run's directory. A run that passes leaves no logs, and
 the next run removes the logs of runs that have ended; `--print-output` prints every engine's
 output before the verdict, whether the run passed or not.
 
@@ -154,10 +188,13 @@ A suite declaring `const GDHARNESS_NEEDS_WINDOW: bool = true` runs in an engine 
 a headless engine delivers no input events. So does one calling gdUnit4's `scene_runner` that
 declares nothing, which is a guess: a suite that uses the scene runner only to stand a scene up and
 read it declares `const GDHARNESS_NEEDS_WINDOW: bool = false` and runs headless. The declaration
-counts from the suite or any script it extends. All the windowed suites go to one windowed engine,
-which starts first, counts toward `--engines`, and runs nothing else: a suite dealt there would meet
-the real display server, so the screen size and scale, the keyboard layout and the display features
-it reports would be the machine's rather than the headless server's, setting the root viewport's
+counts from the suite or any script it extends. A project whose scene runner suites pass headless
+turns the guess off for every suite with `gdharness/tests/scene_runner_needs_window=false` in
+`project.godot`, and then only a suite declaring `true` gets a window. All the windowed suites go
+to one windowed engine, which starts first, counts toward `--engines`, and runs nothing else: a
+suite dealt there would meet the real display server, so the screen size and scale, the keyboard
+layout and the display features it reports would be the machine's rather than the headless
+server's, setting the root viewport's
 size would leave it the window's, and it would run slower for drawing frames. Once the windowed
 engine ends, a headless engine follows it in the same slot without giving the slot back, dealt as
 though it began then, so a few quick windowed suites never leave a slot idle. With `--engines 1`
@@ -168,8 +205,9 @@ whole run one, and the run names each suite declaring `false` that runs with the
 starts. The windowed engine runs without
 `--headless`, at the size `project.godot` gives its viewport, and with the Dummy audio driver like
 every other test engine. On Windows it runs on a desktop of its own, so its window never appears
-on the desktop in use or takes its focus. Elsewhere it uses the display there is; on a CI runner
-with none, run it under `xvfb-run`.
+on the desktop in use or takes its focus. The headless engines run there too, since an engine that
+fails to start shows a modal alert even with `--headless`. Elsewhere it uses the display there is;
+on a CI runner with none, run it under `xvfb-run`.
 
 The `project_test` tool reads the suites the same way. Its run is one engine, so when a suite in it
 needs a window the whole run has one, started as above, and the answer's `windowNote` names the
@@ -185,13 +223,14 @@ runs windowed suites there can set `rendering/rendering_device/driver.macos` to 
 ## Silence and memory
 
 An engine that prints nothing for 300 seconds, or for four times its slowest unit's last time when
-that is longer, is ended, and the case it was in is named. `--silence` changes the 300. An engine
-whose autoload did not start is ended as soon as it says so, since nothing a suite reports without
-it means anything.
+that is longer, is ended, and the case it was in is named. `--silence` changes the 300. Silence
+never ends an engine that keeps printing, such as a case warning every frame; `--deadline` ends any
+engine that has run that many seconds, naming the case it was in. An engine whose autoload did not
+start is ended as soon as it says so, since nothing a suite reports without it means anything.
 
 When an engine runs out of memory, which shows as the allocator's null, an image decode failing, or
 Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`, every engine that failed runs again, one at
-a time, and those runs are the ones judged.
+a time, and those runs are the ones judged. One that fails again is headed as run again alone.
 
 ## Leaving out what passed
 
@@ -237,6 +276,36 @@ is why the tolerance is two seconds. On Linux, read it as gdharness and psutil's
 the `btime` line of `/proc/stat`, plus the 22nd field of `/proc/<pid>/stat` divided by
 `getconf CLK_TCK`, in seconds. That is up to a second early; `ps -o lstart` there cuts the same sum
 to the second again and reads up to two seconds early, which is the whole tolerance.
+
+## Preparing the game before any suite
+
+Something every suite needs in place before the first one runs, such as a root node of the game's
+own or a pace the game's clock runs at, goes in a gdUnit4 session hook. The runner leaves the
+project's hooks on, so each engine calls the hook's `startup` once before its first suite and its
+`shutdown` once after its last. A hook extends `GdUnitTestSessionHook` and is registered in
+gdUnit4's settings dialog, which keeps it under `gdunit4/hooks/session_hooks` in `project.godot`:
+
+```gdscript
+class_name GameRootHook
+extends GdUnitTestSessionHook
+
+
+func _init() -> void:
+    super("Game root", "Adds the game's root before the first suite.")
+
+
+func startup(_session: GdUnitTestSession) -> GdUnitResult:
+    var tree := Engine.get_main_loop() as SceneTree
+    tree.root.add_child(preload("res://game/root.tscn").instantiate())
+    return GdUnitResult.success()
+
+
+func shutdown(_session: GdUnitTestSession) -> GdUnitResult:
+    return GdUnitResult.success()
+```
+
+A hook that answers with `GdUnitResult.error` fails the run, because gdUnit4 prints that answer as
+an engine error that no suite declared.
 
 ## Starting the runner yourself
 

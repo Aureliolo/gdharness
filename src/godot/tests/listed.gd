@@ -66,6 +66,8 @@ class GdhRunner:
 	var own_path: String = ""
 	## The cases dealt by their rows, by `res://suite.gd:test_case`.
 	var row_shares: Dictionary[String, GdhRowShare] = {}
+	## The cases gdUnit4 said it finished, which [GdhSessionCheck] holds the session's lookups against.
+	var cases_ended: int = 0
 
 	func get_cmdline_args() -> PackedStringArray:
 		return options_of(OS.get_cmdline_args(), own_path)
@@ -87,6 +89,8 @@ class GdhRunner:
 	func _on_gdunit_event(event: GdUnitEvent) -> void:
 		if event.type() == GdUnitEvent.SESSION_START:
 			_test_session = GdhIndexedSession.of(_test_session)
+		elif event.type() == GdUnitEvent.TESTCASE_AFTER:
+			cases_ended += 1
 		super(event)
 
 	## [param args] with everything up to the script at [param own] given as gdUnit4's tool name. The
@@ -130,6 +134,8 @@ class GdhRowShare:
 class GdhIndexedSession:
 	extends GdUnitTestSession
 
+	## The cases found by id, which [GdhSessionCheck] reads to tell that the console used this session.
+	var lookups: int = 0
 	var _by_id: Dictionary[String, GdUnitTestCase] = {}
 
 	func _init(cases: Array[GdUnitTestCase], reports_in: String) -> void:
@@ -138,6 +144,7 @@ class GdhIndexedSession:
 			_by_id[str(test.guid)] = test
 
 	func find_test_by_id(id: GdUnitGUID) -> GdUnitTestCase:
+		lookups += 1
 		var found: GdUnitTestCase = _by_id.get(str(id), null)
 		return found
 
@@ -149,6 +156,50 @@ class GdhIndexedSession:
 		return GdhIndexedSession.new(made._test_cases, made.report_path)
 
 
+## A session hook of the runner's own, failing the run when the [GdhIndexedSession] is not the
+## session gdUnit4 works from. The swap holds only while gdUnit4 announces a session before it hands
+## it to the hooks and the console, and a gdUnit4 that changed that order would otherwise run every
+## suite as before, only slower, with nothing said. Checked in the gdUnit4 the game installed, on
+## every run, rather than in the one gdharness tests against.
+class GdhSessionCheck:
+	extends GdUnitTestSessionHook
+
+	var _runner: GdhRunner = null
+
+	func _init(runner: GdhRunner) -> void:
+		super("gdharness session check", "Fails the run when gdUnit4 works from another session.")
+		_runner = runner
+
+	func startup(session: GdUnitTestSession) -> GdUnitResult:
+		if session is GdhIndexedSession:
+			return GdUnitResult.success()
+		return GdUnitResult.error(
+			(
+				(
+					"gdharness test: gdUnit4 %s handed its session hooks the session before announcing it, so"
+					+ " the runner's indexed session is not the one they read. This gdUnit4 starts a session"
+					+ " differently from the ones gdharness knows; report it to gdharness with the version."
+				)
+				% GdUnit4Version.current()
+			)
+		)
+
+	func shutdown(session: GdUnitTestSession) -> GdUnitResult:
+		var indexed: GdhIndexedSession = session as GdhIndexedSession
+		if indexed == null or _runner.cases_ended == 0 or indexed.lookups > 0:
+			return GdUnitResult.success()
+		return GdUnitResult.error(
+			(
+				(
+					"gdharness test: gdUnit4 %s ran %d cases without looking one up in the runner's indexed"
+					+ " session, so its console reads another session. This gdUnit4 starts a session"
+					+ " differently from the ones gdharness knows; report it to gdharness with the version."
+				)
+				% [GdUnit4Version.current(), _runner.cases_ended]
+			)
+		)
+
+
 func _initialize() -> void:
 	OS.low_processor_usage_mode_sleep_usec = FRAME_SLEEP_USEC
 	var asked: PackedStringArray = OS.get_cmdline_user_args()
@@ -156,8 +207,19 @@ func _initialize() -> void:
 	for flag: String in REPORTS_OFF:
 		if asked.has(flag):
 			var _unread: bool = unread.append(REPORTS_OFF[flag])
-	if not unread.is_empty():
-		var _off: PackedStringArray = unread_off(GdUnitTestSessionHookService.instance(), unread)
+	var hooks: GdUnitTestSessionHookService = GdUnitTestSessionHookService.instance()
+	var off: PackedStringArray = unread_off(hooks, unread)
+	for path: String in unread:
+		if not off.has(path):
+			push_error(
+				(
+					(
+						"gdharness test: gdUnit4 %s registers no session hook %s, so the report it writes is not"
+						+ " turned off; report it to gdharness with the version."
+					)
+					% [GdUnit4Version.current(), path]
+				)
+			)
 	var suites: PackedStringArray = listed(asked, LISTED)
 	if asked.has(TOGETHER):
 		_together = compiled_together(suites)
@@ -169,6 +231,9 @@ func _initialize() -> void:
 	_runner.add_test_suites(suites)
 	_runner.skip_test_suites(listed(asked, SKIPPING))
 	_runner.row_shares = row_shares_of(listed(asked, ROWS))
+	# Added to the list itself rather than through `register`, which saves every hook it holds into
+	# `project.godot`.
+	hooks.enigne_hooks.append(GdhSessionCheck.new(_runner))
 	root.add_child(_runner)
 
 

@@ -88,6 +88,9 @@ public static class GdharnessDesktop {
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr handle, uint code);
   [DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessAffinityMask(IntPtr process, UIntPtr mask);
+  [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr thread);
+  const uint CreateSuspended = 0x4;
   const uint FailCriticalErrors = 0x1;
   const uint NoOpenFileErrorBox = 0x8000;
 
@@ -149,7 +152,8 @@ public static class GdharnessDesktop {
   public static int RunSpec(string specFile) {
     string[] lines = File.ReadAllLines(specFile);
     Func<int, string> field = delegate(int index) { return Encoding.UTF8.GetString(Convert.FromBase64String(lines[index])); };
-    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6));
+    string affinity = lines.Length > 7 ? field(7) : "";
+    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity));
   }
 
   static void Step(string stepFile, string step) {
@@ -158,7 +162,9 @@ public static class GdharnessDesktop {
     }
   }
 
-  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile) {
+  // With an affinity, the process starts suspended and is held to those processors before its
+  // first thread runs, so every thread it starts afterwards is held to them as well.
+  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     if (desktop.Length > 0) {
@@ -188,8 +194,18 @@ public static class GdharnessDesktop {
     }
     try {
     Step(stepFile, "starting the process");
-    if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, DetachedProcess, IntPtr.Zero, directory, ref startup, out started)) {
+    uint creation = DetachedProcess | (affinity == 0 ? 0u : CreateSuspended);
+    if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, creation, IntPtr.Zero, directory, ref startup, out started)) {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
+    }
+    if (affinity != 0) {
+      Step(stepFile, "holding the process to its processors");
+      if (!SetProcessAffinityMask(started.process, new UIntPtr(affinity))) {
+        int error = Marshal.GetLastWin32Error();
+        TerminateProcess(started.process, 1);
+        throw new Win32Exception(error, "SetProcessAffinityMask " + affinity);
+      }
+      ResumeThread(started.thread);
     }
     File.WriteAllText(pidFile, started.processId.ToString());
     if (noActivate) {
@@ -433,7 +449,13 @@ export function helperStep(stepFile: string): string {
  * Windows CI runner, whose module path is large, waited a minute for a pid that never came.
  */
 export function throughHelper(
-  how: { readonly desktop?: string; readonly noActivate?: boolean; readonly directory: string },
+  how: {
+    readonly desktop?: string;
+    readonly noActivate?: boolean;
+    readonly directory: string;
+    /** The processors the process is held to, one bit each, or none for every processor. */
+    readonly affinity?: bigint;
+  },
   command: string,
   args: readonly string[],
   files: HelperFiles,
@@ -447,6 +469,7 @@ export function throughHelper(
     files.stop,
     how.directory,
     files.step,
+    how.affinity === undefined ? '' : how.affinity.toString(),
   ];
   writeFileSync(
     files.spec,
