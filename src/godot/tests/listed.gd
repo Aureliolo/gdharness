@@ -48,14 +48,15 @@ const EXPECTED: Dictionary[String, String] = {
 }
 ## The tool name gdUnit4 reads its options after.
 const TOOL: String = "GdUnitCmdTool.gd"
+## Ends the runner's own arguments: everything after it is gdUnit4's options, for a run with no
+## script path on its command line to find them after.
+const GDUNIT: String = "--gdh-gdunit"
 ## How long a windowless engine sleeps after each frame. The engine's own default is the
 ## low-processor pause, 6.8 ms measured, which a run of suites awaiting frames spends thousands of
 ## times; zero makes a frame's delta round to nothing, and a tween then never moves.
 const FRAME_SLEEP_USEC: int = 1000
 
 var _runner: GdhRunner = null
-## The suites of the run, compiled by [method compiled_together] and held for as long as it runs.
-var _together: GDScript = null
 
 
 ## gdUnit4's runner reading its options after this script's path rather than after its own tool's,
@@ -64,12 +65,22 @@ class GdhRunner:
 	extends GdUnitTestCIRunner
 
 	var own_path: String = ""
+	## gdUnit4's options when they were given after [constant GDUNIT] rather than read from the
+	## engine's command line, as the suites scene gives them: a played scene has no script path to
+	## find them after.
+	var given: PackedStringArray = []
+	## The suites compiled by [method compiled_together], held for as long as the run goes on.
+	var together: GDScript = null
 	## The cases dealt by their rows, by `res://suite.gd:test_case`.
 	var row_shares: Dictionary[String, GdhRowShare] = {}
 	## The cases gdUnit4 said it finished, which [GdhSessionCheck] holds the session's lookups against.
 	var cases_ended: int = 0
 
 	func get_cmdline_args() -> PackedStringArray:
+		if not given.is_empty():
+			var options: PackedStringArray = [TOOL]
+			options.append_array(given)
+			return options
 		return options_of(OS.get_cmdline_args(), own_path)
 
 	## gdUnit4 asks this of every case it finds, a parameterised case once a row, each row carrying
@@ -201,8 +212,26 @@ class GdhSessionCheck:
 
 
 func _initialize() -> void:
+	_runner = started(OS.get_cmdline_user_args())
+	_runner.own_path = get_script().resource_path
+	root.add_child(_runner)
+
+
+## As gdUnit4's own `GdUnitCmdTool.gd` ends, which names in a verbose run the nodes left orphaned.
+func _finalize() -> void:
+	queue_delete(_runner)
+	if OS.is_stdout_verbose():
+		print("Orphan nodes left as the run ends:")
+		Window.print_orphan_nodes()
+
+
+## The runner over the suites [param given] lists, to be added to the tree, which starts it. Shared
+## by this script and the suites scene of the tests addon, which loads this file from where the
+## server ships it and calls this, since the addon itself names no gdUnit4 class.
+static func started(given: PackedStringArray) -> GdhRunner:
 	OS.low_processor_usage_mode_sleep_usec = FRAME_SLEEP_USEC
-	var asked: PackedStringArray = OS.get_cmdline_user_args()
+	var at: int = given.find(GDUNIT)
+	var asked: PackedStringArray = given if at < 0 else given.slice(0, at)
 	var unread: PackedStringArray = []
 	for flag: String in REPORTS_OFF:
 		if asked.has(flag):
@@ -221,28 +250,21 @@ func _initialize() -> void:
 				)
 			)
 	var suites: PackedStringArray = listed(asked, LISTED)
+	var runner: GdhRunner = GdhRunner.new()
+	if at >= 0:
+		runner.given = given.slice(at + 1)
 	if asked.has(TOGETHER):
-		_together = compiled_together(suites)
+		runner.together = compiled_together(suites)
 	var expected_out: String = argument_after(asked, EXPECTED_OUT)
 	if not expected_out.is_empty():
 		write_expected(expected_out, suites)
-	_runner = GdhRunner.new()
-	_runner.own_path = get_script().resource_path
-	_runner.add_test_suites(suites)
-	_runner.skip_test_suites(listed(asked, SKIPPING))
-	_runner.row_shares = row_shares_of(listed(asked, ROWS))
+	runner.add_test_suites(suites)
+	runner.skip_test_suites(listed(asked, SKIPPING))
+	runner.row_shares = row_shares_of(listed(asked, ROWS))
 	# Added to the list itself rather than through `register`, which saves every hook it holds into
 	# `project.godot`.
-	hooks.enigne_hooks.append(GdhSessionCheck.new(_runner))
-	root.add_child(_runner)
-
-
-## As gdUnit4's own `GdUnitCmdTool.gd` ends, which names in a verbose run the nodes left orphaned.
-func _finalize() -> void:
-	queue_delete(_runner)
-	if OS.is_stdout_verbose():
-		print("Orphan nodes left as the run ends:")
-		Window.print_orphan_nodes()
+	hooks.enigne_hooks.append(GdhSessionCheck.new(runner))
+	return runner
 
 
 ## Turns off the hooks among [param hooks] whose scripts [param unread] names, answering the scripts

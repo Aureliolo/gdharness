@@ -1637,6 +1637,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['start', 'check'],
         description: 'A scene to run instead of the main scene.',
       },
+      suites: {
+        type: ['string', 'array'],
+        items: { type: 'string' },
+        ops: ['start'],
+        description:
+          "start: gdUnit4 suites to play instead of a scene, a suite file or a test directory inside the project or a list of them, as project_test's path takes them. They run in the tests addon's suites scene through the runner gdharness test uses, so with profile: true the profile names what the suites cost by function, which project_test and gdharness test cannot show, since the profiler never sees a script run. The run quits with gdUnit4's exit code; read it with editor_output until running is false, then profile. Takes no scene or executable, and needs gdUnit4 and the tests addon of this release in the project.",
+      },
       args: {
         type: 'array',
         items: { type: 'string' },

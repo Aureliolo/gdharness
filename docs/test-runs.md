@@ -329,6 +329,27 @@ A wait on a timer of an animation's length races the animation: the engine count
 in frame deltas, so on a machine running other engines the timer ends with the tween still going.
 Asking once a frame, or stepping the tween, holds however slowly the frames come.
 
+## What suites cost, by function
+
+`gdharness test` runs suites as a script, and the engine's script profiler only sees a scene, so
+it cannot say where a tier's time goes. `editor_run start` with `suites`, the same paths
+`project_test` takes, plays them in the tests addon's suites scene through the same runner, and
+`editor_run profile` then names what each function cost:
+
+```text
+editor_run start    suites ["tests/house"], headless true, profile true
+editor_output       until running is false
+editor_run profile
+```
+
+The run quits with gdUnit4's exit code. A suite that needs a window needs `headless: false` here
+too.
+
+For game code rather than suites, a scene can step its work one call a frame with
+`GdhBench.each_frame(tree, most, step)`, which stops early when `step` answers false and answers
+`steps` and `ms_each`, the step's own time on average. The profiler names only so many functions a
+frame, so work played inside one frame comes back mostly unnamed; one step a frame names them all.
+
 ## Starting the runner yourself
 
 `gdharness test --runner` prints the path of the shipped runner, `listed.gd`, for a tool that starts

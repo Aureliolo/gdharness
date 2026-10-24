@@ -39077,6 +39077,161 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
 }
 
 /**
+ * Suites handed to editor_run start play in the tests addon's scene, where the profiler sees them.
+ *
+ * A suite run by gdharness test or project_test is a `-s` script, which the profiler never attaches
+ * to, so a game wanting its suites' cost by function kept a bench scene and a runner of its own.
+ * Asserted on what only a played, profiled run has: the suite's own functions in the profile, with
+ * their calls. One suite steps a callable a frame through GdhBench, which stops on the step's false.
+ * The refusals are asserted on a project without the scene, and with arguments suites cannot take.
+ */
+async function testSuitesPlayInASceneTheProfilerSees(): Promise<void> {
+  const engine = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!engine || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('suites scene regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-suites-scene-'));
+  const bare = mkdtempSync(join(tmpdir(), 'gdharness-suites-bare-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-suites-rt-'));
+  const settings = (name: string): string =>
+    `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="${name}"\n\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n`;
+  try {
+    for (const dir of [project, bare]) {
+      cpSync(gdunit, join(dir, 'addons', 'gdUnit4'), { recursive: true });
+      cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(dir, 'addons', 'gdharness_runtime'), {
+        recursive: true,
+      });
+      mkdirSync(join(dir, 'tests'));
+      writeFileSync(
+        join(dir, 'tests', 'quick_test.gd'),
+        'extends GdUnitTestSuite\n\n\nfunc test_passes() -> void:\n\tassert_bool(true).is_true()\n',
+      );
+    }
+    writeFileSync(join(project, 'project.godot'), settings('SuitesScene'));
+    writeFileSync(join(bare, 'project.godot'), settings('SuitesBare'));
+    cpSync(join('src', 'godot', 'addons', 'gdharness_tests'), join(project, 'addons', 'gdharness_tests'), {
+      recursive: true,
+    });
+    mkdirSync(join(project, 'tests', 'heavy'));
+    writeFileSync(
+      join(project, 'tests', 'heavy', 'heavy_test.gd'),
+      [
+        'class_name HeavyTest',
+        'extends GdUnitTestSuite',
+        '',
+        'var _stepped: int = 0',
+        '',
+        '',
+        'func churn(rounds: int) -> int:',
+        '\tvar sum: int = 0',
+        '\tfor i: int in rounds:',
+        '\t\tsum += i % 7',
+        '\treturn sum',
+        '',
+        '',
+        'func step() -> bool:',
+        '\t_stepped += 1',
+        '\treturn _stepped < 4',
+        '',
+        '',
+        'func test_churns() -> void:',
+        '\tassert_int(churn(100000)).is_greater(0)',
+        '',
+        '',
+        'func test_steps_a_frame_until_told_to_stop() -> void:',
+        '\tvar timed: Dictionary = await GdhBench.each_frame(get_tree(), 10, step)',
+        '\tprint("stepped %d" % timed["steps"])',
+        '\tassert_int(timed["steps"]).is_equal(4)',
+        '\tassert_float(timed["ms_each"]).is_greater_equal(0.0)',
+        '',
+      ].join('\n'),
+    );
+    const server = new ServerProcess({
+      env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    });
+    try {
+      await server.initialize('regression-test');
+      const call = async (tool: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name: tool, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ??
+        '';
+
+      const refusals: [Record<string, unknown>, RegExp][] = [
+        [{ op: 'check', projectPath: project, suites: 'tests' }, /^editor_run check does not take suites\./],
+        // A scene not there is refused before an engine is started on it, for both.
+        [
+          { op: 'start', projectPath: project, scene: 'gone.tscn' },
+          /^No scene at res:\/\/gone\.tscn in the project/,
+        ],
+        [
+          { op: 'check', projectPath: project, scene: 'gone.tscn' },
+          /^No scene at res:\/\/gone\.tscn in the project/,
+        ],
+        [
+          { op: 'start', projectPath: project, suites: 'tests', scene: 'a.tscn' },
+          /takes no scene and no executable/,
+        ],
+        [
+          { op: 'start', projectPath: project, suites: [] },
+          /^suites is an empty list: name a suite file or a directory\./,
+        ],
+        [
+          { op: 'start', projectPath: project, suites: ['tests/gone_test.gd'] },
+          /^Nothing at res:\/\/tests\/gone_test\.gd/,
+        ],
+        [
+          { op: 'start', projectPath: bare, suites: 'tests' },
+          /^The project has no addons\/gdharness_tests\/suites\.tscn[\s\S]*upgrade/,
+        ],
+      ];
+      for (const [args, said] of refusals) {
+        const answer = await call('editor_run', args);
+        assert.match(answer, said, `${JSON.stringify(args)}: ${answer}`);
+      }
+
+      const started = await call('editor_run', {
+        op: 'start',
+        projectPath: project,
+        suites: ['tests'],
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(started, /"started": true/, started);
+      const waited = await call('editor_run', { op: 'wait', timeoutMs: 120_000 });
+      assert.match(waited, /"running": false/, `the suites ran to their end: ${waited}`);
+      assert.match(waited, /"exitCode": 0/, `and gdUnit4 passed them: ${waited}`);
+      const printed = await call('editor_output', {});
+      assert.match(printed, /stepped 4/, `GdhBench stopped on the step's false: ${printed}`);
+      assert.match(printed, /test_churns/, printed);
+      assert.match(printed, /test_passes/, `the directory's other suite ran too: ${printed}`);
+
+      // Every function, since gdUnit4's own come first by self time and the step costs next to nothing.
+      const profiled: unknown = JSON.parse(await call('editor_run', { op: 'profile', limit: 5000 }));
+      const shown = JSON.stringify(profiled);
+      const rows = asArray(get(profiled, 'functions'));
+      const row = (name: string): unknown => rows.find((one) => get(one, 'function') === name);
+      assert.deepEqual(
+        [get(row('HeavyTest.churn'), 'script'), get(row('HeavyTest.churn'), 'calls')],
+        ['res://tests/heavy/heavy_test.gd', 1],
+        `the suite's own function, called once by its case: ${shown}`,
+      );
+      assert.equal(get(row('HeavyTest.step'), 'calls'), 4, `stepped once a frame, four times: ${shown}`);
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(bare);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A run started with profile: true answers which GDScript functions took its time.
  *
  * The keeper is the game's debugger and sums the engine's own script profiler. Four runs, because
@@ -59787,6 +59942,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,
+  testSuitesPlayInASceneTheProfilerSees,
   testAProfileSinceAMarkAnswersForOneAction,
   testAProfileFromTheStartWaitsForTheProfiler,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,

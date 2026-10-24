@@ -329,6 +329,7 @@ import {
   withNestedErrors,
 } from './suite-judge.js';
 import { ProjectScripts, TEST_DIRECTORIES, viewportOf, windowNeedsOf } from './suite-plan.js';
+import { hasSuitesScene, SUITES_SCENE, suitesSceneArgs } from './suites-scene.js';
 import { scriptsWithoutCases, selectTests } from './test-selection.js';
 import {
   asParams,
@@ -3549,6 +3550,7 @@ function windowNoteFor(needing: readonly string[], sharing: readonly string[] | 
 export function testPathsIn(
   projectPath: string,
   given: unknown,
+  named: 'path' | 'suites' = 'path',
 ): { ok: true; value: string[] } | { ok: false; reason: string } {
   // The directories gdharness test looks in, so the tool and the gate run the same suites. Only
   // those there, since a default directory a project does not have is not a path it asked for;
@@ -3564,8 +3566,7 @@ export function testPathsIn(
   if (listed.length === 0) {
     return {
       ok: false,
-      reason:
-        'path is an empty list: name a suite file or a directory, or leave path out for tests and test.',
+      reason: `${named} is an empty list: name a suite file or a directory${named === 'path' ? ', or leave path out for tests and test' : ''}.`,
     };
   }
   const resolved: string[] = [];
@@ -3573,7 +3574,7 @@ export function testPathsIn(
     if (typeof entry !== 'string' || entry.trim() === '') {
       return {
         ok: false,
-        reason: `path${Array.isArray(entries) ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
+        reason: `${named}${Array.isArray(entries) ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
       };
     }
     const location = resolveWithinProject(projectPath, entry);
@@ -9947,6 +9948,56 @@ class GodotServer {
     return pid === undefined ? 'the editor on this bridge' : `the editor on this bridge (pid ${pid})`;
   }
 
+  /**
+   * The suites a start was asked to play in the tests addon's suites scene, as the paths
+   * project_test would hand gdUnit4, or null for a start naming none.
+   */
+  private suitesToPlay(
+    args: OperationParams,
+    projectPath: string,
+  ): { ok: true; value: string[] | null } | { ok: false; response: ToolResponse } {
+    if (args['suites'] === undefined) {
+      return { ok: true, value: null };
+    }
+    const refused = (reason: string, solutions?: string[]): { ok: false; response: ToolResponse } => ({
+      ok: false,
+      response: this.createErrorResponse(reason, solutions),
+    });
+    if (args['scene'] !== undefined || args['executable'] !== undefined) {
+      return refused(
+        "suites plays the suites in the tests addon's own scene, so it takes no scene and no executable: leave those out.",
+      );
+    }
+    const paths = testPathsIn(projectPath, args['suites'], 'suites');
+    if (!paths.ok) {
+      return refused(paths.reason, PATH_SOLUTIONS);
+    }
+    const missing = paths.value.filter((path) => !existsSync(join(projectPath, path.slice('res://'.length))));
+    if (missing.length > 0) {
+      return refused(`Nothing at ${missing.join(' and ')} in the project at ${projectPath}.`, PATH_SOLUTIONS);
+    }
+    if (!hasSuitesScene(projectPath)) {
+      return refused(`The project has no ${SUITES_SCENE}, which the tests addon of this release ships.`, [
+        `Run  ${gdharnessCommand(SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which brings the addons into step with this server`,
+      ]);
+    }
+    const unusable = gdUnit4Unusable(projectPath);
+    if (unusable !== null) {
+      return refused(`${unusable.reason}.`, [
+        `${unusable.missing ? 'Install' : 'Update'} gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4`,
+      ]);
+    }
+    const asked = new ProjectScripts(projectPath).searchedAsTold(paths.value);
+    const caseless = scriptsWithoutCases(projectPath, asked);
+    if (caseless.length > 0) {
+      const one = caseless.length === 1;
+      return refused(
+        `${caseless.join(' and ')} ${one ? 'declares' : 'declare'} no case: gdUnit4 runs the functions named test_ at the top level of a script that extends GdUnitTestSuite, and ${one ? 'it has' : 'they have'} none.`,
+      );
+    }
+    return { ok: true, value: asked };
+  }
+
   private async handleRunProject(args: OperationParams, op: string): Promise<ToolResponse> {
     const project = this.project(args);
     if (!project.ok) {
@@ -9968,10 +10019,22 @@ class GodotServer {
     }
     // Before the engine is looked for, so that a scene the server will not run is refused as
     // such rather than as a missing Godot.
-    const scene = readNonEmptyString(args, 'scene');
+    const suites = this.suitesToPlay(args, project.value.path);
+    if (!suites.ok) {
+      return suites.response;
+    }
+    const scene = suites.value === null ? readNonEmptyString(args, 'scene') : SUITES_SCENE;
     const sceneToRun = scene !== undefined ? resolveWithinProject(project.value.path, scene) : null;
     if (sceneToRun && !sceneToRun.ok) {
       return this.createErrorResponse(sceneToRun.reason, PATH_SOLUTIONS);
+    }
+    // An engine told to play a scene that is not there puts up a modal alert, headless on Windows
+    // too, and waits for a click nobody gives.
+    if (sceneToRun?.ok && !existsSync(sceneToRun.absolutePath)) {
+      return this.createErrorResponse(
+        `No scene at res://${sceneToRun.relativePath} in the project at ${project.value.path}.`,
+        PATH_SOLUTIONS,
+      );
     }
     const build = readNonEmptyString(args, 'executable');
     const exported = build === undefined ? null : exportedBuild(project.value.path, build);
@@ -9989,7 +10052,9 @@ class GodotServer {
         'A profile is read through the debugger, and an exported build is started without one, since a release build quits when given --remote-debug. Profile the project without executable.',
       );
     }
-    const given = readStringArray(args, 'args') ?? [];
+    const own = readStringArray(args, 'args') ?? [];
+    const given =
+      suites.value === null ? own : [...own, ...suitesSceneArgs(project.value.path, suites.value)];
     const flags = this.engineArguments(args);
     if (!flags.ok) {
       return flags.response;
@@ -10229,7 +10294,7 @@ class GodotServer {
             ? mainSceneOf(project.value.file)
             : `res://${sceneArgument}`,
       arguments: cmdArgs,
-      argsNote: engineFlagsNote(given),
+      argsNote: engineFlagsNote(own),
       framesNote: racingNote(headless, flags.value),
       // Named here rather than only by editor_output, because a caller who wants to watch the
       // file had to make a second call to learn it and a reconstructed name is worse than no

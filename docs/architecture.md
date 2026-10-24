@@ -159,7 +159,8 @@ addons, installed into your project
 |-- gdharness_editor      the bridge: scenes, resources, running the game
 |-- gdharness_runtime     an autoload: the running game answers through it
 |-- auto_reload           reloads the open scene when a file changes
-`-- gdharness_tests       waits, tween steps and input events for suites; GdhShare
+`-- gdharness_tests       waits, tween steps and input events for suites; GdhShare,
+                          GdhBench, and the scene suites are profiled in
 ```
 
 The CLI half never loads the MCP SDK, and the server half never reads the harness table. They share
@@ -172,7 +173,10 @@ its engines starts the shipped runner, `godot/tests/listed.gd`, from outside the
 the runner `project_test` starts as well. Both read what the engine printed with `suite-judge.ts`,
 from one file holding both of its streams in order, so a suite the tool passes is one the gate
 passes: the tool looks in the same directories and judges engine errors against the same
-declarations.
+declarations. `editor_run start` given `suites` plays the tests addon's `suites.tscn` instead, so
+the profiler sees the suites; the scene loads the same runner from where the server ships it and
+calls its `started`, since the addon must compile in a project without gdUnit4
+(`suites-scene.ts`).
 
 `gdharness spread` plays a bench scene over several engines, each holding one of the same slots,
 and [Spread benches](spread.md) describes it. Both commands start and watch their engines through
