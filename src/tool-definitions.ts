@@ -2120,7 +2120,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['call'],
         description:
-          'call: which one to call. Colons call through what a node holds, "_game:run:advance", the same way a property is written through them, a list or a map is stepped into by index or key, "_game:run:roster:0:retire", and a step written as a call walks through what a reading method returned, "get_viewport():gui_get_focus_owner", as runtime_inspect property describes.',
+          'call: which one to call. Colons call through what a node holds, "_game:run:advance", the same way a property is written through them, a list or a map is stepped into by index or key, "_game:run:roster:0:retire", and a step written as a call walks through what a reading method returned, "get_viewport():gui_get_focus_owner", as runtime_inspect property describes. A list or a map is not called on itself: one that changes it, such as append(), is a set of its whole new value.',
       },
       args: {
         type: 'array',

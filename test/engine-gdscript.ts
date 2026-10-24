@@ -1119,6 +1119,41 @@ function testOperations(godotPath: string, projectDir: string): void {
       constantAt < lines.findIndex((line) => line.startsWith('var ')),
     `the constant sits after the header and before the variables:\n${withConstant}`,
   );
+  // Set apart from the header and from the variables as the style guide groups them, below the
+  // class's own documentation, which a constant above would take over, and joined to the constants
+  // already there. One went in directly under extends, against the header with no blank line.
+  const spacedConstants: [string, string][] = [
+    [
+      'extends Node\n\nvar score: int = 0\n',
+      'extends Node\n\nconst SAVE_PATH: String = "x"\n\nvar score: int = 0\n',
+    ],
+    [
+      'extends Node\nvar score: int = 0\n',
+      'extends Node\n\nconst SAVE_PATH: String = "x"\n\nvar score: int = 0\n',
+    ],
+    [
+      'extends Node\n## The hero.\n\nvar score: int = 0\n',
+      'extends Node\n## The hero.\n\nconst SAVE_PATH: String = "x"\n\nvar score: int = 0\n',
+    ],
+    [
+      'extends Node\n\nconst FIRST: int = 1\n\nvar score: int = 0\n',
+      'extends Node\n\nconst FIRST: int = 1\nconst SAVE_PATH: String = "x"\n\nvar score: int = 0\n',
+    ],
+  ];
+  for (const [before, after] of spacedConstants) {
+    writeFileSync(join(projectDir, 'made', 'constants.gd'), before);
+    const placed = operation('modify_script', {
+      script_path: 'made/constants.gd',
+      modifications: [{ type: 'add_constant', name: 'SAVE_PATH', defaultValue: '"x"' }],
+    });
+    const written = readFileSync(join(projectDir, 'made', 'constants.gd'), 'utf8');
+    assert.equal(written, after, `${JSON.stringify(before)} gets its constant spaced:\n${written}`);
+    assert.equal(
+      get(asArray(get(placed, 'modifications_applied'))[0], 'line'),
+      written.split('\n').indexOf('const SAVE_PATH: String = "x"') + 1,
+      'and answers the line it is on',
+    );
+  }
 
   // Functions are spaced the way gdformat writes them, two blank lines on each side counting those
   // already there, and the file still ends with a newline; one placed after _ready goes above the

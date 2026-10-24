@@ -34189,6 +34189,43 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         ['Cass', 'Bram'],
         'an element written through a path is written into the list the game holds',
       );
+      // A call that changes a list is pointed at the write that does, and was told to call the
+      // method on an element instead: "board:0:append", for a list being added to.
+      const call = (method: string, args: unknown[]): Promise<{ parsed: unknown; said: string }> =>
+        tool('runtime_invoke', { op: 'call', nodePath: '/root/Main', method, args });
+      const appended = (await call('board:append', [7])).said;
+      assert.match(
+        appended,
+        /append\(\) changes the list: to change it, give \/root\/Main:board its new value whole with runtime_invoke set, property board, or call a method of the game that changes it/,
+        appended,
+      );
+      assert.doesNotMatch(appended, /on the element/, appended);
+      const given = await tool('runtime_invoke', {
+        op: 'set',
+        nodePath: '/root/Main',
+        property: 'board',
+        value: [7],
+      });
+      assert.deepEqual(get(given.parsed, 'new_value'), [7], given.said);
+      assert.deepEqual(get((await read('board')).parsed, 'value'), [7], 'and the write it names takes');
+      // The waits below need the board empty again.
+      await tool('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'board', value: [] });
+      assert.deepEqual(get((await read('board')).parsed, 'value'), [], 'the board is emptied again');
+      const lookedIn = (await call('ledger:has', ['zeta'])).said;
+      assert.match(
+        lookedIn,
+        /To look in the map with has\(\), read \/root\/Main:ledger whole with runtime_inspect property, property ledger, and look in what comes back/,
+        lookedIn,
+      );
+      const copied = (await call('ledger:duplicate():erase', ['zeta'])).said;
+      assert.match(
+        copied,
+        /erase\(\) changes the map: to change it, call a method of the game that changes it, since \/root\/Main:ledger:duplicate\(\) is returned by a call/,
+        copied,
+      );
+      const elementWise = (await call('names:to_upper', [])).said;
+      assert.match(elementWise, /is called on the element, as in \/root\/Main:names:0:to_upper/, elementWise);
+      assert.equal(get((await call('names:0:to_upper()', [])).parsed, 'result'), 'CASS', 'as that names it');
 
       // Depth 0 is the node alone, the one depth that reads exactly one node's properties. It read
       // as "not given" and walked the default three levels, which over a router was 4 MB.

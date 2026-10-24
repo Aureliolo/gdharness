@@ -505,7 +505,17 @@ func _add_constant(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 			or line.begins_with("class ")
 		):
 			break
-	return after if _insert(lines, after, [const_line], placed) else -1
+	after = _past_class_doc(lines, after)
+	# Set apart from the header or the signals above and from what follows, as the style guide lays
+	# out its groups; one below the constants already there joins them.
+	var block: Array[String] = [const_line]
+	var above: String = lines[after - 1].strip_edges() if after > 0 else ""
+	var below: String = lines[after].strip_edges() if after < lines.size() else ""
+	if not above.is_empty() and not GdhPatterns.without_annotations(above).begins_with("const "):
+		block.push_front("")
+	if not below.is_empty() and not GdhPatterns.without_annotations(below).begins_with("const "):
+		block.push_back("")
+	return after + block.find(const_line) if _insert(lines, after, block, placed) else -1
 
 
 # Inserts the declaration and answers with its zero-based index, or -1 for one that could not be placed.

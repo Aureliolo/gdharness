@@ -376,6 +376,52 @@ static func held_already(given: Variant, held: Variant) -> bool:
 	return PackedFloat32Array([given])[0] == PackedFloat32Array([held])[0]
 
 
+## What to do instead of the call [param method] makes on [param sort], the list or map [param
+## reached] ends on, which a path does not make. A method of the list itself is the likelier aim
+## than one of what it holds when the list has it: told to call append() on an element, a caller
+## adding to a list has nowhere to go.
+static func _instead_of_a_call(reached: Dictionary, method: String, sort: String) -> String:
+	var own: String = GdhPaths.method_of(str(reached["name"]))
+	if own.is_empty():
+		own = str(reached["name"])
+	var steps: PackedStringArray = GdhPaths.steps_of(method)
+	var _shortened: int = steps.resize(steps.size() - 1)
+	var holding: String = ":".join(steps)
+	var through_a_call: bool = false
+	for step: String in steps:
+		through_a_call = through_a_call or not GdhPaths.method_of(step).is_empty()
+	var the: String = "the " + sort.trim_prefix("a ")
+	match GdhPaths.container_method(reached["holder"], own):
+		"changes":
+			if through_a_call:
+				return (
+					(
+						"%s() changes %s: to change it, call a method of the game that changes it, since %s"
+						+ " is returned by a call, and runtime_invoke set does not write into what a call returns"
+					)
+					% [own, the, reached["called"]]
+				)
+			return (
+				(
+					"%s() changes %s: to change it, give %s its new value whole with runtime_invoke set,"
+					+ " property %s, or call a method of the game that changes it"
+				)
+				% [own, the, reached["called"], holding]
+			)
+		"reads":
+			return (
+				(
+					"To look in %s with %s(), read %s whole with runtime_inspect property, property %s, and"
+					+ " look in what comes back"
+				)
+				% [the, own, reached["called"], holding]
+			)
+	return (
+		"A method of what %s holds is called on the element, as in %s:0:%s"
+		% [sort, reached["called"], reached["name"]]
+	)
+
+
 func call_method(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var method: String = str(params.get("method", ""))
@@ -472,14 +518,7 @@ func call_method(params: Dictionary) -> Dictionary:
 			if GdhPaths.can_read(reached["holder"], spelled)
 			else GdhPaths.nothing_there(reached["holder"], spelled, str(reached["called"]))
 		)
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s. A method of what %s holds is called on the element, as in %s:0:%s"
-				% [why, sort, reached["called"], reached["name"]]
-			)
-		}
+		return {"type": "error", "message": "%s. %s" % [why, _instead_of_a_call(reached, method, sort)]}
 	var holder: Object = reached["holder"]
 	var named: String = reached["name"]
 	# The method a call ends on is the one being called whether or not it carries the brackets a

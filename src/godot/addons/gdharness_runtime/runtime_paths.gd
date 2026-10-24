@@ -64,6 +64,79 @@ const BYTE_CALLS: Array[String] = [
 	"get_string_from_utf32",
 	"hex_encode",
 ]
+## The methods a list, a map and a packed list have that change what they are called on, as the
+## engine's API marks them, and those that read it given arguments. A path makes neither, and a call
+## refused for one is pointed at a write or a whole read instead of at an element, since a method of
+## the list itself was the aim.
+const LIST_CHANGES: Array[String] = [
+	"clear",
+	"assign",
+	"set",
+	"push_back",
+	"push_front",
+	"append",
+	"append_array",
+	"resize",
+	"insert",
+	"remove_at",
+	"fill",
+	"erase",
+	"pop_back",
+	"pop_front",
+	"pop_at",
+	"sort",
+	"sort_custom",
+	"shuffle",
+	"reverse",
+	"make_read_only",
+]
+const LIST_READS: Array[String] = [
+	"get",
+	"find",
+	"find_custom",
+	"rfind",
+	"rfind_custom",
+	"count",
+	"has",
+	"bsearch",
+	"bsearch_custom",
+	"slice",
+	"filter",
+	"map",
+	"reduce",
+	"any",
+	"all",
+	"is_same_typed",
+]
+const MAP_CHANGES: Array[String] = [
+	"clear", "assign", "sort", "merge", "erase", "get_or_add", "set", "make_read_only"
+]
+const MAP_READS: Array[String] = [
+	"merged",
+	"has",
+	"has_all",
+	"find_key",
+	"get",
+	"is_same_typed",
+	"is_same_typed_key",
+	"is_same_typed_value",
+	"recursive_equal",
+]
+const PACKED_CHANGES: Array[String] = [
+	"set",
+	"push_back",
+	"append",
+	"append_array",
+	"remove_at",
+	"insert",
+	"fill",
+	"resize",
+	"clear",
+	"reverse",
+	"sort",
+	"erase",
+]
+const PACKED_READS: Array[String] = ["get", "has", "slice", "bsearch", "find", "rfind", "count"]
 ## The calls a path makes on a string. A word that looks right and does not match is told apart by
 ## its code points, "label:text:to_utf32_buffer():to_int32_array()", which show a non-breaking space
 ## as 160 where the answer's JSON shows a space.
@@ -334,6 +407,30 @@ static func packed_calls(value: Variant) -> Array[String]:
 	else:
 		calls.append("to_byte_array")
 	return calls
+
+
+## "changes" when [param method] is one of [param holder]'s own that changes it, "reads" when it is
+## one that reads it given arguments, and "" otherwise. A packed list of bytes has more of both,
+## encode_ and bswap changing it and decode_ reading it, which are told by their names.
+static func container_method(holder: Variant, method: String) -> String:
+	var changes: Array[String] = MAP_CHANGES
+	var reads: Array[String] = MAP_READS
+	if holder is Array:
+		changes = LIST_CHANGES
+		reads = LIST_READS
+	elif packed(holder):
+		changes = PACKED_CHANGES
+		reads = PACKED_READS
+		if typeof(holder) == TYPE_PACKED_BYTE_ARRAY:
+			if method.begins_with("encode_") or method.begins_with("bswap"):
+				return "changes"
+			if method.begins_with("decode_") or method == "has_encoded_var":
+				return "reads"
+	if method in changes:
+		return "changes"
+	if method in reads:
+		return "reads"
+	return ""
 
 
 ## Whether [param value] is read by its components, a vector or a colour or a transform, and is a
