@@ -127,6 +127,14 @@ an allocation fails at the commit limit however much physical memory is free.
 - An engine that printed nothing at all.
 - An engine ended for its silence or its deadline, or because an autoload did not start.
 - An engine whose banner names another version than `--godot-version` asks for.
+- A gdUnit4 that no longer works the way the runner relies on. The runner swaps the session gdUnit4
+  makes for one that finds each case by its id in a dictionary, since gdUnit4's own walks every case
+  of the session for each lookup, which grows with the square of a run's cases. The swap holds only
+  while gdUnit4 announces a session before it hands it to its hooks and its console, so a session
+  hook of the runner's own fails the run, with gdUnit4's version, when it is handed another session
+  or when the cases ran without one lookup reaching it. A report turned off by an option that
+  gdUnit4 no longer registers a hook for fails the run the same way. These checks run in the gdUnit4
+  the project installs, on every run.
 
 Each failure is printed with the lines that show it: a failing case's report, each unexpected error
 and the line after it, and the run's summary. When an engine was cut short and none of that explains
@@ -268,6 +276,36 @@ is why the tolerance is two seconds. On Linux, read it as gdharness and psutil's
 the `btime` line of `/proc/stat`, plus the 22nd field of `/proc/<pid>/stat` divided by
 `getconf CLK_TCK`, in seconds. That is up to a second early; `ps -o lstart` there cuts the same sum
 to the second again and reads up to two seconds early, which is the whole tolerance.
+
+## Preparing the game before any suite
+
+Something every suite needs in place before the first one runs, such as a root node of the game's
+own or a pace the game's clock runs at, goes in a gdUnit4 session hook. The runner leaves the
+project's hooks on, so each engine calls the hook's `startup` once before its first suite and its
+`shutdown` once after its last. A hook extends `GdUnitTestSessionHook` and is registered in
+gdUnit4's settings dialog, which keeps it under `gdunit4/hooks/session_hooks` in `project.godot`:
+
+```gdscript
+class_name GameRootHook
+extends GdUnitTestSessionHook
+
+
+func _init() -> void:
+    super("Game root", "Adds the game's root before the first suite.")
+
+
+func startup(_session: GdUnitTestSession) -> GdUnitResult:
+    var tree := Engine.get_main_loop() as SceneTree
+    tree.root.add_child(preload("res://game/root.tscn").instantiate())
+    return GdUnitResult.success()
+
+
+func shutdown(_session: GdUnitTestSession) -> GdUnitResult:
+    return GdUnitResult.success()
+```
+
+A hook that answers with `GdUnitResult.error` fails the run, because gdUnit4 prints that answer as
+an engine error that no suite declared.
 
 ## Starting the runner yourself
 

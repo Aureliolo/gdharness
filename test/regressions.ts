@@ -40274,6 +40274,65 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
       /Executed test cases\s*:\s*\(2\//,
       `and the listed suites run beside it: ${together.said}`,
     );
+    for (const healthy of [first, second, third, together]) {
+      assert.doesNotMatch(healthy.said, /gdharness test: gdUnit4/, 'the checks say nothing on this gdUnit4');
+    }
+
+    // The checks on the gdUnit4 installed, each met by a copy changed the way a release could change
+    // it. The run goes on and passes as gdUnit4 judges it, so the line is what fails it.
+    const changed = (file: string, from: string, to: string): (() => void) => {
+      const path = join(projectDir, 'addons', 'gdUnit4', 'src', 'core', ...file.split('/'));
+      const source = readFileSync(path, 'utf8');
+      assert.ok(source.includes(from), `${file} still reads ${from}`);
+      writeFileSync(path, source.replace(from, to));
+      return () => {
+        writeFileSync(path, source);
+      };
+    };
+    const announcedLate = changed(
+      'runners/GdUnitTestSessionRunner.gd',
+      '\t\t\tGdUnitSignals.instance().gdunit_event.emit(GdUnitSessionStart.new())\n\t\t\t# process next test suite\n\t\t\tset_process(false)\n\t\t\tvar result := await _hooks.execute_startup(_test_session)\n',
+      '\t\t\tset_process(false)\n\t\t\tvar result := await _hooks.execute_startup(_test_session)\n\t\t\tGdUnitSignals.instance().gdunit_event.emit(GdUnitSessionStart.new())\n',
+    );
+    const late = run('late', ['--html-report-off', '--junit-report-off']);
+    announcedLate();
+    assert.match(
+      late.said,
+      /gdharness test: gdUnit4 \S+ handed its session hooks the session before announcing it/,
+      late.said,
+    );
+    assert.match(late.said, /Executed test cases\s*:\s*\(2\//, `the suites still ran: ${late.said}`);
+
+    const consoleElsewhere = changed(
+      'runners/GdUnitTestCIRunner.gd',
+      '_console_reporter.test_session = _test_session',
+      '_console_reporter.test_session = GdUnitTestSession.new(_test_session._test_cases, _test_session.report_path)',
+    );
+    const elsewhere = run('elsewhere', ['--html-report-off', '--junit-report-off']);
+    consoleElsewhere();
+    assert.match(
+      elsewhere.said,
+      /gdharness test: gdUnit4 \S+ ran 2 cases without looking one up in the runner's indexed session/,
+      elsewhere.said,
+    );
+
+    const noJunitHook = changed(
+      'hooks/GdUnitTestSessionHookService.gd',
+      'service.register(GdUnitXMLReporterTestSessionHook.new())',
+      'pass',
+    );
+    const unhooked = run('unhooked', ['--html-report-off', '--junit-report-off']);
+    noJunitHook();
+    assert.match(
+      unhooked.said,
+      /gdharness test: gdUnit4 \S+ registers no session hook res:\/\/addons\/gdUnit4\/src\/core\/hooks\/GdUnitXMLReporterTestSessionHook\.gd/,
+      unhooked.said,
+    );
+    assert.doesNotMatch(
+      unhooked.said,
+      /GdUnitHtmlReporterTestSessionHook/,
+      'the hook it found is turned off',
+    );
   } finally {
     sweep(projectDir, scratch);
   }
