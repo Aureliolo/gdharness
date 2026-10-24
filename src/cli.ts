@@ -34,6 +34,7 @@ import {
 } from './harnesses.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
 import { defectReport } from './issues.js';
+import { lspOptionsOf, runLspBridge } from './lsp-bridge.js';
 import { isSameDirectory } from './paths.js';
 import { Ask, interactive } from './prompt.js';
 import { DEBUG_MODE } from './server-version.js';
@@ -789,6 +790,12 @@ Usage:
                                      failed or did not play its whole share. The bench asks
                                      GdhShare.outcomes for each arm's runs. ARGS go to every
                                      engine. docs/spread.md has the rest.
+  gdharness lsp [project] [--port N] [--wait S]
+                                     Bridge a stdio LSP client to the GDScript language server
+                                     of the project's open editor, which it never starts: the
+                                     port named, else GDHARNESS_LSP_PORT, else the one each
+                                     editor of the project records, else 6005. Waits S seconds
+                                     (20) for one serving this project; exit 1 when none does.
   gdharness version                  Show the installed version
   gdharness help                     Show this help
 
@@ -843,6 +850,10 @@ async function main(): Promise<void> {
   if (command === 'spread') {
     await spread();
     return;
+  }
+  if (command === 'lsp') {
+    // Exited rather than returned: the standard input it piped holds the process open.
+    process.exit(await runLspBridge(lspOptionsOf(args.slice(1), process.cwd())));
   }
   checkFlags();
   switch (command) {

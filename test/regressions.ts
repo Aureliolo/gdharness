@@ -164,12 +164,21 @@ import {
 import { freeLibraryCopies, seedExtensionList } from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import {
+  DEFAULT_LSP_PORT,
   GodotLSPClient,
   handleLSPTool,
   LSPTimeout,
   narrowedCompletions,
   typedBefore,
 } from '../src/lsp_client.js';
+import {
+  editorRecordsIn,
+  LSP_WAIT_SECONDS,
+  liveEditorRecords,
+  lspOptionsOf,
+  lspPortChoices,
+  removeLeftRecords,
+} from '../src/lsp-bridge.js';
 import {
   exportedBuild,
   isSameDirectory,
@@ -42150,6 +42159,129 @@ function windowSuite(declared: string): string {
 }
 
 /**
+ * `gdharness lsp` finds the language server from what each editor of the project recorded.
+ *
+ * An editor gdharness opened beside another project's serves on a port of its own, which Godot
+ * records nowhere, so the bridge reads the file the addon writes for each editor process. A record
+ * outlives a crash and a pid is handed out again, so a record counts only while the process under
+ * its pid started before it was written; a gate's `--import` loads the addon too and is nobody's
+ * editor. A left record is deleted only when its pid is provably not its writer: one the platform
+ * would not say about may be a live editor.
+ */
+function testTheLspCommandFindsTheEditorsPort(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-lsp-records-'));
+  try {
+    const directory = join(project, '.godot', 'gdharness-editors');
+    mkdirSync(directory, { recursive: true });
+    const record = (pid: number, lspPort: number, writtenAtMs: number, protocol = 1): string =>
+      JSON.stringify({ protocol, pid, lsp_port: lspPort, dap_port: 6006, written_at_ms: writtenAtMs });
+    writeFileSync(join(directory, '101.json'), record(101, 6101, 5000));
+    writeFileSync(join(directory, '102.json'), record(102, 6102, 9000));
+    writeFileSync(join(directory, '103.json'), record(103, 6103, 7000, 2));
+    writeFileSync(join(directory, '104.json'), '{"protocol": 1, "pid": 104');
+    writeFileSync(join(directory, 'notes.json'), record(105, 6105, 8000));
+    writeFileSync(join(directory, '106.json'), record(106, 0, 8000));
+    const records = editorRecordsIn(project);
+    assert.deepEqual(
+      records.map((one) => [one.pid, one.lspPort]),
+      [
+        [102, 6102],
+        [101, 6101],
+      ],
+      'newest first, and only the shape the addon writes',
+    );
+    assert.deepEqual(editorRecordsIn(join(project, 'nowhere')), [], 'a project no editor recorded');
+
+    const startedAt = new Map([
+      [101, 4000],
+      [102, 11_000],
+    ]);
+    assert.deepEqual(
+      liveEditorRecords(records, startedAt, new Map([[101, null]])).map((one) => one.pid),
+      [101],
+      'a process started after its record holds a reused pid',
+    );
+    assert.deepEqual(
+      liveEditorRecords(
+        records,
+        new Map([
+          [101, 4000],
+          [102, 8500],
+        ]),
+        new Map([[101, '--import']]),
+      ).map((one) => one.pid),
+      [],
+      "a gate importing the project is nobody's editor, and a command line not read is not taken as one",
+    );
+    assert.deepEqual(
+      liveEditorRecords(records, new Map([[102, 9800]]), new Map([[102, null]])).map((one) => one.pid),
+      [102],
+      'started within the second some platforms round a start to',
+    );
+
+    // 101 started before its record and stays; 102's pid went to a later process. Of the two the
+    // platform did not answer for, only the one whose pid nothing holds is deleted.
+    writeFileSync(join(directory, '108.json'), record(108, 6108, 3000));
+    writeFileSync(join(directory, '109.json'), record(109, 6109, 3000));
+    const removed = removeLeftRecords(editorRecordsIn(project), startedAt, (pid) => pid === 109);
+    assert.equal(removed, 2);
+    assert.deepEqual(
+      readdirSync(directory).sort(),
+      ['101.json', '103.json', '104.json', '106.json', '109.json', 'notes.json'],
+      'only the records provably left behind are deleted',
+    );
+
+    assert.deepEqual(lspPortChoices(7001, '7002', records), [{ port: 7001, from: '--port' }]);
+    assert.deepEqual(lspPortChoices(undefined, '7002', records), [
+      { port: 7002, from: 'GDHARNESS_LSP_PORT' },
+    ]);
+    const recorded = [
+      { file: 'a', pid: 102, lspPort: 6102, writtenAtMs: 9000 },
+      { file: 'b', pid: 101, lspPort: DEFAULT_LSP_PORT, writtenAtMs: 5000 },
+    ];
+    assert.deepEqual(
+      lspPortChoices(undefined, 'soon', recorded),
+      [
+        { port: 6102, from: 'the editor with pid 102' },
+        { port: DEFAULT_LSP_PORT, from: 'the editor with pid 101' },
+      ],
+      'a variable that names no port is passed over, and the default is not tried twice',
+    );
+    assert.deepEqual(lspPortChoices(undefined, '', []), [
+      { port: DEFAULT_LSP_PORT, from: "Godot's default" },
+    ]);
+
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    assert.deepEqual(lspOptionsOf([project, '--port', '7003', '--wait', '0'], tmpdir()), {
+      projectPath: resolve(project),
+      port: 7003,
+      waitSeconds: 0,
+    });
+    assert.deepEqual(lspOptionsOf([], project), {
+      projectPath: resolve(project),
+      port: undefined,
+      waitSeconds: LSP_WAIT_SECONDS,
+    });
+    for (const [args, said] of [
+      [['--port', '70000'], /^--port takes a port, 1 to 65535, not 70000\.$/],
+      [['--port'], /^--port takes a port, 1 to 65535, not nothing\.$/],
+      [['--wait', '-1'], /^--wait takes a number of seconds, not -1\.$/],
+      [['--verbose'], /^Unknown option --verbose\. gdharness lsp takes --port N and --wait S\.$/],
+      [[project, 'other'], /^gdharness lsp takes one project, and was given .+ and other\.$/],
+      [[join(project, '.godot')], /^Not a Godot project: .+ holds no project\.godot\.$/],
+    ] as const) {
+      assert.throws(
+        () => lspOptionsOf(args, project),
+        (error: unknown) => error instanceof EngineUsageError && said.test(error.message),
+        args.join(' '),
+      );
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * The tests addon's waits, tween steps and input events, in a real engine: a tween stepped to its
  * end leaves the callback after it until `past` gives it a frame more, a wait asks once a frame and
  * gives up on its bound, `still` holds while a tween runs, and each event reaches what it is built
@@ -60210,6 +60342,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
+  testTheLspCommandFindsTheEditorsPort,
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testTheTestCommandRunsAndJudgesAProject,

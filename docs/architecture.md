@@ -184,6 +184,18 @@ and [Spread benches](spread.md) describes it. Both commands start and watch thei
 every Nth run and writes the outcomes with `store_var`, and in the one engine started after the
 workers it reads them back, so the bench folds the same values in the same order as it does alone.
 
+`gdharness lsp` connects a harness that speaks LSP over stdio to the GDScript language server of
+the project's open editor, passing the bytes through unparsed (`lsp-bridge.ts`). It never starts
+an editor. An editor it started would take the port from the one already open, which then does not
+try again, and every answer would come from a process nobody can see. The editor addon writes the
+ports each editor process serves to `.godot/gdharness-editors/<pid>.json` and removes the file as
+the editor closes. The bridge tries `--port` or `GDHARNESS_LSP_PORT` when given, and otherwise each
+live editor's port, newest first, then Godot's 6005. Before passing anything through, it checks
+that the port serves this project, since a port can belong to another project's editor. A record
+counts only while the process under its pid started before the record was written. Records whose
+process has gone are deleted. A gate's `--import` loads the addon too and writes a record, but its
+command line marks it as a one-off job, so it is passed over.
+
 Every tool is declared in one table and dispatched from it, so a tool the server answers is a tool
 the documentation lists and a fixture drives. The reference on this site is rendered from that same
 table.

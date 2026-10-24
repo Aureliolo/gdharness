@@ -19,6 +19,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -5558,6 +5559,120 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
   });
 }
 
+/** Every whole LSP message in [param bytes], in order. */
+function lspMessages(bytes: Buffer): Record<string, unknown>[] {
+  const messages: Record<string, unknown>[] = [];
+  let at = 0;
+  for (;;) {
+    const headerEnd = bytes.indexOf('\r\n\r\n', at);
+    if (headerEnd < 0) {
+      return messages;
+    }
+    const length = Number(
+      /Content-Length: (\d+)/i.exec(bytes.subarray(at, headerEnd).toString('ascii'))?.[1],
+    );
+    const bodyStart = headerEnd + 4;
+    if (!Number.isInteger(length) || bytes.length < bodyStart + length) {
+      return messages;
+    }
+    messages.push(
+      JSON.parse(bytes.subarray(bodyStart, bodyStart + length).toString('utf8')) as Record<string, unknown>,
+    );
+    at = bodyStart + length;
+  }
+}
+
+/**
+ * `gdharness lsp` pipes a stdio client to the editor's language server, found from the port the
+ * editor recorded.
+ *
+ * The fixture's editor serves on a port reserved for it rather than Godot's default, and the bridge
+ * is given no port and no GDHARNESS_LSP_PORT, so the answer can come only from the record. The
+ * initialize goes through untouched and is answered for this project, with no request to move to
+ * another; the client closing its input ends the bridge cleanly. Asked about a project no editor
+ * serves, given this editor's port, it refuses and names the project that port belongs to.
+ */
+async function testTheLspCommandBridgesToTheEditor({ project, lspPort }: Editor): Promise<void> {
+  const recorded = readdirSync(join(project, '.godot', 'gdharness-editors')).map((name): unknown =>
+    JSON.parse(readFileSync(join(project, '.godot', 'gdharness-editors', name), 'utf8')),
+  );
+  assert.ok(
+    recorded.some((one) => get(one, 'lsp_port') === lspPort && typeof get(one, 'pid') === 'number'),
+    `the editor recorded the port it serves: ${JSON.stringify(recorded)}`,
+  );
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env['GDHARNESS_LSP_PORT'];
+  const bridge = spawnHidden(process.execPath, ['build/cli.js', 'lsp', project, '--wait', '60'], {
+    env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let out = Buffer.alloc(0);
+  let said = '';
+  bridge.stdout.on('data', (chunk: Buffer) => {
+    out = Buffer.concat([out, chunk]);
+  });
+  bridge.stderr.on('data', (chunk: Buffer) => {
+    said += String(chunk);
+  });
+  const ended = new Promise<number | null>((resolveEnd) => {
+    bridge.once('exit', (code) => {
+      resolveEnd(code);
+    });
+  });
+  try {
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { processId: null, rootPath: project, rootUri: pathToFileURL(project).href, capabilities: {} },
+    });
+    bridge.stdin.write(`Content-Length: ${String(Buffer.byteLength(body))}\r\n\r\n${body}`);
+    const until = Date.now() + LSP_READY_TIMEOUT_MS;
+    let messages = lspMessages(out);
+    while (
+      !messages.some((message) => message['id'] === 1) &&
+      Date.now() < until &&
+      bridge.exitCode === null
+    ) {
+      await delay(100);
+      messages = lspMessages(out);
+    }
+    const answer = messages.find((message) => message['id'] === 1);
+    assert.ok(answer !== undefined, `the editor answered initialize through the bridge: ${said}`);
+    assert.equal(typeof get(answer, 'result', 'capabilities'), 'object', JSON.stringify(answer));
+    assert.deepEqual(
+      messages.filter((message) => message['method'] === 'gdscript_client/changeWorkspace'),
+      [],
+      'and answered it for this project',
+    );
+    bridge.stdin.end();
+    assert.equal(await ended, 0, `the client ending its input ends the bridge: ${said}`);
+  } finally {
+    bridge.kill();
+  }
+
+  const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-lsp-elsewhere-'));
+  try {
+    writeFileSync(join(elsewhere, 'project.godot'), 'config_version=5\n');
+    const refused = spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'lsp', elsewhere, '--port', String(lspPort), '--wait', '0'],
+      { encoding: 'utf8', env, timeout: TOOL_TIMEOUT_MS },
+    );
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.equal(refused.stdout, '', 'nothing but LSP traffic goes to standard output');
+    assert.match(
+      refused.stderr,
+      new RegExp(
+        `no language server of .+ answered in 0 s\\.\\n {2}port ${String(lspPort)} \\(--port\\): The language server on port ${String(lspPort)} belongs to the editor of .+; no editor of .+ answers there\\.`,
+      ),
+      refused.stderr,
+    );
+  } finally {
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+}
+
 /**
  * The language server tools, which answer from the editor's own server rather than from the addon.
  *
@@ -7256,6 +7371,7 @@ async function main(): Promise<void> {
     ['testASettingReadFromTheEditor', testASettingReadFromTheEditor],
     ['testAPresetAddedBesideTheEditorIsNoted', testAPresetAddedBesideTheEditorIsNoted],
     ['testLanguageServer', testLanguageServer],
+    ['testTheLspCommandBridgesToTheEditor', testTheLspCommandBridgesToTheEditor],
     ['testAClassWrittenUnderTheEditorNeedsARescan', testAClassWrittenUnderTheEditorNeedsARescan],
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
