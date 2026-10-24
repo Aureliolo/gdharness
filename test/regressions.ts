@@ -22,7 +22,7 @@ import {
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -45,6 +45,7 @@ import {
 } from '../src/boot-note.js';
 import { breakpointNotePath, readBreakpointNote, writeBreakpointNote } from '../src/breakpoint-note.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
+import { callProgress, withCallSignal } from '../src/call-signal.js';
 import {
   type Contradicted,
   cachedClasses,
@@ -92,14 +93,32 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from '../src/editor-log.js';
-import { selfTypedExports, selfTypedSentence } from '../src/engine-leaks.js';
+import {
+  EngineUsageError,
+  heldToCores,
+  inTurns,
+  macMemoryLevel,
+  memoryRoomOf,
+  roomFor,
+  windowsCommitLeft,
+} from '../src/engine-launch.js';
+import {
+  selfTypedExports,
+  selfTypedSentence,
+  WALK_BEGAN,
+  WALK_ENDED,
+  WALK_STOPPED_SENTENCE,
+  walkStoppedPartWay,
+} from '../src/engine-leaks.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import {
   EngineSlots,
   holderOf,
   lockIsFree,
+  machineSlots,
   ownStart,
   START_TOLERANCE_MS,
+  slotWaitSaid,
   UNWRITTEN_MS,
 } from '../src/engine-slots.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
@@ -148,12 +167,21 @@ import {
 import { freeLibraryCopies, seedExtensionList } from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import {
+  DEFAULT_LSP_PORT,
   GodotLSPClient,
   handleLSPTool,
   LSPTimeout,
   narrowedCompletions,
   typedBefore,
 } from '../src/lsp_client.js';
+import {
+  editorRecordsIn,
+  LSP_WAIT_SECONDS,
+  liveEditorRecords,
+  lspOptionsOf,
+  lspPortChoices,
+  removeLeftRecords,
+} from '../src/lsp-bridge.js';
 import {
   exportedBuild,
   isSameDirectory,
@@ -325,12 +353,16 @@ import {
   installAddons,
   installedEditorDigest,
   installedRuntimeDigest,
+  loaderState,
   QUIET_SCENES_SETTING,
   RUNTIME_AUTOLOAD,
+  RUNTIME_SCRIPT,
   removeAddons,
   SCRIPT_RUNS_SETTING,
   shippedEditorDigest,
+  shippedLoader,
   shippedRuntimeDigest,
+  writeLoader,
 } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
 import {
@@ -342,6 +374,7 @@ import {
   spawnShown,
   spawnSyncHidden,
 } from '../src/spawn.js';
+import { type ArmPlayed, armsPlayed, shareFaults, shareOf } from '../src/spread-run.js';
 import { RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import { SuiteFingerprints } from '../src/suite-fingerprint.js';
 import {
@@ -372,17 +405,7 @@ import {
   unitsOf,
   windowedSaid,
 } from '../src/suite-plan.js';
-import {
-  heldToCores,
-  inTurns,
-  macMemoryLevel,
-  memoryRoomOf,
-  roomFor,
-  roomSaid,
-  TestUsageError,
-  testOptionsOf,
-  windowsCommitLeft,
-} from '../src/suite-run.js';
+import { roomSaid, testOptionsOf } from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -7604,7 +7627,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.match(
       await call('editor_run', { op: 'start', projectPath: '/p', frames: 3 }),
-      /start takes: projectPath, scene, args, engineArgs, headless, visible, silent, executable, savesIn, env, runtimeWaitMs/,
+      /start takes: projectPath, scene, suites, args, engineArgs, headless, visible, silent, executable, savesIn, env, runtimeWaitMs/,
       'and the refusal says what start takes instead',
     );
     assert.match(
@@ -7844,7 +7867,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 153;
+const READ_IN_WORDS = 154;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -9364,7 +9387,7 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
       'config_version=5\n\n[autoload]\n\n' +
         'GdharnessLoader="*res://tools/gdharness_loader.gd"\n' +
         'Gone="*res://tools/not_here.gd"\n' +
-        `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n`,
+        `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`,
     );
 
     const json = doctor('--json');
@@ -9382,14 +9405,14 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
       'and so is any other entry naming nothing',
     );
     assert.equal(
-      said.filter((problem) => problem.includes(RUNTIME_AUTOLOAD.path)).length,
+      said.filter((problem) => problem.includes(RUNTIME_SCRIPT)).length,
       0,
       `our own script is covered by the addon line and not said twice: ${said.join(' | ')}`,
     );
     assert.equal(
       said.filter((problem) => problem.includes('is not installed')).length,
-      3,
-      'which is the line that covers it',
+      ADDONS.length,
+      'which is the line that covers it, one for each addon',
     );
     const loader = get(report, 'runtimeLoaderAutoload');
     assert.equal(get(loader, 'exists'), false, 'and the loader entry says its file is not there');
@@ -17986,7 +18009,7 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
   const project = (autoload: 'runtime' | 'herald' | 'none'): string => {
     const dir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-came-and-went-'));
     const registered = {
-      runtime: `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n`,
+      runtime: `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`,
       herald: '\n[autoload]\n\nHerald="*res://herald.gd"\n',
       none: '',
     }[autoload];
@@ -18096,7 +18119,7 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
       join(project, 'project.godot'),
       '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ComingUp"\n' +
         'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
-        `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n`,
+        `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`,
     );
     writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
     cpSync(
@@ -19788,16 +19811,21 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
 }
 
 /**
- * Which autoload entries this tool may rewrite, which is only the one it wrote.
+ * Which autoload entries this tool may rewrite: the shipped loader, and the addon's own script that
+ * earlier versions wrote.
  *
  * Covered without an engine as well as through the CLI, because the engine-backed test is skipped
- * on any machine without Godot and this is the rule that decides whether a socket reaches a
- * shipped build. Nothing else in a project can see the difference: the wrapper stays on disk and
- * correct, and a suite that exercises the script rather than reading project.godot passes either
- * way.
+ * on any machine without Godot. Nothing else in a project can see the difference: a project's own
+ * loader stays on disk and correct, and a suite that exercises the script rather than reading
+ * project.godot passes either way.
  */
 function testOnlyOurOwnAutoloadIsRewritten(): void {
-  assert.equal(autoloadIsOurs('res://addons/gdharness_runtime/runtime_autoload.gd'), true);
+  assert.equal(autoloadIsOurs('res://gdharness/loader.gd'), true, 'the loader gdharness writes');
+  assert.equal(
+    autoloadIsOurs('res://addons/gdharness_runtime/runtime_autoload.gd'),
+    true,
+    'and the old entry',
+  );
   assert.equal(autoloadIsOurs(null), true, 'nothing registered is ours to register');
   assert.equal(
     autoloadIsOurs('res://boot/gdharness_loader.gd'),
@@ -39068,6 +39096,166 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
 }
 
 /**
+ * Suites handed to editor_run start play in the tests addon's scene, where the profiler sees them.
+ *
+ * A suite run by gdharness test or project_test is a `-s` script, which the profiler never attaches
+ * to, so a game wanting its suites' cost by function kept a bench scene and a runner of its own.
+ * Asserted on what only a played, profiled run has: the suite's own functions in the profile, with
+ * their calls. One suite steps a callable a frame through GdhBench, which stops on the step's false.
+ * The refusals are asserted on a project without the scene, and with arguments suites cannot take.
+ */
+async function testSuitesPlayInASceneTheProfilerSees(): Promise<void> {
+  const engine = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!engine || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('suites scene regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-suites-scene-'));
+  const bare = mkdtempSync(join(tmpdir(), 'gdharness-suites-bare-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-suites-rt-'));
+  const settings = (name: string): string =>
+    `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="${name}"\n\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n`;
+  try {
+    for (const dir of [project, bare]) {
+      cpSync(gdunit, join(dir, 'addons', 'gdUnit4'), { recursive: true });
+      cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(dir, 'addons', 'gdharness_runtime'), {
+        recursive: true,
+      });
+      mkdirSync(join(dir, 'tests'));
+      writeFileSync(
+        join(dir, 'tests', 'quick_test.gd'),
+        'extends GdUnitTestSuite\n\n\nfunc test_passes() -> void:\n\tassert_bool(true).is_true()\n',
+      );
+    }
+    writeFileSync(join(project, 'project.godot'), settings('SuitesScene'));
+    writeFileSync(join(bare, 'project.godot'), settings('SuitesBare'));
+    cpSync(join('src', 'godot', 'addons', 'gdharness_tests'), join(project, 'addons', 'gdharness_tests'), {
+      recursive: true,
+    });
+    mkdirSync(join(project, 'tests', 'heavy'));
+    writeFileSync(
+      join(project, 'tests', 'heavy', 'heavy_test.gd'),
+      [
+        'class_name HeavyTest',
+        'extends GdUnitTestSuite',
+        '',
+        'var _stepped: int = 0',
+        '',
+        '',
+        'func churn(rounds: int) -> int:',
+        '\tvar sum: int = 0',
+        '\tfor i: int in rounds:',
+        '\t\tsum += i % 7',
+        '\treturn sum',
+        '',
+        '',
+        // Work the clock can measure: the engine's totals keep the busiest functions up to a cap,
+        // and a step taking no time lost its place to compiled functions that never ran.
+        'func step() -> bool:',
+        '\t_stepped += 1',
+        '\tvar spent: int = 0',
+        '\tfor i: int in 20000:',
+        '\t\tspent += i % 3',
+        '\treturn _stepped < 4 and spent > 0',
+        '',
+        '',
+        'func test_churns() -> void:',
+        '\tassert_int(churn(100000)).is_greater(0)',
+        '',
+        '',
+        'func test_steps_a_frame_until_told_to_stop() -> void:',
+        '\tvar timed: Dictionary = await GdhBench.each_frame(get_tree(), 10, step)',
+        '\tprint("stepped %d" % timed["steps"])',
+        '\tassert_int(timed["steps"]).is_equal(4)',
+        '\tassert_float(timed["ms_each"]).is_greater_equal(0.0)',
+        '',
+      ].join('\n'),
+    );
+    const server = new ServerProcess({
+      env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    });
+    try {
+      await server.initialize('regression-test');
+      const call = async (tool: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name: tool, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ??
+        '';
+
+      const refusals: [Record<string, unknown>, RegExp][] = [
+        [{ op: 'check', projectPath: project, suites: 'tests' }, /^editor_run check does not take suites\./],
+        // A scene not there is refused before an engine is started on it, for both.
+        [
+          { op: 'start', projectPath: project, scene: 'gone.tscn' },
+          /^No scene at res:\/\/gone\.tscn in the project/,
+        ],
+        [
+          { op: 'check', projectPath: project, scene: 'gone.tscn' },
+          /^No scene at res:\/\/gone\.tscn in the project/,
+        ],
+        [
+          { op: 'start', projectPath: project, suites: 'tests', scene: 'a.tscn' },
+          /takes no scene and no executable/,
+        ],
+        [
+          { op: 'start', projectPath: project, suites: [] },
+          /^suites is an empty list: name a suite file or a directory\./,
+        ],
+        [
+          { op: 'start', projectPath: project, suites: ['tests/gone_test.gd'] },
+          /^Nothing at res:\/\/tests\/gone_test\.gd/,
+        ],
+        [
+          { op: 'start', projectPath: bare, suites: 'tests' },
+          /^The project has no addons\/gdharness_tests\/suites\.tscn[\s\S]*upgrade/,
+        ],
+      ];
+      for (const [args, said] of refusals) {
+        const answer = await call('editor_run', args);
+        assert.match(answer, said, `${JSON.stringify(args)}: ${answer}`);
+      }
+
+      const started = await call('editor_run', {
+        op: 'start',
+        projectPath: project,
+        suites: ['tests'],
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(started, /"started": true/, started);
+      const waited = await call('editor_run', { op: 'wait', timeoutMs: 120_000 });
+      assert.match(waited, /"running": false/, `the suites ran to their end: ${waited}`);
+      assert.match(waited, /"exitCode": 0/, `and gdUnit4 passed them: ${waited}`);
+      const printed = await call('editor_output', {});
+      assert.match(printed, /stepped 4/, `GdhBench stopped on the step's false: ${printed}`);
+      assert.match(printed, /test_churns/, printed);
+      assert.match(printed, /test_passes/, `the directory's other suite ran too: ${printed}`);
+
+      // Every function, since gdUnit4's own come first by self time and the step costs next to nothing.
+      const profiled: unknown = JSON.parse(await call('editor_run', { op: 'profile', limit: 5000 }));
+      const shown = JSON.stringify(profiled);
+      const rows = asArray(get(profiled, 'functions'));
+      const row = (name: string): unknown => rows.find((one) => get(one, 'function') === name);
+      assert.deepEqual(
+        [get(row('HeavyTest.churn'), 'script'), get(row('HeavyTest.churn'), 'calls')],
+        ['res://tests/heavy/heavy_test.gd', 1],
+        `the suite's own function, called once by its case: ${shown}`,
+      );
+      assert.equal(get(row('HeavyTest.step'), 'calls'), 4, `stepped once a frame, four times: ${shown}`);
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(bare);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A run started with profile: true answers which GDScript functions took its time.
  *
  * The keeper is the game's debugger and sums the engine's own script profiler. Four runs, because
@@ -40773,6 +40961,51 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     'and a run that reported nothing held at exit says nothing of it',
   );
 
+  // Below 4.8 the runner's markers say whether the engine's shutdown cleared every script. One that
+  // stopped part way reports what it never reached, so its leaks are noted and not counted; a walk
+  // that went whole, or a run without the markers, as on 4.8, counts them as before.
+  const leakLines =
+    'WARNING: 1331 ObjectDB instances were leaked at exit (run with `--verbose` for details).\nERROR: 391 resources still in use at exit (run with --verbose for details).';
+  const stopped = judgeEngine(readRun(`${rows([1])}\n${WALK_BEGAN}\n${leakLines}`), declaredRows, clean);
+  assert.deepEqual(
+    [stopped.passed, stopped.faults, stopped.notes],
+    [
+      true,
+      [],
+      [
+        `${WALK_STOPPED_SENTENCE} It said: WARNING: 1331 ObjectDB instances were leaked at exit (run with \`--verbose\` for details). ERROR: 391 resources still in use at exit (run with --verbose for details).`,
+      ],
+    ],
+    'a walk that stopped part way notes its leaks',
+  );
+  assert.match(WALK_STOPPED_SENTENCE, /godot#117991, fixed in 4\.8 by godot#120976/);
+  for (const [said, around] of [
+    ['a walk that cleared every script', `${WALK_BEGAN}\n${leakLines}\n${WALK_ENDED}`],
+    ['a run without the markers', leakLines],
+    ['the oldest marker alone', `${leakLines}\n${WALK_ENDED}`],
+  ] as const) {
+    const judged = judgeEngine(readRun(`${rows([1])}\n${around}`), declaredRows, clean);
+    assert.deepEqual(
+      [judged.passed, judged.faults.length, judged.notes],
+      [false, 2, []],
+      `${said} counts its leaks: ${judged.faults.join('\n')}`,
+    );
+  }
+  assert.deepEqual(
+    judgeEngine(readRun(`${rows([1])}\n${WALK_BEGAN}`), declaredRows, clean).notes,
+    [],
+    'and a stopped walk with nothing reported notes nothing',
+  );
+  assert.deepEqual(
+    [
+      walkStoppedPartWay([WALK_BEGAN]),
+      walkStoppedPartWay([WALK_BEGAN, WALK_ENDED]),
+      walkStoppedPartWay([WALK_ENDED, WALK_BEGAN]),
+      walkStoppedPartWay([]),
+    ],
+    [true, false, false, false],
+  );
+
   const shortOfCases = judgeEngine(readRun(rows([1])), handed(['test_a', 'test_c'], {}), clean);
   assert.deepEqual(
     shortOfCases.faults,
@@ -41880,7 +42113,7 @@ function testTheTestCommandReadsItsOwnOptions(): void {
     ] as const) {
       assert.throws(
         () => testOptionsOf(args, project),
-        (error: unknown) => error instanceof TestUsageError && said.test(String(error)),
+        (error: unknown) => error instanceof EngineUsageError && said.test(String(error)),
         String(args),
       );
     }
@@ -41926,6 +42159,706 @@ function windowSuite(declared: string): string {
     '\tassert_bool(shown.visible).is_true()',
     '',
   ].join('\n');
+}
+
+/**
+ * One budget of engines for the whole machine, which every engine gdharness starts waits on.
+ *
+ * Each game's gate once took four slots of its own checkout's, so a machine running three gates and
+ * a session's tools ran twelve engines and every gate ran past its wall clock. The slots are now one
+ * directory and one count for the machine, worked out the same way by every tool that starts an
+ * engine, and the server's own engines take them too: a headless operation through `runEngine` and a
+ * boot check through the engine it holds. Both are held behind a slot this process took, and must
+ * still be waiting when it is given back.
+ */
+async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
+  const machine = (env: NodeJS.ProcessEnv, platform: NodeJS.Platform, processors = 32) => ({
+    env,
+    platform,
+    processors,
+    home: join(sep, 'home', 'me'),
+    cwd: join(sep, 'work'),
+  });
+  const none = { directory: null, count: null };
+  const cases: [string, ReturnType<typeof machine>, string, number][] = [
+    [
+      'the cache home on every platform',
+      machine({ XDG_CACHE_HOME: join(sep, 'cache'), LOCALAPPDATA: join(sep, 'local') }, 'win32'),
+      join(sep, 'cache', 'gdharness', 'slots'),
+      6,
+    ],
+    [
+      "Windows' local data without one",
+      machine({ XDG_CACHE_HOME: '', LOCALAPPDATA: join(sep, 'local') }, 'win32', 4),
+      join(sep, 'local', 'gdharness', 'slots'),
+      1,
+    ],
+    [
+      'the home cache elsewhere',
+      machine({ LOCALAPPDATA: join(sep, 'local') }, 'linux', 10),
+      join(sep, 'home', 'me', '.cache', 'gdharness', 'slots'),
+      2,
+    ],
+    [
+      'Windows with neither',
+      machine({}, 'win32', 1),
+      join(sep, 'home', 'me', '.cache', 'gdharness', 'slots'),
+      1,
+    ],
+    [
+      'the variables',
+      machine(
+        { GODOT_ENGINE_SLOTS: 'slots', GODOT_ENGINE_SLOT_COUNT: '3', XDG_CACHE_HOME: join(sep, 'c') },
+        'linux',
+      ),
+      resolve(sep, 'work', 'slots'),
+      3,
+    ],
+  ];
+  for (const [said, on, directory, count] of cases) {
+    assert.deepEqual(machineSlots(none, on), { directory, count }, said);
+  }
+  assert.deepEqual(
+    machineSlots(
+      { directory: join(sep, 'asked'), count: 2 },
+      machine({ GODOT_ENGINE_SLOTS: 'slots', GODOT_ENGINE_SLOT_COUNT: '3' }, 'linux'),
+    ),
+    { directory: join(sep, 'asked'), count: 2 },
+    "a command's own --slots and --slot-count come first",
+  );
+  for (const counted of ['0', 'four', '2.5']) {
+    assert.throws(
+      () => machineSlots(none, machine({ GODOT_ENGINE_SLOT_COUNT: counted }, 'linux')),
+      (error: unknown) =>
+        error instanceof EngineUsageError &&
+        error.message === `GODOT_ENGINE_SLOT_COUNT takes a whole number above 0, not ${counted}.`,
+      counted,
+    );
+  }
+  // The suites take slots of their own, which every server and command they start inherits.
+  assert.deepEqual(machineSlots().directory, join(tmpdir(), 'gdharness-test-slots'));
+  assert.equal(
+    slotWaitSaid(41_400, 6, 'slots'),
+    'Waiting 41 s so far for an engine: all 6 engine slots on this machine (slots) are in use, by a gate or another tool, and the engine starts when one is given back.',
+  );
+  // A wait reports from its own start and so does the run after it, and the client is sent numbers
+  // that rise all the same.
+  const sent: number[] = [];
+  await withCallSignal(
+    undefined,
+    () => {
+      for (const number of [5, 3, 3, 7]) {
+        callProgress()?.(number, 'said');
+      }
+      return Promise.resolve();
+    },
+    (number) => {
+      sent.push(number);
+    },
+  );
+  assert.deepEqual(sent, [5, 6, 7, 8]);
+
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names nothing usable.');
+    }
+    console.log('machine slot regression: engine half skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-machine-slot-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-machine-slots-'));
+  const ours = join(slots, '0.lock');
+  const hold = async (): Promise<void> => {
+    writeFileSync(ours, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+  };
+  // Who holds the one slot, read every 20 ms until [param pid] does or the time runs out.
+  const heldBy = async (pid: number | undefined, withinMs: number): Promise<boolean> => {
+    const until = Date.now() + withinMs;
+    while (Date.now() < until) {
+      try {
+        if (holderOf(readFileSync(ours, 'utf8'))?.pid === pid) {
+          return true;
+        }
+      } catch {
+        // Between its holders.
+      }
+      await delay(20);
+    }
+    return false;
+  };
+  const env = { GODOT_PATH: godotPath, GODOT_ENGINE_SLOTS: slots, GODOT_ENGINE_SLOT_COUNT: '1' };
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="MachineSlot"\nrun/main_scene="res://main.tscn"\n',
+      'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+    });
+
+    await hold();
+    const classes = spawnHidden(process.execPath, ['build/cli.js', 'classes', project], {
+      env: { ...process.env, ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let said = '';
+    classes.stdout.on('data', (chunk: Buffer) => {
+      said += String(chunk);
+    });
+    classes.stderr.on('data', (chunk: Buffer) => {
+      said += String(chunk);
+    });
+    const ended = new Promise<number | null>((resolveEnd) => {
+      classes.once('exit', (code) => {
+        resolveEnd(code);
+      });
+    });
+    await delay(3000);
+    assert.deepEqual(
+      [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, readdirSync(slots)],
+      [null, process.pid, ['0.lock']],
+      `the command waits behind the slot held, and takes no other: ${said}`,
+    );
+    rmSync(ours);
+    assert.ok(await heldBy(classes.pid, 30_000), `then takes the slot given back: ${said}`);
+    assert.equal(await ended, 0, said);
+    assert.match(said, /"path": "res:\/\/\.godot\/global_script_class_cache\.cfg"/, said);
+    assert.deepEqual(readdirSync(slots), [], `and gives it back: ${said}`);
+
+    await hold();
+    const server = new ServerProcess({ env });
+    try {
+      await server.initialize('regression-test');
+      const checking = server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { op: 'check', projectPath: project },
+          _meta: { progressToken: 'slot' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      await delay(3000);
+      assert.equal(holderOf(readFileSync(ours, 'utf8'))?.pid, process.pid, 'the boot check waits too');
+      // A client that asked for progress is told why nothing has started, rather than left silent.
+      const told = server.notifications
+        .filter((message) => message.method === 'notifications/progress')
+        .map((message) => text(get(message, 'params', 'message')));
+      assert.deepEqual(
+        told,
+        [
+          `Waiting for an engine: the one engine slot on this machine (${slots}) is in use, by a gate or another tool, and the engine starts when one is given back.`,
+        ],
+        JSON.stringify(server.notifications),
+      );
+      rmSync(ours);
+      assert.ok(await heldBy(server.child.pid, 30_000), 'then its engine runs in the slot given back');
+      const checked = JSON.parse(textOf(await checking) ?? '{}') as unknown;
+      assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
+      assert.deepEqual(readdirSync(slots), [], 'and the server gives it back once the run is read');
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project, slots);
+  }
+}
+
+/**
+ * `gdharness lsp` finds the language server from what each editor of the project recorded.
+ *
+ * An editor gdharness opened beside another project's serves on a port of its own, which Godot
+ * records nowhere, so the bridge reads the file the addon writes for each editor process. A record
+ * outlives a crash and a pid is handed out again, so a record counts only while the process under
+ * its pid started before it was written; a gate's `--import` loads the addon too and is nobody's
+ * editor. A left record is deleted only when its pid is provably not its writer: one the platform
+ * would not say about may be a live editor.
+ */
+function testTheLspCommandFindsTheEditorsPort(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-lsp-records-'));
+  try {
+    const directory = join(project, '.godot', 'gdharness-editors');
+    mkdirSync(directory, { recursive: true });
+    const record = (pid: number, lspPort: number, writtenAtMs: number, protocol = 1): string =>
+      JSON.stringify({ protocol, pid, lsp_port: lspPort, dap_port: 6006, written_at_ms: writtenAtMs });
+    writeFileSync(join(directory, '101.json'), record(101, 6101, 5000));
+    writeFileSync(join(directory, '102.json'), record(102, 6102, 9000));
+    writeFileSync(join(directory, '103.json'), record(103, 6103, 7000, 2));
+    writeFileSync(join(directory, '104.json'), '{"protocol": 1, "pid": 104');
+    writeFileSync(join(directory, 'notes.json'), record(105, 6105, 8000));
+    writeFileSync(join(directory, '106.json'), record(106, 0, 8000));
+    const records = editorRecordsIn(project);
+    assert.deepEqual(
+      records.map((one) => [one.pid, one.lspPort]),
+      [
+        [102, 6102],
+        [101, 6101],
+      ],
+      'newest first, and only the shape the addon writes',
+    );
+    assert.deepEqual(editorRecordsIn(join(project, 'nowhere')), [], 'a project no editor recorded');
+
+    const startedAt = new Map([
+      [101, 4000],
+      [102, 11_000],
+    ]);
+    assert.deepEqual(
+      liveEditorRecords(records, startedAt, new Map([[101, null]])).map((one) => one.pid),
+      [101],
+      'a process started after its record holds a reused pid',
+    );
+    assert.deepEqual(
+      liveEditorRecords(
+        records,
+        new Map([
+          [101, 4000],
+          [102, 8500],
+        ]),
+        new Map([[101, '--import']]),
+      ).map((one) => one.pid),
+      [],
+      "a gate importing the project is nobody's editor, and a command line not read is not taken as one",
+    );
+    assert.deepEqual(
+      liveEditorRecords(records, new Map([[102, 9800]]), new Map([[102, null]])).map((one) => one.pid),
+      [102],
+      'started within the second some platforms round a start to',
+    );
+
+    // 101 started before its record and stays; 102's pid went to a later process. Of the two the
+    // platform did not answer for, only the one whose pid nothing holds is deleted.
+    writeFileSync(join(directory, '108.json'), record(108, 6108, 3000));
+    writeFileSync(join(directory, '109.json'), record(109, 6109, 3000));
+    const removed = removeLeftRecords(editorRecordsIn(project), startedAt, (pid) => pid === 109);
+    assert.equal(removed, 2);
+    assert.deepEqual(
+      readdirSync(directory).sort(),
+      ['101.json', '103.json', '104.json', '106.json', '109.json', 'notes.json'],
+      'only the records provably left behind are deleted',
+    );
+
+    assert.deepEqual(lspPortChoices(7001, '7002', records), [{ port: 7001, from: '--port' }]);
+    assert.deepEqual(lspPortChoices(undefined, '7002', records), [
+      { port: 7002, from: 'GDHARNESS_LSP_PORT' },
+    ]);
+    const recorded = [
+      { file: 'a', pid: 102, lspPort: 6102, writtenAtMs: 9000 },
+      { file: 'b', pid: 101, lspPort: DEFAULT_LSP_PORT, writtenAtMs: 5000 },
+    ];
+    assert.deepEqual(
+      lspPortChoices(undefined, 'soon', recorded),
+      [
+        { port: 6102, from: 'the editor with pid 102' },
+        { port: DEFAULT_LSP_PORT, from: 'the editor with pid 101' },
+      ],
+      'a variable that names no port is passed over, and the default is not tried twice',
+    );
+    assert.deepEqual(lspPortChoices(undefined, '', []), [
+      { port: DEFAULT_LSP_PORT, from: "Godot's default" },
+    ]);
+
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    assert.deepEqual(lspOptionsOf([project, '--port', '7003', '--wait', '0'], tmpdir()), {
+      projectPath: resolve(project),
+      port: 7003,
+      waitSeconds: 0,
+    });
+    assert.deepEqual(lspOptionsOf([], project), {
+      projectPath: resolve(project),
+      port: undefined,
+      waitSeconds: LSP_WAIT_SECONDS,
+    });
+    for (const [args, said] of [
+      [['--port', '70000'], /^--port takes a port, 1 to 65535, not 70000\.$/],
+      [['--port'], /^--port takes a port, 1 to 65535, not nothing\.$/],
+      [['--wait', '-1'], /^--wait takes a number of seconds, not -1\.$/],
+      [['--verbose'], /^Unknown option --verbose\. gdharness lsp takes --port N and --wait S\.$/],
+      [[project, 'other'], /^gdharness lsp takes one project, and was given .+ and other\.$/],
+      [[join(project, '.godot')], /^Not a Godot project: .+ holds no project\.godot\.$/],
+    ] as const) {
+      assert.throws(
+        () => lspOptionsOf(args, project),
+        (error: unknown) => error instanceof EngineUsageError && said.test(error.message),
+        args.join(' '),
+      );
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The tests addon's waits, tween steps and input events, in a real engine: a tween stepped to its
+ * end leaves the callback after it until `past` gives it a frame more, a wait asks once a frame and
+ * gives up on its bound, `still` holds while a tween runs, and each event reaches what it is built
+ * for when the engine is handed it, a button, an action, a key binding and a pad binding.
+ */
+function testTheTestHelpersWaitStepAndPress(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names nothing usable.');
+    }
+    console.log('test helpers regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helpers-'));
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Helpers"\n',
+      'case/helpers.tscn':
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://case/helpers.gd" id="1"]\n\n[node name="Helpers" type="Node"]\nscript = ExtResource("1")\n',
+      'case/helpers.gd': [
+        'extends Node',
+        '',
+        'var value: float = 0.0',
+        'var after: bool = false',
+        'var pressed_count: int = 0',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar tween: Tween = create_tween()',
+        '\ttween.tween_property(self, "value", 1.0, 1.0)',
+        '\ttween.tween_callback(func() -> void: after = true)',
+        '\tGdhTweens.step(get_tree(), 0.5)',
+        '\tprint("half=%.3f" % value)',
+        '\tGdhTweens.step(get_tree(), 0.5)',
+        '\tprint("whole=%.3f after=%s" % [value, after])',
+        '\tGdhTweens.past(get_tree(), 0.0)',
+        '\tprint("past after=%s" % after)',
+        '\tvar asked: Array[int] = [0]',
+        '\tvar fifth: Callable = func() -> bool:',
+        '\t\tasked[0] += 1',
+        '\t\treturn asked[0] >= 5',
+        '\tvar reached: bool = await GdhWait.until(get_tree(), fifth)',
+        '\tprint("until=%s asked=%d" % [reached, asked[0]])',
+        '\tvar began: int = Time.get_ticks_msec()',
+        '\tvar never: bool = await GdhWait.until(get_tree(), func() -> bool: return false, 200)',
+        '\tprint("never=%s bounded=%s" % [never, Time.get_ticks_msec() - began < 5000])',
+        '\tvar long: Tween = create_tween()',
+        '\tlong.tween_property(self, "value", 2.0, 30.0)',
+        '\tvar still_running: bool = await GdhWait.still(get_tree(), 3, 200)',
+        '\tlong.kill()',
+        '\tvar still_after: bool = await GdhWait.still(get_tree())',
+        '\tprint("still while running=%s after kill=%s" % [still_running, still_after])',
+        '\tvar button: Button = Button.new()',
+        '\tbutton.position = Vector2(10, 10)',
+        '\tbutton.size = Vector2(100, 40)',
+        '\tbutton.pressed.connect(func() -> void: pressed_count += 1)',
+        '\tadd_child(button)',
+        '\tawait GdhWait.frames(get_tree(), 2)',
+        '\tInput.parse_input_event(GdhEvent.click(Vector2(30, 25)))',
+        '\tInput.parse_input_event(GdhEvent.release(Vector2(30, 25)))',
+        '\tawait GdhWait.frames(get_tree(), 2)',
+        '\tprint("button pressed=%d" % pressed_count)',
+        '\tInputMap.add_action("go")',
+        '\tInput.parse_input_event(GdhEvent.action("go"))',
+        '\tawait GdhWait.frames(get_tree(), 1)',
+        '\tprint("action go=%s" % Input.is_action_pressed("go"))',
+        '\tInputMap.add_action("jump")',
+        '\tInputMap.action_add_event("jump", GdhEvent.key(KEY_SPACE))',
+        '\tInput.parse_input_event(GdhEvent.key(KEY_SPACE))',
+        '\tawait GdhWait.frames(get_tree(), 1)',
+        '\tprint("key jump=%s" % Input.is_action_pressed("jump"))',
+        '\tInputMap.add_action("confirm")',
+        '\tInputMap.action_add_event("confirm", GdhEvent.pad(JOY_BUTTON_A))',
+        '\tInput.parse_input_event(GdhEvent.pad(JOY_BUTTON_A))',
+        '\tawait GdhWait.frames(get_tree(), 1)',
+        '\tprint("pad confirm=%s" % Input.is_action_pressed("confirm"))',
+        '\tvar click: InputEventMouseButton = GdhEvent.click(Vector2(3, 4), MOUSE_BUTTON_RIGHT)',
+        '\tprint("click=%d %s %s %s mask=%d" % [click.button_index, click.pressed, click.position, click.global_position, click.button_mask])',
+        '\tvar wheel: InputEventMouseButton = GdhEvent.wheel(Vector2(1, 2), false)',
+        '\tprint("wheel=%d %s" % [wheel.button_index, wheel.pressed])',
+        '\tvar moved: InputEventMouseMotion = GdhEvent.motion(Vector2(5, 6), Vector2(1, 0), MOUSE_BUTTON_MASK_LEFT)',
+        '\tprint("motion=%s %s %s mask=%d" % [moved.position, moved.global_position, moved.relative, moved.button_mask])',
+        '\tvar axis: InputEventJoypadMotion = GdhEvent.axis(JOY_AXIS_LEFT_X, -0.5, 1)',
+        '\tprint("axis=%d %.2f device=%d" % [axis.axis, axis.axis_value, axis.device])',
+        '\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    });
+    const env = { ...process.env, GODOT_PATH: godotPath };
+    const setUp = spawnSyncHidden(
+      process.execPath,
+      [resolve('build', 'cli.js'), 'setup', project, '--no-connect', '--no-skill', '--no-runtime', '--yes'],
+      { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+    );
+    assert.equal(setUp.status, 0, `${setUp.stdout}${setUp.stderr}`);
+    const ran = spawnSyncHidden(
+      godotPath,
+      ['--headless', '--audio-driver', 'Dummy', '--path', project, 'res://case/helpers.tscn'],
+      { encoding: 'utf8', env, timeout: ENGINE_CALL_TIMEOUT_MS },
+    );
+    const said = `${ran.stdout}${ran.stderr}`;
+    assert.equal(ran.status, 0, said);
+    assert.doesNotMatch(said, /SCRIPT ERROR|^ERROR:/m, said);
+    assert.deepEqual(
+      said.split(/\r?\n/).filter((line) => /^[a-z]+[ =]/.test(line) && !line.startsWith('Godot')),
+      [
+        'half=0.500',
+        'whole=1.000 after=false',
+        'past after=true',
+        'until=true asked=5',
+        'never=false bounded=true',
+        'still while running=false after kill=true',
+        'button pressed=1',
+        'action go=true',
+        'key jump=true',
+        'pad confirm=true',
+        'click=2 true (3.0, 4.0) (3.0, 4.0) mask=2',
+        'wheel=5 true',
+        'motion=(5.0, 6.0) (5.0, 6.0) (1.0, 0.0) mask=1',
+        'axis=0 -0.50 device=1',
+      ],
+      said,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * `gdharness spread` against the same bench played on its own: the same table to the last digit,
+ * floats included, from three workers and a gathering engine, none of which announces itself as
+ * the game. Then each way a fan-out can half work, each refused before or after the gathering with
+ * the fault named: a worker that played no arm, one that went another way through the arms, one
+ * that printed an error, a gathering run that skipped an arm, and an outcome that is an object.
+ */
+function testASpreadBenchGathersTheTableItPlaysAlone(): void {
+  // The share each worker plays and the faults read from what they say they played, without an engine.
+  assert.deepEqual(
+    [0, 1, 2].map((index) => shareOf(10, index, 3)),
+    [4, 3, 3],
+    'every third run from the worker index, the first worker taking the remainder',
+  );
+  assert.deepEqual(
+    [0, 1, 2, 3].map((index) => shareOf(2, index, 4)),
+    [1, 1, 0, 0],
+    'workers past the last run play none of it',
+  );
+  const arms = (index: number, workers: number): ArmPlayed[] => [
+    { arm: 'a', runs: 10, played: shareOf(10, index, workers) },
+    { arm: 'b', runs: 7, played: shareOf(7, index, workers) },
+  ];
+  assert.deepEqual(shareFaults([arms(0, 2), arms(1, 2)]), [], 'two workers each playing their own share');
+  assert.deepEqual(
+    shareFaults([arms(0, 2), [{ arm: 'a', runs: 10, played: 4 }, ...arms(1, 2).slice(1)]]),
+    ["worker 1 played 4 of a's 10 runs, and its share is 5"],
+    'a worker that played one run fewer than its share',
+  );
+  assert.deepEqual(
+    shareFaults([arms(0, 2), []]),
+    ['worker 1 played no arm: the scene never asked GdhShare.outcomes for one, or quit before it did'],
+    'a worker that played nothing',
+  );
+  assert.deepEqual(
+    shareFaults([arms(0, 2), arms(1, 2).slice(0, 1)]),
+    [
+      'worker 1 played a (10 runs), and worker 0 played a (10 runs), b (7 runs): which arms a bench plays must depend on its command line alone',
+    ],
+    'a worker that went another way through the arms',
+  );
+  assert.deepEqual(
+    shareFaults([arms(0, 2), null]),
+    ['worker 1 left a line about its arms that cannot be read'],
+    'a line that does not read',
+  );
+  assert.deepEqual(
+    armsPlayed('{"arm":"a","runs":10,"played":4}\n\n{"arm":"b c","runs":7,"played":3}\n'),
+    [
+      { arm: 'a', runs: 10, played: 4 },
+      { arm: 'b c', runs: 7, played: 3 },
+    ],
+    'one arm a line, blank lines passed over',
+  );
+  assert.equal(armsPlayed('{"arm":"a","runs":"10","played":4}'), null, 'a count that is not a number');
+
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names nothing usable.');
+    }
+    console.log('spread regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-slots-'));
+  const runtimeDirectory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-runtime-'));
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Spread"\n',
+      'bench/bench.tscn':
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://bench/bench.gd" id="1"]\n\n[node name="Bench" type="Node"]\nscript = ExtResource("1")\n',
+      'bench/bench.gd': [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar mode: String = ""',
+        '\tvar me: int = -1',
+        '\tfor given: String in OS.get_cmdline_user_args():',
+        '\t\tif given.begins_with("--break="):',
+        '\t\t\tmode = given.trim_prefix("--break=")',
+        '\t\telif given.begins_with("--gdh-share="):',
+        '\t\t\tme = given.trim_prefix("--gdh-share=").get_slice("/", 0).to_int()',
+        '\tif mode == "none" and me == 1:',
+        '\t\tget_tree().quit()',
+        '\t\treturn',
+        '\tvar a: Array = GdhShare.outcomes("a", 10, func(run: int) -> Dictionary: return {"won": run % 3, "most_x": run})',
+        '\tvar b: Array = []',
+        '\tif not (mode == "skip" and GdhShare.gathering()):',
+        '\t\tvar second: String = "c" if mode == "other" and me == 1 else "b"',
+        '\t\tb = GdhShare.outcomes(second, 7, func(run: int) -> Variant: return _played(run, mode))',
+        '\tif mode == "error" and me == 2:',
+        '\t\tpush_error("worker two broke")',
+        '\tif not GdhShare.working():',
+        '\t\tprint("a=", var_to_str(a).replace("\\n", ""))',
+        '\t\tprint("b=", var_to_str(b).replace("\\n", ""))',
+        '\t\tprint("added=", GdhShare.added(a, ["most_x"]))',
+        '\tget_tree().quit()',
+        '',
+        '',
+        'func _played(run: int, mode: String) -> Variant:',
+        '\tif mode == "object" and run == 4:',
+        '\t\treturn RefCounted.new()',
+        '\treturn sqrt(float(run)) / 7.0',
+        '',
+      ].join('\n'),
+    });
+    const env = { ...process.env, GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDirectory };
+    const cli = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(process.execPath, [resolve('build', 'cli.js'), ...args], {
+        encoding: 'utf8',
+        env,
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      });
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const setUp = cli('setup', project, '--no-connect', '--no-skill', '--yes');
+    assert.equal(setUp.status, 0, setUp.said);
+    assert.match(
+      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+      /"class": &"GdhShare"/,
+      `the rebuilt class list names GdhShare, from the tests addon: ${setUp.said}`,
+    );
+    const alone = spawnSyncHidden(
+      godotPath,
+      ['--headless', '--audio-driver', 'Dummy', '--path', project, 'res://bench/bench.tscn'],
+      { encoding: 'utf8', env, timeout: ENGINE_CALL_TIMEOUT_MS },
+    );
+    const aloneSaid = `${alone.stdout}${alone.stderr}`;
+    assert.equal(alone.status, 0, aloneSaid);
+    assert.match(
+      aloneSaid,
+      /\[gdharness\] runtime listening on/,
+      `the runtime is up in this project: ${aloneSaid}`,
+    );
+    const table = (said: string): string[] =>
+      said.split(/\r?\n/).filter((line) => /^(a|b|added)=/.test(line));
+    assert.deepEqual(
+      table(aloneSaid).map((line) => line.split('=')[0]),
+      ['a', 'b', 'added'],
+      `the bench prints its table alone: ${aloneSaid}`,
+    );
+    assert.match(aloneSaid, /^added=\{ "won": 9, "most_x": 9 \}$/m, aloneSaid);
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+    mkdirSync(runtimeDirectory);
+
+    const spread = cli('spread', project, 'bench/bench.tscn', '--workers', '3', '--slots', slots);
+    assert.equal(spread.status, 0, spread.said);
+    assert.deepEqual(
+      table(spread.said),
+      table(aloneSaid),
+      `the same table to the last digit: ${spread.said}`,
+    );
+    assert.match(spread.said, /^\[spread\] 3 of 3 workers done, worker \d in \d+\.\d s$/m, spread.said);
+    assert.match(
+      spread.said,
+      /^Spread: 17 runs in 2 arms over 3 workers, \d+\.\d s; the longest worker took \d+\.\d s\.$/m,
+      spread.said,
+    );
+    assert.doesNotMatch(
+      spread.said,
+      /runtime listening/,
+      `the gathering engine serves nothing: ${spread.said}`,
+    );
+    assert.deepEqual(
+      readdirSync(runtimeDirectory),
+      [],
+      'no engine of the spread announced itself as the game',
+    );
+    assert.deepEqual(
+      readdirSync(join(project, '.godot', 'gdharness', 'spread-runs')),
+      [],
+      'a run that passed leaves nothing behind',
+    );
+
+    const broken = (mode: string): string => {
+      const ran = cli(
+        'spread',
+        project,
+        'res://bench/bench.tscn',
+        '--workers',
+        '3',
+        '--slots',
+        slots,
+        '--',
+        `--break=${mode}`,
+      );
+      assert.equal(ran.status, 1, `${mode}: ${ran.said}`);
+      return ran.said;
+    };
+    const none = broken('none');
+    assert.match(
+      none,
+      /^Failed, so nothing was gathered:\n {2}worker 1 played no arm: the scene never asked GdhShare\.outcomes for one, or quit before it did$/m,
+      none,
+    );
+    assert.doesNotMatch(none, /^a=/m, `no table from a half-played run: ${none}`);
+    const other = broken('other');
+    assert.match(
+      other,
+      /^ {2}worker 1 played a \(10 runs\), c \(7 runs\), and worker 0 played a \(10 runs\), b \(7 runs\): which arms a bench plays must depend on its command line alone$/m,
+      other,
+    );
+    const error = broken('error');
+    assert.match(error, /^ {2}worker-2: it printed an engine error, the first "worker two broke"$/m, error);
+    assert.match(error, /^Every engine's output is kept under .+spread-runs.+ until the next run\.$/m, error);
+    const workerLog = /^what worker-0 printed: (.+)$/m.exec(error)?.[1] ?? '';
+    const workerSaid = readFileSync(workerLog.trim(), 'utf8');
+    assert.match(
+      workerSaid,
+      /^gdharness share: b 3 of 3 runs$/m,
+      `the worker played its share of b: ${workerSaid}`,
+    );
+    assert.doesNotMatch(workerSaid, /runtime listening/, `a worker serves nothing: ${workerSaid}`);
+    const skip = broken('skip');
+    assert.match(skip, /^a=/m, `the gathering run printed its table: ${skip}`);
+    assert.match(
+      skip,
+      /^Failed, so the table above is not to be trusted:\n {2}the gathering run never asked for b, which the workers played: it went another way through the arms than they did$/m,
+      skip,
+    );
+    const object = broken('object');
+    assert.match(
+      object,
+      /worker-1: it printed an engine error, the first "GdhShare: run 4 of b answered an object, which cannot be handed from one engine to another"/,
+      object,
+    );
+
+    const ours = cli('spread', project, 'bench/bench.tscn', '--', '--gdh-share=0/1');
+    assert.equal(ours.status, 2, ours.said);
+    assert.match(
+      ours.said,
+      /--gdh-share=0\/1 is gdharness spread's own to hand each engine, so it cannot be given\./,
+      ours.said,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
 }
 
 function testTheTestCommandRunsAndJudgesAProject(): void {
@@ -42266,7 +43199,7 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     writeFileSync(godotFile, projectText);
     assert.match(
       noAutoload.said,
-      /^ {2}an autoload did not start, so the suites were ended rather than run without it$/m,
+      /^ {2}an autoload did not start, so the engine was ended rather than run without it$/m,
       noAutoload.said,
     );
     assert.equal(noAutoload.status, 1, noAutoload.said);
@@ -42338,6 +43271,121 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     } else {
       console.log(`test command windowed case skipped: ${windowed}`);
     }
+  } finally {
+    sweep(project, slots);
+  }
+}
+
+/**
+ * Below 4.8 the runner holds the project's scripts past the engine's shutdown walk, and a leak of a
+ * run's own still fails it.
+ *
+ * Godot 4.7's walk over its scripts ends on freed memory when releasing one frees the next
+ * (godot#117991), and reports everything it never reached as leaked at exit: a game's run of suites
+ * that freed what it made ended with 1331 instances and 391 resources reported. The hold keeps every
+ * script loaded from a file alive until the theme database goes, after the walk. What a test keeps
+ * in a cycle holds what it reaches as well, a script resource included, so that is still reported:
+ * the hold must not make a real leak pass. The runner's markers bracket the walk, and 4.8 and later
+ * get neither the hold nor the markers, so nothing there is excused.
+ */
+function testTheShutdownWalkIsHeldAndARealLeakStillFails(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('shutdown walk regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-walk-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-walk-slots-'));
+  const runner = resolve('build', 'godot', 'tests', 'listed.gd').replaceAll('\\', '/');
+  const cycle = (keeps: string): string =>
+    [
+      'extends GdUnitTestSuite',
+      '',
+      '',
+      'func test_keeps_a_cycle() -> void:',
+      '\tvar kept: RefCounted = RefCounted.new()',
+      '\tkept.set_meta("me", kept)',
+      keeps,
+      '\tassert_object(kept).is_not_null()',
+      '',
+    ].join('\n');
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Walk"\n',
+      'core/base.gd': 'class_name WalkBase\nextends RefCounted\n\nvar parts: Array = []\n',
+      'core/part.gd': 'class_name WalkPart\nextends WalkBase\n\nfunc named() -> String:\n\treturn "part"\n',
+      'clean/clean_test.gd':
+        'extends GdUnitTestSuite\n\n\nfunc test_frees_what_it_makes() -> void:\n\tassert_str(WalkPart.new().named()).is_equal("part")\n',
+      'cycle/cycle_test.gd': cycle(''),
+      'script/script_test.gd': cycle('\tkept.set_meta("script", load("res://core/part.gd"))'),
+      'gate.gd': [
+        'extends SceneTree',
+        '',
+        '',
+        'func _initialize() -> void:',
+        `\tvar walk: Variant = load(${JSON.stringify(runner)}).get("GdhShutdownWalk")`,
+        '\tfor version: Dictionary in [',
+        '\t\t{"major": 4, "minor": 6}, {"major": 4, "minor": 7}, {"major": 4, "minor": 8},',
+        '\t\t{"major": 4, "minor": 9}, {"major": 5, "minor": 0}, {"major": 3, "minor": 7},',
+        '\t]:',
+        '\t\tprint("walk guarded %d.%d: %s" % [version["major"], version["minor"], walk.guarded(version)])',
+        '\tquit()',
+        '',
+      ].join('\n'),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const env = { ...process.env, GODOT_PATH: godotPath };
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, ...args],
+        { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const printedBy = (said: string): string => {
+      const log = /^everything it printed: (.+)$/m.exec(said)?.[1];
+      assert.ok(log !== undefined, `the run names its engine's log: ${said}`);
+      return readFileSync(log.trim(), 'utf8');
+    };
+
+    const clean = test('--import', 'clean');
+    assert.equal(clean.status, 0, clean.said);
+    assert.match(clean.said, /^Passed: 1 case in 1 suite across 1 engine, /m, clean.said);
+
+    // Both leaks are judged with the walk whole: the markers bracket it, and the leak is a fault.
+    for (const [suite, holding] of [
+      ['cycle', /ObjectDB instances? (?:was|were) leaked at exit/],
+      ['script', /resources? still in use at exit/],
+    ] as const) {
+      const leaked = test(suite);
+      assert.equal(leaked.status, 1, leaked.said);
+      assert.match(leaked.said, /the engine exited holding what it should have freed: /, leaked.said);
+      assert.match(leaked.said, holding, leaked.said);
+      assert.doesNotMatch(leaked.said, /not counted against the run/, leaked.said);
+      const printed = printedBy(leaked.said);
+      const began = printed.indexOf(WALK_BEGAN);
+      const ended = printed.indexOf(WALK_ENDED);
+      assert.ok(began >= 0 && ended > began, `${suite}: the walk went whole: ${printed}`);
+    }
+    // The cycle alone holds no resource, so the script's leak is the one that holds its script.
+    assert.doesNotMatch(test('cycle').said, /resources? still in use at exit/);
+
+    const gate = spawnSyncHidden(godotPath, ['--headless', '--path', project, '-s', 'res://gate.gd'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    const gated = `${gate.stdout}${gate.stderr}`;
+    assert.deepEqual(
+      [...gated.matchAll(/^walk guarded (\d+\.\d+): (\w+)$/gm)].map((match) => `${match[1]} ${match[2]}`),
+      ['4.6 true', '4.7 true', '4.8 false', '4.9 false', '5.0 false', '3.7 false'],
+      gated,
+    );
   } finally {
     sweep(project, slots);
   }
@@ -45582,6 +46630,87 @@ function testUninstallLeavesAddonsItDidNotMake(): void {
 }
 
 /**
+ * The shipped loader brings the runtime up in a game that has the addon, before the main scene's
+ * `_ready`, and does nothing at all in one that does not.
+ *
+ * Before is the point of adding the runtime as the loader's child rather than deferring it to the
+ * root, which every project's own loader did: a deferred add runs only once the main scene's
+ * `_ready` has returned, so a scene doing its work there could not be reached while it did. The
+ * main scene here says what it finds, and the runtime's own line says it served. Without the addon
+ * the game prints no error and announces nothing, which is what a clone without `addons/` meets.
+ */
+function testTheShippedLoaderBringsTheRuntimeUpFirst(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('shipped loader regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-loader-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-loader-runtime-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Loader"\n' +
+        `run/main_scene="res://main.tscn"\n\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="res://${RUNTIME_AUTOLOAD.path}"\n`,
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar found: Node = get_node_or_null("/root/GdharnessRuntime/GdharnessRuntime")',
+        '\tprint("runtime before main: %s" % (found != null and found.is_node_ready()))',
+        '\tget_tree().quit.call_deferred()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    assert.equal(writeLoader(project), true, 'the loader is written into a project that has none');
+    assert.equal(loaderState(project), 'current');
+    assert.equal(writeLoader(project), false, 'and left alone once it is the shipped one');
+    const play = (): string => {
+      const ran = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--quit-after', '600'], {
+        encoding: 'utf8',
+        timeout: ENGINE_CALL_TIMEOUT_MS,
+        env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+      });
+      assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+      return stripVTControlCharacters(`${ran.stdout}${ran.stderr}`);
+    };
+
+    // A clone without the addon: the loader finds nothing to bring up, and says nothing about it.
+    const bare = play();
+    assert.match(bare, /^runtime before main: false$/m, bare);
+    assert.doesNotMatch(bare, /ERROR/, `nothing is missing when the addon is not there: ${bare}`);
+    assert.deepEqual(readdirSync(runtime), [], 'and no runtime announced');
+
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    const served = play();
+    assert.match(served, /^runtime before main: true$/m, served);
+    assert.doesNotMatch(served, /ERROR/, served);
+    // Printed once it serves; the announcement itself is taken back as the game quits.
+    assert.match(served, /\[gdharness\] runtime listening on [\d.]+:\d+, announced at /, served);
+  } finally {
+    sweep(project, runtime);
+  }
+}
+
+/**
  * The CLI against a real engine: setup puts the addons in and turns the editor ones on,
  * runtime on and off registers and removes the autoload, and doctor says so, then says what
  * is wrong once something is.
@@ -45624,27 +46753,76 @@ function testCommandLineSetup(): void {
     const written = readFileSync(join(projectDir, 'project.godot'), 'utf8');
     assert.match(written, /res:\/\/addons\/gdharness_editor\/plugin\.cfg/, 'the editor plugin is enabled');
     assert.match(written, /res:\/\/addons\/auto_reload\/plugin\.cfg/, 'and auto reload');
+    const loaderEntry = /^GdharnessRuntime="res:\/\/gdharness\/loader\.gd"$/m;
     assert.match(
       written,
-      /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
-      'the runtime autoload is registered, in this project and nowhere else',
+      loaderEntry,
+      'the runtime autoload names the shipped loader, in this project alone',
     );
-    assert.match(setup.stdout, /gdharness runtime off/, 'and setup says how to take it out of an export');
+    assert.equal(loaderState(projectDir), 'current', 'and the loader it names is the shipped one');
+    assert.match(
+      setup.stdout,
+      /Commit it with project\.godot/,
+      'and setup says the loader is to be committed',
+    );
+    assert.doesNotMatch(setup.stdout, /runtime off/, 'rather than to turn it off before an export');
 
     const healthy = cli('doctor', projectDir, '--json');
     assert.equal(healthy.status, 0, `doctor after setup:\n${healthy.stdout}${healthy.stderr}`);
     const report: unknown = JSON.parse(healthy.stdout);
     assert.deepEqual(get(report, 'problems'), []);
     assert.equal(get(report, 'runtimeAutoload'), true);
+    assert.match(
+      cli('doctor', projectDir).stdout,
+      /^runtime autoload: registered through res:\/\/gdharness\/loader\.gd, the loader gdharness ships$/m,
+    );
 
-    assert.equal(cli('runtime', 'off', projectDir).status, 0);
+    // A loader that has drifted from the shipped text is a problem, and setup writes it again.
+    const loaderFile = join(projectDir, 'gdharness', 'loader.gd');
+    writeFileSync(loaderFile, `${readFileSync(loaderFile, 'utf8')}\n# edited by hand\n`);
+    const drifted = cli('doctor', projectDir);
+    assert.equal(drifted.status, 1, drifted.stdout);
+    assert.match(
+      drifted.stdout,
+      /problem: res:\/\/gdharness\/loader\.gd is not the loader this gdharness ships/,
+    );
+    const rewritten = cli('runtime', 'on', projectDir);
+    assert.match(rewritten.stdout, /and the loader written again, since it differed/, rewritten.stdout);
+    assert.equal(loaderState(projectDir), 'current');
+    // CRLF, as git on Windows checks the file out, is the same loader.
+    writeFileSync(loaderFile, readFileSync(shippedLoader(), 'utf8').replaceAll('\n', '\r\n'));
+    assert.equal(cli('doctor', projectDir).status, 0, 'a checkout with CRLF endings is the shipped loader');
+
+    const turnedOff = cli('runtime', 'off', projectDir);
+    assert.equal(turnedOff.status, 0, turnedOff.stdout);
+    assert.match(turnedOff.stdout, /autoload removed, with res:\/\/gdharness\/loader\.gd/, turnedOff.stdout);
     assert.doesNotMatch(readFileSync(join(projectDir, 'project.godot'), 'utf8'), /GdharnessRuntime/);
+    assert.equal(
+      existsSync(join(projectDir, 'gdharness')),
+      false,
+      'the loader goes with the entry, and its folder',
+    );
     assert.equal(get(JSON.parse(cli('doctor', projectDir, '--json').stdout), 'runtimeAutoload'), false);
     assert.equal(cli('runtime', 'on', projectDir).status, 0);
-    assert.match(
-      readFileSync(join(projectDir, 'project.godot'), 'utf8'),
-      /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
+    assert.match(readFileSync(join(projectDir, 'project.godot'), 'utf8'), loaderEntry);
+
+    // The entry earlier versions wrote names the addon's own script. Doctor says so, and turning the
+    // runtime on points it at the loader.
+    const projectFile = join(projectDir, 'project.godot');
+    writeFileSync(
+      projectFile,
+      readFileSync(projectFile, 'utf8').replace(loaderEntry, `GdharnessRuntime="*res://${RUNTIME_SCRIPT}"`),
     );
+    const direct = cli('doctor', projectDir);
+    assert.equal(direct.status, 1, direct.stdout);
+    assert.match(
+      direct.stdout,
+      /problem: the GdharnessRuntime autoload names the addon's own script/,
+      direct.stdout,
+    );
+    const moved = cli('runtime', 'on', projectDir);
+    assert.match(moved.stdout, /autoload moved from the addon's own script to res:\/\/gdharness\/loader\.gd/);
+    assert.match(readFileSync(projectFile, 'utf8'), loaderEntry);
 
     // The opt-out, in its own project, because the flag only means anything on a fresh install.
     const bare = mkdtempSync(join(tmpdir(), 'gdharness-cli-bare-'));
@@ -45670,13 +46848,10 @@ function testCommandLineSetup(): void {
         .sort();
     // A project that brings the runtime up its own way keeps doing so across an upgrade.
     //
-    // project.godot is committed and addons/ often is not, so the install guide tells projects to
-    // point this entry at a script of their own that brings the addon up when it is there and does
-    // nothing when it is not. Repointing it at the addon takes away the one refusal the addon
-    // cannot make for itself, and does it to the file written to keep it. Nothing fails: the
-    // wrapper is still on disk and correct, and no gate asks what project.godot registers, so one
-    // project found it in git status after twelve green ones, having been told about five other
-    // replacements and not this.
+    // Repointing a project's own loader takes away whatever that file refuses, and does it to the
+    // file written to keep it. Nothing fails: the loader is still on disk and correct, and no gate
+    // asks what project.godot registers, so one project found it in git status after twelve green
+    // ones, having been told about five other replacements and not this.
     const guard = join(projectDir, 'boot');
     mkdirSync(guard, { recursive: true });
     writeFileSync(
@@ -45687,7 +46862,7 @@ function testCommandLineSetup(): void {
     writeFileSync(
       project,
       readFileSync(project, 'utf8').replace(
-        /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
+        loaderEntry,
         'GdharnessRuntime="*res://boot/gdharness_loader.gd"',
       ),
     );
@@ -45775,6 +46950,11 @@ function testCommandLineSetup(): void {
       'a loader registered under another name is not joined by a second entry',
     );
     assert.match(underAnotherName.stdout, /GdharnessLoader autoload already names/, underAnotherName.stdout);
+    assert.match(
+      underAnotherName.stdout,
+      /gdharness ships a loader that does the same: take the GdharnessLoader entry out of project\.godot's \[autoload\] and delete res:\/\/boot\/gdharness_loader\.gd, then run gdharness runtime on/,
+      `and it says how to use the shipped loader instead: ${underAnotherName.stdout}`,
+    );
 
     // And the doctor says the runtime is brought up, naming the file that does it. It used to
     // answer "not registered" about a runtime that was binding a port and serving queries, because
@@ -45824,13 +47004,18 @@ function testCommandLineSetup(): void {
       /that file is not in this project/,
       'and the answer says the entry names nothing, rather than reading as approval',
     );
+    assert.match(
+      orphaned.stdout,
+      /take the GdharnessRuntime entry out of project\.godot's \[autoload\] and delete res:\/\/boot\/gdharness_loader\.gd/,
+      orphaned.stdout,
+    );
 
     // Back to ours, so everything after this reads the project the rest of the test expects.
     writeFileSync(
       project,
       readFileSync(project, 'utf8').replace(
         /GdharnessRuntime="\*res:\/\/boot\/gdharness_loader\.gd"/,
-        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"',
+        `GdharnessRuntime="res://${RUNTIME_AUTOLOAD.path}"`,
       ),
     );
     assert.deepEqual(
@@ -45880,6 +47065,8 @@ function testCommandLineSetup(): void {
     assert.equal(existsSync(join(projectDir, 'addons')), false, 'and is gone, holding nothing else');
     const stripped = readFileSync(join(projectDir, 'project.godot'), 'utf8');
     assert.doesNotMatch(stripped, /GdharnessRuntime/, 'the autoload is gone');
+    assert.equal(existsSync(join(projectDir, 'gdharness')), false, 'with the loader it named');
+    assert.match(removed.stdout, /autoload removed, with res:\/\/gdharness\/loader\.gd/, removed.stdout);
     assert.doesNotMatch(stripped, /gdharness_editor\/plugin\.cfg/, 'and the editor plugin is off');
     assert.equal(existsSync(join(projectDir, '.agents')), false, 'the directory the skill made is gone');
     const theirs = JSON.parse(readFileSync(shared, 'utf8')) as Record<string, Record<string, unknown>>;
@@ -45908,16 +47095,14 @@ function testCommandLineSetup(): void {
     writeFileSync(join(guard, 'gdharness_loader.gd'), 'extends Node\n');
     writeFileSync(
       project,
-      readFileSync(project, 'utf8').replace(
-        /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
-        'GdharnessLoader="*res://boot/gdharness_loader.gd"',
-      ),
+      readFileSync(project, 'utf8').replace(loaderEntry, 'GdharnessLoader="*res://boot/gdharness_loader.gd"'),
     );
     assert.match(
       readFileSync(project, 'utf8'),
       /GdharnessLoader=/,
       'the fixture has the loader and not our entry',
     );
+    assert.equal(loaderState(projectDir), 'current', 'and the shipped loader, which nothing names now');
     const throughALoader = cli('uninstall', projectDir);
     assert.equal(
       throughALoader.status,
@@ -45925,6 +47110,8 @@ function testCommandLineSetup(): void {
       `uninstall beside a loader:\n${throughALoader.stdout}${throughALoader.stderr}`,
     );
     assert.equal(existsSync(join(projectDir, 'addons')), false, 'the addons are removed');
+    assert.equal(existsSync(join(projectDir, 'gdharness')), false, 'and the shipped loader nothing named');
+    assert.match(throughALoader.stdout, /removed res:\/\/gdharness\/loader\.gd, which no autoload named/);
     assert.doesNotMatch(throughALoader.stdout, /GdharnessRuntime autoload removed/, throughALoader.stdout);
     assert.match(
       readFileSync(project, 'utf8'),
@@ -46990,11 +48177,12 @@ const HABIT_PHRASES = [
  * What [param text] holds that the project's prose may not, by rule.
  *
  * An em dash anywhere, and an en dash standing between spaces as one. In [param prose], also a
- * spaced double hyphen standing in for a dash, outside backticks, where a command line's own `--`
- * lives, and the habit phrases.
+ * spaced double hyphen standing in for a dash, outside backticks and fenced blocks, where a command
+ * line's own `--` lives, and the habit phrases.
  */
 function proseFaults(text: string, prose: boolean): string[] {
   const faults: string[] = [];
+  let fenced = false;
   for (const [index, line] of text.split('\n').entries()) {
     const at = `line ${index + 1}`;
     if (line.includes(EM_DASH)) {
@@ -47003,7 +48191,11 @@ function proseFaults(text: string, prose: boolean): string[] {
     if (line.includes(` ${EN_DASH} `)) {
       faults.push(`${at}: an en dash used as a dash`);
     }
-    if (!prose) {
+    if (line.trimStart().startsWith('```')) {
+      fenced = !fenced;
+      continue;
+    }
+    if (!prose || fenced) {
       continue;
     }
     const outsideCode = line.replace(/`[^`]*`/g, '');
@@ -47041,6 +48233,14 @@ function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
   ]);
   assert.deepEqual(proseFaults('godot `--path p -- -e` and `HEAD -- package.json`', true), []);
   assert.deepEqual(proseFaults('wait -- then go', false), [], 'a test line may hold a command line');
+  assert.deepEqual(
+    proseFaults(
+      `\`\`\`text\ngdharness spread a.tscn -- --seed=3\n\`\`\`\nwait -- then go\n\`\`\`\n${EM_DASH}\n\`\`\``,
+      true,
+    ),
+    ['line 4: a double hyphen used as a dash', 'line 6: an em dash'],
+    'a fenced command line may hold its separator, and the prose after the fence is read again',
+  );
 
   const read: { where: string; text: string; prose: boolean }[] = [];
   const kinds = /\.(ts|gd|md|yml|yaml|json|jsonc|cfg|tscn|sh|ps1|mjs)$/;
@@ -48732,6 +49932,121 @@ async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
       ),
       `a colour naming its alpha otherwise is told the key it goes under: ${alpha.said}`,
     );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A settings write changes the line of the setting it names and no other, and a setting the engine
+ * does not declare takes a packed array by its tag.
+ *
+ * The engine's save leaves out every key at its default, so a project holding
+ * `unsafe_call_argument=0` on purpose lost the line to a write of another key. And with no declared
+ * type to fit a tagged PackedStringArray to, the tag was written into the file as a dictionary.
+ */
+async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('settings lines regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-setting-lines-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-setting-lines-rt-'));
+  // The last line is not a default, so the engine keeps the section and leaves out only the others;
+  // the [rendering] section holds only a default, so the engine leaves the whole of it out.
+  const warning =
+    'gdscript/warnings/unsafe_call_argument=0\ngdscript/warnings/unused_variable=1\n' +
+    'gdscript/warnings/untyped_declaration=1\n';
+  const filter = 'textures/canvas_textures/default_texture_filter=1\n';
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Lines"\n\n' +
+      `[debug]\n\n${warning}\n[rendering]\n\n${filter}`,
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const settings = async (args: Record<string, unknown>): Promise<{ answer: unknown; said: string }> => {
+    const response = await server.request(
+      'tools/call',
+      { name: 'project_settings', arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    return { answer: parseTextContent(response), said: textOf(response) ?? JSON.stringify(response) };
+  };
+  const file = (): string => readFileSync(join(project, 'project.godot'), 'utf8');
+  try {
+    await server.initialize('regression-test');
+    const other = await settings({ op: 'set', setting: 'application/config/description', value: 'kept' });
+    assert.equal(get(other.answer, 'saved'), true, `another setting is written: ${other.said}`);
+    assert.match(file(), /config\/description="kept"/, `and is in the file: ${file()}`);
+    assert.ok(
+      file().includes(`[debug]\n\n${warning}`),
+      `a line holding a default stays where it was: ${file()}`,
+    );
+    assert.ok(
+      file().includes(`[rendering]\n\n${filter}`),
+      `and so does a section holding only one: ${file()}`,
+    );
+
+    const tagged = await settings({
+      op: 'set',
+      setting: 'gdharness/tests/not_searched',
+      value: { _type: 'PackedStringArray', value: ['res://test/bench/'] },
+    });
+    assert.equal(get(tagged.answer, 'saved'), true, `a tagged packed array is written: ${tagged.said}`);
+    assert.match(
+      file(),
+      /\[gdharness\]\n\ntests\/not_searched=PackedStringArray\("res:\/\/test\/bench\/"\)\n/,
+      `as that packed array: ${file()}`,
+    );
+
+    // A setting the file does not hold yet, as one it holds has a type to be refused by.
+    const before = file();
+    const unfit = await settings({
+      op: 'set',
+      setting: 'gdharness/fresh_list',
+      value: { _type: 'PackedStringArray', value: ['res://a/', 7] },
+    });
+    assert.ok(
+      unfit.said.includes(
+        'The value for gdharness/fresh_list is tagged "PackedStringArray" and could not be read as one, so nothing was written. One is written as {"_type": "PackedStringArray", "value": [...]}.',
+      ),
+      `a tag whose list does not fit is refused: ${unfit.said}`,
+    );
+    const callable = await settings({ op: 'set', setting: 'gdharness/probe', value: { _type: 'Callable' } });
+    assert.ok(
+      callable.said.includes('A setting cannot hold a Callable written as a tag.'),
+      `as is a tag no value can be built from: ${callable.said}`,
+    );
+    assert.equal(file(), before, 'and neither touches the file');
+
+    // The file holds the default, so the setting is not new to it, whatever its value.
+    const warned = 'debug/gdscript/warnings/unsafe_call_argument';
+    const raised = await settings({ op: 'set', setting: warned, value: 1 });
+    assert.equal(get(raised.answer, 'was_new'), false, `a setting the file holds is not new: ${raised.said}`);
+    assert.ok(
+      file().includes('[debug]\n\ngdscript/warnings/unsafe_call_argument=1\n'),
+      `and its line changes in place: ${file()}`,
+    );
+    const lowered = await settings({ op: 'set', setting: warned, value: 0 });
+    assert.equal(get(lowered.answer, 'saved'), true, `set back to its default: ${lowered.said}`);
+    const unset = await settings({ op: 'unset', setting: warned });
+    assert.equal(
+      get(unset.answer, 'removed'),
+      false,
+      `which the engine leaves out of the file, so unset finds no line: ${unset.said}`,
+    );
+    assert.ok(!file().includes('unsafe_call_argument'), `the line went with the write: ${file()}`);
+    const kept = await settings({ op: 'unset', setting: 'debug/gdscript/warnings/unused_variable' });
+    assert.equal(get(kept.answer, 'removed'), true, `a line holding a default can be unset: ${kept.said}`);
+    assert.ok(!file().includes('unused_variable'), `which takes it out: ${file()}`);
+    assert.ok(file().includes(`[rendering]\n\n${filter}`), `and leaves the other: ${file()}`);
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
@@ -58927,6 +60242,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowedRunWritesItsMovie,
   testTheEditorIsOfferedWhereItCanAnswer,
   testASettingTakesWhatAPropertyTakes,
+  testASettingsWriteKeepsEveryOtherLine,
   testAnElementIsToldWhatItsTypeTakes,
   testAWriteSaysWhatElseItChanged,
   testAWriteReadsWhatThePropertyDeclares,
@@ -59231,7 +60547,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
+  testTheLspCommandFindsTheEditorsPort,
+  testEveryEngineWaitsForAMachineSlot,
+  testTheTestHelpersWaitStepAndPress,
+  testASpreadBenchGathersTheTableItPlaysAlone,
   testTheTestCommandRunsAndJudgesAProject,
+  testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
@@ -59249,9 +60570,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,
+  testSuitesPlayInASceneTheProfilerSees,
   testAProfileSinceAMarkAnswersForOneAction,
   testAProfileFromTheStartWaitsForTheProfiler,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
+  testTheShippedLoaderBringsTheRuntimeUpFirst,
   testCommandLineSetup,
   testUninstallLeavesAddonsItDidNotMake,
   testNoShippedScriptParsesJsonLoudly,

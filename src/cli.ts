@@ -8,6 +8,7 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { serverServing } from './bridge-announce.js';
+import { EngineUsageError } from './engine-launch.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
@@ -33,6 +34,7 @@ import {
 } from './harnesses.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
 import { defectReport } from './issues.js';
+import { lspOptionsOf, runLspBridge } from './lsp-bridge.js';
 import { isSameDirectory } from './paths.js';
 import { Ask, interactive } from './prompt.js';
 import { DEBUG_MODE } from './server-version.js';
@@ -44,14 +46,18 @@ import {
   inspectProject,
   installAddons,
   installedEditorDigest,
+  loaderState,
   RUNTIME_AUTOLOAD,
+  RUNTIME_SCRIPT,
   removeAddons,
+  removeLoader,
   setRuntime,
   shippedListedRunner,
   shippedOperationsScript,
 } from './setup.js';
 import { everySkillDirectory, removeSkill, skillDirectories, writeSkill } from './skill.js';
-import { runTestCommand, TestUsageError, testOptionsOf } from './suite-run.js';
+import { runSpreadCommand, spreadOptionsOf } from './spread-run.js';
+import { runTestCommand, testOptionsOf } from './suite-run.js';
 import { getLocalVersion } from './version.js';
 
 const args = process.argv.slice(2);
@@ -125,46 +131,63 @@ function said(outcome: HeadlessOutcome, what: string): void {
   }
 }
 
+/** What a project with a loader of its own does to use the shipped one instead. */
+function useTheShippedLoader(name: string, path: string): string {
+  return `gdharness ships a loader that does the same: take the ${name} entry out of project.godot's [autoload] and delete res://${path}, then run gdharness runtime on, which writes res://${RUNTIME_AUTOLOAD.path} and points ${RUNTIME_AUTOLOAD.name} at it`;
+}
+
 /**
- * The runtime autoload registered, or left where the project put it, with a line saying which.
+ * The runtime autoload pointed at the shipped loader, with the loader written, or left where the
+ * project put it, with a line saying which.
  *
  * One function for setup, upgrade and `runtime on`, because the rule is one rule and three
- * phrasings of it would drift. An entry naming anything other than the addon's own script is the
- * project's: `project.godot` is committed and `addons/` often is not, so the install guide asks
- * projects to point the entry at a script of their own that brings the addon up when it is there,
- * and rewriting that is rewriting the file the guide asked for.
+ * phrasings of it would drift. An entry naming the shipped loader or the addon's own script is
+ * ours to rewrite; one naming a script of the project's own is the project's, and is left with a
+ * line saying how to use the shipped loader instead.
  *
- * A wrapper that is not on disk is still not rewritten, because a file can be absent for a moment
- * and a line rewritten is gone for good, but it is said plainly: an entry naming nothing boots the
- * project with a missing script, and "left as it is" on its own would read as approval.
+ * A project's loader that is not on disk is still not rewritten, because a file can be absent for
+ * a moment and a line rewritten is gone for good, but it is said plainly: an entry naming nothing
+ * boots the project with a missing script, and "left as it is" on its own would read as approval.
  */
 async function registerRuntime(godot: HeadlessEngine, projectPath: string): Promise<void> {
   const report = inspectProject(projectPath);
   const named = report.runtimeAutoloadPath;
   const loader = report.runtimeLoaderAutoload;
   // Nothing registered under our name, and something registered under another that looks like this
-  // project's own way of bringing the runtime up. Adding ours would put the addon's script in the
-  // tree beside the guard rather than behind it, which is the bug this whole rule exists to stop,
-  // reached through a name instead of a path.
+  // project's own way of bringing the runtime up. Adding ours would bring the runtime up twice.
   if (named === null && loader !== null) {
     console.log(
-      `${loader.name} autoload already names res://${loader.path}, which is this project bringing the runtime up its own way, so ${RUNTIME_AUTOLOAD.name} was not added: a second entry would come up beside it without whatever that file refuses. If it is not a loader, add ${RUNTIME_AUTOLOAD.name} yourself.`,
+      `${loader.name} autoload already names res://${loader.path}, which is this project bringing the runtime up its own way, so ${RUNTIME_AUTOLOAD.name} was not added: a second entry would bring it up twice.`,
     );
+    console.log(`  ${useTheShippedLoader(loader.name, loader.path)}`);
     return;
   }
   if (autoloadIsOurs(named)) {
+    const before = loaderState(projectPath);
     said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
-    console.log(
-      `${RUNTIME_AUTOLOAD.name} autoload ${named === null ? 'registered' : 'already registered'} at res://${RUNTIME_AUTOLOAD.path}`,
-    );
+    const at = `res://${RUNTIME_AUTOLOAD.path}`;
+    if (named === null) {
+      console.log(`${RUNTIME_AUTOLOAD.name} autoload registered at ${at}, the loader gdharness ships`);
+    } else if (named === `res://${RUNTIME_SCRIPT}`) {
+      console.log(
+        `${RUNTIME_AUTOLOAD.name} autoload moved from the addon's own script to ${at}, the loader gdharness ships, so a build without addons/ no longer boots with a missing script`,
+      );
+    } else {
+      console.log(
+        `${RUNTIME_AUTOLOAD.name} autoload already registered at ${at}${before === 'current' ? '' : before === 'missing' ? ', and the loader written, since it was not there' : ', and the loader written again, since it differed from the one gdharness ships'}`,
+      );
+    }
+    if (before !== 'current') {
+      console.log(`  commit ${at} with project.godot, since the entry names it`);
+    }
     return;
   }
+  const path = (named ?? '').replace(/^res:\/\//, '');
   console.log(`${RUNTIME_AUTOLOAD.name} autoload left at ${named}, which this project registers itself`);
-  if (!existsSync(join(projectPath, (named ?? '').replace(/^res:\/\//, '')))) {
-    console.log(
-      `  that file is not in this project, so it boots with a missing script: restore it, or point the entry at res://${RUNTIME_AUTOLOAD.path}`,
-    );
+  if (!existsSync(join(projectPath, path))) {
+    console.log('  that file is not in this project, so it boots with a missing script');
   }
+  console.log(`  ${useTheShippedLoader(RUNTIME_AUTOLOAD.name, path)}`);
 }
 
 /** setup's own flags, so anything else beginning with `--` is read as naming a harness. */
@@ -296,12 +319,9 @@ function nextSteps(projectPath: string, runtime: boolean): void {
   console.log('\nTwo things this cannot do for you:');
   console.log('  1. Reconnect the MCP server in your harness, so it spawns this version.');
   console.log('  2. Restart an open editor, or open the project. Then editor_status should answer.');
-  if (runtime) {
-    // The path only when it is not the one you are standing in. Spelling out a temp directory the
-    // reader is already inside turns a command they can copy into a line that wraps twice.
-    const where = projectPath === process.cwd() ? '' : ` ${projectPath}`;
+  if (runtime && loaderState(projectPath) !== 'missing') {
     console.log(
-      `\nThe runtime autoload is registered, which is what the runtime_* tools talk to. It reaches an\nexport, so turn it off before you ship: gdharness runtime off${where}`,
+      `\nThe runtime autoload names res://${RUNTIME_AUTOLOAD.path}, which brings up the runtime the runtime_*\ntools talk to in a debug build that has the addon, and does nothing in a release export or a\nclone without addons/. Commit it with project.godot.`,
     );
   }
 }
@@ -428,8 +448,14 @@ async function uninstall(): Promise<void> {
   // project's, and asking the engine to remove GdharnessRuntime from such a project failed here on
   // every run, after the harness entries had gone and before the addons did.
   if (before.runtimeAutoloadPath !== null) {
+    const hadLoader = loaderState(projectPath) !== 'missing';
     said(await setRuntime(godot, projectPath, false), 'removing the runtime autoload');
-    console.log(`${RUNTIME_AUTOLOAD.name} autoload removed`);
+    console.log(
+      `${RUNTIME_AUTOLOAD.name} autoload removed${hadLoader ? `, with res://${RUNTIME_AUTOLOAD.path}` : ''}`,
+    );
+  } else if (loaderState(projectPath) === 'current' && removeLoader(projectPath)) {
+    // Taken out only while it is the shipped text: a copy somebody changed is theirs to delete.
+    console.log(`removed res://${RUNTIME_AUTOLOAD.path}, which no autoload named`);
   }
   const loader = before.runtimeLoaderAutoload;
   if (loader !== null && loader.name !== RUNTIME_AUTOLOAD.name) {
@@ -499,9 +525,8 @@ async function upgrade(): Promise<void> {
     said(outcome, `enabling ${EDITOR_PLUGINS[index] ?? ''}`);
   }
   // Only when it was already on: an upgrade must not put back an autoload somebody turned off
-  // deliberately, which is the one thing here that would reach a shipped build. And only when it
-  // names this addon's own script, because an entry pointing elsewhere is a project's own wrapper
-  // and every refusal it makes would go with it. Said either way: this line was rewritten once
+  // deliberately. registerRuntime writes the loader again when it is this gdharness's, and leaves
+  // an entry naming a project's own loader alone. Said either way: this line was rewritten once
   // without being mentioned, beside five replacements that were, and the silence is what cost.
   if (before.runtimeAutoload) {
     await registerRuntime(godot, projectPath);
@@ -600,13 +625,23 @@ function doctorReport(projectPath: string): void {
     // that was answering queries is what sent a project looking, and naming the file is the half
     // that can be checked from their end: they can open it and see.
     const loader = report.runtimeLoaderAutoload;
+    const named = report.runtimeAutoloadPath;
+    const shipped = {
+      current: '',
+      differs: ', which differs from the one this gdharness ships',
+      missing: ', which is not in this project',
+    }[loaderState(report.projectPath)];
     console.log(
       `runtime autoload: ${
-        loader === null
-          ? report.runtimeAutoload
-            ? 'registered'
-            : 'not registered'
-          : `registered through res://${loader.path}, as ${loader.name}${loader.exists ? '' : ', and that file is not in this project'}`
+        loader !== null
+          ? `registered through res://${loader.path}, as ${loader.name}${loader.exists ? '' : ', and that file is not in this project'}`
+          : named === `res://${RUNTIME_AUTOLOAD.path}`
+            ? `registered through ${named}, the loader gdharness ships${shipped}`
+            : named === `res://${RUNTIME_SCRIPT}`
+              ? `registered as the addon's own script, ${named}`
+              : named !== null
+                ? `registered through ${named}, this project's own`
+                : 'not registered'
       }`,
     );
     console.log(
@@ -658,8 +693,11 @@ async function runtime(): Promise<void> {
     }
     return;
   }
+  const hadLoader = loaderState(projectPath) !== 'missing';
   said(await setRuntime(godot, projectPath, false), 'turning the runtime off');
-  console.log(`${RUNTIME_AUTOLOAD.name} autoload removed`);
+  console.log(
+    `${RUNTIME_AUTOLOAD.name} autoload removed${hadLoader ? `, with res://${RUNTIME_AUTOLOAD.path}` : ''}`,
+  );
   if (loader !== null) {
     // The one case where "removed" on its own is dangerous. Somebody running this before an export
     // is asking that nothing comes up, and a loader this tool will not touch still brings it up:
@@ -744,6 +782,20 @@ Usage:
                                      prints what every engine printed, for a
                                      benchmark run by hand. --runner prints the shipped runner's
                                      path. docs/test-runs.md has the rest.
+  gdharness spread [project] SCENE [--workers N] [--slots DIR] [--slot-count N] [--silence S]
+                   [--deadline S] [--godot PATH] [--godot-version V] [--cores N] [-- ARGS]
+                                     Play a bench scene's runs over several headless engines,
+                                     each in an engine slot, then gather every run's outcome in
+                                     run order and print the bench's table: exit 1 when a worker
+                                     failed or did not play its whole share. The bench asks
+                                     GdhShare.outcomes for each arm's runs. ARGS go to every
+                                     engine. docs/spread.md has the rest.
+  gdharness lsp [project] [--port N] [--wait S]
+                                     Bridge a stdio LSP client to the GDScript language server
+                                     of the project's open editor, which it never starts: the
+                                     port named, else GDHARNESS_LSP_PORT, else the one each
+                                     editor of the project records, else 6005. Waits S seconds
+                                     (20) for one serving this project; exit 1 when none does.
   gdharness version                  Show the installed version
   gdharness help                     Show this help
 
@@ -782,11 +834,26 @@ async function test(): Promise<void> {
   process.exitCode = await runTestCommand(options, godotPath);
 }
 
+/** `gdharness spread`, whose options are its own, read by {@link spreadOptionsOf}. */
+async function spread(): Promise<void> {
+  const options = spreadOptionsOf(args.slice(1), process.cwd());
+  const godotPath = options.godotPath ?? (await engine(options.projectPath)).godotPath;
+  process.exitCode = await runSpreadCommand(options, godotPath);
+}
+
 async function main(): Promise<void> {
   await letWindowsReportCrashes();
   if (command === 'test') {
     await test();
     return;
+  }
+  if (command === 'spread') {
+    await spread();
+    return;
+  }
+  if (command === 'lsp') {
+    // Exited rather than returned: the standard input it piped holds the process open.
+    process.exit(await runLspBridge(lspOptionsOf(args.slice(1), process.cwd())));
   }
   checkFlags();
   switch (command) {
@@ -835,7 +902,7 @@ async function main(): Promise<void> {
 await main().catch((error: unknown) => {
   if (error instanceof Refusal) {
     console.error('gdharness:', error.message);
-    process.exit(error instanceof UsageError || error instanceof TestUsageError ? 2 : 1);
+    process.exit(error instanceof UsageError || error instanceof EngineUsageError ? 2 : 1);
   }
   // Nothing anticipated this, so the person in front of it is owed more than the exception's
   // message: what broke, that it is not theirs to fix, and what to do with it if they want to.

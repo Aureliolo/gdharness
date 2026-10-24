@@ -15,16 +15,90 @@
  * and removes the steal file. A steal file older than {@link UNWRITTEN_MS} is a taker that died
  * holding it.
  *
+ * One directory and one count serve the whole machine, whichever project an engine is for: every
+ * game's gate, bench and tool, and this server's own engines, draw on the same budget. The directory
+ * is `$XDG_CACHE_HOME/gdharness/slots` where that variable is set, else
+ * `%LOCALAPPDATA%\gdharness\slots` on Windows, else `~/.cache/gdharness/slots`; the count is a fifth
+ * of the processors, at least one. `GODOT_ENGINE_SLOTS` and `GODOT_ENGINE_SLOT_COUNT`
+ * replace either, and a command's `--slots` and `--slot-count` replace those ({@link machineSlots}).
+ *
  * The games' own tools take slots in this directory the same way, which is the point of it: the
  * scheme is written out in docs/test-runs.md for them, and a change here is a change there.
  */
 
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { availableParallelism, homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
+import { callProgress, callSignal } from './call-signal.js';
+import { EngineUsageError } from './engine-launch.js';
 import { startTimesOf } from './process-children.js';
+
+/** The variable naming the slot directory in place of the machine's. */
+export const SLOTS_VARIABLE = 'GODOT_ENGINE_SLOTS';
+/** The variable naming the slot count in place of the machine's. */
+export const SLOT_COUNT_VARIABLE = 'GODOT_ENGINE_SLOT_COUNT';
+/** Processors to each slot by default, which leaves most of the machine to whoever is at it. */
+const PROCESSORS_A_SLOT = 5;
+
+/** Where the slots are and how many there are. */
+export interface SlotsChosen {
+  readonly directory: string;
+  readonly count: number;
+}
+
+/** What the machine says, handed in so every branch can be asked about without its machine. */
+export interface SlotsMachine {
+  readonly env: NodeJS.ProcessEnv;
+  readonly platform: NodeJS.Platform;
+  readonly processors: number;
+  readonly home: string;
+  readonly cwd: string;
+}
+
+/**
+ * The slots a run takes: [param asked] where a command named them, else the variables, else the
+ * machine's own directory and count. Every tool on the machine works the default out the same way,
+ * so it is one budget whoever starts the engine.
+ */
+export function machineSlots(
+  asked: { readonly directory: string | null; readonly count: number | null } = {
+    directory: null,
+    count: null,
+  },
+  machine: SlotsMachine = {
+    env: process.env,
+    platform: process.platform,
+    processors: availableParallelism(),
+    home: homedir(),
+    cwd: process.cwd(),
+  },
+): SlotsChosen {
+  const { env } = machine;
+  const named = nonEmpty(env[SLOTS_VARIABLE]);
+  // The cache home in the same order on every platform, so a machine that sets XDG_CACHE_HOME on
+  // Windows too has one answer whichever tool works it out.
+  const xdg = nonEmpty(env['XDG_CACHE_HOME']);
+  const local = machine.platform === 'win32' ? nonEmpty(env['LOCALAPPDATA']) : undefined;
+  const cache = join(xdg ?? local ?? join(machine.home, '.cache'), 'gdharness');
+  const directory =
+    asked.directory ?? (named === undefined ? join(cache, 'slots') : resolve(machine.cwd, named));
+  const counted = nonEmpty(env[SLOT_COUNT_VARIABLE]);
+  let count = asked.count;
+  if (count === null && counted !== undefined) {
+    count = Number(counted);
+    if (!Number.isInteger(count) || count < 1) {
+      throw new EngineUsageError(`${SLOT_COUNT_VARIABLE} takes a whole number above 0, not ${counted}.`);
+    }
+  }
+  return { directory, count: count ?? Math.max(1, Math.floor(machine.processors / PROCESSORS_A_SLOT)) };
+}
+
+function nonEmpty(value: string | undefined): string | undefined {
+  return value === undefined || value === '' ? undefined : value;
+}
 
 /** How far a process's start may be from the time its lock names and still be the one that wrote it. */
 export const START_TOLERANCE_MS = 2000;
@@ -32,6 +106,11 @@ export const START_TOLERANCE_MS = 2000;
 export const UNWRITTEN_MS = 10_000;
 /** How long between looks at a full set of slots. */
 const SLOT_WAIT_MS = 50;
+/**
+ * How often a wait for a slot says it is still waiting: inside the minute the SDK lets a call stay
+ * silent by default, since a gate can hold every slot for far longer.
+ */
+const WAIT_SAID_MS = 20_000;
 /** How long a holder's start time, once read, is believed before it is read again. */
 const START_READ_MS = 10_000;
 
@@ -103,8 +182,10 @@ export class EngineSlots {
   }
 
   /** Takes a slot, waiting for one to come free, and answers its lock's path. */
-  async take(signal?: AbortSignal): Promise<string> {
+  async take(signal?: AbortSignal, waiting?: (waitedMs: number) => void): Promise<string> {
     mkdirSync(this.directory, { recursive: true });
+    const began = Date.now();
+    let said = Number.NEGATIVE_INFINITY;
     for (;;) {
       signal?.throwIfAborted();
       for (let slot = 0; slot < this.count; slot += 1) {
@@ -113,6 +194,10 @@ export class EngineSlots {
           this.held.add(lock);
           return lock;
         }
+      }
+      if (waiting !== undefined && Date.now() - said >= WAIT_SAID_MS) {
+        said = Date.now();
+        waiting(said - began);
       }
       await delay(SLOT_WAIT_MS, undefined, signal === undefined ? {} : { signal });
     }
@@ -211,5 +296,61 @@ export class EngineSlots {
     }
     const started = (await startTimesOf([pid])).get(pid);
     this.starts.set(pid, { started, readAt: Date.now() });
+  }
+}
+
+let ours: Promise<EngineSlots> | undefined;
+
+/**
+ * The machine's slots as this process takes them for an engine of its own, outside a run that names
+ * its slots: one made once a process, so every engine it starts is counted against the same holder.
+ */
+function processSlots(): Promise<EngineSlots> {
+  ours ??= ownStart().then((started) => {
+    const chosen = machineSlots();
+    return new EngineSlots(chosen.directory, chosen.count, { pid: process.pid, started });
+  });
+  return ours;
+}
+
+/** What waiting for a slot says, after [param waitedMs], to the client of the call that waits. */
+export function slotWaitSaid(waitedMs: number, count: number, directory: string): string {
+  const slots =
+    count === 1
+      ? `the one engine slot on this machine (${directory}) is in use`
+      : `all ${String(count)} engine slots on this machine (${directory}) are in use`;
+  return `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine: ${slots}, by a gate or another tool, and the engine starts when one is given back.`;
+}
+
+/**
+ * Takes one of the machine's slots for the call being answered, waiting for one: a cancelled call
+ * stops waiting, and one whose client asked for progress is told that it is waiting and why.
+ * Answers how to give it back.
+ */
+export async function slotForCall(): Promise<{ readonly release: () => void }> {
+  const slots = await processSlots();
+  const progress = callProgress();
+  const lock = await slots.take(
+    callSignal(),
+    progress === undefined
+      ? undefined
+      : (waitedMs) => {
+          progress(waitedMs / 1000, slotWaitSaid(waitedMs, slots.count, slots.directory));
+        },
+  );
+  return {
+    release: () => {
+      slots.release(lock);
+    },
+  };
+}
+
+/** Runs [param body] holding one of the machine's slots for the call, and gives it back after. */
+export async function inASlot<T>(body: () => Promise<T>): Promise<T> {
+  const held = await slotForCall();
+  try {
+    return await body();
+  } finally {
+    held.release();
   }
 }

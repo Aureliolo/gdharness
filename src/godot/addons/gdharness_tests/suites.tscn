@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://c8vtk4rm1ynho"]
+
+[ext_resource type="Script" uid="uid://bq3n7xkd2wfs0" path="res://addons/gdharness_tests/suites.gd" id="1_suites"]
+
+[node name="GdhSuites" type="Node"]
+script = ExtResource("1_suites")

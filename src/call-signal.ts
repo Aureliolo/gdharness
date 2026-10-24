@@ -33,7 +33,20 @@ export function withCallSignal<T>(
 ): Promise<T> {
   return signal === undefined && progress === undefined
     ? answer()
-    : current.run({ signal, progress }, answer);
+    : current.run({ signal, progress: progress === undefined ? undefined : risingOnly(progress) }, answer);
+}
+
+/**
+ * [param progress] with every number above the one before it, as the protocol requires of one
+ * call's notifications. A call can report from two places, such as the wait for an engine slot
+ * and then the run it waited for, and each counts from its own start.
+ */
+function risingOnly(progress: CallProgress): CallProgress {
+  let last = Number.NEGATIVE_INFINITY;
+  return (number, message) => {
+    last = number > last ? number : last + 1;
+    progress(last, message);
+  };
 }
 
 /** The signal of the call being answered, or undefined outside one. */

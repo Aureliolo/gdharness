@@ -47,9 +47,11 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		old_value = ProjectSettings.get_setting(setting_path)
 	# A setting the engine registers is there with its default whether or not project.godot sets it,
 	# so has_setting alone called the description of a project that had never set one an old value.
-	# At its default, the file does not set it: the engine drops a key at its default when it saves.
+	# Whether it is new is the file's to say: one at its default has a line only where the project
+	# wrote it out on purpose.
 	var default_value: Variant = ProjectSettings.property_get_revert(setting_path)
 	var was_default: bool = had_value and default_value != null and old_value == default_value
+	var in_file: bool = GdhProjectFile.sets(setting_path)
 
 	var wanted: int = _wanted_type(setting_path, old_value if had_value else null)
 	# A value of fields or a colour's html code is fitted as a property write fits it, so a value one
@@ -68,12 +70,18 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		var number: float = final_value
 		if number == floorf(number) and absf(number) < 9.0e15:
 			final_value = int(number)
+	# A tag that could not be built is still the dictionary it arrived as, and a setting nothing
+	# declares took it as one: the file was given the tag key by key, beside an answer of success.
+	if final_value is Dictionary:
+		var held: Dictionary = final_value
+		if held.has("_type"):
+			return _log.failure(_unbuilt(setting_path, held))
 
 	var answer: Dictionary = {
 		"setting_path": setting_path,
 		"old_value": _values.serialize_value(old_value) if had_value else null,
 		"new_value": _values.serialize_value(final_value),
-		"was_new": not had_value or was_default,
+		"was_new": not in_file,
 		"was_default": was_default,
 		"saved": true,
 	}
@@ -82,7 +90,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	if had_value and typeof(old_value) == typeof(final_value) and old_value == final_value:
 		answer["saved"] = false
 		answer["unchanged"] = true
-		if was_default:
+		if was_default and not in_file:
 			answer["note"] = (
 				(
 					"%s is already this setting's default, which project.godot holds no line for:"
@@ -122,7 +130,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 			said += ("; project_import reimport makes the translation files from " + ", ".join(made))
 		answer["note"] = (str(answer["note"]) + " " if answer.has("note") else "") + said + "."
 	ProjectSettings.set_setting(setting_path, final_value)
-	var err: Error = GdhProjectFile.save()
+	var err: Error = GdhProjectFile.save([setting_path])
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 	return answer
@@ -180,8 +188,9 @@ func unset_project_setting(params: Dictionary) -> Dictionary:
 		"setting_path": setting_path,
 		"default_value": _values.serialize_value(default_value) if default_value != null else null,
 	}
-	# A setting at the engine's default has no line to take out, as the engine leaves it out of the file.
-	if not held or (default_value != null and value == default_value):
+	# Read off the file rather than the value: a setting at its default usually has no line, as the
+	# engine leaves it out, but a project can hold one written out on purpose.
+	if not held or not GdhProjectFile.sets(setting_path):
 		answer["removed"] = false
 		answer["saved"] = false
 		answer["note"] = "project.godot does not set %s, so there was nothing to take out." % setting_path
@@ -190,7 +199,7 @@ func unset_project_setting(params: Dictionary) -> Dictionary:
 	# The default rather than null for a setting the engine declares: null takes the declaration away
 	# as well, and a value at its default is left out of the file all the same.
 	ProjectSettings.set_setting(setting_path, default_value)
-	var err: Error = GdhProjectFile.save()
+	var err: Error = GdhProjectFile.save([setting_path])
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 	answer["removed"] = true
@@ -266,6 +275,24 @@ static func _cannot_hold(setting_path: String, wanted: int, value: Variant) -> S
 	return "%s, and %s (%s) cannot become one.%s" % [declared, JSON.stringify(value), given, remedy]
 
 
+## Why [param tagged], a value whose tag could not be built, was not written to [param setting_path],
+## and how a value of that tag is written.
+static func _unbuilt(setting_path: String, tagged: Dictionary) -> String:
+	var tag: String = str(tagged["_type"])
+	var refused: String = (
+		"The value for %s is tagged %s and could not be read as one, so nothing was written."
+		% [setting_path, JSON.stringify(tag)]
+	)
+	var shapes: Array = GdhShapes.REQUIRED.get(tag, [])
+	if shapes.is_empty():
+		return refused + " A setting cannot hold a %s written as a tag." % tag
+	var keys: Array = shapes[0]
+	var parts: Array[String] = ['"_type": "%s"' % tag]
+	for key: Variant in keys:
+		parts.append('"%s": %s' % [key, "[...]" if tag.begins_with("Packed") and key == "value" else "..."])
+	return refused + " One is written as {%s}." % ", ".join(parts)
+
+
 # Add an autoload singleton
 func add_autoload(params: Dictionary) -> Dictionary:
 	var name: String = str(params.get("name", ""))
@@ -313,7 +340,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 			"saved": false
 		}
 	ProjectSettings.set_setting(setting, entry)
-	var err: Error = GdhProjectFile.save()
+	var err: Error = GdhProjectFile.save([setting])
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
@@ -339,7 +366,7 @@ func remove_autoload(params: Dictionary) -> Dictionary:
 
 	var old_value: String = str(ProjectSettings.get_setting(setting))
 	ProjectSettings.set_setting(setting, null)
-	var err: Error = GdhProjectFile.save()
+	var err: Error = GdhProjectFile.save([setting])
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
@@ -401,7 +428,7 @@ func set_main_scene(params: Dictionary) -> Dictionary:
 	var old_main_scene: String = str(ProjectSettings.get_setting("application/run/main_scene", ""))
 
 	ProjectSettings.set_setting("application/run/main_scene", scene_path)
-	var err: Error = GdhProjectFile.save()
+	var err: Error = GdhProjectFile.save(["application/run/main_scene"])
 
 	if err != OK:
 		return _log.failure("Failed to save project settings: " + str(err))

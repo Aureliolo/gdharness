@@ -222,6 +222,8 @@ func deserialize_value(value: Variant) -> Variant:
 	# to compile a script that gives a Variant to a typed parameter: the operations are compiled
 	# under the target project's warning levels, so one such project lost every headless call.
 	var tag: String = str(fields["_type"])
+	if GdhShapes.LIST_TAGS.has(tag):
+		return GdhShapes.packed_tagged(fields, fitted)
 	var builder: String = BUILDERS.get(tag, "")
 	if builder.is_empty() or not GdhShapes.buildable(fields, tag):
 		return fields

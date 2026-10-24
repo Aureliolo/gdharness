@@ -20,6 +20,38 @@ import { codeOf } from './gdscript-source.js';
 export const EXIT_LEAK =
   /ObjectDB instances? (?:was |were )?leaked at exit|resources? still in use at exit|Pages in use exist at exit/;
 
+/**
+ * What the test runner's markers print as the engine's shutdown clears the newest script and the
+ * oldest, on an engine below 4.8. Kept in step with WALK_BEGAN and WALK_ENDED in listed.gd.
+ */
+export const WALK_BEGAN = "gdharness: the engine's shutdown began clearing scripts";
+export const WALK_ENDED = "gdharness: the engine's shutdown cleared every script";
+
+/**
+ * Whether [param lines] show the engine's shutdown stopping part way through its scripts: the
+ * marker of the newest script printed and the marker of the oldest did not. Below 4.8 the walk
+ * clearing them ends on freed memory when a script's release frees the next one, and every script
+ * it never reached is reported as leaked at exit, whatever the run freed itself.
+ */
+export function walkStoppedPartWay(lines: Iterable<string>): boolean {
+  let began = false;
+  for (const line of lines) {
+    if (line.includes(WALK_ENDED)) {
+      return false;
+    }
+    began ||= line.includes(WALK_BEGAN);
+  }
+  return began;
+}
+
+/** Why a leak report beside a walk that stopped part way is not counted against the run. */
+export const WALK_STOPPED_SENTENCE =
+  "The engine's shutdown stopped part way through its scripts (godot#117991, fixed in 4.8 by " +
+  'godot#120976), so it reported as leaked at exit what it never got to free, and the report is the ' +
+  "engine's rather than the run's. gdharness holds every script loaded from a file past that walk, " +
+  'which keeps it whole, so this one stopped on a script it could not hold, such as one made in code. ' +
+  "A leak of the run's own is not told apart in such a run.";
+
 /** One exported variable typed with its own script's class. */
 export interface SelfTypedExport {
   readonly script: string;

@@ -13,7 +13,13 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { Harness } from './harnesses.js';
-import { BIND_ADDRESS_SETTING, PORT_SETTING, QUIET_SCENES_SETTING, SCRIPT_RUNS_SETTING } from './setup.js';
+import {
+  BIND_ADDRESS_SETTING,
+  PORT_SETTING,
+  QUIET_SCENES_SETTING,
+  RUNTIME_AUTOLOAD,
+  SCRIPT_RUNS_SETTING,
+} from './setup.js';
 import { projectPathSentence, TOOL_SPECS, theGamePicked } from './tool-definitions.js';
 import { renderToolsMarkdown } from './tool-reference.js';
 
@@ -139,7 +145,10 @@ the project lists its folder in \`${QUIET_SCENES_SETTING}\`, a \`PackedStringArr
 prefixes, empty by default. A run started on a scene under one of them neither serves nor
 announces, nor do the engines it starts, unless it was started to be profiled from its start.
 
-The autoload reaches an export. \`gdharness runtime off\` in the project before shipping.
+The autoload names \`res://${RUNTIME_AUTOLOAD.path}\`, the loader \`gdharness setup\` writes, which
+brings the runtime up only in a debug build that has the addon, so a release export carries it and
+does nothing. It is committed with \`project.godot\`, and \`gdharness doctor\` says when it differs
+from the one gdharness ships.
 
 ## At a breakpoint
 

@@ -20,9 +20,10 @@ It exits 0 when every case passed and nothing else was wrong, 1 when anything fa
 command line itself is wrong.
 
 - `--engines N`: at most this many engines, 4 by default.
-- `--slots DIR`: the slot directory, `.godot/gate/slots` in the main checkout by default.
-- `--slot-count N`: how many slots that directory has; 4, or fewer on a machine with fewer
-  processors.
+- `--slots DIR`: the slot directory, the machine's own by default (see
+  [Engine slots](#engine-slots)).
+- `--slot-count N`: how many slots that directory has; by default a fifth of the processors, at
+  least one.
 - `--silence S`: the shortest silence that ends an engine, in seconds; 300 by default.
 - `--deadline S`: the most seconds one engine may run, printing or not, the import's included. No
   limit by default.
@@ -119,7 +120,13 @@ an allocation fails at the commit limit however much physical memory is free.
   exports an array or dictionary typed with its own class, such as `@export var parts: Array[Item]`
   in the script declaring `Item`, so a run that loads one always ends this way; the verdict names
   each such script in the project. Typed with a class it extends instead, as `Array[Resource]`, it
-  is freed.
+  is freed. Below 4.8 the engine's shutdown can stop part way through its scripts, when releasing one
+  frees the next (godot#117991, fixed in 4.8 by godot#120976), and it then reports as held
+  everything it never reached. On those engines the runner keeps every script loaded from a file
+  alive until that walk is over, which keeps it whole, and prints a line as the walk starts and
+  another as it ends. A run whose walk still stopped part way lists what the engine reported under
+  "not counted against the run" instead of failing on it. What a test leaks itself, a script it
+  holds included, still holds what it reaches, so it is still reported and still fails the run.
 - An exit code other than 0, named by its meaning: a Windows status such as
   `0xC0000005 (STATUS_ACCESS_VIOLATION)`, or one of gdUnit4's, such as 101 for orphan nodes. gdUnit4's
   100, which it exits with when a case failed, is left out beside that case's own line. An engine
@@ -249,10 +256,26 @@ kept in `.godot/gdharness/suite-passed.json`, beside the times.
 
 ## Engine slots
 
-The slots are files in one directory, shared by every tool on the machine that starts a test engine
-for the project, so that a gate, a benchmark and a build running at once start no more engines
-between them than there are slots. A tool of a game's own that starts engines takes them the same
-way:
+The slots are files in one directory, shared by every tool on the machine that starts an engine,
+for every project, so that the gates of several games, a benchmark and a build running at once
+start no more engines between them than there are slots. The MCP server's own engines take them
+too: each headless operation, script check, export, `project_test` run and `editor_run check`
+waits for a slot before its engine starts. A game started with `editor_run start`, and one the
+editor plays, does not: someone is driving it for as long as it runs.
+
+The directory and the count are the same for every tool on the machine:
+
+- The directory is `GODOT_ENGINE_SLOTS` when that is set and not empty. Otherwise it is
+  `$XDG_CACHE_HOME/gdharness/slots` when `XDG_CACHE_HOME` is set and not empty, on any platform,
+  then `%LOCALAPPDATA%\gdharness\slots` on Windows, and `~/.cache/gdharness/slots` everywhere
+  else.
+- The count is `GODOT_ENGINE_SLOT_COUNT` when that is set, a whole number above 0. Otherwise it is
+  a fifth of the processors the machine offers, rounded down, and at least one.
+- A command's `--slots` and `--slot-count` come before both.
+
+`--engines` is how many engines one run would like, and is not the slot count: a gate given its
+share of the machine passes `--engines` for its share and the machine's directory and count for
+the slots. A tool of a game's own that starts engines takes them the same way:
 
 1. A slot is `<directory>/<n>.lock`, for `n` from 0 below the slot count.
 2. To take one, create the file exclusively (`O_CREAT | O_EXCL`, Python's `open(path, "x")`), and
@@ -306,6 +329,49 @@ func shutdown(_session: GdUnitTestSession) -> GdUnitResult:
 
 A hook that answers with `GdUnitResult.error` fails the run, because gdUnit4 prints that answer as
 an engine error that no suite declared.
+
+## Waits, tweens and input in a suite
+
+The tests addon, `addons/gdharness_tests`, which `gdharness setup` installs, has three classes for
+the things a suite waits on or presses:
+
+- `GdhWait.until(tree, done)` awaits until `done` answers true, asking once a frame, and answers
+  false after 30 seconds (or the bound it is given) so that something that never ends fails the
+  case by name. `GdhWait.still(tree)` awaits three frames in a row with no tween running.
+  `GdhWait.frames(tree, n)` awaits n frames.
+- `GdhTweens.step(tree, seconds)` moves every running tween on by that much, as frames would.
+  `GdhTweens.past(tree, seconds)` steps one frame further, for a case about what an animation
+  leaves when it is over: a step ending exactly where the last tweener ends leaves the callback
+  after it unrun.
+- `GdhEvent` builds events: `click(at)`, `release(at)`, `wheel(at, up)`, `motion(at, moved, held)`,
+  `key(KEY_SPACE)`, `pad(JOY_BUTTON_A)`, `axis(JOY_AXIS_LEFT_X, value)` and `action("jump")`, each
+  pressed unless told otherwise. Hand one to `Input.parse_input_event`, or to a control's own
+  `_gui_input`.
+
+A wait on a timer of an animation's length races the animation: the engine counts a tween's time
+in frame deltas, so on a machine running other engines the timer ends with the tween still going.
+Asking once a frame, or stepping the tween, holds however slowly the frames come.
+
+## What suites cost, by function
+
+`gdharness test` runs suites as a script, and the engine's script profiler only sees a scene, so
+it cannot say where a tier's time goes. `editor_run start` with `suites`, the same paths
+`project_test` takes, plays them in the tests addon's suites scene through the same runner, and
+`editor_run profile` then names what each function cost:
+
+```text
+editor_run start    suites ["tests/house"], headless true, profile true
+editor_output       until running is false
+editor_run profile
+```
+
+The run quits with gdUnit4's exit code. A suite that needs a window needs `headless: false` here
+too.
+
+For game code rather than suites, a scene can step its work one call a frame with
+`GdhBench.each_frame(tree, most, step)`, which stops early when `step` answers false and answers
+`steps` and `ms_each`, the step's own time on average. The profiler names only so many functions a
+frame, so work played inside one frame comes back mostly unnamed; one step a frame names them all.
 
 ## Starting the runner yourself
 

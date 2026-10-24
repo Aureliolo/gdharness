@@ -48,14 +48,22 @@ const EXPECTED: Dictionary[String, String] = {
 }
 ## The tool name gdUnit4 reads its options after.
 const TOOL: String = "GdUnitCmdTool.gd"
+## Ends the runner's own arguments: everything after it is gdUnit4's options, for a run with no
+## script path on its command line to find them after.
+const GDUNIT: String = "--gdh-gdunit"
 ## How long a windowless engine sleeps after each frame. The engine's own default is the
 ## low-processor pause, 6.8 ms measured, which a run of suites awaiting frames spends thousands of
 ## times; zero makes a frame's delta round to nothing, and a tween then never moves.
 const FRAME_SLEEP_USEC: int = 1000
+## What the engine's shutdown prints as it clears the newest script and the oldest, on an engine
+## whose walk [GdhShutdownWalk] guards. Kept in step with the server's engine-leaks.ts, which reads
+## a run printing the first and not the second as a walk that stopped part way.
+const WALK_BEGAN: String = "gdharness: the engine's shutdown began clearing scripts"
+const WALK_ENDED: String = "gdharness: the engine's shutdown cleared every script"
+## The meta of the theme database holding the scripts [method GdhShutdownWalk.hold] keeps.
+const WALK_HOLD: StringName = &"gdharness_scripts_held_past_the_shutdown_walk"
 
 var _runner: GdhRunner = null
-## The suites of the run, compiled by [method compiled_together] and held for as long as it runs.
-var _together: GDScript = null
 
 
 ## gdUnit4's runner reading its options after this script's path rather than after its own tool's,
@@ -64,12 +72,38 @@ class GdhRunner:
 	extends GdUnitTestCIRunner
 
 	var own_path: String = ""
+	## gdUnit4's options when they were given after [constant GDUNIT] rather than read from the
+	## engine's command line, as the suites scene gives them: a played scene has no script path to
+	## find them after.
+	var given: PackedStringArray = []
+	## The suites compiled by [method compiled_together], held for as long as the run goes on.
+	var together: GDScript = null
 	## The cases dealt by their rows, by `res://suite.gd:test_case`.
 	var row_shares: Dictionary[String, GdhRowShare] = {}
 	## The cases gdUnit4 said it finished, which [GdhSessionCheck] holds the session's lookups against.
 	var cases_ended: int = 0
+	## The marker of the shutdown walk's oldest end, made as the run starts.
+	var walk_scripts: Array[GDScript] = []
+
+	## As the run ends, the marker of the walk's newest end, and every script held past the walk, on
+	## an engine whose walk can stop part way ([GdhShutdownWalk]).
+	func _notification(what: int) -> void:
+		if what != NOTIFICATION_EXIT_TREE or not GdhShutdownWalk.guarded():
+			return
+		var also: Array[GDScript] = walk_scripts.duplicate()
+		also.append_array(GdhShutdownWalk.marker(WALK_BEGAN))
+		if together != null:
+			also.append(together)
+		var own: GDScript = ResourceLoader.get_cached_ref(own_path) as GDScript
+		if own != null:
+			also.append(own)
+		GdhShutdownWalk.hold(also)
 
 	func get_cmdline_args() -> PackedStringArray:
+		if not given.is_empty():
+			var options: PackedStringArray = [TOOL]
+			options.append_array(given)
+			return options
 		return options_of(OS.get_cmdline_args(), own_path)
 
 	## gdUnit4 asks this of every case it finds, a parameterised case once a row, each row carrying
@@ -200,9 +234,92 @@ class GdhSessionCheck:
 		)
 
 
+## The engine's shutdown walk over its scripts, on an engine below 4.8. It clears them from the
+## newest, and a script whose release frees the next one, as the last reference to its base can,
+## leaves the walk on freed memory, where it ends (godot#117991, fixed in 4.8 by godot#120976).
+## Every script it never reached keeps what it holds, which the engine then reports as leaked at
+## exit, so a run of suites that leaked nothing failed on it.
+class GdhShutdownWalk:
+	extends RefCounted
+
+	## Whether the engine of [param version] is one whose walk can stop part way.
+	static func guarded(version: Dictionary = Engine.get_version_info()) -> bool:
+		var major: int = version.get("major", 0)
+		var minor: int = version.get("minor", 0)
+		return major == 4 and minor < 8
+
+	## A script the walk clears as it passes it, printing [param said] then, made now so it takes
+	## this place in the walk. It holds an instance of itself, which keeps it alive past the engine
+	## dropping its cache of scripts until the walk clears it, and the instance that prints, whose
+	## script is older and so is not cleared yet.
+	static func marker(said: String) -> Array[GDScript]:
+		var printing: GDScript = GDScript.new()
+		printing.source_code = (
+			'extends RefCounted\n\nvar said: String = ""\n\n\nfunc _notification(what: int) -> void:\n'
+			+ "\tif what == NOTIFICATION_PREDELETE:\n\t\tprint(said)\n"
+		)
+		var marking: GDScript = GDScript.new()
+		marking.source_code = (
+			"extends RefCounted\n\nstatic var kept: RefCounted = null\n"
+			+ "static var printing: RefCounted = null\n"
+		)
+		if printing.reload() != OK or marking.reload() != OK:
+			push_error("gdharness test could not make the marker of the engine's shutdown: " + said)
+			return []
+		var instance: Object = printing.new()
+		instance.set("said", said)
+		marking.set("kept", marking.new())
+		marking.set("printing", instance)
+		return [printing, marking]
+
+	## Every script loaded from a file under res://, and [param also], held until the theme database
+	## goes, which is after the walk and before the GDScript language does. Freed in the walk, a
+	## script can take the next one with it and end the walk; held, none is freed there, so the walk
+	## reaches every script and what the engine reports at exit is only what was leaked. A script a
+	## run leaks is held by what leaked it as well, and is still reported.
+	static func hold(also: Array[GDScript]) -> void:
+		var held: Array[GDScript] = also.duplicate()
+		var pending: PackedStringArray = ["res://"]
+		while not pending.is_empty():
+			var directory: String = pending[pending.size() - 1]
+			pending.remove_at(pending.size() - 1)
+			for file: String in DirAccess.get_files_at(directory):
+				var path: String = directory.path_join(file)
+				if file.ends_with(".gd") and ResourceLoader.has_cached(path):
+					var script: GDScript = ResourceLoader.get_cached_ref(path) as GDScript
+					if script != null:
+						held.append(script)
+			for inner: String in DirAccess.get_directories_at(directory):
+				if not inner.begins_with("."):
+					var _inner: bool = pending.append(directory.path_join(inner))
+		ThemeDB.set_meta(WALK_HOLD, held)
+
+
 func _initialize() -> void:
+	_runner = started(OS.get_cmdline_user_args())
+	_runner.own_path = get_script().resource_path
+	root.add_child(_runner)
+
+
+## As gdUnit4's own `GdUnitCmdTool.gd` ends, which names in a verbose run the nodes left orphaned.
+func _finalize() -> void:
+	queue_delete(_runner)
+	if OS.is_stdout_verbose():
+		print("Orphan nodes left as the run ends:")
+		Window.print_orphan_nodes()
+
+
+## The runner over the suites [param given] lists, to be added to the tree, which starts it. Shared
+## by this script and the suites scene of the tests addon, which loads this file from where the
+## server ships it and calls this, since the addon itself names no gdUnit4 class.
+static func started(given: PackedStringArray) -> GdhRunner:
+	# First, so the marker is older than every script the run loads.
+	var oldest: Array[GDScript] = []
+	if GdhShutdownWalk.guarded():
+		oldest = GdhShutdownWalk.marker(WALK_ENDED)
 	OS.low_processor_usage_mode_sleep_usec = FRAME_SLEEP_USEC
-	var asked: PackedStringArray = OS.get_cmdline_user_args()
+	var at: int = given.find(GDUNIT)
+	var asked: PackedStringArray = given if at < 0 else given.slice(0, at)
 	var unread: PackedStringArray = []
 	for flag: String in REPORTS_OFF:
 		if asked.has(flag):
@@ -221,28 +338,22 @@ func _initialize() -> void:
 				)
 			)
 	var suites: PackedStringArray = listed(asked, LISTED)
+	var runner: GdhRunner = GdhRunner.new()
+	runner.walk_scripts = oldest
+	if at >= 0:
+		runner.given = given.slice(at + 1)
 	if asked.has(TOGETHER):
-		_together = compiled_together(suites)
+		runner.together = compiled_together(suites)
 	var expected_out: String = argument_after(asked, EXPECTED_OUT)
 	if not expected_out.is_empty():
 		write_expected(expected_out, suites)
-	_runner = GdhRunner.new()
-	_runner.own_path = get_script().resource_path
-	_runner.add_test_suites(suites)
-	_runner.skip_test_suites(listed(asked, SKIPPING))
-	_runner.row_shares = row_shares_of(listed(asked, ROWS))
+	runner.add_test_suites(suites)
+	runner.skip_test_suites(listed(asked, SKIPPING))
+	runner.row_shares = row_shares_of(listed(asked, ROWS))
 	# Added to the list itself rather than through `register`, which saves every hook it holds into
 	# `project.godot`.
-	hooks.enigne_hooks.append(GdhSessionCheck.new(_runner))
-	root.add_child(_runner)
-
-
-## As gdUnit4's own `GdUnitCmdTool.gd` ends, which names in a verbose run the nodes left orphaned.
-func _finalize() -> void:
-	queue_delete(_runner)
-	if OS.is_stdout_verbose():
-		print("Orphan nodes left as the run ends:")
-		Window.print_orphan_nodes()
+	hooks.enigne_hooks.append(GdhSessionCheck.new(runner))
+	return runner
 
 
 ## Turns off the hooks among [param hooks] whose scripts [param unread] names, answering the scripts
