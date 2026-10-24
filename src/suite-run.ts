@@ -106,6 +106,10 @@ export interface TestOptions {
   readonly printOutput: boolean;
 }
 
+/** The least exit code that is a Windows exception status, such as 0xC0000005, read unsigned. */
+const WINDOWS_EXCEPTION = 0xc0000000;
+/** How many of the slowest suites the run names at its end. */
+const SLOWEST_NAMED = 5;
 /** Most engines a run starts, whatever the machine has. */
 const MOST_ENGINES = 4;
 /** Memory left to the rest of the machine, and what each engine is taken to need. */
@@ -446,6 +450,8 @@ interface EngineRan {
   readonly verdict: EngineVerdict;
   readonly log: string;
   readonly seconds: number;
+  /** Whether this is the engine run again alone after one ran out of memory. */
+  readonly again: boolean;
 }
 
 /** What starting engines needs, the same for every engine of a run. */
@@ -907,6 +913,7 @@ async function runEngine(
     verdict: judgeEngine(printed, assignment, end),
     log,
     seconds: (Date.now() - began) / 1000,
+    again: again !== '',
   };
 }
 
@@ -1034,12 +1041,14 @@ async function watched(
     launch.running.delete(stop);
   }
   const { code, signal } = await exited;
+  // Read as soon as it is known, while the machine is still as the engine left it.
+  const freeBytes = code !== null && code >>> 0 >= WINDOWS_EXCEPTION ? freemem() : undefined;
   // The helper's own failure reaches only its file, and the exit code it leaves says nothing.
   const failed = helper === null ? null : helperFailure(helper.error);
   if (failed !== null && helper !== null) {
     ended ??= `the engine could not be started ${helper.how}: ${failed}`;
   }
-  return { code, signal, ended };
+  return { code, signal, ended, ...(freeBytes === undefined ? {} : { freeBytes }) };
 }
 
 /** Ends [param child] and everything it started: Godot's console build is a wrapper around the engine. */
@@ -1084,12 +1093,19 @@ function report(
   }
   const failed = ran.filter((engine) => !engine.verdict.passed);
   for (const engine of failed) {
+    const heading = `--- engine ${String(engine.index)}: ${plural(engine.plan.suites.length, 'suite')}, ${engine.seconds.toFixed(1)} s${engine.again ? ', run again alone after an engine ran out of memory, and failed again' : ''}`;
     console.log('');
-    console.log(
-      `--- engine ${String(engine.index)}: ${plural(engine.plan.suites.length, 'suite')}, ${engine.seconds.toFixed(1)} s`,
-    );
+    console.log(heading);
     for (const fault of engine.verdict.faults) {
       console.log(`  ${fault}`);
+    }
+    // At the top of the kept log, so the file says why on its own, even when the engine printed nothing.
+    if (existsSync(engine.log)) {
+      const verdict = [
+        `gdharness: ${heading.slice(4)}`,
+        ...engine.verdict.faults.map((fault) => `  ${fault}`),
+      ];
+      writeFileSync(engine.log, `${verdict.join('\n')}\n---\n${readFileSync(engine.log, 'utf8')}`);
     }
     if (engine.verdict.shown.length > 0) {
       console.log('');
@@ -1113,6 +1129,26 @@ function report(
   const suites = new Set(ran.flatMap((engine) => engine.plan.suites.map((suite) => suite.path))).size;
   const longest = Math.max(0, ...ran.map((engine) => engine.seconds));
   const took = (Date.now() - startedAt) / 1000;
+  // What each engine took beside what it was dealt, so an uneven deal is told from a slow suite.
+  if (ran.length > 1) {
+    console.log('');
+    console.log(
+      `The engines took ${ran.map((engine) => `${engine.seconds.toFixed(1)} s`).join(', ')}, dealt ${ran.map((engine) => `${engine.plan.cost.toFixed(1)} s`).join(', ')}.`,
+    );
+  }
+  const slowest = ran
+    .flatMap((engine) =>
+      [...engine.printed.suites.values()].flatMap((suite) =>
+        suite.closed === null ? [] : [{ path: suite.path, seconds: suite.closed.seconds }],
+      ),
+    )
+    .sort((a, b) => b.seconds - a.seconds)
+    .slice(0, SLOWEST_NAMED);
+  if (slowest.length > 1) {
+    console.log(
+      `The slowest suites: ${slowest.map((suite) => `${suite.path} ${suite.seconds.toFixed(1)} s`).join(', ')}.`,
+    );
+  }
   const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s; the longest engine took ${longest.toFixed(1)} s.`;
   console.log('');
   if (failed.length === 0 && across.length === 0) {

@@ -118,14 +118,20 @@ an allocation fails at the commit limit however much physical memory is free.
   is freed.
 - An exit code other than 0, named by its meaning: a Windows status such as
   `0xC0000005 (STATUS_ACCESS_VIOLATION)`, or one of gdUnit4's, such as 101 for orphan nodes. gdUnit4's
-  100, which it exits with when a case failed, is left out beside that case's own line.
-- An engine ended for its silence, or because an autoload did not start.
+  100, which it exits with when a case failed, is left out beside that case's own line. An engine
+  that died on a Windows exception status also says how much memory was free as it ended.
+- An engine that printed nothing at all.
+- An engine ended for its silence or its deadline, or because an autoload did not start.
+- An engine whose banner names another version than `--godot-version` asks for.
 
 Each failure is printed with the lines that show it: a failing case's report, each unexpected error
 and the line after it, and the run's summary. When an engine was cut short and none of that explains
 it, its last 60 lines. The engine's whole output stays in
-`.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names, and the
-last lines count the problems and name the run's directory. A run that passes leaves no logs, and
+`.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names and which
+opens with the engine's verdict, so the file says why even for an engine that printed nothing. Before
+the verdict, a run over several engines says what each took beside what it was dealt, so an uneven
+deal is told from a slow suite, and a run of several suites names its five slowest. The last lines
+count the problems and name the run's directory. A run that passes leaves no logs, and
 the next run removes the logs of runs that have ended; `--print-output` prints every engine's
 output before the verdict, whether the run passed or not.
 
@@ -212,7 +218,7 @@ start is ended as soon as it says so, since nothing a suite reports without it m
 
 When an engine runs out of memory, which shows as the allocator's null, an image decode failing, or
 Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`, every engine that failed runs again, one at
-a time, and those runs are the ones judged.
+a time, and those runs are the ones judged. One that fails again is headed as run again alone.
 
 ## Leaving out what passed
 

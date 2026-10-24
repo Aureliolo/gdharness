@@ -40467,6 +40467,22 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     ]);
   const declaredRows = handed(['test_a', 'test_p'], { test_p: ['row said'] });
 
+  // An engine that printed nothing says so, and one that died on a Windows exception says how much
+  // memory was free as it ended, which tells a machine that ran out from a fault in the engine.
+  const mute = judgeEngine(readRun('\n\n'), handed(['test_a']), clean).faults;
+  assert.ok(mute.includes('the engine printed nothing at all'), mute.join('\n'));
+  const crashed = judgeEngine(readRun(rows([1, 1, 1])), declaredRows, {
+    code: 0xc0000005,
+    signal: null,
+    ended: null,
+    freeBytes: 2.5 * 1024 ** 3,
+  }).faults;
+  assert.deepEqual(
+    crashed,
+    ['the engine exited 0xC0000005 (STATUS_ACCESS_VIOLATION), with 2.5 GB of memory free as it ended'],
+    crashed.join('\n'),
+  );
+
   const passing = judgeEngine(readRun(rows([1, 1, 1])), declaredRows, clean);
   assert.deepEqual(passing.faults, [], 'a declared error once a row passes');
   assert.equal(passing.passed, true);
@@ -41911,6 +41927,11 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     assert.equal(first.status, 0, first.said);
     assert.match(first.said, /^Passed: 4 cases in 2 suites across 1 engine, /m, first.said);
     assert.doesNotMatch(first.said, /The import was skipped/, 'a project never imported is imported');
+    assert.match(
+      first.said,
+      /^The slowest suites: res:\/\/tests\/(?:ok|declared)_test\.gd \d+\.\d s, res:\/\/tests\/(?:ok|declared)_test\.gd \d+\.\d s\.$/m,
+      first.said,
+    );
     assert.ok(existsSync(join(project, '.godot', 'global_script_class_cache.cfg')), first.said);
     const state = join(project, '.godot', 'gdharness');
     const times = JSON.parse(readFileSync(join(state, 'suite-times.json'), 'utf8')) as Record<
@@ -41983,6 +42004,16 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       noisy.said,
     );
     assert.match(noisy.said, /^everything it printed: .*engine\.log$/m, 'the log is kept and named');
+    const kept = readFileSync(
+      /^everything it printed: (.*engine\.log)$/m.exec(noisy.said)?.[1] ?? '',
+      'utf8',
+    );
+    assert.match(
+      kept,
+      /^gdharness: engine \d+: 1 suite, \d+\.\d s\n {2}an engine error in res:\/\/tests\/noisy_test\.gd > test_noisy: nobody said this;.*\n---\n/,
+      `the kept log opens with the verdict: ${kept.slice(0, 400)}`,
+    );
+    assert.match(kept, /^Godot Engine v/m, 'and goes on with what the engine printed');
     assert.match(
       noisy.said,
       /^Failed: 1 problem, listed above\. Ran 1 case in 1 suite across 1 engine, /m,
@@ -42372,6 +42403,11 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
         `${what}: ${run.said}`,
       );
       assert.equal(new Set([...ran.values()].flat()).size, 2, `${what}: over both engines: ${run.said}`);
+      assert.match(
+        run.said,
+        /^The engines took \d+\.\d s, \d+\.\d s, dealt \d+\.\d s, \d+\.\d s\.$/m,
+        `${what}: what each took beside what it was dealt: ${run.said}`,
+      );
       assert.equal(rowsTimed(), rows, `${what}: and every row is timed afterwards`);
     }
     assert.deepEqual(readdirSync(slots), [], 'every slot given back');

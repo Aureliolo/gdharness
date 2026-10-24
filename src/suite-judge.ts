@@ -354,6 +354,11 @@ export interface EngineEnd {
   readonly signal: string | null;
   /** Why gdharness ended it, when it did. */
   readonly ended: string | null;
+  /**
+   * The memory free as an engine that died on a Windows exception ended, which tells a machine
+   * that ran out from a fault in the engine.
+   */
+  readonly freeBytes?: number;
 }
 
 export interface EngineVerdict {
@@ -498,11 +503,18 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   if (end.ended !== null) {
     faults.push(end.ended);
   } else if (end.code !== 0 && !explained) {
+    const free =
+      end.freeBytes === undefined
+        ? ''
+        : `, with ${(end.freeBytes / 1024 ** 3).toFixed(1)} GB of memory free as it ended`;
     faults.push(
       end.code === null
-        ? `the engine was ended by ${end.signal ?? 'a signal'}`
-        : `the engine exited ${exitNamed(end.code)}`,
+        ? `the engine was ended by ${end.signal ?? 'a signal'}${free}`
+        : `the engine exited ${exitNamed(end.code)}${free}`,
     );
+  }
+  if (printed.lines.every((line) => line.trim() === '')) {
+    faults.push('the engine printed nothing at all');
   }
   if (printed.unloadable.length > 0) {
     faults.push(`gdUnit4 could not load ${named(printed.unloadable)}, so it ran nothing`);
