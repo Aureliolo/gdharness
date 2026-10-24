@@ -7608,7 +7608,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.match(
       await call('editor_run', { op: 'start', projectPath: '/p', frames: 3 }),
-      /start takes: projectPath, scene, args, engineArgs, headless, visible, silent, executable, savesIn, env, runtimeWaitMs/,
+      /start takes: projectPath, scene, suites, args, engineArgs, headless, visible, silent, executable, savesIn, env, runtimeWaitMs/,
       'and the refusal says what start takes instead',
     );
     assert.match(
@@ -7848,7 +7848,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 153;
+const READ_IN_WORDS = 154;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -49430,6 +49430,121 @@ async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
 }
 
 /**
+ * A settings write changes the line of the setting it names and no other, and a setting the engine
+ * does not declare takes a packed array by its tag.
+ *
+ * The engine's save leaves out every key at its default, so a project holding
+ * `unsafe_call_argument=0` on purpose lost the line to a write of another key. And with no declared
+ * type to fit a tagged PackedStringArray to, the tag was written into the file as a dictionary.
+ */
+async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('settings lines regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-setting-lines-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-setting-lines-rt-'));
+  // The last line is not a default, so the engine keeps the section and leaves out only the others;
+  // the [rendering] section holds only a default, so the engine leaves the whole of it out.
+  const warning =
+    'gdscript/warnings/unsafe_call_argument=0\ngdscript/warnings/unused_variable=1\n' +
+    'gdscript/warnings/untyped_declaration=1\n';
+  const filter = 'textures/canvas_textures/default_texture_filter=1\n';
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Lines"\n\n' +
+      `[debug]\n\n${warning}\n[rendering]\n\n${filter}`,
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const settings = async (args: Record<string, unknown>): Promise<{ answer: unknown; said: string }> => {
+    const response = await server.request(
+      'tools/call',
+      { name: 'project_settings', arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    return { answer: parseTextContent(response), said: textOf(response) ?? JSON.stringify(response) };
+  };
+  const file = (): string => readFileSync(join(project, 'project.godot'), 'utf8');
+  try {
+    await server.initialize('regression-test');
+    const other = await settings({ op: 'set', setting: 'application/config/description', value: 'kept' });
+    assert.equal(get(other.answer, 'saved'), true, `another setting is written: ${other.said}`);
+    assert.match(file(), /config\/description="kept"/, `and is in the file: ${file()}`);
+    assert.ok(
+      file().includes(`[debug]\n\n${warning}`),
+      `a line holding a default stays where it was: ${file()}`,
+    );
+    assert.ok(
+      file().includes(`[rendering]\n\n${filter}`),
+      `and so does a section holding only one: ${file()}`,
+    );
+
+    const tagged = await settings({
+      op: 'set',
+      setting: 'gdharness/tests/not_searched',
+      value: { _type: 'PackedStringArray', value: ['res://test/bench/'] },
+    });
+    assert.equal(get(tagged.answer, 'saved'), true, `a tagged packed array is written: ${tagged.said}`);
+    assert.match(
+      file(),
+      /\[gdharness\]\n\ntests\/not_searched=PackedStringArray\("res:\/\/test\/bench\/"\)\n/,
+      `as that packed array: ${file()}`,
+    );
+
+    // A setting the file does not hold yet, as one it holds has a type to be refused by.
+    const before = file();
+    const unfit = await settings({
+      op: 'set',
+      setting: 'gdharness/fresh_list',
+      value: { _type: 'PackedStringArray', value: ['res://a/', 7] },
+    });
+    assert.ok(
+      unfit.said.includes(
+        'The value for gdharness/fresh_list is tagged "PackedStringArray" and could not be read as one, so nothing was written. One is written as {"_type": "PackedStringArray", "value": [...]}.',
+      ),
+      `a tag whose list does not fit is refused: ${unfit.said}`,
+    );
+    const callable = await settings({ op: 'set', setting: 'gdharness/probe', value: { _type: 'Callable' } });
+    assert.ok(
+      callable.said.includes('A setting cannot hold a Callable written as a tag.'),
+      `as is a tag no value can be built from: ${callable.said}`,
+    );
+    assert.equal(file(), before, 'and neither touches the file');
+
+    // The file holds the default, so the setting is not new to it, whatever its value.
+    const warned = 'debug/gdscript/warnings/unsafe_call_argument';
+    const raised = await settings({ op: 'set', setting: warned, value: 1 });
+    assert.equal(get(raised.answer, 'was_new'), false, `a setting the file holds is not new: ${raised.said}`);
+    assert.ok(
+      file().includes('[debug]\n\ngdscript/warnings/unsafe_call_argument=1\n'),
+      `and its line changes in place: ${file()}`,
+    );
+    const lowered = await settings({ op: 'set', setting: warned, value: 0 });
+    assert.equal(get(lowered.answer, 'saved'), true, `set back to its default: ${lowered.said}`);
+    const unset = await settings({ op: 'unset', setting: warned });
+    assert.equal(
+      get(unset.answer, 'removed'),
+      false,
+      `which the engine leaves out of the file, so unset finds no line: ${unset.said}`,
+    );
+    assert.ok(!file().includes('unsafe_call_argument'), `the line went with the write: ${file()}`);
+    const kept = await settings({ op: 'unset', setting: 'debug/gdscript/warnings/unused_variable' });
+    assert.equal(get(kept.answer, 'removed'), true, `a line holding a default can be unset: ${kept.said}`);
+    assert.ok(!file().includes('unused_variable'), `which takes it out: ${file()}`);
+    assert.ok(file().includes(`[rendering]\n\n${filter}`), `and leaves the other: ${file()}`);
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * A read asked of the editor is refused rather than answered from disk.
  *
  * The two are not the same reading, which is the whole reason for saying which one you want: disk
@@ -59618,6 +59733,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowedRunWritesItsMovie,
   testTheEditorIsOfferedWhereItCanAnswer,
   testASettingTakesWhatAPropertyTakes,
+  testASettingsWriteKeepsEveryOtherLine,
   testAnElementIsToldWhatItsTypeTakes,
   testAWriteSaysWhatElseItChanged,
   testAWriteReadsWhatThePropertyDeclares,

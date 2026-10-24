@@ -5,21 +5,25 @@ extends RefCounted
 ## The engine writes each section's keys in the order it registered them, and an engine running a
 ## script registers them in another order than the editor does, so a one-setting change moved lines
 ## nobody touched across several sections and a commit of it read as a rewrite. The save is still the
-## engine's, for what only it gets right: the header, each value's text and dropping a key that is
-## back at its default. Only the order is taken from the file as it was.
+## engine's, for what only it gets right: the header and each value's text. The order is taken from
+## the file as it was, and so is every line of a key the call did not change: the engine leaves out
+## each key at its default, so a project holding `unsafe_call_argument=0` on purpose lost the line to
+## a change of another key.
 
 const PATH: String = "res://project.godot"
 
 
 ## Saves the project's settings, keeping the sections and keys already in the file where they were.
-## A key or a section new to the file goes where the engine put it relative to its neighbours.
-static func save() -> Error:
+## A key or a section new to the file goes where the engine put it relative to its neighbours. Only
+## the settings in [param changed] may leave the file, as the engine leaves out one set back to its
+## default or erased.
+static func save(changed: PackedStringArray) -> Error:
 	var before: String = FileAccess.get_file_as_string(PATH)
 	var err: Error = ProjectSettings.save()
 	if err != OK or before.is_empty():
 		return err
 	var written: String = FileAccess.get_file_as_string(PATH)
-	var kept: String = in_order_of(before, written)
+	var kept: String = in_order_of(before, written, changed)
 	if kept == written:
 		return OK
 	var file: FileAccess = FileAccess.open(PATH, FileAccess.WRITE)
@@ -31,13 +35,32 @@ static func save() -> Error:
 	return OK
 
 
-## [param written] with its sections and their keys put in the order [param before] has them. Every
-## line of the result is a line of [param written], so nothing the engine wrote is lost or changed.
-static func in_order_of(before: String, written: String) -> String:
+## [param written] with its sections and their keys put in the order [param before] has them, and
+## each line [param before] has for a key [param written] lacks put back, unless that key's setting
+## is in [param changed]. Every other line of the result is a line of [param written], so nothing the
+## engine wrote is lost or changed.
+static func in_order_of(before: String, written: String, changed: PackedStringArray) -> String:
 	var old: Dictionary = _parsed(before)
 	var fresh: Dictionary = _parsed(written)
 	var old_sections: Array[Dictionary] = old["sections"]
 	var fresh_sections: Array[Dictionary] = fresh["sections"]
+
+	var by_name: Dictionary[String, Dictionary] = {}
+	var fresh_names: Array[String] = []
+	var entry_of: Dictionary[String, Dictionary] = {}
+	var fresh_keys: Dictionary[String, Array] = {}
+	for section: Dictionary in fresh_sections:
+		var name: String = section["name"]
+		by_name[name] = section
+		fresh_names.append(name)
+		var texts: Dictionary[String, String] = {}
+		var keys: Array[String] = []
+		for entry: Dictionary in section["entries"]:
+			var key: String = entry["key"]
+			texts[key] = str(entry["text"])
+			keys.append(key)
+		entry_of[name] = texts
+		fresh_keys[name] = keys
 
 	var old_names: Array[String] = []
 	var old_keys: Dictionary[String, Array] = {}
@@ -48,37 +71,72 @@ static func in_order_of(before: String, written: String) -> String:
 		for entry: Dictionary in section["entries"]:
 			keys.append(str(entry["key"]))
 		old_keys[name] = keys
+		var kept: Array[Dictionary] = []
+		for entry: Dictionary in section["entries"]:
+			var key: String = entry["key"]
+			if (
+				not (by_name.has(name) and entry_of[name].has(key))
+				and not changed.has(_setting_of(name, key))
+			):
+				kept.append(entry)
+		if kept.is_empty():
+			continue
+		if not by_name.has(name):
+			by_name[name] = section
+			fresh_names.append(name)
+			entry_of[name] = {}
+			fresh_keys[name] = []
+		for entry: Dictionary in kept:
+			entry_of[name][str(entry["key"])] = str(entry["text"])
+			fresh_keys[name].append(str(entry["key"]))
 
-	var by_name: Dictionary[String, Dictionary] = {}
-	var fresh_names: Array[String] = []
+	# The blank lines closing a section belong to its place in the file rather than to the section,
+	# so the last one keeps the ending the engine gave the file wherever it moved from. A section put
+	# back sits between two others, which the engine parts with a blank line.
+	var names: Array[String] = _merged(old_names, fresh_names)
+	var tails: Array[String] = []
 	for section: Dictionary in fresh_sections:
-		var name: String = section["name"]
-		by_name[name] = section
-		fresh_names.append(name)
+		tails.append(str(section["tail"]))
+	while tails.size() < names.size():
+		# Not checked: a position inside the array cannot be refused.
+		var _inserted: int = tails.insert(maxi(tails.size() - 1, 0), "\n")
 
 	var text: String = fresh["preamble"]
-	var at: int = 0
-	for name: String in _merged(old_names, fresh_names):
-		var section: Dictionary = by_name[name]
-		var entries: Array[Dictionary] = section["entries"]
-		var entry_of: Dictionary[String, String] = {}
-		var fresh_keys: Array[String] = []
-		for entry: Dictionary in entries:
-			var key: String = entry["key"]
-			entry_of[key] = str(entry["text"])
-			fresh_keys.append(key)
+	for at: int in names.size():
+		var name: String = names[at]
 		var known: Array = old_keys.get(name, [])
 		var held: Array[String] = []
 		held.assign(known)
-		text += str(section["head"])
-		for key: String in _merged(held, fresh_keys):
-			text += entry_of[key]
-		# The blank lines closing a section belong to its place in the file rather than to the
-		# section, so the last one keeps the ending the engine gave the file wherever it moved from.
-		var placed: Dictionary = fresh_sections[at]
-		text += str(placed["tail"])
-		at += 1
+		var listed: Array = fresh_keys[name]
+		var wanted: Array[String] = []
+		wanted.assign(listed)
+		text += str(by_name[name]["head"])
+		for key: String in _merged(held, wanted):
+			text += str(entry_of[name][key])
+		text += tails[at]
 	return text
+
+
+## The setting [param key] in section [param section] stands for, as the engine names it: the
+## section and the key joined, a quoted key read without its quotes.
+static func _setting_of(section: String, key: String) -> String:
+	var bare: String = key
+	if bare.length() >= 2 and bare.begins_with('"') and bare.ends_with('"'):
+		bare = bare.substr(1, bare.length() - 2).c_unescape()
+	return bare if section.is_empty() else section + "/" + bare
+
+
+## Whether project.godot has a line for [param setting_path]. A setting at its default is in the
+## file only when the file says so, which the value alone cannot tell.
+static func sets(setting_path: String) -> bool:
+	var parsed: Dictionary = _parsed(FileAccess.get_file_as_string(PATH))
+	var sections: Array[Dictionary] = parsed["sections"]
+	for section: Dictionary in sections:
+		var entries: Array[Dictionary] = section["entries"]
+		for entry: Dictionary in entries:
+			if _setting_of(str(section["name"]), str(entry["key"])) == setting_path:
+				return true
+	return false
 
 
 ## The names of [param wanted] in the order [param held] lists them, those [param held] lacks each

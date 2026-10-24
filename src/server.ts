@@ -10028,15 +10028,16 @@ class GodotServer {
     if (sceneToRun && !sceneToRun.ok) {
       return this.createErrorResponse(sceneToRun.reason, PATH_SOLUTIONS);
     }
+    const build = readNonEmptyString(args, 'executable');
     // An engine told to play a scene that is not there puts up a modal alert, headless on Windows
-    // too, and waits for a click nobody gives.
-    if (sceneToRun?.ok && !existsSync(sceneToRun.absolutePath)) {
+    // too, and waits for a click nobody gives. An exported build carries its scenes in its pack, so
+    // the project folder is no measure of them.
+    if (build === undefined && sceneToRun?.ok && !existsSync(sceneToRun.absolutePath)) {
       return this.createErrorResponse(
         `No scene at res://${sceneToRun.relativePath} in the project at ${project.value.path}.`,
         PATH_SOLUTIONS,
       );
     }
-    const build = readNonEmptyString(args, 'executable');
     const exported = build === undefined ? null : exportedBuild(project.value.path, build);
     if (exported !== null && !exported.ok) {
       return this.createErrorResponse(exported.reason, PATH_SOLUTIONS);

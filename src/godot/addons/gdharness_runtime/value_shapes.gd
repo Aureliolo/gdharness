@@ -20,6 +20,18 @@ const PACKED_ELEMENTS: Dictionary = {
 	TYPE_PACKED_VECTOR4_ARRAY: TYPE_VECTOR4,
 	TYPE_PACKED_COLOR_ARRAY: TYPE_COLOR,
 }
+## The tags of the packed arrays that cross as a plain list, and the type each builds.
+const LIST_TAGS: Dictionary = {
+	"PackedInt32Array": TYPE_PACKED_INT32_ARRAY,
+	"PackedInt64Array": TYPE_PACKED_INT64_ARRAY,
+	"PackedFloat32Array": TYPE_PACKED_FLOAT32_ARRAY,
+	"PackedFloat64Array": TYPE_PACKED_FLOAT64_ARRAY,
+	"PackedStringArray": TYPE_PACKED_STRING_ARRAY,
+	"PackedVector2Array": TYPE_PACKED_VECTOR2_ARRAY,
+	"PackedVector3Array": TYPE_PACKED_VECTOR3_ARRAY,
+	"PackedVector4Array": TYPE_PACKED_VECTOR4_ARRAY,
+	"PackedColorArray": TYPE_PACKED_COLOR_ARRAY,
+}
 
 # What each tag has to carry before it is built. A tag naming a type whose keys are not there is a
 # tag somebody wrote by mistake or wrote for a different shape, and building one out of defaults
@@ -44,6 +56,15 @@ const REQUIRED: Dictionary = {
 	"Color": [["r", "g", "b"]],
 	"NodePath": [["path"]],
 	"PackedByteArray": [["base64"]],
+	"PackedInt32Array": [["value"]],
+	"PackedInt64Array": [["value"]],
+	"PackedFloat32Array": [["value"]],
+	"PackedFloat64Array": [["value"]],
+	"PackedStringArray": [["value"]],
+	"PackedVector2Array": [["value"]],
+	"PackedVector3Array": [["value"]],
+	"PackedVector4Array": [["value"]],
+	"PackedColorArray": [["value"]],
 	"float": [["value"]],
 	"int": [["value"]],
 	"RID": [["id"]],
@@ -78,6 +99,10 @@ static func written_as(type: int) -> String:
 	var tag: String = type_string(type)
 	var alternatives: Array = REQUIRED.get(tag, [])
 	if alternatives.is_empty() or tag in ["float", "int", "Dictionary"]:
+		return ""
+	# A packed list is written as the plain list wherever its type is declared, so its tag is no
+	# remedy there.
+	if PACKED_ELEMENTS.has(type) and type != TYPE_PACKED_BYTE_ARRAY:
 		return ""
 	var keys: Array = alternatives[0]
 	var optional: Array = OPTIONAL.get(tag, [])
@@ -170,6 +195,20 @@ static func fraction(value: Variant, type: int, elements: Array = []) -> bool:
 			if fraction(key, key_type) or fraction(entries[key], value_type):
 				return true
 	return false
+
+
+## A packed array tagged with its type, {"_type": "PackedStringArray", "value": [...]}, for where
+## nothing declares what a plain list is to become: a setting the engine does not declare, or a
+## Variant property, takes a list as an Array. Each item is fitted as a declared list's would be,
+## and a list with an item that does not fit stays the tag it arrived as, for the caller to refuse.
+static func packed_tagged(fields: Dictionary, fit: Callable) -> Variant:
+	var tag: String = str(fields["_type"])
+	if not buildable(fields, tag) or not fields["value"] is Array:
+		return fields
+	var type: int = LIST_TAGS[tag]
+	var items: Array = fields["value"]
+	var built: Variant = packed_from(items, type, fit)
+	return built if typeof(built) == type else fields
 
 
 ## The packed array [param type] built from [param items], each fitted by [param fit] to what the
