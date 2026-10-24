@@ -78,12 +78,16 @@ func set_property(params: Dictionary) -> Dictionary:
 		var unwritable: String = GdhPaths.unwritable_copy(chain)
 		if not unwritable.is_empty():
 			return {"type": "error", "message": unwritable}
-	# The write alone, setter included, which is where a property's cost is.
+	# The write alone, setter included, which is where a property's cost is. Listened to as a call
+	# is, since a setter refusing a value says why only in what it reports.
+	var caught: GdhCallErrors = GdhCallErrors.new()
+	OS.add_logger(caught)
 	var began: int = Time.get_ticks_usec()
 	var written: Variant = GdhPaths.write(holder, named, given)
 	if copied:
 		GdhPaths.write_back(chain, written)
 	var elapsed: int = Time.get_ticks_usec() - began
+	OS.remove_logger(caught)
 	var now: Variant = GdhPaths.read_under(holder, named)
 	if copied:
 		var again: Dictionary = GdhPaths.walk_to(target, node_path, property)
@@ -122,20 +126,20 @@ func set_property(params: Dictionary) -> Dictionary:
 				)
 				% [named, str(slot["class"]), GdhValues.class_of(refused_object)]
 			)
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s.%s was given %s and reads %s afterwards, as it did before: %s."
-				% [
-					reached["called"],
-					named,
-					JSON.stringify(_values.serialize(given), "", false),
-					JSON.stringify(_values.serialize(now), "", false),
-					why,
-				]
-			)
-		}
+		var refused: String = (
+			"%s.%s was given %s and reads %s afterwards, as it did before: %s."
+			% [
+				reached["called"],
+				named,
+				JSON.stringify(_values.serialize(given), "", false),
+				JSON.stringify(_values.serialize(now), "", false),
+				why,
+			]
+		)
+		if not caught.raised.is_empty():
+			var reported: PackedStringArray = PackedStringArray(caught.raised.slice(0, ERRORS_KEPT))
+			refused += " While it was written the game reported: %s" % "; ".join(reported)
+		return {"type": "error", "message": refused}
 
 	var answer: Dictionary = {
 		"type": "property_set",
@@ -147,6 +151,8 @@ func set_property(params: Dictionary) -> Dictionary:
 	}
 	if already and unmoved:
 		answer["unchanged"] = true
+	_keep_reported(answer, "errors", caught.raised)
+	_keep_reported(answer, "warnings", caught.warned)
 	# The engine stores a number past an export range, or one no enum value has, as given; only the
 	# inspector holds a property to them, so the game now holds a value its own script never expected.
 	if holder is Object:
@@ -169,6 +175,33 @@ func _argument_for(
 	var holder: Object = reached["holder"]
 	var called: String = reached["called"]
 	var wants: int = _values.parameter_type(holder, named, index)
+	var choices: Dictionary = _values.parameter_enum(holder, named, index)
+	var values: Dictionary = choices.get("values", {})
+	if not choices.is_empty() and sent is String and not str(sent).strip_edges().is_valid_int():
+		var chosen: Variant = GdhDeclared.enum_named(values, str(sent))
+		if chosen == null:
+			return {
+				"type": "error",
+				"message":
+				GdhDeclared.enum_argument_refusal(
+					"%s.%s" % [called, named], index, str(choices["enum"]), str(sent), values
+				)
+			}
+		return {"value": chosen}
+	# A packed list's elements are fitted one by one, and one that cannot become what the list holds
+	# is named: converted whole, a word or a fraction among them became 0 or was cut, and the call ran.
+	var packed: Variant = GdhValues.packed_template(wants)
+	if packed != null and sent is Array:
+		var elements: Dictionary = _values.typed_like(sent, packed, _element_object.bind(node, node_path))
+		if elements.has("message"):
+			return {
+				"type": "error",
+				"message":
+				(
+					"%s.%s takes %s as argument %d: %s"
+					% [called, named, type_string(wants), index + 1, elements["message"]]
+				)
+			}
 	if GdhValues.cuts(sent, wants):
 		return {
 			"type": "error",
@@ -259,6 +292,14 @@ func _value_for(
 			return {"value": by_name[1]}
 		if not str(by_name[1]).is_empty():
 			return {"type": "error", "message": by_name[1]}
+	var packed: Variant = GdhValues.packed_template(wanted)
+	if packed != null and value is Array:
+		var elements: Dictionary = _values.typed_like(value, packed, _element_object.bind(node, node_path))
+		if elements.has("message"):
+			return {
+				"type": "error",
+				"message": "%s.%s holds %s: %s" % [called, named, type_string(wanted), elements["message"]]
+			}
 	var holds_objects: bool = (
 		declared == TYPE_OBJECT or (declared == TYPE_NIL and (old_value == null or old_value is Object))
 	)
@@ -335,6 +376,52 @@ static func held_already(given: Variant, held: Variant) -> bool:
 	return PackedFloat32Array([given])[0] == PackedFloat32Array([held])[0]
 
 
+## What to do instead of the call [param method] makes on [param sort], the list or map [param
+## reached] ends on, which a path does not make. A method of the list itself is the likelier aim
+## than one of what it holds when the list has it: told to call append() on an element, a caller
+## adding to a list has nowhere to go.
+static func _instead_of_a_call(reached: Dictionary, method: String, sort: String) -> String:
+	var own: String = GdhPaths.method_of(str(reached["name"]))
+	if own.is_empty():
+		own = str(reached["name"])
+	var steps: PackedStringArray = GdhPaths.steps_of(method)
+	var _shortened: int = steps.resize(steps.size() - 1)
+	var holding: String = ":".join(steps)
+	var through_a_call: bool = false
+	for step: String in steps:
+		through_a_call = through_a_call or not GdhPaths.method_of(step).is_empty()
+	var the: String = "the " + sort.trim_prefix("a ")
+	match GdhPaths.container_method(reached["holder"], own):
+		"changes":
+			if through_a_call:
+				return (
+					(
+						"%s() changes %s: to change it, call a method of the game that changes it, since %s"
+						+ " is returned by a call, and runtime_invoke set does not write into what a call returns"
+					)
+					% [own, the, reached["called"]]
+				)
+			return (
+				(
+					"%s() changes %s: to change it, give %s its new value whole with runtime_invoke set,"
+					+ " property %s, or call a method of the game that changes it"
+				)
+				% [own, the, reached["called"], holding]
+			)
+		"reads":
+			return (
+				(
+					"To look in %s with %s(), read %s whole with runtime_inspect property, property %s, and"
+					+ " look in what comes back"
+				)
+				% [the, own, reached["called"], holding]
+			)
+	return (
+		"A method of what %s holds is called on the element, as in %s:0:%s"
+		% [sort, reached["called"], reached["name"]]
+	)
+
+
 func call_method(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var method: String = str(params.get("method", ""))
@@ -343,7 +430,33 @@ func call_method(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or method.is_empty():
 		return {"type": "error", "message": "Node path and method required"}
 
-	var standing: Dictionary = GdhValues.target_at(_host.get_tree().root, node_path)
+	var root: Node = _host.get_tree().root
+	var standing: Dictionary = GdhValues.class_at(root, node_path)
+	if standing.is_empty():
+		standing = GdhValues.target_at(root, node_path)
+		if standing.has("message") and node_path.is_valid_ascii_identifier():
+			var classes: Array[String] = []
+			for declared: Dictionary in ProjectSettings.get_global_class_list():
+				classes.append(str(declared.get("class", "")))
+			var close: PackedStringArray = GdhRead.nearest(node_path, PackedStringArray(classes))
+			standing["message"] = (
+				(
+					"%s. No global class is called %s either%s; a static function is called with its"
+					+ " class's name or its script's res:// path as the path."
+				)
+				% [
+					str(standing["message"]).trim_suffix("."),
+					node_path,
+					(
+						""
+						if close.is_empty()
+						else (
+							", and the nearest %s %s"
+							% ["is" if close.size() == 1 else "are", ", ".join(close)]
+						)
+					),
+				]
+			)
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
@@ -368,13 +481,24 @@ func call_method(params: Dictionary) -> Dictionary:
 		var spelled: String = str(reached["name"])
 		if GdhPaths.method_of(spelled).is_empty():
 			spelled += "()"
-		# A vector or a transform has no element to call a method on: it is read by its components.
-		if GdhPaths.composite(reached["holder"]):
+		# A vector or a transform has no element to call a method on, so a call it does not answer is
+		# refused without the advice about elements below.
+		var answers: bool = GdhPaths.can_read(reached["holder"], spelled)
+		var called_on: Variant = reached["holder"]
+		if (
+			(GdhPaths.composite(called_on) or GdhPaths.textual(called_on))
+			and not (args.is_empty() and answers)
+		):
 			return {
 				"type": "error",
-				"message": GdhPaths.nothing_there(reached["holder"], spelled, str(reached["called"]))
+				"message":
+				(
+					"%s:%s takes no arguments" % [reached["called"], spelled]
+					if answers
+					else GdhPaths.nothing_there(reached["holder"], spelled, str(reached["called"]))
+				)
 			}
-		if args.is_empty() and GdhPaths.can_read(reached["holder"], spelled):
+		if args.is_empty() and answers:
 			var read_from: int = Time.get_ticks_usec()
 			var answered: Variant = GdhPaths.read_under(reached["holder"], spelled)
 			var read_for: int = Time.get_ticks_usec() - read_from
@@ -394,20 +518,19 @@ func call_method(params: Dictionary) -> Dictionary:
 			if GdhPaths.can_read(reached["holder"], spelled)
 			else GdhPaths.nothing_there(reached["holder"], spelled, str(reached["called"]))
 		)
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s. A method of what %s holds is called on the element, as in %s:0:%s"
-				% [why, sort, reached["called"], reached["name"]]
-			)
-		}
+		return {"type": "error", "message": "%s. %s" % [why, _instead_of_a_call(reached, method, sort)]}
 	var holder: Object = reached["holder"]
 	var named: String = reached["name"]
 	# The method a call ends on is the one being called whether or not it carries the brackets a
 	# step along the way would: "get_viewport():gui_get_focus_owner()" is the same call as without
 	# the last pair.
-	var not_called: String = _not_a_method_to_call(holder, named, str(reached["called"]))
+	var not_called: String = _instance_method(
+		holder,
+		named if GdhPaths.method_of(named).is_empty() else GdhPaths.method_of(named),
+		str(reached["called"])
+	)
+	if not_called.is_empty():
+		not_called = _not_a_method_to_call(holder, named, str(reached["called"]))
 	if not not_called.is_empty():
 		return {"type": "error", "message": not_called}
 	if not GdhPaths.method_of(named).is_empty():
@@ -424,6 +547,9 @@ func call_method(params: Dictionary) -> Dictionary:
 	# The object arguments checked only against the engine class, by position from 1, for the refusal
 	# the engine may still make: see [method GdhValues.slot_declared].
 	var by_engine_class: Dictionary = {}
+	# The enum arguments given a number none of their values has, said beside the answer: the engine
+	# passes any number on, and a write of the same number to a property already said so.
+	var outside: PackedStringArray = []
 	for index: int in args.size():
 		var wants: int = _values.parameter_type(holder, named, index)
 		if wants == TYPE_OBJECT and (args[index] is String or args[index] is Dictionary):
@@ -444,6 +570,14 @@ func call_method(params: Dictionary) -> Dictionary:
 		if argument.has("message"):
 			return argument
 		deserialized_args.append(argument["value"])
+		var choices: Dictionary = _values.parameter_enum(holder, named, index)
+		if not choices.is_empty():
+			var values: Dictionary = choices["values"]
+			var stray: String = GdhDeclared.outside_enum_argument(
+				index, str(choices["enum"]), argument["value"], values
+			)
+			if not stray.is_empty():
+				var _noted: bool = outside.append(stray)
 
 	# Timed around the call alone, since the bridge's round trip is a second or more and swamps what
 	# one click's work costs; the frame metrics read whichever frame is last, which is not this one.
@@ -491,6 +625,8 @@ func call_method(params: Dictionary) -> Dictionary:
 	}
 	if awaited:
 		answer["awaited"] = true
+	if not outside.is_empty():
+		answer["outside_declared"] = " ".join(outside)
 	_keep_reported(answer, "errors", caught.raised)
 	_keep_reported(answer, "warnings", caught.warned)
 	# Main.explode, ended at a null it called into, answered result 0 as if it had counted something.
@@ -530,6 +666,25 @@ static func _not_a_method_to_call(holder: Object, named: String, called: String)
 	if holder.has_method(method):
 		return ""
 	return GdhPaths.with_methods_offered("%s has no method %s" % [called, method], holder, method)
+
+
+## Why [param method] cannot be called on [param holder], a script named by its class or its path,
+## or "": a function that is not static runs on an instance of the class, which the script is not.
+static func _instance_method(holder: Object, method: String, called: String) -> String:
+	if not holder is Script:
+		return ""
+	var script: Script = holder
+	for entry: Dictionary in script.get_script_method_list():
+		if str(entry.get("name", "")) != method or GdhRead.as_int(entry.get("flags", 0)) & METHOD_FLAG_STATIC:
+			continue
+		return (
+			(
+				"%s.%s is not static, so it runs on an instance of the class: call it on a node carrying %s,"
+				+ " or on an object a path from one reaches"
+			)
+			% [called, method, script.resource_path]
+		)
+	return ""
 
 
 ## Whether a call's `properties` asks for its result to be read: true, or a list of names.
@@ -613,7 +768,7 @@ static func _argument_count_refused(holder: Object, method: String, given: int) 
 	# of the game's frame; a call giving exactly the arguments the method declares needs no walk.
 	if given == holder.get_method_argument_count(method):
 		return ""
-	for entry: Dictionary in holder.get_method_list():
+	for entry: Dictionary in GdhValues.methods_of(holder):
 		if str(entry.get("name", "")) != method:
 			continue
 		var parameters: Array = entry.get("args", [])

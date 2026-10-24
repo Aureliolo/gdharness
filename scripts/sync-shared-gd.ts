@@ -36,6 +36,7 @@ export const SHARED_GDSCRIPT: Readonly<Record<string, readonly string[]>> = {
   'reading.gd': ['gdharness_editor', 'gdharness_runtime'],
   'same_values.gd': ['gdharness_editor'],
   'serialisation.gd': ['gdharness_editor', 'gdharness_runtime'],
+  'setting_reads.gd': ['gdharness_editor'],
   'value_shapes.gd': ['gdharness_editor', 'gdharness_runtime'],
 };
 

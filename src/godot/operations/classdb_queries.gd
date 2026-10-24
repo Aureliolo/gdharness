@@ -93,6 +93,19 @@ func query_classes(params: Dictionary) -> Dictionary:
 
 		filtered_classes.append(class_name_str)
 
+	var declared: Dictionary = _declared_classes(params)
+	var own: Array[Dictionary] = []
+	for name: String in _sorted_names(declared):
+		if instantiable_only and not _instantiable(name, declared):
+			continue
+		if not filter.is_empty() and not name.to_lower().contains(filter.to_lower()):
+			continue
+		if not bases.is_empty():
+			var engine_base: String = _engine_base_of(name, declared)
+			if engine_base.is_empty() or not _under_any(engine_base, bases):
+				continue
+		own.append(_project_entry(name, declared))
+
 	_log.info(
 		"Found " + str(filtered_classes.size()) + " classes (out of " + str(all_classes.size()) + " total)"
 	)
@@ -103,7 +116,8 @@ func query_classes(params: Dictionary) -> Dictionary:
 		"filter": filter,
 		"category": category,
 		"instantiable_only": instantiable_only,
-		"classes": filtered_classes
+		"classes": filtered_classes,
+		"project_classes": own,
 	}
 
 
@@ -194,6 +208,8 @@ static func _names(members: Array[Dictionary]) -> Array[String]:
 	return names
 
 
+## What the project's scripts declare on disk, class to its path, what it extends and whether it is
+## abstract, as the server read them.
 static func _declared_classes(params: Dictionary) -> Dictionary:
 	var given: Variant = params.get("project_classes", {})
 	if given is Dictionary:
@@ -202,12 +218,75 @@ static func _declared_classes(params: Dictionary) -> Dictionary:
 	return {}
 
 
+static func _entry_of(name: String, declared: Dictionary) -> Dictionary:
+	var entry: Variant = declared.get(name, {})
+	if entry is Dictionary:
+		var fields: Dictionary = entry
+		return fields
+	return {}
+
+
+static func _sorted_names(declared: Dictionary) -> Array[String]:
+	var names: Array[String] = []
+	for name: Variant in declared.keys():
+		names.append(str(name))
+	names.sort()
+	return names
+
+
+## [param name]'s ancestors, nearest first: the project classes it extends, then the engine's. A
+## base that is neither ends the line, as it is written.
+static func _ancestors_of(name: String, declared: Dictionary) -> Array[String]:
+	var ancestors: Array[String] = []
+	var current: String = name
+	while declared.has(current):
+		var base: String = str(_entry_of(current, declared).get("extends", ""))
+		if base.is_empty() or base == name or ancestors.has(base):
+			return ancestors
+		ancestors.append(base)
+		current = base
+	while ClassDB.class_exists(current):
+		var parent: String = ClassDB.get_parent_class(current)
+		if parent.is_empty():
+			break
+		ancestors.append(parent)
+		current = parent
+	return ancestors
+
+
+## The engine class [param name] is built on, or empty when its line reaches none.
+static func _engine_base_of(name: String, declared: Dictionary) -> String:
+	if not declared.has(name):
+		return name if ClassDB.class_exists(name) else ""
+	for each: String in _ancestors_of(name, declared):
+		if ClassDB.class_exists(each):
+			return each
+	return ""
+
+
+static func _instantiable(name: String, declared: Dictionary) -> bool:
+	if GdhRead.as_bool(_entry_of(name, declared).get("abstract", false)):
+		return false
+	var engine_base: String = _engine_base_of(name, declared)
+	return not engine_base.is_empty() and ClassDB.can_instantiate(engine_base)
+
+
+static func _project_entry(name: String, declared: Dictionary) -> Dictionary:
+	var entry: Dictionary = _entry_of(name, declared)
+	return {
+		"name": name,
+		"path": str(entry.get("path", "")),
+		"extends": str(entry.get("extends", "")),
+		"abstract": GdhRead.as_bool(entry.get("abstract", false)),
+	}
+
+
 ## Why [param wanted] has no answer here. A class_name a project script declares is not in ClassDB,
 ## and "Class not found" for one read as though the project had no such class. [param declared] is
 ## what the project's scripts declare on disk, class to path, rather than the engine's list, which is
 ## the class cache: that lags the scripts, and a class written a moment ago was refused as declared
 ## nowhere.
-func _not_found(wanted: String, declared: Dictionary) -> Dictionary:
+func _not_found(wanted: String, declared: Dictionary, answers_own: bool = false) -> Dictionary:
 	if declared.has(wanted):
 		return _log.failure(
 			(
@@ -216,7 +295,7 @@ func _not_found(wanted: String, declared: Dictionary) -> Dictionary:
 					+ "the engine's ClassDB only. script_info structure on that script, with "
 					+ "includeInherited, answers what it declares and what it inherits."
 				)
-				% [wanted, str(declared[wanted])]
+				% [wanted, str(_entry_of(wanted, declared).get("path", ""))]
 			)
 		)
 	# The usual miss is a spelling, one letter off a class the engine has or one the project declares.
@@ -245,12 +324,17 @@ func _not_found(wanted: String, declared: Dictionary) -> Dictionary:
 	)
 	if not own.is_empty():
 		offered += (
-			" The nearest %s a project script declares %s %s, which script_info structure reads."
+			" The nearest %s a project script declares %s %s%s."
 			% [
 				"class" if own.size() == 1 else "classes",
 				"is" if own.size() == 1 else "are",
 				", ".join(own),
+				"" if answers_own else ", which script_info structure reads",
 			]
+		)
+	if answers_own:
+		return _log.failure(
+			"Class not found: %s.%s Neither the engine nor a project script declares it." % [wanted, offered]
 		)
 	return _log.failure(
 		(
@@ -340,8 +424,34 @@ func inspect_inheritance(params: Dictionary) -> Dictionary:
 
 	_log.info("Inspecting inheritance for: " + class_name_str)
 
-	if not ClassDB.class_exists(class_name_str):
-		return _not_found(class_name_str, _declared_classes(params))
+	var declared: Dictionary = _declared_classes(params)
+	var own_class: bool = declared.has(class_name_str)
+	if not own_class and not ClassDB.class_exists(class_name_str):
+		return _not_found(class_name_str, declared, true)
+
+	# A class a project script declares can stand only under another or under an engine class, so
+	# both answers carry the project's own beneath the class asked about.
+	var project_children: Array[Dictionary] = []
+	var project_descendants: Array[Dictionary] = []
+	for name: String in _sorted_names(declared):
+		var line: Array[String] = _ancestors_of(name, declared)
+		if name == class_name_str or not line.has(class_name_str):
+			continue
+		project_descendants.append(_project_entry(name, declared))
+		if line[0] == class_name_str:
+			project_children.append(_project_entry(name, declared))
+	if own_class:
+		var own_line: Array[String] = _ancestors_of(class_name_str, declared)
+		return {
+			"class_name": class_name_str,
+			"declared_in": str(_entry_of(class_name_str, declared).get("path", "")),
+			"parent_class": "" if own_line.is_empty() else own_line[0],
+			"ancestors": own_line,
+			"abstract": GdhRead.as_bool(_entry_of(class_name_str, declared).get("abstract", false)),
+			"can_instantiate": _instantiable(class_name_str, declared),
+			"project_children": project_children,
+			"project_descendants": project_descendants,
+		}
 
 	var ancestors: Array[String] = []
 	var current: String = class_name_str
@@ -386,7 +496,9 @@ func inspect_inheritance(params: Dictionary) -> Dictionary:
 		"direct_children": direct_children,
 		"all_descendants_count": all_descendants.size(),
 		"all_descendants": all_descendants,
-		"can_instantiate": ClassDB.can_instantiate(class_name_str)
+		"can_instantiate": ClassDB.can_instantiate(class_name_str),
+		"project_children": project_children,
+		"project_descendants": project_descendants,
 	}
 
 

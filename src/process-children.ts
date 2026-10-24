@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { runHidden as run } from './spawn.js';
 import { askWindows, WindowsAskFailure } from './windows-ask.js';
@@ -29,6 +30,9 @@ export async function startTimesOf(pids: readonly number[]): Promise<Map<number,
       }
       return began;
     }
+    if (process.platform === 'linux') {
+      return await linuxStartTimes(pids);
+    }
     // Read whatever ps printed rather than its exit status: a pid among these that has gone makes
     // ps exit non-zero after printing the rest, and the rest is the answer. In the C locale, since
     // lstart is a date in words and the words are the ones Date.parse reads.
@@ -47,6 +51,66 @@ export async function startTimesOf(pids: readonly number[]): Promise<Map<number,
     // The platform would not say, which the empty map is.
   }
   return began;
+}
+
+/**
+ * When each of [param pids] started, on Linux, as milliseconds, for the ones whose entry under /proc
+ * can be read: the boot time the kernel gives in whole seconds, plus the start in ticks after it, as
+ * psutil's create_time() reads it.
+ *
+ * Up to a second early and never late, and the same number in every process that asks, since the
+ * boot time is the kernel's. `ps -o lstart` adds the same two and then cuts the sum to the second,
+ * up to two seconds early: on a CI runner the process a game restarted itself into was dated before
+ * the run that made it had begun, past the second a comparison allows, and refused as older than the
+ * run. A boot instant worked out as now less the uptime is finer, but each process works out its own
+ * a few milliseconds apart, and a start one server noted and another compares has to be one number.
+ */
+export async function linuxStartTimes(pids: readonly number[]): Promise<Map<number, number>> {
+  const began = new Map<number, number>();
+  const hertz = await ticksPerSecond();
+  let booted: number;
+  try {
+    booted = Number(/^btime\s+(\d+)$/m.exec(readFileSync('/proc/stat', 'utf8'))?.[1] ?? Number.NaN) * 1000;
+  } catch {
+    return began;
+  }
+  if (hertz === null || Number.isNaN(booted)) {
+    return began;
+  }
+  for (const pid of pids) {
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
+    } catch {
+      continue;
+    }
+    // After the name, which is in brackets and can hold spaces and brackets of its own; the start is
+    // the twenty-second field, and the state after the name the third.
+    const ticks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]);
+    if (Number.isInteger(ticks) && ticks >= 0) {
+      began.set(pid, booted + Math.round((ticks * 1000) / hertz));
+    }
+  }
+  return began;
+}
+
+let ticksAnswered: number | undefined;
+
+/** The ticks a second /proc counts starts in, asked once it has been answered. */
+async function ticksPerSecond(): Promise<number | null> {
+  if (ticksAnswered !== undefined) {
+    return ticksAnswered;
+  }
+  try {
+    const hertz = Number((await run('getconf', ['CLK_TCK'], { timeout: ASK_TIMEOUT_MS })).stdout.trim());
+    if (Number.isInteger(hertz) && hertz > 0) {
+      ticksAnswered = hertz;
+      return hertz;
+    }
+  } catch {
+    // Not answered, which is asked again next time.
+  }
+  return null;
 }
 
 /** What [param command] printed to stdout, whatever it exited with. */
@@ -190,17 +254,22 @@ export function parseProcessTable(printed: string, started = false): ProcessTree
  * link to a parent that began later is to the number and not to the process. Only judged where
  * the listing says when each began; POSIX hands an orphan to init the moment its parent goes, so
  * its links are never stale and its listing carries no times.
+ *
+ * A parent that has gone is not listed, so its start is [param since] when the caller knows it: a
+ * run's game is asked about after it ended, and without a start to hold them against, the orphans
+ * of an earlier holder of its number were listed as the run's, which they had been refused as
+ * while it lived.
  */
-function linked(tree: ProcessTree, child: number, parent: number): boolean {
+function linked(tree: ProcessTree, child: number, parent: number, since?: number): boolean {
   const from = tree.get(child);
-  const to = tree.get(parent);
+  const began = tree.get(parent)?.startedAt ?? since;
   if (from === undefined || from.parent !== parent) {
     return false;
   }
-  if (from.startedAt === undefined || to?.startedAt === undefined) {
+  if (from.startedAt === undefined || began === undefined) {
     return true;
   }
-  return from.startedAt >= to.startedAt;
+  return from.startedAt >= began;
 }
 
 /**
@@ -225,11 +294,14 @@ function isConsoleHost(listed: ListedProcess): boolean {
   );
 }
 
-/** The processes whose parent is [param pid], as [param tree] has them, console hosts aside. */
-function childrenIn(tree: ProcessTree, pid: number): number[] {
+/**
+ * The processes whose parent is [param pid], as [param tree] has them, console hosts aside, with
+ * [param since] as [method linked] takes it.
+ */
+function childrenIn(tree: ProcessTree, pid: number, since?: number): number[] {
   const children: number[] = [];
   for (const [child, listed] of tree) {
-    if (linked(tree, child, pid) && !isConsoleHost(listed)) {
+    if (linked(tree, child, pid, since) && !isConsoleHost(listed)) {
       children.push(child);
     }
   }
@@ -243,9 +315,10 @@ function childrenIn(tree: ProcessTree, pid: number): number[] {
  * lives: ending it reparents them, to init on POSIX, so the tree has to be read while the parent
  * is still there. To any depth because the process a run holds is not always the game: a console
  * wrapper on Windows starts the engine as its child, and the engine's workers are the wrapper's
- * grandchildren.
+ * grandchildren. [param since] is when [param pid] began, for when it may have gone; every process
+ * below it was found listed, with its own start.
  */
-export function descendantsIn(tree: ProcessTree, pid: number): number[] {
+export function descendantsIn(tree: ProcessTree, pid: number, since?: number): number[] {
   const found: number[] = [];
   const queue = [pid];
   const seen = new Set<number>([pid]);
@@ -254,7 +327,7 @@ export function descendantsIn(tree: ProcessTree, pid: number): number[] {
     if (next === undefined) {
       break;
     }
-    for (const child of childrenIn(tree, next)) {
+    for (const child of childrenIn(tree, next, next === pid ? since : undefined)) {
       if (!seen.has(child)) {
         seen.add(child);
         found.push(child);
@@ -287,10 +360,13 @@ export function ancestorsIn(tree: ProcessTree, pid: number, root: number): numbe
   return chain;
 }
 
-/** The processes whose parent is [param pid] right now, or undefined when the platform will not say. */
-export async function childrenOf(pid: number): Promise<number[] | undefined> {
+/**
+ * The processes whose parent is [param pid] right now, or undefined when the platform will not say,
+ * with [param since] as [method descendantsIn] takes it.
+ */
+export async function childrenOf(pid: number, since?: number): Promise<number[] | undefined> {
   const tree = await processTree();
-  return tree === undefined ? undefined : childrenIn(tree, pid);
+  return tree === undefined ? undefined : childrenIn(tree, pid, since);
 }
 
 /** What a command line says a process is: the executable it runs and the project it was pointed at. */

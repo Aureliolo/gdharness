@@ -15,7 +15,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import process from 'node:process';
 import type { AnnouncedServer } from './bridge-announce.js';
 import {
@@ -879,8 +879,16 @@ export function recordedEnginePath(projectPath: string): string | null {
       continue;
     }
     const named = reach(entryEnvironment(harness, projectPath), 'GODOT_PATH');
-    if (typeof named === 'string' && named !== '' && existsSync(named)) {
-      return named;
+    // Relative to the project, where the harness starts the server that reads it; an absolute one
+    // as written, for the same reason as GODOT_PATH itself.
+    const path =
+      typeof named !== 'string' || named === ''
+        ? null
+        : isAbsolute(named)
+          ? named
+          : resolve(projectPath, named);
+    if (path !== null && existsSync(path)) {
+      return path;
     }
   }
   return null;

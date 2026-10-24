@@ -17,7 +17,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { exitOf } from './alive.js';
-import { DESKTOP_VARIABLE, ensureHelperCompiled, throughHelper } from './desktop.js';
+import {
+  DESKTOP_VARIABLE,
+  ensureHelperCompiled,
+  helperFailure,
+  helperStep,
+  throughHelper,
+} from './desktop.js';
 import { crashesReported, letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
@@ -29,7 +35,7 @@ import {
   sendSpec,
   withChanges,
 } from './outside.js';
-import { recordRunEnded, writeRunRecord } from './run-record.js';
+import { type RestartedFrom, type RunRecord, recordRunEnded, writeRunRecord } from './run-record.js';
 import { discard, scratchDirectory } from './scratch.js';
 import {
   frameFunctionsFor,
@@ -40,6 +46,7 @@ import {
   writeProfileFile,
 } from './script-profile.js';
 import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
+import { followSuccessor } from './successor.js';
 
 /**
  * The target started detached, so it is in no job object and no process group of this process;
@@ -99,6 +106,7 @@ async function startThroughHelper(
   const scratch = scratchDirectory('desktop');
   const pidFile = join(scratch, 'pid');
   const errorFile = join(scratch, 'error');
+  const stepFile = join(scratch, 'step');
   const where =
     spec.desktop !== undefined
       ? `on the ${spec.desktop} desktop`
@@ -117,6 +125,7 @@ async function startThroughHelper(
       pid: pidFile,
       error: errorFile,
       stop: stopFile,
+      step: stepFile,
     });
     // The helper's environment is what it starts inherits, since the start names no other.
     const envChanges =
@@ -145,15 +154,15 @@ async function startThroughHelper(
         return { child: started.child, pid };
       }
       if (exited.now) {
-        const why = existsSync(errorFile)
-          ? readFileSync(errorFile, 'utf8').trim()
-          : 'it exited saying nothing';
+        const why = helperFailure(errorFile) ?? 'it exited saying nothing';
         return { error: `it could not be started ${where}: ${why}` };
       }
       await delay(50);
     }
     started.child.kill();
-    return { error: `it was not started ${where} within ${DESKTOP_START_MS} ms` };
+    return {
+      error: `it was not started ${where} within ${DESKTOP_START_MS} ms, and ${helperStep(stepFile)}`,
+    };
   } finally {
     discard(scratch);
   }
@@ -337,16 +346,23 @@ async function keep(): Promise<void> {
     run === undefined || run.debugged === false
       ? null
       : await GameDebugger.open(run.breakpoints ?? [], profiled === null ? [] : [profiled.observer]);
+  const exitNotes = run === undefined ? null : mkdtempSync(join(tmpdir(), 'gdharness-exit-'));
+  const noted =
+    exitNotes === null
+      ? spec
+      : { ...spec, envChanges: { ...spec.envChanges, [EXIT_NOTES_VARIABLE]: exitNotes } };
   const toStart =
     debuggerPeer === null
-      ? spec
-      : { ...spec, args: withEngineArguments(spec.args, debuggerPeer.engineArguments) };
+      ? noted
+      : { ...noted, args: withEngineArguments(noted.args, debuggerPeer.engineArguments) };
   const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
   // Private to this keeper, for the file a helper watches for its stop.
   const own =
     run !== undefined && throughTheHelper(spec) ? mkdtempSync(join(tmpdir(), 'gdharness-stop-')) : null;
   const stopFile = own === null ? '' : join(own, 'stop');
   let started: Awaited<ReturnType<typeof startDetached>>;
+  // Before the game exists, so anything listed as started after it can be the game's own.
+  const spawnedAt = Date.now();
   try {
     started = await startDetached(toStart, transcript, run === undefined, stopFile);
   } finally {
@@ -370,6 +386,7 @@ async function keep(): Promise<void> {
           startedAt: run.startedAt,
           startedBy: Date.now(),
           projectPath: run.projectPath,
+          keeperPid: process.pid,
           ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
           ...(run.profile === undefined ? {} : { profile: run.profile }),
           arguments: toStart.args,
@@ -382,17 +399,23 @@ async function keep(): Promise<void> {
   }
   const exited = exitOf(child);
   let listening: KeeperListening | null = null;
+  // What a stop ends: the game, through what this process holds rather than through the pid (the
+  // game's own handle, or the helper's, which ends the game through the handle it holds; neither can
+  // reach a later process given the same number), and then whatever it restarted itself into.
+  let end = (): 'signalled' | 'gone' => {
+    if (stopFile !== '') {
+      writeFileSync(stopFile, '');
+      return 'signalled';
+    }
+    return child.kill() ? 'signalled' : 'gone';
+  };
+  // Held in an object, since it is set by the stop the channel hears, which no flow analysis follows.
+  const asked = { stop: false };
   if (record !== null) {
-    // Through what this process holds rather than through the pid: the game's own handle, or the
-    // helper's, which ends the game through the handle it holds. Neither can reach a later process
-    // given the same number.
     listening = await listenForTheServer(
       () => {
-        if (stopFile !== '') {
-          writeFileSync(stopFile, '');
-          return 'signalled';
-        }
-        return child.kill() ? 'signalled' : 'gone';
+        asked.stop = true;
+        return end();
       },
       debuggerPeer === null ? null : (request) => debuggerPeer.ask(request),
     );
@@ -408,22 +431,114 @@ async function keep(): Promise<void> {
     });
     process.stdout.end(`pid ${pid}\n`, resolve);
   });
-  const { code, signal } = await exited;
+  let { code, signal } = await exited;
+  let exitedAt = Date.now();
+  let note: RunRecord | null =
+    record === null ? null : listening === null ? record : { ...record, keeper: listening.address };
+  if (note !== null) {
+    writeNoteIfItCan({ ...note, endingAt: exitedAt });
+  }
+  // The game's restart, if it made one, is not this process's child, so the handle is no way to end it.
+  end = () => 'gone';
+  // Looked for at once, beside the drain: a successor that ends before the listing sees it is not
+  // followed, and the run ends with the first process's exit.
+  let looked =
+    note === null || restartSaid(exitNotes, pid) === false
+      ? null
+      : followSuccessor(pid, spec.command, spawnedAt, exitedAt, run?.transcript);
   // The profile is finished from everything the game sent, which is read after its exit is told.
   if (debuggerPeer !== null) {
     await debuggerPeer.drained(DRAIN_MS);
   }
   profiled?.finish();
+  let carried = pid;
+  let notTold = false;
+  while (note !== null && looked !== null) {
+    const followed = await looked;
+    if (followed === null) {
+      break;
+    }
+    const next = followed.successor;
+    const before: RestartedFrom = {
+      pid: carried,
+      endedAt: exitedAt,
+      ...(code === null ? {} : { exitCode: code }),
+      ...(code === null && signal !== null ? { exitSignal: signal } : {}),
+    };
+    note = {
+      ...note,
+      pid: next.pid,
+      startedBy: next.startedAt,
+      restartedFrom: [...(note.restartedFrom ?? []), before],
+    };
+    writeNoteIfItCan(note);
+    end = () => {
+      try {
+        process.kill(next.pid);
+        return 'signalled';
+      } catch {
+        return 'gone';
+      }
+    };
+    // Asked while the restart was being looked for, and answered as nothing to end then.
+    if (asked.stop) {
+      end();
+    }
+    const ended = await followed.ended;
+    carried = next.pid;
+    code = ended.code;
+    signal = null;
+    notTold = ended.code === null;
+    exitedAt = Date.now();
+    writeNoteIfItCan({ ...note, endingAt: exitedAt });
+    looked =
+      restartSaid(exitNotes, next.pid) === false
+        ? null
+        : followSuccessor(next.pid, spec.command, next.startedAt, exitedAt, run?.transcript);
+  }
   // After the profile, so a server told the run ended reads the profile it ended with.
   if (run !== undefined) {
-    recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
+    recordRunEnded(run.projectPath, carried, {
+      exitCode: code,
+      exitSignal: code === null ? signal : null,
+      notTold,
+    });
   }
   debuggerPeer?.close();
   listening?.close();
-  if (own !== null) {
-    rmSync(own, { recursive: true, force: true });
+  for (const made of [own, exitNotes]) {
+    if (made !== null) {
+      rmSync(made, { recursive: true, force: true });
+    }
   }
   process.exit(0);
+}
+
+/**
+ * Where the runtime addon in a game this keeper holds says, once its tree has gone, whether it set
+ * a restart. Kept in step with `EXIT_NOTES_VARIABLE` in the runtime addon.
+ */
+const EXIT_NOTES_VARIABLE = 'GDHARNESS_EXIT_NOTES';
+
+/**
+ * Whether [param pid] said as it exited that it restarts, or null when it said nothing: a game with
+ * no runtime addon, or one that did not end its tree, and the successor is then looked for by what
+ * the platform lists alone. Only a game can tell a restart from a worker it started in its last
+ * moments: one of those was taken for a successor, and the stop that asked the game to close ended
+ * the worker as the run.
+ */
+function restartSaid(notes: string | null, pid: number): boolean | null {
+  if (notes === null) {
+    return null;
+  }
+  try {
+    const said: unknown = JSON.parse(readFileSync(join(notes, `exit-${String(pid)}.json`), 'utf8'));
+    return typeof said === 'object' && said !== null && 'restart' in said && typeof said.restart === 'boolean'
+      ? said.restart
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 await letWindowsReportCrashes();

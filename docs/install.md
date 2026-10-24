@@ -140,9 +140,12 @@ at `addons/<name>/.gdharness-version`, which is what `gdharness doctor` reads.
 Then mind the autoload, which is the half that breaks quietly. `project.godot` is committed and
 names `res://addons/gdharness_runtime/runtime_autoload.gd`, so a clone or a CI runner boots with a
 missing script. `gdharness doctor` asks git which of the files your autoloads name are in the
-index, which is what a clone gets, and names any that are not. Commit the addon, or point the
-autoload at a script of your own that brings the addon up when it is there and does nothing when it
-is not. Outside a repository, or with no git on the machine, it says nothing rather than guessing.
+index, which is what a clone gets. A file nobody added is a problem, which fails `setup` and
+`doctor`. A file your `.gitignore` matches is named on a line of its own and is not a problem,
+because ignoring it says your own install step puts it there before `setup` runs; make sure it
+does, or point the autoload at a script of your own that brings the addon up when it is there and
+does nothing when it is not. Outside a repository, or with no git on the machine, it says nothing
+rather than guessing.
 
 Such a script usually adds the addon with `add_child.call_deferred`, because the root is still
 adding its own children while autoloads get `_ready`. A deferred add runs only once the main

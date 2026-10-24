@@ -3,17 +3,20 @@ extends Node
 
 ## Scenes and their nodes, edited in the open editor and read back from what it holds.
 
+const GdhDeclared = preload("../declared_values.gd")
 const GdhFileReads = preload("../file_reads.gd")
 const GdhRead = preload("../reading.gd")
 const GdhGroups = preload("scene_groups.gd")
+const GdhHeadlessCheck = preload("../headless_check.gd")
 const GdhKin = preload("scene_kin.gd")
+const GdhNavigationBake = preload("navigation_bake.gd")
 const GdhPaths = preload("scene_paths.gd")
 const GdhPlacing = preload("scene_placing.gd")
 const GdhPropertyValues = preload("../property_values.gd")
-const GdhResourceTools = preload("resource_tools.gd")
 const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSerialisation = preload("../serialisation.gd")
+const GdhTilesetTools = preload("tileset_tools.gd")
 
 var _editor_plugin: EditorPlugin = null
 var _values: GdhSerialisation = GdhSerialisation.new()
@@ -216,10 +219,11 @@ func list_scene_nodes(args: Dictionary) -> Dictionary:
 	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	var depth: int = GdhRead.as_int(args.get("depth", -1), -1)
 	var include_properties: bool = GdhRead.as_bool(args.get("includeProperties", false))
+	var include_defaults: bool = GdhRead.as_bool(args.get("includeDefaults", false))
 
 	# Read as a headless engine reads it with no editor connected, so the answer does not depend on
 	# whether one is.
-	var read: Dictionary = GdhFileReads.scene_tree(scene_path, depth, include_properties)
+	var read: Dictionary = GdhFileReads.scene_tree(scene_path, depth, include_properties, include_defaults)
 	if read.get("ok", false):
 		read["unsavedInEditor"] = GdhSceneFile.unsaved(scene_path)
 	return read
@@ -287,6 +291,9 @@ func add_node(args: Dictionary) -> Dictionary:
 		return scene.refuse("Nothing was written: " + unsettled)
 	scene.asked(new_node, properties.keys())
 	var unwritten: String = _properties.write_all(new_node, properties)
+	scene.asked(new_node, _properties.moved_by_engine.keys())
+	if not unwritten.is_empty():
+		unwritten = GdhHeadlessCheck.setter_ran(new_node, _properties.unheld, unwritten)
 	if unwritten.is_empty():
 		unwritten = GdhGroups.change(scene, new_node, adding, [])
 	if not unwritten.is_empty():
@@ -308,7 +315,7 @@ func add_node(args: Dictionary) -> Dictionary:
 		answer["properties"] = held
 	_properties.note_write(answer, new_node)
 	if not adding.is_empty():
-		answer.merge(GdhGroups.read(scene, new_node))
+		answer.merge(GdhGroups.read_added(new_node, adding))
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var unkept: String = _kept(
@@ -619,8 +626,13 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var old_path: String = scene.path_of(node)
 	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
+	scene.asked(node, _properties.moved_by_engine.keys())
 	if not refused_property.is_empty():
-		return scene.refuse(GdhSceneFile.missing_on(node, refused_property))
+		return scene.refuse(
+			GdhHeadlessCheck.setter_ran(
+				node, _properties.unheld, GdhSceneFile.missing_on(node, refused_property)
+			)
+		)
 	var ungrouped: String = GdhGroups.change(scene, node, adding, removing)
 	if not ungrouped.is_empty():
 		return scene.refuse(ungrouped)
@@ -726,11 +738,55 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	# names this scene's file sets are always answered.
 	var set_here: Dictionary = scene.set_here(node)
 	var props: Dictionary = _properties_of(node, include_defaults, set_here)
-	var cells: Dictionary = GdhResourceTools.cells_of(node)
+	var cells: Dictionary = GdhTilesetTools.cells_of(node)
 	var at: String = scene.path_of(node)
 	var here: Array = set_here.keys()
 	here.sort()
 	var answer: Dictionary = {"ok": true, "nodePath": at, "properties": props, "setHere": here}
+	# A Node3D stores only its transform, a matrix, while a set takes the position, rotation and
+	# scale the inspector shows, so a node turned 45 degrees down read back as nine numbers. A
+	# sheared one has no such three, and is left to its transform.
+	var placed: Node3D = node as Node3D
+	var rebuilt: Transform3D = Transform3D()
+	if placed != null:
+		var turned: Basis = Basis.from_euler(placed.rotation, placed.rotation_order)
+		rebuilt = Transform3D(turned * Basis.from_scale(placed.scale), placed.position)
+	if placed != null and props.has("transform") and rebuilt.is_equal_approx(placed.transform):
+		# Rounded, since a node never scaled came back with a scale of 0.99999994 out of the matrix;
+		# the transform beside it is exact.
+		var step: Vector3 = Vector3.ONE * 0.00001
+		answer["placement"] = {
+			"position": _readable(node, placed.position.snapped(step)),
+			"rotation_degrees": _readable(node, placed.rotation_degrees.snapped(step)),
+			"scale": _readable(node, placed.scale.snapped(step)),
+		}
+	# A player's getter answers Master for a bus the layout does not have, while the file keeps the
+	# name, so a player left on a renamed or removed bus read as one put on Master.
+	var bus: String = str(set_here.get("bus", ""))
+	var plays: bool = node is AudioStreamPlayer or node is AudioStreamPlayer2D or node is AudioStreamPlayer3D
+	if plays and not bus.is_empty() and AudioServer.get_bus_index(bus) == -1:
+		props["bus"] = bus
+		var buses: PackedStringArray = []
+		for index: int in AudioServer.bus_count:
+			var _added: bool = buses.append(AudioServer.get_bus_name(index))
+		answer["busNote"] = (
+			(
+				"%s names the bus %s, which the project's bus layout does not have, so it plays on %s; "
+				+ "the buses are %s."
+			)
+			% [str(node.name) if at == "." else at, bus, AudioServer.get_bus_name(0), ", ".join(buses)]
+		)
+	# A mask reads as a number, and which layers it holds, under the names the project gives them,
+	# is what a caller reads it for.
+	var layers: Dictionary = {}
+	for declared: Dictionary in node.get_property_list():
+		var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+		var named: String = str(declared.get("name", ""))
+		var mask: Variant = node.get(named) if props.has(named) else null
+		if hint in GdhDeclared.LAYER_NAMES and mask is int:
+			layers[named] = GdhDeclared.layers_in(hint, GdhRead.as_int(mask))
+	if not layers.is_empty():
+		answer["layers"] = layers
 	answer.merge(GdhSceneFile.class_of(node))
 	answer.merge(GdhGroups.read(scene, node))
 	var from: String = scene.values_from(node, at)
@@ -751,6 +807,24 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 			+ "includeDefaults: true lists them all."
 		)
 	return answer
+
+
+func bake_navigation(args: Dictionary) -> Dictionary:
+	var project_path: String = str(args.get("projectPath", ""))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var node_path: String = str(args.get("nodePath", "."))
+	var opened: Array = _open(scene_path, true)
+	var scene: GdhSceneFile = opened[0]
+	var refused: Dictionary = opened[1]
+	if not refused.is_empty():
+		return refused
+	var node: Node = GdhSceneFile.node_at(scene.root, node_path)
+	if not node:
+		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
+	var foreign: String = scene.foreign(node)
+	if not foreign.is_empty():
+		return scene.refuse(foreign)
+	return GdhNavigationBake.bake(scene, node)
 
 
 func save_scene(args: Dictionary) -> Dictionary:

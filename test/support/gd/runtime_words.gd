@@ -24,6 +24,10 @@ func _init() -> void:
 
 
 func _run() -> void:
+	# A headless script run's window is 64 by 64, and words drawn outside it are not on the screen;
+	# the new size is only in force from the next frame.
+	root.size = Vector2i(640, 480)
+	await process_frame
 	await _check_reading_rich_text()
 	await _check_reading_lists()
 	await _check_reading_as_drawn()
@@ -59,7 +63,10 @@ func _check_a_long_screen() -> void:
 		line.text = "line %d" % index
 		long.add_child(line)
 	await process_frame
-	var all: Dictionary = await node._execute_command("read_text", {"root": "/root/Long", "limit": 1200})
+	# Hidden ones included, since all but the first twenty lines sit below the window.
+	var all: Dictionary = await node._execute_command(
+		"read_text", {"root": "/root/Long", "limit": 1200, "include_hidden": true}
+	)
 	if all.get("count") != 1200 or all.get("omitted") != 0:
 		_fail("a limit above the default reads that many lines: %s" % str(all.get("count")))
 	var many: Dictionary = await node._execute_command(
@@ -95,15 +102,18 @@ func _check_a_near_miss_counts_what_would_be_found() -> void:
 		"find_nodes", {"name": "Enemy", "include_hidden": false}
 	)
 	var said: String = str(by_name.get("note", ""))
-	if not said.contains(
-		'2 hidden node names contain "Enemy", which "*Enemy*" with includeHidden true would find'
+	if not (
+		said
+		. contains(
+			'2 hidden or out-of-view node names contain "Enemy", which "*Enemy*" with includeHidden true would find'
+		)
 	):
 		_fail("a near miss on hidden nodes names the query that finds them: %s" % str(by_name))
 	var by_words: Dictionary = await node._execute_command(
 		"find_nodes", {"says": "dragon*", "include_hidden": false}
 	)
 	if not str(by_words.get("note", "")).contains(
-		'"*dragon*" with includeHidden true would find 2 hidden nodes'
+		'"*dragon*" with includeHidden true would find 2 hidden or out-of-view nodes'
 	):
 		_fail("and so does one on the words they hold: %s" % str(by_words))
 	var shown_too: Dictionary = await node._execute_command("find_nodes", {"name": "Enemy"})
@@ -191,6 +201,8 @@ func _paths(reply: Dictionary) -> Array[String]:
 func _check_reading_rich_text() -> void:
 	var dossier: VBoxContainer = VBoxContainer.new()
 	dossier.name = "Dossier"
+	# Wide enough to read: with no width, rich text wraps at every character and runs off the window.
+	dossier.custom_minimum_size = Vector2(600, 0)
 	root.add_child(dossier)
 	var marked: RichTextLabel = RichTextLabel.new()
 	marked.bbcode_enabled = true

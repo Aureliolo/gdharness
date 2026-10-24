@@ -121,6 +121,43 @@ func reload_script(args: Dictionary) -> Dictionary:
 	return answer
 
 
+## Which of [code]scriptPaths[/code] the editor holds a compiled copy of whose text is not the file's,
+## without loading or reloading anything. A script compiled against such a copy fails on the
+## members the file has gained, and a reload of it fails the same way until the copy is reloaded
+## first; the rescan that met this blamed the new classes the script also named, which were fine.
+##
+## Only a copy the editor already holds can be behind: one it has not loaded is compiled from the
+## file when something asks for it. One open in a script tab with unsaved edits is answered apart,
+## since reloading it from the file would put the file's text under the edits.
+func scripts_behind(args: Dictionary) -> Dictionary:
+	var given: Variant = args.get("scriptPaths", [])
+	if not given is Array:
+		return {"ok": false, "error": "scriptPaths must be a list of res:// paths"}
+	var asked: Array = given
+	var unsaved: PackedStringArray = []
+	if Engine.is_editor_hint():
+		unsaved = EditorInterface.get_script_editor().get_unsaved_files()
+	var behind: Array[String] = []
+	var edited: Array[String] = []
+	for entry: Variant in asked:
+		var path: String = _spelled_as_on_disk(str(entry))
+		var script: GDScript = ResourceLoader.get_cached_ref(path) as GDScript
+		if script == null:
+			continue
+		var reader: FileAccess = FileAccess.open(path, FileAccess.READ)
+		if reader == null:
+			continue
+		var text: String = reader.get_as_text()
+		reader.close()
+		if script.source_code == text:
+			continue
+		if path in unsaved:
+			edited.append(path)
+		else:
+			behind.append(path)
+	return {"ok": true, "behind": behind, "unsavedInEditor": edited}
+
+
 ## Has the script editor's tabs reread what changed on disk, as the editor does when its window takes
 ## the focus, which a hidden editor's never does. A tab with unsaved edits is left alone and named:
 ## saving it writes its text over the file, and rereading would ask a question nobody can answer in a

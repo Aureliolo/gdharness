@@ -10,8 +10,8 @@ extends SceneTree
 ## its own and reaches gdUnit4 through the project's global classes. Besides the file of suites it
 ## finds each case by its id in a dictionary ([GdhIndexedSession]), can compile the suites together
 ## before gdUnit4 loads them ([constant TOGETHER]), can turn off the reports the caller does
-## not read ([constant REPORTS_OFF]), and writes the errors each suite declares it expects
-## ([constant EXPECTED_OUT]).
+## not read ([constant REPORTS_OFF]), and writes the errors and warnings each suite declares it
+## prints ([constant EXPECTED_OUT]).
 
 const LISTED: String = "--suites-in"
 const SKIPPING: String = "--skipping-in"
@@ -27,11 +27,15 @@ const REPORTS_OFF: Dictionary[String, String] = {
 ## does not compile named. project_test does not: its answer is about the scripts its run reached,
 ## and the compile names every broken script of the game, then once more as the one script it made.
 const TOGETHER: String = "--compile-together"
-## The file to write the errors every suite declares it expects into, as JSON keyed by suite path and
-## then case name.
-const EXPECTED_OUT: String = "--expected-errors-out"
-## The constant a suite declares its expected errors in: case name to the exact texts it prints.
-const EXPECTED: String = "GDHARNESS_EXPECTED_ERRORS"
+## The file to write what every suite declares it prints into, as JSON: each key of
+## [constant EXPECTED] holding the declarations keyed by suite path and then case name.
+const EXPECTED_OUT: String = "--expected-out"
+## The constants a suite declares what it prints on purpose in, case name to the exact texts: its
+## engine errors, and its engine warnings.
+const EXPECTED: Dictionary[String, String] = {
+	"errors": "GDHARNESS_EXPECTED_ERRORS",
+	"warnings": "GDHARNESS_EXPECTED_WARNINGS",
+}
 ## The tool name gdUnit4 reads its options after.
 const TOOL: String = "GdUnitCmdTool.gd"
 ## How long a windowless engine sleeps after each frame. The engine's own default is the
@@ -217,18 +221,18 @@ static func argument_after(args: PackedStringArray, flag: String) -> String:
 	return args[at + 1]
 
 
-## The errors each of [param suites] declares it expects, by suite path and then case name, read off
-## the compiled suite's constants so a declaration is whatever the engine made of it. A directory
+## What each of [param suites] declares in [param constant], by suite path and then case name, read
+## off the compiled suite's constants so a declaration is whatever the engine made of it. A directory
 ## listed is walked for its scripts, as gdUnit4 walks it for suites. Only a script whose source names
 ## the constant is loaded: gdUnit4 stops on a suite that does not load only when its own load is the
 ## one that fails, so a broken suite loaded here first let the rest of its directory run.
-static func expected_by_suite(suites: PackedStringArray) -> Dictionary:
+static func expected_by_suite(suites: PackedStringArray, constant: String) -> Dictionary:
 	var expected: Dictionary = {}
 	for path: String in scripts_in(suites):
-		if not FileAccess.file_exists(path) or not FileAccess.get_file_as_string(path).contains(EXPECTED):
+		if not FileAccess.file_exists(path) or not FileAccess.get_file_as_string(path).contains(constant):
 			continue
 		var suite: Script = load(path)
-		var declared: Variant = suite.get_script_constant_map().get(EXPECTED)
+		var declared: Variant = suite.get_script_constant_map().get(constant)
 		if declared is Dictionary:
 			expected[path] = declared
 	return expected
@@ -259,5 +263,8 @@ static func write_expected(path: String, suites: PackedStringArray) -> void:
 	if file == null:
 		push_error("Could not write the expected errors to %s: %s" % [path, FileAccess.get_open_error()])
 		return
-	var _stored: bool = file.store_string(JSON.stringify(expected_by_suite(suites)))
+	var expected: Dictionary = {}
+	for kind: String in EXPECTED:
+		expected[kind] = expected_by_suite(suites, EXPECTED[kind])
+	var _stored: bool = file.store_string(JSON.stringify(expected))
 	file.close()

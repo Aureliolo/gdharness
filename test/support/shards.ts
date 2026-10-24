@@ -1,70 +1,122 @@
 /**
  * Seconds each regression of five or more takes on its slowest platform, from the engine legs' own
- * "took" lines (the run of #978, 2026-10-09, nine parts across three platforms). Every regression
- * not named here took under five seconds and is counted as `UNMEASURED_SECONDS`.
+ * "took" lines (two runs of the nine parts across three platforms, the larger figure kept). Every
+ * regression not named here took under five seconds and is counted as `UNMEASURED_SECONDS`.
  *
- * Only the split reads these, so a stale figure costs balance and never coverage. Dealt out every
- * nth instead, the two halves of the Windows leg ran 578 and about 370 seconds, and the run waited
- * on the long one. Weighting only the regressions of twenty or more left the Windows parts at 439
- * and 268, the middle weights falling where they fell.
+ * Only the split reads these, so a stale figure costs balance and never coverage, until a part runs
+ * into its job's timeout: with figures taken before the slowest of today's regressions were written, the first macOS
+ * part carried 679 seconds of regressions and 339 of engine fixtures, and was cancelled at twenty
+ * minutes while the other two finished in fourteen. Dealt out every nth instead, the two halves of
+ * the Windows leg ran 578 and about 370 seconds, and the run waited on the long one.
  */
 export const REGRESSION_SECONDS: Readonly<Record<string, number>> = {
-  testATestRunSaysHowFarItHasGot: 63,
-  testGdUnitRunner: 55,
-  testAOneShotEngineRunIsNotTheEditor: 40,
-  testAStartWaitsOutTheEditorsScan: 33,
-  testARescanAsTheEditorOpensFindsNothingMissing: 29,
-  testAReimportReimportsThroughTheEngine: 28,
-  testAnEditorWritesItsConsoleWhereTheServerLooks: 27,
-  testAnInjectedMotionCarriesHowFarThePointerMoved: 26,
-  testATestRunCutShortIsNamedForWhatItWasDoing: 26,
-  testACallTakesAnObjectByItsPath: 25,
-  testCommandLineSetup: 23,
-  testTheEditorsGameIsToldFromAnotherOfTheSameProject: 21,
-  testAnEditorIsReadOnceItHasSaidWhoItIs: 19,
-  testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight: 18,
-  testAStopGoesThroughTheKeeper: 16,
+  testARescanTheEditorDidNotAnswerIsFinishedByTheNext: 143,
+  testAnAnimationIsWrittenWithNoEditor: 117,
+  testAPresetIsSetRemovedAndPacked: 109,
+  testAWriteWithNoEditorGoesThroughAHeadlessEngine: 109,
+  testTheTestCommandRunsAndJudgesAProject: 103,
+  testASceneKeepsItsOwnValuesForAnotherScenesNodes: 97,
+  testAWriteReadsWhatThePropertyDeclares: 92,
+  testGdUnitRunner: 86,
+  testATestRunSaysHowFarItHasGot: 76,
+  testAThemeAndATilesetWithNoEditor: 73,
+  testAReimportReimportsThroughTheEngine: 56,
+  testATestRunCutShortIsNamedForWhatItWasDoing: 52,
+  testARunawayTestRunAnswersASizeTheClientTakes: 50,
+  testAStartWaitsOutTheEditorsScan: 46,
+  testAOneShotEngineRunIsNotTheEditor: 46,
+  testANodeKeepsItsGroupsAndItsPlace: 45,
+  testARunImportsWhatChangedFirst: 44,
+  testACallWaitsForTheEditorThisServerOpened: 44,
+  testAGameHeldInACallHasTheCall: 43,
+  testAnEditorWritesItsConsoleWhereTheServerLooks: 42,
+  testARealBenchTakesItsWorkerWithIt: 36,
+  testCommandLineSetup: 36,
+  testANavigationRegionIsBakedWithNoEditor: 36,
+  testTheWaitIsSizedToTheLastBoot: 35,
+  testAnInjectedMotionCarriesHowFarThePointerMoved: 35,
+  testAMovedNodeIsFollowedIntoTheScenesNamingIt: 32,
+  testARescanAsTheEditorOpensFindsNothingMissing: 32,
+  testAProjectsFilesAndLayersAreNamedWithNoEditor: 30,
+  testACallTakesAnObjectByItsPath: 30,
+  testTheEditorsGameIsToldFromAnotherOfTheSameProject: 30,
+  testProjectTestJudgesItsRunAsTheGateDoes: 30,
+  testAnEngineGdharnessStartsCanHaveItsCrashReported: 29,
+  testAnImportOrExportOverAStaleDocCacheRunsAgain: 28,
+  testATestRunNamesItsLeaksAndItsUnusedIgnores: 27,
+  testThePhysicsRateIsTheStepsTaken: 27,
+  testAnEditorThisServerStartsIsSilentUnlessAsked: 26,
+  testAReadWithNoEditorAnswersFromTheFile: 25,
+  testARunFollowsTheGamesRestart: 28,
+  testWhatTheGameTellsAScreenReaderIsRead: 25,
+  testAPointerOnTheHiddenDesktopIsNoted: 24,
+  testTheShippedRunnerRunsAFileOfSuites: 22,
+  testAWordsWaitLeavesTheGameItsSpeed: 20,
+  testATestRunTakesTheCasesNamed: 20,
+  testAStackOverflowIsNotAPass: 19,
+  testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight: 19,
+  testAStopGoesThroughTheKeeper: 18,
+  testALateAnnouncementIsTiedToThePlayedRun: 18,
+  testThePowerShellHelperGoesWithItsProcess: 17,
+  testEveryHiddenStartIsStartedHidden: 16,
+  testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites: 16,
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver: 16,
-  testASubViewportCaptureIsDrawnNow: 15,
-  testTheWaitIsSizedToTheLastBoot: 14,
+  testASelfContainedEngineKeepsItsTemplates: 16,
+  testAnEditorIsReadOnceItHasSaidWhoItIs: 15,
+  testAWindowedRunWritesItsMovie: 15,
+  testACancelledWaitStopsAskingTheEditor: 15,
+  testAQuietSceneIsNotServed: 14,
+  testAProfiledRunNamesWhereItsTimeWent: 14,
+  testAMovedNodeKeepsThePathsNamingIt: 14,
+  testAKeyDoesNotChooseFromAnOpenedMenu: 14,
+  testACaptureBeforeTheFirstFrameWaitsForIt: 14,
+  testATestRunWhoseAutoloadDidNotCompileStops: 14,
+  testTheRendererIsChosenAndItsMemoryRead: 14,
   testTheAnnounceWaitIsNotHeldByASlowEditor: 14,
-  testACancelledWaitStopsAskingTheEditor: 14,
-  testARunOnItsOwnDesktopIsThere: 12,
-  testARealBenchTakesItsWorkerWithIt: 12,
+  testAMoveWithNoEditorLeavesTheProjectLoading: 14,
+  testASettingsWriteIsTakenUpByTheEditor: 13,
+  testParametersReachTheEngine: 13,
+  testAHandWrittenValueIsNoChangeOfAScripts: 13,
+  testA3DLevelIsReadAsItIsWritten: 12,
+  testAGameThisServerStartedIsDebugged: 12,
   testACancelledFolderStopsAsking: 12,
-  testAWordsWaitLeavesTheGameItsSpeed: 11,
-  testASupersededServerStandsDown: 11,
+  testAnEditorStartedByAnEditorSaysSo: 12,
+  testARunOnItsOwnDesktopIsThere: 11,
+  testAWriteSaysWhatElseItChanged: 11,
   testARuntimeCallReachesThisServersOwnGame: 11,
-  testALateAnnouncementIsTiedToThePlayedRun: 11,
-  testACaptureBeforeTheFirstFrameWaitsForIt: 11,
-  testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites: 10,
-  testAnEditorStartedByAnEditorSaysSo: 10,
-  testAStackOverflowIsNotAPass: 10,
-  testAKeyDoesNotChooseFromAnOpenedMenu: 10,
-  testAnEditorAServerOpenedIsStartedAgain: 9,
-  testASilentRunIsStartedHereAndSaysWhy: 9,
-  testAStopCanEndWhatTheGameStarted: 8,
-  testAPointerOnTheHiddenDesktopIsNoted: 8,
-  testARescanReloadsWhatNamesAClassItBroughtIn: 7,
-  testParametersReachTheEngine: 6,
-  testDiagnosticsAnswerSeveralScripts: 6,
-  testAStatusCallIsNotHeldByAHeldGame: 6,
-  testAProfiledRunNamesWhereItsTimeWent: 6,
-  testAForeignRunSurvivesAStart: 6,
+  testAStopCanEndWhatTheGameStarted: 11,
+  testDiagnosticsWithoutAnEditorComeFromTheEngine: 11,
+  testAControlIsLaidOutAsTheEditorLaysItOut: 11,
+  testAnAnnotatedDeclarationIsStillADeclaration: 11,
+  testTheLifecycleLogSaysHowAServerEnded: 11,
+  testASupersededServerStandsDown: 10,
+  testAStopAsksTheGameToCloseFirst: 10,
+  testAPlayedGameIsToldFromItsWorkers: 10,
+  testAnAddedPresetExports: 10,
+  testAProfileFromTheStartWaitsForTheProfiler: 9,
+  testEditorStatusCountsOnlyOtherCallsInFlight: 9,
+  testAStatusCallIsNotHeldByAHeldGame: 9,
+  testAStructureReadDescribesTheScriptItRead: 8,
+  testAToolWaitsOutTheEditorsScan: 8,
+  testARescanReloadsWhatNamesAClassItBroughtIn: 8,
+  testAnElementIsToldWhatItsTypeTakes: 7,
+  testAScreenshotHoldsTheGamesOwnWindows: 7,
+  testDiagnosticsAnswerSeveralScripts: 7,
+  testCallsSentTogetherWaitTheirTurnAtTheGame: 7,
+  testASubViewportCaptureIsDrawnNow: 7,
+  testAForeignRunSurvivesAStart: 7,
+  testTheFrameTimeIsTheFrame: 6,
+  testACaptureOfOneNodeIsThatNodeAtItsOwnPixels: 6,
+  testASilentRunIsStartedHereAndSaysWhy: 6,
+  testAClickInAWindowNothingEnteredPresses: 6,
+  testAPressIsHeldForTheFramesAsked: 6,
+  testOptionsWrittenAreSaidWhenTheirReimportFails: 6,
+  testTheRunAdoptedIsTheLatestStarted: 6,
+  testAPathStepsIntoAVectorsComponents: 5,
+  testAPauseAnswersWithTheGamesOwnScript: 5,
+  testAnEditorAServerOpenedIsStartedAgain: 5,
   testDiagnosticsTimeoutIsNotAnEmptyResult: 5,
-  testASettingsWriteIsTakenUpByTheEditor: 5,
-  testAScreenshotHoldsTheGamesOwnWindows: 5,
 };
-
-/**
- * Seconds the engine fixtures took on macOS (179 in the run above), where they run on the first
- * regression part's machine rather than one of their own. GitHub runs five macOS jobs at once for the
- * account, and a run that asked for five queued behind any other run holding one: a pull request's
- * run beside main's, or the release's install check beside the release commit's, waited up to eight
- * minutes for a machine. With the slow waits cut, the macOS parts ran 242 to 263 seconds against the
- * Windows parts' 321 to 333, so a third of the fixtures on each still finishes inside the Windows leg.
- */
-export const ENGINE_FIXTURES_SECONDS = 180;
 
 /**
  * What a regression too quick to have been measured is counted as. The ones under five seconds
@@ -84,14 +136,12 @@ export function regressionPart(
   part: number,
   parts: number,
   seconds: Readonly<Record<string, number>> = REGRESSION_SECONDS,
-  firstPartCarries = 0,
 ): string[] {
   const weight = (name: string): number => seconds[name] ?? UNMEASURED_SECONDS;
   const order = names
     .map((name, at) => ({ name, at }))
     .sort((a, b) => weight(b.name) - weight(a.name) || a.at - b.at);
-  // Work the first part's machine does besides its regressions, so the rest are dealt round it.
-  const loads = Array.from({ length: parts }, (_unused, at) => (at === 0 ? firstPartCarries : 0));
+  const loads = Array.from({ length: parts }, () => 0);
   const placed = new Map<string, number>();
   for (const { name } of order) {
     const lightest = loads.indexOf(Math.min(...loads));

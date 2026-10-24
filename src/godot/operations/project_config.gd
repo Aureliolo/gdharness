@@ -5,6 +5,7 @@ const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhProjectFile = preload("project_file.gd")
 const GdhSerialisation = preload("serialisation.gd")
+const GdhSettingReads = preload("setting_reads.gd")
 const GdhShapes = preload("value_shapes.gd")
 
 var _log: GdhLog
@@ -19,7 +20,8 @@ func _init(p_log: GdhLog) -> void:
 func get_project_setting(params: Dictionary) -> Dictionary:
 	var prefix: String = str(params.get("prefix", ""))
 	if not prefix.is_empty():
-		return _settings_under(prefix)
+		_log.info("Listing project settings under: " + prefix)
+		return GdhSettingReads.under(prefix, _values)
 
 	var setting_path: String = str(params.get("setting", ""))
 	if setting_path.is_empty():
@@ -27,73 +29,7 @@ func get_project_setting(params: Dictionary) -> Dictionary:
 
 	_log.info("Getting project setting: " + setting_path)
 
-	var result: Dictionary = {
-		"setting_path": setting_path, "exists": ProjectSettings.has_setting(setting_path)
-	}
-
-	if result["exists"]:
-		var value: Variant = ProjectSettings.get_setting(setting_path)
-		result["value"] = _values.serialize_value(value)
-		# A setting the engine registers exists whether or not the project sets it, so exists did
-		# not say whether project.godot has a line for it. At its default it has none: the engine
-		# drops such a key when it saves.
-		var default_value: Variant = ProjectSettings.property_get_revert(setting_path)
-		if default_value != null:
-			result["at_default"] = value == default_value
-	else:
-		result["value"] = null
-		result["message"] = "Setting does not exist"
-
-	# The value under this name is not the one every build reads: `name.windows` replaces it on
-	# Windows, `name.editor` in the editor. Read alone, a caller saw the plain value and not the one
-	# their game showed.
-	var overrides: Dictionary = {}
-	for info: Dictionary in ProjectSettings.get_property_list():
-		var name: String = str(info.get("name", ""))
-		if name.begins_with(setting_path + "."):
-			overrides[name.substr(setting_path.length() + 1)] = _values.serialize_value(
-				ProjectSettings.get_setting(name)
-			)
-	if not overrides.is_empty():
-		result["overrides"] = overrides
-
-	return result
-
-
-# Every setting whose name starts with [prefix], with the type the engine registers for each.
-#
-# A caller after a whole family, "everything under debug/gdscript/warnings", had no way to ask: a get
-# takes one name, and the engine is the only thing that knows what the family contains. The way round
-# it was to walk ProjectSettings.get_property_list() from a script written for the purpose, which is
-# an engine start to answer a question the engine was already open for.
-#
-# The type is here because it is the half a name hides. A setting sitting among a family of levels
-# can be a bool, and a caller that assumes otherwise writes a level over it and sees nothing go
-# wrong: 2 is as true as true is. Reading it out of the property list is how that is caught.
-func _settings_under(prefix: String) -> Dictionary:
-	_log.info("Listing project settings under: " + prefix)
-
-	var found: Array[Dictionary] = []
-	for property: Dictionary in ProjectSettings.get_property_list():
-		var name: String = str(property.get("name", ""))
-		if not name.begins_with(prefix):
-			continue
-		var kind: int = GdhRead.as_int(property.get("type", TYPE_NIL), TYPE_NIL)
-		var value: Variant = ProjectSettings.get_setting(name)
-		var described: Dictionary = {
-			"setting": name,
-			"type": type_string(kind),
-			"value": _values.serialize_value(value),
-		}
-		# As a single get says it, so a family read can be told apart into what the project sets
-		# and the engine's defaults: "input/" is ninety actions the engine ships and the project's few.
-		var default_value: Variant = ProjectSettings.property_get_revert(name)
-		if default_value != null:
-			described["at_default"] = value == default_value
-		found.append(described)
-
-	found.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["setting"] < b["setting"])
-	return {"prefix": prefix, "count": found.size(), "settings": found}
+	return GdhSettingReads.one(setting_path, _values)
 
 
 # Set a project setting value
@@ -146,6 +82,14 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	if had_value and typeof(old_value) == typeof(final_value) and old_value == final_value:
 		answer["saved"] = false
 		answer["unchanged"] = true
+		if was_default:
+			answer["note"] = (
+				(
+					"%s is already this setting's default, which project.godot holds no line for:"
+					+ " the engine reads it wherever %s is asked for, so nothing was written."
+				)
+				% [JSON.stringify(_values.serialize_value(final_value)), setting_path]
+			)
 		return answer
 
 	var near: PackedStringArray = []
@@ -159,11 +103,68 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 			)
 			% [setting_path, "setting is" if near.size() == 1 else "settings are", ", ".join(near)]
 		)
+	# Written as given, since a file can be made after the setting names it, as an import makes a
+	# translation; said, since until then the engine complains of it on every boot.
+	var missing: Array[String] = _missing_files(final_value)
+	if not missing.is_empty():
+		answer["missing_files"] = missing
+		var said: String = (
+			"%s %s not exist, and the engine reports %s on every boot until %s"
+			% [
+				", ".join(missing),
+				"does" if missing.size() == 1 else "do",
+				"it" if missing.size() == 1 else "them",
+				"it does" if missing.size() == 1 else "they do",
+			]
+		)
+		var made: Array[String] = _translations_made_by(missing)
+		if not made.is_empty():
+			said += ("; project_import reimport makes the translation files from " + ", ".join(made))
+		answer["note"] = (str(answer["note"]) + " " if answer.has("note") else "") + said + "."
 	ProjectSettings.set_setting(setting_path, final_value)
 	var err: Error = GdhProjectFile.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 	return answer
+
+
+## The res:// files [param value] names that are not on disk: a path, an autoload's starred path, or
+## a list or dictionary of them.
+static func _missing_files(value: Variant) -> Array[String]:
+	var items: Array = []
+	if value is String or value is StringName:
+		items = [value]
+	elif value is PackedStringArray:
+		var strings: PackedStringArray = value
+		items = Array(strings)
+	elif value is Array:
+		items = value
+	elif value is Dictionary:
+		var held: Dictionary = value
+		items = held.values()
+	var missing: Array[String] = []
+	for item: Variant in items:
+		if not (item is String or item is StringName):
+			continue
+		var path: String = str(item).trim_prefix("*")
+		if not path.begins_with("res://"):
+			continue
+		if not FileAccess.file_exists(path) and not DirAccess.dir_exists_absolute(path):
+			missing.append(path)
+	return missing
+
+
+## The CSV files an import makes the translations among [param missing] from: strings.en.translation
+## from strings.csv beside it.
+static func _translations_made_by(missing: Array[String]) -> Array[String]:
+	var sources: Array[String] = []
+	for path: String in missing:
+		if path.get_extension() != "translation":
+			continue
+		var csv: String = path.get_basename().get_basename() + ".csv"
+		if FileAccess.file_exists(csv) and not csv in sources:
+			sources.append(csv)
+	return sources
 
 
 # Takes a setting's line out of project.godot, so the engine's default holds again, or nothing at all
@@ -184,7 +185,7 @@ func unset_project_setting(params: Dictionary) -> Dictionary:
 		answer["removed"] = false
 		answer["saved"] = false
 		answer["note"] = "project.godot does not set %s, so there was nothing to take out." % setting_path
-		return answer
+		return _with_what_holds(answer, setting_path)
 	answer["old_value"] = _values.serialize_value(value)
 	# The default rather than null for a setting the engine declares: null takes the declaration away
 	# as well, and a value at its default is left out of the file all the same.
@@ -194,6 +195,19 @@ func unset_project_setting(params: Dictionary) -> Dictionary:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 	answer["removed"] = true
 	answer["saved"] = true
+	return _with_what_holds(answer, setting_path)
+
+
+# An override has no default of its own: with it gone, a build with its feature reads the base
+# setting, and default_value, null, said nothing of that.
+func _with_what_holds(answer: Dictionary, setting_path: String) -> Dictionary:
+	var base: String = GdhSettingReads.override_base(setting_path)
+	if base.is_empty() or not ProjectSettings.has_setting(base):
+		return answer
+	answer["override_of"] = base
+	answer["holds"] = _values.serialize_value(ProjectSettings.get_setting(base))
+	var said: String = GdhSettingReads.overridden_by_none(setting_path, _values)
+	answer["note"] = said if not answer.has("note") else "%s %s" % [answer["note"], said]
 	return answer
 
 

@@ -401,8 +401,10 @@ the engine for a log file as it starts, and `editor_output op: "editor"` reads i
 replaces that file when it opens it, so one file is one editor session from its first line, which
 is where a wall of startup errors will be. Beside it, `.godot/gdharness-editor.json` records which
 editor the log belongs to: a log from yesterday's editor is still on disk today, and reading it as
-this one's would answer with a session that has ended. An editor somebody opened by hand has no log
-at all and is refused saying so.
+this one's would answer with a session that has ended. The same note answers once no editor is
+connected: the log of the editor it names is read as that editor's, with whether it still runs, so
+an editor that closed or crashed can still be asked what it printed last. An editor somebody opened
+by hand has no log at all and is refused saying so.
 
 The editor keeps asking from its end too, so the order the two start in does not matter. A socket
 pointed at a port nothing is listening on sits in its connect for thirty seconds before it gives
@@ -639,7 +641,27 @@ the run first, which on Windows is a PowerShell query and `tasklist`: a windowed
 software on a runner with no GPU loaded the machine until neither started in time, and the stop
 refused its own game three times in a day. The pid and that proof remain for a keeper that does not
 answer. Whatever the keeper says, the stop waits on the process itself before it calls the run
-ended. One run is one process: what the
+ended.
+
+A game that restarts itself with `OS.set_restart_on_exit` is still the same run. Once the game has
+exited, its keeper looks for the engine started again in the last two seconds of its life: on Windows
+among the processes that still name it as their parent. On POSIX the engine starts the successor
+in a session of its own and init takes it as its parent, so the keeper looks for the engine
+writing its output into the run's transcript, which it inherited and which belongs to this run
+alone. From outside, a worker the game started in its last moments looks the same, so the
+runtime addon writes a note once the game's tree has gone, into a directory the keeper names in
+the game's environment, saying whether a restart is set. Where it says none, nothing is looked
+for; a game without the addon is judged by the listing alone. The keeper writes `endingAt` into
+the note while it looks,
+and a server waits that out rather than settling the run as ended. When the keeper finds the
+successor, it writes it into the note in the game's place, with `restartedFrom`. It then follows
+the successor, ends it on a stop, and records its end as the run's. On Windows the exit code is
+read through a handle a PowerShell opened as it listed the process. POSIX tells only a process's
+parent its exit code, so there the run ends with `exitNotTold`. A stop that closes the game like a
+player can set off the restart itself, and then goes on to end the successor. A successor that ends
+before the keeper's listing sees it is not followed.
+
+Otherwise one run is one process: what the
 game started for itself is not signalled and the answer says so, unless the stop is asked for
 `andChildren`, and then every process under the run's, to any depth,
 that is a game of the project goes with it, listed before the run is ended because ending it is

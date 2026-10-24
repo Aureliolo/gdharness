@@ -26,38 +26,109 @@ static func declared_on(target: Object, property: String) -> Dictionary:
 ## start with the name of one holding a resource built into it, then a slash and a key of that
 ## resource: "sources/0/0:0/0/probability" is the probability of tile 0:0 in the atlas source a
 ## TileSet keeps as sources/0. A colon path cannot reach it, since the tile's own name holds colons.
-## A resource kept in a file of its own is not reached, nor, given the file [param home] that
-## [param target] is saved in, one built into another file, since writing it here would leave that
-## file as it was.
+## A list of resources is stepped into by an element's index: "lines/1/text" is the text of the
+## second resource in lines. A resource kept in a file of its own is not reached, nor, given the
+## file [param home] that [param target] is saved in, one built into another file, since writing it
+## here would leave that file as it was.
 static func holder_of(target: Object, key: String, home: String = "") -> Array:
 	var through: Array[Resource] = []
 	var holder: Object = target
 	var name: String = key
 	while declared_on(holder, name).is_empty():
 		var reached: Resource = null
+		var rest: int = -1
 		var at: int = name.find("/")
 		while at > 0:
-			var held: Resource = built_in_at(holder, name.left(at), home)
-			if held != null:
+			var stepped: Array = _stepped(holder, name, at)
+			var held: Resource = stepped[0]
+			if held != null and _built_into(held, home):
 				reached = held
+				rest = GdhRead.as_int(stepped[1])
 				break
 			at = name.find("/", at + 1)
 		if reached == null:
 			break
 		through.append(reached)
 		holder = reached
-		name = name.substr(at + 1)
+		name = name.substr(rest)
 	return [holder, name, through]
 
 
-## The resource [param target] holds under [param property] when it is built into a file, or null;
-## given [param home], only one built into that file or into none yet.
-static func built_in_at(target: Object, property: String, home: String = "") -> Resource:
-	var held: Resource = held_at(target, property)
-	if held == null or not held.is_built_in():
-		return null
+## The resource the part of [param name] before the slash at [param at] reaches on [param target],
+## as [resource, where the rest of [param name] starts], or [null, -1]: the one held under that key,
+## or the element of the list held there that the step after the slash indexes.
+static func _stepped(target: Object, name: String, at: int) -> Array:
+	var head: String = name.left(at)
+	var held: Resource = held_at(target, head)
+	if held != null:
+		return [held, at + 1]
+	var end: int = name.find("/", at + 1)
+	if end < 0 or declared_on(target, head).is_empty():
+		return [null, -1]
+	var index: String = name.substr(at + 1, end - at - 1)
+	var listed: Variant = target.get(head)
+	if not listed is Array or not index.is_valid_int():
+		return [null, -1]
+	var items: Array = listed
+	var place: int = index.to_int()
+	if place < 0 or place >= items.size() or not items[place] is Resource:
+		return [null, -1]
+	return [items[place], end + 1]
+
+
+## The refusal for [param name], which [param target] does not declare, when a step of it indexes a
+## list [param target] holds and names no resource in it; or "".
+static func unlisted(target: Object, name: String) -> String:
+	var at: int = name.find("/")
+	while at > 0:
+		var head: String = name.left(at)
+		var listed: Variant = null if declared_on(target, head).is_empty() else target.get(head)
+		if listed is Array:
+			var items: Array = listed
+			return _unlisted_in(items, "%s.%s" % [class_called(target), head], name, at)
+		at = name.find("/", at + 1)
+	return ""
+
+
+static func _unlisted_in(items: Array, called: String, name: String, at: int) -> String:
+	var head: String = name.left(at)
+	var end: int = name.find("/", at + 1)
+	var index: String = name.substr(at + 1) if end < 0 else name.substr(at + 1, end - at - 1)
+	if items.is_empty():
+		return "%s holds no elements, so %s names none: give %s a whole list first." % [called, name, head]
+	var last: int = items.size() - 1
+	if not index.is_valid_int():
+		return (
+			"%s is a list, so the step after it is the index of one of its elements, from 0 to %d, not %s."
+			% [called, last, index]
+		)
+	var place: int = index.to_int()
+	if place < 0 or place > last:
+		return (
+			"%s holds %d element%s, so %s names none: an index goes from 0 to %d."
+			% [called, items.size(), "" if items.size() == 1 else "s", name, last]
+		)
+	if not items[place] is Resource:
+		return (
+			"%s/%d holds %s, which has no properties to write: give %s a whole list instead."
+			% [head, place, type_string(typeof(items[place])), head]
+		)
+	if end < 0:
+		return (
+			(
+				"%s/%d is an element of %s, which a path does not replace alone: give %s a whole list, or "
+				+ "write a property of the element, as %s/%d/<property>."
+			)
+			% [head, place, called, head, head, place]
+		)
+	return ""
+
+
+static func _built_into(held: Resource, home: String) -> bool:
+	if not held.is_built_in():
+		return false
 	var file: String = held.resource_path.get_slice("::", 0)
-	return held if home.is_empty() or file.is_empty() or file == home else null
+	return home.is_empty() or file.is_empty() or file == home
 
 
 ## The file [param target] is saved in: its scene's for a node, as the nodes of an instance are
@@ -184,9 +255,11 @@ static func class_called(target: Object) -> String:
 static func held_elsewhere(target: Object, name: String, home: String) -> String:
 	var at: int = name.find("/")
 	while at > 0:
-		var head: String = name.left(at)
-		var rest: String = name.substr(at + 1)
-		var held: Resource = held_at(target, head)
+		var stepped: Array = _stepped(target, name, at)
+		var held: Resource = stepped[0]
+		var past: int = GdhRead.as_int(stepped[1])
+		var head: String = "" if held == null else name.left(past - 1)
+		var rest: String = "" if held == null else name.substr(past)
 		var file: String = "" if held == null else held.resource_path.get_slice("::", 0)
 		if held != null and not held.is_built_in():
 			return (

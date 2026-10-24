@@ -43,6 +43,11 @@ export interface RuntimeEndpoint {
   /** When the announcement was written, which is what `judgeAnnouncedGame` holds the process to. */
   readonly announcedAt?: number;
   /**
+   * The directory the game's user:// is, as the engine resolved it: no tool reads a user:// path,
+   * since it is outside the project, so this is where a caller reads a game's saves and settings.
+   */
+  readonly userDir?: string;
+  /**
    * The runtime addon the game loaded, as its markers said when it started: empty strings when it
    * could not read them, as for a copy gdharness did not install.
    */
@@ -234,6 +239,7 @@ function parseAnnouncement(file: string, pid: number): Announced {
     return { kind: 'unspoken', unspoken: { pid, protocol: protocol ?? 0, project: named, ...when } };
   }
   const editorPid = readNumber(fields, 'editor_pid');
+  const userDir = readString(fields, 'user_dir');
   const addonVersion = readString(fields, 'addon_version');
   const addonDigest = readString(fields, 'addon_digest');
   if (addonVersion === undefined || addonDigest === undefined) {
@@ -248,6 +254,7 @@ function parseAnnouncement(file: string, pid: number): Announced {
       project: named,
       file,
       ...(editorPid !== undefined && Number.isInteger(editorPid) && editorPid > 0 ? { editorPid } : {}),
+      ...(userDir === undefined || userDir === '' ? {} : { userDir }),
       ...when,
       addon: { version: addonVersion, digest: addonDigest },
     },

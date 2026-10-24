@@ -2,13 +2,15 @@
  * What one engine's run of suites printed, read case by case, and judged.
  *
  * Read from the engine's own console rather than from gdUnit4's reports, because a gate needs what
- * the reports leave out: the `ERROR` lines a passing case printed, which case printed each one, the
+ * the reports leave out: the `ERROR` and `WARNING` lines a passing case printed, which case printed
+ * each one, the
  * leaks the engine reports as it exits, and how far a run got when it crashed or was ended. Both of
  * the engine's streams go into one file, so an error is read in order with the case lines around it.
  */
 
 import { readFileSync } from 'node:fs';
 import { stripVTControlCharacters } from 'node:util';
+import { EXIT_LEAK, type SelfTypedExport, selfTypedSentence } from './engine-leaks.js';
 import type { LogEntry } from './game-log.js';
 import { scriptErrorsPrinted } from './junit.js';
 
@@ -32,10 +34,12 @@ interface SuitePrinted {
   closed: { readonly verdict: string; readonly seconds: number } | null;
 }
 
-/** An error line the engine printed, and what was running when it did. */
+/** An error or warning line the engine printed, and what was running when it did. */
 interface PrintedError {
-  /** The line's text after `ERROR: `, which is what a suite declares it expects. */
+  /** The line's text after `ERROR: ` or `WARNING: `, which is what a suite declares it expects. */
   readonly text: string;
+  /** Whether it is a warning, which a suite declares apart from its errors. */
+  readonly warning: boolean;
   readonly at: number;
   /** The suite that was open, or null for one printed outside every suite. */
   readonly suite: string | null;
@@ -71,14 +75,17 @@ const CASE_LINE = new RegExp(
 );
 const STATISTICS = new RegExp(String.raw`^Statistics:.*\|\s*([A-Z]+)(?:\s+\(.*?\))?\s+(${TIME})\s*$`);
 const ERROR_LINE = /^\s*(?:SCRIPT |USER )?ERROR: (.*?)\s*$/;
+const WARNING_LINE = /^\s*(?:SCRIPT |USER )?WARNING: (.*?)\s*$/;
 const EXECUTED = /^Executed test cases\s*:\s*\((\d+)\//;
 // Godot giving up on a rendering driver it could not start, and starting the next. The display
 // server is made before any script of the project runs, so every error printed before this line
 // is the engine probing a driver: a windowed engine on a machine without a Vulkan surface prints
 // two and then runs its cases on Direct3D 12 or OpenGL.
 const DRIVER_FALLBACK = /^\s*WARNING: Your video card drivers .*, switching to /;
-const LEAK =
-  /ObjectDB instances (?:were )?leaked at exit|resources? still in use at exit|Pages in use exist at exit/;
+// gdUnit4's own report of the orphans a case or suite left, printed with a WARNING prefix. The
+// orphans are reported from the suite's statistics; read as a warning no suite declared, the line
+// came back as one more fault, with advice to declare it rather than free the nodes.
+const ORPHANS_REPORTED = /^\s*WARNING: Detected \d+ (?:possible )?orphan nodes\.\s*$/;
 // The allocator's null, in its error line and the location under it, and an image decode the same
 // pressure made fail. Both are the machine running out, not the case being wrong.
 const STARVED = [
@@ -112,7 +119,7 @@ export function readRun(printed: string): RunPrinted {
   let open: SuitePrinted | null = null;
   let during: string | null = null;
   // Errors printed after a verdict, held until it is known whether another case follows.
-  let afterCase: { text: string; at: number }[] = [];
+  let afterCase: { text: string; at: number; warning: boolean }[] = [];
   let lastCase: string | null = null;
   const settleAfterCase = (owner: string): void => {
     for (const held of afterCase) {
@@ -163,25 +170,35 @@ export function readRun(printed: string): RunPrinted {
       executed = Number(counted[1]);
       continue;
     }
-    if (LEAK.test(line)) {
+    if (EXIT_LEAK.test(line)) {
       leaks.push(line.trim());
       continue;
     }
-    if (suites.size === 0 && DRIVER_FALLBACK.test(line)) {
-      errors.length = 0;
+    if (ORPHANS_REPORTED.test(line)) {
+      continue;
+    }
+    if (DRIVER_FALLBACK.test(line)) {
+      if (suites.size === 0) {
+        errors.length = 0;
+      }
       continue;
     }
     const error = ERROR_LINE.exec(line);
-    if (error === null) {
+    // A warning counts only inside a suite. Outside every suite it is the engine's own as it starts
+    // or exits, which no suite can declare; the leaks it reports at exit are read above.
+    const warned = error === null && open !== null ? WARNING_LINE.exec(line) : null;
+    const found = error ?? warned;
+    if (found === null) {
       continue;
     }
-    const text = error[1] ?? '';
+    const text = found[1] ?? '';
+    const warning = error === null;
     if (open === null) {
-      errors.push({ text, at, suite: null, during: null });
+      errors.push({ text, at, suite: null, during: null, warning });
     } else if (during === null) {
-      afterCase.push({ text, at });
+      afterCase.push({ text, at, warning });
     } else {
-      errors.push({ text, at, suite: open.path, during });
+      errors.push({ text, at, suite: open.path, during, warning });
     }
   }
   const last: SuitePrinted | null = open;
@@ -217,30 +234,43 @@ export function withNestedErrors(printed: RunPrinted, piped: readonly LogEntry[]
   const nested = piped.flatMap((entry, at) => {
     const next = piped[at + 1];
     return entry.severity === 'info' && entry.text.trim() === NESTED_ERROR && next?.severity === 'error'
-      ? [{ text: next.text, at: printed.lines.length, suite: null, during: null }]
+      ? [{ text: next.text, at: printed.lines.length, suite: null, during: null, warning: false }]
       : [];
   });
   return nested.length === 0 ? printed : { ...printed, errors: [...printed.errors, ...nested] };
+}
+
+/** What suites declare they print, by suite and then by function or hook. */
+type Declared = Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
+
+/**
+ * The errors and the warnings each suite declares it prints: its `GDHARNESS_EXPECTED_ERRORS` and
+ * `GDHARNESS_EXPECTED_WARNINGS` constants as the runner read them from the compiled suite.
+ */
+export interface Expected {
+  readonly errors: Declared;
+  readonly warnings: Declared;
 }
 
 /** What one engine was handed, which is what its run is judged against. */
 export interface EngineAssignment {
   /** Each suite, with the functions this engine is to run of it. */
   readonly suites: ReadonlyArray<{ readonly path: string; readonly cases: readonly string[] }>;
-  /**
-   * The errors each suite declares it prints, by suite and then by function or hook: the
-   * `GDHARNESS_EXPECTED_ERRORS` constant as the runner read it from the compiled suite.
-   */
-  readonly expected: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
+  readonly expected: Expected;
+  /** The project's scripts the engine never frees once loaded, which its report at exit counts. */
+  readonly selfTyped?: readonly SelfTypedExport[];
 }
 
-/** The errors each suite declares, as the runner's `--expected-errors-out` wrote them, or none. */
-export function readExpected(file: string): EngineAssignment['expected'] {
+/** What each suite declares, as the runner's `--expected-out` wrote it, or nothing. */
+export function readExpected(file: string): Expected {
+  const declared = (value: unknown): Declared =>
+    typeof value === 'object' && value !== null ? (value as Declared) : {};
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-    return typeof parsed === 'object' && parsed !== null ? (parsed as EngineAssignment['expected']) : {};
+    const read = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+    return { errors: declared(read['errors']), warnings: declared(read['warnings']) };
   } catch {
-    return {};
+    return { errors: {}, warnings: {} };
   }
 }
 
@@ -408,7 +438,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
     faults.push(
       error.suite === null
         ? `an engine error outside every suite: ${error.text}`
-        : `an engine error in ${error.suite} > ${error.during ?? ''}: ${error.text}; ${declaringAdvice(error.during ?? '')}`,
+        : `an engine ${error.warning ? 'warning' : 'error'} in ${error.suite} > ${error.during ?? ''}: ${error.text}; ${declaringAdvice(error.during ?? '', error.warning)}`,
     );
     if (error.suite !== null) {
       failing.add(error.suite);
@@ -418,13 +448,17 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   }
   for (const missing of unexpected.neverPrinted) {
     faults.push(
-      `${missing.suite} > ${missing.during} declares the error "${missing.text}", which it never printed`,
+      `${missing.suite} > ${missing.during} declares the ${missing.warning ? 'warning' : 'error'} "${missing.text}", which it never printed`,
     );
     failing.add(missing.suite);
   }
-  for (const leak of printed.leaks) {
-    faults.push(`the engine exited holding what it should have freed: ${leak}`);
-  }
+  const selfTyped = selfTypedSentence(handed.selfTyped ?? []);
+  printed.leaks.forEach((leak, at) => {
+    const last = at === printed.leaks.length - 1;
+    faults.push(
+      `the engine exited holding what it should have freed: ${leak}${last && selfTyped !== undefined ? ` ${selfTyped}` : ''}`,
+    );
+  });
   const memoryExit = end.code !== null && MEMORY_EXITS.has(end.code >>> 0);
   const starved = memoryExit || printed.starved.length > 0;
   if (printed.starved.length > 0) {
@@ -480,50 +514,60 @@ function linesShown(lines: readonly string[], picked: ReadonlySet<number>, cutSh
   return shown;
 }
 
-/** What to do about an error printed during [param during] that its suite did not declare. */
-export function declaringAdvice(during: string): string {
-  return `if the suite prints it on purpose, list its text under "${funcOf(during)}" in the suite's GDHARNESS_EXPECTED_ERRORS`;
+/** What to do about an error, or a [param warning], printed during [param during] that its suite did not declare. */
+export function declaringAdvice(during: string, warning = false): string {
+  return `if the suite prints it on purpose, list its text under "${funcOf(during)}" in the suite's ${warning ? 'GDHARNESS_EXPECTED_WARNINGS' : 'GDHARNESS_EXPECTED_ERRORS'}`;
 }
 
 interface MissingError {
   readonly suite: string;
   readonly during: string;
   readonly text: string;
+  readonly warning: boolean;
 }
 
 /**
- * The errors printed that no suite declared, and the declared ones that were not printed, for the
- * suites at [param paths]. A case declares each text once for every time it prints it, and a
- * parameterised case each time per row.
+ * The errors and warnings printed that no suite declared, and the declared ones that were not
+ * printed, for the suites at [param paths]. A case declares each text once for every time it prints
+ * it, and a parameterised case each time per row; an error is declared among the errors and a
+ * warning among the warnings, so a text declared as one does not accept the other.
  */
 export function unexpectedErrors(
   printed: RunPrinted,
-  expected: EngineAssignment['expected'],
+  expected: Expected,
   paths: readonly string[],
 ): { printed: PrintedError[]; neverPrinted: MissingError[] } {
-  const owed = new Map<string, { suite: string; during: string; texts: string[] }>();
+  const owed = new Map<string, { suite: string; during: string; warning: boolean; texts: string[] }>();
   for (const path of paths) {
     const suite = printed.suites.get(path);
-    const declared = expected[path];
-    if (suite === undefined || declared === undefined) {
+    if (suite === undefined) {
       continue;
     }
     const ranHooks = suite.closed === null ? ['before'] : ['before', 'after'];
-    for (const during of [...ranHooks, ...suite.cases.map((ran) => ran.name)]) {
-      const texts: unknown = declared[funcOf(during)];
-      if (Array.isArray(texts) && texts.length > 0) {
-        owed.set(`${path}\n${during}`, {
-          suite: path,
-          during,
-          texts: texts.map((text: unknown) => String(text)),
-        });
+    for (const warning of [false, true]) {
+      const declared = (warning ? expected.warnings : expected.errors)[path];
+      if (declared === undefined) {
+        continue;
+      }
+      for (const during of [...ranHooks, ...suite.cases.map((ran) => ran.name)]) {
+        const texts: unknown = declared[funcOf(during)];
+        if (Array.isArray(texts) && texts.length > 0) {
+          owed.set(`${path}\n${during}\n${String(warning)}`, {
+            suite: path,
+            during,
+            warning,
+            texts: texts.map((text: unknown) => String(text)),
+          });
+        }
       }
     }
   }
   const unexpected: PrintedError[] = [];
   for (const error of printed.errors) {
     const debt =
-      error.suite === null || error.during === null ? undefined : owed.get(`${error.suite}\n${error.during}`);
+      error.suite === null || error.during === null
+        ? undefined
+        : owed.get(`${error.suite}\n${error.during}\n${String(error.warning)}`);
     const index = debt?.texts.indexOf(error.text) ?? -1;
     if (debt === undefined || index < 0) {
       unexpected.push(error);
@@ -532,7 +576,7 @@ export function unexpectedErrors(
     }
   }
   const neverPrinted = [...owed.values()].flatMap((debt) =>
-    debt.texts.map((text) => ({ suite: debt.suite, during: debt.during, text })),
+    debt.texts.map((text) => ({ suite: debt.suite, during: debt.during, text, warning: debt.warning })),
   );
   return { printed: unexpected, neverPrinted };
 }

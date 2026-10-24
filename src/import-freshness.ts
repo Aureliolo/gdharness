@@ -52,6 +52,8 @@ export const IMPORTABLE_EXTENSIONS: readonly string[] = [
   'fbx',
   'obj',
   'dae',
+  'csv',
+  'glsl',
 ];
 
 const IMPORTABLE = new Set(IMPORTABLE_EXTENSIONS);

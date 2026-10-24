@@ -22,6 +22,22 @@ static func read(scene: GdhSceneFile, node: Node) -> Dictionary:
 	return answer
 
 
+## The groups of [param node], just added to this scene and put in [param adding] there, in the shape
+## [method read] answers: this scene's file does not hold the node until it is saved.
+static func read_added(node: Node, adding: Array) -> Dictionary:
+	var all: Array = _sorted(node.get_groups())
+	if all.is_empty():
+		return {}
+	var answer: Dictionary = {"groups": all}
+	var here: Array = []
+	for group: String in _sorted(adding):
+		if not here.has(group):
+			here.append(group)
+	if here.size() != all.size():
+		answer["groupsHere"] = here
+	return answer
+
+
 ## The group names under [param key] of [param args], which the server has checked are strings, or
 ## none when not given.
 static func asked(args: Dictionary, key: String) -> Array:

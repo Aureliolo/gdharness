@@ -25,7 +25,15 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive, exitOf } from './alive.js';
-import { DESKTOP_VARIABLE, ensureHelperCompiled, HIDDEN_DESKTOP, throughHelper } from './desktop.js';
+import {
+  DESKTOP_VARIABLE,
+  ensureHelperCompiled,
+  HIDDEN_DESKTOP,
+  helperFailure,
+  helperStep,
+  throughHelper,
+} from './desktop.js';
+import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, ownStart } from './engine-slots.js';
 import { crashesReported } from './error-mode.js';
 import { Refusal } from './errors.js';
@@ -48,7 +56,9 @@ import {
   type DeclaredSuite,
   dealt,
   type EnginePlan,
+  headlessInAWindow,
   inOneEngine,
+  lanesOf,
   ProjectScripts,
   readTimes,
   SPLIT_PAST_SECONDS,
@@ -61,6 +71,7 @@ import {
   writeJson,
 } from './suite-plan.js';
 import { getLocalVersion } from './version.js';
+import { askWindows } from './windows-ask.js';
 
 /** A command line `test` cannot act on, which the CLI answers with exit code 2. */
 export class TestUsageError extends Refusal {}
@@ -80,6 +91,8 @@ export interface TestOptions {
   readonly importFirst: boolean;
   /** Every suite in one engine in this order: `reversed`, or shuffled by the seed. */
   readonly order: 'reversed' | number | null;
+  /** Print what each engine printed, after the run and before its verdict. */
+  readonly printOutput: boolean;
 }
 
 /** Most engines a run starts, whatever the machine has. */
@@ -92,8 +105,15 @@ const SILENCE_FLOOR_SECONDS = 300;
 /** How many times its slowest unit an engine may print nothing for. */
 const SILENCE_TIMES_SLOWEST = 4;
 const LOOK_MS = 500;
+/** How long Windows is given to say how much it can still commit, on a machine the run may load. */
+const COMMIT_ASK_MS = 15_000;
 /** What the engine prints when an autoload did not start, after which no suite can mean anything. */
 const AUTOLOAD_FAILED = 'Failed to instantiate an autoload';
+/**
+ * A terminal control sequence. gdUnit4 opens its output by clearing the screen, which printed as it
+ * stands would wipe the lines the run had printed before it.
+ */
+const CONTROL_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[A-Za-z]`, 'g');
 
 const VALUED = new Set([
   '--engines',
@@ -104,7 +124,7 @@ const VALUED = new Set([
   '--reach-also',
   '--order',
 ]);
-const SWITCHES = new Set(['--changed-only', '--import']);
+const SWITCHES = new Set(['--changed-only', '--import', '--print-output']);
 
 /** [param args], everything after `test`, read into options; relative paths are read from [param cwd]. */
 export function testOptionsOf(args: readonly string[], cwd: string): TestOptions {
@@ -149,6 +169,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
     importFirst: switches.has('--import'),
     order: order === undefined ? null : order === 'reversed' ? 'reversed' : seedOf(order),
+    printOutput: switches.has('--print-output'),
   };
 }
 
@@ -263,6 +284,7 @@ export function roomFor(
   most: number,
   processors: number,
   available: number,
+  said = 'of memory free',
 ): { engines: number; held: string | undefined } {
   const byMemory = Math.floor((available - MEMORY_KEPT) / MEMORY_PER_ENGINE);
   const engines = Math.max(1, Math.min(most, processors, byMemory));
@@ -274,20 +296,68 @@ export function roomFor(
     engines,
     held:
       byMemory < processors
-        ? `the machine has ${gigabytes(Math.max(0, available))} of memory free, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(MEMORY_PER_ENGINE)} taken for each engine`
+        ? `the machine has ${gigabytes(Math.max(0, available))} ${said}, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(MEMORY_PER_ENGINE)} taken for each engine`
         : `the machine has ${plural(processors, 'processor')}`,
   };
+}
+
+/** The memory the machine can give engines, how the line on room words it, and why a reading failed. */
+interface MemoryRoom {
+  readonly bytes: number;
+  readonly said: string;
+  readonly unread?: string;
 }
 
 /**
  * The memory the machine can give engines. freemem on macOS counts only the pages nobody holds,
  * a few hundred megabytes on a Mac whose file cache would give way at once, so a run there was held
  * to one engine whatever it asked for. The kernel's own share of memory it counts as free, the
- * percentage memory_pressure prints, includes what it can take back.
+ * percentage memory_pressure prints, includes what it can take back. Windows refuses an allocation
+ * at the commit limit rather than at physical memory, and a machine with 23 GB free and 4.9 GB left
+ * to commit started sixteen engines that died with STATUS_COMMITMENT_LIMIT, so there the smaller
+ * of the two is the room.
  */
-async function memoryAvailable(): Promise<number> {
+async function memoryAvailable(): Promise<MemoryRoom> {
   const level = await macMemoryLevel();
-  return level === null ? freemem() : (totalmem() * level) / 100;
+  if (level !== null) {
+    return { bytes: (totalmem() * level) / 100, said: 'of memory free' };
+  }
+  return memoryRoomOf(freemem(), await windowsCommitLeft());
+}
+
+/**
+ * The room [param free] physical bytes and [param commit], what Windows can still commit (null
+ * elsewhere, or why it did not say), leave engines: the smaller of the two.
+ */
+export function memoryRoomOf(free: number, commit: number | string | null): MemoryRoom {
+  if (typeof commit === 'string') {
+    return { bytes: free, said: 'of memory free', unread: commit };
+  }
+  return commit !== null && commit < free
+    ? { bytes: commit, said: 'of memory left to commit' }
+    : { bytes: free, said: 'of memory free' };
+}
+
+/**
+ * How much more Windows will commit, in bytes, which is what GlobalMemoryStatusEx answers as
+ * ullAvailPageFile; null off Windows, or why Windows did not say.
+ */
+export async function windowsCommitLeft(): Promise<number | string | null> {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+  try {
+    const said = await askWindows(
+      '(Get-CimInstance Win32_OperatingSystem -Property FreeVirtualMemory).FreeVirtualMemory',
+      COMMIT_ASK_MS,
+    );
+    const kilobytes = Number(said.trim());
+    return Number.isFinite(kilobytes) && kilobytes > 0
+      ? kilobytes * 1024
+      : `it answered ${JSON.stringify(said.trim())}`;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 /** The percentage of memory macOS counts as free, or null off macOS or when it would not say. */
@@ -347,6 +417,7 @@ interface Launch {
   readonly slots: EngineSlots;
   readonly silenceFloorSeconds: number;
   readonly running: Set<() => void>;
+  readonly selfTyped: readonly SelfTypedExport[];
 }
 
 /** Runs the suites [param options] asks for with the engine at [param godotPath], answering the exit code. */
@@ -391,6 +462,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     slots,
     silenceFloorSeconds: options.silenceSeconds,
     running,
+    selfTyped: selfTypedExports(scripts.sources),
   };
   try {
     if (options.importFirst) {
@@ -429,26 +501,34 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     }
     const times = readTimes(timesFile);
     const units = unitsOf(suites, times);
-    const room = roomFor(options.engines, availableParallelism(), await memoryAvailable());
+    const memory = await memoryAvailable();
+    if (memory.unread !== undefined) {
+      console.log(
+        `Windows did not say how much memory it can still commit (${memory.unread}), so engines are sized by the physical memory free.`,
+      );
+    }
+    const room = roomFor(options.engines, availableParallelism(), memory.bytes, memory.said);
     const plans =
       options.order === null
         ? dealt(units, declared, room.engines)
         : [inOneEngine(ordered(units, options.order), declared)];
     const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
-    // Said only when the room was the limit, rather than a run with fewer units than engines.
-    const held =
-      options.order === null && room.held !== undefined && plans.length === room.engines
-        ? `, of the ${String(options.engines)} asked for, since ${room.held}`
-        : '';
     const how =
       options.order === null
-        ? `${windowedSaid(plans)}${held}`
+        ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(units, declared, options.engines)), room.held, options.engines)}`
         : options.order === 'reversed'
           ? ', in reverse order of path'
           : `, shuffled by ${String(options.order)}`;
     console.log(
       `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.`,
     );
+    const windowedAnyway = headlessInAWindow(plans, units);
+    if (windowedAnyway.length > 0) {
+      const one = windowedAnyway.length === 1;
+      console.log(
+        `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since an ordered run is one engine and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
+      );
+    }
     const split = [...new Set(units.map((unit) => unit.suite))].filter(
       (path) => units.filter((unit) => unit.suite === path).length > 1,
     );
@@ -457,7 +537,12 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(split)}.`,
       );
     }
-    let ran = await Promise.all(plans.map((plan, index) => runEngine(launch, plan, index, units)));
+    const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
+      plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
+    );
+    let ran = (await inTurns(lanes, room.engines, (lane) => runLane(launch, lane, units)))
+      .flat()
+      .sort((a, b) => a.index - b.index);
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
       console.log('An engine ran out of memory, so every engine that failed runs again, one at a time.');
       const again: EngineRan[] = [];
@@ -477,11 +562,51 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       ),
     );
     recordPassed(passedFile, ran, printsOf);
-    return report(ran, startedAt, runDirectory);
+    return report(ran, startedAt, runDirectory, options.printOutput);
   } finally {
     process.off('SIGINT', interrupted);
     process.off('SIGTERM', interrupted);
   }
+}
+
+/**
+ * What the line announcing a dealt run says of the machine's room, after the window: nothing unless
+ * what [param held] it kept its [param lanes] below the [param unheld] it would have dealt with the
+ * [param asked] engines, since a run too small to fill more lanes was not held by anything. Its
+ * [param engines] run [param lanes] at a time.
+ */
+export function roomSaid(
+  engines: number,
+  lanes: number,
+  unheld: number,
+  held: string | undefined,
+  asked: number,
+): string {
+  if (held === undefined || lanes >= unheld) {
+    return '';
+  }
+  return engines > lanes
+    ? `, ${lanes === 1 ? 'one' : String(lanes)} at a time, since ${held}`
+    : `, of the ${String(asked)} asked for, since ${held}`;
+}
+
+/** [param run] over every one of [param items], [param at] at most at a time, answered in their order. */
+export async function inTurns<T, R>(
+  items: readonly T[],
+  at: number,
+  run: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const answers: R[] = [];
+  let next = 0;
+  const lane = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      answers[index] = await run(items[index] as T, index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(at, items.length)) }, lane));
+  return answers;
 }
 
 function plural(count: number, noun: string): string {
@@ -563,13 +688,38 @@ async function importProject(launch: Launch): Promise<string | null> {
   }
 }
 
-/** Runs [param plan] in an engine of its own once a slot is free, and judges what it printed. */
+/**
+ * Runs the engines of one lane one after another in a single slot, taken before the first and given
+ * back after the last, so another run on the machine cannot take it in between.
+ */
+async function runLane(
+  launch: Launch,
+  lane: ReadonlyArray<{ readonly plan: EnginePlan; readonly index: number }>,
+  units: readonly Unit[],
+): Promise<EngineRan[]> {
+  const lock = await launch.slots.take();
+  try {
+    const ran: EngineRan[] = [];
+    for (const { plan, index } of lane) {
+      ran.push(await runEngine(launch, plan, index, units, '', lock));
+    }
+    return ran;
+  } finally {
+    launch.slots.release(lock);
+  }
+}
+
+/**
+ * Runs [param plan] in an engine of its own, in the slot [param slot] when its lane holds one and
+ * otherwise once a slot is free, and judges what it printed.
+ */
 async function runEngine(
   launch: Launch,
   plan: EnginePlan,
   index: number,
   units: readonly Unit[],
   again = '',
+  slot: string | null = null,
 ): Promise<EngineRan> {
   const directory = join(launch.runDirectory, `engine-${String(index)}${again === '' ? '' : `-${again}`}`);
   mkdirSync(join(directory, 'user'), { recursive: true });
@@ -608,23 +758,29 @@ async function runEngine(
     '--html-report-off',
     '--junit-report-off',
     '--compile-together',
-    '--expected-errors-out',
+    '--expected-out',
     expectedFile,
   ];
   const held = new Set(plan.suites.map((suite) => suite.path));
   const slowest = Math.max(0, ...units.filter((unit) => held.has(unit.suite)).map((unit) => unit.cost));
   const silence = Math.max(launch.silenceFloorSeconds, SILENCE_TIMES_SLOWEST * slowest);
   const log = join(directory, 'engine.log');
-  const lock = await launch.slots.take();
+  const lock = slot ?? (await launch.slots.take());
   const began = Date.now();
   let end: EngineEnd;
   try {
     end = await watched(launch, args, directory, log, plan.windowed, silence);
   } finally {
-    launch.slots.release(lock);
+    if (slot === null) {
+      launch.slots.release(lock);
+    }
   }
   const printed = readRun(readFileSync(log, 'utf8'));
-  const assignment: EngineAssignment = { suites: plan.suites, expected: readExpected(expectedFile) };
+  const assignment: EngineAssignment = {
+    suites: plan.suites,
+    expected: readExpected(expectedFile),
+    selfTyped: launch.selfTyped,
+  };
   return {
     index,
     plan,
@@ -654,24 +810,33 @@ async function watched(
   const output = openSync(log, 'w');
   let child: ChildProcess;
   let stop: () => void;
+  let helper: {
+    readonly error: string;
+    readonly how: string;
+    readonly pid: string;
+    readonly step: string;
+  } | null = null;
   try {
     // Through the helper on Windows for a desktop of its own, and also wherever this process could
     // not clear the bit that keeps a crash from being reported, since the helper clears it in itself.
     if (process.platform === 'win32' && (windowed || !crashesReported())) {
+      const where = windowed ? 'on a desktop of its own' : 'through the desktop helper';
       const compiled = await ensureHelperCompiled();
       if (compiled !== null) {
-        const how = windowed ? 'on a desktop of its own' : 'through the desktop helper';
-        return { code: null, signal: null, ended: `the engine could not be started ${how}: ${compiled}` };
+        return { code: null, signal: null, ended: `the engine could not be started ${where}: ${compiled}` };
       }
       const stopFile = join(directory, 'stop');
+      const error = join(directory, 'error');
+      helper = { error, how: where, pid: join(directory, 'pid'), step: join(directory, 'step') };
       const how = windowed
         ? { desktop: HIDDEN_DESKTOP, directory: launch.projectPath }
         : { directory: launch.projectPath };
       const wrapper = throughHelper(how, launch.godotPath, args, {
-        spec: join(directory, 'spec.json'),
-        pid: join(directory, 'pid'),
-        error: join(directory, 'error'),
+        spec: join(directory, 'spec'),
+        pid: helper.pid,
+        error,
         stop: stopFile,
+        step: helper.step,
       });
       child = spawnHidden(wrapper.command, wrapper.args, {
         stdio: ['ignore', output, output],
@@ -730,7 +895,12 @@ async function watched(
         }
       } else if (ended === null && Date.now() - lastGrowth > silenceSeconds * 1000) {
         const stoppedIn = readRun(text).stoppedIn;
-        ended = `the engine printed nothing for ${String(silenceSeconds)} s${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
+        // A helper that never wrote the pid never started the engine, which is a start that hung.
+        const unstarted =
+          helper !== null && !existsSync(helper.pid)
+            ? `, and it never started ${helper.how}: ${helperStep(helper.step)}`
+            : '';
+        ended = `the engine printed nothing for ${String(silenceSeconds)} s${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended${unstarted}`;
         stop();
       }
     }
@@ -739,6 +909,11 @@ async function watched(
     launch.running.delete(stop);
   }
   const { code, signal } = await exited;
+  // The helper's own failure reaches only its file, and the exit code it leaves says nothing.
+  const failed = helper === null ? null : helperFailure(helper.error);
+  if (failed !== null && helper !== null) {
+    ended ??= `the engine could not be started ${helper.how}: ${failed}`;
+  }
   return { code, signal, ended };
 }
 
@@ -761,7 +936,26 @@ function endTree(child: ChildProcess): void {
 }
 
 /** Prints how the run went and answers the exit code: what failed, in full, then one line of totals. */
-function report(ran: readonly EngineRan[], startedAt: number, runDirectory: string): number {
+function report(
+  ran: readonly EngineRan[],
+  startedAt: number,
+  runDirectory: string,
+  printOutput: boolean,
+): number {
+  // Ahead of the verdict, so the last lines are still how the run went.
+  if (printOutput) {
+    for (const engine of ran) {
+      console.log('');
+      console.log(
+        `--- what engine ${String(engine.index)} printed, running ${named(engine.plan.suites.map((suite) => suite.path))}:`,
+      );
+      console.log(
+        existsSync(engine.log)
+          ? readFileSync(engine.log, 'utf8').replace(CONTROL_SEQUENCE, '').trimEnd()
+          : '(no log was written)',
+      );
+    }
+  }
   const failed = ran.filter((engine) => !engine.verdict.passed);
   for (const engine of failed) {
     console.log('');

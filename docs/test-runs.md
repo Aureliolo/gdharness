@@ -33,6 +33,8 @@ command line itself is wrong.
   iterating only.
 - `--reach-also PATH`: a file every suite depends on, for `--changed-only`. May be given more than
   once.
+- `--print-output`: print everything each engine printed, before the verdict, as for a benchmark
+  written as a suite and run by hand. A gate never passes it.
 - `--runner`: print the path of the shipped runner and exit.
 
 ## Which suites run
@@ -67,7 +69,9 @@ dealt slowest first, each to the engine with the least so far. A run starts no m
 free memory allows once 4 GB is left for everything else at 1.5 GB an engine, and no more than it
 takes to keep each one busy for as long as the slowest unit or 5 seconds, whichever is longer. A
 run held below `--engines` by processors or memory says which on its first line. On macOS the free
-memory is the share the system itself counts as free, which includes the cache it can give back.
+memory is the share the system itself counts as free, which includes the cache it can give back. On
+Windows it is the smaller of the physical memory free and what the system can still commit, since
+an allocation fails at the commit limit however much physical memory is free.
 
 ## What fails a run
 
@@ -81,7 +85,11 @@ memory is the share the system itself counts as free, which includes the cache i
   and a case that ran without being planned.
 - A suite that reports a failure while all its cases passed, which is a failing `before` or `after`.
 - A run that printed no summary or ran no case, or a script gdUnit4 could not load.
-- Objects, resources or memory pages still held as the engine exits.
+- Objects, resources or memory pages still held as the engine exits. Godot never frees a script that
+  exports an array or dictionary typed with its own class, such as `@export var parts: Array[Item]`
+  in the script declaring `Item`, so a run that loads one always ends this way; the verdict names
+  each such script in the project. Typed with a class it extends instead, as `Array[Resource]`, it
+  is freed.
 - An exit code other than 0, named by its meaning: a Windows status such as
   `0xC0000005 (STATUS_ACCESS_VIOLATION)`, or one of gdUnit4's, such as 101 for orphan nodes. gdUnit4's
   100, which it exits with when a case failed, is left out beside that case's own line.
@@ -92,9 +100,10 @@ and the line after it, and the run's summary. When an engine was cut short and n
 it, its last 60 lines. The engine's whole output stays in
 `.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names, and the
 last lines count the problems and name the run's directory. A run that passes leaves no logs, and
-the next run removes the logs of runs that have ended.
+the next run removes the logs of runs that have ended; `--print-output` prints every engine's
+output before the verdict, whether the run passed or not.
 
-## Errors a suite expects
+## Errors and warnings a suite expects
 
 A suite that prints an engine error on purpose declares it, with its exact text, in a constant:
 
@@ -111,9 +120,19 @@ printing it twice lists it twice, and a parameterised case declares what one row
 declared text the case does not print fails the run too, since the case no longer reaches what it
 was written to test. There is no way to accept errors across a whole run: gdUnit4's own
 `report/godot/script_error` setting decides only which errors fail a case, and an error a case meant
-to raise with `assert_error` is declared like any other. `project_test` judges a
-run's errors by the same declarations, and names what fails it under `undeclaredErrors` and
-`declaredNotPrinted`.
+to raise with `assert_error` is declared like any other.
+
+An engine warning printed while a suite runs fails the run the same way, since Godot answers some
+refused changes with nothing but a warning: an `after_test` setting the root's
+`gui_embed_subwindows` while a window it had shown was still up was refused, the root went on
+embedding windows for every later suite, and the run passed. A suite that prints one on purpose
+declares it in `GDHARNESS_EXPECTED_WARNINGS`, keyed the same way, with the text after `WARNING:` and
+its space. A text declared as an error does not accept a warning, or the reverse. A warning printed
+outside every suite, as the engine starts or exits, is not judged, and neither is the one Godot
+prints when it falls back to another rendering driver.
+
+`project_test` judges a run's errors and warnings by the same declarations, and names what fails it
+under `undeclaredErrors` and `declaredNotPrinted`, a warning marked `warning: true`.
 
 An error counts as the case's that was running when it was printed. One printed after a case's
 verdict counts as that case's while another case follows, since what a case leaves for a later
@@ -121,17 +140,37 @@ frame prints there, and as `after`'s once the last case is done.
 
 ## Suites that need a window
 
-A suite declaring `const GDHARNESS_NEEDS_WINDOW: bool = true`, or calling gdUnit4's `scene_runner`,
-runs in an engine with a window, since a headless engine delivers no input events. All of those go
-to one windowed engine, which starts first and counts toward `--engines`, and which is then dealt
-headless suites like the others, so a few quick windowed suites never leave it idle. A headless
-suite dealt there meets the real display server, so the screen size and scale and the display
-features it reports are the machine's rather than the headless server's; a suite that relies on the
-headless answers passes or fails by where it was dealt. It runs without
+A suite declaring `const GDHARNESS_NEEDS_WINDOW: bool = true` runs in an engine with a window, since
+a headless engine delivers no input events. So does one calling gdUnit4's `scene_runner` that
+declares nothing, which is a guess: a suite that uses the scene runner only to stand a scene up and
+read it declares `const GDHARNESS_NEEDS_WINDOW: bool = false` and runs headless. The declaration
+counts from the suite or any script it extends. All the windowed suites go to one windowed engine,
+which starts first, counts toward `--engines`, and runs nothing else: a suite dealt there would meet
+the real display server, so the screen size and scale, the keyboard layout and the display features
+it reports would be the machine's rather than the headless server's, setting the root viewport's
+size would leave it the window's, and it would run slower for drawing frames. Once the windowed
+engine ends, a headless engine follows it in the same slot without giving the slot back, dealt as
+though it began then, so a few quick windowed suites never leave a slot idle. With `--engines 1`
+the run is that one slot: the windowed engine, then a headless one. On a machine with room for
+fewer engines than asked for, the slots run one after the other, and the line announcing the run
+says so. An ordered run (`--order`) is one engine, so a suite in it needing a window gives the
+whole run one, and the run names each suite declaring `false` that runs with the window before it
+starts. The windowed engine runs without
 `--headless`, at the size `project.godot` gives its viewport, and with the Dummy audio driver like
 every other test engine. On Windows it runs on a desktop of its own, so its window never appears
 on the desktop in use or takes its focus. Elsewhere it uses the display there is; on a CI runner
 with none, run it under `xvfb-run`.
+
+The `project_test` tool reads the suites the same way. Its run is one engine, so when a suite in it
+needs a window the whole run has one, started as above, and the answer's `windowNote` names the
+suites that needed it and those declaring `false` that shared it. On a machine with no display the
+run stays headless, and the note says so.
+
+On a GitHub macOS runner, whose GPU is virtual, Godot's Metal driver under the Forward+ renderer
+prints `timeout waiting for fence` as a windowed engine draws, and that engine error fails the run.
+It was measured in eight of ten windowed runs drawing thirty frames, and in none of ten under the
+Mobile or Compatibility renderer or with the Vulkan driver. A project rendering with Forward+ that
+runs windowed suites there can set `rendering/rendering_device/driver.macos` to `vulkan`.
 
 ## Silence and memory
 
@@ -183,8 +222,11 @@ way:
 6. When done, remove the lock, but only if it still names your pid.
 
 The start time is what tells a holder from a later process given its pid. Windows reports a
-process's creation time to the millisecond, and `ps -o lstart` elsewhere only to the second, which
-is why the tolerance is two seconds.
+process's creation time to the millisecond, and `ps -o lstart` on macOS only to the second, which
+is why the tolerance is two seconds. On Linux, read it as gdharness and psutil's `create_time()` do:
+the `btime` line of `/proc/stat`, plus the 22nd field of `/proc/<pid>/stat` divided by
+`getconf CLK_TCK`, in seconds. That is up to a second early; `ps -o lstart` there cuts the same sum
+to the second again and reads up to two seconds early, which is the whole tolerance.
 
 ## Starting the runner yourself
 
@@ -197,4 +239,5 @@ gdUnit4's own options, then after `--`:
 - `--html-report-off` and `--junit-report-off`: no HTML report, and no JUnit report.
 - `--compile-together`: compile the suites together beside every class of the game before running
   them, so every script that does not compile is named.
-- `--expected-errors-out FILE`: write each suite's `GDHARNESS_EXPECTED_ERRORS` there, as JSON.
+- `--expected-out FILE`: write each suite's `GDHARNESS_EXPECTED_ERRORS` and
+  `GDHARNESS_EXPECTED_WARNINGS` there, as JSON under `errors` and `warnings`.

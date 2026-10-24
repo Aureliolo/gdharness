@@ -53,18 +53,25 @@ function editorLogNotePath(projectPath: string): string {
  * and would otherwise be read as the connected editor's console, which is the one way this can
  * answer with somebody else's output.
  */
-interface EditorLogNote {
+export interface EditorLogNote {
   readonly pid: number;
   readonly startedAt: string;
+  /**
+   * When the process began, as the platform says, which is what tells the editor from a later
+   * process given its pid once it has gone. Absent while it is being asked, and when the platform
+   * did not answer.
+   */
+  readonly processStartedAt?: number;
 }
 
-function readEditorLogNote(projectPath: string): EditorLogNote | null {
+export function readEditorLogNote(projectPath: string): EditorLogNote | null {
   try {
     const fields = asParams(JSON.parse(readFileSync(editorLogNotePath(projectPath), 'utf8')));
     const pid = readNumber(fields, 'pid');
     const startedAt = readString(fields, 'startedAt');
+    const processStartedAt = readNumber(fields, 'processStartedAt');
     return pid !== undefined && Number.isInteger(pid) && pid > 0 && startedAt !== undefined
-      ? { pid, startedAt }
+      ? { pid, startedAt, ...(processStartedAt === undefined ? {} : { processStartedAt }) }
       : null;
   } catch {
     return null;
@@ -92,11 +99,23 @@ export function clearEditorLog(projectPath: string): void {
 }
 
 /** Notes that the editor whose console sits beside this note is [param pid]. */
-export function writeEditorLogNote(projectPath: string, pid: number): void {
+export function writeEditorLogNote(projectPath: string, pid: number, processStartedAt?: number): void {
   try {
     const path = editorLogNotePath(projectPath);
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify({ pid, startedAt: new Date().toISOString() }, null, 2), 'utf8');
+    writeFileSync(
+      path,
+      JSON.stringify(
+        {
+          pid,
+          startedAt: new Date().toISOString(),
+          ...(processStartedAt === undefined ? {} : { processStartedAt }),
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
   } catch {
     // As above: no note is the uncaptured answer, which is true of this editor.
   }

@@ -19,7 +19,7 @@ func create_audio_bus(params: Dictionary) -> Dictionary:
 		return _log.failure("bus_name is required")
 	var parent_idx: int = GdhRead.as_int(params.get("parent_bus_index", 0))
 	if parent_idx < 0 or parent_idx >= AudioServer.bus_count:
-		return _log.failure("No bus at index " + str(parent_idx))
+		return _log.failure(_no_index(parent_idx))
 	# Sends are by name, so a second bus with one would leave every send to it meaning either.
 	var existing: int = AudioServer.get_bus_index(bus_name)
 	if existing != -1:
@@ -50,10 +50,7 @@ func remove_audio_bus(params: Dictionary) -> Dictionary:
 		return _log.failure("bus_name is required")
 	var index: int = AudioServer.get_bus_index(bus_name)
 	if index == -1:
-		var names: Array[String] = []
-		for i: int in range(AudioServer.bus_count):
-			names.append(AudioServer.get_bus_name(i))
-		return _log.failure("No bus named %s. The buses are %s." % [bus_name, ", ".join(names)])
+		return _log.failure("No bus named %s. The buses are %s." % [bus_name, ", ".join(_names())])
 	if index == 0:
 		return _log.failure("%s is the bus every other ends in, so it cannot be removed." % bus_name)
 
@@ -105,7 +102,7 @@ func set_audio_bus_effect(params: Dictionary) -> Dictionary:
 	var effect_type: String = str(params.get("effect_type", ""))
 	var enabled: bool = GdhRead.as_bool(params.get("enabled", true), true)
 	if bus_idx < 0 or bus_idx >= AudioServer.bus_count:
-		return _log.failure("No bus at index " + str(bus_idx))
+		return _log.failure(_no_index(bus_idx))
 
 	var effect: AudioEffect = _effect_named(effect_type)
 	if effect == null:
@@ -153,7 +150,7 @@ func set_audio_bus_volume(params: Dictionary) -> Dictionary:
 	var bus_idx: int = GdhRead.as_int(params.get("bus_index", 0))
 	var volume_db: float = GdhRead.as_float(params.get("volume_db", 0.0))
 	if bus_idx < 0 or bus_idx >= AudioServer.bus_count:
-		return _log.failure("No bus at index " + str(bus_idx))
+		return _log.failure(_no_index(bus_idx))
 
 	AudioServer.set_bus_volume_db(bus_idx, volume_db)
 
@@ -161,6 +158,95 @@ func set_audio_bus_volume(params: Dictionary) -> Dictionary:
 	if layout.is_empty():
 		return {}
 	return {"bus": _bus(bus_idx), "layout": layout}
+
+
+## Renames a bus, and every send to it with it: the engine renames the one bus and leaves a bus that
+## sent to it sending to a name nothing has, which it reads as Master. The scenes naming it are the
+## server's to rewrite, since they are files rather than anything this process holds.
+func rename_audio_bus(params: Dictionary) -> Dictionary:
+	var bus_name: String = str(params.get("bus_name", ""))
+	var new_name: String = str(params.get("new_bus_name", ""))
+	if bus_name.is_empty() or new_name.is_empty():
+		return _log.failure("bus_name and new_bus_name are required")
+	var index: int = AudioServer.get_bus_index(bus_name)
+	if index == -1:
+		return _log.failure("No bus named %s. The buses are %s." % [bus_name, ", ".join(_names())])
+	if index == 0:
+		return _log.failure(
+			"%s is the bus every other ends in, which the editor keeps under its name." % bus_name
+		)
+	var existing: int = AudioServer.get_bus_index(new_name)
+	if existing != -1:
+		return _log.failure("A bus named " + new_name + " already exists, at index " + str(existing))
+	AudioServer.set_bus_name(index, new_name)
+	var resent: Array[String] = []
+	for i: int in range(AudioServer.bus_count):
+		if AudioServer.get_bus_send(i) == bus_name:
+			AudioServer.set_bus_send(i, new_name)
+			resent.append(AudioServer.get_bus_name(i))
+
+	var layout: String = _save_layout()
+	if layout.is_empty():
+		return {}
+	var answer: Dictionary = {
+		"renamed": {"from": bus_name, "to": new_name}, "bus": _bus(index), "layout": layout
+	}
+	if not resent.is_empty():
+		answer["resent"] = resent
+	return answer
+
+
+## Points a bus's send at another bus. Only one before it: the editor offers no other, and the
+## engine takes any name, a later bus, the bus itself or one that does not exist, without a word.
+func set_audio_bus_send(params: Dictionary) -> Dictionary:
+	var bus_idx: int = GdhRead.as_int(params.get("bus_index", 0))
+	var send: String = str(params.get("send_to", ""))
+	if bus_idx < 0 or bus_idx >= AudioServer.bus_count:
+		return _log.failure(_no_index(bus_idx))
+	var bus_name: String = AudioServer.get_bus_name(bus_idx)
+	if bus_idx == 0:
+		return _log.failure("%s sends nowhere: it is the bus every other ends in." % bus_name)
+	var target: int = AudioServer.get_bus_index(send)
+	if target == -1:
+		return _log.failure("No bus named %s. The buses are %s." % [send, ", ".join(_names())])
+	if target == bus_idx:
+		return _log.failure(
+			"%s cannot send to itself; it can send to %s." % [bus_name, ", ".join(_names().slice(0, bus_idx))]
+		)
+	if target > bus_idx:
+		return (
+			_log
+			. failure(
+				(
+					(
+						"%s is bus %d and %s is bus %d: a bus sends only to one before it, which keeps sound from "
+						+ "going round in a loop, so %s can send to %s."
+					)
+					% [bus_name, bus_idx, send, target, bus_name, ", ".join(_names().slice(0, bus_idx))]
+				)
+			)
+		)
+	AudioServer.set_bus_send(bus_idx, send)
+
+	var layout: String = _save_layout()
+	if layout.is_empty():
+		return {}
+	return {"bus": _bus(bus_idx), "layout": layout}
+
+
+func _names() -> Array[String]:
+	var names: Array[String] = []
+	for i: int in range(AudioServer.bus_count):
+		names.append(AudioServer.get_bus_name(i))
+	return names
+
+
+## The refusal for a bus index nothing is at, with each bus at its index, so the caller has one.
+func _no_index(index: int) -> String:
+	var held: PackedStringArray = []
+	for i: int in range(AudioServer.bus_count):
+		var _added: bool = held.append("%d %s" % [i, AudioServer.get_bus_name(i)])
+	return "No bus at index %d; the buses are %s." % [index, ", ".join(held)]
 
 
 func _bus(index: int) -> Dictionary:

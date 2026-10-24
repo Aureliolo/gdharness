@@ -175,9 +175,15 @@ export function resolveWithinProject(
   }
   const scheme = OTHER_SCHEME.exec(withoutScheme);
   if (scheme) {
+    // Said for user:// above all, which is where a game writes its saves and settings: a caller
+    // checking what one wrote had nothing to go on.
+    const elsewhere =
+      scheme[0].toLowerCase() === 'user://'
+        ? " A game's user:// is a directory of its own outside the project: a running game's is under userDir in editor_status runtimes and in editor_run start's runtime, where a file reader of your own reads it."
+        : '';
     return {
       ok: false,
-      reason: `Path '${trimmed}' uses the '${scheme[0]}' scheme, which names somewhere other than this project.`,
+      reason: `Path '${trimmed}' uses the '${scheme[0]}' scheme, which names somewhere other than this project.${elsewhere}`,
     };
   }
 

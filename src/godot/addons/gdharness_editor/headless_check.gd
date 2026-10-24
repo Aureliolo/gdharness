@@ -68,6 +68,18 @@ static func through_script(object: Object, names: Dictionary) -> bool:
 	return false
 
 
+## Whether [param object] still holds [param held] for [param name] once set to [param wanted]
+## because the engine derives it, as it keeps layout_mode at Container under a container: an engine
+## property, so no script code ran for the set, and an editor saves the same.
+static func kept_by_engine(object: Object, name: String, wanted: Variant, held: Variant) -> bool:
+	return (
+		not GdhSame.same(object.get(name), wanted)
+		and GdhSame.same(object.get(name), held)
+		and name != "script"
+		and not through_script(object, {name: true})
+	)
+
+
 ## The stored properties of [param object] that are not in [param names] and no longer hold what
 ## [param before] recorded. One the object did not have before, which a script set on it declares,
 ## counts once it holds anything but its default; one it no longer has went with the old script.
@@ -366,8 +378,14 @@ static func embedded_changes(before: String, after: String, reached_ids: Diction
 ## Compares the file just saved at [param path] with [param before], what it held, and puts back
 ## what a script that is not a tool changed in it: in its embedded resources, which [param values]
 ## reach, and in [param main], its main resource, unless that is null. [param asked] and
-## [param reached_ids] are what the call changed. Saved again through [param resave], which answers
-## an Error, and answers "" or why the file still does not hold what it should.
+## [param reached_ids] are what the call changed, and [param carried] is [method embedded_in] of
+## [param values] taken before the save. Saved again through [param resave], which answers an Error,
+## and answers "" or why the file still does not hold what it should.
+##
+## An id is compared only where the resource holding it after the save held it before. Each headless
+## engine hands out the ids of one sequence, so a resource the call added can be saved under the id
+## the file had kept for one it dropped. Read as one resource, the new third line of a dialogue was
+## taken for the old first one changed by its script, and given the old one's text back.
 static func settle_saved(
 	path: String,
 	before: String,
@@ -375,6 +393,7 @@ static func settle_saved(
 	main: Object,
 	asked: Dictionary,
 	reached_ids: Dictionary,
+	carried: Dictionary,
 	resave: Callable
 ) -> String:
 	for attempt: int in 2:
@@ -383,6 +402,8 @@ static func settle_saved(
 		var embedded: Array[Array] = []
 		for found: Array in embedded_changes(before, after, reached_ids):
 			var holder: Resource = by_id.get(found[0])
+			if not carried.has(found[0]) or (holder != null and not is_same(holder, carried[found[0]])):
+				continue
 			if holder != null and _unchanged(holder, found.slice(1)):
 				continue
 			if found[2] or holder == null or not at_default(holder, str(found[1])):
@@ -456,6 +477,32 @@ static func put_back_value(object: Object, name: String, was_set: bool, held: St
 		return "its value there names another resource, which cannot be restored from the text here."
 	object.set(name, str_to_var(held))
 	return ""
+
+
+## [param refused], a refusal of [param property] on [param object] for not holding what it was given,
+## with why when a headless engine set it through a script that is not a tool. That setter runs here
+## and in the game, and an editor runs none and saves the value given, so a setter clamping stock to
+## 0 refused -5 here and the same call through an editor wrote it.
+static func setter_ran(object: Object, property: String, refused: String) -> String:
+	if Engine.is_editor_hint() or property.is_empty():
+		return refused
+	if not through_script(object, {property.get_slice(":", 0): true}):
+		return refused
+	var attached: Variant = object.get_script()
+	var named: String = "Its script"
+	if attached is Script:
+		var script: Script = attached
+		named = script.resource_path
+	return (
+		(
+			(
+				"%s %s is not a tool script, so its setter ran in the headless engine writing this as it runs "
+				+ "in the game; an editor runs none and would have saved the value given. "
+			)
+			% [refused, named]
+		)
+		+ REMEDY
+	)
 
 
 ## Why [param name] on [param what] cannot be saved as the file held it.

@@ -16,15 +16,19 @@ const GdhSerialisation = preload("serialisation.gd")
 
 
 ## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
-## editableChildren on a node that instances another scene and every stored property when
-## [param include_properties] is set, the file's value or the default where it sets none.
+## editableChildren on a node that instances another scene and its stored properties when
+## [param include_properties] is set, the file's value or the default where it sets none, and on a
+## node another file makes setHere, the properties this file sets on it. Defaults the file leaves
+## alone are counted as defaultsLeftOut rather than listed unless [param include_defaults] is set.
 ## [param depth] -1 reads every level.
-static func scene_tree(scene_path: String, depth: int, include_properties: bool) -> Dictionary:
+static func scene_tree(
+	scene_path: String, depth: int, include_properties: bool, include_defaults: bool
+) -> Dictionary:
 	var laid: Dictionary = _laid(scene_path)
 	if not laid.get("ok", false):
 		return laid
 	var nodes: Dictionary = laid["nodes"]
-	return {"ok": true, "tree": _entry(nodes, ".", include_properties, depth, 0)}
+	return {"ok": true, "tree": _entry(nodes, ".", include_properties, include_defaults, depth, 0)}
 
 
 ## The node at [param node_path] in [param scene_path] as {ok, name, type, properties}, laid as
@@ -176,6 +180,7 @@ static func _lay(
 				continue
 			else:
 				nodes[path] = _made(str(state.get_node_type(index)))
+				nodes[path]["madeHere"] = loaded != null
 			if ids[index] >= 0:
 				nodes[path]["uniqueId"] = ids[index]
 			# Laid at the root with no scene handed in is a scene the one being read inherits, and the
@@ -202,10 +207,15 @@ static func _lay(
 			if not grouped.has(str(group)):
 				grouped.append(str(group))
 		var held: Dictionary = nodes[path]["properties"]
+		# What the file being read sets, kept apart for a node another file makes, whose values read
+		# the same whether this scene changed them or that one gave them.
+		var laid: Dictionary = nodes[path]
+		var set_here: Array = laid.get_or_add("setHere", [])
 		for property: int in state.get_node_property_count(index):
-			held[str(state.get_node_property_name(index, property))] = state.get_node_property_value(
-				index, property
-			)
+			var named: String = str(state.get_node_property_name(index, property))
+			held[named] = state.get_node_property_value(index, property)
+			if loaded != null and not set_here.has(named):
+				set_here.append(named)
 	# Only the scene being read and the scenes it inherits share its root, the owner whose editable
 	# instances a write here sets; a file instanced below makes its own owner's editable.
 	if prefix == ".":
@@ -321,7 +331,12 @@ static func _joined(prefix: String, given: String) -> String:
 
 
 static func _entry(
-	nodes: Dictionary, path: String, include_properties: bool, depth: int, current_depth: int
+	nodes: Dictionary,
+	path: String,
+	include_properties: bool,
+	include_defaults: bool,
+	depth: int,
+	current_depth: int
 ) -> Dictionary:
 	var node: Dictionary = nodes[path]
 	var children: Array[Dictionary] = []
@@ -344,7 +359,21 @@ static func _entry(
 		data["groups"] = sorted
 	if include_properties:
 		var given: Dictionary = node["properties"]
-		data["properties"] = _stored(str(node["type"]), given)
+		var stored: Dictionary = _stored(str(node["type"]), given, include_defaults)
+		data["properties"] = stored["properties"]
+		if stored["left_out"] > 0:
+			data["defaultsLeftOut"] = stored["left_out"]
+		var cells: int = _cell_count(str(node["type"]), given)
+		if cells >= 0:
+			data["cellCount"] = cells
+			data["cellsListedBy"] = (
+				"scene_node get with nodePath %s, which lists them as set_tilemap_cells takes them" % path
+			)
+		if not node.get("madeHere", false):
+			var kept: Array = node.get("setHere", [])
+			var set_here: Array = kept.duplicate()
+			set_here.sort()
+			data["setHere"] = set_here
 	var below: Array[String] = node["children"]
 	# Counted rather than left as an empty list, which reads as a node with no children.
 	if depth >= 0 and current_depth >= depth:
@@ -352,19 +381,56 @@ static func _entry(
 			data["childrenNotListed"] = below.size()
 		return data
 	for child: String in below:
-		children.append(_entry(nodes, child, include_properties, depth, current_depth + 1))
+		children.append(_entry(nodes, child, include_properties, include_defaults, depth, current_depth + 1))
 	return data
 
 
+## How many cells a TileMapLayer or TileMap of [param type] holds under the values [param given], or
+## -1 when it is another node or the file sets none of its cells. The file keeps them as packed bytes,
+## which a read of the tree answered with alone, so a caller decoded the base64 to learn what was
+## painted. Only cells the file sets are counted: an instance's come from its own scene.
+static func _cell_count(type: String, given: Dictionary) -> int:
+	if not ClassDB.class_exists(type) or not ClassDB.can_instantiate(type):
+		return -1
+	var single: bool = ClassDB.is_parent_class(type, "TileMapLayer")
+	if not single and not ClassDB.is_parent_class(type, "TileMap"):
+		return -1
+	var painted: bool = false
+	for property: Variant in given:
+		var named: String = str(property)
+		if named == "tile_map_data" or (named.begins_with("layer_") and named.ends_with("/tile_data")):
+			painted = true
+	if not painted:
+		return -1
+	var bare: Node = ClassDB.instantiate(type)
+	for property: Variant in given:
+		if property != "script":
+			bare.set(str(property), given[property])
+	var count: int = 0
+	if single:
+		count = (bare as TileMapLayer).get_used_cells().size()
+	else:
+		var layered: TileMap = bare as TileMap
+		for layer: int in layered.get_layers_count():
+			count += layered.get_used_cells(layer).size()
+	bare.free()
+	return count
+
+
 ## Every property a node of [param type] stores, with the value [param given] sets or the default,
-## read as a node holding those values would answer them.
+## read as a node holding those values would answer them, as {properties, left_out}.
 ##
 ## The engine's half is read off a bare node of the class with the file's values set on it, which
 ## runs no script: what a node lists depends on its values (a thread group's settings appear only
 ## once it has one) and some setters set others (a Control's anchors preset sets how it grows), so
 ## the class's defaults and the file's entries alone answered neither. The script's half is its
 ## declared defaults under the file's values.
-static func _stored(type: String, given: Dictionary) -> Dictionary:
+##
+## Without [param include_defaults], properties keeps only what the file sets and what differs from
+## a node of the class holding none of its values, and left_out counts the rest. Every Control
+## carries a hundred properties, and ten of them came to 57 KB of defaults around the few values a
+## menu scene set.
+static func _stored(type: String, given: Dictionary, include_defaults: bool) -> Dictionary:
 	var attached: Variant = given.get("script")
 	var script: Script = attached if attached is Script else null
 	var scripted: Dictionary = {}
@@ -374,8 +440,10 @@ static func _stored(type: String, given: Dictionary) -> Dictionary:
 			if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
 				scripted[property] = script.get_property_default_value(property)
 	var values: Dictionary = {}
+	var defaults: Dictionary = {}
 	if ClassDB.class_exists(type) and ClassDB.can_instantiate(type):
 		var bare: Object = ClassDB.instantiate(type)
+		var plain: Object = ClassDB.instantiate(type)
 		for property: Variant in given:
 			if property != "script" and not scripted.has(property):
 				bare.set(str(property), given[property])
@@ -383,18 +451,30 @@ static func _stored(type: String, given: Dictionary) -> Dictionary:
 			var property: String = str(declared.get("name", ""))
 			if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
 				values[property] = bare.get(property)
-		if bare is Node:
-			bare.free()
+				defaults[property] = plain.get(property)
+		for made: Object in [bare, plain]:
+			if made is Node:
+				made.free()
 	for property: String in scripted:
 		values[property] = scripted[property]
+		defaults[property] = scripted[property]
 	# Given last, which keeps what a bare node cannot hold: the script itself, and a path to a node
 	# for a property that holds the node once it is in a tree.
 	values.merge(given, true)
 	var serialiser: GdhSerialisation = GdhSerialisation.new()
 	var answered: Dictionary = {}
+	var left_out: int = 0
 	for property: Variant in values:
+		var as_default: bool = (
+			not given.has(property)
+			and defaults.has(property)
+			and GdhSame.same(values[property], defaults[property])
+		)
+		if as_default and not include_defaults:
+			left_out += 1
+			continue
 		answered[property] = serialiser.serialize_value(values[property])
-	return answered
+	return {"properties": answered, "left_out": left_out}
 
 
 ## What a resource file holds, in the form modify takes, so a value read here can be written back.
@@ -407,12 +487,16 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	var file: String = res_path.get_slice("::", 0)
 	if not FileAccess.file_exists(file):
 		return {"ok": false, "error": "No resource at " + file}
-	var loaded: Resource = ResourceLoader.load(file, "", ResourceLoader.CACHE_MODE_IGNORE)
-	if loaded == null:
+	var whole: Resource = ResourceLoader.load(file, "", ResourceLoader.CACHE_MODE_IGNORE)
+	if whole == null:
 		return {"ok": false, "error": "%s did not load as a resource." % file}
+	# The file's resource is held until the read is done, since what it keeps can depend on it: a
+	# TileSet that goes unlinks its sources, and an atlas source with no TileSet lists none of its
+	# tiles' physics, navigation or custom data.
+	var loaded: Resource = whole
 	if file != res_path:
 		var id: String = res_path.trim_prefix(file + "::")
-		var inner: Resource = _kept_in(loaded, file, id, {})
+		var inner: Resource = _kept_in(whole, file, id, {})
 		if inner == null:
 			return {"ok": false, "error": "%s keeps no resource with the id %s." % [file, id]}
 		loaded = inner

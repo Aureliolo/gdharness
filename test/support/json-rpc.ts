@@ -41,12 +41,31 @@ export function parseJsonLines(data: string): JsonRpcMessage[] {
   return messages;
 }
 
-/** The tool result's text blocks joined, or null when the result carries no text at all. */
+/**
+ * The tool result's text blocks joined, or null when the result carries no text at all.
+ *
+ * Without the feedback block the server adds to every two hundred and fiftieth answer, which is
+ * about no answer: a refusal it landed on failed an assertion anchored on the refusal's last
+ * sentence, at whichever call the suite had reached.
+ */
 export function textOf(response: JsonRpcMessage | null | undefined): string | null {
   const result = response?.result;
   if (!isRecord(result) || !Array.isArray(result['content'])) return null;
-  const text = (result['content'] as ToolContentBlock[]).map((chunk) => chunk.text ?? '').join('');
+  const text = (result['content'] as ToolContentBlock[])
+    .filter((chunk) => !isFeedbackBlock(chunk))
+    .map((chunk) => chunk.text ?? '')
+    .join('');
   return text || null;
+}
+
+/** Whether [chunk] is the block asking, now and then, for the tool that is missing. */
+export function isFeedbackBlock(chunk: ToolContentBlock): boolean {
+  try {
+    const parsed: unknown = JSON.parse(chunk.text ?? '');
+    return isRecord(parsed) && Object.keys(parsed).length === 1 && 'gdharness_feedback' in parsed;
+  } catch {
+    return false;
+  }
 }
 
 /**

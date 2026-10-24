@@ -11,6 +11,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
+import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import type { GameLog, LogEntry } from './game-log.js';
 import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
@@ -27,6 +28,8 @@ export interface HeadlessEngine {
   readonly script: string;
   /** Ask the script for its own debug lines. */
   readonly debug: boolean;
+  /** Start the engine as an editor, which is the only engine that can make an exporter. */
+  readonly editor?: boolean;
 }
 
 /** The problems a run reported, as many as an answer carries, and how many older ones it left out. */
@@ -37,6 +40,14 @@ interface Reported {
   /** What was reported once the answer was written, which is not the operation's. */
   readonly afterAnswerMessages?: readonly LogEntry[];
   readonly afterAnswerOmitted?: number;
+  /**
+   * What those messages mean when the caller knows better than the default note, which takes an
+   * autoload that failed to compile as broken: a rebuild of the class list compiles the autoloads
+   * against the list the engine started with, and that list lacks every class the rebuild added.
+   */
+  readonly afterAnswerNote?: string;
+  /** The project's scripts the engine never frees, when it reported at exit what it still held. */
+  readonly exitLeakNote?: string;
   /** What the autoloads reported while an operation waited for them, which is not its own either. */
   readonly beforeOperationMessages?: readonly LogEntry[];
   readonly beforeOperationOmitted?: number;
@@ -74,10 +85,16 @@ export function engineExtras(
 ): Record<string, unknown> {
   const after = outcome.afterAnswerMessages ?? [];
   const before = outcome.beforeOperationMessages ?? [];
-  const notImported = notImportedNote(outcome.messages);
+  // Beside whichever list holds the engine's report at exit: after the answer when there is one,
+  // among the operation's own when it refused and wrote none.
+  const leakIn = (entries: readonly LogEntry[]): string | undefined =>
+    entries.some((entry) => EXIT_LEAK.test(entry.text)) ? outcome.exitLeakNote : undefined;
+  const notes = (...parts: (string | undefined)[]): string | undefined =>
+    parts.filter((part) => part !== undefined).join(' ') || undefined;
+  const ownNote = notes(notImportedNote(outcome.messages), leakIn(outcome.messages));
   return {
     ...(outcome.messages.length > 0 ? { engine_messages: outcome.messages } : {}),
-    ...(notImported === undefined ? {} : { engine_messages_note: notImported }),
+    ...(ownNote === undefined ? {} : { engine_messages_note: ownNote }),
     ...(before.length > 0
       ? {
           engine_messages_before_operation: before,
@@ -91,7 +108,10 @@ export function engineExtras(
     ...(after.length > 0
       ? {
           engine_messages_after_answer: after,
-          engine_messages_after_answer_note: withNotCompiled(AFTER_ANSWER_NOTE, after),
+          engine_messages_after_answer_note: notes(
+            outcome.afterAnswerNote ?? withNotCompiled(AFTER_ANSWER_NOTE, after),
+            leakIn(after),
+          ),
         }
       : {}),
     ...(outcome.afterAnswerOmitted === undefined
@@ -119,7 +139,7 @@ const AFTER_ANSWER_NOTE =
  * the operation and left a caller who had just registered a broken autoload with `saved: true` to
  * guess that every run of the project now starts without it.
  */
-function withNotCompiled(note: string, entries: readonly LogEntry[]): string {
+export function withNotCompiled(note: string, entries: readonly LogEntry[]): string {
   const path = entries.map(notCompiledIn).find((found) => found !== undefined);
   return path === undefined
     ? note
@@ -390,6 +410,12 @@ export async function runImport(
   };
 }
 
+/** What the engine prints when a .blend file is to be imported and no Blender is set. */
+const NO_BLENDER = 'Blender path is invalid or not set';
+
+const BLENDER_STOPPED =
+  'the import pass stopped at a .blend file and imported nothing: the engine imports .blend files through Blender, which the editor setting filesystem/import/blender/blender_path names, and here it names none. Set it in an editor, or set the project setting filesystem/import/blender/enabled to false with project_settings set, which has the engine leave .blend files unimported.';
+
 async function importOnce(godotPath: string, projectPath: string): Promise<ImportOutcome> {
   const logDir = scratchDirectory('import');
   const caches = editorCacheDirectory(godotPath);
@@ -409,6 +435,16 @@ async function importOnce(godotPath: string, projectPath: string): Promise<Impor
   }
   const problems = problemsIn(ran.log);
   const crash = docCacheCrash(ran, cachesBefore, docCachesWritten(caches), 'import');
+  // The engine exits 0 having imported nothing at all, the files before the .blend in the scan
+  // included, so the pass is a failure whatever the exit code says.
+  if (problems.some((entry) => entry.text.startsWith(NO_BLENDER))) {
+    return {
+      ok: false,
+      message: BLENDER_STOPPED,
+      ...reported(problems),
+      ...(crash === null ? {} : { docCacheNote: crash }),
+    };
+  }
   if (ran.exitCode === 0 && ran.failure === null) {
     return { ok: true, ...reported(problems), ...(crash === null ? {} : { docCacheNote: crash }) };
   }
@@ -420,7 +456,25 @@ async function importOnce(godotPath: string, projectPath: string): Promise<Impor
   };
 }
 
+/**
+ * [param operation] run by the operations script on the project at [param projectPath], with the
+ * project's scripts the engine never frees named when it reported at exit what it still held.
+ */
 export async function runOperation(
+  engine: HeadlessEngine,
+  operation: string,
+  params: OperationParams,
+  projectPath: string,
+): Promise<HeadlessOutcome> {
+  const outcome = await operationOutcome(engine, operation, params, projectPath);
+  const heldAtExit = [...outcome.messages, ...(outcome.afterAnswerMessages ?? [])].some((entry) =>
+    EXIT_LEAK.test(entry.text),
+  );
+  const note = heldAtExit ? selfTypedSentence(projectSelfTypedExports(projectPath)) : undefined;
+  return note === undefined ? outcome : { ...outcome, exitLeakNote: note };
+}
+
+async function operationOutcome(
   engine: HeadlessEngine,
   operation: string,
   params: OperationParams,
@@ -434,6 +488,7 @@ export async function runOperation(
   writeFileSync(paramsFile, JSON.stringify(snakeCased(params)), 'utf8');
   const args = [
     '--headless',
+    ...(engine.editor === true ? ['--editor'] : []),
     // Away from the project's own user://logs/godot.log, which a project with file logging on
     // has a run writing to. The engine renames that file when a process starts, so a boot here
     // rotated a running bench's log out from under it and the bench went on writing at the

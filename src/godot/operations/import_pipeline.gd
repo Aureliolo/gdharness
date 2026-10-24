@@ -1,8 +1,5 @@
 extends RefCounted
 
-const GdhDependencies = preload("dependencies.gd")
-const GdhExportPresets = preload("export_presets.gd")
-const GdhScriptCheck = preload("script_check.gd")
 const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhFileWalk = preload("file_walk.gd")
@@ -40,7 +37,14 @@ const IMPORTABLE_EXTENSIONS: Array[String] = [
 	"fbx",
 	"obj",
 	"dae",
+	"csv",
+	"glsl",
 ]
+## What the engine imports through Blender, which it finds only through an editor setting. With the
+## setting unset, a headless import stops at the first of these and imports nothing after it.
+const BLENDER_EXTENSIONS: Array[String] = ["blend"]
+const BLENDER_SETTING: String = "filesystem/import/blender/blender_path"
+const BLENDER_ENABLED: String = "filesystem/import/blender/enabled"
 ## The format version each importer writes as `importer_version` where it is above 0, which the
 ## editor reimports anything older than. Read off sidecars 4.7.2 writes: scene and animation_library
 ## write 1, and the texture importers write none. A case imports one fresh and compares, so an engine
@@ -348,224 +352,6 @@ static func _all_ints(held: Variant, keys: bool) -> bool:
 	return true
 
 
-# Validate project for export
-func validate_project(params: Dictionary) -> Dictionary:
-	var preset_name: String = str(params.get("preset", ""))
-	var include_suggestions: bool = GdhRead.as_bool(params.get("include_suggestions", true), true)
-
-	_log.info("Validating project" + (" for preset: " + preset_name if not preset_name.is_empty() else ""))
-
-	var issues: Array[Dictionary] = []
-	var warnings: Array[Dictionary] = []
-	var checks_performed: Array[String] = []
-
-	checks_performed.append("project_file")
-	if not FileAccess.file_exists("res://project.godot"):
-		issues.append(
-			_finding(
-				"error",
-				"project_file",
-				"project.godot not found",
-				"Ensure you are running this from a valid Godot project directory",
-				include_suggestions
-			)
-		)
-
-	checks_performed.append("main_scene")
-	var main_scene: String = str(ProjectSettings.get_setting("application/run/main_scene", ""))
-	if main_scene.is_empty():
-		issues.append(
-			_finding(
-				"error",
-				"main_scene",
-				"No main scene set",
-				"Set a main scene in Project Settings > Application > Run > Main Scene",
-				include_suggestions
-			)
-		)
-	elif not GdhFileWalk.missing_reason(main_scene).is_empty():
-		issues.append(
-			_finding(
-				"error",
-				"main_scene",
-				"Main scene " + GdhFileWalk.missing_reason(main_scene),
-				"Update the main scene setting or create the missing scene file",
-				include_suggestions
-			)
-		)
-
-	# A file never imported is on disk, so the reference checks pass it, and still nothing loads it:
-	# a scene using one fails to load in a run or an export.
-	checks_performed.append("imports")
-	var never: Array[String] = []
-	for path: String in _files.find_files_with_extensions("res://", IMPORTABLE_EXTENSIONS):
-		if not FileAccess.file_exists(path + ".import"):
-			never.append(path)
-	if not never.is_empty():
-		never.sort()
-		warnings.append(
-			_finding(
-				"warning",
-				"imports",
-				never_imported_line(never),
-				"Run project_import reimport, or open the project in the editor, whose scan imports them",
-				include_suggestions
-			)
-		)
-
-	checks_performed.append("export_presets")
-	if not FileAccess.file_exists("res://export_presets.cfg"):
-		warnings.append(
-			_finding(
-				"warning",
-				"export_presets",
-				"No export presets configured",
-				"Add a preset with project_export add_preset, or in the editor: Project > Export",
-				include_suggestions
-			)
-		)
-
-	# The preset asked about is looked for rather than only logged: validating "for" a preset that
-	# does not exist answered valid, as though it had been checked.
-	if not preset_name.is_empty():
-		checks_performed.append("export_preset")
-		var named: Array[String] = GdhExportPresets.names()
-		if preset_name not in named:
-			issues.append(
-				_finding(
-					"error",
-					"export_preset",
-					(
-						"No export preset is named "
-						+ preset_name
-						+ (
-							": the project has none"
-							if named.is_empty()
-							else ": the presets are " + ", ".join(named)
-						)
-					),
-					"Pass one of the preset names, or add the preset with project_export add_preset",
-					include_suggestions
-				)
-			)
-
-	checks_performed.append("icon")
-	var icon_path: String = str(ProjectSettings.get_setting("application/config/icon", ""))
-	if icon_path.is_empty():
-		warnings.append(
-			_finding(
-				"warning",
-				"icon",
-				"No application icon set",
-				"Set an icon in Project Settings > Application > Config > Icon",
-				include_suggestions
-			)
-		)
-	elif not FileAccess.file_exists(icon_path):
-		warnings.append(
-			_finding(
-				"warning",
-				"icon",
-				"Icon file does not exist: " + icon_path,
-				"Update the icon path or add the missing icon file",
-				include_suggestions
-			)
-		)
-
-	checks_performed.append("project_name")
-	var project_name: String = str(ProjectSettings.get_setting("application/config/name", ""))
-	if project_name.is_empty():
-		warnings.append(
-			_finding(
-				"warning",
-				"project_name",
-				"No project name set",
-				"Set a project name in Project Settings > Application > Config > Name",
-				include_suggestions
-			)
-		)
-
-	checks_performed.append("scripts")
-	var script_files: Array[String] = _files.find_files_with_extensions("res://", ["gd"])
-	var scripts_checked: int = 0
-	var script_issues: Array[Dictionary] = []
-
-	# A hundred scripts is enough to say whether the project is tidy without a large one
-	# turning validation into a full read of its source tree.
-	for script_path: String in script_files.slice(0, 100):
-		scripts_checked += 1
-		var file: FileAccess = FileAccess.open(script_path, FileAccess.READ)
-		if file:
-			var content: String = file.get_as_text()
-			file.close()
-
-			if "# TODO" in content or "# FIXME" in content:
-				script_issues.append({"path": script_path, "issue": "Contains TODO/FIXME comments"})
-			if "pass # TODO" in content:
-				script_issues.append({"path": script_path, "issue": "Contains unimplemented functions"})
-
-	# Compiled by the server and handed in, as for the health check: a script the engine refuses
-	# stops the export's game at the first scene using it, which the comment check above never saw.
-	var compiled: Dictionary = params.get("compiled", {})
-	if compiled.has("checked"):
-		checks_performed.append("compiles")
-	var failures: Array = compiled.get("failures", [])
-	for failure: Dictionary in failures:
-		issues.append(
-			_finding(
-				"error",
-				"compiles",
-				GdhScriptCheck.failure_line(failure),
-				"script_diagnostics gives every error in it with its line",
-				include_suggestions
-			)
-		)
-
-	checks_performed.append("references")
-	for entry: Dictionary in GdhDependencies.new(_log).missing_references():
-		issues.append(
-			_finding(
-				"error",
-				"references",
-				GdhDependencies.missing_line(entry),
-				"Restore the file, or point the reference at the file that replaced it",
-				include_suggestions
-			)
-		)
-
-	if script_issues.size() > 0:
-		var warning: Dictionary = _finding(
-			"warning",
-			"scripts",
-			str(script_issues.size()) + " script issues found",
-			"Review and resolve TODO/FIXME items before release",
-			include_suggestions
-		)
-		warning["details"] = script_issues.slice(0, 5)
-		warnings.append(warning)
-
-	return {
-		"valid": issues.is_empty(),
-		"issues": issues,
-		"warnings": warnings,
-		"checks_performed": checks_performed,
-		"scripts_checked": scripts_checked,
-		# Said beside the count, so a project of four hundred scripts is not read as checked whole.
-		"scripts_total": script_files.size(),
-		"issue_count": issues.size(),
-		"warning_count": warnings.size()
-	}
-
-
-func _finding(
-	type: String, check: String, message: String, suggestion: String, include_suggestion: bool
-) -> Dictionary:
-	var finding: Dictionary = {"type": type, "check": check, "message": message}
-	if include_suggestion:
-		finding["suggestion"] = suggestion
-	return finding
-
-
 func _tally(summary: Dictionary, status: Dictionary) -> void:
 	summary["total"] += 1
 	var state: String = status["status"]
@@ -662,6 +448,19 @@ func _never_imported(resource_path: String) -> String:
 	var extension: String = resource_path.get_extension().to_lower()
 	if extension in IMPORTABLE_EXTENSIONS:
 		return ""
+	if extension in BLENDER_EXTENSIONS:
+		if not ProjectSettings.get_setting(BLENDER_ENABLED, true):
+			return "the project sets " + BLENDER_ENABLED + " to false, so the engine leaves them unimported"
+		return (
+			"the engine imports ."
+			+ extension
+			+ " files through Blender, which it finds through the editor setting "
+			+ BLENDER_SETTING
+			+ ". An editor with it set imports them on its scan; an import pass with it unset stops at"
+			+ " the first one and imports nothing, and setting "
+			+ BLENDER_ENABLED
+			+ " to false has the engine leave them unimported"
+		)
 	# Loadable without a sidecar is what a scene, a script or a saved resource is: read as it is.
 	if ResourceLoader.exists(resource_path):
 		return "the engine loads ." + extension + " files as they are, without importing them"

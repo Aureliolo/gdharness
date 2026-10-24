@@ -52,7 +52,108 @@ const MAP_CALLS: Array[String] = [
 ]
 ## The calls a path makes on a packed list, which has fewer than a list: measured on 4.7.2, it has no
 ## front(), back(), max(), min() or hash().
-const PACKED_CALLS: Array[String] = ["size", "is_empty", "duplicate", "to_byte_array"]
+const PACKED_CALLS: Array[String] = ["size", "is_empty", "duplicate"]
+## What a packed list of bytes answers beside those, read as another list or as text. It has no
+## to_byte_array(), which every other packed list has.
+const BYTE_CALLS: Array[String] = [
+	"to_int32_array",
+	"to_int64_array",
+	"to_float32_array",
+	"to_float64_array",
+	"get_string_from_utf8",
+	"get_string_from_utf32",
+	"hex_encode",
+]
+## The methods a list, a map and a packed list have that change what they are called on, as the
+## engine's API marks them, and those that read it given arguments. A path makes neither, and a call
+## refused for one is pointed at a write or a whole read instead of at an element, since a method of
+## the list itself was the aim.
+const LIST_CHANGES: Array[String] = [
+	"clear",
+	"assign",
+	"set",
+	"push_back",
+	"push_front",
+	"append",
+	"append_array",
+	"resize",
+	"insert",
+	"remove_at",
+	"fill",
+	"erase",
+	"pop_back",
+	"pop_front",
+	"pop_at",
+	"sort",
+	"sort_custom",
+	"shuffle",
+	"reverse",
+	"make_read_only",
+]
+const LIST_READS: Array[String] = [
+	"get",
+	"find",
+	"find_custom",
+	"rfind",
+	"rfind_custom",
+	"count",
+	"has",
+	"bsearch",
+	"bsearch_custom",
+	"slice",
+	"filter",
+	"map",
+	"reduce",
+	"any",
+	"all",
+	"is_same_typed",
+]
+const MAP_CHANGES: Array[String] = [
+	"clear", "assign", "sort", "merge", "erase", "get_or_add", "set", "make_read_only"
+]
+const MAP_READS: Array[String] = [
+	"merged",
+	"has",
+	"has_all",
+	"find_key",
+	"get",
+	"is_same_typed",
+	"is_same_typed_key",
+	"is_same_typed_value",
+	"recursive_equal",
+]
+const PACKED_CHANGES: Array[String] = [
+	"set",
+	"push_back",
+	"append",
+	"append_array",
+	"remove_at",
+	"insert",
+	"fill",
+	"resize",
+	"clear",
+	"reverse",
+	"sort",
+	"erase",
+]
+const PACKED_READS: Array[String] = ["get", "has", "slice", "bsearch", "find", "rfind", "count"]
+## The calls a path makes on a string. A word that looks right and does not match is told apart by
+## its code points, "label:text:to_utf32_buffer():to_int32_array()", which show a non-breaking space
+## as 160 where the answer's JSON shows a space.
+const STRING_CALLS: Array[String] = [
+	"length",
+	"is_empty",
+	"strip_edges",
+	"to_lower",
+	"to_upper",
+	"c_escape",
+	"json_escape",
+	"is_valid_int",
+	"to_int",
+	"to_float",
+	"to_utf8_buffer",
+	"to_utf32_buffer",
+]
 ## The packed lists, which a game keeps names and points in as often as it keeps them in an Array.
 const PACKED: Array[int] = [
 	TYPE_PACKED_BYTE_ARRAY,
@@ -66,6 +167,108 @@ const PACKED: Array[int] = [
 	TYPE_PACKED_COLOR_ARRAY,
 	TYPE_PACKED_VECTOR4_ARRAY,
 ]
+## The calls a path makes on a vector, a colour, a rectangle or a transform, by its type: those that
+## take no arguments, as the engine has them on 4.7.2. Named for the reason the list calls are, and
+## none can change what it is called on, since such a value is a copy wherever it is read from. A
+## wait for something to come to rest reads "linear_velocity:length()".
+const VALUE_CALLS: Dictionary = {
+	TYPE_VECTOR2:
+	[
+		"length",
+		"length_squared",
+		"normalized",
+		"abs",
+		"sign",
+		"floor",
+		"ceil",
+		"round",
+		"angle",
+		"aspect",
+		"is_normalized",
+		"is_zero_approx",
+		"is_finite",
+		"orthogonal",
+		"max_axis_index",
+		"min_axis_index",
+	],
+	TYPE_VECTOR2I: ["length", "length_squared", "abs", "sign", "aspect", "max_axis_index", "min_axis_index"],
+	TYPE_VECTOR3:
+	[
+		"length",
+		"length_squared",
+		"normalized",
+		"abs",
+		"sign",
+		"floor",
+		"ceil",
+		"round",
+		"is_normalized",
+		"is_zero_approx",
+		"is_finite",
+		"max_axis_index",
+		"min_axis_index",
+		"inverse",
+	],
+	TYPE_VECTOR3I: ["length", "length_squared", "abs", "sign", "max_axis_index", "min_axis_index"],
+	TYPE_VECTOR4:
+	[
+		"length",
+		"length_squared",
+		"normalized",
+		"abs",
+		"sign",
+		"floor",
+		"ceil",
+		"round",
+		"is_normalized",
+		"is_zero_approx",
+		"is_finite",
+		"max_axis_index",
+		"min_axis_index",
+		"inverse",
+	],
+	TYPE_VECTOR4I: ["length", "length_squared", "abs", "sign", "max_axis_index", "min_axis_index"],
+	TYPE_COLOR: ["get_luminance", "inverted", "to_html"],
+	TYPE_RECT2: ["abs", "is_finite", "get_area", "get_center", "has_area"],
+	TYPE_RECT2I: ["abs", "get_area", "get_center", "has_area"],
+	TYPE_TRANSFORM2D:
+	[
+		"is_finite",
+		"get_origin",
+		"get_rotation",
+		"get_scale",
+		"get_skew",
+		"inverse",
+		"determinant",
+		"orthonormalized",
+	],
+	TYPE_TRANSFORM3D: ["is_finite", "inverse", "orthonormalized"],
+	TYPE_BASIS:
+	[
+		"is_finite",
+		"get_scale",
+		"inverse",
+		"determinant",
+		"orthonormalized",
+		"get_euler",
+		"get_rotation_quaternion",
+	],
+	TYPE_QUATERNION:
+	[
+		"length",
+		"length_squared",
+		"normalized",
+		"is_normalized",
+		"is_finite",
+		"inverse",
+		"get_euler",
+		"get_angle",
+		"get_axis",
+	],
+	TYPE_PLANE: ["normalized", "is_finite", "get_center"],
+	TYPE_AABB: ["abs", "is_finite", "get_center", "get_volume", "get_longest_axis", "get_shortest_axis"],
+	TYPE_PROJECTION: ["inverse", "determinant"],
+}
 ## The calls an empty list has nothing to answer, which the engine reports as an error when asked.
 const NEEDS_AN_ELEMENT: Array[String] = ["front", "back", "pick_random"]
 
@@ -97,7 +300,8 @@ const READS_ONLY: String = ", and a path, which a wait reads every frame, only c
 ##
 ## A step into a vector, a colour, a rectangle or a transform reads one of its components,
 ## "size:x" or "global_transform:origin:y", by the names GDScript gives them; see
-## [method GdhSerialisation.components_of].
+## [method GdhSerialisation.components_of]. It answers the calls in [constant VALUE_CALLS] too,
+## "linear_velocity:length()".
 ##
 ## Answers with a `message` instead when a step along the way is not there or holds something that
 ## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
@@ -180,13 +384,64 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 ## components can be walked into, and a number or a string is where a path ends whether the caller
 ## meant it to or not.
 static func can_hold(value: Variant) -> bool:
-	return value is Object or value is Array or value is Dictionary or packed(value) or composite(value)
+	return (
+		value is Object
+		or value is Array
+		or value is Dictionary
+		or packed(value)
+		or composite(value)
+		or textual(value)
+	)
+
+
+## Whether [param value] is a string, which a path makes calls on and does not step into.
+static func textual(value: Variant) -> bool:
+	return typeof(value) in [TYPE_STRING, TYPE_STRING_NAME]
+
+
+## The calls a path makes on [param value], a packed list.
+static func packed_calls(value: Variant) -> Array[String]:
+	var calls: Array[String] = PACKED_CALLS.duplicate()
+	if typeof(value) == TYPE_PACKED_BYTE_ARRAY:
+		calls.append_array(BYTE_CALLS)
+	else:
+		calls.append("to_byte_array")
+	return calls
+
+
+## "changes" when [param method] is one of [param holder]'s own that changes it, "reads" when it is
+## one that reads it given arguments, and "" otherwise. A packed list of bytes has more of both,
+## encode_ and bswap changing it and decode_ reading it, which are told by their names.
+static func container_method(holder: Variant, method: String) -> String:
+	var changes: Array[String] = MAP_CHANGES
+	var reads: Array[String] = MAP_READS
+	if holder is Array:
+		changes = LIST_CHANGES
+		reads = LIST_READS
+	elif packed(holder):
+		changes = PACKED_CHANGES
+		reads = PACKED_READS
+		if typeof(holder) == TYPE_PACKED_BYTE_ARRAY:
+			if method.begins_with("encode_") or method.begins_with("bswap"):
+				return "changes"
+			if method.begins_with("decode_") or method == "has_encoded_var":
+				return "reads"
+	if method in changes:
+		return "changes"
+	if method in reads:
+		return "reads"
+	return ""
 
 
 ## Whether [param value] is read by its components, a vector or a colour or a transform, and is a
 ## copy wherever it is read from.
 static func composite(value: Variant) -> bool:
 	return not GdhSerialisation.components_of(value).is_empty()
+
+
+## The calls a path makes on [param value], a vector, a colour, a rectangle or a transform.
+static func value_calls(value: Variant) -> Array:
+	return VALUE_CALLS.get(typeof(value), [])
 
 
 ## Whether [param value] is a packed list. Stepped into the way a list is, by index, and a write into
@@ -228,15 +483,19 @@ static func can_read(holder: Variant, named: String) -> bool:
 		return _index_in(named, items.size()) != -1
 	if packed(holder):
 		if not method.is_empty():
-			return args.is_empty() and method in PACKED_CALLS
+			return args.is_empty() and method in packed_calls(holder)
 		return _index_in(named, len(holder)) != -1
+	if textual(holder):
+		return args.is_empty() and method in STRING_CALLS
 	if holder is Dictionary:
 		var map: Dictionary = holder
 		if not method.is_empty():
 			return args.is_empty() and method in MAP_CALLS
 		return not _key_in(map, named).is_empty()
 	if composite(holder):
-		return method.is_empty() and named in GdhSerialisation.components_of(holder)
+		if not method.is_empty():
+			return args.is_empty() and method in value_calls(holder)
+		return named in GdhSerialisation.components_of(holder)
 	if holder is Object:
 		var object: Object = holder
 		if not method.is_empty():
@@ -386,7 +645,7 @@ static func _not_literals(named: String) -> String:
 ## [method Object.has_method], because a method given too few or too many raises inside the game
 ## rather than answering.
 static func _arity(object: Object, method: String) -> Dictionary:
-	for entry: Dictionary in object.get_method_list():
+	for entry: Dictionary in GdhValues.methods_of(object):
 		if str(entry.get("name", "")) != method:
 			continue
 		var params: Array = entry.get("args", [])
@@ -465,15 +724,18 @@ static func call_refused(object: Object, method: String, called_as: String, give
 ## so they are offered only when one is near.
 static func with_methods_offered(said: String, object: Object, method: String) -> String:
 	var own: Array[String] = []
-	var attached: Variant = object.get_script()
+	var attached: Variant = object if object is Script else object.get_script()
 	if attached is Script:
 		var script: Script = attached
 		for entry: Dictionary in script.get_script_method_list():
 			var name: String = str(entry.get("name", ""))
-			if not name.is_empty() and not own.has(name):
+			# A class called by its name runs only its static functions, so offering the rest leads to a refusal.
+			var flags: int = entry.get("flags", 0)
+			var callable: bool = not object is Script or flags & METHOD_FLAG_STATIC
+			if callable and not name.is_empty() and not own.has(name):
 				own.append(name)
 	var every: Array[String] = own.duplicate()
-	for entry: Dictionary in object.get_method_list():
+	for entry: Dictionary in GdhValues.methods_of(object):
 		var name: String = str(entry.get("name", ""))
 		if not every.has(name):
 			every.append(name)
@@ -483,7 +745,8 @@ static func with_methods_offered(said: String, object: Object, method: String) -
 	if own.is_empty():
 		return said
 	own.sort()
-	return "%s; its script declares %s" % [said, ", ".join(PackedStringArray(own))]
+	var offered: String = "its static functions are" if object is Script else "its script declares"
+	return "%s; %s %s" % [said, offered, ", ".join(PackedStringArray(own))]
 
 
 ## The entry a script attached to [param object] declares for [param method], or an empty one when
@@ -501,7 +764,7 @@ static func _script_method(object: Object, method: String) -> Dictionary:
 
 ## The flags the engine declares [param method] with on [param object].
 static func _native_flags(object: Object, method: String) -> int:
-	for entry: Dictionary in object.get_method_list():
+	for entry: Dictionary in GdhValues.methods_of(object):
 		if str(entry.get("name", "")) == method:
 			var flags: int = entry.get("flags", 0)
 			return flags
@@ -569,7 +832,10 @@ static func write_back(chain: Array[Dictionary], changed: Variant) -> void:
 ## What [param holder] holds under [param named], or answers to it when [param named] is a call.
 ## Only ever called once [method can_read] agrees.
 static func read_under(holder: Variant, named: String) -> Variant:
-	if (holder is Array or holder is Dictionary or packed(holder)) and not method_of(named).is_empty():
+	if (
+		(holder is Array or holder is Dictionary or packed(holder) or composite(holder) or textual(holder))
+		and not method_of(named).is_empty()
+	):
 		return Callable.create(holder, method_of(named)).call()
 	if holder is Array:
 		var items: Array = holder
@@ -624,8 +890,17 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 		return "%s is a list of %d, so there is no %s in it" % [called_as, items.size(), named]
 	if packed(holder):
 		if not container_call.is_empty():
-			return container_calls_refused(called_as, "a packed list", container_call, given_count)
+			return container_calls_refused(
+				called_as, "a packed list", container_call, given_count, packed_calls(holder)
+			)
 		return "%s is a packed list of %d, so there is no %s in it" % [called_as, len(holder), named]
+	if textual(holder):
+		if container_call.is_empty():
+			return (
+				"%s is a string, so a path makes only calls on it, which read it and take no arguments: %s"
+				% [called_as, "(), ".join(STRING_CALLS) + "()"]
+			)
+		return container_calls_refused(called_as, "a string", container_call, given_count, STRING_CALLS)
 	if holder is Dictionary:
 		if not container_call.is_empty():
 			return container_calls_refused(called_as, "a map", container_call, given_count)
@@ -655,9 +930,21 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 		var sort: String = ("an " if kind.left(1) in ["A", "E", "I", "O", "U"] else "a ") + kind
 		var has: String = ", ".join(GdhSerialisation.components_of(holder))
 		if not container_call.is_empty():
+			var calls: Array = value_calls(holder)
+			if given_count > 0 and container_call in calls:
+				return (
+					"%s is %s, and a path calls %s() on one with no arguments"
+					% [called_as, sort, container_call]
+				)
+			var spelled: Array[String] = []
+			for each: Variant in calls:
+				spelled.append(str(each) + "()")
 			return (
-				"%s is %s, which a path reads by its components, %s, and makes no call on"
-				% [called_as, sort, has]
+				(
+					"%s is %s, and %s() is not one of the calls a path makes on one, which read it"
+					+ " and take no arguments: %s; its components are %s"
+				)
+				% [called_as, sort, container_call, ", ".join(spelled), has]
 			)
 		return "%s is %s, so it has no %s; it has %s" % [called_as, sort, named, has]
 	if not holder is Object:
@@ -676,17 +963,17 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 	return GdhRead.near_property("%s has no property %s" % [called_as, named], object, named)
 
 
-## Why [param method] is not a call a path makes on [param sort] ("a list", "a packed list" or "a
-## map"), naming the calls it does make, or that it makes this one with no arguments when
-## [param given] were.
+## Why [param method] is not a call a path makes on [param sort] ("a list" or "a map", or another
+## sort given its [param made]), naming the calls it does make, or that it makes this one with no
+## arguments when [param given] were.
 static func container_calls_refused(
-	called_as: String, sort: String, method: String, given: int = 0
+	called_as: String, sort: String, method: String, given: int = 0, made: Array[String] = []
 ) -> String:
 	var calls: Array[String] = MAP_CALLS
-	if sort == "a list":
+	if not made.is_empty():
+		calls = made
+	elif sort == "a list":
 		calls = LIST_CALLS
-	elif sort == "a packed list":
-		calls = PACKED_CALLS
 	if given > 0 and method in calls:
 		return "%s is %s, and a path calls %s() on one with no arguments" % [called_as, sort, method]
 	var spelled: Array[String] = []

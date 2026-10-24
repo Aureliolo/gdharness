@@ -9,6 +9,7 @@ const Checked = preload("checked.gd")
 const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const WALKER_SCRIPT: String = "res://change_walker.gd"
+const MOODS_SCRIPT: String = "res://change_moods.gd"
 const HOLDER_SOURCE: String = """extends Node
 
 const Walker = preload("res://change_walker.gd")
@@ -33,6 +34,22 @@ var area: Rect2 = Rect2()
 var tint: Color = Color.WHITE
 var trail: Array[Vector2] = []
 var marks: Dictionary[String, Vector2] = {}
+var path_points: PackedVector2Array = PackedVector2Array()
+var ids: PackedInt32Array = PackedInt32Array()
+var whole_counts: Array[int] = [1]
+var health: int = 10:
+	set(value):
+		if value < 0:
+			push_error("health cannot go below zero")
+			return
+		health = value
+var level: int = 0:
+	set(value):
+		if value > 9:
+			push_warning("level is high")
+		level = value
+
+enum Mood { CALM, ANGRY, SLEEPY = 5 }
 
 
 func press(point: Vector2, forward: bool) -> bool:
@@ -49,6 +66,32 @@ func pair(a: int, b: int = 2) -> int:
 
 func many(first: int, ...rest: Array) -> int:
 	return first + rest.size()
+
+
+func length_of(points: PackedVector2Array) -> float:
+	var length: float = 0.0
+	for at: int in range(1, points.size()):
+		length += points[at - 1].distance_to(points[at])
+	return length
+
+
+func sum_ids(given: PackedInt32Array) -> int:
+	var sum: int = 0
+	for one: int in given:
+		sum += one
+	return sum
+
+
+func add_counts(more: Array[int]) -> int:
+	return more.size()
+
+
+func feel(how: Mood) -> int:
+	return how
+
+
+func mode_of(mode: Node.ProcessMode) -> int:
+	return mode
 
 
 func noisy() -> int:
@@ -102,10 +145,12 @@ func _run() -> void:
 	await _check_maps_typed_by_key()
 	await _check_a_key_holding_a_colon()
 	await _check_a_value_given_by_its_fields()
+	await _check_packed_lists_enums_and_setters()
 	node._cleanup()
 	# Not checked: both are gone either way by the time the fixture tears itself down.
 	var _took_directory: Error = DirAccess.remove_absolute(directory)
 	var _took_script: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(WALKER_SCRIPT))
+	var _took_moods: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(MOODS_SCRIPT))
 
 	if failures.is_empty():
 		print(JSON.stringify({"ok": true}))
@@ -518,3 +563,137 @@ func _check_a_map_keyed_by_numbers() -> void:
 	var said: String = str(paired.get("message", ""))
 	if paired.get("type") != "error" or not said.contains("has a key that reads (1, 2), but it is Vector2i"):
 		_fail("a key a step cannot spell is named by its type: %s" % JSON.stringify(paired))
+
+
+## A packed list fitted element by element, an element of a typed list held to what a single value
+## is, an enum argument given by name, and a setter's own report beside the write it refused.
+func _check_packed_lists_enums_and_setters() -> void:
+	var walked: Dictionary = await _invoke("length_of", [[{"x": 0, "y": 0}, {"x": 3, "y": 4}]])
+	if walked.get("result") != 5.0:
+		_fail("a packed list of points takes each as its fields: %s" % JSON.stringify(walked))
+	var stray: Dictionary = await _invoke("length_of", [[{"x": 0, "y": 0}, "east"]])
+	if (
+		str(stray.get("message", ""))
+		!= (
+			'/root/Holder.length_of takes PackedVector2Array as argument 1: element 1 is "east", which cannot'
+			+ ' become Vector2. A Vector2 is sent as {"x": ..., "y": ...}.'
+		)
+	):
+		_fail("and names the element that is no point: %s" % JSON.stringify(stray))
+	var summed: Dictionary = await _invoke("sum_ids", [[1, 2]])
+	if summed.get("result") != 3:
+		_fail("a packed list of whole numbers is summed: %s" % JSON.stringify(summed))
+	var cut: Dictionary = await _invoke("sum_ids", [[1, 2.5]])
+	if not str(cut.get("message", "")).ends_with(
+		"element 1 is 2.5, which an int cannot hold without changing it."
+	):
+		_fail("and a fraction in one is refused, not cut: %s" % JSON.stringify(cut))
+	var counted: Dictionary = await _invoke("add_counts", [[4.5]])
+	if (
+		str(counted.get("message", ""))
+		!= (
+			"/root/Holder.add_counts takes a typed list as argument 1: element 0 is 4.5, which an int cannot"
+			+ " hold without changing it."
+		)
+	):
+		_fail("a fraction in a typed list of ints is refused: %s" % JSON.stringify(counted))
+	var whole: Dictionary = await _invoke("add_counts", [[4, 5]])
+	if whole.get("result") != 2:
+		_fail("while whole numbers are taken: %s" % JSON.stringify(whole))
+	var written_cut: Dictionary = await _write("whole_counts", [2.5])
+	if not str(written_cut.get("message", "")).ends_with(
+		"element 0 is 2.5, which an int cannot hold without changing it."
+	):
+		_fail("and so is one written into a typed list: %s" % JSON.stringify(written_cut))
+	var drawn: Dictionary = await _write("path_points", [{"x": 1, "y": 2}])
+	if (
+		drawn.get("type") != "property_set"
+		or holder.get("path_points") != PackedVector2Array([Vector2(1, 2)])
+	):
+		_fail("a packed list written takes points as their fields: %s" % JSON.stringify(drawn))
+	var worded: Dictionary = await _write("ids", [1, "x"])
+	if (
+		str(worded.get("message", ""))
+		!= ('/root/Holder.ids holds PackedInt32Array: element 1 is "x", which cannot become int.')
+	):
+		_fail("and refuses a word among whole numbers: %s" % JSON.stringify(worded))
+	if holder.get("ids") != PackedInt32Array():
+		_fail("leaving the list as it was: %s" % str(holder.get("ids")))
+
+	for given: Array in [["ANGRY", 1], ["sleepy", 5], [5, 5]]:
+		var felt: Dictionary = await _invoke("feel", [given[0]])
+		if felt.get("result") != given[1] or felt.has("outside_declared"):
+			_fail("an enum argument takes %s: %s" % [JSON.stringify(given[0]), JSON.stringify(felt)])
+	var misspelt: Dictionary = await _invoke("feel", ["ANGRYY"])
+	if (
+		str(misspelt.get("message", ""))
+		!= (
+			"/root/Holder.feel takes the enum Mood as argument 1, and ANGRYY is none of its values: send CALM"
+			+ " (0), ANGRY (1), SLEEPY (5) by name or by number. The nearest is ANGRY."
+		)
+	):
+		_fail("a name the enum has not is refused naming its values: %s" % JSON.stringify(misspelt))
+	var past: Dictionary = await _invoke("feel", [7])
+	if (
+		past.get("result") != 7
+		or (
+			past.get("outside_declared")
+			!= ("argument 1, 7, is none of the values Mood declares: CALM (0), ANGRY (1), SLEEPY (5).")
+		)
+	):
+		_fail("a number the enum has not runs and is said: %s" % JSON.stringify(past))
+	var mode: Dictionary = await _invoke("mode_of", ["PROCESS_MODE_DISABLED"])
+	if mode.get("result") != Node.PROCESS_MODE_DISABLED:
+		_fail("an engine enum takes its constant's name: %s" % JSON.stringify(mode))
+
+	var below: Dictionary = await _write("health", -1)
+	if not str(below.get("message", "")).ends_with(
+		"both look like. While it was written the game reported: health cannot go below zero"
+	):
+		_fail("a setter keeping its value says what it reported: %s" % JSON.stringify(below))
+	var healed: Dictionary = await _write("health", 5)
+	if healed.get("type") != "property_set" or healed.has("errors") or holder.get("health") != 5:
+		_fail("while one it takes reports nothing: %s" % JSON.stringify(healed))
+	var huge: Dictionary = await _invoke("add_counts", [[9007199254740993.0]])
+	var huge_said: String = str(huge.get("message", ""))
+	if (
+		not huge_said.contains("element 0 is too large to be sure of: ")
+		or not huge_said.contains(
+			" is 2^53 or more, where a JSON number holds a whole number only to the nearest"
+		)
+	):
+		_fail("a whole number past 2^53 in a typed list is refused: %s" % JSON.stringify(huge))
+
+	# A saved script's enum, and one of a class inside it, which the engine names by the path and the
+	# inner class: res://change_moods.gd.Inner.Size.
+	var file: FileAccess = FileAccess.open(MOODS_SCRIPT, FileAccess.WRITE)
+	var source: PackedStringArray = [
+		"extends Node",
+		"",
+		"enum Mood { CALM, ANGRY }",
+		"",
+		"",
+		"func size_of(s: Inner.Size) -> int:",
+		"\treturn s",
+		"",
+		"",
+		"class Inner:",
+		"\tenum Size { SMALL, BIG = 9 }",
+		"",
+	]
+	Checked.worked(file.store_string("\n".join(source)), "writing the moods script")
+	file.close()
+	var moody: Node = Node.new()
+	moody.name = "Moody"
+	moody.set_script(load(MOODS_SCRIPT))
+	root.add_child(moody)
+	var sized: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Moody", "method": "size_of", "args": ["BIG"]}
+	)
+	if sized.get("result") != 9:
+		_fail("an inner class's enum takes its name: %s" % JSON.stringify(sized))
+	moody.free()
+
+	var high: Dictionary = await _write("level", 12)
+	if high.get("type") != "property_set" or high.get("warnings") != ["level is high"]:
+		_fail("and a warning from a setter that took the value is beside it: %s" % JSON.stringify(high))

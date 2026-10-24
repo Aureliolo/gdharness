@@ -546,7 +546,7 @@ async function main(): Promise<void> {
           ) ?? '';
         assert.match(
           misspelt,
-          /The nearest class a project script declares is FreshUnscanned, which script_info structure reads\./,
+          /The nearest class a project script declares is FreshUnscanned\. Neither the engine nor a project script declares it\./,
           misspelt,
         );
       } finally {

@@ -31,15 +31,6 @@ const GdhHeadlessCheck = preload("headless_check.gd")
 const PUTTING_BACK_PASSES: int = 4
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
-## The names Object.ConnectFlags gives each bit. The number alone left a reader guessing that 2 is
-## the persistence every connection in a saved scene carries.
-const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
-	Object.CONNECT_DEFERRED: "deferred",
-	Object.CONNECT_PERSIST: "persist",
-	Object.CONNECT_ONE_SHOT: "one_shot",
-	Object.CONNECT_REFERENCE_COUNTED: "reference_counted",
-	Object.CONNECT_APPEND_SOURCE_OBJECT: "append_source_object",
-}
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
 ## for the editor's files to settle has to wait through as well.
@@ -69,6 +60,10 @@ var _copied_from: Dictionary = {}
 var _reached: Dictionary = {}
 ## The file as it was opened, to compare its embedded resources with what the write saves.
 var _text: String = ""
+## The engine properties a put back did not take on a node, as "id:name": the engine derives them
+## from where the node is, as it keeps layout_mode at Container under a container, and stores the
+## same from an editor.
+var _engine_kept: Dictionary = {}
 
 
 ## Opens [param scene_path], answering a refusal, or {} with [member root] set.
@@ -168,19 +163,6 @@ static func unsaved_in_editor(scene_path: String) -> String:
 func refuse(error: String) -> Dictionary:
 	close()
 	return {"ok": false, "error": error}
-
-
-## Each bit set in [param flags], a connection's, by name, and any bits left unnamed as one number.
-static func flag_names(flags: int) -> Array[String]:
-	var names: Array[String] = []
-	var rest: int = flags
-	for bit: int in CONNECT_FLAG_NAMES:
-		if flags & bit:
-			names.append(CONNECT_FLAG_NAMES[bit])
-			rest &= ~bit
-	if rest != 0:
-		names.append(str(rest))
-	return names
 
 
 ## [param said], the refusal for [param node_path] found nowhere in this scene, with how a path is
@@ -518,7 +500,7 @@ func unusable_name(parent: Node, child_name: String, moving: Node = null) -> Str
 	return ""
 
 
-## The names of the properties this scene's own file sets on [param node], whatever their values.
+## The properties this scene's own file sets on [param node], each with the value the file gives it.
 func set_here(node: Node) -> Dictionary:
 	return set_at(path_of(node))
 
@@ -545,17 +527,17 @@ func groups_at(at: String) -> PackedStringArray:
 	return named
 
 
-## The names of the properties this scene's own file sets on the node at [param at].
+## The properties this scene's own file sets on the node at [param at], with the values it gives.
 func set_at(at: String) -> Dictionary:
-	var names: Dictionary = {}
+	var held: Dictionary = {}
 	if _state == null:
-		return names
+		return held
 	for index: int in _state.get_node_count():
 		if _relative(str(_state.get_node_path(index))) != at:
 			continue
-		for property: int in _state.get_node_property_count(index):
-			names[str(_state.get_node_property_name(index, property))] = true
-	return names
+		for p: int in _state.get_node_property_count(index):
+			held[str(_state.get_node_property_name(index, p))] = _state.get_node_property_value(index, p)
+	return held
 
 
 ## Whether [param loaded], read off [param saved] (a copy instantiated from the pack), is
@@ -616,15 +598,23 @@ func write(check: Callable = Callable()) -> Dictionary:
 	if FileAccess.file_exists(path):
 		previous = FileAccess.get_file_as_bytes(path)
 	written_pack = packed
-	var written: Dictionary = save_packed(packed, path)
-	if not written.is_empty() or not headless or not path.ends_with(".tscn"):
-		return written
 	var state: SceneState = packed.get_state()
 	var values: Array = []
 	for index: int in state.get_node_count():
 		values.append_array(_stored_at(state, index).values())
+	var carried: Dictionary = GdhHeadlessCheck.embedded_in(values, {})
+	var written: Dictionary = save_packed(packed, path)
+	if not written.is_empty() or not headless or not path.ends_with(".tscn"):
+		return written
 	var unkept: String = GdhHeadlessCheck.settle_saved(
-		path, _text, values, null, {}, _reached, func() -> Error: return save_keeping_uid(packed, path)
+		path,
+		_text,
+		values,
+		null,
+		{},
+		_reached,
+		carried,
+		func() -> Error: return save_keeping_uid(packed, path)
 	)
 	if unkept.is_empty():
 		return {}
@@ -832,7 +822,11 @@ func _settled(packed: PackedScene) -> Array:
 		for found: Array in stray:
 			var node: Node = found[0]
 			var name: String = found[1]
-			node.set(name, found[3] if found[2] else _unset_value(node, name))
+			var wanted: Variant = found[3] if found[2] else _unset_value(node, name)
+			var held: Variant = node.get(name)
+			node.set(name, wanted)
+			if GdhHeadlessCheck.kept_by_engine(node, name, wanted, held):
+				_engine_kept["%d:%s" % [node.get_instance_id(), name]] = true
 		for found: Array in moved:
 			var node: Node = found[0]
 			var before: Dictionary = _before[node.get_instance_id()]
@@ -901,6 +895,8 @@ func _strays(state: SceneState) -> Array[Array]:
 			if held == stored.has(name) and (not held or GdhSame.same(stored[name], filed[name])):
 				continue
 			if not held and GdhHeadlessCheck.at_default(node, name):
+				continue
+			if _engine_kept.has("%d:%s" % [id, name]):
 				continue
 			stray.append([node, name, held, filed.get(name)])
 	return stray
