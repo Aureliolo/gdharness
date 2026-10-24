@@ -24,6 +24,8 @@ command line itself is wrong.
 - `--slot-count N`: how many slots that directory has; 4, or fewer on a machine with fewer
   processors.
 - `--silence S`: the shortest silence that ends an engine, in seconds; 300 by default.
+- `--deadline S`: the most seconds one engine may run, printing or not, the import's included. No
+  limit by default.
 - `--tests DIR`: where to look for suites, `tests` and `test` by default. May be given more than
   once.
 - `--import`: import the project in an engine of its own before the suites.
@@ -43,6 +45,17 @@ A suite is a script under one of the test directories whose chain of `extends` r
 `GdUnitTestSuite`, by class name, by `res://` path or by a path relative to the script, and which
 declares a function starting `test_` or inherits one from a script of the project. Those functions
 are the cases it is expected to run, which is how a case that never ran is noticed.
+
+A project keeps folders out of every search by listing them in `gdharness/tests/not_searched`, a
+`PackedStringArray` of `res://` paths in `project.godot`; benches written as suites and run by hand
+go there. A suite in such a folder still runs when it, or a folder at or inside the listed one, is
+named. project_test reads the same setting.
+
+```ini
+[gdharness]
+
+tests/not_searched=PackedStringArray("res://test/bench")
+```
 
 ## How they are dealt to engines
 
@@ -154,10 +167,13 @@ A suite declaring `const GDHARNESS_NEEDS_WINDOW: bool = true` runs in an engine 
 a headless engine delivers no input events. So does one calling gdUnit4's `scene_runner` that
 declares nothing, which is a guess: a suite that uses the scene runner only to stand a scene up and
 read it declares `const GDHARNESS_NEEDS_WINDOW: bool = false` and runs headless. The declaration
-counts from the suite or any script it extends. All the windowed suites go to one windowed engine,
-which starts first, counts toward `--engines`, and runs nothing else: a suite dealt there would meet
-the real display server, so the screen size and scale, the keyboard layout and the display features
-it reports would be the machine's rather than the headless server's, setting the root viewport's
+counts from the suite or any script it extends. A project whose scene runner suites pass headless
+turns the guess off for every suite with `gdharness/tests/scene_runner_needs_window=false` in
+`project.godot`, and then only a suite declaring `true` gets a window. All the windowed suites go
+to one windowed engine, which starts first, counts toward `--engines`, and runs nothing else: a
+suite dealt there would meet the real display server, so the screen size and scale, the keyboard
+layout and the display features it reports would be the machine's rather than the headless
+server's, setting the root viewport's
 size would leave it the window's, and it would run slower for drawing frames. Once the windowed
 engine ends, a headless engine follows it in the same slot without giving the slot back, dealt as
 though it began then, so a few quick windowed suites never leave a slot idle. With `--engines 1`
@@ -168,8 +184,9 @@ whole run one, and the run names each suite declaring `false` that runs with the
 starts. The windowed engine runs without
 `--headless`, at the size `project.godot` gives its viewport, and with the Dummy audio driver like
 every other test engine. On Windows it runs on a desktop of its own, so its window never appears
-on the desktop in use or takes its focus. Elsewhere it uses the display there is; on a CI runner
-with none, run it under `xvfb-run`.
+on the desktop in use or takes its focus. The headless engines run there too, since an engine that
+fails to start shows a modal alert even with `--headless`. Elsewhere it uses the display there is;
+on a CI runner with none, run it under `xvfb-run`.
 
 The `project_test` tool reads the suites the same way. Its run is one engine, so when a suite in it
 needs a window the whole run has one, started as above, and the answer's `windowNote` names the
@@ -185,9 +202,10 @@ runs windowed suites there can set `rendering/rendering_device/driver.macos` to 
 ## Silence and memory
 
 An engine that prints nothing for 300 seconds, or for four times its slowest unit's last time when
-that is longer, is ended, and the case it was in is named. `--silence` changes the 300. An engine
-whose autoload did not start is ended as soon as it says so, since nothing a suite reports without
-it means anything.
+that is longer, is ended, and the case it was in is named. `--silence` changes the 300. Silence
+never ends an engine that keeps printing, such as a case warning every frame; `--deadline` ends any
+engine that has run that many seconds, naming the case it was in. An engine whose autoload did not
+start is ended as soon as it says so, since nothing a suite reports without it means anything.
 
 When an engine runs out of memory, which shows as the allocator's null, an image decode failing, or
 Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`, every engine that failed runs again, one at

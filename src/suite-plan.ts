@@ -8,9 +8,10 @@
  */
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, posix } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { declaredClassOf, eachScript } from './class-cache.js';
 import { codeOf, shapeOf } from './gdscript-source.js';
+import { parseProjectGodot } from './resources.js';
 import type { HandedSuite, RowShare, RunPrinted } from './suite-judge.js';
 import { writeWhole } from './whole-file.js';
 
@@ -28,6 +29,23 @@ export const TEST_DIRECTORIES = ['tests', 'test'];
  * suites use it only to stand a scene up, so a suite's own declaration overrides it.
  */
 const SCENE_RUNNER = /\bscene_runner\s*\(/;
+
+/**
+ * The folders no search for suites goes into, a `PackedStringArray` of `res://` paths: benches
+ * written as suites, run by hand. A suite in one still runs when it, or a folder at or inside the
+ * one listed, is named.
+ */
+export const NOT_SEARCHED_SETTING = 'gdharness/tests/not_searched';
+/**
+ * Whether a suite calling scene_runner and declaring nothing is given a window, true unless set. A
+ * project whose scene runner suites pass headless turns the guess off here rather than in each.
+ */
+export const GUESS_WINDOW_SETTING = 'gdharness/tests/scene_runner_needs_window';
+
+/** [param path] at or inside the folder [param folder], both `res://` paths. */
+function within(path: string, folder: string): boolean {
+  return path === folder || path.startsWith(`${folder}/`);
+}
 
 export interface DeclaredSuite {
   readonly path: string;
@@ -59,9 +77,28 @@ export class ProjectScripts {
   readonly classes = new Map<string, string>();
   private readonly read = new Map<string, ReadScript>();
   readonly projectPath: string;
+  /** The folders [constant NOT_SEARCHED_SETTING] names, without a trailing slash. */
+  readonly notSearched: readonly string[];
+  private readonly guessWindow: boolean;
 
   constructor(projectPath: string) {
     this.projectPath = projectPath;
+    let settings: Record<string, unknown> = {};
+    try {
+      settings =
+        parseProjectGodot(readFileSync(join(projectPath, 'project.godot'), 'utf8'))['gdharness'] ?? {};
+    } catch {
+      // A project with no readable project.godot has no settings to read; whatever runs it says so.
+    }
+    const [section, key] = [NOT_SEARCHED_SETTING, GUESS_WINDOW_SETTING].map((setting) =>
+      setting.slice('gdharness/'.length),
+    );
+    const listed = settings[section ?? ''];
+    this.notSearched =
+      typeof listed === 'string'
+        ? [...listed.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((found) => (found[1] ?? '').replace(/\/+$/, ''))
+        : [];
+    this.guessWindow = settings[key ?? ''] !== false;
     eachScript(projectPath, (script, source) => {
       this.sources.set(script, source);
       const declared = declaredClassOf(source);
@@ -131,7 +168,7 @@ export class ProjectScripts {
       }
       const declared = NEEDS_WINDOW.exec(read.code)?.[1];
       said ??= declared === undefined ? undefined : declared === 'true';
-      guessed ||= SCENE_RUNNER.test(read.code);
+      guessed ||= this.guessWindow && SCENE_RUNNER.test(read.code);
       const base = this.base(at);
       if (base === null) {
         return null;
@@ -150,13 +187,41 @@ export class ProjectScripts {
     return null;
   }
 
-  /** Every suite under the directories [param roots] name, as `res://` paths, sorted by path. */
+  /**
+   * Every suite under the directories [param roots] name, as `res://` paths, sorted by path, past
+   * the folders [constant NOT_SEARCHED_SETTING] names unless the root is at or inside one.
+   */
   suitesUnder(roots: readonly string[]): DeclaredSuite[] {
-    const prefixes = roots.map((root) => (root.endsWith('/') ? root : `${root}/`));
+    const searched = roots.map((root) => root.replace(/\/+$/, ''));
     return [...this.sources.keys()]
-      .filter((path) => prefixes.some((prefix) => path.startsWith(prefix)))
+      .filter((path) =>
+        searched.some(
+          (root) =>
+            path.startsWith(`${root}/`) &&
+            !this.notSearched.some((folder) => within(path, folder) && !within(root, folder)),
+        ),
+      )
       .sort()
       .flatMap((path) => this.suite(path) ?? []);
+  }
+
+  /**
+   * [param paths], files and directories as `res://` paths, with each directory that holds a folder
+   * [constant NOT_SEARCHED_SETTING] names replaced by the suites found in it, for a runner that
+   * searches directories itself.
+   */
+  searchedAsTold(paths: readonly string[]): string[] {
+    return [
+      ...new Set(
+        paths.flatMap((path) => {
+          const root = path.replace(/\/+$/, '');
+          return path.endsWith('.gd') ||
+            !this.notSearched.some((folder) => folder.startsWith(`${root}/`) && !within(root, folder))
+            ? [path]
+            : this.suitesUnder([root]).map((suite) => suite.path);
+        }),
+      ),
+    ];
   }
 }
 
@@ -576,10 +641,9 @@ function planOf(
  * to its windowed engine, and those among them saying they run headless, each sorted by path.
  */
 export function windowNeedsOf(
-  projectPath: string,
+  scripts: ProjectScripts,
   paths: readonly string[],
 ): { readonly needing: string[]; readonly headless: string[] } {
-  const scripts = new ProjectScripts(projectPath);
   const suites = new Map(
     paths
       .flatMap((path) => (path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path])))

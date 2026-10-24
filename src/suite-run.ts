@@ -35,7 +35,6 @@ import {
 } from './desktop.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, ownStart } from './engine-slots.js';
-import { crashesReported } from './error-mode.js';
 import { Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
@@ -85,6 +84,8 @@ export interface TestOptions {
   readonly slotsDirectory: string | null;
   readonly slotCount: number | null;
   readonly silenceSeconds: number;
+  /** The most seconds one engine may run, the import's included, or null for no limit. */
+  readonly deadlineSeconds: number | null;
   /** The directories suites are looked for in, as `res://` paths, or none for `tests` and `test`. */
   readonly roots: readonly string[];
   readonly changedOnly: boolean;
@@ -121,6 +122,7 @@ const VALUED = new Set([
   '--slots',
   '--slot-count',
   '--silence',
+  '--deadline',
   '--tests',
   '--reach-also',
   '--order',
@@ -165,6 +167,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     slotsDirectory: last('--slots') === undefined ? null : resolve(cwd, last('--slots') ?? ''),
     slotCount: whole(last('--slot-count'), '--slot-count'),
     silenceSeconds: whole(last('--silence'), '--silence') ?? SILENCE_FLOOR_SECONDS,
+    deadlineSeconds: whole(last('--deadline'), '--deadline'),
     roots: (valued.get('--tests') ?? []).map((root) => resPathOf(root, projectPath, cwd).replace(/\/$/, '')),
     changedOnly: switches.has('--changed-only'),
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
@@ -417,6 +420,8 @@ interface Launch {
   readonly runDirectory: string;
   readonly slots: EngineSlots;
   readonly silenceFloorSeconds: number;
+  /** The most seconds one engine may run, printing or not, or null for no limit. */
+  readonly deadlineSeconds: number | null;
   readonly running: Set<() => void>;
   readonly selfTyped: readonly SelfTypedExport[];
 }
@@ -462,6 +467,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     runDirectory,
     slots,
     silenceFloorSeconds: options.silenceSeconds,
+    deadlineSeconds: options.deadlineSeconds,
     running,
     selfTyped: selfTypedExports(scripts.sources),
   };
@@ -703,7 +709,6 @@ async function importProject(launch: Launch): Promise<string | null> {
       ['--headless', '--audio-driver', 'Dummy', '--path', launch.projectPath, '--import'],
       directory,
       log,
-      false,
       launch.silenceFloorSeconds,
     );
     if (ended.ended !== null || ended.code !== 0) {
@@ -812,7 +817,7 @@ async function runEngine(
   const began = Date.now();
   let end: EngineEnd;
   try {
-    end = await watched(launch, args, directory, log, plan.windowed, silence);
+    end = await watched(launch, args, directory, log, silence);
   } finally {
     if (slot === null) {
       launch.slots.release(lock);
@@ -837,14 +842,13 @@ async function runEngine(
 /**
  * Starts the engine with [param args], both its streams into [param log] through one handle so
  * their lines stay in the order printed, and waits for it, ending it once it has printed nothing for
- * [param silenceSeconds] or an autoload has failed to start.
+ * [param silenceSeconds], has run past the run's deadline, or an autoload has failed to start.
  */
 async function watched(
   launch: Launch,
   args: readonly string[],
   directory: string,
   log: string,
-  windowed: boolean,
   silenceSeconds: number,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
@@ -860,10 +864,11 @@ async function watched(
     readonly step: string;
   } | null = null;
   try {
-    // Through the helper on Windows for a desktop of its own, and also wherever this process could
-    // not clear the bit that keeps a crash from being reported, since the helper clears it in itself.
-    if (process.platform === 'win32' && (windowed || !crashesReported())) {
-      const where = windowed ? 'on a desktop of its own' : 'through the desktop helper';
+    // On Windows every engine on a desktop of its own, headless too: an engine that fails to start
+    // shows a modal alert even with --headless, and on the desktop in use that takes the keyboard of
+    // whoever is working there. The helper also clears the bit that keeps a crash from being reported.
+    if (process.platform === 'win32') {
+      const where = 'on a desktop of its own';
       const compiled = await ensureHelperCompiled();
       if (compiled !== null) {
         return { code: null, signal: null, ended: `the engine could not be started ${where}: ${compiled}` };
@@ -871,9 +876,7 @@ async function watched(
       const stopFile = join(directory, 'stop');
       const error = join(directory, 'error');
       helper = { error, how: where, pid: join(directory, 'pid'), step: join(directory, 'step') };
-      const how = windowed
-        ? { desktop: HIDDEN_DESKTOP, directory: launch.projectPath }
-        : { directory: launch.projectPath };
+      const how = { desktop: HIDDEN_DESKTOP, directory: launch.projectPath };
       const wrapper = throughHelper(how, launch.godotPath, args, {
         spec: join(directory, 'spec'),
         pid: helper.pid,
@@ -883,7 +886,7 @@ async function watched(
       });
       child = spawnHidden(wrapper.command, wrapper.args, {
         stdio: ['ignore', output, output],
-        env: windowed ? { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP } : env,
+        env: { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
         cwd: directory,
       });
       stop = () => {
@@ -894,7 +897,7 @@ async function watched(
         stdio: ['ignore', output, output],
         env,
         cwd: launch.projectPath,
-        detached: process.platform !== 'win32',
+        detached: true,
       });
       stop = () => {
         endTree(child);
@@ -921,10 +924,18 @@ async function watched(
   const reading = openSync(log, 'r');
   try {
     let size = 0;
-    let lastGrowth = Date.now();
+    const started = Date.now();
+    let lastGrowth = started;
     let text = '';
     while (!finished.now) {
       await delay(LOOK_MS);
+      // Silence alone never ends an engine that keeps printing, such as a case warning every frame.
+      const deadline = launch.deadlineSeconds;
+      if (ended === null && deadline !== null && Date.now() - started > deadline * 1000) {
+        const stoppedIn = readRun(text).stoppedIn;
+        ended = `the engine ran past the ${String(deadline)} s deadline${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
+        stop();
+      }
       const now = fstatSync(reading).size;
       if (now > size) {
         const chunk = Buffer.alloc(now - size);

@@ -358,9 +358,11 @@ import {
   type DeclaredSuite,
   dealt,
   type EnginePlan,
+  GUESS_WINDOW_SETTING,
   headlessInAWindow,
   inOneEngine,
   lanesOf,
+  NOT_SEARCHED_SETTING,
   ProjectScripts,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
@@ -41012,6 +41014,46 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       ],
       'every suite under the root, its cases own and inherited, which need a window and which say they run headless',
     );
+    assert.deepEqual(scripts.searchedAsTold(['res://tests', 'res://other/']), [
+      'res://tests',
+      'res://other/',
+    ]);
+
+    // A project keeping its benches out of every search, and its scene runner suites headless.
+    writeTree(project, {
+      'project.godot': [
+        'config_version=5',
+        '',
+        '[gdharness]',
+        '',
+        `${NOT_SEARCHED_SETTING.slice('gdharness/'.length)}=PackedStringArray("res://tests/deep/", "res://other")`,
+        `${GUESS_WINDOW_SETTING.slice('gdharness/'.length)}=false`,
+        '',
+      ].join('\n'),
+    });
+    const told = new ProjectScripts(project);
+    const paths = (suites: DeclaredSuite[]): string[] => suites.map((one) => one.path);
+    const under = paths(told.suitesUnder(['res://tests']));
+    assert.deepEqual(
+      under,
+      paths(found).filter((path) => path !== 'res://tests/deep/path_test.gd'),
+      'a search leaves the folders the project names out',
+    );
+    assert.deepEqual(paths(told.suitesUnder(['res://tests/deep'])), ['res://tests/deep/path_test.gd']);
+    assert.deepEqual(paths(told.suitesUnder(['res://other/'])), ['res://other/outside_test.gd']);
+    assert.deepEqual(
+      told
+        .suitesUnder(['res://tests'])
+        .map((one) => [one.path, one.windowed])
+        .filter(([, windowed]) => windowed),
+      [['res://tests/window_test.gd', true]],
+      'with the guess off, only a suite saying so needs a window',
+    );
+    assert.deepEqual(
+      told.searchedAsTold(['res://tests/', 'res://tests/a_test.gd', 'res://tests/deep', 'res://other']),
+      [...under, 'res://tests/deep', 'res://other'],
+      'a directory holding a folder left out is handed as its suites, and one named inside it as it is',
+    );
 
     const suite = (path: string, names: string[], windowed = false, headless = false) => ({
       path,
@@ -41988,6 +42030,21 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
         : /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than 10 s last time: res:\/\/tests\/ok_test\.gd\.$/m,
       split.said,
     );
+
+    // A case printing all the while is never silent, so only the deadline ends it.
+    writeTree(project, {
+      'tests/chatty_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_chatters() -> void:\n\tfor tick: int in 600:\n\t\tprint("tick %d" % tick)\n\t\tawait get_tree().create_timer(0.1).timeout\n',
+    });
+    const chatty = test('tests/chatty_test.gd', '--silence', '4', '--deadline', '12');
+    rmSync(join(project, 'tests', 'chatty_test.gd'));
+    assert.match(
+      chatty.said,
+      /^ {2}the engine ran past the 12 s deadline while running res:\/\/tests\/chatty_test\.gd > test_chatters, so it was ended$/m,
+      chatty.said,
+    );
+    assert.doesNotMatch(chatty.said, /printed nothing for/, chatty.said);
+    assert.equal(chatty.status, 1, chatty.said);
 
     const hung = test('tests/hang_test.gd', '--silence', '4');
     assert.match(
