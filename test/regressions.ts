@@ -145,7 +145,7 @@ import {
   savesStayPut,
   userDataIn,
 } from '../src/launch.js';
-import { freeLibraryCopies } from '../src/library-copies.js';
+import { freeLibraryCopies, seedExtensionList } from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import {
   GodotLSPClient,
@@ -41885,6 +41885,8 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     const first = test('--import', 'tests/ok_test.gd', 'tests/declared_test.gd');
     assert.equal(first.status, 0, first.said);
     assert.match(first.said, /^Passed: 4 cases in 2 suites across 1 engine, /m, first.said);
+    assert.doesNotMatch(first.said, /The import was skipped/, 'a project never imported is imported');
+    assert.ok(existsSync(join(project, '.godot', 'global_script_class_cache.cfg')), first.said);
     const state = join(project, '.godot', 'gdharness');
     const times = JSON.parse(readFileSync(join(state, 'suite-times.json'), 'utf8')) as Record<
       string,
@@ -41915,6 +41917,33 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       false,
       'a passing run keeps no logs',
     );
+
+    // Nothing changed since, so nothing to import; then a new file to import, then one that fails.
+    const unchanged = test('--import', 'tests/ok_test.gd');
+    assert.match(
+      unchanged.said,
+      /^The import was skipped: every imported file and the class cache are current\.$/m,
+      unchanged.said,
+    );
+    assert.equal(unchanged.status, 0, unchanged.said);
+    writeTree(project, {
+      'dot.svg':
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4"/></svg>\n',
+    });
+    const changed = test('--import', 'tests/ok_test.gd');
+    assert.doesNotMatch(changed.said, /The import was skipped/, changed.said);
+    assert.equal(changed.status, 0, changed.said);
+    assert.ok(existsSync(join(project, 'dot.svg.import')), `the new file was imported: ${changed.said}`);
+    writeTree(project, { 'broken.svg': 'not an image\n' });
+    const failing = test('--import', 'tests/ok_test.gd');
+    rmSync(join(project, 'broken.svg'));
+    rmSync(join(project, 'broken.svg.import'), { force: true });
+    assert.match(
+      failing.said,
+      /^The import failed, so no suite ran: it printed (?:an engine error|\d+ engine errors), the first ".+"; everything it printed is in .+import\.log$/m,
+      failing.said,
+    );
+    assert.equal(failing.status, 1, failing.said);
 
     const noisy = test('tests/ok_test.gd', 'tests/declared_test.gd', 'tests/noisy_test.gd', '--changed-only');
     assert.equal(noisy.status, 1, noisy.said);
@@ -42149,6 +42178,47 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     }
   } finally {
     sweep(project, slots);
+  }
+}
+
+/**
+ * A project with no extension list, as a fresh clone has, is given one naming every manifest the
+ * editor's scan would find, so the import that follows loads the extensions; one with a list keeps it.
+ */
+function testAFreshCloneHasItsExtensionsListed(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-extensions-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'addons/sandbox/sandbox.gdextension': '[configuration]\n',
+      'native/b.gdextension': '[configuration]\n',
+      'skipped/.gdignore': '',
+      'skipped/c.gdextension': '[configuration]\n',
+      '.hidden/d.gdextension': '[configuration]\n',
+      'native/notes.txt': 'not a manifest\n',
+    });
+    const list = join(project, '.godot', 'extension_list.cfg');
+    assert.deepEqual(seedExtensionList(project), [
+      'res://addons/sandbox/sandbox.gdextension',
+      'res://native/b.gdextension',
+    ]);
+    assert.equal(
+      readFileSync(list, 'utf8'),
+      'res://addons/sandbox/sandbox.gdextension\nres://native/b.gdextension\n',
+    );
+    writeFileSync(list, 'res://native/b.gdextension\n');
+    assert.equal(seedExtensionList(project), null, 'a list already there is left as the editor wrote it');
+    assert.equal(readFileSync(list, 'utf8'), 'res://native/b.gdextension\n');
+    const bare = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-extensions-none-'));
+    try {
+      writeTree(bare, { 'project.godot': 'config_version=5\n' });
+      assert.deepEqual(seedExtensionList(bare), []);
+      assert.equal(existsSync(join(bare, '.godot', 'extension_list.cfg')), false, 'no manifest, no list');
+    } finally {
+      sweep(bare);
+    }
+  } finally {
+    sweep(project);
   }
 }
 
@@ -58912,6 +58982,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTestCommandReadsItsOwnOptions,
   testTheTestCommandRunsAndJudgesAProject,
   testAParameterisedCaseIsDealtByItsRows,
+  testAFreshCloneHasItsExtensionsListed,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,
   testATestRunSaysHowFarItHasGot,

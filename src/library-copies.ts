@@ -1,4 +1,13 @@
-import { existsSync, readdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
+import {
+  type Dirent,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 
 /** What freeing a project's library copies did, for the debug log. */
@@ -66,6 +75,54 @@ export function freeLibraryCopies(
     }
   }
   return { setAside, swept };
+}
+
+/**
+ * Writes `.godot/extension_list.cfg` for a project that has none, naming every `.gdextension`
+ * manifest in it, and answers the `res://` paths written, or null when the list was there already.
+ *
+ * The engine loads the extensions that list names as it starts, and the list is written by the
+ * scan of an editor-mode run, after that. On a fresh clone the first import therefore ran with no
+ * extension loaded, so every script
+ * using a class an extension adds failed to compile in it, and the class cache it wrote left
+ * those scripts out. Walked past names starting with a dot and folders holding a `.gdignore`, as
+ * the editor's scan walks.
+ */
+export function seedExtensionList(projectPath: string): string[] | null {
+  const list = join(projectPath, '.godot', 'extension_list.cfg');
+  if (existsSync(list)) {
+    return null;
+  }
+  const found: string[] = [];
+  const visit = (directory: string, resDirectory: string): void => {
+    if (existsSync(join(directory, '.gdignore'))) {
+      return;
+    }
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        visit(join(directory, entry.name), `${resDirectory}${entry.name}/`);
+      } else if (entry.name.endsWith('.gdextension')) {
+        found.push(`${resDirectory}${entry.name}`);
+      }
+    }
+  };
+  visit(projectPath, 'res://');
+  if (found.length === 0) {
+    return [];
+  }
+  found.sort();
+  mkdirSync(dirname(list), { recursive: true });
+  writeFileSync(list, `${found.join('\n')}\n`);
+  return found;
 }
 
 /**

@@ -25,6 +25,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive, exitOf } from './alive.js';
+import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
   DESKTOP_VARIABLE,
   ensureHelperCompiled,
@@ -37,6 +38,8 @@ import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, ownStart } from './engine-slots.js';
 import { Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
+import { staleImports } from './import-freshness.js';
+import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { SuiteFingerprints } from './suite-fingerprint.js';
@@ -44,6 +47,7 @@ import {
   type EngineAssignment,
   type EngineEnd,
   type EngineVerdict,
+  exitNamed,
   judgeEngine,
   named,
   type RunPrinted,
@@ -697,13 +701,34 @@ function sweepRunDirectories(testRuns: string): void {
   }
 }
 
-/** Imports the project once before the suites, as its own engine in a slot, answering why it failed or null. */
+/**
+ * Imports the project once before the suites, as its own engine in a slot, answering why it failed
+ * or null. Skipped when every imported file is current and the class cache lists every class the
+ * scripts declare, which is all an import would change for the suites.
+ */
 async function importProject(launch: Launch): Promise<string | null> {
+  const seeded = seedExtensionList(launch.projectPath);
+  if (seeded !== null && seeded.length > 0) {
+    console.log(`Wrote .godot/extension_list.cfg naming ${named(seeded)}, so the import loads them.`);
+  }
+  const cached = cachedClasses(launch.projectPath);
+  if (
+    (seeded === null || seeded.length === 0) &&
+    cached !== null &&
+    staleAgainst(cached, launch.projectPath).length === 0 &&
+    staleImports(launch.projectPath).length === 0
+  ) {
+    console.log('The import was skipped: every imported file and the class cache are current.');
+    return null;
+  }
   const directory = join(launch.runDirectory, 'import');
   mkdirSync(join(directory, 'user'), { recursive: true });
   const log = join(directory, 'import.log');
   const lock = await launch.slots.take();
   try {
+    // An editor open on the project holds the copies of its extension libraries, and an import
+    // that cannot copy one runs without the extension.
+    freeLibraryCopies(launch.projectPath);
     const ended = await watched(
       launch,
       ['--headless', '--audio-driver', 'Dummy', '--path', launch.projectPath, '--import'],
@@ -712,7 +737,13 @@ async function importProject(launch: Launch): Promise<string | null> {
       launch.silenceFloorSeconds,
     );
     if (ended.ended !== null || ended.code !== 0) {
-      return `${ended.ended ?? `the engine exited ${String(ended.code)}`}; everything it printed is in ${log}`;
+      return `${ended.ended ?? `the engine exited ${exitNamed(ended.code ?? 0)}`}; everything it printed is in ${log}`;
+    }
+    // Godot's import exits 0 whatever it printed, and a suite run on a failed import reads what
+    // the import left behind.
+    const errors = readRun(readFileSync(log, 'utf8')).errors.filter((error) => !error.warning);
+    if (errors.length > 0) {
+      return `it printed ${errors.length === 1 ? 'an engine error' : `${String(errors.length)} engine errors`}, the first ${JSON.stringify(errors[0]?.text ?? '')}; everything it printed is in ${log}`;
     }
     return null;
   } finally {
