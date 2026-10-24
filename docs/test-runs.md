@@ -29,6 +29,10 @@ command line itself is wrong.
 - `--godot PATH`: the engine to run, in place of the one `GODOT_PATH` or the usual places give.
 - `--godot-version V`: fail every engine, the import's included, whose banner names another
   version. `4.7.2` holds for `4.7.2.stable.official`, and `4.7` for every patch of it.
+- `--cores N`: hold every engine, the import's included, to the first N processors, and start no
+  more engines than N. On Linux this goes through `taskset`, and on Windows the engine is held
+  before it starts running. macOS has no way to hold a process to some processors, so there it
+  holds only the number of engines.
 - `--tests DIR`: where to look for suites, `tests` and `test` by default. May be given more than
   once.
 - `--import`: import the project in an engine of its own before the suites.
@@ -91,7 +95,7 @@ those, and the one holding the last row also runs any row the times do not know,
 since they were taken still runs once. The run names each case it dealt out that way, and fails
 when a row that any engine found ran in none of them or in more than one. Units are
 dealt slowest first, each to the engine with the least so far. A run starts no more engines than
-`--engines`, the machine's processors, or its
+`--engines`, the machine's processors (or `--cores`), or its
 free memory allows once 4 GB is left for everything else at 1.5 GB an engine, and no more than it
 takes to keep each one busy for as long as the slowest unit or 5 seconds, whichever is longer. A
 run held below `--engines` by processors or memory says which on its first line. On macOS the free

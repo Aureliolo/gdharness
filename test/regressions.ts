@@ -21,7 +21,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -373,6 +373,7 @@ import {
   windowedSaid,
 } from '../src/suite-plan.js';
 import {
+  heldToCores,
   inTurns,
   macMemoryLevel,
   memoryRoomOf,
@@ -41802,7 +41803,16 @@ function testTheTestCommandReadsItsOwnOptions(): void {
     );
     assert.equal(testOptionsOf(['--order', 'reversed'], project).order, 'reversed');
     assert.equal(testOptionsOf([], project).projectPath, project, 'the directory you are in');
+    assert.equal(testOptionsOf(['--cores', '1'], project).cores, 1);
+    assert.equal(testOptionsOf([], project).cores, null, 'every processor unless asked');
+    const most = Math.min(availableParallelism(), 64);
+    assert.equal(testOptionsOf(['--cores', String(most)], project).cores, most, 'up to every processor');
     for (const [args, said] of [
+      [
+        ['--cores', String(most + 1)],
+        new RegExp(`--cores ${String(most + 1)} is more than the ${String(most)} processors`),
+      ],
+      [['--cores', '0'], /whole number above 0/],
       [['--bogus'], /Unknown option --bogus/],
       [['--engines'], /--engines needs a value/],
       [['--engines', '0'], /whole number above 0/],
@@ -42096,13 +42106,11 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
 
     const timesFile = join(state, 'suite-times.json');
     const timed = readFileSync(timesFile, 'utf8');
-    writeFileSync(
-      timesFile,
-      JSON.stringify({
-        ...(JSON.parse(timed) as object),
-        'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
-      }),
-    );
+    const slowTimes = JSON.stringify({
+      ...(JSON.parse(timed) as object),
+      'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
+    });
+    writeFileSync(timesFile, slowTimes);
     const split = test('tests/ok_test.gd', 'tests/declared_test.gd', '--engines', '2');
     assert.equal(split.status, 0, split.said);
     // Two engines need about seven gigabytes free, which the macOS runner does not have, so there
@@ -42114,6 +42122,22 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
         ? /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since the machine has \d+\.\d GB of memory free, 4\.0 GB of it kept for everything else and 1\.5 GB taken for each engine\.$/m
         : /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than 10 s last time: res:\/\/tests\/ok_test\.gd\.$/m,
       split.said,
+    );
+    // The same run held to one processor starts one engine and says so; a machine short of memory
+    // for even one engine names that instead, since memory is what the room is checked against first.
+    // The split run kept what the suite took, so it is made slow again to want two engines.
+    writeFileSync(timesFile, slowTimes);
+    const cored = test('tests/ok_test.gd', 'tests/declared_test.gd', '--engines', '2', '--cores', '1');
+    assert.equal(cored.status, 0, cored.said);
+    assert.match(
+      cored.said,
+      /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since (--cores holds it to 1 processor|the machine has \d+\.\d GB of memory free, .*)\.$/m,
+      cored.said,
+    );
+    assert.equal(
+      cored.said.includes('macOS offers no way to hold a process to some processors'),
+      process.platform === 'darwin',
+      cored.said,
     );
 
     // The engine named on the command line, held to the version asked for by what it prints.
@@ -42257,6 +42281,87 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     }
   } finally {
     sweep(project, slots);
+  }
+}
+
+/**
+ * `--cores` holds what an engine is started as to the first processors: through the desktop helper
+ * on Windows, which starts the process suspended and sets its affinity before it runs, and through
+ * taskset on Linux. Each is read from a real process.
+ */
+async function testAnEngineIsHeldToTheProcessorsAsked(): Promise<void> {
+  assert.deepEqual(heldToCores(3, 'godot', ['--headless'], 'linux'), {
+    command: 'taskset',
+    args: ['-c', '0-2', 'godot', '--headless'],
+  });
+  assert.deepEqual(heldToCores(3, 'godot', ['--headless'], 'darwin'), {
+    command: 'godot',
+    args: ['--headless'],
+  });
+  assert.deepEqual(heldToCores(null, 'godot', [], 'linux'), { command: 'godot', args: [] });
+  if (process.platform === 'linux') {
+    const held = heldToCores(1, 'grep', ['Cpus_allowed_list', '/proc/self/status']);
+    const ran = spawnSyncHidden(held.command, held.args, { encoding: 'utf8' });
+    assert.match(ran.stdout, /^Cpus_allowed_list:\s*0\s*$/m, `${ran.stdout}${ran.stderr}`);
+    return;
+  }
+  if (process.platform !== 'win32') {
+    console.log('processor hold regression: macOS cannot hold a process to some processors');
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cores-'));
+  try {
+    // Windows PowerShell started without a console exits before running its command, so the held
+    // process is a waiting runtime, asked from outside while it runs.
+    const affinityOf = async (affinity: bigint | undefined, name: string): Promise<string> => {
+      const files = {
+        spec: join(scratch, `${name}.spec`),
+        pid: join(scratch, `${name}.pid`),
+        error: join(scratch, `${name}.error`),
+        stop: join(scratch, `${name}.stop`),
+        step: join(scratch, `${name}.step`),
+      };
+      // Written once the process runs, which a start left suspended never reaches.
+      const ran = join(scratch, `${name}.ran`);
+      const wrapper = throughHelper(
+        { directory: scratch, ...(affinity === undefined ? {} : { affinity }) },
+        process.execPath,
+        ['-e', `require('node:fs').writeFileSync(${JSON.stringify(ran)}, ''); setTimeout(() => {}, 120000)`],
+        files,
+      );
+      const helper = spawnHidden(wrapper.command, wrapper.args, { stdio: 'ignore' });
+      const ended = new Promise<number | null>((settle) => helper.once('exit', settle));
+      try {
+        const until = Date.now() + 60_000;
+        while (!existsSync(ran) && !existsSync(files.error) && Date.now() < until) {
+          await delay(100);
+        }
+        const error = existsSync(files.error) ? readFileSync(files.error, 'utf8') : '';
+        assert.ok(existsSync(ran), `the process it started runs: ${error}${helperStep(files.step)}`);
+        const pid = Number(readFileSync(files.pid, 'utf8'));
+        const asked = spawnSyncHidden(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).ProcessorAffinity`],
+          { encoding: 'utf8', timeout: 60_000 },
+        );
+        assert.equal(asked.status, 0, `${asked.stdout}${asked.stderr}`);
+        return asked.stdout.trim();
+      } finally {
+        writeFileSync(files.stop, '');
+        await ended;
+      }
+    };
+    assert.equal(await affinityOf(1n, 'one'), '1', 'held to the first processor');
+    assert.equal(await affinityOf(3n, 'two'), '3', 'held to the first two');
+    const all = (1n << BigInt(Math.min(availableParallelism(), 64))) - 1n;
+    assert.equal(
+      await affinityOf(undefined, 'every'),
+      all.toString(),
+      'and to every processor when none is asked',
+    );
+  } finally {
+    sweep(scratch);
   }
 }
 
@@ -59067,6 +59172,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTestCommandRunsAndJudgesAProject,
   testAParameterisedCaseIsDealtByItsRows,
   testAFreshCloneHasItsExtensionsListed,
+  testAnEngineIsHeldToTheProcessorsAsked,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,
   testATestRunSaysHowFarItHasGot,

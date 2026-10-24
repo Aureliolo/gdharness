@@ -93,6 +93,8 @@ export interface TestOptions {
   readonly deadlineSeconds: number | null;
   /** The engine `--godot` names, or null for the one gdharness finds. */
   readonly godotPath: string | null;
+  /** How many processors, the first ones, every engine of the run is held to, or null for all. */
+  readonly cores: number | null;
   /** The version every engine must say it is as it starts, such as `4.7.2`, or null for any. */
   readonly godotVersion: string | null;
   /** The directories suites are looked for in, as `res://` paths, or none for `tests` and `test`. */
@@ -138,6 +140,7 @@ const VALUED = new Set([
   '--deadline',
   '--godot',
   '--godot-version',
+  '--cores',
   '--tests',
   '--reach-also',
   '--order',
@@ -185,6 +188,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     deadlineSeconds: whole(last('--deadline'), '--deadline'),
     godotPath: godotNamed(last('--godot'), cwd),
     godotVersion: versionNamed(last('--godot-version')),
+    cores: coresNamed(last('--cores')),
     roots: (valued.get('--tests') ?? []).map((root) => resPathOf(root, projectPath, cwd).replace(/\/$/, '')),
     changedOnly: switches.has('--changed-only'),
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
@@ -214,6 +218,18 @@ function godotNamed(value: string | undefined, cwd: string): string | null {
     throw new TestUsageError(`--godot names ${path}, which is not an engine executable.`);
   }
   return path;
+}
+
+function coresNamed(value: string | undefined): number | null {
+  const cores = whole(value, '--cores');
+  // A Windows affinity mask is one bit a processor of one group, which holds 64.
+  const most = Math.min(availableParallelism(), 64);
+  if (cores !== null && cores > most) {
+    throw new TestUsageError(
+      `--cores ${String(cores)} is more than the ${String(most)} processors a run can be held to here.`,
+    );
+  }
+  return cores;
 }
 
 function versionNamed(value: string | undefined): string | null {
@@ -328,6 +344,7 @@ export function roomFor(
   processors: number,
   available: number,
   said = 'of memory free',
+  processorsSaid = `the machine has ${plural(processors, 'processor')}`,
 ): { engines: number; held: string | undefined } {
   const byMemory = Math.floor((available - MEMORY_KEPT) / MEMORY_PER_ENGINE);
   const engines = Math.max(1, Math.min(most, processors, byMemory));
@@ -340,7 +357,7 @@ export function roomFor(
     held:
       byMemory < processors
         ? `the machine has ${gigabytes(Math.max(0, available))} ${said}, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(MEMORY_PER_ENGINE)} taken for each engine`
-        : `the machine has ${plural(processors, 'processor')}`,
+        : processorsSaid,
   };
 }
 
@@ -466,6 +483,23 @@ interface Launch {
   readonly running: Set<() => void>;
   readonly selfTyped: readonly SelfTypedExport[];
   readonly godotVersion: string | null;
+  readonly cores: number | null;
+}
+
+/**
+ * [param command] and [param args] held to the first [param cores] processors on Linux, through
+ * taskset, which execs the command in its own place so the pid is the engine's; as they are
+ * elsewhere, since Windows holds a process through the helper and macOS cannot.
+ */
+export function heldToCores(
+  cores: number | null,
+  command: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[] } {
+  return cores === null || platform !== 'linux'
+    ? { command, args: [...args] }
+    : { command: 'taskset', args: ['-c', `0-${String(cores - 1)}`, command, ...args] };
 }
 
 /** Runs the suites [param options] asks for with the engine at [param godotPath], answering the exit code. */
@@ -513,6 +547,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     running,
     selfTyped: selfTypedExports(scripts.sources),
     godotVersion: options.godotVersion,
+    cores: options.cores,
   };
   try {
     if (options.importFirst) {
@@ -557,7 +592,21 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         `Windows did not say how much memory it can still commit (${memory.unread}), so engines are sized by the physical memory free.`,
       );
     }
-    const room = roomFor(options.engines, availableParallelism(), memory.bytes, memory.said);
+    const room =
+      options.cores === null
+        ? roomFor(options.engines, availableParallelism(), memory.bytes, memory.said)
+        : roomFor(
+            options.engines,
+            options.cores,
+            memory.bytes,
+            memory.said,
+            `--cores holds it to ${plural(options.cores, 'processor')}`,
+          );
+    if (options.cores !== null && process.platform === 'darwin') {
+      console.log(
+        'macOS offers no way to hold a process to some processors, so --cores holds only the number of engines here.',
+      );
+    }
     const plans =
       options.order === null
         ? dealt(units, declared, room.engines)
@@ -954,7 +1003,11 @@ async function watched(
       const stopFile = join(directory, 'stop');
       const error = join(directory, 'error');
       helper = { error, how: where, pid: join(directory, 'pid'), step: join(directory, 'step') };
-      const how = { desktop: HIDDEN_DESKTOP, directory: launch.projectPath };
+      const how = {
+        desktop: HIDDEN_DESKTOP,
+        directory: launch.projectPath,
+        ...(launch.cores === null ? {} : { affinity: (1n << BigInt(launch.cores)) - 1n }),
+      };
       const wrapper = throughHelper(how, launch.godotPath, args, {
         spec: join(directory, 'spec'),
         pid: helper.pid,
@@ -971,7 +1024,8 @@ async function watched(
         writeFileSync(stopFile, '');
       };
     } else {
-      child = spawnHidden(launch.godotPath, args, {
+      const held = heldToCores(launch.cores, launch.godotPath, args);
+      child = spawnHidden(held.command, held.args, {
         stdio: ['ignore', output, output],
         env,
         cwd: launch.projectPath,
