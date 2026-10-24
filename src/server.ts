@@ -83,7 +83,14 @@ import {
   handleDAPTool,
   type StoppedAt,
 } from './dap_client.js';
-import { ensureHelperCompiled, HIDDEN_DESKTOP } from './desktop.js';
+import {
+  DESKTOP_VARIABLE,
+  ensureHelperCompiled,
+  type HelperFiles,
+  HIDDEN_DESKTOP,
+  helperFailure,
+  throughHelper,
+} from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import {
@@ -312,8 +319,15 @@ import {
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
 // array element, so a path full of backslashes, spaces or quotes is just a path.
 import { runHidden as run, spawnHidden } from './spawn.js';
-import { declaringAdvice, readExpected, readRun, unexpectedErrors, withNestedErrors } from './suite-judge.js';
-import { ProjectScripts, TEST_DIRECTORIES } from './suite-plan.js';
+import {
+  declaringAdvice,
+  named,
+  readExpected,
+  readRun,
+  unexpectedErrors,
+  withNestedErrors,
+} from './suite-judge.js';
+import { ProjectScripts, TEST_DIRECTORIES, viewportOf, windowNeedsOf } from './suite-plan.js';
 import { scriptsWithoutCases, selectTests } from './test-selection.js';
 import {
   asParams,
@@ -3477,6 +3491,25 @@ function elsewhereIn(projectPath: string, asked: string): string {
   }
   const there = near.map((name) => `res://${name}`).join(' and ');
   return near.length === 0 ? '' : ` The project does have ${there}.`;
+}
+
+/**
+ * What a test run says about [param needing], the suites gdharness test would give a window: that
+ * the run had one, beside [param sharing], those that say they run headless and shared it, or, when
+ * the run had none, that the machine has no display.
+ */
+function windowNoteFor(needing: readonly string[], sharing: readonly string[] | null): string {
+  const one = needing.length === 1;
+  const why =
+    'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or calls scene_runner and declares nothing; one that uses the scene runner only to stand a scene up declares it false and runs headless.';
+  if (sharing === null) {
+    return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, and this machine has no display, so the run was headless and input events went nowhere. ${why} Run under xvfb-run to give it a display.`;
+  }
+  const shared =
+    sharing.length === 0
+      ? ''
+      : ` ${named(sharing)} ${sharing.length === 1 ? 'says it runs' : 'say they run'} headless and ran with the window too, since the run is one engine: run ${sharing.length === 1 ? 'it' : 'them'} without the windowed suites to run ${sharing.length === 1 ? 'it' : 'them'} headless.`;
+  return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, so the run had one: the engine ran without --headless, at the size project.godot gives its viewport, with no sound${process.platform === 'win32' ? ', on a desktop of its own, where its window neither shows nor takes the keyboard' : ''}. ${why}${shared}`;
 }
 
 /**
@@ -7098,9 +7131,25 @@ class GodotServer {
     if (!selection.ok) {
       return this.createErrorResponse(selection.reason);
     }
+    // As gdharness test deals them, so a suite passing there is not failed here for running without
+    // the window it was given there: a scene that sets itself up only off the headless display
+    // server answered six errors pointing at the game. A suite left out whole by ignore is not run.
+    const leftOut = new Set(readStringArray(args, 'ignore') ?? []);
+    const needs = windowNeedsOf(project.value.path, selection.value?.suites ?? asked);
+    const needing = needs.needing.filter((path) => !leftOut.has(basename(path, '.gd')));
+    const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
+    const windowed = needing.length > 0 && !noDisplay;
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response;
+    }
+    if (windowed && process.platform === 'win32') {
+      const compiled = await ensureHelperCompiled();
+      if (compiled !== null) {
+        return this.createErrorResponse(
+          `${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the helper that starts a windowed engine on a desktop of its own could not be made: ${compiled}`,
+        );
+      }
     }
 
     // The rebuild waits out the editor's scan before it runs, so what it waited is what this run
@@ -7147,8 +7196,21 @@ class GodotServer {
     const expectedFile = join(userData, 'expected.json');
     writeFileSync(suitesFile, `${(selection.value?.suites ?? asked).join('\n')}\n`);
     writeFileSync(skippingFile, `${[...ignored, ...(selection.value?.ignore ?? [])].join('\n')}\n`);
+    const viewport = windowed ? viewportOf(project.value.path) : null;
+    const sharing = needs.headless.filter((path) => !leftOut.has(basename(path, '.gd')));
+    const windowSaid =
+      needing.length === 0 ? {} : { windowed, windowNote: windowNoteFor(needing, windowed ? sharing : null) };
     const cmdArgs = [
-      '--headless',
+      // The windowed engine as gdharness test starts it: the project's viewport size, and no sound.
+      ...(windowed
+        ? [
+            ...(viewport === null
+              ? []
+              : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]),
+            '--audio-driver',
+            'Dummy',
+          ]
+        : ['--headless']),
       '--path',
       project.value.path,
       // Before the script, where the engine reads its own options rather than handing them on.
@@ -7157,7 +7219,7 @@ class GodotServer {
       engineLog,
       '-s',
       this.listedRunner,
-      '--ignoreHeadlessMode',
+      ...(windowed ? [] : ['--ignoreHeadlessMode']),
       ...(readBoolean(args, 'failFast') === true ? [] : ['-c']),
       '-rd',
       reports,
@@ -7174,7 +7236,22 @@ class GodotServer {
     ];
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 600000;
     this.logDebug(`Running tests: ${engine.value} ${cmdArgs.join(' ')}`);
-    const run = this.spawnGame(engine.value, cmdArgs, userDataIn(userData));
+    const helperFiles: HelperFiles = {
+      spec: join(userData, 'spec.json'),
+      pid: join(userData, 'pid'),
+      error: join(userData, 'error'),
+      stop: join(userData, 'stop'),
+    };
+    // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
+    // Elsewhere it uses the display there is.
+    const run = this.spawnGame(
+      engine.value,
+      cmdArgs,
+      userDataIn(userData),
+      windowed && process.platform === 'win32'
+        ? { directory: project.value.path, files: helperFiles }
+        : undefined,
+    );
     // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
     // marks which characters of a failing string were there, and its report drops them.
     const console: Buffer[] = [];
@@ -7202,13 +7279,13 @@ class GodotServer {
         read = entries.length;
         if (stopped.for !== null) {
           clearInterval(watching);
-          run.process.kill();
+          run.stop();
         }
       }, 100);
       const timer = setTimeout(() => {
         clearInterval(watching);
         silentForMs = Date.now() - lastSaid;
-        run.process.kill();
+        run.stop();
         resolve(true);
       }, timeoutMs);
       const ended = (): void => {
@@ -7226,6 +7303,14 @@ class GodotServer {
       await untilGone([run.process.pid]);
     }
     await run.settled;
+    // The helper's own failure reaches only its file, and the exit it leaves says nothing.
+    const helperFailed = helperFailure(helperFiles.error);
+    if (helperFailed !== null) {
+      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
+      return this.createErrorResponse(
+        `No tests ran: ${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the engine could not be started on a desktop of its own: ${helperFailed}`,
+      );
+    }
     const tookMs = Date.now() - began;
     // Read again once the run is over, so a run that ended between two looks answers as one that
     // was stopped: whether it got through its suites first is a race, and what they said about
@@ -7433,6 +7518,7 @@ class GodotServer {
                 ...printedLines,
                 savesNote,
                 ...scanned,
+                ...windowSaid,
               },
               null,
               2,
@@ -7687,6 +7773,7 @@ class GodotServer {
       ...printedLines,
       savesNote,
       ...scanned,
+      ...windowSaid,
       // The word on its own was the whole answer, and it named neither what was warned nor where.
       note:
         [
@@ -10977,11 +11064,36 @@ class GodotServer {
     godotPath: string,
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
-  ): SpawnedGame & { readonly settled: Promise<void> } {
-    const child = spawnHidden(godotPath, cmdArgs, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...(env ? { env } : {}),
-    });
+    onDesktop?: { readonly directory: string; readonly files: HelperFiles },
+  ): SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void } {
+    // Through the helper the child is PowerShell, and ending it would leave the engine running on a
+    // desktop nobody can see, so the helper is asked to end the engine instead.
+    const wrapper =
+      onDesktop === undefined
+        ? null
+        : throughHelper(
+            { desktop: HIDDEN_DESKTOP, directory: onDesktop.directory },
+            godotPath,
+            cmdArgs,
+            onDesktop.files,
+          );
+    const child =
+      wrapper === null
+        ? spawnHidden(godotPath, cmdArgs, {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            ...(env ? { env } : {}),
+          })
+        : spawnHidden(wrapper.command, wrapper.args, {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...(env ?? process.env), [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
+          });
+    const stop = (): void => {
+      if (onDesktop === undefined) {
+        child.kill();
+      } else {
+        writeFileSync(onDesktop.files.stop, '');
+      }
+    };
     // The same reasoning at the other end of the call: a caller who cancelled is no longer the
     // reader this run is held for, so it is ended with the call rather than at its own timeout.
     const cancelled = callSignal();
@@ -10989,7 +11101,7 @@ class GodotServer {
       const end = (): void => {
         if (child.exitCode === null && child.signalCode === null) {
           this.logDebug(`The call waiting on pid ${child.pid ?? 'unknown'} was cancelled; ending it.`);
-          child.kill();
+          stop();
         }
       };
       if (cancelled.aborted) {
@@ -11058,7 +11170,7 @@ class GodotServer {
       });
     });
     // The same object the handlers above write the exit into, not a copy of it.
-    return Object.assign(started, { settled });
+    return Object.assign(started, { settled, stop });
   }
 
   /**

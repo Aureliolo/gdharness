@@ -163,6 +163,11 @@ every other test engine. On Windows it runs on a desktop of its own, so its wind
 on the desktop in use or takes its focus. Elsewhere it uses the display there is; on a CI runner
 with none, run it under `xvfb-run`.
 
+The `project_test` tool reads the suites the same way. Its run is one engine, so when a suite in it
+needs a window the whole run has one, started as above, and the answer's `windowNote` names the
+suites that needed it and those declaring `false` that shared it. On a machine with no display the
+run stays headless, and the note says so.
+
 On a GitHub macOS runner, whose GPU is virtual, Godot's Metal driver under the Forward+ renderer
 prints `timeout waiting for fence` as a windowed engine draws, and that engine error fails the run.
 It was measured in eight of ten windowed runs drawing thirty frames, and in none of ten under the

@@ -41490,6 +41490,90 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         );
         rmSync(join(project, 'deep'), { recursive: true, force: true });
 
+        // A suite standing a scene up through the scene runner and declaring nothing is given a
+        // window, as gdharness test gives it one, and one declaring false beside it shares it.
+        writeTree(project, {
+          'win/stood.tscn': '[gd_scene format=3]\n\n[node name="Stood" type="Control"]\n',
+          'win/shown_test.gd': [
+            'extends GdUnitTestSuite',
+            '',
+            '',
+            'func test_shown() -> void:',
+            '\tvar runner: GdUnitSceneRunner = scene_runner("res://win/stood.tscn")',
+            '\tassert_object(runner.scene()).is_not_null()',
+            '\tassert_str(DisplayServer.get_name()).is_not_equal("headless")',
+            '\tassert_str(AudioServer.get_driver_name()).is_equal("Dummy")',
+            '',
+          ].join('\n'),
+          'win/quiet_test.gd':
+            'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n\n\nfunc test_quiet() -> void:\n\tassert_bool(true).is_true()\n',
+        });
+        const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
+        const windowRefused = windowedRunRefused();
+        if (windowRefused === null || noDisplay) {
+          const shown = jsonOf(
+            await call('project_test', { projectPath: project, path: 'win' }, ENGINE_CALL_TIMEOUT_MS * 3),
+            'win',
+          );
+          const why =
+            'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or calls scene_runner and declares nothing; one that uses the scene runner only to stand a scene up declares it false and runs headless.';
+          if (noDisplay) {
+            // Headless, where the case asserting a window fails, and the answer says why.
+            assert.deepEqual(
+              [get(shown, 'passed'), get(shown, 'tests'), get(shown, 'windowed'), get(shown, 'windowNote')],
+              [
+                false,
+                2,
+                false,
+                `res://win/shown_test.gd needs a window, as gdharness test reads it, and this machine has no display, so the run was headless and input events went nowhere. ${why} Run under xvfb-run to give it a display.`,
+              ],
+              JSON.stringify(shown),
+            );
+          } else {
+            assert.deepEqual(
+              [get(shown, 'passed'), get(shown, 'tests'), get(shown, 'windowed'), get(shown, 'windowNote')],
+              [
+                true,
+                2,
+                true,
+                `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one: the engine ran without --headless, at the size project.godot gives its viewport, with no sound${process.platform === 'win32' ? ', on a desktop of its own, where its window neither shows nor takes the keyboard' : ''}. ${why} res://win/quiet_test.gd says it runs headless and ran with the window too, since the run is one engine: run it without the windowed suites to run it headless.`,
+              ],
+              JSON.stringify(shown),
+            );
+          }
+        } else {
+          console.log(`project_test windowed case skipped: ${windowRefused}`);
+        }
+        // Alone, the suite declaring false runs headless, and the answer speaks of no window.
+        const quiet = jsonOf(
+          await call(
+            'project_test',
+            { projectPath: project, path: 'win/quiet_test.gd' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+          'quiet',
+        );
+        assert.deepEqual(
+          [get(quiet, 'passed'), get(quiet, 'tests'), get(quiet, 'windowed'), get(quiet, 'windowNote')],
+          [true, 1, undefined, undefined],
+          JSON.stringify(quiet),
+        );
+        // Left out by ignore, the suite needing a window gives the run none.
+        const ignoring = jsonOf(
+          await call(
+            'project_test',
+            { projectPath: project, path: 'win', ignore: ['shown_test'] },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+          'ignoring',
+        );
+        assert.deepEqual(
+          [get(ignoring, 'passed'), get(ignoring, 'tests'), get(ignoring, 'windowed')],
+          [true, 1, undefined],
+          JSON.stringify(ignoring),
+        );
+        rmSync(join(project, 'win'), { recursive: true, force: true });
+
         // Each on its own, since either fails the run and the run above holds both.
         for (const [path, verdict] of [
           ['tests/noisy_test.gd', 'one engine error no suite declared'],

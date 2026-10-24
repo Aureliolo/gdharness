@@ -429,6 +429,27 @@ function planOf(bin: readonly Unit[], declared: CasesBySuite, windowed: boolean)
   };
 }
 
+/**
+ * The suites under [param paths], files or directories as `res://` paths, that gdharness test deals
+ * to its windowed engine, and those among them saying they run headless, each sorted by path.
+ */
+export function windowNeedsOf(
+  projectPath: string,
+  paths: readonly string[],
+): { readonly needing: string[]; readonly headless: string[] } {
+  const scripts = new ProjectScripts(projectPath);
+  const suites = new Map(
+    paths
+      .flatMap((path) => (path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path])))
+      .map((suite) => [suite.path, suite]),
+  );
+  const sorted = [...suites.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return {
+    needing: sorted.filter((suite) => suite.windowed).map((suite) => suite.path),
+    headless: sorted.filter((suite) => suite.headless).map((suite) => suite.path),
+  };
+}
+
 /** The window size a project asks for, from its viewport settings, or null for Godot's own default. */
 export function viewportOf(projectPath: string): { width: number; height: number } | null {
   const file = `${projectPath}/project.godot`;
