@@ -2366,7 +2366,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       doubleClick: {
         type: 'boolean',
         ops: ['click', 'mouse_click'],
-        description: 'click, mouse_click: default false.',
+        description:
+          'click, mouse_click: default false. A double click is sent as one arrives from the system: a whole click, then a second press marked double_click and its release, so a button presses twice, as a player double-clicking it would.',
       },
       relativeX: {
         type: 'number',
@@ -2443,7 +2444,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'runtime_wait',
     title: 'Wait in the running game',
     description:
-      'Lets the running game get on with it and answers when something has happened: a number of frames, a signal, a property reaching a value, or words appearing on a screen. Needs the game running with the runtime addon.',
+      'Lets the running game get on with it and answers when something has happened: a number of frames, a signal, a property reaching a value, or words appearing on a screen. Records a signal or a property from before the call that sets it off, so a change over before the next call arrives is still seen. Needs the game running with the runtime addon.',
+    answer:
+      'recorded: changes, each with frame (frames since the watch was armed, 0 the reading at arming), elapsed_ms, game_time (the seconds of process time the game had been given by that frame, scaled by Engine.time_scale as a tween is) and value; frames and elapsed_ms say how long it recorded. dropped says so when more than 1000 changes came, and ended when recording stopped before it was collected: the node was freed, the path stopped reading, or 120000 ms passed.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
@@ -2458,21 +2461,25 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['signal', 'watch', 'until'],
         description:
-          'signal, watch, until: the node, by its path from the root, such as "/root/Main/Player". Needed for a signal without a watch, a watch and a property; for says it defaults to /root, the whole screen.',
+          'signal, watch, until: the node, by its path from the root, such as "/root/Main/Player". Needed for a signal without a watch, a watch of either kind and a property; for says it defaults to /root, the whole screen.',
       },
-      signal: { type: 'string', ops: ['signal', 'watch'], description: 'signal, watch: the signal name.' },
+      signal: {
+        type: 'string',
+        ops: ['signal', 'watch'],
+        description: 'signal, watch: the signal name. watch takes it or property, not both.',
+      },
       watch: {
         type: 'integer',
         minimum: 1,
-        ops: ['signal'],
+        ops: ['signal', 'recorded'],
         description:
-          'signal: the watch an earlier watch answered, in place of nodePath and signal. Answers at once, with fired_before_wait, when the signal fired after the watch was armed, and otherwise waits for it; times counts how often it fired, and args is what the first carried. The watch goes with the answer.',
+          'signal: the watch an earlier watch of a signal answered, in place of nodePath and signal. Answers at once, with fired_before_wait, when the signal fired after the watch was armed, and otherwise waits for it; times counts how often it fired, and args is what the first carried. recorded: the watch an earlier watch of a property answered. The watch goes with the answer either way.',
       },
       property: {
         type: 'string',
-        ops: ['until'],
+        ops: ['until', 'watch'],
         description:
-          'until: the property name, or a colon path through what the node holds, "_game:run:day", read the way runtime_inspect property reads one, a step written as a call included, and one axis of a vector as well: "global_position:x" with compare ">=" stops once a thing has travelled far enough, and "linear_velocity:length()" with "<" once it has come to rest. Walked again on every frame, so a holder the game replaces while the wait is on is followed.',
+          'watch: record this property every frame from now until recorded collects it, read as until reads it, which is how a tween or an animation shorter than the gap between two calls is seen partway: arm the watch, make the call that starts it, then collect. until: the property name, or a colon path through what the node holds, "_game:run:day", read the way runtime_inspect property reads one, a step written as a call included, and one axis of a vector as well: "global_position:x" with compare ">=" stops once a thing has travelled far enough, and "linear_velocity:length()" with "<" once it has come to rest. Walked again on every frame, so a holder the game replaces while the wait is on is followed.',
       },
       value: {
         ops: ['until'],
@@ -2519,8 +2526,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       watch: {
         effect: 'read',
         summary:
-          'start recording a signal and answer at once with a watch; arm it before the call meant to set the signal off, then collect it with signal and the watch. A client can run a call sent beside a wait only after the wait answers, so a wait sent with the call misses it',
-        requires: ['nodePath', 'signal'],
+          'start recording a signal, or a property every frame, and answer at once with a watch; arm it before the call meant to set the signal off or start the change, then collect it, a signal with signal and the watch and a property with recorded. A client can run a call sent beside a wait only after the wait answers, so a wait sent with the call misses it',
+        // A signal or a property, which the declaration cannot say, so the handler asks.
+        requires: ['nodePath'],
+      },
+      recorded: {
+        effect: 'read',
+        summary:
+          'answer what a watch of a property recorded since it was armed, at once: changes holds the reading at arming and every later one that differed, each with the frame, elapsed_ms and game_time it was read at',
+        requires: ['watch'],
       },
       until: {
         effect: 'read',

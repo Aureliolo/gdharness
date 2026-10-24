@@ -15649,18 +15649,37 @@ class GodotServer {
     }
 
     if (op === 'watch') {
+      const property = readNonEmptyString(args, 'property');
+      if (property === undefined && readNonEmptyString(args, 'signal') === undefined) {
+        return this.createErrorResponse(
+          'runtime_wait watch needs signal, to record a signal, or property, to record a property every frame.',
+        );
+      }
       return await this.handleRuntimeCommand(
         'watch_signal',
         {
           ...whichGame(args),
           path: readNonEmptyString(args, 'nodePath') ?? '',
           signal: readString(args, 'signal') ?? '',
+          ...(property === undefined ? {} : { property }),
         },
         { tool: 'runtime_wait', op },
       );
     }
-    const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
     const watch = readPositiveNumber(args, 'watch');
+    if (op === 'recorded') {
+      if (watch === undefined) {
+        return this.createErrorResponse(
+          'runtime_wait recorded needs watch, the number runtime_wait watch answered for a property.',
+        );
+      }
+      return await this.handleRuntimeCommand(
+        'watch_recorded',
+        { ...whichGame(args), watch },
+        { tool: 'runtime_wait', op },
+      );
+    }
+    const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
     if (
       op === 'signal' &&
       watch === undefined &&

@@ -385,7 +385,7 @@ import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
 import { greeting } from './support/greeting.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
-import { asArray, asNumber, asObject, get, text } from './support/json.js';
+import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
 import {
   isFeedbackBlock,
   isRecord,
@@ -15704,6 +15704,289 @@ async function testAClickThatDoesNotProcessSaysWhy(): Promise<void> {
       /the game is paused and \/root\/Main\/Later does not process while it is \(\/root\/Main\/Later inherits process_mode PAUSABLE from \/root\), so clicking it does nothing/,
       'the pause, and the root it inherits pausable from',
     );
+    await stopItsRun(server);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
+ * A double click arrives as one does from the system: a whole click, then a press marked
+ * double_click and its release.
+ *
+ * Found by a probe: sent as the marked press alone, a double click pressed a button once, where a
+ * player double-clicking it presses it twice, and nothing in the answer said how many presses went.
+ */
+async function testADoubleClickPressesTwice(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('double click regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-double-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-double-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Double"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    // Every press the game is given, in order, as its double_click flag, and every time the button
+    // acted on one.
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Control\n\nvar presses: Array[bool] = []\nvar pressed_times: int = 0\n\n\n' +
+        'func _ready() -> void:\n\t$Twice.pressed.connect(func() -> void: pressed_times += 1)\n\n\n' +
+        'func _input(event: InputEvent) -> void:\n' +
+        '\tvar button: InputEventMouseButton = event as InputEventMouseButton\n' +
+        '\tif button != null and button.pressed:\n\t\tpresses.append(button.double_click)\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\noffset_right = 200.0\noffset_bottom = 200.0\nscript = ExtResource("1")\n\n' +
+        '[node name="Twice" type="Button" parent="."]\noffset_right = 60.0\noffset_bottom = 30.0\ntext = "Twice"\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+      parseTextContent(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS));
+    const started = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+    const read = async (property: string): Promise<unknown> =>
+      get(await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property }), 'value');
+
+    const single = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Twice' });
+    assert.equal(get(single, 'landed'), true, JSON.stringify(single));
+    assert.deepEqual(await read('presses'), [false], 'a click is one press');
+    assert.equal(await read('pressed_times'), 1, 'and presses the button once');
+
+    const twice = await call('runtime_input', {
+      op: 'click',
+      nodePath: '/root/Main/Twice',
+      doubleClick: true,
+    });
+    assert.equal(get(twice, 'double'), true, JSON.stringify(twice));
+    assert.deepEqual(
+      await read('presses'),
+      [false, false, true],
+      'a double click is a press, then a second press marked double_click',
+    );
+    assert.equal(await read('pressed_times'), 3, 'and presses the button twice, as a player would');
+
+    const atAPoint = await call('runtime_input', { op: 'mouse_click', x: 20, y: 10, doubleClick: true });
+    assert.equal(get(atAPoint, 'double'), true, JSON.stringify(atAPoint));
+    assert.deepEqual(
+      await read('presses'),
+      [false, false, true, false, true],
+      'a double click at a point arrives the same way',
+    );
+    assert.equal(await read('pressed_times'), 5, JSON.stringify(atAPoint));
+    await stopItsRun(server);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
+ * A watch of a property records it every frame from before the call that changes it, with the game
+ * time each reading was taken at.
+ *
+ * Found by a probe: a 0.3 second slide was over before a wait sent after the click began, so its
+ * middle could be read only by slowing the game's clock.
+ */
+async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('property watch regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-trace-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-trace-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Trace"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    // clock is the process time the game has been given, which a watch's game_time has to match.
+    // Jolted, the clock runs at one and three times speed by turns, so no two frames in a row are
+    // given the same time: held to a steady rate they all are, and a game time a frame out matched.
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Control\n\nvar clock: float = 0.0\nvar jolting: bool = false\nvar found: Array[int] = []\n\n\n' +
+        'func _process(delta: float) -> void:\n\tclock += delta\n' +
+        '\tif jolting:\n\t\tEngine.time_scale = 3.0 if Engine.time_scale == 1.0 else 1.0\n\n\n' +
+        'func slide() -> void:\n\tcreate_tween().tween_property($Toast, "position:x", 700.0, 0.3)\n\n\n' +
+        'func drop() -> void:\n\t$Gone.queue_free()\n\n\n' +
+        'func find_one() -> void:\n\tfound.append(found.size() + 1)\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\nscript = ExtResource("1")\n\n' +
+        '[node name="Toast" type="Panel" parent="."]\noffset_left = 980.0\noffset_right = 1220.0\noffset_bottom = 40.0\n\n' +
+        '[node name="Gone" type="Node2D" parent="."]\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const call = async (
+      name: string,
+      args: Record<string, unknown>,
+    ): Promise<{ parsed: unknown; said: string }> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return { parsed: parseTextContent(response), said: textOf(response) ?? '' };
+    };
+    // Held to the clock, so a fraction of a second is a few dozen frames rather than thousands.
+    const started = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+      engineArgs: ['--max-fps', '60'],
+    });
+    assert.equal(get(started.parsed, 'runtime', 'listening'), true, started.said);
+    const watch = async (nodePath: string, property: string): Promise<number> => {
+      const armed = await call('runtime_wait', { op: 'watch', nodePath, property });
+      assert.equal(get(armed.parsed, 'type'), 'watching', armed.said);
+      return asNumber(get(armed.parsed, 'watch'));
+    };
+    const recorded = async (id: number): Promise<{ parsed: unknown; said: string }> =>
+      call('runtime_wait', { op: 'recorded', watch: id });
+    const changesOf = (answer: unknown): { frame: number; game_time: number; value: unknown }[] =>
+      asArray(get(answer, 'changes')).map((one) => ({
+        frame: asNumber(get(one, 'frame')),
+        game_time: asNumber(get(one, 'game_time')),
+        value: get(one, 'value'),
+      }));
+
+    const slid = await watch('/root/Main/Toast', 'position:x');
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'slide' });
+    const arrived = await call('runtime_wait', {
+      op: 'until',
+      nodePath: '/root/Main/Toast',
+      property: 'position:x',
+      value: 700,
+    });
+    assert.equal(get(arrived.parsed, 'met'), true, arrived.said);
+    const slide = await recorded(slid);
+    const along = changesOf(slide.parsed).map((one) => asNumber(one.value));
+    assert.equal(along[0], 980, `the reading at arming comes first: ${slide.said}`);
+    assert.equal(along.at(-1), 700, slide.said);
+    const partway = along.filter((x) => x < 980 && x > 700);
+    assert.ok(partway.length >= 5, `the slide is seen partway, frame by frame: ${slide.said}`);
+    assert.deepEqual(
+      along,
+      [...along].sort((a, b) => b - a),
+      'and in the order it went',
+    );
+    const again = await recorded(slid);
+    assert.match(
+      again.said,
+      new RegExp(`No property watch ${slid} is armed in this game: it was collected already`),
+    );
+
+    // Each reading's game time is the time the game had been given by then: the clock it keeps
+    // itself, less what it read at arming.
+    await call('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'jolting', value: true });
+    const clocked = await watch('/root/Main', 'clock');
+    await call('runtime_wait', { op: 'frames', frames: 20 });
+    await call('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'jolting', value: false });
+    await call('runtime_invoke', { op: 'set', nodePath: 'Engine', property: 'time_scale', value: 1 });
+    const wrongWay = await call('runtime_wait', { op: 'signal', watch: clocked });
+    assert.match(
+      wrongWay.said,
+      new RegExp(
+        `Watch ${clocked} records /root/Main:clock, a property, and is collected with runtime_wait recorded`,
+      ),
+    );
+    const clock = changesOf((await recorded(clocked)).parsed);
+    assert.ok(clock.length >= 20, JSON.stringify(clock));
+    const atArming = asNumber(clock[0]?.value);
+    for (const one of clock) {
+      assert.ok(
+        Math.abs(asNumber(one.value) - atArming - one.game_time) < 0.0002,
+        `frame ${one.frame} was read at ${one.game_time}s of game time, and the game had been given ${asNumber(one.value) - atArming}s: ${JSON.stringify(clock)}`,
+      );
+    }
+    assert.deepEqual(
+      clock.map((one) => one.frame),
+      clock.map((_, index) => index),
+      'a clock changes every frame, so every frame is a change',
+    );
+
+    const gone = await watch('/root/Main/Gone', 'position');
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'drop' });
+    await call('runtime_wait', { op: 'frames', frames: 3 });
+    const freed = await recorded(gone);
+    assert.match(
+      asString(get(freed.parsed, 'ended')),
+      /^\/root\/Main\/Gone was freed \d+ frames after the watch was armed$/,
+      freed.said,
+    );
+    assert.equal(
+      changesOf(freed.parsed).length,
+      1,
+      `a node that never moved has its reading at arming: ${freed.said}`,
+    );
+
+    // A list the game adds to in place is a change, though it is the same list: held as the game's
+    // own, the reading kept would read the same as every later one.
+    const finds = await watch('/root/Main', 'found');
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'find_one' });
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'find_one' });
+    await call('runtime_wait', { op: 'frames', frames: 2 });
+    const found = await recorded(finds);
+    assert.deepEqual(
+      changesOf(found.parsed).map((one) => one.value),
+      [[], [1], [1, 2]],
+      found.said,
+    );
+
+    // Past the most kept, each change takes the last place, so the list still ends on the latest.
+    await call('runtime_invoke', { op: 'set', nodePath: 'Engine', property: 'max_fps', value: 0 });
+    const flood = await watch('/root/Main', 'clock');
+    await call('runtime_wait', { op: 'frames', frames: 600 });
+    await call('runtime_wait', { op: 'frames', frames: 600 });
+    const flooded = await recorded(flood);
+    const kept = changesOf(flooded.parsed);
+    assert.equal(kept.length, 1000, flooded.said.slice(0, 400));
+    assert.match(
+      asString(get(flooded.parsed, 'dropped')),
+      /^\d+ changes are left out: past 1000, each new one took the last place, so the list ends on the latest$/,
+    );
+    assert.equal(kept.at(-1)?.frame, asNumber(get(flooded.parsed, 'frames')), 'the last kept is the latest');
     await stopItsRun(server);
   } finally {
     await server.stop();
@@ -57854,6 +58137,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARelativeEnginePathIsMadeWhole,
   testAPointerOnTheHiddenDesktopIsNoted,
   testAClickThatDoesNotProcessSaysWhy,
+  testADoubleClickPressesTwice,
+  testAWatchRecordsAPropertyEveryFrame,
   testAClickInAWindowNothingEnteredPresses,
   testAHeadlessGameSaysItHasNoWindow,
   testTheKeeperAnswersAStop,

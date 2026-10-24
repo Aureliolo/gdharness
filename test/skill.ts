@@ -100,6 +100,7 @@ function testTheReferenceIsTheServersOwnToolList(): void {
       'editor_status',
       'runtime_inspect',
       'runtime_input',
+      'runtime_wait',
     ],
     'the tools whose answers are described apart from their description',
   );

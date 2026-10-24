@@ -65,6 +65,23 @@ static func mask_of(button: int) -> int:
 	return 1 << (button - 1)
 
 
+## A button event carries the buttons held once it has happened: the pressed one among them, the
+## released one out. A wheel step is a button with no mask, as it is from a real mouse.
+static func button_event(
+	position: Vector2, button: int, pressed: bool, double: bool
+) -> InputEventMouseButton:
+	var event: InputEventMouseButton = InputEventMouseButton.new()
+	event.position = position
+	event.global_position = position
+	event.button_index = button as MouseButton
+	event.pressed = pressed
+	event.double_click = double
+	var held: int = Input.get_mouse_button_mask()
+	var own: int = mask_of(button)
+	event.button_mask = (held | own) if pressed else (held & ~own)
+	return event
+
+
 ## [param answer], saying so when one of [param points] lies outside [param viewport]: the GUI picks
 ## what is under the pointer only inside it, so such a press or motion reaches no control, and its
 ## answer read the same as one that landed.

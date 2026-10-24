@@ -295,16 +295,22 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	# its drag from the press, which is where a real pointer would be.
 	var _moved: Vector2 = _arrive(position)
 	var supplied: bool = _follow_in_the_window(position)
-	var press: InputEventMouseButton = _button(position, button, whole or held, double)
+	# A double click's first click goes whole before it, as [method _click_button] sends one.
+	if double and held and not notch:
+		Input.parse_input_event(GdhMouse.button_event(position, button, true, false))
+		await _host.get_tree().process_frame
+		Input.parse_input_event(GdhMouse.button_event(position, button, false, false))
+		await _host.get_tree().process_frame
+	var press: InputEventMouseButton = GdhMouse.button_event(position, button, whole or held, double)
 	Input.parse_input_event(press)
 	var lasted: Variant = null
 	if notch:
-		Input.parse_input_event(_button(position, button, false, false))
+		Input.parse_input_event(GdhMouse.button_event(position, button, false, false))
 	elif whole:
 		# A frame between the halves at least, as inject_action has, so a control that acts on the
 		# press and one that acts on the release each get a frame to do it in.
 		lasted = await GdhValues.hold(_host.get_tree(), frames)
-		Input.parse_input_event(_button(position, button, false, false))
+		Input.parse_input_event(GdhMouse.button_event(position, button, false, false))
 	# Input hands the events on at the next frame, so the control under the pointer is read after it.
 	await _host.get_tree().process_frame
 	var hovered: Control = _hover.hovered_in(_host.get_viewport())
@@ -405,7 +411,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 	var end: Vector2 = points[points.size() - 1]
 	var _moved: Vector2 = _arrive(start)
 	var supplied: bool = _follow_in_the_window(start)
-	Input.parse_input_event(_button(start, button, true, false))
+	Input.parse_input_event(GdhMouse.button_event(start, button, true, false))
 	var travelled: Vector2 = Vector2.ZERO
 	for step: int in range(1, frames + 1):
 		await _host.get_tree().process_frame
@@ -415,7 +421,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 		supplied = _follow_in_the_window(at) or supplied
 		Input.parse_input_event(_motion(at, relative))
 	await _host.get_tree().process_frame
-	Input.parse_input_event(_button(end, button, false, false))
+	Input.parse_input_event(GdhMouse.button_event(end, button, false, false))
 	await _host.get_tree().process_frame
 
 	var said: Dictionary = _pointer_noted(
@@ -656,10 +662,7 @@ func click(params: Dictionary) -> Dictionary:
 	var was_pressed: Variant = null
 	if toggle != null and toggle.toggle_mode:
 		was_pressed = toggle.button_pressed
-	var press: InputEventMouseButton = _button(position, button, true, double)
-	_press_button(viewport, press)
-	await _host.get_tree().process_frame
-	_press_button(viewport, _button(position, button, false, false))
+	var press: InputEventMouseButton = await _click_button(viewport, position, button, double)
 	# The release is what a button acts on, and a queue_free it causes lands at the end of
 	# this frame; the frame passes so the answer describes the control as the click left it.
 	await _host.get_tree().process_frame
@@ -795,6 +798,23 @@ func _no_window_note(viewport: Viewport) -> String:
 ##
 ## Any other viewport is pushed into directly: Input reaches only the game's window. That is a
 ## viewport with no place on the screen, since `GdhScreen.reach` carries every other one there.
+## A press and its release a frame apart, answering with the press. A double click arrives as the
+## engine gets one from the system: a whole click, then a second press marked as a double click and
+## its release. Sent as the marked press alone, it pressed a button once where a player's presses it
+## twice.
+func _click_button(viewport: Viewport, position: Vector2, button: int, double: bool) -> InputEventMouseButton:
+	if double:
+		_press_button(viewport, GdhMouse.button_event(position, button, true, false))
+		await _host.get_tree().process_frame
+		_press_button(viewport, GdhMouse.button_event(position, button, false, false))
+		await _host.get_tree().process_frame
+	var press: InputEventMouseButton = GdhMouse.button_event(position, button, true, double)
+	_press_button(viewport, press)
+	await _host.get_tree().process_frame
+	_press_button(viewport, GdhMouse.button_event(position, button, false, false))
+	return press
+
+
 func _press_button(viewport: Viewport, event: InputEventMouseButton) -> void:
 	if viewport == _host.get_tree().root:
 		Input.parse_input_event(event)
@@ -877,9 +897,7 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	var through: Dictionary = _through_the_interface(out)
 	var hovered_path: Variant = through["hovered"]
 
-	_press_button(arriving, _button(position, button, true, double))
-	await _host.get_tree().process_frame
-	_press_button(arriving, _button(position, button, false, false))
+	var _press: InputEventMouseButton = await _click_button(arriving, position, button, double)
 	await _host.get_tree().process_frame
 
 	return _pointer_noted(
@@ -974,19 +992,4 @@ func _motion(position: Vector2, relative: Vector2) -> InputEventMouseMotion:
 	event.velocity = relative / _arrival_seconds
 	event.screen_velocity = event.velocity
 	event.button_mask = Input.get_mouse_button_mask()
-	return event
-
-
-## A button event carries the buttons held once it has happened: the pressed one among them, the
-## released one out. A wheel step is a button with no mask, as it is from a real mouse.
-func _button(position: Vector2, button: int, pressed: bool, double: bool) -> InputEventMouseButton:
-	var event: InputEventMouseButton = InputEventMouseButton.new()
-	event.position = position
-	event.global_position = position
-	event.button_index = button as MouseButton
-	event.pressed = pressed
-	event.double_click = double
-	var held: int = Input.get_mouse_button_mask()
-	var own: int = GdhMouse.mask_of(button)
-	event.button_mask = (held | own) if pressed else (held & ~own)
 	return event
