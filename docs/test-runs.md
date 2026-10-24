@@ -307,6 +307,28 @@ func shutdown(_session: GdUnitTestSession) -> GdUnitResult:
 A hook that answers with `GdUnitResult.error` fails the run, because gdUnit4 prints that answer as
 an engine error that no suite declared.
 
+## Waits, tweens and input in a suite
+
+The tests addon, `addons/gdharness_tests`, which `gdharness setup` installs, has three classes for
+the things a suite waits on or presses:
+
+- `GdhWait.until(tree, done)` awaits until `done` answers true, asking once a frame, and answers
+  false after 30 seconds (or the bound it is given) so that something that never ends fails the
+  case by name. `GdhWait.still(tree)` awaits three frames in a row with no tween running.
+  `GdhWait.frames(tree, n)` awaits n frames.
+- `GdhTweens.step(tree, seconds)` moves every running tween on by that much, as frames would.
+  `GdhTweens.past(tree, seconds)` steps one frame further, for a case about what an animation
+  leaves when it is over: a step ending exactly where the last tweener ends leaves the callback
+  after it unrun.
+- `GdhEvent` builds events: `click(at)`, `release(at)`, `wheel(at, up)`, `motion(at, moved, held)`,
+  `key(KEY_SPACE)`, `pad(JOY_BUTTON_A)`, `axis(JOY_AXIS_LEFT_X, value)` and `action("jump")`, each
+  pressed unless told otherwise. Hand one to `Input.parse_input_event`, or to a control's own
+  `_gui_input`.
+
+A wait on a timer of an animation's length races the animation: the engine counts a tween's time
+in frame deltas, so on a machine running other engines the timer ends with the tween still going.
+Asking once a frame, or stepping the tween, holds however slowly the frames come.
+
 ## Starting the runner yourself
 
 `gdharness test --runner` prints the path of the shipped runner, `listed.gd`, for a tool that starts

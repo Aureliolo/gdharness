@@ -41938,6 +41938,137 @@ function windowSuite(declared: string): string {
 }
 
 /**
+ * The tests addon's waits, tween steps and input events, in a real engine: a tween stepped to its
+ * end leaves the callback after it until `past` gives it a frame more, a wait asks once a frame and
+ * gives up on its bound, `still` holds while a tween runs, and each event reaches what it is built
+ * for when the engine is handed it, a button, an action, a key binding and a pad binding.
+ */
+function testTheTestHelpersWaitStepAndPress(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names nothing usable.');
+    }
+    console.log('test helpers regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helpers-'));
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Helpers"\n',
+      'case/helpers.tscn':
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://case/helpers.gd" id="1"]\n\n[node name="Helpers" type="Node"]\nscript = ExtResource("1")\n',
+      'case/helpers.gd': [
+        'extends Node',
+        '',
+        'var value: float = 0.0',
+        'var after: bool = false',
+        'var pressed_count: int = 0',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar tween: Tween = create_tween()',
+        '\ttween.tween_property(self, "value", 1.0, 1.0)',
+        '\ttween.tween_callback(func() -> void: after = true)',
+        '\tGdhTweens.step(get_tree(), 0.5)',
+        '\tprint("half=%.3f" % value)',
+        '\tGdhTweens.step(get_tree(), 0.5)',
+        '\tprint("whole=%.3f after=%s" % [value, after])',
+        '\tGdhTweens.past(get_tree(), 0.0)',
+        '\tprint("past after=%s" % after)',
+        '\tvar asked: Array[int] = [0]',
+        '\tvar fifth: Callable = func() -> bool:',
+        '\t\tasked[0] += 1',
+        '\t\treturn asked[0] >= 5',
+        '\tvar reached: bool = await GdhWait.until(get_tree(), fifth)',
+        '\tprint("until=%s asked=%d" % [reached, asked[0]])',
+        '\tvar began: int = Time.get_ticks_msec()',
+        '\tvar never: bool = await GdhWait.until(get_tree(), func() -> bool: return false, 200)',
+        '\tprint("never=%s bounded=%s" % [never, Time.get_ticks_msec() - began < 5000])',
+        '\tvar long: Tween = create_tween()',
+        '\tlong.tween_property(self, "value", 2.0, 30.0)',
+        '\tvar still_running: bool = await GdhWait.still(get_tree(), 3, 200)',
+        '\tlong.kill()',
+        '\tvar still_after: bool = await GdhWait.still(get_tree())',
+        '\tprint("still while running=%s after kill=%s" % [still_running, still_after])',
+        '\tvar button: Button = Button.new()',
+        '\tbutton.position = Vector2(10, 10)',
+        '\tbutton.size = Vector2(100, 40)',
+        '\tbutton.pressed.connect(func() -> void: pressed_count += 1)',
+        '\tadd_child(button)',
+        '\tawait GdhWait.frames(get_tree(), 2)',
+        '\tInput.parse_input_event(GdhEvent.click(Vector2(30, 25)))',
+        '\tInput.parse_input_event(GdhEvent.release(Vector2(30, 25)))',
+        '\tawait GdhWait.frames(get_tree(), 2)',
+        '\tprint("button pressed=%d" % pressed_count)',
+        '\tInputMap.add_action("go")',
+        '\tInput.parse_input_event(GdhEvent.action("go"))',
+        '\tawait GdhWait.frames(get_tree(), 1)',
+        '\tprint("action go=%s" % Input.is_action_pressed("go"))',
+        '\tInputMap.add_action("jump")',
+        '\tInputMap.action_add_event("jump", GdhEvent.key(KEY_SPACE))',
+        '\tInput.parse_input_event(GdhEvent.key(KEY_SPACE))',
+        '\tawait GdhWait.frames(get_tree(), 1)',
+        '\tprint("key jump=%s" % Input.is_action_pressed("jump"))',
+        '\tInputMap.add_action("confirm")',
+        '\tInputMap.action_add_event("confirm", GdhEvent.pad(JOY_BUTTON_A))',
+        '\tInput.parse_input_event(GdhEvent.pad(JOY_BUTTON_A))',
+        '\tawait GdhWait.frames(get_tree(), 1)',
+        '\tprint("pad confirm=%s" % Input.is_action_pressed("confirm"))',
+        '\tvar click: InputEventMouseButton = GdhEvent.click(Vector2(3, 4), MOUSE_BUTTON_RIGHT)',
+        '\tprint("click=%d %s %s %s mask=%d" % [click.button_index, click.pressed, click.position, click.global_position, click.button_mask])',
+        '\tvar wheel: InputEventMouseButton = GdhEvent.wheel(Vector2(1, 2), false)',
+        '\tprint("wheel=%d %s" % [wheel.button_index, wheel.pressed])',
+        '\tvar moved: InputEventMouseMotion = GdhEvent.motion(Vector2(5, 6), Vector2(1, 0), MOUSE_BUTTON_MASK_LEFT)',
+        '\tprint("motion=%s %s %s mask=%d" % [moved.position, moved.global_position, moved.relative, moved.button_mask])',
+        '\tvar axis: InputEventJoypadMotion = GdhEvent.axis(JOY_AXIS_LEFT_X, -0.5, 1)',
+        '\tprint("axis=%d %.2f device=%d" % [axis.axis, axis.axis_value, axis.device])',
+        '\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    });
+    const env = { ...process.env, GODOT_PATH: godotPath };
+    const setUp = spawnSyncHidden(
+      process.execPath,
+      [resolve('build', 'cli.js'), 'setup', project, '--no-connect', '--no-skill', '--no-runtime', '--yes'],
+      { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+    );
+    assert.equal(setUp.status, 0, `${setUp.stdout}${setUp.stderr}`);
+    const ran = spawnSyncHidden(
+      godotPath,
+      ['--headless', '--audio-driver', 'Dummy', '--path', project, 'res://case/helpers.tscn'],
+      { encoding: 'utf8', env, timeout: ENGINE_CALL_TIMEOUT_MS },
+    );
+    const said = `${ran.stdout}${ran.stderr}`;
+    assert.equal(ran.status, 0, said);
+    assert.doesNotMatch(said, /SCRIPT ERROR|^ERROR:/m, said);
+    assert.deepEqual(
+      said.split(/\r?\n/).filter((line) => /^[a-z]+[ =]/.test(line) && !line.startsWith('Godot')),
+      [
+        'half=0.500',
+        'whole=1.000 after=false',
+        'past after=true',
+        'until=true asked=5',
+        'never=false bounded=true',
+        'still while running=false after kill=true',
+        'button pressed=1',
+        'action go=true',
+        'key jump=true',
+        'pad confirm=true',
+        'click=2 true (3.0, 4.0) (3.0, 4.0) mask=2',
+        'wheel=5 true',
+        'motion=(5.0, 6.0) (5.0, 6.0) (1.0, 0.0) mask=1',
+        'axis=0 -0.50 device=1',
+      ],
+      said,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * `gdharness spread` against the same bench played on its own: the same table to the last digit,
  * floats included, from three workers and a gathering engine, none of which announces itself as
  * the game. Then each way a fan-out can half work, each refused before or after the gathering with
@@ -42058,9 +42189,9 @@ function testASpreadBenchGathersTheTableItPlaysAlone(): void {
     const setUp = cli('setup', project, '--no-connect', '--no-skill', '--yes');
     assert.equal(setUp.status, 0, setUp.said);
     assert.match(
-      setUp.said,
-      /^class list rebuilt: 1 classes$/m,
-      `GdhShare, from the tests addon: ${setUp.said}`,
+      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+      /"class": &"GdhShare"/,
+      `the rebuilt class list names GdhShare, from the tests addon: ${setUp.said}`,
     );
     const alone = spawnSyncHidden(
       godotPath,
@@ -59623,6 +59754,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
+  testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testTheTestCommandRunsAndJudgesAProject,
   testAParameterisedCaseIsDealtByItsRows,
