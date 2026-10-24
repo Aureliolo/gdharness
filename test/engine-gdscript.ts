@@ -76,7 +76,7 @@ function resolveGodotPath(): string | null {
 
 /** Every GDScript file the package ships, as the engine will see it inside the fixture project. */
 function shippedScripts(): string[] {
-  return ['operations', 'addons'].flatMap((root) => scriptsUnder(join('src', 'godot', root), root));
+  return ['operations', 'addons', 'loader'].flatMap((root) => scriptsUnder(join('src', 'godot', root), root));
 }
 
 /** Every fixture script, as the engine will see it once the typed gate copies them to res://fixtures. */
@@ -202,7 +202,14 @@ function createProject(godotPath: string): string {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-engine-'));
 
   cpSync('src/godot/addons', join(dir, 'addons'), { recursive: true });
+  // Marked as an install marks them, so what the operations step over as gdharness's own is what
+  // they step over in a game: unmarked, the tests addon's suites scene was offered as a scene of
+  // the project's.
+  for (const addon of readdirSync('src/godot/addons')) {
+    writeFileSync(join(dir, 'addons', addon, '.gdharness-version'), '0.0.0\n');
+  }
   cpSync('src/godot/operations', join(dir, 'operations'), { recursive: true });
+  cpSync('src/godot/loader', join(dir, 'loader'), { recursive: true });
 
   writeFileSync(
     join(dir, 'project.godot'),
@@ -4019,7 +4026,9 @@ function testValidationSaysHowMuchItRead(godotPath: string): void {
   const dir = createProject(godotPath);
   try {
     mkdirSync(join(dir, 'many'));
-    for (let index = 0; index < 60; index++) {
+    // Past the limit by these alone: validation passes over installed addons, so the fixture's own
+    // scripts count for nothing.
+    for (let index = 0; index < 110; index++) {
       writeFileSync(join(dir, 'many', `s${index}.gd`), 'extends Node\n');
     }
     const validated = runOperation(godotPath, dir, 'validate_project', {});

@@ -71,6 +71,10 @@ const SCRIPT_RUNS_SETTING: String = "gdharness/runtime/serve_script_runs"
 ## not served. Kept in step with `QUIET_SCENES_SETTING` in src/setup.ts.
 const QUIET_SCENES_SETTING: String = "gdharness/runtime/quiet_scenes_under"
 
+## What every user argument `gdharness spread` hands its engines starts with. Kept in step with
+## the constants of GdhShare in addons/gdharness_tests/share.gd.
+const SPREAD_ARGUMENTS: String = "--gdh-share"
+
 ## What the engine takes a bare argument for as the scene to run, by its extension.
 const SCENE_EXTENSIONS: PackedStringArray = ["tscn", "scn", "escn", "res", "tres"]
 
@@ -489,6 +493,12 @@ func _start_server() -> void:
 		_enabled = false
 		return
 
+	# Nor an engine `gdharness spread` started, whatever folder its scene is in: its workers and the
+	# engine gathering their outcomes play a bench rather than the game, several at once.
+	if spread_engine(OS.get_cmdline_user_args()):
+		_enabled = false
+		return
+
 	_server = TCPServer.new()
 	# listen() defaults bind_address to "*", which exposes the game to the whole network.
 	var bind_address: String = str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
@@ -538,6 +548,15 @@ static func quiet_scene_in(given: PackedStringArray, prefixes: Variant) -> Strin
 			if not folder.is_empty() and scene.begins_with(folder):
 				return scene
 	return ""
+
+
+## Whether [param given], the engine's user arguments, are those `gdharness spread` hands its
+## engines, which the tests addon's GdhShare reads.
+static func spread_engine(given: PackedStringArray) -> bool:
+	for argument: String in given:
+		if argument.begins_with(SPREAD_ARGUMENTS):
+			return true
+	return false
 
 
 ## Whether the engine was told to run a script rather than the game.

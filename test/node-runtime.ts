@@ -17,6 +17,7 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
 import { spawnHidden } from '../src/spawn.js';
+import './support/slots.js';
 
 const HOST = '127.0.0.1';
 const ENTRY = 'build/cli.js';

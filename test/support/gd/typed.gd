@@ -11,7 +11,10 @@ var failures: Array[String] = []
 
 func _init() -> void:
 	var scripts: Array[String] = (
-		_scripts("res://operations") + _scripts("res://addons") + _scripts("res://fixtures")
+		_scripts("res://operations")
+		+ _scripts("res://addons")
+		+ _scripts("res://loader")
+		+ _scripts("res://fixtures")
 	)
 	for path: String in scripts:
 		var script: Script = load(path)

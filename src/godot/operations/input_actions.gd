@@ -191,7 +191,7 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	# Through ProjectSettings so the file is saved the way the editor saves it, header and
 	# every other line kept; a ConfigFile of project.godot drops the comments on the way out.
 	ProjectSettings.set_setting(setting, action)
-	var err: Error = GdhProjectFile.save()
+	var err: Error = GdhProjectFile.save([setting])
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
@@ -297,7 +297,7 @@ func remove_input_action(params: Dictionary) -> Dictionary:
 			)
 		)
 	ProjectSettings.set_setting(setting, null)
-	var err: Error = GdhProjectFile.save()
+	var err: Error = GdhProjectFile.save([setting])
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 	return {"action_name": action_name, "removed": true}

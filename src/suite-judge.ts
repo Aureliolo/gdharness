@@ -10,7 +10,13 @@
 
 import { readFileSync } from 'node:fs';
 import { stripVTControlCharacters } from 'node:util';
-import { EXIT_LEAK, type SelfTypedExport, selfTypedSentence } from './engine-leaks.js';
+import {
+  EXIT_LEAK,
+  type SelfTypedExport,
+  selfTypedSentence,
+  WALK_STOPPED_SENTENCE,
+  walkStoppedPartWay,
+} from './engine-leaks.js';
 import type { LogEntry } from './game-log.js';
 import { scriptErrorsPrinted } from './junit.js';
 
@@ -365,6 +371,8 @@ export interface EngineVerdict {
   readonly passed: boolean;
   /** Each thing wrong with the run, one sentence each. */
   readonly faults: readonly string[];
+  /** What the engine got wrong that is not counted against the run, one sentence each. */
+  readonly notes: readonly string[];
   /** The suites that passed whole here: every case it was handed passed and printed nothing unexpected. */
   readonly passedSuites: readonly string[];
   /** Whether the machine running out of memory may be why it failed. */
@@ -620,12 +628,17 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
     failing.add(missing.suite);
   }
   const selfTyped = selfTypedSentence(handed.selfTyped ?? []);
-  printed.leaks.forEach((leak, at) => {
-    const last = at === printed.leaks.length - 1;
-    faults.push(
-      `the engine exited holding what it should have freed: ${leak}${last && selfTyped !== undefined ? ` ${selfTyped}` : ''}`,
-    );
-  });
+  const notes: string[] = [];
+  if (printed.leaks.length > 0 && walkStoppedPartWay(printed.lines)) {
+    notes.push(`${WALK_STOPPED_SENTENCE} It said: ${printed.leaks.join(' ')}`);
+  } else {
+    printed.leaks.forEach((leak, at) => {
+      const last = at === printed.leaks.length - 1;
+      faults.push(
+        `the engine exited holding what it should have freed: ${leak}${last && selfTyped !== undefined ? ` ${selfTyped}` : ''}`,
+      );
+    });
+  }
   const memoryExit = end.code !== null && MEMORY_EXITS.has(end.code >>> 0);
   const starved = memoryExit || printed.starved.length > 0;
   if (printed.starved.length > 0) {
@@ -646,6 +659,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   return {
     passed,
     faults,
+    notes,
     passedSuites,
     starved,
     shown: passed ? [] : linesShown(printed.lines, shownAt, cutShort),

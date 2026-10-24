@@ -370,6 +370,7 @@ function renderHomeText(): string {
     '- [How it works](architecture.md): what an install writes, how it decides, and what talks to',
     '  what once it is running.',
     '- [Test runs](test-runs.md): `gdharness test`, what fails a run, and the engine slots.',
+    '- [Spread benches](spread.md): `gdharness spread`, a bench over several engines gathered back whole.',
     '- [Tools](tools.md): every tool, op and argument.',
     '',
     '## Project',
@@ -438,6 +439,13 @@ const PAGES: readonly Page[] = [
     text: 'test-runs.md',
     title: 'Test runs',
     summary: 'gdharness test: running and judging the suites of a game, and the engine slots it shares.',
+  },
+  {
+    source: 'spread.md',
+    path: 'spread.html',
+    text: 'spread.md',
+    title: 'Spread benches',
+    summary: 'gdharness spread: a bench played over several engines and gathered back in run order.',
   },
   {
     path: 'tools.html',

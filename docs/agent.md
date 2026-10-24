@@ -55,13 +55,10 @@ The config carries `GODOT_PATH` and `GDHARNESS_PROJECT`, and nothing else is rea
 environment. Every tool call carries its own `projectPath`. Reconnect the harness, then confirm the
 tools are listed.
 
-The runtime addon is an autoload and reaches an export. Turn it off before committing:
-
-```bash
-npx -y gdharness@{{version}} runtime off
-```
-
-Without it, `runtime_*` has nothing to talk to.
+The runtime autoload names `res://gdharness/loader.gd`, which setup writes. It brings the runtime up
+only in a debug build that has the addon, and does nothing in a release export or in a clone
+without `addons/`, so commit it with `project.godot` and leave it on. Without it, `runtime_*` has
+nothing to talk to.
 
 ## 3. Verify
 

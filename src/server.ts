@@ -104,8 +104,15 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from './editor-log.js';
-import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
+import {
+  EXIT_LEAK,
+  projectSelfTypedExports,
+  selfTypedSentence,
+  WALK_STOPPED_SENTENCE,
+  walkStoppedPartWay,
+} from './engine-leaks.js';
 import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
+import { slotForCall } from './engine-slots.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
@@ -313,7 +320,7 @@ import {
   inspectProject,
   installedAddonVersion,
   installedRuntimeDigest,
-  RUNTIME_AUTOLOAD,
+  RUNTIME_SCRIPT,
   shippedListedRunner,
   shippedRuntimeDigest,
 } from './setup.js';
@@ -329,6 +336,7 @@ import {
   withNestedErrors,
 } from './suite-judge.js';
 import { ProjectScripts, TEST_DIRECTORIES, viewportOf, windowNeedsOf } from './suite-plan.js';
+import { hasSuitesScene, SUITES_SCENE, suitesSceneArgs } from './suites-scene.js';
 import { scriptsWithoutCases, selectTests } from './test-selection.js';
 import {
   asParams,
@@ -3549,6 +3557,7 @@ function windowNoteFor(needing: readonly string[], sharing: readonly string[] | 
 export function testPathsIn(
   projectPath: string,
   given: unknown,
+  named: 'path' | 'suites' = 'path',
 ): { ok: true; value: string[] } | { ok: false; reason: string } {
   // The directories gdharness test looks in, so the tool and the gate run the same suites. Only
   // those there, since a default directory a project does not have is not a path it asked for;
@@ -3564,8 +3573,7 @@ export function testPathsIn(
   if (listed.length === 0) {
     return {
       ok: false,
-      reason:
-        'path is an empty list: name a suite file or a directory, or leave path out for tests and test.',
+      reason: `${named} is an empty list: name a suite file or a directory${named === 'path' ? ', or leave path out for tests and test' : ''}.`,
     };
   }
   const resolved: string[] = [];
@@ -3573,7 +3581,7 @@ export function testPathsIn(
     if (typeof entry !== 'string' || entry.trim() === '') {
       return {
         ok: false,
-        reason: `path${Array.isArray(entries) ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
+        reason: `${named}${Array.isArray(entries) ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
       };
     }
     const location = resolveWithinProject(projectPath, entry);
@@ -7279,7 +7287,7 @@ class GodotServer {
     const onDesktop = windowed && process.platform === 'win32';
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
-    const run = this.spawnGame(
+    const run = await this.spawnGame(
       engine.value,
       cmdArgs,
       userDataIn(userData),
@@ -7636,6 +7644,9 @@ class GodotServer {
     const leakedAtExit = [
       ...new Set(run.log.all.filter((entry) => EXIT_LEAK.test(entry.text)).map((entry) => entry.text)),
     ];
+    // Listed all the same, and not counted: the engine's shutdown stopped before freeing them.
+    const walkStopped = leakedAtExit.length > 0 && walkStoppedPartWay(run.log.all.map((entry) => entry.text));
+    const countedLeaks = walkStopped ? [] : leakedAtExit;
     // A declared text matches the whole line, so one declaring the start of a message that ends in
     // a number reads as both never printed and undeclared, and nothing said the two were one line.
     const declaredNotPrinted = judgedErrors.neverPrinted.map((missing) => ({
@@ -7750,12 +7761,12 @@ class GodotServer {
         uncaught.length === 0 &&
         undeclaredPrinted.length === 0 &&
         declaredNotPrinted.length === 0 &&
-        leakedAtExit.length === 0 &&
+        countedLeaks.length === 0 &&
         missing.length === 0 &&
         testsNotRun.length === 0,
       verdict: [
         // gdUnit4's word for the exit, which is not the run's when something below fails it.
-        verdict === 'passed' && undeclaredPrinted.length + declaredNotPrinted.length + leakedAtExit.length > 0
+        verdict === 'passed' && undeclaredPrinted.length + declaredNotPrinted.length + countedLeaks.length > 0
           ? undefined
           : verdict,
         ...[false, true].map((warning) => {
@@ -7772,7 +7783,7 @@ class GodotServer {
             ? `${count === 1 ? `one declared ${word}` : `${String(count)} declared ${word}s`} never printed`
             : undefined;
         }),
-        leakedAtExit.length > 0 ? 'the engine exited holding what it should have freed' : undefined,
+        countedLeaks.length > 0 ? 'the engine exited holding what it should have freed' : undefined,
         testsNotRun.length > 0 ? `not run: ${testsNotRun.join(', ')}` : undefined,
       ]
         .filter((part) => part !== undefined)
@@ -7834,7 +7845,8 @@ class GodotServer {
           declaredNotPrinted.length > 0
             ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'
             : undefined,
-          leakedAtExit.length > 0
+          walkStopped ? WALK_STOPPED_SENTENCE : undefined,
+          countedLeaks.length > 0
             ? [
                 'What the engine still held as it exited fails the run, as gdharness test judges it; engineArgs ["--verbose"] names each instance and resource under engineEntries.',
                 selfTypedSentence(projectSelfTypedExports(project.value.path)),
@@ -9947,6 +9959,56 @@ class GodotServer {
     return pid === undefined ? 'the editor on this bridge' : `the editor on this bridge (pid ${pid})`;
   }
 
+  /**
+   * The suites a start was asked to play in the tests addon's suites scene, as the paths
+   * project_test would hand gdUnit4, or null for a start naming none.
+   */
+  private suitesToPlay(
+    args: OperationParams,
+    projectPath: string,
+  ): { ok: true; value: string[] | null } | { ok: false; response: ToolResponse } {
+    if (args['suites'] === undefined) {
+      return { ok: true, value: null };
+    }
+    const refused = (reason: string, solutions?: string[]): { ok: false; response: ToolResponse } => ({
+      ok: false,
+      response: this.createErrorResponse(reason, solutions),
+    });
+    if (args['scene'] !== undefined || args['executable'] !== undefined) {
+      return refused(
+        "suites plays the suites in the tests addon's own scene, so it takes no scene and no executable: leave those out.",
+      );
+    }
+    const paths = testPathsIn(projectPath, args['suites'], 'suites');
+    if (!paths.ok) {
+      return refused(paths.reason, PATH_SOLUTIONS);
+    }
+    const missing = paths.value.filter((path) => !existsSync(join(projectPath, path.slice('res://'.length))));
+    if (missing.length > 0) {
+      return refused(`Nothing at ${missing.join(' and ')} in the project at ${projectPath}.`, PATH_SOLUTIONS);
+    }
+    if (!hasSuitesScene(projectPath)) {
+      return refused(`The project has no ${SUITES_SCENE}, which the tests addon of this release ships.`, [
+        `Run  ${gdharnessCommand(SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which brings the addons into step with this server`,
+      ]);
+    }
+    const unusable = gdUnit4Unusable(projectPath);
+    if (unusable !== null) {
+      return refused(`${unusable.reason}.`, [
+        `${unusable.missing ? 'Install' : 'Update'} gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4`,
+      ]);
+    }
+    const asked = new ProjectScripts(projectPath).searchedAsTold(paths.value);
+    const caseless = scriptsWithoutCases(projectPath, asked);
+    if (caseless.length > 0) {
+      const one = caseless.length === 1;
+      return refused(
+        `${caseless.join(' and ')} ${one ? 'declares' : 'declare'} no case: gdUnit4 runs the functions named test_ at the top level of a script that extends GdUnitTestSuite, and ${one ? 'it has' : 'they have'} none.`,
+      );
+    }
+    return { ok: true, value: asked };
+  }
+
   private async handleRunProject(args: OperationParams, op: string): Promise<ToolResponse> {
     const project = this.project(args);
     if (!project.ok) {
@@ -9968,12 +10030,25 @@ class GodotServer {
     }
     // Before the engine is looked for, so that a scene the server will not run is refused as
     // such rather than as a missing Godot.
-    const scene = readNonEmptyString(args, 'scene');
+    const suites = this.suitesToPlay(args, project.value.path);
+    if (!suites.ok) {
+      return suites.response;
+    }
+    const scene = suites.value === null ? readNonEmptyString(args, 'scene') : SUITES_SCENE;
     const sceneToRun = scene !== undefined ? resolveWithinProject(project.value.path, scene) : null;
     if (sceneToRun && !sceneToRun.ok) {
       return this.createErrorResponse(sceneToRun.reason, PATH_SOLUTIONS);
     }
     const build = readNonEmptyString(args, 'executable');
+    // An engine told to play a scene that is not there puts up a modal alert, headless on Windows
+    // too, and waits for a click nobody gives. An exported build carries its scenes in its pack, so
+    // the project folder is no measure of them.
+    if (build === undefined && sceneToRun?.ok && !existsSync(sceneToRun.absolutePath)) {
+      return this.createErrorResponse(
+        `No scene at res://${sceneToRun.relativePath} in the project at ${project.value.path}.`,
+        PATH_SOLUTIONS,
+      );
+    }
     const exported = build === undefined ? null : exportedBuild(project.value.path, build);
     if (exported !== null && !exported.ok) {
       return this.createErrorResponse(exported.reason, PATH_SOLUTIONS);
@@ -9989,7 +10064,9 @@ class GodotServer {
         'A profile is read through the debugger, and an exported build is started without one, since a release build quits when given --remote-debug. Profile the project without executable.',
       );
     }
-    const given = readStringArray(args, 'args') ?? [];
+    const own = readStringArray(args, 'args') ?? [];
+    const given =
+      suites.value === null ? own : [...own, ...suitesSceneArgs(project.value.path, suites.value)];
     const flags = this.engineArguments(args);
     if (!flags.ok) {
       return flags.response;
@@ -10229,7 +10306,7 @@ class GodotServer {
             ? mainSceneOf(project.value.file)
             : `res://${sceneArgument}`,
       arguments: cmdArgs,
-      argsNote: engineFlagsNote(given),
+      argsNote: engineFlagsNote(own),
       framesNote: racingNote(headless, flags.value),
       // Named here rather than only by editor_output, because a caller who wants to watch the
       // file had to make a second call to learn it and a reconstructed name is worse than no
@@ -10288,7 +10365,7 @@ class GodotServer {
     withArgs: boolean,
   ): Promise<Record<string, unknown>> {
     const budgetMs = budget.ms;
-    if (!existsSync(join(projectPath, RUNTIME_AUTOLOAD.path))) {
+    if (!existsSync(join(projectPath, RUNTIME_SCRIPT))) {
       return runtimeVerdict(null, {
         addon: false,
         budgetMs,
@@ -11098,7 +11175,26 @@ class GodotServer {
    * asked, so a server that goes away mid-run takes the only reader with it; outliving it would
    * leave an engine nobody is reading and nobody will ever end.
    */
-  private spawnGame(
+  private async spawnGame(
+    godotPath: string,
+    cmdArgs: string[],
+    env?: NodeJS.ProcessEnv,
+    onDesktop?: { readonly directory: string; readonly files: HelperFiles },
+  ): Promise<SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void }> {
+    // In one of the machine's engine slots, taken before the engine starts and given back once its
+    // log is whole, so the caller's own limit counts the engine's time and not the wait.
+    const held = await slotForCall();
+    try {
+      const run = this.spawnHeld(godotPath, cmdArgs, env, onDesktop);
+      void run.settled.finally(held.release);
+      return run;
+    } catch (error) {
+      held.release();
+      throw error;
+    }
+  }
+
+  private spawnHeld(
     godotPath: string,
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
@@ -12055,7 +12151,7 @@ class GodotServer {
       userArgs,
       engineArgs,
     });
-    const boot = this.spawnGame(
+    const boot = await this.spawnGame(
       godotPath,
       cmdArgs,
       needsItsOwnProcess(asked)
@@ -12822,7 +12918,7 @@ class GodotServer {
         endedWithoutACode({
           throughEditor: run.throughEditor,
           announced: announced !== undefined || run.announcedPid !== undefined,
-          couldAnnounce: run.projectPath !== null && existsSync(join(run.projectPath, RUNTIME_AUTOLOAD.path)),
+          couldAnnounce: run.projectPath !== null && existsSync(join(run.projectPath, RUNTIME_SCRIPT)),
           endedHere: typeof run.endedHere === 'string',
           pickedUp: run.pickedUp === true,
         }),
@@ -15230,7 +15326,7 @@ class GodotServer {
       project === null ||
       run.announcedPid !== undefined ||
       (run.projectPath !== null && !isSameDirectory(run.projectPath, project)) ||
-      !existsSync(join(project, RUNTIME_AUTOLOAD.path)) ||
+      !existsSync(join(project, RUNTIME_SCRIPT)) ||
       !(await this.runStillGoing(run))
     ) {
       return null;

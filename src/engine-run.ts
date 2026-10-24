@@ -7,6 +7,7 @@
  */
 
 import { callSignal } from './call-signal.js';
+import { inASlot } from './engine-slots.js';
 import { GameLog } from './game-log.js';
 import { spawnHidden } from './spawn.js';
 
@@ -20,19 +21,44 @@ export interface EngineRun {
 }
 
 /**
- * Settles on `close` rather than `exit`: the streams can still hold the run's last lines when
- * `exit` fires, and those are the lines a verdict is read from. Node emits `close` after a failed
- * start and after an abort as well, so it is the one place every run ends.
+ * Runs the engine in one of the machine's engine slots, waiting for one first, so an engine this
+ * process starts counts against the same budget as every gate on the machine. The timeout starts
+ * once the engine does.
  */
-export function runEngine(
+export async function runEngine(
   executable: string,
   args: readonly string[],
   options: { readonly timeout?: { readonly ms: number; readonly said: string } } = {},
 ): Promise<EngineRun> {
+  const signal = callSignal();
+  try {
+    return await inASlot(() => runStarted(executable, args, options, signal));
+  } catch (error) {
+    const said = error instanceof Error ? error.message : String(error);
+    return {
+      log: new GameLog(),
+      exitCode: null,
+      exitSignal: null,
+      failure:
+        signal?.aborted === true ? 'the call was cancelled' : `it could not take an engine slot: ${said}`,
+    };
+  }
+}
+
+/**
+ * Settles on `close` rather than `exit`: the streams can still hold the run's last lines when
+ * `exit` fires, and those are the lines a verdict is read from. Node emits `close` after a failed
+ * start and after an abort as well, so it is the one place every run ends.
+ */
+function runStarted(
+  executable: string,
+  args: readonly string[],
+  options: { readonly timeout?: { readonly ms: number; readonly said: string } },
+  signal: AbortSignal | undefined,
+): Promise<EngineRun> {
   return new Promise((resolve) => {
     const log = new GameLog();
     let failure: string | null = null;
-    const signal = callSignal();
     const child = spawnHidden(executable, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(signal === undefined ? {} : { signal }),

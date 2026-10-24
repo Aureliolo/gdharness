@@ -19,6 +19,9 @@ const DIGEST_MARKER: String = "res://addons/gdharness_editor/.gdharness-digest"
 ## step with `announcementPath` in src/bridge-announce.ts.
 const ANNOUNCEMENT: String = "res://.godot/gdharness-bridge.json"
 const ANNOUNCE_PROTOCOL: int = 1
+## Where each editor of this project says which ports it serves; see [method _ports_record].
+const EDITORS_RECORDED: String = "res://.godot/gdharness-editors"
+const EDITORS_RECORDED_PROTOCOL: int = 1
 const RECONNECT_DELAY: float = 3.0
 const MAX_RECONNECT_DELAY: float = 30.0
 
@@ -128,6 +131,52 @@ func _ready() -> void:
 
 	set_process(true)
 	_initialized = true
+	_record_ports()
+
+
+func _exit_tree() -> void:
+	var record: String = _ports_record()
+	if FileAccess.file_exists(record):
+		var _removed: Error = DirAccess.remove_absolute(record)
+
+
+## The file saying which ports this editor serves, named by its process id, so `gdharness lsp` can
+## find its language server when a server moved it off the default. One for each process rather
+## than one for the project, because a gate's `--import` loads this addon too, and its plugin is
+## shown none of the options that would say so; the reader tells the two apart by command line.
+## Kept in step with `editorRecordsIn` in src/lsp-bridge.ts.
+static func _ports_record() -> String:
+	return ProjectSettings.globalize_path(EDITORS_RECORDED).path_join("%d.json" % OS.get_process_id())
+
+
+func _record_ports() -> void:
+	if not Engine.is_editor_hint():
+		return
+	var made: Error = DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(EDITORS_RECORDED))
+	if made != OK and made != ERR_ALREADY_EXISTS:
+		return
+	var file: FileAccess = FileAccess.open(_ports_record(), FileAccess.WRITE)
+	if file == null:
+		return
+	var written: bool = (
+		file
+		. store_string(
+			(
+				JSON
+				. stringify(
+					{
+						"protocol": EDITORS_RECORDED_PROTOCOL,
+						"pid": OS.get_process_id(),
+						"lsp_port": _serves(LSP_ASKED, LSP_SETTING),
+						"dap_port": _serves(DAP_ASKED, DAP_SETTING),
+						"written_at_ms": int(Time.get_unix_time_from_system() * 1000.0),
+					}
+				)
+			)
+		)
+	)
+	if not written:
+		push_warning("gdharness: could not write " + _ports_record())
 
 
 func _process(_delta: float) -> void:

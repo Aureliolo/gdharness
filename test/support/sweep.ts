@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { discard, type Surviving, untilDiscarded } from '../../src/scratch.js';
 import { type EndedEngine, endEnginesUnder } from './engines.js';
+import './slots.js';
 
 /**
  * A fixture's temporary directories, removed the way the server removes its own.

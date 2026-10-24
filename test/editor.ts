@@ -19,6 +19,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -41,7 +42,7 @@ import { NOT_INHERITED, RESOLVED_ELSEWHERE } from '../src/rename.js';
 import { readLatestRun } from '../src/run-record.js';
 import { frameFunctionsFor, queuedMessagesOf } from '../src/script-profile.js';
 import { SERVER_VERSION } from '../src/server-version.js';
-import { installAddons, RUNTIME_AUTOLOAD } from '../src/setup.js';
+import { installAddons, RUNTIME_AUTOLOAD, writeLoader } from '../src/setup.js';
 import { type ChildProcess, spawnHidden, spawnSyncHidden } from '../src/spawn.js';
 import { endEnginesUnder } from './support/engines.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
@@ -49,6 +50,7 @@ import { parseTextContent, textOf } from './support/json-rpc.js';
 import { pixelPng, solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
 import { sweep } from './support/sweep.js';
+import { sampleThread } from './support/thread-samples.js';
 
 /** Long enough for a cold editor to finish its first filesystem scan on a slow runner. */
 const CONNECT_TIMEOUT_MS = 120_000;
@@ -701,6 +703,7 @@ function createProject(): string {
   // Installed as setup installs them, markers and digests included: a copy without them is one
   // gdharness did not put there, and its editor is asked nothing but to quit.
   installAddons(dir);
+  writeLoader(dir);
 
   writeFileSync(
     join(dir, 'project.godot'),
@@ -737,9 +740,9 @@ function createProject(): string {
       '',
       'limits/debugger/max_queued_messages=3072',
       '',
-      // The runtime addon, registered the way an install registers it. A game the editor plays
-      // then serves the runtime tools, which is the only way to drive them against a real one:
-      // its own guard is the debug build, not the display, so a headless game answers.
+      // The runtime addon, registered through the loader the way an install registers it. A game
+      // the editor plays then serves the runtime tools, which is the only way to drive them against
+      // a real one: its own guard is the debug build, not the display, so a headless game answers.
       '[autoload]',
       '',
       `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"`,
@@ -1192,6 +1195,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   const engineOutput: string[] = [];
   editor.stdout?.on('data', (chunk: Buffer) => engineOutput.push(chunk.toString()));
   editor.stderr?.on('data', (chunk: Buffer) => engineOutput.push(chunk.toString()));
+  const thread = sampleThread(editor.pid);
 
   try {
     await server.initialize('editor-fixture');
@@ -1208,6 +1212,10 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
     await body({ call, refusal, attempt, play, project, godotPath, lspPort, dapPort, server, serverEnv });
+    // A /proc that stopped answering would leave every later failure without its samples, unseen.
+    if (process.platform === 'linux') {
+      assert.notEqual(thread.account(), '', "the editor's main thread was sampled from /proc");
+    }
   } catch (failure) {
     // What the engine said on its way to failing, which is the half of the evidence a tool
     // answer does not carry: a fixture that reports only its own assertion sends whoever reads
@@ -1222,10 +1230,12 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
         : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
     // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
     // failed is the last thing in it.
+    const sampled = thread.account();
     throw new Error(
-      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}`,
+      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
     );
   } finally {
+    thread.stop();
     // The game first: it is the editor's child and outlives it, so a run that failed part way
     // through would otherwise leave an engine behind holding the fixture project.
     await invoke('editor_run', { op: 'stop' }).catch(() => undefined);
@@ -5549,6 +5559,120 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
   });
 }
 
+/** Every whole LSP message in [param bytes], in order. */
+function lspMessages(bytes: Buffer): Record<string, unknown>[] {
+  const messages: Record<string, unknown>[] = [];
+  let at = 0;
+  for (;;) {
+    const headerEnd = bytes.indexOf('\r\n\r\n', at);
+    if (headerEnd < 0) {
+      return messages;
+    }
+    const length = Number(
+      /Content-Length: (\d+)/i.exec(bytes.subarray(at, headerEnd).toString('ascii'))?.[1],
+    );
+    const bodyStart = headerEnd + 4;
+    if (!Number.isInteger(length) || bytes.length < bodyStart + length) {
+      return messages;
+    }
+    messages.push(
+      JSON.parse(bytes.subarray(bodyStart, bodyStart + length).toString('utf8')) as Record<string, unknown>,
+    );
+    at = bodyStart + length;
+  }
+}
+
+/**
+ * `gdharness lsp` pipes a stdio client to the editor's language server, found from the port the
+ * editor recorded.
+ *
+ * The fixture's editor serves on a port reserved for it rather than Godot's default, and the bridge
+ * is given no port and no GDHARNESS_LSP_PORT, so the answer can come only from the record. The
+ * initialize goes through untouched and is answered for this project, with no request to move to
+ * another; the client closing its input ends the bridge cleanly. Asked about a project no editor
+ * serves, given this editor's port, it refuses and names the project that port belongs to.
+ */
+async function testTheLspCommandBridgesToTheEditor({ project, lspPort }: Editor): Promise<void> {
+  const recorded = readdirSync(join(project, '.godot', 'gdharness-editors')).map((name): unknown =>
+    JSON.parse(readFileSync(join(project, '.godot', 'gdharness-editors', name), 'utf8')),
+  );
+  assert.ok(
+    recorded.some((one) => get(one, 'lsp_port') === lspPort && typeof get(one, 'pid') === 'number'),
+    `the editor recorded the port it serves: ${JSON.stringify(recorded)}`,
+  );
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env['GDHARNESS_LSP_PORT'];
+  const bridge = spawnHidden(process.execPath, ['build/cli.js', 'lsp', project, '--wait', '60'], {
+    env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let out = Buffer.alloc(0);
+  let said = '';
+  bridge.stdout.on('data', (chunk: Buffer) => {
+    out = Buffer.concat([out, chunk]);
+  });
+  bridge.stderr.on('data', (chunk: Buffer) => {
+    said += String(chunk);
+  });
+  const ended = new Promise<number | null>((resolveEnd) => {
+    bridge.once('exit', (code) => {
+      resolveEnd(code);
+    });
+  });
+  try {
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { processId: null, rootPath: project, rootUri: pathToFileURL(project).href, capabilities: {} },
+    });
+    bridge.stdin.write(`Content-Length: ${String(Buffer.byteLength(body))}\r\n\r\n${body}`);
+    const until = Date.now() + LSP_READY_TIMEOUT_MS;
+    let messages = lspMessages(out);
+    while (
+      !messages.some((message) => message['id'] === 1) &&
+      Date.now() < until &&
+      bridge.exitCode === null
+    ) {
+      await delay(100);
+      messages = lspMessages(out);
+    }
+    const answer = messages.find((message) => message['id'] === 1);
+    assert.ok(answer !== undefined, `the editor answered initialize through the bridge: ${said}`);
+    assert.equal(typeof get(answer, 'result', 'capabilities'), 'object', JSON.stringify(answer));
+    assert.deepEqual(
+      messages.filter((message) => message['method'] === 'gdscript_client/changeWorkspace'),
+      [],
+      'and answered it for this project',
+    );
+    bridge.stdin.end();
+    assert.equal(await ended, 0, `the client ending its input ends the bridge: ${said}`);
+  } finally {
+    bridge.kill();
+  }
+
+  const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-lsp-elsewhere-'));
+  try {
+    writeFileSync(join(elsewhere, 'project.godot'), 'config_version=5\n');
+    const refused = spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'lsp', elsewhere, '--port', String(lspPort), '--wait', '0'],
+      { encoding: 'utf8', env, timeout: TOOL_TIMEOUT_MS },
+    );
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.equal(refused.stdout, '', 'nothing but LSP traffic goes to standard output');
+    assert.match(
+      refused.stderr,
+      new RegExp(
+        `no language server of .+ answered in 0 s\\.\\n {2}port ${String(lspPort)} \\(--port\\): The language server on port ${String(lspPort)} belongs to the editor of .+; no editor of .+ answers there\\.`,
+      ),
+      refused.stderr,
+    );
+  } finally {
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+}
+
 /**
  * The language server tools, which answer from the editor's own server rather than from the addon.
  *
@@ -7247,6 +7371,7 @@ async function main(): Promise<void> {
     ['testASettingReadFromTheEditor', testASettingReadFromTheEditor],
     ['testAPresetAddedBesideTheEditorIsNoted', testAPresetAddedBesideTheEditorIsNoted],
     ['testLanguageServer', testLanguageServer],
+    ['testTheLspCommandBridgesToTheEditor', testTheLspCommandBridgesToTheEditor],
     ['testAClassWrittenUnderTheEditorNeedsARescan', testAClassWrittenUnderTheEditorNeedsARescan],
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
