@@ -43191,7 +43191,9 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
       const exited = exitOf(run);
       const pid = await readyPid(ready, what);
       assertReportable(pid, what);
-      await assertStartedBy(pid, runtimeName === 'Bun' ? /cli\.js"? test/ : /powershell/i, what);
+      // Every engine of a test run is on the hidden desktop, so it goes through the helper under
+      // either runtime, which is what makes its error mode the helper's to set.
+      await assertStartedBy(pid, /powershell/i, what);
       writeFileSync(read, '');
       const { code } = await exited;
       assert.equal(code, 0, `${what}: the suite was let go and passed: ${printed}`);
