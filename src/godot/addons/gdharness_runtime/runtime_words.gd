@@ -55,6 +55,33 @@ static func lines_said_by(node: Node) -> Array[String]:
 	return lines
 
 
+## The node [param node] is drawn as a copy of, or null: the nearest node above it that says
+## anything, when it says the same words, followed up while that one is a copy in turn. A word drawn
+## with an outline or a glow is often a label holding copies of itself, offset or tinted, and a
+## player reads one sign where a find counted four.
+static func copied_from(node: Node) -> Node:
+	var chain: Array[Node] = copied_through(node)
+	return null if chain.is_empty() else chain.back()
+
+
+## Every node above [param node] that it is drawn as a copy of, nearest first: see
+## [method copied_from], which is the last of them.
+static func copied_through(node: Node) -> Array[Node]:
+	var chain: Array[Node] = []
+	var words: String = said_by(node)
+	if words.is_empty():
+		return chain
+	var above: Node = node.get_parent()
+	while above != null:
+		var said: String = said_by(above)
+		if not said.is_empty():
+			if said != words:
+				break
+			chain.append(above)
+		above = above.get_parent()
+	return chain
+
+
 ## Each item [param node] draws as one of a list, as {"says", "item"}: a tab, a menu title, a list
 ## entry or a menu item by its index, and a tree row by its TreeItem. Empty for a node drawing none.
 ## Held apart rather than joined, so a click on a tab's title presses that tab: the bar's middle is

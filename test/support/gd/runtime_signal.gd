@@ -106,6 +106,8 @@ func _check_signal() -> void:
 		"If a call meant to set the signal off was sent beside this wait"
 	):
 		_fail("a wait that ran out says how to catch a signal a call sets off: %s" % str(expired))
+	if not str(expired.get("note", "")).begins_with("A wait hears the signal only from when it begins"):
+		_fail("and that one fired before it began is not counted: %s" % str(expired))
 	if fired.has("note"):
 		_fail("and one that fired says nothing of it: %s" % str(fired))
 	await _check_watch(timer)

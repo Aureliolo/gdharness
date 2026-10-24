@@ -6,6 +6,36 @@ extends RefCounted
 
 const GdhRead = preload("reading.gd")
 
+## The section of layer_names in project.godot naming the layers of each layers hint.
+const LAYER_NAMES: Dictionary[int, String] = {
+	PROPERTY_HINT_LAYERS_2D_PHYSICS: "2d_physics",
+	PROPERTY_HINT_LAYERS_2D_RENDER: "2d_render",
+	PROPERTY_HINT_LAYERS_2D_NAVIGATION: "2d_navigation",
+	PROPERTY_HINT_LAYERS_3D_PHYSICS: "3d_physics",
+	PROPERTY_HINT_LAYERS_3D_RENDER: "3d_render",
+	PROPERTY_HINT_LAYERS_3D_NAVIGATION: "3d_navigation",
+	PROPERTY_HINT_LAYERS_AVOIDANCE: "avoidance",
+}
+## How many layers a mask holds, one bit each, whatever the editor names.
+const MASK_LAYERS: int = 32
+
+
+## The layers [param mask] holds under a layers [param hint], each with the name project.godot
+## gives it where it gives one.
+static func layers_in(hint: int, mask: int) -> Array[Dictionary]:
+	var layers: Array[Dictionary] = []
+	for layer: int in range(1, MASK_LAYERS + 1):
+		if mask & (1 << (layer - 1)) == 0:
+			continue
+		var entry: Dictionary = {"layer": layer}
+		var name: String = str(
+			ProjectSettings.get_setting("layer_names/%s/layer_%d" % [LAYER_NAMES[hint], layer], "")
+		)
+		if not name.is_empty():
+			entry["name"] = name
+		layers.append(entry)
+	return layers
+
 
 ## The values an enum hint names, by name, from its hint string: "SWORD:0,SHIELD:1" as a script
 ## declares one, or "Add,Subtract" as an engine property does, each name then taking the number
@@ -127,6 +157,77 @@ static func enum_refusal(
 	return said + ". The nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
 
 
+## Why [param word], given as argument [param index] of [param called] for the enum [param named],
+## names none of its [param choices].
+static func enum_argument_refusal(
+	called: String, index: int, named: String, word: String, choices: Dictionary
+) -> String:
+	var said: String = (
+		"%s takes the enum %s as argument %d, and %s is none of its values: send %s by name or by number"
+		% [called, named, index + 1, word, _listed(choices)]
+	)
+	var close: PackedStringArray = GdhRead.nearest(word, PackedStringArray(choices.keys()))
+	if close.is_empty():
+		return said + "."
+	return said + ". The nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
+
+
+## Why [param value], given as argument [param index] for the enum [param named], is none of its
+## [param choices], or "" when it is one. The engine passes any number on.
+static func outside_enum_argument(index: int, named: String, value: Variant, choices: Dictionary) -> String:
+	if typeof(value) != TYPE_INT or choices.values().has(value):
+		return ""
+	return (
+		"argument %d, %d, is none of the values %s declares: %s."
+		% [index + 1, value, named, _listed(choices)]
+	)
+
+
+## The values of the enum the engine names [param qualified], by name: an engine class's, as
+## Node.ProcessMode, or a script's, as Named.Size for a class_name, res://main.gd.Mood for a script
+## without one, and either followed by inner classes. {} when it names nothing this can read.
+static func enum_declared_as(qualified: String) -> Dictionary:
+	var cut: int = qualified.rfind(".")
+	if cut <= 0:
+		return {}
+	var owner: String = qualified.substr(0, cut)
+	var named: String = qualified.substr(cut + 1)
+	if ClassDB.class_exists(owner):
+		var constants: Dictionary = {}
+		for constant: String in ClassDB.class_get_enum_constants(owner, named):
+			constants[constant] = ClassDB.class_get_integer_constant(owner, constant)
+		return constants
+	var script: Script = _script_named_as(owner)
+	if script == null:
+		return {}
+	var found: Variant = script.get_script_constant_map().get(named)
+	if not found is Dictionary:
+		return {}
+	var values: Dictionary = found
+	return values
+
+
+## The script [param owner] names: a class_name, a res:// path, or an inner class of either after a
+## dot, or null.
+static func _script_named_as(owner: String) -> Script:
+	var by_name: Script = script_class(owner)
+	if by_name != null:
+		return by_name
+	if owner.begins_with("res://") and ResourceLoader.exists(owner):
+		return load(owner) as Script
+	var cut: int = owner.rfind(".")
+	if cut <= 0:
+		return null
+	var outer: Script = _script_named_as(owner.substr(0, cut))
+	if outer == null:
+		return null
+	var inner: Variant = outer.get_script_constant_map().get(owner.substr(cut + 1))
+	if not inner is Script:
+		return null
+	var inner_script: Script = inner
+	return inner_script
+
+
 ## Why [param value], shown as [param shown], lies outside what [param declared] allows, an export
 ## range or an enum's values, or "" when it does not. A range marked or_greater or or_less is open
 ## on that side.
@@ -153,6 +254,19 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 		if choices.is_empty() or choices.values().has(value):
 			return ""
 		return "%d is none of the values %s declares: %s." % [value, property, _listed(choices)]
+	if hint == PROPERTY_HINT_FLAGS and typeof(value) == TYPE_INT:
+		var flags: Dictionary = flags_of(hint_string)
+		var known: int = 0
+		for bit: int in flags.values():
+			known |= bit
+		var whole: int = value
+		var stray: int = whole & ~known
+		if flags.is_empty() or stray == 0:
+			return ""
+		return (
+			"%d holds bits no flag of %s has (%d): its flags are %s; the engine stores it as given."
+			% [whole, property, stray, _listed(flags)]
+		)
 	if hint != PROPERTY_HINT_RANGE:
 		return ""
 	var parts: PackedStringArray = []
@@ -171,6 +285,20 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 		)
 		% [shown, property, _bound(low), _bound(high)]
 	)
+
+
+## The flags a flags hint names, each with its bit: "Fill:1,Expand:2" gives its values, and a name
+## with none takes the bit of its place, as @export_flags("A", "B") does.
+static func flags_of(hint_string: String) -> Dictionary:
+	var flags: Dictionary = {}
+	var parts: PackedStringArray = hint_string.split(",", false)
+	for index: int in parts.size():
+		var part: String = parts[index].strip_edges()
+		if ":" in part:
+			flags[part.get_slice(":", 0)] = part.get_slice(":", 1).to_int()
+		else:
+			flags[part] = 1 << index
+	return flags
 
 
 static func _listed(choices: Dictionary) -> String:
@@ -291,3 +419,147 @@ static func is_a(value: Object, name: String) -> bool:
 			return true
 		script = script.get_base_script()
 	return false
+
+
+## Whether writing [param name] on [param target] runs code of its script: the script itself, a
+## property it declares, or any property once it takes sets through [code]_set[/code].
+static func runs_script_code(target: Object, name: String) -> bool:
+	var script: Script = target.get_script()
+	if name == "script":
+		return true
+	if script == null:
+		return false
+	for method: Dictionary in script.get_script_method_list():
+		if str(method.get("name", "")) == "_set":
+			return true
+	for declared: Dictionary in script.get_script_property_list():
+		if str(declared.get("name", "")) == name:
+			return true
+	return false
+
+
+## Why [param property] of a [param holder], an [param engine_class], declared as [param declared],
+## holds [param held], as shown, after it was given [param given], the value and how it is shown. A
+## text property with a list of names holds only one of them, and its getter answers its default
+## for any other. A player's bus is one, though the engine fills its list only in the inspector, so
+## the buses are read from the AudioServer, which holds the project's layout; "the engine changed or
+## refused the value" left a caller to guess the bus did not exist.
+static func not_held(
+	holder: String, engine_class: String, property: String, declared: Dictionary, given: Array, held: String
+) -> String:
+	var value: Variant = given[0]
+	var said: String = "%s.%s was given %s and holds %s after it was set" % [holder, property, given[1], held]
+	var type: int = GdhRead.as_int(declared.get("type", TYPE_NIL))
+	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+	if hint in LAYER_NAMES and typeof(value) == TYPE_INT:
+		return (
+			(
+				"%s: it is a mask of the %s layers, one bit each from layer 1 (1) to layer %d (%d), so it "
+				+ "takes 0 to %d and the engine keeps only those bits. Nothing was written."
+			)
+			% [
+				said,
+				LAYER_NAMES[hint],
+				MASK_LAYERS,
+				1 << (MASK_LAYERS - 1),
+				(1 << MASK_LAYERS) - 1,
+			]
+		)
+	var names: PackedStringArray = []
+	if hint == PROPERTY_HINT_ENUM and (type == TYPE_STRING or type == TYPE_STRING_NAME):
+		names = PackedStringArray(enum_values(str(declared.get("hint_string", ""))).keys())
+	var bus: bool = property == "bus" and engine_class.begins_with("AudioStreamPlayer")
+	if bus:
+		names = []
+		for index: int in AudioServer.bus_count:
+			var _added: bool = names.append(AudioServer.get_bus_name(index))
+	if names.is_empty() or names.has(str(value)):
+		return said + ": the engine changed or refused the value, so nothing was written."
+	var close: PackedStringArray = GdhRead.nearest(str(value), names)
+	var nearest: String = (
+		"%s %s" % ["is" if close.size() == 1 else "are", ", ".join(close)] if not close.is_empty() else ""
+	)
+	if bus:
+		# Not "holds Master after it was set": the getter answers the first bus for any name the
+		# layout lacks, and nothing was kept.
+		return (
+			(
+				"%s.bus takes the name of one of the project's audio buses, and %s is none of them, so it "
+				+ "would play on %s; %s. project_info include audio_buses lists them, and "
+				+ "project_settings add_audio_bus adds one. Nothing was written."
+			)
+			% [
+				holder,
+				given[1],
+				AudioServer.get_bus_name(0),
+				"the buses are " + ", ".join(names) if nearest.is_empty() else "the nearest " + nearest
+			]
+		)
+	return (
+		"%s: it takes one of the names it lists, and %s is none of them; %s. Nothing was written."
+		% [
+			said,
+			given[1],
+			"it lists " + ", ".join(names) if nearest.is_empty() else "the nearest it lists " + nearest
+		]
+	)
+
+
+## The sentence naming the children of [param node] that have [param property], or "" when none
+## does. A property of a helper node set on the body it serves, as navigation_layers on the
+## CharacterBody2D rather than its NavigationAgent2D, was refused with the nearest physics layer.
+static func held_by_children(node: Node, property: String) -> String:
+	var root: Node = node.owner if node.owner != null else node
+	var holders: PackedStringArray = []
+	for child: Node in node.get_children():
+		if property in child:
+			var _added: bool = holders.append("%s (a %s)" % [root.get_path_to(child), child.get_class()])
+	if holders.is_empty():
+		return ""
+	if holders.size() == 1:
+		return " The node at %s has it." % holders[0]
+	var last: String = holders[holders.size() - 1]
+	return " The nodes at %s and %s have it." % [", ".join(holders.slice(0, -1)), last]
+
+
+## A sentence for each node path in [param given], by property, that names no node from
+## [param node]. A path is written whatever it names, as the inspector writes one, since the node may
+## be added next; a joint whose node_a named nothing then joined nothing, and no answer said so.
+static func naming_nothing(node: Node, given: Dictionary) -> Dictionary:
+	var said: Dictionary = {}
+	for property: String in given:
+		if "/" in property or ":" in property:
+			continue
+		# What the node holds, since a path given as text is held as text until the engine stores it.
+		var path: Variant = node.get(property)
+		if not path is NodePath:
+			continue
+		var named: NodePath = path
+		if named.is_empty() or node.get_node_or_null(named) != null:
+			continue
+		said[property] = (
+			(
+				"%s names no node from %s. It is written, as the editor writes one, since that node may "
+				+ "be added next; until it is, %s finds nothing."
+			)
+			% [str(named), node.name, property]
+		)
+	return said
+
+
+## Why [param material] has no [param property]: a ShaderMaterial's parameters are its shader's
+## uniforms, so the shader is what lacks one, and "ShaderMaterial has no property" named the
+## material.
+static func no_uniform(material: ShaderMaterial, property: String) -> String:
+	var uniform: String = property.trim_prefix("shader_parameter/")
+	if material.shader == null:
+		return "The ShaderMaterial has no shader, so it has no parameter %s yet; set shader first." % uniform
+	var shader: String = material.shader.resource_path
+	var named: String = shader if not shader.is_empty() else "Its shader"
+	var uniforms: Array = []
+	for entry: Dictionary in material.shader.get_shader_uniform_list():
+		uniforms.append(str(entry["name"]))
+	var said: String = "%s declares no uniform %s, which %s would set" % [named, uniform, property]
+	if uniforms.is_empty():
+		return said + "; it declares no uniforms."
+	return GdhRead.offered(said, uniform, uniforms) + "."

@@ -6,9 +6,33 @@ extends Node
 
 const GdhRead = preload("../reading.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhSerialisation = preload("../serialisation.gd")
 
 ## What every emission meets when a connection cannot call its method.
 const FAILS: String = ", so every emission fails to call it."
+## The names Object.ConnectFlags gives each bit. The number alone left a reader guessing that 2 is
+## the persistence every connection in a saved scene carries.
+const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
+	Object.CONNECT_DEFERRED: "deferred",
+	Object.CONNECT_PERSIST: "persist",
+	Object.CONNECT_ONE_SHOT: "one_shot",
+	Object.CONNECT_REFERENCE_COUNTED: "reference_counted",
+	Object.CONNECT_APPEND_SOURCE_OBJECT: "append_source_object",
+	# The engine's CONNECT_INHERITED, which GDScript is not given: on a connection an instanced scene
+	# makes inside itself, as a scene holding one loads it.
+	32: "inherited",
+}
+## The flags a caller may give: the engine's own CONNECT_INHERITED marks a connection an instanced
+## scene makes, and is never one a scene makes for itself.
+const GIVEN_FLAGS: int = (
+	Object.CONNECT_DEFERRED
+	| Object.CONNECT_PERSIST
+	| Object.CONNECT_ONE_SHOT
+	| Object.CONNECT_REFERENCE_COUNTED
+	| Object.CONNECT_APPEND_SOURCE_OBJECT
+)
+
+var _values: GdhSerialisation = GdhSerialisation.new()
 
 
 func connect_signal(args: Dictionary) -> Dictionary:
@@ -20,7 +44,8 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	var method_name: String = str(args.get("methodName", ""))
 	# A connection without CONNECT_PERSIST is a runtime one, and PackedScene.pack drops those on
 	# the way out: without this the scene saves unchanged and this answers success over nothing.
-	var flags: int = GdhRead.as_int(args.get("flags", 0)) | Object.CONNECT_PERSIST
+	var given_flags: int = GdhRead.as_int(args.get("flags", 0))
+	var flags: int = given_flags | Object.CONNECT_PERSIST
 
 	if (
 		source_node_path.is_empty()
@@ -29,6 +54,9 @@ func connect_signal(args: Dictionary) -> Dictionary:
 		or method_name.is_empty()
 	):
 		return {"ok": false, "error": "Missing required signal connection arguments"}
+	var unasked: String = _unasked(given_flags)
+	if not unasked.is_empty():
+		return {"ok": false, "error": unasked}
 
 	var scene: GdhSceneFile = GdhSceneFile.new()
 	var refused: Dictionary = scene.open(scene_path, true)
@@ -43,40 +71,57 @@ func connect_signal(args: Dictionary) -> Dictionary:
 
 	# Reconnected rather than left alone when the flags differ, so the connection saved is the one
 	# asked for. Left alone, the answer gave the flags asked for and the file kept the old ones.
+	# Found by its object and method, as the engine finds it: a connection carrying binds is another
+	# callable, so comparing callables missed it, and the engine's is_connected then found it, took it
+	# out and put a bare one in its place, losing the binds without a word.
+	var before: Dictionary = _held(source, signal_name, target, method_name)
+	var binds: Array = []
+	var unbinds: int = 0
+	if not before.is_empty():
+		binds = before["binds"]
+		unbinds = before["unbinds"]
+	if args.has("unbinds"):
+		unbinds = GdhRead.as_int(args["unbinds"])
+	if args.has("binds"):
+		var given: Array = args["binds"]
+		binds = _bound_values(given, source, signal_name, Callable(target, method_name), unbinds, flags)
 	var callable: Callable = Callable(target, method_name)
+	if not binds.is_empty():
+		callable = callable.bindv(binds)
+	if unbinds > 0:
+		callable = callable.unbind(unbinds)
 	var method_found: bool = target.has_method(method_name)
 	var misfit: String = _misfit(source, signal_name, callable, flags)
-	var flags_before: int = -1
-	for connection: Dictionary in source.get_signal_connection_list(signal_name):
-		if connection.get("callable") == callable:
-			flags_before = GdhRead.as_int(connection.get("flags", 0))
-	if source.is_connected(signal_name, callable):
-		source.disconnect(signal_name, callable)
+	if not before.is_empty():
+		var held: Callable = before["callable"]
+		source.disconnect(signal_name, held)
 	var connect_result: Error = source.connect(signal_name, callable, flags)
 	if connect_result != OK:
 		return scene.refuse("Failed to connect signal: " + error_string(connect_result))
 
 	var from: String = scene.path_of(source)
 	var to: String = scene.path_of(target)
-	var saved_flags: Array = [-1]
+	var saved: Dictionary = {}
 	var written: Dictionary = scene.write(
-		func(saved: Node) -> String:
-			saved_flags[0] = _connection_flags(saved, from, signal_name, to, method_name)
-			if saved_flags[0] < 0:
+		func(loaded: Node) -> String:
+			var found: Dictionary = _saved(loaded, from, signal_name, to, method_name)
+			saved.merge(found)
+			if found.is_empty():
 				return "the connection would not be in the scene when it loads."
 			return ""
 	)
 	if not written.is_empty():
 		return written
 
+	var saved_flags: int = saved["flags"]
 	var answer: Dictionary = {
 		"ok": true,
 		"sourceNodePath": from,
 		"signalName": signal_name,
 		"targetNodePath": to,
 		"methodName": method_name,
-		"flags": saved_flags[0],
-		"flagNames": GdhSceneFile.flag_names(GdhRead.as_int(saved_flags[0])),
+		"flags": saved_flags,
+		"flagNames": flag_names(saved_flags),
 		# Connected either way, as the editor's own dialog allows, since the method may be written
 		# next; a caller told nothing learnt of a misspelt one only when the signal fired.
 		"methodFound": method_found
@@ -89,11 +134,106 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	# A second connect of the same pair read exactly like the first, so a caller could not tell a
 	# connection made from one that was already there, and a list showing one where two were made
 	# looked like a lost write.
-	if flags_before >= 0:
+	_bound_into(answer, saved)
+	if not before.is_empty():
 		answer["alreadyConnected"] = true
-		if flags_before != GdhRead.as_int(saved_flags[0]):
-			answer["flagsBefore"] = GdhSceneFile.flag_names(flags_before)
+		var flags_before: int = before["flags"]
+		if flags_before != saved_flags:
+			answer["flagsBefore"] = flag_names(flags_before)
+		var binds_before: Variant = _values.serialize_value(before["binds"])
+		if JSON.stringify(binds_before) != JSON.stringify(answer.get("binds", [])):
+			answer["bindsBefore"] = binds_before
+		if before["unbinds"] != saved["unbinds"]:
+			answer["unbindsBefore"] = before["unbinds"]
 	return answer
+
+
+## Why [param given_flags] cannot be connected with, or "" when it can: a bit no flag a scene
+## connects with has. The server checks the type of every argument, and nothing knows the bits.
+static func _unasked(given_flags: int) -> String:
+	if given_flags >= 0 and not given_flags & ~GIVEN_FLAGS:
+		return ""
+	var named: Array[String] = []
+	for bit: int in CONNECT_FLAG_NAMES:
+		if bit & GIVEN_FLAGS:
+			named.append("%s %d" % [CONNECT_FLAG_NAMES[bit], bit])
+	return (
+		"flags %d holds bits no flag a scene connects with has: they are %s, added together."
+		% [given_flags, ", ".join(named)]
+	)
+
+
+## [param given] as the values [param called] is bound with, each number fitted to the parameter it
+## lands on. JSON has one kind of number, so 3 arrived as 3.0, the file said [3.0], and a whole
+## number for an untyped parameter is an int, as GDScript reads the literal 3.
+func _bound_values(
+	given: Array, source: Node, signal_name: String, called: Callable, unbinds: int, flags: int
+) -> Array:
+	var passed: int = 0
+	for info: Dictionary in source.get_signal_list():
+		if str(info.get("name", "")) == signal_name:
+			var arguments: Array = info.get("args", [])
+			passed = arguments.size()
+	if flags & Object.CONNECT_APPEND_SOURCE_OBJECT:
+		passed += 1
+	passed = maxi(passed - unbinds, 0)
+	var parameters: Array = []
+	for info: Dictionary in called.get_object().get_method_list():
+		if str(info.get("name", "")) == str(called.get_method()):
+			parameters = info.get("args", [])
+			break
+	var values: Array = []
+	for at: int in given.size():
+		var value: Variant = _values.deserialize_value(given[at])
+		var declared: int = TYPE_NIL
+		if passed + at < parameters.size():
+			var parameter: Dictionary = parameters[passed + at]
+			declared = GdhRead.as_int(parameter.get("type", TYPE_NIL))
+		if value is float and declared != TYPE_FLOAT:
+			var number: float = value
+			if is_finite(number) and number == floorf(number) and absf(number) < 9007199254740992.0:
+				value = int(number)
+		values.append(value)
+	return values
+
+
+## The connection from [param signal_name] of [param source] to [param method] on [param target],
+## as {callable, flags, binds, unbinds}, or {} when there is none.
+static func _held(source: Node, signal_name: String, target: Object, method: String) -> Dictionary:
+	for conn: Dictionary in source.get_signal_connection_list(signal_name):
+		var callable: Callable = conn.get("callable", Callable())
+		if callable.get_object() == target and str(callable.get_method()) == method:
+			return {
+				"callable": callable,
+				"flags": GdhRead.as_int(conn.get("flags", 0)),
+				"binds": callable.get_bound_arguments(),
+				"unbinds": callable.get_unbound_arguments_count(),
+			}
+	return {}
+
+
+## [param held]'s binds and unbinds into [param answer], each only when it has any, as the scene
+## file writes them.
+func _bound_into(answer: Dictionary, held: Dictionary) -> void:
+	var binds: Array = held["binds"]
+	if not binds.is_empty():
+		answer["binds"] = _values.serialize_value(binds)
+	var unbinds: int = held["unbinds"]
+	if unbinds > 0:
+		answer["unbinds"] = unbinds
+
+
+## Each bit set in [param flags], a connection's, by name, and any bits left unnamed as one number.
+static func flag_names(flags: int) -> Array[String]:
+	var names: Array[String] = []
+	var rest: int = flags
+	for bit: int in CONNECT_FLAG_NAMES:
+		if flags & bit:
+			names.append(CONNECT_FLAG_NAMES[bit])
+			rest &= ~bit
+	if rest != 0:
+		names.append(str(rest))
+	return names
 
 
 ## The two ends of a connection in [param scene], as [source, target], or [null, why not].
@@ -119,23 +259,17 @@ func _connection_ends(
 	return [source, target]
 
 
-## The flags of the persistent connection from [param from]'s [param signal_name] to
-## [param method] on [param to] in the tree under [param root], or -1 when there is none.
-func _connection_flags(root: Node, from: String, signal_name: String, to: String, method: String) -> int:
+## The persistent connection from [param from]'s [param signal_name] to [param method] on [param to]
+## in the tree under [param root], as [method _held] answers it, or {} when there is none.
+static func _saved(root: Node, from: String, signal_name: String, to: String, method: String) -> Dictionary:
 	var source: Node = root.get_node_or_null(from)
 	var target: Node = root.get_node_or_null(to)
 	if source == null or target == null or not source.has_signal(signal_name):
-		return -1
-	for conn: Dictionary in source.get_signal_connection_list(signal_name):
-		var flags: int = GdhRead.as_int(conn.get("flags", 0))
-		var callable: Callable = conn.get("callable", Callable())
-		if (
-			flags & Object.CONNECT_PERSIST
-			and callable.get_object() == target
-			and str(callable.get_method()) == method
-		):
-			return flags
-	return -1
+		return {}
+	var held: Dictionary = _held(source, signal_name, target, method)
+	if held.is_empty() or not GdhRead.as_int(held["flags"]) & Object.CONNECT_PERSIST:
+		return {}
+	return held
 
 
 ## Why what [param signal_name] of [param source] passes cannot reach [param callable], or "" when it
@@ -264,7 +398,8 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 	var to: String = scene.path_of(target)
 	# A connection that was never there saved the scene unchanged and answered as removed, so a
 	# typo in either name read as success.
-	if _connection_flags(scene.root, from, signal_name, to, method_name) < 0:
+	var held: Dictionary = _saved(scene.root, from, signal_name, to, method_name)
+	if held.is_empty():
 		# The root's path is ".", which before ".method" read as "..method".
 		var said_from: String = str(source.name) if source == scene.root else from
 		var said_to: String = str(target.name) if target == scene.root else to
@@ -274,25 +409,31 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 				% [scene_path, said_from, signal_name, said_to, method_name]
 			)
 		)
-	source.disconnect(signal_name, Callable(target, method_name))
+	var callable: Callable = held["callable"]
+	source.disconnect(signal_name, callable)
 
 	var written: Dictionary = scene.write(
-		func(saved: Node) -> String:
-			if _connection_flags(saved, from, signal_name, to, method_name) >= 0:
+		func(loaded: Node) -> String:
+			if not _saved(loaded, from, signal_name, to, method_name).is_empty():
 				return "the connection would still be in the scene when it loads."
 			return ""
 	)
 	if not written.is_empty():
 		return written
 
-	return {
+	var removed_flags: int = held["flags"]
+	var answer: Dictionary = {
 		"ok": true,
 		"removed": true,
 		"sourceNodePath": from,
 		"signalName": signal_name,
 		"targetNodePath": to,
-		"methodName": method_name
+		"methodName": method_name,
+		"flags": removed_flags,
+		"flagNames": flag_names(removed_flags),
 	}
+	_bound_into(answer, held)
+	return answer
 
 
 func list_connections(args: Dictionary) -> Dictionary:
@@ -344,12 +485,17 @@ func list_connections(args: Dictionary) -> Dictionary:
 					"targetNodePath": target_path,
 					"methodName": str(callable.get_method()),
 					"flags": flags,
-					"flagNames": GdhSceneFile.flag_names(flags),
+					"flagNames": flag_names(flags),
 					# False for a connection an instanced scene makes inside itself, which only that
 					# scene can change.
 					"editable": editable,
 					"methodFound": target_obj != null and target_obj.has_method(callable.get_method()),
 				}
+				var bound: Dictionary = {
+					"binds": callable.get_bound_arguments(),
+					"unbinds": callable.get_unbound_arguments_count(),
+				}
+				_bound_into(listed, bound)
 				var misfit: String = _misfit(node, signal_name, callable, flags)
 				if not misfit.is_empty():
 					listed["misfit"] = misfit

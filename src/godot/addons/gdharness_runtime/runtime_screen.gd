@@ -29,9 +29,13 @@ static func steps_out(viewport: Viewport, point: Vector2) -> Array[Dictionary]:
 	var out: Array[Dictionary] = [{"viewport": viewport, "point": point, "through": null}]
 	while true:
 		var window: Window = viewport as Window
-		if window != null and window.is_embedded() and window.get_parent() != null:
-			point += Vector2(window.position)
-			viewport = window.get_parent().get_viewport()
+		var host: Viewport = embedder_of(window) if window != null and window.is_embedded() else null
+		if host != null:
+			# A window's canvas is drawn into its embedder through its own final transform, which is
+			# where a content scale goes: one at 4 drew a button at four times the point it was clicked
+			# at, and the click missed it.
+			point = Vector2(window.position) + window.get_final_transform() * point
+			viewport = host
 			out.append({"viewport": viewport, "point": point, "through": window})
 			continue
 		var shown_by: SubViewportContainer = viewport.get_parent() as SubViewportContainer
@@ -43,6 +47,19 @@ static func steps_out(viewport: Viewport, point: Vector2) -> Array[Dictionary]:
 			continue
 		break
 	return out
+
+
+## The viewport [param window] is embedded in and placed by, found as the engine finds it, which
+## does not offer it to scripts: the nearest viewport above that embeds subwindows. That is not
+## always its parent's: a window under a window that does not embed is embedded in the one above.
+static func embedder_of(window: Window) -> Viewport:
+	var above: Node = window.get_parent()
+	# A viewport's get_viewport is itself, so a window's parent that is one is asked first.
+	var viewport: Viewport = above.get_viewport() if above != null else null
+	while viewport != null and not viewport.is_embedding_subwindows():
+		above = viewport.get_parent()
+		viewport = above.get_viewport() if above != null else null
+	return viewport
 
 
 ## Where [param point], in [param viewport]'s own coordinates, is in the pixels of the window the
@@ -60,3 +77,32 @@ static func rect_in_window(viewport: Viewport, rect: Rect2) -> Rect2:
 	var start: Vector2 = in_window(viewport, rect.position)
 	var end: Vector2 = in_window(viewport, rect.end)
 	return Rect2(start.min(end), (end - start).abs())
+
+
+## Whether any of [param node] is drawn where the player can see it: inside its viewport, and inside
+## every ScrollContainer between it and the viewport, each of which clips what it holds. A label
+## placed past the window's edge was read out as written on the screen. Only a Control has a box to
+## ask about, so anything else is in view.
+static func in_view(node: Node) -> bool:
+	var control: Control = node as Control
+	return control == null or shown_part(control) != null
+
+
+## The part of [param control] the player can see, in its viewport's canvas, or null when there is
+## none: its drawn box cut to the viewport and to every ScrollContainer between, each cut taken from
+## what the last one left. A control in view of an inner list and of the outer one can still sit
+## where the two do not overlap.
+static func shown_part(control: Control) -> Variant:
+	var part: Rect2 = control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size)
+	var clips: Array[Rect2] = [control.get_viewport().get_visible_rect()]
+	var walking: Node = control.get_parent()
+	while walking != null and not (walking is Viewport):
+		var holder: ScrollContainer = walking as ScrollContainer
+		if holder != null:
+			clips.append(holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size))
+		walking = walking.get_parent()
+	for clip: Rect2 in clips:
+		if not part.intersects(clip, true):
+			return null
+		part = part.intersection(clip)
+	return part

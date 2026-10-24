@@ -24,6 +24,7 @@ const GdhFileReads = preload("file_reads.gd")
 const GdhGdscriptAnalysis = preload("gdscript_analysis.gd")
 const GdhGdscriptAuthoring = preload("gdscript_authoring.gd")
 const GdhImportPipeline = preload("import_pipeline.gd")
+const GdhProjectValidation = preload("project_validation.gd")
 const GdhInputActions = preload("input_actions.gd")
 const GdhLog = preload("logger.gd")
 const GdhPlugins = preload("plugins.gd")
@@ -51,6 +52,8 @@ const BEGUN: String = "[gdharness] begun"
 const AFTER_THE_AUTOLOADS: Array[String] = [
 	"check_scripts",
 	"create_script",
+	# An exporter made in _init, before an editor's main loop has started, crashed the engine.
+	"export_options",
 	"modify_script",
 	"read_animation_states",
 	"read_animations",
@@ -188,7 +191,8 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 				GdhFileReads.scene_tree(
 					str(params.get("scene_path", "")),
 					GdhRead.as_int(params.get("depth", -1), -1),
-					GdhRead.as_bool(params.get("include_properties", false))
+					GdhRead.as_bool(params.get("include_properties", false)),
+					GdhRead.as_bool(params.get("include_defaults", false))
 				)
 			)
 		"read_resource":
@@ -229,8 +233,14 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = GdhExportPresets.new(_log).list_export_presets(params)
 		"add_export_preset":
 			payload = GdhExportPresets.new(_log).add_export_preset(params)
+		"set_export_preset":
+			payload = GdhExportPresets.new(_log).set_export_preset(params)
+		"remove_export_preset":
+			payload = GdhExportPresets.new(_log).remove_export_preset(params)
+		"export_options":
+			payload = GdhExportPresets.new(_log).export_options(params)
 		"validate_project":
-			payload = GdhImportPipeline.new(_log).validate_project(params)
+			payload = GdhProjectValidation.new(_log).validate_project(params)
 
 		# Dependencies and project inspection
 		"get_dependencies":
@@ -295,6 +305,10 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = GdhAudioBuses.new(_log).set_audio_bus_effect(params)
 		"set_audio_bus_volume":
 			payload = GdhAudioBuses.new(_log).set_audio_bus_volume(params)
+		"rename_audio_bus":
+			payload = GdhAudioBuses.new(_log).rename_audio_bus(params)
+		"set_audio_bus_send":
+			payload = GdhAudioBuses.new(_log).set_audio_bus_send(params)
 
 		# ClassDB
 		"query_classes":

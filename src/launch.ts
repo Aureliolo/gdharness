@@ -155,7 +155,7 @@ export function engineFlags(given: readonly string[]): { ok: true } | { ok: fals
         reason:
           setBy !== undefined
             ? `${flag} is set by this tool's own argument, ${setBy}, rather than through engineArgs.`
-            : `${flag} is not one of the engine flags engineArgs takes, which are those that change what the engine logs, draws for debugging, checks on the GPU, which renderer draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's --write-movie: ${offered}. A value goes as the next entry, as in ["--fixed-fps", "60"].`,
+            : `${flag} is not one of the engine flags engineArgs takes, which are those that change what the engine logs, draws for debugging, checks on the GPU, which renderer draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's --write-movie: ${offered}. A value goes as the next entry, as in ["--max-fps", "60"].`,
       };
     }
     if (takes === 'none') {

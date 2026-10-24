@@ -8,8 +8,10 @@ extends Node
 const GdhSceneTools = preload("tools/scene_tools.gd")
 const GdhSignalTools = preload("tools/signal_tools.gd")
 const GdhResourceTools = preload("tools/resource_tools.gd")
+const GdhTilesetTools = preload("tools/tileset_tools.gd")
 const GdhAnimationStates = preload("tools/animation_states.gd")
 const GdhAnimationTools = preload("tools/animation_tools.gd")
+const GdhAnimationTracks = preload("tools/animation_tracks.gd")
 const GdhPlayTools = preload("tools/play_tools.gd")
 const GdhClassTools = preload("tools/class_tools.gd")
 const GdhSettingsTools = preload("tools/settings_tools.gd")
@@ -21,8 +23,10 @@ var _editor_plugin: EditorPlugin = null
 var _scene_tools: GdhSceneTools = null
 var _signal_tools: GdhSignalTools = null
 var _resource_tools: GdhResourceTools = null
+var _tileset_tools: GdhTilesetTools = null
 var _animation_states: GdhAnimationStates = null
 var _animation_tools: GdhAnimationTools = null
+var _animation_tracks: GdhAnimationTracks = null
 var _play_tools: GdhPlayTools = null
 var _class_tools: GdhClassTools = null
 var _settings_tools: GdhSettingsTools = null
@@ -38,8 +42,10 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_init_tools()
 	_scene_tools.set_editor_plugin(plugin)
 	_resource_tools.set_editor_plugin(plugin)
+	_tileset_tools.set_editor_plugin(plugin)
 	_animation_tools.set_editor_plugin(plugin)
 	_animation_states.set_editor_plugin(plugin)
+	_animation_tracks.set_editor_plugin(plugin)
 	_play_tools.set_editor_plugin(plugin)
 	_class_tools.set_editor_plugin(plugin)
 	_filesystem_tools.set_editor_plugin(plugin)
@@ -63,6 +69,10 @@ func _init_tools() -> void:
 	_resource_tools.name = "ResourceTools"
 	add_child(_resource_tools)
 
+	_tileset_tools = GdhTilesetTools.new()
+	_tileset_tools.name = "TilesetTools"
+	add_child(_tileset_tools)
+
 	_animation_tools = GdhAnimationTools.new()
 	_animation_tools.name = "AnimationTools"
 	add_child(_animation_tools)
@@ -70,6 +80,10 @@ func _init_tools() -> void:
 	_animation_states = GdhAnimationStates.new()
 	_animation_states.name = "AnimationStates"
 	add_child(_animation_states)
+
+	_animation_tracks = GdhAnimationTracks.new()
+	_animation_tracks.name = "AnimationTracks"
+	add_child(_animation_tracks)
 
 	_play_tools = GdhPlayTools.new()
 	_play_tools.name = "PlayTools"
@@ -101,6 +115,7 @@ func _init_tools() -> void:
 		"reparent_node": [_scene_tools, "reparent_node"],
 		"set_node_properties": [_scene_tools, "set_node_properties"],
 		"get_node_properties": [_scene_tools, "get_node_properties"],
+		"bake_navigation": [_scene_tools, "bake_navigation"],
 		"save_scene": [_scene_tools, "save_scene"],
 		"connect_signal": [_signal_tools, "connect_signal"],
 		"disconnect_signal": [_signal_tools, "disconnect_signal"],
@@ -111,6 +126,7 @@ func _init_tools() -> void:
 		"files_moved": [_filesystem_tools, "files_moved"],
 		"global_classes": [_class_tools, "global_classes"],
 		"reload_script": [_class_tools, "reload_script"],
+		"scripts_behind": [_class_tools, "scripts_behind"],
 		# Settings, for a caller that asked the editor rather than the file on disk
 		"get_project_setting": [_settings_tools, "get_project_setting"],
 		"adopt_project_settings": [_settings_tools, "adopt_project_settings"],
@@ -120,10 +136,11 @@ func _init_tools() -> void:
 		"modify_resource": [_resource_tools, "modify_resource"],
 		"read_resource": [_resource_tools, "read_resource"],
 		"create_shader": [_resource_tools, "create_shader"],
-		"create_tileset": [_resource_tools, "create_tileset"],
-		"set_tilemap_cells": [_resource_tools, "set_tilemap_cells"],
+		"create_tileset": [_tileset_tools, "create_tileset"],
+		"set_tilemap_cells": [_tileset_tools, "set_tilemap_cells"],
 		"set_theme_color": [_resource_tools, "set_theme_color"],
 		"set_theme_font_size": [_resource_tools, "set_theme_font_size"],
+		"remove_theme_item": [_resource_tools, "remove_theme_item"],
 		"play_scene": [_play_tools, "play_scene"],
 		"restart_editor": [_play_tools, "restart_editor"],
 		"quit_editor": [_play_tools, "quit_editor"],
@@ -137,8 +154,8 @@ func _init_tools() -> void:
 		"read_animations": [_animation_tools, "read_animations"],
 		"read_animation_states": [_animation_tools, "read_animation_states"],
 		"create_animation": [_animation_tools, "create_animation"],
-		"add_animation_track": [_animation_tools, "add_animation_track"],
-		"remove_animation_track": [_animation_tools, "remove_animation_track"],
+		"add_animation_track": [_animation_tracks, "add_animation_track"],
+		"remove_animation_track": [_animation_tracks, "remove_animation_track"],
 		"set_animation": [_animation_tools, "set_animation"],
 		"rename_animation": [_animation_tools, "rename_animation"],
 		"remove_animation": [_animation_tools, "remove_animation"],

@@ -614,6 +614,11 @@ function doctorReport(projectPath: string): void {
         ? `class cache: ${report.staleClasses.length === 0 ? 'current' : `stale for ${report.staleClasses.join(', ')}`}`
         : 'class cache: missing',
     );
+    for (const { name, path } of report.ignoredAutoloads) {
+      console.log(
+        `autoload ${name}: res://${path} is ignored by git, so a clone has it only once the project's own install step has put it there`,
+      );
+    }
     for (const problem of report.problems) {
       console.log(`problem: ${problem}`);
     }
@@ -727,15 +732,17 @@ Usage:
   gdharness classes [project]        Rebuild .godot/global_script_class_cache.cfg from disk
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--tests DIR] [--changed-only] [--reach-also PATH] [--import]
-                 [--order reversed|SEED] [--runner]
+                 [--order reversed|SEED] [--print-output] [--runner]
                                      Run the project's gdUnit4 suites over several engines and
                                      judge every line they print: exit 1 on a failing case, an
                                      engine error no case declared, a case that never finished
                                      or a leak at exit. A suite is a script, a directory, or
                                      script.gd:test_case for one case. --changed-only leaves out
                                      suites that passed with everything they reach unchanged; it
-                                     is for iterating, and no gate passes it. --runner prints the
-                                     shipped runner's path. docs/test-runs.md has the rest.
+                                     is for iterating, and no gate passes it. --print-output
+                                     prints what every engine printed, for a
+                                     benchmark run by hand. --runner prints the shipped runner's
+                                     path. docs/test-runs.md has the rest.
   gdharness version                  Show the installed version
   gdharness help                     Show this help
 

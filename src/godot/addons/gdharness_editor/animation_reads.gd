@@ -5,6 +5,7 @@ extends RefCounted
 ## stores, which runs no script of the scene's, so a read answers the same either way.
 
 const GdhFileReads = preload("file_reads.gd")
+const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 
 const LOOP_MODE_NAMES: Dictionary[int, String] = {
@@ -28,6 +29,11 @@ const SWITCH_MODE_NAMES: Dictionary[int, String] = {
 	AnimationNodeStateMachineTransition.SWITCH_MODE_SYNC: "sync",
 	AnimationNodeStateMachineTransition.SWITCH_MODE_AT_END: "at_end",
 }
+const ADVANCE_MODE_NAMES: Dictionary[int, String] = {
+	AnimationNodeStateMachineTransition.ADVANCE_MODE_DISABLED: "disabled",
+	AnimationNodeStateMachineTransition.ADVANCE_MODE_ENABLED: "enabled",
+	AnimationNodeStateMachineTransition.ADVANCE_MODE_AUTO: "auto",
+}
 
 
 ## [method animations] of the AnimationPlayer at [param player_path] in the file [param scene_path].
@@ -47,8 +53,21 @@ static func scene_states(scene_path: String, tree_path: String, state_machine_pa
 	if made[0] == null:
 		return made[1]
 	var tree: AnimationTree = made[0]
-	var answer: Dictionary = states(tree, state_machine_path)
+	# The player the tree plays from, read from the file the same way, since a bare tree has no
+	# siblings to find it among.
+	# A path above the root names no node the file has, and finds none, as the editor finds none.
+	var player: AnimationPlayer = null
+	var player_path: String = ""
+	if not str(tree.anim_player).is_empty():
+		player_path = (tree_path + "/" + str(tree.anim_player)).simplify_path()
+		if player_path.is_empty():
+			player_path = "."
+		var found: Array = _bare(scene_path, player_path, "AnimationPlayer")
+		player = found[0]
+	var answer: Dictionary = states(tree, state_machine_path, player, player_path)
 	tree.free()
+	if player != null:
+		player.free()
 	return answer
 
 
@@ -200,8 +219,28 @@ static func no_machine(tree: AnimationTree, state_machine_path: String) -> Strin
 	return "No state machine at " + state_machine_path
 
 
+## Why a state playing [param animation_name] from [param player], at [param player_path] from the
+## scene root as playerNodePath takes it, plays nothing yet. anim_player is relative to the tree
+## ("../Anim"), which no argument takes.
+static func missing_animation(player: AnimationPlayer, player_path: String, animation_name: String) -> String:
+	var said: String = (
+		"The AnimationPlayer at %s has no animation %s yet, so the state plays nothing until it has one."
+		% [player_path, animation_name]
+	)
+	var close: PackedStringArray = GdhRead.nearest(animation_name, player.get_animation_list())
+	if close.is_empty():
+		return said
+	return (
+		said + " The nearest %s %s." % ["it has is" if close.size() == 1 else "it has are", ", ".join(close)]
+	)
+
+
 ## The states and transitions of the state machine at [param state_machine_path] in [param tree].
-static func states(tree: AnimationTree, state_machine_path: String) -> Dictionary:
+## A state playing an animation says whether [param player], at [param player_path], has it, as
+## add_state answers: a state naming one it lacks plays nothing, and says so only in a log.
+static func states(
+	tree: AnimationTree, state_machine_path: String, player: AnimationPlayer, player_path: String
+) -> Dictionary:
 	var sm: AnimationNodeStateMachine = state_machine(tree, state_machine_path)
 	if sm == null:
 		return {"ok": false, "error": no_machine(tree, state_machine_path)}
@@ -212,6 +251,10 @@ static func states(tree: AnimationTree, state_machine_path: String) -> Dictionar
 		if node is AnimationNodeAnimation:
 			var plays: AnimationNodeAnimation = node
 			entry["animationName"] = str(plays.animation)
+			var found: bool = player != null and player.has_animation(plays.animation)
+			entry["animationFound"] = found
+			if player != null and not found:
+				entry["animationMissing"] = missing_animation(player, player_path, str(plays.animation))
 		listed.append(entry)
 	var transitions: Array[Dictionary] = []
 	for index: int in sm.get_transition_count():
@@ -220,8 +263,76 @@ static func states(tree: AnimationTree, state_machine_path: String) -> Dictionar
 			"from": str(sm.get_transition_from(index)),
 			"to": str(sm.get_transition_to(index)),
 			"transitionType": SWITCH_MODE_NAMES.get(transition.switch_mode, str(transition.switch_mode)),
+			"advanceMode": ADVANCE_MODE_NAMES.get(transition.advance_mode, str(transition.advance_mode)),
 		}
-		if not str(transition.advance_condition).is_empty():
-			shaped["advanceCondition"] = str(transition.advance_condition)
+		var condition: String = str(transition.advance_condition)
+		if not condition.is_empty():
+			shaped["advanceCondition"] = condition
+		# A condition is checked only on an auto transition, and the default is enabled: a machine
+		# with its conditions set true stayed where it was, and nothing said why.
+		if not condition.is_empty() and transition.advance_mode != transition.ADVANCE_MODE_AUTO:
+			shaped["conditionNote"] = (
+				(
+					"advanceMode is %s, so %s never advances it: the engine checks a condition only on an"
+					+ " auto transition%s. disconnect_states and connect_states again with the condition"
+					+ " write it as auto"
+				)
+				% [
+					shaped["advanceMode"],
+					condition,
+					(
+						", and travel() still takes this one"
+						if transition.advance_mode == transition.ADVANCE_MODE_ENABLED
+						else ""
+					)
+				]
+			)
 		transitions.append(shaped)
 	return {"ok": true, "states": listed, "transitions": transitions}
+
+
+## The states of the AnimationTrees under [param root] that play [param animation_name] from
+## [param player], as [[node, {animTreePath, state}]], a state named by the path of the nodes leading
+## to it.
+static func states_playing(root: Node, player: AnimationPlayer, animation_name: String) -> Array:
+	var found: Array = []
+	var trees: Array[Node] = root.find_children("*", "AnimationTree", true, false)
+	if root is AnimationTree:
+		trees.append(root)
+	for node: Node in trees:
+		var tree: AnimationTree = node
+		if tree.tree_root == null or tree.get_node_or_null(tree.anim_player) != player:
+			continue
+		var tree_path: String = str(root.get_path_to(tree))
+		_collect_playing(tree.tree_root, "", tree_path, animation_name, found)
+	return found
+
+
+static func _collect_playing(
+	node: AnimationNode, at: String, tree_path: String, animation_name: String, found: Array
+) -> void:
+	if node is AnimationNodeAnimation:
+		var plays: AnimationNodeAnimation = node
+		if plays.animation == StringName(animation_name):
+			found.append([plays, {"animTreePath": tree_path, "state": "." if at.is_empty() else at}])
+		return
+	var children: Dictionary = {}
+	if node is AnimationNodeStateMachine:
+		var machine: AnimationNodeStateMachine = node
+		for state: StringName in machine.get_node_list():
+			children[str(state)] = machine.get_node(state)
+	elif node is AnimationNodeBlendTree:
+		var blend: AnimationNodeBlendTree = node
+		for input: StringName in blend.get_node_list():
+			children[str(input)] = blend.get_node(input)
+	elif node is AnimationNodeBlendSpace1D:
+		var line: AnimationNodeBlendSpace1D = node
+		for point: int in line.get_blend_point_count():
+			children[str(point)] = line.get_blend_point_node(point)
+	elif node is AnimationNodeBlendSpace2D:
+		var plane: AnimationNodeBlendSpace2D = node
+		for point: int in plane.get_blend_point_count():
+			children[str(point)] = plane.get_blend_point_node(point)
+	for step: String in children:
+		var child: AnimationNode = children[step]
+		_collect_playing(child, step if at.is_empty() else at + "/" + step, tree_path, animation_name, found)

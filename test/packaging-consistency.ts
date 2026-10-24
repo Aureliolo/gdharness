@@ -91,14 +91,17 @@ const operationsModules = [
   'project_config.gd',
   'project_diagnostics.gd',
   'project_file.gd',
+  'project_validation.gd',
   'property_paths.gd',
   'property_values.gd',
   'reading.gd',
   'rename_checks.gd',
   'resource_files.gd',
   'same_values.gd',
+  'scene_connections.gd',
   'script_check.gd',
   'serialisation.gd',
+  'setting_reads.gd',
   'value_shapes.gd',
 ];
 

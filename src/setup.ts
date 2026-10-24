@@ -160,7 +160,7 @@ function digestMarker(projectPath: string, addon: string): string | null {
 }
 
 /** Where the shipped addons are, beside this module in the build and in the source tree alike. */
-function shippedAddonsDirectory(): string {
+export function shippedAddonsDirectory(): string {
   return join(dirname(fileURLToPath(import.meta.url)), 'godot', 'addons');
 }
 
@@ -369,6 +369,12 @@ export interface ProjectReport {
   /** class_name declarations on disk that the class cache does not list, or lists elsewhere. */
   readonly staleClasses: readonly string[];
   readonly classCacheExists: boolean;
+  /**
+   * Autoloads naming a file that is here and that git ignores, so a clone has it only once the
+   * project's own install step has run. Said rather than counted a problem: the rule is the project
+   * deciding that, where a file nobody added is one somebody forgot.
+   */
+  readonly ignoredAutoloads: readonly { readonly name: string; readonly path: string }[];
   readonly problems: readonly string[];
 }
 
@@ -454,6 +460,29 @@ function trackedByGit(projectPath: string, wanted: readonly string[]): Set<strin
   return new Set(asked.stdout.split('\0').filter(Boolean));
 }
 
+/**
+ * Which of [param wanted] git ignores and does not track, none where git could not say.
+ *
+ * Kept apart from a file nobody added: a rule ignoring it is somebody deciding the repository does
+ * not carry it, as a project does for an addon its own install step puts in place before setup
+ * runs. Failing setup on that failed every fresh clone of such a project.
+ */
+function ignoredByGit(projectPath: string, wanted: readonly string[]): Set<string> {
+  if (wanted.length === 0) {
+    return new Set();
+  }
+  // Read whatever the exit: 1 is "none of them", and a failure prints none.
+  const asked = spawnSyncHidden('git', ['check-ignore', '-z', '--stdin'], {
+    cwd: projectPath,
+    encoding: 'utf8',
+    input: wanted.map((path) => `${path}\0`).join(''),
+  });
+  if (asked.error !== undefined) {
+    return new Set();
+  }
+  return new Set(asked.stdout.split('\0').filter(Boolean));
+}
+
 /** The enabled editor plugins, read out of project.godot's PackedStringArray of plugin.cfg paths. */
 function enabledPlugins(settings: Record<string, Record<string, unknown>>): string[] {
   const raw = settings['editor_plugins']?.['enabled'];
@@ -500,7 +529,8 @@ export function inspectProject(projectPath: string): ProjectReport {
   // its path under addons/, and a project that installs its addons rather than committing them, the
   // way it treats gdUnit4, then carries a line pointing at a file the next clone will not have: the
   // game boots with a missing script and nothing in the repository says why. Found on two projects,
-  // and nothing said so at the moment it was created.
+  // and nothing said so at the moment it was created. A file git ignores is said and not failed: a
+  // project ignoring it has an install step that puts it there, and setup runs in fresh clones.
   const named = autoloadPaths(settings);
   const runtimeLoaderAutoload = loaderAmong(projectPath, named);
   // Whether the runtime is brought up at all, which is the question the name asks. It used to mean
@@ -510,6 +540,9 @@ export function inspectProject(projectPath: string): ProjectReport {
   // other than what the reader takes it for.
   const runtimeAutoload = runtimeAutoloadPath !== null || runtimeLoaderAutoload !== null;
   const tracked = trackedByGit(projectPath, [...named.values()]);
+  const untracked = [...named.values()].filter((path) => tracked !== null && !tracked.has(path));
+  const ignored = ignoredByGit(projectPath, untracked);
+  const ignoredAutoloads: { name: string; path: string }[] = [];
   const addonMissing = (path: string): boolean =>
     addons.some((addon) => !addon.installed && path.startsWith(`addons/${addon.name}/`));
   for (const [name, path] of named) {
@@ -526,7 +559,9 @@ export function inspectProject(projectPath: string): ProjectReport {
       }
       continue;
     }
-    if (tracked !== null && !tracked.has(path)) {
+    if (ignored.has(path)) {
+      ignoredAutoloads.push({ name, path });
+    } else if (tracked !== null && !tracked.has(path)) {
       problems.push(
         `the ${name} autoload names res://${path}, which git does not carry, so a clone boots with a missing script; commit that file, or point the autoload at one the project tracks`,
       );
@@ -554,6 +589,7 @@ export function inspectProject(projectPath: string): ProjectReport {
     runtimeLoaderAutoload,
     staleClasses,
     classCacheExists: cached !== null,
+    ignoredAutoloads,
     problems,
   };
 }

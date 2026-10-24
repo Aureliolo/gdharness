@@ -9,9 +9,11 @@ extends RefCounted
 
 const GdhAnimationStates = preload("../addons/gdharness_editor/tools/animation_states.gd")
 const GdhAnimationTools = preload("../addons/gdharness_editor/tools/animation_tools.gd")
+const GdhAnimationTracks = preload("../addons/gdharness_editor/tools/animation_tracks.gd")
 const GdhResourceTools = preload("../addons/gdharness_editor/tools/resource_tools.gd")
 const GdhSceneTools = preload("../addons/gdharness_editor/tools/scene_tools.gd")
 const GdhSignalTools = preload("../addons/gdharness_editor/tools/signal_tools.gd")
+const GdhTilesetTools = preload("../addons/gdharness_editor/tools/tileset_tools.gd")
 const GdhSceneFile = preload("../addons/gdharness_editor/scene_file.gd")
 
 const SCENE_COMMANDS: Array[String] = [
@@ -23,25 +25,25 @@ const SCENE_COMMANDS: Array[String] = [
 	"duplicate_node",
 	"reparent_node",
 	"delete_node",
+	"bake_navigation",
 ]
 const SIGNAL_COMMANDS: Array[String] = ["connect_signal", "disconnect_signal", "list_connections"]
 const RESOURCE_COMMANDS: Array[String] = [
-	"set_tilemap_cells",
 	"create_resource",
 	"modify_resource",
 	"create_shader",
-	"create_tileset",
 	"set_theme_color",
 	"set_theme_font_size",
+	"remove_theme_item",
 ]
+const TILESET_COMMANDS: Array[String] = ["create_tileset", "set_tilemap_cells"]
 const ANIMATION_COMMANDS: Array[String] = [
 	"create_animation",
-	"add_animation_track",
-	"remove_animation_track",
 	"set_animation",
 	"rename_animation",
 	"remove_animation",
 ]
+const ANIMATION_TRACK_COMMANDS: Array[String] = ["add_animation_track", "remove_animation_track"]
 const ANIMATION_STATE_COMMANDS: Array[String] = [
 	"add_animation_state",
 	"connect_animation_states",
@@ -64,8 +66,12 @@ static func run(params: Dictionary) -> Dictionary:
 		tools = GdhSignalTools.new()
 	elif command in RESOURCE_COMMANDS:
 		tools = GdhResourceTools.new()
+	elif command in TILESET_COMMANDS:
+		tools = GdhTilesetTools.new()
 	elif command in ANIMATION_COMMANDS:
 		tools = GdhAnimationTools.new()
+	elif command in ANIMATION_TRACK_COMMANDS:
+		tools = GdhAnimationTracks.new()
 	elif command in ANIMATION_STATE_COMMANDS:
 		tools = GdhAnimationStates.new()
 	else:
@@ -77,15 +83,14 @@ static func run(params: Dictionary) -> Dictionary:
 		if not GdhSceneFile.by_path.is_empty():
 			answered["namedByPath"] = (
 				(
-					"%s %s named by path rather than by uid. A uid in a file's own header is resolved "
-					+ "through the project's uid cache, which holds none for %s yet, as with a file "
-					+ "made since the project was last scanned, and a uid it does not hold would warn "
-					+ "on every load. project_import refresh_uids scans the project, and writes after "
-					+ "it name %s by uid."
+					"What this saved names %s by path rather than by uid. A uid in a file's own header is "
+					+ "resolved through the project's uid cache, which holds none for %s yet, as with a "
+					+ "file made since the project was last scanned, and a uid it does not hold would "
+					+ "warn on every load. project_import refresh_uids scans the project, and writes "
+					+ "after it name %s by uid."
 				)
 				% [
 					", ".join(GdhSceneFile.by_path),
-					"is" if GdhSceneFile.by_path.size() == 1 else "are",
 					"it" if GdhSceneFile.by_path.size() == 1 else "them",
 					"it" if GdhSceneFile.by_path.size() == 1 else "them",
 				]

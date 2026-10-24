@@ -605,6 +605,52 @@ const SCENE_FILES: Record<string, string[]> = {
     '[node name="Ground" type="TileMapLayer" parent="."]',
     '',
   ],
+  // A region reading its obstacles from a group, and a scene open in the editor with a node of its
+  // own in that group, inside the region's outline.
+  'nav/outline.tres': [
+    '[gd_resource type="NavigationPolygon" format=3]',
+    '',
+    '[resource]',
+    'outlines = Array[PackedVector2Array]([PackedVector2Array(0, 0, 300, 0, 300, 300, 0, 300)])',
+    'source_geometry_mode = 1',
+    'source_geometry_group_name = &"walls"',
+    '',
+  ],
+  'nav/grouped.tscn': [
+    '[gd_scene load_steps=3 format=3]',
+    '',
+    '[ext_resource type="NavigationPolygon" path="res://nav/outline.tres" id="1_p"]',
+    '',
+    '[sub_resource type="CircleShape2D" id="CircleShape2D_c"]',
+    'radius = 30.0',
+    '',
+    '[node name="Level" type="Node2D"]',
+    '',
+    '[node name="Region" type="NavigationRegion2D" parent="."]',
+    'navigation_polygon = ExtResource("1_p")',
+    '',
+    '[node name="Pillar" type="StaticBody2D" parent="." groups=["walls"]]',
+    'position = Vector2(150, 150)',
+    '',
+    '[node name="Shape" type="CollisionShape2D" parent="Pillar"]',
+    'shape = SubResource("CircleShape2D_c")',
+    '',
+  ],
+  'nav/other.tscn': [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[sub_resource type="RectangleShape2D" id="RectangleShape2D_w"]',
+    'size = Vector2(40, 40)',
+    '',
+    '[node name="Other" type="Node2D"]',
+    '',
+    '[node name="Wall" type="StaticBody2D" parent="." groups=["walls"]]',
+    'position = Vector2(250, 50)',
+    '',
+    '[node name="Shape" type="CollisionShape2D" parent="Wall"]',
+    'shape = SubResource("RectangleShape2D_w")',
+    '',
+  ],
   // A variable that is not exported: set and read back like any property on a @tool script, and
   // kept by no file, which only reading the saved form can tell.
   'layers/tool_node.gd': ['@tool', 'extends Node', '', '@export var target: Node', 'var hidden: int = 0', ''],
@@ -2373,7 +2419,8 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
     asArray(get(machine, 'states'), 'states').find((state) => get(state, 'stateName') === name);
   assert.deepEqual(
     named('walk'),
-    { stateName: 'walk', type: 'AnimationNodeAnimation', animationName: 'step' },
+    // This tree has no player, so there is nothing to find the animation in or name as missing.
+    { stateName: 'walk', type: 'AnimationNodeAnimation', animationName: 'step', animationFound: false },
     JSON.stringify(machine),
   );
   assert.equal(
@@ -2383,12 +2430,12 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
   );
   assert.deepEqual(
     asArray(get(machine, 'transitions'), 'transitions').find((one) => get(one, 'from') === 'idle'),
-    { from: 'idle', to: 'walk', transitionType: 'immediate' },
+    { from: 'idle', to: 'walk', transitionType: 'immediate', advanceMode: 'enabled' },
     JSON.stringify(machine),
   );
   assert.deepEqual(
     asArray(get(machine, 'transitions'), 'transitions').find((one) => get(one, 'from') === 'walk'),
-    { from: 'walk', to: 'idle', transitionType: 'at_end', advanceCondition: 'stopped' },
+    { from: 'walk', to: 'idle', transitionType: 'at_end', advanceMode: 'auto', advanceCondition: 'stopped' },
     JSON.stringify(machine),
   );
   assert.match(
@@ -3033,15 +3080,12 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
   await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_free' });
   assert.doesNotMatch(fileText(project, 'signals.tscn'), /\[connection/, 'and a disconnect removes it');
 
-  // A bit Object.ConnectFlags does not name is still said, as its number, rather than dropped.
-  const unnamed = await call('scene_signal', {
-    ...ends,
-    op: 'connect',
-    methodName: 'queue_free',
-    flags: 1024,
-  });
-  assert.deepEqual(get(unnamed, 'flagNames'), ['persist', '1024'], JSON.stringify(unnamed));
-  await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_free' });
+  // A bit no flag a scene connects with has is refused before anything is written.
+  assert.match(
+    await refusal('scene_signal', { ...ends, op: 'connect', methodName: 'queue_free', flags: 1024 }),
+    /flags 1024 holds bits no flag a scene connects with has: they are deferred 1, persist 2, /,
+  );
+  assert.doesNotMatch(fileText(project, 'signals.tscn'), /\[connection/, 'and the scene is left as it was');
 }
 
 /**
@@ -3145,7 +3189,8 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
   });
   assert.deepEqual(
     [get(untracked, 'removed'), get(untracked, 'keysRemoved'), get(untracked, 'tracks')],
-    [{ type: 'method', nodePath: 'Sprite' }, 1, 1],
+    // Read gives the track the method all its keys call, so every key goes, and the track with them.
+    [{ type: 'method', nodePath: 'Sprite', method: 'set_visible' }, 1, 1],
     JSON.stringify(untracked),
   );
   assert.deepEqual(
@@ -3268,6 +3313,21 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
     String(get(lost, 'animationMissing')),
     /^The AnimationPlayer at Body\/Player has no animation moves\/missing yet, so the state plays nothing until it has one\./,
   );
+  // Read through the editor, the state says the same, the player named from the scene root.
+  const treed = await call('scene_animation', {
+    projectPath: project,
+    scenePath: 'res://moves/treed.tscn',
+    animTreePath: 'Tree',
+    op: 'read_states',
+  });
+  const lostRead = asArray(get(treed, 'states'), 'states').find(
+    (state) => get(state, 'stateName') === 'Lost',
+  );
+  assert.deepEqual(
+    [get(lostRead, 'animationFound'), get(lostRead, 'animationMissing')],
+    [false, get(lost, 'animationMissing')],
+    JSON.stringify(treed),
+  );
 
   // A resource kept inside a file, read through the editor by the path a read answers it with.
   for (const [inner, type] of [
@@ -3361,6 +3421,35 @@ async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Pr
     await refusal('scene_node', { ...cell({ x: 0, y: 0 }), layer: 1 }),
     /TileMapLayer, which is one layer/,
   );
+}
+
+/**
+ * A bake through the editor reads only the scene it bakes. The navigation servers read the nodes of a
+ * source group from the whole tree, and the editor's tree holds the scene being edited: a wall in
+ * the open scene's own copy of that group would be carved out of a region in another scene.
+ */
+async function testABakeReadsOnlyItsOwnScene({ call, project }: Editor): Promise<void> {
+  await hook(project, { op: 'open', path: 'res://nav/other.tscn' });
+  const baked = await call('scene_node', {
+    projectPath: project,
+    scenePath: 'res://nav/grouped.tscn',
+    op: 'bake_navigation',
+    nodePath: 'Region',
+  });
+  assert.equal(get(baked, 'savedTo'), 'res://nav/outline.tres', text(baked));
+  const saved = fileText(project, 'nav/outline.tres');
+  const listed = /^vertices = PackedVector2Array\(([^)]*)\)/m.exec(saved)?.[1] ?? '';
+  const numbers = listed.split(',').map(Number);
+  const points = numbers.flatMap((x, at) => (at % 2 === 0 ? [[x, numbers[at + 1] ?? NaN]] : []));
+  // The pillar in the baked scene's group is carved, with the agent's radius of 10 around it.
+  assert.ok(
+    points.some(([x = 0, y = 0]) => Math.hypot(x - 150, y - 150) <= 41),
+    `the scene's own pillar is carved out: ${listed}`,
+  );
+  // The open scene's wall covers 230 to 270 across and 30 to 70 down, so carving it puts points
+  // from 220 to 280 and 20 to 80.
+  const inOthers = points.filter(([x = 0, y = 0]) => x >= 219 && x <= 281 && y >= 19 && y <= 81);
+  assert.deepEqual(inOthers, [], `the open scene's wall is not carved: ${listed}`);
 }
 
 /**
@@ -3530,6 +3619,28 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     }),
     /res:\/\/tiles\/atlas\.png is imported/,
   );
+
+  // A setter of a script that is not a tool runs in the game and not in the editor, so the editor
+  // saves the value given. With no editor the same create is refused with that said, and the
+  // refusal's remedy is this call.
+  writeFileSync(
+    join(project, 'clamped_stock.gd'),
+    'extends Resource\n\n@export var stock: int = 0:\n\tset(value):\n\t\tstock = maxi(value, 0)\n',
+  );
+  const clamped = await call('resource_edit', {
+    projectPath: project,
+    op: 'create',
+    resourcePath: 'res://clamped.tres',
+    resourceType: 'Resource',
+    script: 'res://clamped_stock.gd',
+    properties: { stock: -5 },
+  });
+  assert.deepEqual(
+    [get(clamped, 'properties'), get(clamped, 'script')],
+    [{ stock: -5 }, 'res://clamped_stock.gd'],
+    JSON.stringify(clamped),
+  );
+  assert.match(fileText(project, 'clamped.tres'), /^stock = -5$/m, 'the file holds the value given');
 }
 
 /** editor_rescan is how a file written from outside the editor becomes loadable. */
@@ -4086,6 +4197,29 @@ async function testASettingReadFromTheEditor({ call, refusal, project }: Editor)
     from: 'editor',
   });
   assert.equal(get(held, 'exists'), true, `the editor should hold the new action: ${text(held)}`);
+  // The editor's read answers what the headless one does, the default and the overrides included.
+  const width = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: 'display/window/size/viewport_width',
+    from: 'editor',
+  });
+  assert.equal(
+    typeof get(width, 'at_default'),
+    'boolean',
+    `the editor should say at_default: ${text(width)}`,
+  );
+  const mobile = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: 'display/window/size/viewport_width.mobile',
+    from: 'editor',
+  });
+  assert.deepEqual(
+    [get(mobile, 'exists'), get(mobile, 'override_of'), get(mobile, 'holds')],
+    [false, 'display/window/size/viewport_width', get(width, 'value')],
+    `an override the project does not set reads as its base: ${text(mobile)}`,
+  );
 
   // And a setting a write takes out, which the editor has to let go of rather than save back.
   writeFileSync(join(project, 'adopted_autoload.gd'), 'extends Node\n');
@@ -4605,8 +4739,8 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   );
   assert.match(
     String(get(refused, 'reloadProblem')),
-    /a member of Peal that its file declares/,
-    'and the class it names',
+    /The editor holds none of what it is compiled against, [^.]*Peal \(res:\/\/peal\.gd\)[^.]*, so no stale copy is what it fails on\./,
+    'and the class it names, which was checked and is not behind',
   );
   assert.equal(get(refused, 'reloadedMethods'), undefined, 'and nothing claimed as reloaded');
 
@@ -5467,6 +5601,47 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
     asNumber(get(everything, 'total'), 'total') - 100,
     'with the rest counted',
   );
+
+  // A class written beside the editor, which it has not scanned: the language server reads it as
+  // nothing, so a completion after self. in a script extending it came back empty without a word.
+  writeFileSync(
+    join(project, 'unseen_base.gd'),
+    'class_name UnseenBase\nextends Node\n\nvar health: int = 3\n',
+  );
+  writeFileSync(join(project, 'unseen_child.gd'), 'extends UnseenBase\n\n\nfunc hit() -> void:\n\tself.\n');
+  const child = {
+    projectPath: project,
+    scriptPath: 'res://unseen_child.gd',
+    op: 'completion',
+    line: 5,
+    character: 7,
+  };
+  try {
+    const blind = await call('script_info', child);
+    assert.deepEqual(
+      get(blind, 'unseenByEditor'),
+      [{ className: 'UnseenBase', path: 'res://unseen_base.gd' }],
+      JSON.stringify(blind),
+    );
+    assert.match(
+      text(get(blind, 'unseenNote')),
+      /^The editor cannot see UnseenBase yet, though its script declares it/,
+    );
+    await call('editor_rescan', { projectPath: project });
+    const seen = await call('script_info', child);
+    const offeredNow = asArray(get(seen, 'completions'), 'completions').map((entry) =>
+      asString(get(entry, 'label'), 'label'),
+    );
+    assert.ok(
+      offeredNow.includes('health'),
+      `once scanned, the base's members are offered: ${offeredNow.join(', ')}`,
+    );
+    assert.equal(get(seen, 'unseenByEditor'), undefined, JSON.stringify(get(seen, 'unseenNote')));
+  } finally {
+    rmSync(join(project, 'unseen_base.gd'), { force: true });
+    rmSync(join(project, 'unseen_child.gd'), { force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
 }
 
 /**
@@ -7020,6 +7195,7 @@ async function main(): Promise<void> {
     ['testSignalsAreTheFilesOwn', testSignalsAreTheFilesOwn],
     ['testAnimationEditsLandWhereKept', testAnimationEditsLandWhereKept],
     ['testTilesDrawWhatTheyName', testTilesDrawWhatTheyName],
+    ['testABakeReadsOnlyItsOwnScene', testABakeReadsOnlyItsOwnScene],
     ['testACreateMakesWhatWasAsked', testACreateMakesWhatWasAsked],
     ['testEditorRescan', testEditorRescan],
     ['testAReimportGoesThroughTheEditor', testAReimportGoesThroughTheEditor],

@@ -27,12 +27,18 @@ const LOOKS_APART: int = 9
 ## two looks and a wait for 32 never sees it.
 const COMPARES: Array[String] = ["==", "!=", ">=", "<=", ">", "<"]
 
-## The most signal watches kept at once; arming one past this lets the oldest go.
+## The most signal watches kept at once; arming one past this lets the oldest go. Property watches
+## are counted apart, to the same number.
 const MOST_WATCHES: int = 16
+
+## The most changes a property watch keeps. Past it, each new one takes the last place, so what is
+## kept still ends on the latest value.
+const MOST_CHANGES: int = 1000
 
 var _host: Node
 var _values: GdhValues
 var _watches: Dictionary[int, GdhWatch] = {}
+var _traces: Dictionary[int, GdhTrace] = {}
 var _next_watch: int = 1
 
 
@@ -110,9 +116,10 @@ func wait_signal(params: Dictionary) -> Dictionary:
 	}
 	if not catcher.fired:
 		answer["note"] = (
-			"If a call meant to set the signal off was sent beside this wait, it may have run only after"
-			+ " the wait answered, as a client can run its calls in turn: arm runtime_wait watch first,"
-			+ " make the call, then wait with signal and that watch"
+			"A wait hears the signal only from when it begins, so one that fired before it is not"
+			+ " counted. If a call meant to set the signal off was sent beside this wait, it may have run"
+			+ " only after the wait answered, as a client can run its calls in turn: arm runtime_wait"
+			+ " watch first, make the call, then wait with signal and that watch"
 		)
 	return answer
 
@@ -125,6 +132,18 @@ func wait_signal(params: Dictionary) -> Dictionary:
 func watch_signal(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var signal_name: String = str(params.get("signal", ""))
+	var property: String = str(params.get("property", ""))
+	if not signal_name.is_empty() and not property.is_empty():
+		return {
+			"type": "error",
+			"message":
+			(
+				"A watch records a signal or a property, not both: this one has signal %s and property %s"
+				% [signal_name, property]
+			)
+		}
+	if not property.is_empty():
+		return _watch_property(node_path, property)
 	if node_path.is_empty() or signal_name.is_empty():
 		return {"type": "error", "message": "Node path and signal name required"}
 	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
@@ -149,6 +168,15 @@ func watch_signal(params: Dictionary) -> Dictionary:
 ## Answers at once with the first emission recorded since watch [param id] was armed, otherwise
 ## waits for the next until the time runs out. The watch goes either way.
 func _collect(id: int, timeout_ms: int) -> Dictionary:
+	if _traces.has(id):
+		return {
+			"type": "error",
+			"message":
+			(
+				"Watch %d records %s:%s, a property, and is collected with runtime_wait recorded"
+				% [id, _traces[id].node_path, _traces[id].property]
+			)
+		}
 	if not _watches.has(id):
 		return {
 			"type": "error",
@@ -192,6 +220,129 @@ func _let_go(id: int) -> void:
 	var callable: Callable = watch.catcher._on_fired
 	if node != null and node.is_connected(watch.signal_name, callable):
 		node.disconnect(watch.signal_name, callable)
+
+
+## Starts recording [param property] every frame and answers at once with the watch and what it
+## reads now.
+##
+## A tween or an animation is over before a client's next call reaches the game: a slide of 0.3
+## seconds had finished by the time a wait sent after the click began, so its middle could be read
+## only by slowing the game's clock. Armed before the click, the watch has every frame of it.
+func _watch_property(node_path: String, property: String) -> Dictionary:
+	if node_path.is_empty():
+		return {"type": "error", "message": "Node path required"}
+	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
+	var watched: Dictionary = _watched(node, node_path, property)
+	if watched.has("message"):
+		return watched
+	var trace: GdhTrace = GdhTrace.new(node, node_path, property)
+	trace.see(0, 0, 0.0, watched["value"], _values)
+	while _traces.size() >= MOST_WATCHES:
+		var _gone: bool = _traces.erase(_traces.keys().min())
+	var id: int = _next_watch
+	_next_watch += 1
+	_traces[id] = trace
+	# Left to run across frames while the answer goes now. Deferred calls run once the frame's
+	# _process is done and before its tweens step, so the recording starts in the frame it was armed in.
+	_record.call_deferred(trace)
+	return {
+		"type": "watching",
+		"watch": id,
+		"path": node_path,
+		"property": property,
+		"value": _values.serialize(watched["value"]),
+	}
+
+
+## Reads the watched property at the start of every frame until the watch is collected, the node
+## goes or the ceiling a wait has is reached.
+##
+## Read where a frame begins, which is after the last one's tweens and _process ran: the game time
+## beside each reading is the time those had been given, which counts the frame the watch was armed
+## in, since commands run before that frame's tweens step.
+func _record(trace: GdhTrace) -> void:
+	var started: int = Time.get_ticks_msec()
+	var given: float = _host.get_process_delta_time()
+	var game_time: float = 0.0
+	var frame: int = 0
+	while not trace.collected:
+		await _host.get_tree().process_frame
+		if trace.collected:
+			return
+		frame += 1
+		game_time += given
+		given = _host.get_process_delta_time()
+		var elapsed: int = Time.get_ticks_msec() - started
+		var held: Object = trace.node.get_ref()
+		var node: Node = held as Node
+		if node == null:
+			trace.ended = "%s was freed %d frames after the watch was armed" % [trace.node_path, frame]
+			return
+		var watched: Dictionary = _watched(node, trace.node_path, trace.property)
+		if watched.has("message"):
+			trace.ended = "%d frames after the watch was armed: %s" % [frame, watched["message"]]
+			return
+		trace.see(frame, elapsed, game_time, watched["value"], _values)
+		trace.frames = frame
+		trace.elapsed_ms = elapsed
+		if elapsed >= CEILING_MSEC:
+			trace.ended = (
+				"recording stopped %d ms after the watch was armed, the longest a wait lasts" % elapsed
+			)
+			return
+
+
+## What a property watch recorded, each change with the frame, the time and the game time it was
+## read at. The watch goes with the answer.
+func recorded(params: Dictionary) -> Dictionary:
+	var id: int = GdhRead.as_int(params.get("watch", 0), 0)
+	if _watches.has(id):
+		return {
+			"type": "error",
+			"message":
+			(
+				"Watch %d records the signal %s of %s, and is collected with runtime_wait signal"
+				% [id, _watches[id].signal_name, _watches[id].node_path]
+			)
+		}
+	if not _traces.has(id):
+		return {
+			"type": "error",
+			"message":
+			(
+				(
+					"No property watch %d is armed in this game: it was collected already, %d armed after"
+					+ " it let it go, or the game started again since"
+				)
+				% [id, MOST_WATCHES]
+			),
+		}
+	var trace: GdhTrace = _traces[id]
+	trace.collected = true
+	var _gone: bool = _traces.erase(id)
+	var answer: Dictionary = {
+		"type": "recorded",
+		"watch": id,
+		"path": trace.node_path,
+		"property": trace.property,
+		"changes": trace.changes,
+		"frames": trace.frames,
+		"elapsed_ms": trace.elapsed_ms,
+	}
+	if trace.dropped > 0:
+		answer["dropped"] = (
+			(
+				"%d changes are left out: past %d, each new one took the last place, so the list ends on"
+				+ " the latest"
+			)
+			% [trace.dropped, MOST_CHANGES]
+		)
+	if not trace.ended.is_empty():
+		answer["ended"] = trace.ended
+	return answer
 
 
 ## Waits until a property reads as the value given, or until something under the path says what
@@ -305,7 +456,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 			return watched
 		current = watched["value"]
 
-	return {
+	var answer: Dictionary = {
 		"type": "condition",
 		"path": node_path,
 		"property": property,
@@ -315,6 +466,16 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"elapsed_ms": Time.get_ticks_msec() - started,
 		"frames": frames,
 	}
+	# Said rather than refused, since a game may store a number no value has, as set says it stores
+	# one: a wait for 7 on an enum of three ran its whole timeout and answered only that it was not met.
+	if watched["holder"] is Object:
+		var owner: Object = watched["holder"]
+		var shown: String = JSON.stringify(_values.serialize(wanted), "", false)
+		var declaration: Dictionary = watched["declaration"]
+		var outside: String = GdhDeclared.outside(owner, declaration, wanted, shown)
+		if not outside.is_empty():
+			answer["outside_declared"] = outside
+	return answer
 
 
 ## What a property wait is missing or was given wrongly, or "" when it can go ahead.
@@ -589,7 +750,7 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 		looks += 1
 		looked_usec += Time.get_ticks_usec() - last
 
-	return {
+	var answer: Dictionary = {
 		"type": "condition",
 		"path": node_path,
 		"says": said,
@@ -600,12 +761,24 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 		"looks": looks,
 		"looking_ms": looked_usec / 1000.0,
 	}
+	# Words that are there and cannot be read look, from a wait that ran out, like words that never
+	# came.
+	if not found and not include_hidden and _anything_says(node_path, said, true):
+		answer["unseen_note"] = (
+			(
+				"Something under %s says it, but is hidden or drawn outside the viewport or a"
+				+ " ScrollContainer, where the player cannot read it; includeHidden true counts it there too"
+			)
+			% node_path
+		)
+	return answer
 
 
-## Whether anything under [param node_path] says [param said], the node itself included, and shown
-## unless hidden ones are wanted too. Matched as a find and a click match `says`, a glob over the
-## whole text when it has `*` or `?`: read as literal words, a glob a click had just pressed by was
-## waited on for the whole timeout with its label on screen, and answered as words never arriving.
+## Whether anything under [param node_path] says [param said], the node itself included, and where
+## the player can read it unless hidden ones are wanted too. Matched as a find and a click match
+## `says`, a glob over the whole text when it has `*` or `?`: read as literal words, a glob a click
+## had just pressed by was waited on for the whole timeout with its label on screen, and answered as
+## words never arriving.
 func _anything_says(node_path: String, said: String, include_hidden: bool) -> bool:
 	var root: Node = _host.get_tree().root.get_node_or_null(node_path)
 	if root == null:
@@ -613,7 +786,7 @@ func _anything_says(node_path: String, said: String, include_hidden: bool) -> bo
 	var pending: Array[Node] = [root]
 	while not pending.is_empty():
 		var node: Node = pending.pop_back()
-		if GdhSays.says(node, said) and (include_hidden or GdhQueries.shown(node)):
+		if GdhSays.says(node, said) and (include_hidden or GdhQueries.readable(node)):
 			return true
 		pending.append_array(node.get_children(true))
 	return false
@@ -635,6 +808,53 @@ class GdhSignalCatcher:
 			args = carried
 		fired = true
 		times += 1
+
+
+## A property recorded from when it was armed until it is collected: the reading at arming, then
+## each frame's that differs from the one before.
+class GdhTrace:
+	extends RefCounted
+	var node: WeakRef
+	var node_path: String
+	var property: String
+	var changes: Array[Dictionary] = []
+	var dropped: int = 0
+	var frames: int = 0
+	var elapsed_ms: int = 0
+	var ended: String = ""
+	var collected: bool = false
+	var _last: Variant = null
+	var _seen: bool = false
+
+	func _init(watched: Node, path: String, named: String) -> void:
+		node = weakref(watched)
+		node_path = path
+		property = named
+
+	func see(frame: int, elapsed: int, game_time: float, value: Variant, values: GdhValues) -> void:
+		if _seen and typeof(value) == typeof(_last) and value == _last:
+			return
+		_seen = true
+		# A copy of a list or a map, which the game may change in place: held as it is, the reading
+		# kept is the game's own, and it reads the same as every later one.
+		_last = value
+		if value is Array:
+			var list: Array = value
+			_last = list.duplicate(true)
+		elif value is Dictionary:
+			var map: Dictionary = value
+			_last = map.duplicate(true)
+		var change: Dictionary = {
+			"frame": frame,
+			"elapsed_ms": elapsed,
+			"game_time": snappedf(game_time, 0.0001),
+			"value": values.serialize(value),
+		}
+		if changes.size() < MOST_CHANGES:
+			changes.append(change)
+		else:
+			changes[changes.size() - 1] = change
+			dropped += 1
 
 
 ## A signal recorded from when it was armed until it is collected.

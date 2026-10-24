@@ -5,6 +5,7 @@ const GdhFileWalk = preload("file_walk.gd")
 const GdhImportPipeline = preload("import_pipeline.gd")
 const GdhLog = preload("logger.gd")
 const GdhRead = preload("reading.gd")
+const GdhSceneConnections = preload("scene_connections.gd")
 const GdhScriptCheck = preload("script_check.gd")
 
 var _log: GdhLog
@@ -128,6 +129,9 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		var scene_files: Array[String] = _files.find_files_with_extensions("res://", ["tscn", "scn"])
 		if scene_files.size() == 0:
 			details.append("No scene files found in project")
+			deductions += 5
+		for entry: Dictionary in GdhSceneConnections.new(_log).broken():
+			details.append(GdhSceneConnections.broken_line(entry))
 			deductions += 5
 
 		checks["scenes"] = {

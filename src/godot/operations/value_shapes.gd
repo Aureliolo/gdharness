@@ -5,6 +5,22 @@ extends RefCounted
 ##
 ## This file is the one beside the operations, and `bun run sync:gd` copies it into each addon.
 
+const GdhRead = preload("reading.gd")
+
+## What each packed array holds, one value of which every element is fitted to.
+const PACKED_ELEMENTS: Dictionary = {
+	TYPE_PACKED_BYTE_ARRAY: TYPE_INT,
+	TYPE_PACKED_INT32_ARRAY: TYPE_INT,
+	TYPE_PACKED_INT64_ARRAY: TYPE_INT,
+	TYPE_PACKED_FLOAT32_ARRAY: TYPE_FLOAT,
+	TYPE_PACKED_FLOAT64_ARRAY: TYPE_FLOAT,
+	TYPE_PACKED_STRING_ARRAY: TYPE_STRING,
+	TYPE_PACKED_VECTOR2_ARRAY: TYPE_VECTOR2,
+	TYPE_PACKED_VECTOR3_ARRAY: TYPE_VECTOR3,
+	TYPE_PACKED_VECTOR4_ARRAY: TYPE_VECTOR4,
+	TYPE_PACKED_COLOR_ARRAY: TYPE_COLOR,
+}
+
 # What each tag has to carry before it is built. A tag naming a type whose keys are not there is a
 # tag somebody wrote by mistake or wrote for a different shape, and building one out of defaults
 # answers with a Transform2D of zeros where the caller meant something else entirely. Unbuilt, it
@@ -32,6 +48,21 @@ const REQUIRED: Dictionary = {
 	"int": [["value"]],
 	"RID": [["id"]],
 	"Dictionary": [["entries"]],
+}
+## The fields each type reads as numbers. A builder reads a word there as 0, so {"x": 0, "y": "far"}
+## was written as (0, 0) and answered as written.
+const NUMBER_FIELDS: Dictionary = {
+	"Vector2": ["x", "y"],
+	"Vector2i": ["x", "y"],
+	"Vector3": ["x", "y", "z"],
+	"Vector3i": ["x", "y", "z"],
+	"Vector4": ["x", "y", "z", "w"],
+	"Vector4i": ["x", "y", "z", "w"],
+	"Rect2": ["x", "y", "width", "height"],
+	"Rect2i": ["x", "y", "width", "height"],
+	"Plane": ["d"],
+	"Quaternion": ["x", "y", "z", "w"],
+	"Color": ["r", "g", "b", "a"],
 }
 ## The fields a builder reads when they are there and does without when not.
 const OPTIONAL: Dictionary = {
@@ -77,6 +108,86 @@ static func spare(fields: Dictionary, tag: String) -> Array:
 	return lists
 
 
+## Whether a [param tag] built from [param fields] reads every one of them, and each it reads as a
+## number holds one.
+static func buildable(fields: Dictionary, tag: String) -> bool:
+	return (
+		spare(fields, tag).any(func(left: Array) -> bool: return left.is_empty())
+		and not_a_number(fields, tag).is_empty()
+	)
+
+
+## The first field of [param fields] that a [param tag] reads as a number and that holds no number,
+## or "" when there is none. Digits in quotes are a number, as a write takes them for a float.
+static func not_a_number(fields: Dictionary, tag: String) -> String:
+	for key: String in NUMBER_FIELDS.get(tag, []):
+		if fields.has(key) and not _is_number(fields[key]):
+			return key
+	return ""
+
+
+## Whether every item of [param items] is a number, for a list read by its places as a vector.
+static func all_numbers(items: Array) -> bool:
+	return items.all(_is_number)
+
+
+# A float JSON has no number for, infinity or NaN, crosses tagged as {"_type": "float", "value":
+# "inf"}, and is a number.
+static func _is_number(held: Variant) -> bool:
+	if held is int or held is float:
+		return true
+	if held is String:
+		return str(held).is_valid_float()
+	if held is Dictionary:
+		var tagged: Dictionary = held
+		return str(tagged.get("_type", "")) in ["float", "int"] and tagged.has("value")
+	return false
+
+
+## Whether [param value] holds a number with a fractional part where an integer is wanted, in a
+## list or a dictionary as much as bare. The conversion would cut 2.7 to 2 without a word, and a
+## dictionary key arrives as the text "2.7", which reads as the same number.
+static func fraction(value: Variant, type: int, elements: Array = []) -> bool:
+	if type == TYPE_INT:
+		var number: Variant = value
+		if typeof(value) == TYPE_STRING:
+			number = GdhRead.json_or_null(str(value))
+		if typeof(number) != TYPE_FLOAT:
+			return false
+		var whole: float = number
+		return is_finite(whole) and whole != floorf(whole)
+	var element: int = GdhRead.as_int(PACKED_ELEMENTS.get(type, TYPE_NIL), TYPE_NIL)
+	if type == TYPE_ARRAY and not elements.is_empty():
+		element = GdhRead.as_int(elements[0], TYPE_NIL)
+	if value is Array and element != TYPE_NIL:
+		var items: Array = value
+		return items.any(func(item: Variant) -> bool: return fraction(item, element))
+	if type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
+		var entries: Dictionary = value
+		var key_type: int = GdhRead.as_int(elements[0], TYPE_NIL)
+		var value_type: int = GdhRead.as_int(elements[1], TYPE_NIL)
+		for key: Variant in entries:
+			if fraction(key, key_type) or fraction(entries[key], value_type):
+				return true
+	return false
+
+
+## The packed array [param type] built from [param items], each fitted by [param fit] to what the
+## array holds, or [param items] as they are when one cannot become that, for the caller to refuse.
+## Element by element, so a point given as its fields is read as one: converted whole, a list of
+## {"x": 3, "y": 4} became zero vectors, and the call ran on them.
+static func packed_from(items: Array, type: int, fit: Callable) -> Variant:
+	var element: int = PACKED_ELEMENTS[type]
+	var numbers: Array[int] = [TYPE_INT, TYPE_FLOAT]
+	var built: Array = []
+	for item: Variant in items:
+		var one: Variant = fit.call(item, element)
+		if typeof(one) != element and not (numbers.has(typeof(one)) and numbers.has(element)):
+			return items
+		built.append(one)
+	return type_convert(built, type)
+
+
 ## The sentences a refusal of [param value] where a [param type] goes ends with: which of its keys
 ## kept it from being read as one, and how one is written. Empty for a type not built from fields.
 ##
@@ -92,7 +203,23 @@ static func remedy(value: Variant, type: int) -> String:
 	var shape: String = written_as(type)
 	if shape.is_empty():
 		return ""
-	return _unread(value, type) + " A %s is sent as %s." % [type_string(type), shape]
+	return (
+		_unread(value, type) + _no_number(value, type) + " A %s is sent as %s." % [type_string(type), shape]
+	)
+
+
+static func _no_number(value: Variant, type: int) -> String:
+	var tag: String = type_string(type)
+	if value is Dictionary:
+		var fields: Dictionary = value
+		var key: String = not_a_number(fields, tag)
+		if not key.is_empty():
+			return " Its %s is %s, which is no number." % [key, JSON.stringify(fields[key])]
+	if value is Array and NUMBER_FIELDS.has(tag):
+		var items: Array = value
+		if not all_numbers(items):
+			return " Read by its places, each item is a number."
+	return ""
 
 
 static func _unread(value: Variant, type: int) -> String:

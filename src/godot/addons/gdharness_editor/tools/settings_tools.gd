@@ -10,12 +10,12 @@ extends Node
 ## of the two a caller wants is theirs to say, so the server only comes here when asked, and the
 ## difference is the reason the argument exists rather than an inconvenience to paper over.
 ##
-## Every value goes through the same serialiser the headless answer uses, because the two are one
+## Every answer is built by the same reads the headless answer uses, because the two are one
 ## question asked of two places: a value spelled differently here would read as the editor and the
 ## file disagreeing about something they agree about.
 
-const GdhRead = preload("../reading.gd")
 const GdhSerialisation = preload("../serialisation.gd")
+const GdhSettingReads = preload("../setting_reads.gd")
 
 var _values: GdhSerialisation = GdhSerialisation.new()
 
@@ -23,40 +23,17 @@ var _values: GdhSerialisation = GdhSerialisation.new()
 func get_project_setting(args: Dictionary) -> Dictionary:
 	var prefix: String = str(args.get("prefix", ""))
 	if not prefix.is_empty():
-		return _settings_under(prefix)
+		var family: Dictionary = GdhSettingReads.under(prefix, _values)
+		family["ok"] = true
+		return family
 
 	var setting: String = str(args.get("setting", ""))
 	if setting.is_empty():
 		return {"ok": false, "error": "setting is required, or prefix to read every setting under one"}
 
-	var exists: bool = ProjectSettings.has_setting(setting)
-	var result: Dictionary = {"ok": true, "setting_path": setting, "exists": exists, "value": null}
-	if exists:
-		result["value"] = _values.serialize_value(ProjectSettings.get_setting(setting))
-	else:
-		result["message"] = "Setting does not exist"
+	var result: Dictionary = GdhSettingReads.one(setting, _values)
+	result["ok"] = true
 	return result
-
-
-## Every setting under [prefix] with the type the engine registers for each, which is the half a
-## name hides: a family of levels can hold a setting that is a bool, and writing a level over it
-## looks like it worked.
-func _settings_under(prefix: String) -> Dictionary:
-	var found: Array[Dictionary] = []
-	for property: Dictionary in ProjectSettings.get_property_list():
-		var setting: String = str(property.get("name", ""))
-		if not setting.begins_with(prefix):
-			continue
-		var kind: int = GdhRead.as_int(property.get("type", TYPE_NIL), TYPE_NIL)
-		var described: Dictionary = {
-			"setting": setting,
-			"type": type_string(kind),
-			"value": _values.serialize_value(ProjectSettings.get_setting(setting)),
-		}
-		found.append(described)
-
-	found.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["setting"] < b["setting"])
-	return {"ok": true, "prefix": prefix, "count": found.size(), "settings": found}
 
 
 ## Takes the named settings from project.godot as it is on disk, after something else wrote it.

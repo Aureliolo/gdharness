@@ -13,7 +13,9 @@
  * commands addressed to it, so every command to a held game goes to the thread that stopped.
  */
 
+import { readFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
+import { join } from 'node:path';
 import {
   type DebuggerMessage,
   DebuggerStream,
@@ -22,6 +24,7 @@ import {
   MAIN_THREAD,
   type SentValue,
 } from './godot-variant.js';
+import { shippedAddonsDirectory } from './setup.js';
 
 /** One frame of a held game's stack, innermost first. */
 export interface DebugFrame {
@@ -49,6 +52,7 @@ export type DebugRequest =
   | { readonly op: 'resume'; readonly how: 'continue' | 'next' | 'step' | 'out' }
   | { readonly op: 'stack' }
   | { readonly op: 'variables'; readonly frame: number }
+  | { readonly op: 'evaluate'; readonly frame: number; readonly expression: string }
   | { readonly op: 'output' }
   | { readonly op: 'state' };
 
@@ -70,13 +74,39 @@ export const PAUSE_MS = 30_000;
 /** How long a step waits for the game to stop again, as the editor's adapter is given. */
 export const STEP_MS = 10_000;
 /**
- * How long a pause that stopped in the runtime addon steps on looking for a line of the game's own
- * script. A frame of the addon is a few dozen lines, so a game with any script of its own each frame
- * gets there well inside it, and one with none would otherwise be stepped through frame after frame.
+ * How many of the runtime addon's frames a pause that stopped in it goes through looking for a line
+ * of the game's own script. Counted in frames rather than time: stepping a frame through a line at a
+ * time took under a second here and over five on a macOS runner.
  */
-const ADDON_STEP_MS = 5000;
+const ADDON_FRAMES = 5;
+/**
+ * How many lines of the runtime addon outside its _process are stepped through before giving up,
+ * which nothing it runs comes near: it has no other per-frame code.
+ */
+const ADDON_LINES = 200;
 /** Where setup installs the runtime addon, whose scripts run in the game on gdharness's behalf. */
 export const RUNTIME_ADDON = 'res://addons/gdharness_runtime/';
+const RUNTIME_AUTOLOAD = `${RUNTIME_ADDON}runtime_autoload.gd`;
+let frameEnd: number | null = null;
+
+/**
+ * The line of the runtime autoload's _notification, the last it runs in a frame, read off the shipped
+ * copy: a game is started only on this release's addon, so that is the copy it runs.
+ */
+function frameEndLine(): number {
+  if (frameEnd === null) {
+    const lines = readFileSync(
+      join(shippedAddonsDirectory(), 'gdharness_runtime', 'runtime_autoload.gd'),
+      'utf8',
+    ).split('\n');
+    const declared = lines.findIndex((line) => line.startsWith('func _notification('));
+    if (declared === -1) {
+      throw new Error(`The shipped ${RUNTIME_AUTOLOAD} declares no _notification.`);
+    }
+    frameEnd = declared + 2;
+  }
+  return frameEnd;
+}
 /** How long a read of a held game waits for its answer, which comes from the same thread at once. */
 export const READ_MS = 5000;
 /** The messages that answer a command, which wait in the inbox when no request is reading yet. */
@@ -86,6 +116,8 @@ const REPLIES: ReadonlySet<string> = new Set([
   'stack_dump',
   'stack_frame_vars',
   'stack_frame_var',
+  'evaluation_return',
+  'scene:inspect_object',
 ]);
 /** The most unread replies kept, which a frame of a few thousand globals stays under. */
 const INBOX_KEPT = 10_000;
@@ -176,6 +208,14 @@ export function shownValue(value: GodotValue, typeHint = ''): string {
     return `<${typeHint === '' ? 'Object' : typeHint}#${String(value.values[0])}>`;
   }
   return `${value.kind}(${value.values.join(', ')})`;
+}
+
+/** The type of a value the game sent: its class when it named one, else its Variant type. */
+function typeNamed(type: GodotValue | undefined, hint: GodotValue | undefined): string {
+  if (typeof hint === 'string' && hint !== '') {
+    return hint;
+  }
+  return typeof type === 'number' ? (TYPE_NAMES[type] ?? String(type)) : 'Variant';
 }
 
 /** A held game's stack from a `stack_dump`: its size, then file, line and function per frame. */
@@ -466,7 +506,7 @@ export class GameDebugger {
           [request.script, request.line, request.set],
           this.held?.thread ?? MAIN_THREAD,
         );
-        return { sent: true };
+        return { sent: true, taken: await this.taken() };
       case 'pause':
         return await this.pause();
       case 'resume':
@@ -488,6 +528,8 @@ export class GameDebugger {
       }
       case 'variables':
         return await this.variables(request.frame);
+      case 'evaluate':
+        return await this.evaluate(request.frame, request.expression);
       default:
         return { refused: `Nothing here answers ${JSON.stringify(request)}.` };
     }
@@ -561,40 +603,70 @@ export class GameDebugger {
     }
     // The runtime addon is an autoload, so its _process runs first in every frame, and a pause taken
     // every 2048 lines falls wherever they do: an idle game stopped in gdharness's code, not its own.
-    const frames = await this.pastTheAddon();
-    if (frames === 'lost') {
+    const past = await this.pastTheAddon();
+    if (past === 'lost') {
       return {
         paused: false,
-        note: `The game stopped in gdharness's runtime addon and was stepped on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs; debug_state stack reads it then.`,
+        note: `The game stopped in gdharness's runtime addon and was let go on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs; debug_state stack reads it then.`,
       };
     }
     this.stoppedBy('Paused');
-    const stack = frames ?? [];
+    const stack = past.frames ?? [];
     return {
       paused: true,
       held: this.heldState(),
       stack,
-      ...(stack[0]?.script.startsWith(RUNTIME_ADDON) === true
+      ...(past.gaveUp === 'frames'
         ? {
-            note: `The game is held in gdharness's runtime addon, whose _process runs first in every frame: ${ADDON_STEP_MS / 1000}s of stepping reached no line of the game's own script, so it runs none from frame to frame. A breakpoint in the game's script stops it there.`,
+            note: `The game is held in gdharness's runtime addon, whose _process runs first in every frame: ${ADDON_FRAMES} frames went by without a line of the game's own script, so it runs none from frame to frame. A breakpoint in the game's script stops it there.`,
           }
-        : {}),
+        : past.gaveUp === 'lines'
+          ? {
+              note: `The game is held in gdharness's runtime addon, which ran ${ADDON_LINES} lines outside its _process without reaching a line of the game's own script. debug_control step_over goes on from here, and a breakpoint in the game's script stops it there.`,
+            }
+          : {}),
     };
   }
 
   /**
-   * The held game's stack, stepped on into while its top frame is gdharness's runtime addon, for at
-   * most {@link ADDON_STEP_MS}; `lost` when a step did not stop again.
+   * The held game's stack, taken on while its top frame is gdharness's runtime addon; `lost` when the
+   * game did not stop again, and `gaveUp` naming the budget that ran out when it is still there.
+   *
+   * A stop inside the autoload's _process is let go to a breakpoint on its _notification, the last
+   * line it runs in the frame, and stepped once from there into whatever runs next. Stepping the
+   * frame a line at a time costs two round trips for each of a few dozen lines. What the game runs
+   * inside that _process, a call a caller queued, is passed over unless a breakpoint holds it.
    */
-  private async pastTheAddon(): Promise<DebugFrame[] | null | 'lost'> {
+  private async pastTheAddon(
+    until?: number,
+  ): Promise<
+    { readonly frames: DebugFrame[] | null; readonly gaveUp?: 'frames' | 'lines' | 'time' } | 'lost'
+  > {
     let frames = await this.stack();
-    const stepping = Date.now();
-    while (
-      frames !== null &&
-      this.held !== null &&
-      (frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false) &&
-      Date.now() - stepping < ADDON_STEP_MS
-    ) {
+    let framesLeft = ADDON_FRAMES;
+    let linesLeft = ADDON_LINES;
+    while (frames !== null && this.held !== null && (frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false)) {
+      if (until !== undefined && Date.now() >= until) {
+        return { frames, gaveUp: 'time' };
+      }
+      if (frames.some((frame) => frame.script === RUNTIME_AUTOLOAD && frame.name === '_process')) {
+        if (until === undefined && framesLeft === 0) {
+          return { frames, gaveUp: 'frames' };
+        }
+        framesLeft -= 1;
+        // Where it stops is looked at again: the frame end is stepped from, and a stop short of it,
+        // on a breakpoint or an error in what the frame ran, is where the game is.
+        const reached = await this.toTheFrameEnd();
+        if (reached === 'lost') {
+          return 'lost';
+        }
+        frames = reached;
+        continue;
+      }
+      if (until === undefined && linesLeft === 0) {
+        return { frames, gaveUp: 'lines' };
+      }
+      linesLeft -= 1;
       this.forget('debug_enter');
       this.send('step', [], this.held.thread);
       if ((await this.next(GameDebugger.named('debug_enter'), STEP_MS)) === null) {
@@ -602,7 +674,27 @@ export class GameDebugger {
       }
       frames = await this.stack();
     }
-    return frames;
+    return { frames };
+  }
+
+  /** The stack where the held game next stops once let go towards the runtime autoload's frame end. */
+  private async toTheFrameEnd(): Promise<DebugFrame[] | null | 'lost'> {
+    const held = this.held;
+    if (held === null) {
+      return null;
+    }
+    const line = frameEndLine();
+    const theirs = this.breakpointLines.has(`${RUNTIME_AUTOLOAD}:${String(line)}`);
+    if (!theirs) {
+      this.send('breakpoint', [RUNTIME_AUTOLOAD, line, true], held.thread);
+    }
+    this.forget('debug_enter');
+    this.send('continue', [], held.thread);
+    const stopped = await this.next(GameDebugger.named('debug_enter'), STEP_MS);
+    if (!theirs) {
+      this.send('breakpoint', [RUNTIME_AUTOLOAD, line, false], this.held?.thread ?? MAIN_THREAD);
+    }
+    return stopped === null ? 'lost' : await this.stack();
   }
 
   /**
@@ -648,17 +740,19 @@ export class GameDebugger {
       };
     }
     // The step into a function's last line goes on into whatever runs next, which in an idle frame
-    // is the runtime addon's _process, the first thing every frame runs.
-    const frames = await this.pastTheAddon();
-    if (frames === 'lost') {
+    // is the runtime addon's _process, the first thing every frame runs. Taken on for as long as the
+    // step may wait rather than for a few frames, since the next line of the game's own script can
+    // be a timer's second away: five frames in, a step was answered with the addon's stack.
+    const past = await this.pastTheAddon(Date.now() + STEP_MS);
+    if (past === 'lost') {
       return {
         stepped: true,
         heldAgain: false,
-        note: `The step stopped in gdharness's runtime addon and was stepped on to reach the game's own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script the game runs; debug_state stack reads it then.`,
+        note: `The step stopped in gdharness's runtime addon and was let go on to reach the game's own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script the game runs; debug_state stack reads it then.`,
       };
     }
     this.stoppedBy('Stepped');
-    const stack = frames ?? [];
+    const stack = past.frames ?? [];
     const top = stack[0];
     // The engine names every stop Breakpoint, so a step that ran into one cannot be told from a step
     // that ended on its line; the line is what can be said.
@@ -668,6 +762,11 @@ export class GameDebugger {
       heldAgain: true,
       held: { ...this.heldState(), ...(onBreakpoint ? { onBreakpoint: true } : {}) },
       stack,
+      ...(past.gaveUp === undefined
+        ? {}
+        : {
+            note: `The step went on through gdharness's runtime addon, whose _process runs first in every frame, for ${STEP_MS / 1000}s without the game running a line of its own script, and is held in the addon. debug_control continue lets the game go, and a breakpoint in its script stops it there.`,
+          }),
     };
   }
 
@@ -680,13 +779,9 @@ export class GameDebugger {
     if (frames === null) {
       return { refused: `The game did not send its stack within ${READ_MS / 1000}s.` };
     }
-    if (frames.find((each) => each.id === frame) === undefined) {
-      return {
-        refused:
-          frames.length === 0
-            ? 'The game is held where no script runs, so it has no frames: debug_control step_over takes it to the next line of script.'
-            : `The stack has no frame ${frame}; its frames are ${frames.map((each) => each.id).join(', ')}.`,
-      };
+    const missing = GameDebugger.noFrame(frames, frame);
+    if (missing !== null) {
+      return missing;
     }
     this.forget('stack_frame_vars');
     this.forget('stack_frame_var');
@@ -710,19 +805,91 @@ export class GameDebugger {
         };
       }
       const [name, scope, type, value, hint] = one.data;
-      const into = scopes[typeof scope === 'number' ? scope : 0];
-      into?.variables.push({
-        name: typeof name === 'string' ? name : shownValue(name ?? null),
+      const named = typeof name === 'string' ? name : shownValue(name ?? null);
+      // The compiler's own locals, such as the position a for loop keeps as @counter_pos, which no
+      // source names and no expression can read.
+      if (named.startsWith('@')) {
+        continue;
+      }
+      scopes[typeof scope === 'number' ? scope : 0]?.variables.push({
+        name: named,
         value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
-        type:
-          typeof hint === 'string' && hint !== ''
-            ? hint
-            : typeof type === 'number'
-              ? (TYPE_NAMES[type] ?? String(type))
-              : 'Variant',
+        type: typeNamed(type, hint),
       });
     }
     return { held: this.heldState(), frame, scopes };
+  }
+
+  /**
+   * What [param expression] comes to at [param frame], worked out by the game itself with the
+   * frame's locals, the globals and every global class in scope and the frame's instance as self.
+   * Values come back as text, and an object as its class and id only, so this is what reads into
+   * one: `wave.spawned` where the frame's variables show `wave` as `<RefCounted#…>`.
+   */
+  private async evaluate(frame: number, expression: string): Promise<DebugAnswer> {
+    const held = this.held;
+    if (held === null) {
+      return this.notHeld();
+    }
+    // The engine evaluates on the frame's instance, and in a frame with none, a static function's,
+    // it leaves its debug loop instead of answering, which lets the game go on. A frame with an
+    // instance lists it as self among its members, so that is asked first.
+    const read = await this.variables(frame);
+    if (!Array.isArray(read['scopes'])) {
+      return read;
+    }
+    const members = (read['scopes'] as readonly DebugScope[]).find((scope) => scope.name === 'Members');
+    if (members?.variables.some((variable) => variable.name === 'self') !== true) {
+      return {
+        refused: `Frame ${frame} has no instance of its script to evaluate on, as a static function called on its class has none, and the engine lets the game go on rather than answer one there, so it was not asked. Evaluate in a frame below it, or read this one's locals with debug_state variables.`,
+      };
+    }
+    this.forget('evaluation_return');
+    this.send('evaluate', [expression, frame], held.thread);
+    const answered = await this.next(GameDebugger.named('evaluation_return'), READ_MS);
+    if (answered === null || !('data' in answered)) {
+      return {
+        refused: `The game worked out nothing for ${expression} within ${READ_MS / 1000}s. Ask again.`,
+      };
+    }
+    const [, , type, value, hint] = answered.data;
+    return {
+      held: this.heldState(),
+      frame,
+      expression,
+      value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
+      type: typeNamed(type, hint),
+      ...(value === null || value === undefined
+        ? {
+            note: 'null is also what an expression comes to when it does not parse or fails as it runs. The game prints why as an error, which editor_output reads, since its debugger hands errors over apart from the console debug_state output keeps.',
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * Whether the game has taken what was last sent it. A running game reads its debugger when it next
+   * polls, between frames or every 2048 lines of script, and answers nothing for a breakpoint, so a
+   * call sent at once ran a static function straight past the line it had been told. An inspection
+   * of no object is answered, and is read after everything sent before it on the same connection.
+   */
+  private async taken(): Promise<boolean> {
+    this.forget('scene:inspect_object');
+    this.send('scene:inspect_object', [0], this.held?.thread ?? MAIN_THREAD);
+    return (await this.next(GameDebugger.named('scene:inspect_object'), READ_MS)) !== null;
+  }
+
+  /** The refusal for [param frame] when [param frames] has no such frame, or null when it does. */
+  private static noFrame(frames: readonly DebugFrame[], frame: number): DebugAnswer | null {
+    if (frames.find((each) => each.id === frame) !== undefined) {
+      return null;
+    }
+    return {
+      refused:
+        frames.length === 0
+          ? 'The game is held where no script runs, so it has no frames: debug_control step_over takes it to the next line of script.'
+          : `The stack has no frame ${frame}; its frames are ${frames.map((each) => each.id).join(', ')}.`,
+    };
   }
 
   close(): void {
