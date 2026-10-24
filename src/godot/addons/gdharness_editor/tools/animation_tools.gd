@@ -9,6 +9,7 @@ const GdhHeadlessCheck = preload("../headless_check.gd")
 const GdhPropertyValues = preload("../property_values.gd")
 const GdhRead = preload("../reading.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhSceneUids = preload("../scene_uids.gd")
 const GdhSerialisation = preload("../serialisation.gd")
 
 const LOOP_MODES: Dictionary = {
@@ -99,7 +100,7 @@ func _finish(scene: GdhSceneFile, check: Callable, homes: Dictionary, answer: Di
 		return written
 	for file: Variant in homes:
 		var resource: Resource = homes[file]
-		var saving: Error = GdhSceneFile.save_keeping_uid(resource, str(file))
+		var saving: Error = GdhSceneUids.save_keeping_uid(resource, str(file))
 		if saving != OK:
 			return {"ok": false, "error": "Failed to save %s: %s" % [file, error_string(saving)]}
 		if Engine.is_editor_hint():

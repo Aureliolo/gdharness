@@ -60,7 +60,9 @@ project is a git worktree of one:
 
 `seconds` is the suite run whole, with its `before` and `after`; `cases` holds each function, with
 the rows of a parameterised one added together. A case never timed is taken to cost the median of
-the cases that have been, and 0.02 s when nothing has.
+the cases that have been, and 0.02 s when nothing has. Each run that writes the file leaves out a
+suite the project no longer has, deleted or renamed, and a case its suite no longer declares, with
+its seconds taken off the suite's.
 
 A suite costing more than 10 seconds, with more than one case, is dealt out case by case, and an
 engine holding part of it skips the rest; the run names each suite it dealt out that way. Units are

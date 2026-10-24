@@ -14,6 +14,7 @@ enum { UNCHANGED, REWRITTEN, DELETED }
 const GdhHeadlessCheck = preload("../headless_check.gd")
 const GdhRead = preload("../reading.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhSceneUids = preload("../scene_uids.gd")
 ## PROPERTY_HINT_NO_NODEPATH, which marks a property the editor's rename skips. It is not bound for
 ## scripts, and follows PROPERTY_HINT_ONESHOT in the engine's list.
 const HINT_NO_NODEPATH: int = PROPERTY_HINT_ONESHOT + 1
@@ -127,7 +128,7 @@ func put_back(scene_path: String, why: String = "") -> void:
 func answer() -> Dictionary:
 	for file: String in _homes:
 		var resource: Resource = _homes[file]
-		var saving: Error = GdhSceneFile.save_keeping_uid(resource, file)
+		var saving: Error = GdhSceneUids.save_keeping_uid(resource, file)
 		if saving == OK:
 			if Engine.is_editor_hint():
 				EditorInterface.get_resource_filesystem().update_file(file)
