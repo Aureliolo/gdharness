@@ -10,6 +10,7 @@ const GdhPropertyValues = preload("../property_values.gd")
 const GdhRead = preload("../reading.gd")
 const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhSceneUids = preload("../scene_uids.gd")
 const GdhSerialisation = preload("../serialisation.gd")
 
 # The minimal shader of a type: its declaration and the one function the engine calls for it.
@@ -97,7 +98,7 @@ func _load_theme(theme_path: String) -> Theme:
 ## script variable that is not exported. Both were answered as changed.
 func _save_checked(resource: Resource, path: String, names: Array, previous: Variant) -> String:
 	var carried: Dictionary = GdhHeadlessCheck.embedded_in(GdhHeadlessCheck.stored(resource).values(), {})
-	var saving: Error = GdhSceneFile.save_keeping_uid(resource, path)
+	var saving: Error = GdhSceneUids.save_keeping_uid(resource, path)
 	if saving != OK:
 		return "Failed to save %s: %s" % [path, error_string(saving)]
 	var unkept: String = _unkept_headless(
@@ -171,7 +172,7 @@ func _unkept_headless(
 		asked,
 		reached,
 		carried,
-		func() -> Error: return GdhSceneFile.save_keeping_uid(resource, path)
+		func() -> Error: return GdhSceneUids.save_keeping_uid(resource, path)
 	)
 
 
@@ -425,7 +426,7 @@ class GdhShaderErrors:
 func _save_theme(theme: Theme, theme_path: String, items: Array) -> String:
 	var previous: PackedByteArray = FileAccess.get_file_as_bytes(theme_path)
 	var carried: Dictionary = GdhHeadlessCheck.embedded_in(GdhHeadlessCheck.stored(theme).values(), {})
-	var saving: Error = GdhSceneFile.save_keeping_uid(theme, theme_path)
+	var saving: Error = GdhSceneUids.save_keeping_uid(theme, theme_path)
 	if saving != OK:
 		return "Failed to save %s: %s" % [theme_path, error_string(saving)]
 	var unkept: String = _unkept_headless(theme, theme_path, items, previous, carried)

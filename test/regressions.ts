@@ -395,9 +395,16 @@ import {
   textOf,
 } from './support/json-rpc.js';
 import { pixelPng, solidPng } from './support/png.js';
-import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
+import { listenOnAReservedPort, reservePort, ServerProcess, stopServersOf } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
-import { endEnginesLeft, leftBehindBy, reportUnswept, sweep, sweepingFor } from './support/sweep.js';
+import {
+  endEnginesLeft,
+  leftBehindBy,
+  lookUnder,
+  reportUnswept,
+  sweep,
+  sweepingFor,
+} from './support/sweep.js';
 
 /**
  * Runs [param run] with a bridge port held by something else, handed to it to configure a server
@@ -16073,6 +16080,23 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
       // frame.
       assert.ok(Math.abs(rate + 280) < 14, `frame ${one.frame} moved at ${rate} a second: ${slide.said}`);
     }
+    // The call that started the slide is noted beside the last reading before it ran, and the tween
+    // it made steps in that frame, so the first move is the very next reading. The watch, the wait
+    // and the collection are not calls on the game.
+    assert.deepEqual(
+      asArray(get(slide.parsed, 'calls')).map((one) => [
+        get(one, 'call'),
+        get(one, 'path'),
+        get(one, 'method'),
+      ]),
+      [['runtime_invoke call', '/root/Main', 'slide']],
+      slide.said,
+    );
+    assert.equal(
+      asNumber(get(slide.parsed, 'calls', 0, 'frame')) + 1,
+      moving[0]?.frame,
+      `the slide moves on the reading after the call: ${slide.said}`,
+    );
     const again = await recorded(slid);
     assert.match(
       again.said,
@@ -16093,8 +16117,28 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
         `Watch ${clocked} records /root/Main:clock, a property, and is collected with runtime_wait recorded`,
       ),
     );
-    const clock = changesOf((await recorded(clocked)).parsed);
+    const clockAnswer = await recorded(clocked);
+    const clock = changesOf(clockAnswer.parsed);
     assert.ok(clock.length >= 20, JSON.stringify(clock));
+    // Both sets came after the twenty frames waited, one after the other, and Engine is a path too.
+    const sets = asArray(get(clockAnswer.parsed, 'calls')).map((one) => ({
+      call: get(one, 'call'),
+      path: get(one, 'path'),
+      property: get(one, 'property'),
+      frame: asNumber(get(one, 'frame')),
+    }));
+    assert.deepEqual(
+      sets.map(({ call: made, path, property }) => [made, path, property]),
+      [
+        ['runtime_invoke set', '/root/Main', 'jolting'],
+        ['runtime_invoke set', 'Engine', 'time_scale'],
+      ],
+      clockAnswer.said,
+    );
+    assert.ok(
+      (sets[0]?.frame ?? 0) >= 20 && (sets[1]?.frame ?? 0) >= (sets[0]?.frame ?? Infinity),
+      clockAnswer.said,
+    );
     const atArming = asNumber(clock[0]?.value);
     for (const one of clock) {
       assert.ok(
@@ -46806,6 +46850,62 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
       undefined,
       `one axis of a property given is that property, not another: ${JSON.stringify(nudged)}`,
     );
+    for (const [answer, what] of [
+      [sized, 'an add to a file that loads as it reads'],
+      [filled, 'a set, whose own changes are under alsoChanged'],
+    ] as const) {
+      assert.equal(
+        get(answer, 'alsoSaved'),
+        undefined,
+        `${what} saves nothing else: ${JSON.stringify(answer)}`,
+      );
+    }
+
+    // A centred menu as a hand would write it (probe 183): anchors_preset gives it both grow
+    // directions as it loads, so a save names them on a node the call never touched, and a root
+    // Control written with no layout is saved with the one the engine gives it.
+    writeFileSync(
+      join(project, 'menu.tscn'),
+      '[gd_scene format=3]\n\n[node name="Main" type="Control"]\n\n' +
+        '[node name="Menu" type="VBoxContainer" parent="."]\nlayout_mode = 1\nanchors_preset = 8\n' +
+        'anchor_left = 0.5\nanchor_top = 0.5\nanchor_right = 0.5\nanchor_bottom = 0.5\n' +
+        'offset_left = -150.0\noffset_top = -80.0\noffset_right = 150.0\noffset_bottom = 80.0\n\n' +
+        '[node name="Title" type="Label" parent="Menu"]\nlayout_mode = 2\ntext = "Settings"\n',
+    );
+    const row = async (nodeName: string): Promise<unknown> =>
+      await call('scene_node', {
+        scenePath: 'res://menu.tscn',
+        op: 'add',
+        parentNodePath: 'Menu',
+        nodeType: 'HBoxContainer',
+        nodeName,
+      });
+    const first = await row('VolumeRow');
+    assert.equal(get(first, 'nodePath'), 'Menu/VolumeRow', JSON.stringify(first));
+    assert.deepEqual(
+      get(first, 'alsoSaved'),
+      [
+        { node: '.', property: 'layout_mode', saved: 3 },
+        { node: '.', property: 'anchors_preset', saved: 0 },
+        { node: 'Menu', property: 'grow_horizontal', saved: 2 },
+        { node: 'Menu', property: 'grow_vertical', saved: 2 },
+      ],
+      `the grow directions the preset gave the menu are named: ${JSON.stringify(first)}`,
+    );
+    const menu = readFileSync(join(project, 'menu.tscn'), 'utf8');
+    assert.match(
+      menu,
+      /type="Control"[^[]*layout_mode = 3\nanchors_preset = 0\n/,
+      'the file holds the root layout',
+    );
+    assert.match(menu, /parent="\."[^[]*grow_horizontal = 2\ngrow_vertical = 2\n/, 'and the grow directions');
+    const second = await row('SoundRow');
+    assert.equal(get(second, 'nodePath'), 'Menu/SoundRow', JSON.stringify(second));
+    assert.equal(
+      get(second, 'alsoSaved'),
+      undefined,
+      `once the file says them, a save names nothing else: ${JSON.stringify(second)}`,
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
@@ -58587,17 +58687,35 @@ async function main(): Promise<void> {
       }
     }
   };
-  // A regression that hangs fails by name rather than taking the leg's whole budget with it: on
-  // the 1.1.49 release commit one hung on the Windows engine leg until the job's 25 minutes ran
-  // out, and a job ended that way uploads no log, so nothing said which test it was. The slowest
-  // took 79s on the Windows leg that first printed the times, so eight minutes is room for a
-  // loaded runner rather than a limit anything meets; the variable shortens it to check the deadline.
-  const deadlineMs = Number(process.env['GDHARNESS_REGRESSION_DEADLINE_MS'] ?? 8 * 60_000);
+  // A regression that hangs fails by name rather than taking the leg's whole budget with it: a job
+  // its own limit ends uploads no log, so nothing says which test it was. The slowest took 142s on
+  // the Windows leg, so five minutes is room for a loaded runner rather than a limit anything meets;
+  // the variable shortens it to check the deadline.
+  const deadlineMs = Number(process.env['GDHARNESS_REGRESSION_DEADLINE_MS'] ?? 5 * 60_000);
+  // The time the whole run has, which CI sets below the job's limit. A deadline alone did not keep
+  // inside it: a part takes about twelve minutes of a twenty-minute job, so a test hanging for its
+  // full deadline and the tests after it ran into the limit, and the job ended with no log again.
+  const budget = process.env['GDHARNESS_REGRESSION_BUDGET_MS'];
+  const budgetMs = budget === undefined ? Number.POSITIVE_INFINITY : Number(budget);
+  if (!(budgetMs > 0)) {
+    console.error(
+      `GDHARNESS_REGRESSION_BUDGET_MS is ${String(budget)}; it takes the run's time in milliseconds.`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  const runEnds = Date.now() + budgetMs;
   const ranPast: string[] = [];
-  for (const test of chosen) {
+  const unreached: string[] = [];
+  for (const [index, test] of chosen.entries()) {
+    if (Date.now() >= runEnds) {
+      unreached.push(...chosen.slice(index).map((left) => left.name));
+      break;
+    }
     sweepingFor(test.name);
     let passed = true;
     const began = Date.now();
+    const allowedMs = Math.min(deadlineMs, runEnds - began);
     let deadline: NodeJS.Timeout | undefined;
     const running = Promise.resolve().then(() => test());
     // A test that settles after its deadline has nobody waiting on it any more.
@@ -58608,8 +58726,15 @@ async function main(): Promise<void> {
         new Promise<never>((_resolve, reject) => {
           deadline = setTimeout(() => {
             ranPast.push(test.name);
-            reject(new Error(`${test.name} was still running ${deadlineMs / 1000}s after it started`));
-          }, deadlineMs);
+            const took = `${(allowedMs / 1000).toFixed(1)}s after it started`;
+            reject(
+              new Error(
+                allowedMs < deadlineMs
+                  ? `${test.name} was still running when the run's ${budgetMs / 1000}s ran out, ${took}`
+                  : `${test.name} was still running ${took}`,
+              ),
+            );
+          }, allowedMs);
         }),
       ]);
     } catch (error) {
@@ -58632,6 +58757,10 @@ async function main(): Promise<void> {
     if (took >= 5_000) {
       console.log(`${test.name} took ${(took / 1000).toFixed(1)}s`);
     }
+    if (ranPast.includes(test.name)) {
+      // Still running, it never reached its own stops and sweeps.
+      lookUnder(test.name, await stopServersOf(test.name));
+    }
     if (!passed || leftBehindBy(test.name)) {
       leftRunning(await endEnginesLeft(test.name));
     }
@@ -58641,10 +58770,20 @@ async function main(): Promise<void> {
 
   await reportUnswept();
 
-  if (failed.length > 0) {
-    console.error(`${failed.length} of ${chosen.length} regressions failed:`);
-    for (const name of failed) {
-      console.error(`  ${name}`);
+  if (failed.length > 0 || unreached.length > 0) {
+    if (failed.length > 0) {
+      console.error(`${failed.length} of ${chosen.length} regressions failed:`);
+      for (const name of failed) {
+        console.error(`  ${name}`);
+      }
+    }
+    if (unreached.length > 0) {
+      console.error(
+        `${unreached.length} of ${chosen.length} regressions were not reached before the run's ${budgetMs / 1000}s ran out:`,
+      );
+      for (const name of unreached) {
+        console.error(`  ${name}`);
+      }
     }
     process.exitCode = 1;
     // A test past its deadline is still running and holds whatever it opened, which would keep
