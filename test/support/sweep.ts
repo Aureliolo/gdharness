@@ -35,6 +35,21 @@ export function sweepingFor(fixture: string | null): void {
   during = fixture;
 }
 
+/** The fixture running now, or null between fixtures. */
+export function fixtureNow(): string | null {
+  return during;
+}
+
+/**
+ * Paths [param fixture] ran engines under and never swept, for `endEnginesLeft` to look under too.
+ * Nothing is removed: a project a fixture names can be one the repository holds.
+ */
+export function lookUnder(fixture: string, paths: readonly string[]): void {
+  for (const path of paths) {
+    swept.push({ path, during: fixture });
+  }
+}
+
 export function sweep(...paths: (string | null | undefined)[]): void {
   for (const path of paths) {
     if (path) {

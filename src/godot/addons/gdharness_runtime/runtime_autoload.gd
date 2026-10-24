@@ -695,6 +695,7 @@ func _execute_command(command: String, params: Dictionary) -> Dictionary:
 			"type": "error",
 			"message": "Unknown command: %s. Commands: %s" % [command, ", ".join(_commands.keys())]
 		}
+	_waits.saw_call(command, params)
 	var answer: Variant = await handler.call(params)
 	return answer
 

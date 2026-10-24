@@ -394,10 +394,18 @@ import {
   parseTextContent,
   textOf,
 } from './support/json-rpc.js';
+import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
 import { pixelPng, solidPng } from './support/png.js';
-import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
+import { listenOnAReservedPort, reservePort, ServerProcess, stopServersOf } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
-import { endEnginesLeft, leftBehindBy, reportUnswept, sweep, sweepingFor } from './support/sweep.js';
+import {
+  endEnginesLeft,
+  leftBehindBy,
+  lookUnder,
+  reportUnswept,
+  sweep,
+  sweepingFor,
+} from './support/sweep.js';
 
 /**
  * Runs [param run] with a bridge port held by something else, handed to it to configure a server
@@ -10884,6 +10892,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     process.env[cachePathVariable] = inheritedCachePath;
   }
   let pid = 0;
+  const met = new MetProcesses();
   let socket: WebSocket | null = null;
   const sceneCreate = async (): Promise<JsonRpcMessage> =>
     await server.request(
@@ -10909,6 +10918,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
       }),
     );
     pid = asNumber(get(opened, 'pid'), 'pid');
+    await met.meet(pid);
     assert.ok(alive(pid), `the fixture needs the opened editor running: ${JSON.stringify(opened)}`);
     // The note beside its console says when it began, which tells a server reading that console
     // after the editor has gone the editor from a later process given its pid. Here because this
@@ -11033,15 +11043,11 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     );
     assert.equal(get(closed, 'beforeConnecting'), true, JSON.stringify(closed));
     assert.equal(get(closed, 'editorPid'), pid, JSON.stringify(closed));
-    assert.equal(alive(pid), false, 'and its process is gone');
+    assert.equal(await met.runs(pid), false, 'and its process is gone');
   } finally {
     socket?.close();
-    if (pid > 0 && alive(pid)) {
-      process.kill(pid);
-    }
-    for (let waited = 0; pid > 0 && waited < 10_000 && alive(pid); waited += 100) {
-      await delay(100);
-    }
+    await met.end();
+    await met.gone(pid, 10_000);
     await server.stop();
     sweep(project);
   }
@@ -11464,8 +11470,8 @@ function isAlive(pid: number): boolean {
  */
 async function testALaunchIsOutsideTheServersTree(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-outside-'));
-  let launched = 0;
-  let standInPid = 0;
+  const met = new MetProcesses();
+  let standIn: ReturnType<typeof spawnHidden> | null = null;
   try {
     const pidFile = join(scratch, 'launched.txt');
     const server = join(scratch, 'server.mjs');
@@ -11486,13 +11492,13 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
         `setInterval(() => {}, 1000);`,
       ].join('\n'),
     );
-    const standIn = spawnHidden(process.execPath, [server], { stdio: 'ignore' });
-    standInPid = standIn.pid ?? 0;
+    standIn = spawnHidden(process.execPath, [server], { stdio: 'ignore' });
     for (let waited = 0; waited < 20_000 && !existsSync(pidFile); waited += 100) {
       await delay(100);
     }
     const said: unknown = JSON.parse(readFileSync(pidFile, 'utf8'));
-    launched = asNumber(get(said, 'pid'));
+    const launched = asNumber(get(said, 'pid'));
+    await met.meet(launched);
     assert.ok(isAlive(launched), `the launch should be running: ${JSON.stringify(said)}`);
 
     const tree = await processTree();
@@ -11509,15 +11515,12 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
     await killTheTree(standIn.pid);
     await delay(1_000);
     assert.equal(isAlive(standIn.pid), false, 'the tree kill should have ended the stand-in server');
-    assert.ok(isAlive(launched), `and left the launch running: pid ${launched}`);
+    assert.equal(await met.runs(launched), true, `and left the launch running: pid ${launched}`);
   } finally {
     // Both, whichever assertion failed: a stand-in server left running keeps this runner from
-    // exiting at all.
-    for (const pid of [launched, standInPid]) {
-      if (pid > 0 && isAlive(pid)) {
-        process.kill(pid);
-      }
-    }
+    // exiting at all. The stand-in through the handle held on it, which no later process can share.
+    standIn?.kill();
+    await met.end();
     sweep(scratch);
   }
 }
@@ -11530,11 +11533,11 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
  * that the keeper had ended before it said anything. The note's path is made a directory, which no
  * write can replace, and a stand-in is launched through the launcher and keeper the server uses.
  */
-function testAKeeperHoldsARunWhoseNoteItCannotWrite(): void {
+async function testAKeeperHoldsARunWhoseNoteItCannotWrite(): Promise<void> {
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unwritable-note-'));
   const runtime = join(scratch, 'runtime');
   const project = join(scratch, 'project');
-  let launched = 0;
+  const met = new MetProcesses();
   try {
     mkdirSync(project);
     mkdirSync(runRecordPath(project, runtime), { recursive: true });
@@ -11565,13 +11568,11 @@ function testAKeeperHoldsARunWhoseNoteItCannotWrite(): void {
       typeof pid === 'number',
       `the launch answers with the run's pid: ${JSON.stringify(said)} ${ran.stdout} ${ran.stderr}`,
     );
-    launched = pid;
+    await met.meet(pid);
     assert.ok(isAlive(pid), `and the run is going: pid ${String(pid)}`);
     assert.ok(statSync(runRecordPath(project, runtime)).isDirectory(), 'with no note written in its place');
   } finally {
-    if (launched > 0 && isAlive(launched)) {
-      process.kill(launched);
-    }
+    await met.end();
     sweep(scratch);
   }
 }
@@ -12169,6 +12170,7 @@ async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
     env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_TEST_SECRET: secret },
   });
   let game = 0;
+  const met = new MetProcesses();
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -12204,6 +12206,7 @@ async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
     );
     const answer = parseTextContent(started);
     game = asNumber(get(answer, 'pid'));
+    await met.meet(game);
     const transcript = text(get(answer, 'transcript'));
 
     let printed = '';
@@ -12251,9 +12254,7 @@ async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
       `the keeper's command line should carry no encoded payload: ${keeper.command.slice(0, 300)}`,
     );
   } finally {
-    if (game > 0 && isAlive(game)) {
-      process.kill(game);
-    }
+    await met.end();
     await server.stop();
     sweep(project);
   }
@@ -12590,7 +12591,7 @@ async function testAnotherProjectsRunLeavesOursStoppable(): Promise<void> {
   const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
   const first = new ServerProcess({ env });
   let second: ServerProcess | null = null;
-  const games: number[] = [];
+  const games = new MetProcesses();
   const began = Date.now();
   const theirNote = JSON.stringify({
     pid: process.pid,
@@ -12616,7 +12617,7 @@ async function testAnotherProjectsRunLeavesOursStoppable(): Promise<void> {
       ENGINE_CALL_TIMEOUT_MS,
     );
     const pid = asNumber(get(parseTextContent(started), 'pid'));
-    games.push(pid);
+    await games.meet(pid);
     assert.ok(isAlive(pid), `the run should be going: ${textOf(started)}`);
     return pid;
   };
@@ -12687,11 +12688,7 @@ async function testAnotherProjectsRunLeavesOursStoppable(): Promise<void> {
       "and the other project's note is left as it was",
     );
   } finally {
-    for (const pid of games) {
-      if (isAlive(pid)) {
-        process.kill(pid);
-      }
-    }
+    await games.end();
     await first.stop().catch(() => undefined);
     await second?.stop();
     sweep(project);
@@ -12734,6 +12731,7 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
   const first = new ServerProcess({ env: { ...env, GDHARNESS_EDITOR_PID: String(bystander.pid ?? 0) } });
   let second: ServerProcess | null = null;
   let game = 0;
+  const met = new MetProcesses();
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -12773,6 +12771,7 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
     // server launched, and under the Windows console build that is a wrapper whose child is the
     // engine: taken from the run, this case expected a number the next server has no way to know.
     game = asNumber(get(startedAnswer, 'runtime', 'pid'));
+    await met.meet(game);
     const announced: unknown = JSON.parse(readFileSync(join(runtime, `runtime-${game}.json`), 'utf8'));
     assert.equal(
       get(announced, 'pid'),
@@ -12859,15 +12858,10 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
       /identified by its announcement and by its command line/,
       `and says what identified it: ${textOf(named)}`,
     );
-    for (let waited = 0; waited < 10_000 && isAlive(game); waited += 250) {
-      await delay(250);
-    }
-    assert.equal(isAlive(game), false, `pid ${game} should be gone`);
+    assert.equal(await met.gone(game, 10_000), true, `pid ${game} should be gone`);
   } finally {
     bystander.kill();
-    if (game > 0 && isAlive(game)) {
-      process.kill(game);
-    }
+    await met.end();
     await first.stop().catch(() => undefined);
     await second?.stop();
     sweep(project);
@@ -12901,6 +12895,7 @@ async function testARunOutlivesItsServersTree(): Promise<void> {
   const first = new ServerProcess({ env });
   let second: ServerProcess | null = null;
   let game = 0;
+  const met = new MetProcesses();
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -12926,6 +12921,7 @@ async function testARunOutlivesItsServersTree(): Promise<void> {
       ENGINE_CALL_TIMEOUT_MS,
     );
     game = asNumber(get(parseTextContent(started), 'pid'));
+    await met.meet(game);
     assert.ok(isAlive(game), `the run should be going: ${textOf(started)}`);
 
     const serverPid = first.child.pid;
@@ -12956,9 +12952,7 @@ async function testARunOutlivesItsServersTree(): Promise<void> {
       `and the next server should read the code its keeper wrote: ${said}`,
     );
   } finally {
-    if (game > 0 && isAlive(game)) {
-      process.kill(game);
-    }
+    await met.end();
     await first.stop().catch(() => undefined);
     await second?.stop();
     sweep(project);
@@ -13055,7 +13049,9 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
   const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
   const first = new ServerProcess({ env });
   let second: ServerProcess | null = null;
-  const successors: number[] = [];
+  const met = new MetProcesses();
+  const meet = (pid: number): Promise<void> => met.meet(pid);
+  const runs = (pid: number): Promise<boolean | 'unsaid'> => met.runs(pid);
   const decoyProject = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-decoy-'));
   let decoy: ReturnType<typeof spawnHidden> | null = null;
   try {
@@ -13130,7 +13126,7 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
       assert.ok(existsSync(mark), `the game should have restarted itself: ${JSON.stringify(started)}`);
       await delay(250);
       const successor = Number(readFileSync(mark, 'utf8'));
-      successors.push(successor);
+      await meet(successor);
       assert.notEqual(successor, firstPid, 'into another process');
       return { first: firstPid, successor };
     };
@@ -13161,6 +13157,9 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
       detached: true,
       stdio: 'ignore',
     });
+    if (decoy.pid !== undefined) {
+      await meet(decoy.pid);
+    }
     const one = await start(first);
     const going = await output(first);
     // What the keeper's search met, read once it has answered, for a run that was not followed: the
@@ -13250,10 +13249,14 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
       `the stop ends the successor: ${JSON.stringify(stopped)}`,
     );
     assert.notEqual(get(stopped, 'exitedBeforeStop'), true, JSON.stringify(stopped));
-    for (let waited = 0; waited < 10_000 && isAlive(one.successor); waited += 250) {
+    for (let waited = 0; waited < 10_000 && (await runs(one.successor)) !== false; waited += 250) {
       await delay(250);
     }
-    assert.equal(isAlive(one.successor), false, `pid ${String(one.successor)} should be gone after the stop`);
+    assert.equal(
+      await runs(one.successor),
+      false,
+      `pid ${String(one.successor)} should be gone after the stop`,
+    );
 
     // An end of the successor's own is the run's end.
     // Once the run is in the successor: a successor gone before the keeper's listing saw it is not
@@ -13272,7 +13275,7 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
       ended = await output(second);
     }
     assert.equal(get(ended.answer, 'running'), false, `the run ends with its successor: ${ended.said}`);
-    assert.equal(isAlive(two.successor), false, ended.said);
+    assert.equal(await runs(two.successor), false, ended.said);
     if (process.platform === 'win32') {
       assert.equal(get(ended.answer, 'exitCode'), 5, `with the successor's own exit code: ${ended.said}`);
       assert.match(
@@ -13320,6 +13323,12 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     );
     assert.equal(get(closing, 'runtime', 'listening'), true, JSON.stringify(closing));
     const closedFirst = asNumber(get(closing, 'pid'));
+    await meet(closedFirst);
+    assert.equal(
+      await runs(closedFirst),
+      true,
+      `pid ${String(closedFirst)} is met with its start while it runs`,
+    );
     const closed = parseTextContent(
       await second.request(
         'tools/call',
@@ -13330,28 +13339,32 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     // The keeper can end the successor before its script has run, so its mark is not required;
     // a successor that lived long enough to write one must be the process the stop ended.
     const closedSuccessor = asNumber(get(closed, 'endedPid'));
-    successors.push(closedSuccessor);
+    await meet(closedSuccessor);
     assert.notEqual(
       closedSuccessor,
       closedFirst,
       `the stop ended the process the close restarted it into: ${JSON.stringify(closed)}`,
     );
-    assert.equal(isAlive(closedFirst), false, JSON.stringify(closed));
+    assert.equal(
+      await runs(closedFirst),
+      false,
+      `the first process is gone once the stop answers: ${JSON.stringify(closed)}`,
+    );
     assert.equal(get(closed, 'stopped'), true, JSON.stringify(closed));
-    for (let waited = 0; waited < 10_000 && isAlive(closedSuccessor); waited += 250) {
+    for (let waited = 0; waited < 10_000 && (await runs(closedSuccessor)) !== false; waited += 250) {
       await delay(250);
     }
-    assert.equal(isAlive(closedSuccessor), false, `pid ${String(closedSuccessor)} should be gone`);
+    assert.equal(await runs(closedSuccessor), false, `pid ${String(closedSuccessor)} should be gone`);
     await delay(5000);
     if (existsSync(mark)) {
       const marked = Number(readFileSync(mark, 'utf8'));
-      successors.push(marked);
+      await meet(marked);
       assert.equal(
         marked,
         closedSuccessor,
         `the successor that ran is the one ended: ${JSON.stringify(closed)}`,
       );
-      assert.equal(isAlive(marked), false, `pid ${String(marked)} should be gone`);
+      assert.equal(await runs(marked), false, `pid ${String(marked)} should be gone`);
     }
     assert.match(
       text(get(closed, 'note')),
@@ -13385,10 +13398,10 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     await delay(3_000);
     const restartedAnyway = existsSync(mark) ? Number(readFileSync(mark, 'utf8')) : null;
     if (restartedAnyway !== null) {
-      successors.push(restartedAnyway);
+      await meet(restartedAnyway);
     }
     assert.ok(
-      restartedAnyway === null || !isAlive(restartedAnyway),
+      restartedAnyway === null || (await runs(restartedAnyway)) === false,
       `nothing of the run is left after the stop: ${JSON.stringify(killed)}`,
     );
 
@@ -13414,7 +13427,7 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     }
     assert.ok(existsSync(workerMark), `the game started its worker: ${JSON.stringify(working)}`);
     const worker = Number(readFileSync(workerMark, 'utf8'));
-    successors.push(worker);
+    await meet(worker);
     let left = await output(second);
     for (let waited = 0; waited < 30_000 && get(left.answer, 'running') !== false; waited += 500) {
       await delay(500);
@@ -13425,16 +13438,9 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
       [false, worked, undefined],
       `the run ends with the game, not in its worker: ${left.said}`,
     );
-    assert.ok(isAlive(worker), `and nothing ended the worker: ${left.said}`);
+    assert.equal(await runs(worker), true, `and nothing ended the worker: ${left.said}`);
   } finally {
-    for (const pid of successors) {
-      if (isAlive(pid)) {
-        process.kill(pid);
-      }
-    }
-    if (decoy?.pid !== undefined && isAlive(decoy.pid)) {
-      process.kill(decoy.pid);
-    }
+    await met.end();
     sweep(decoyProject);
     await first.stop().catch(() => undefined);
     await second?.stop();
@@ -15190,7 +15196,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-through-keeper-rt-'));
   const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
   const servers: ServerProcess[] = [];
-  const games: number[] = [];
+  const games = new MetProcesses();
   const serve = async (extra: Record<string, string> = {}): Promise<ServerProcess> => {
     const server = new ServerProcess({ env: { ...env, ...extra } });
     servers.push(server);
@@ -15209,7 +15215,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     const answer = parseTextContent(started);
     assert.equal(get(answer, 'runtime', 'listening'), true, `the game should announce: ${textOf(started)}`);
     const game = asNumber(get(answer, 'runtime', 'pid'));
-    games.push(game);
+    await games.meet(game);
     return game;
   };
   const note = (): Record<string, unknown> =>
@@ -15244,10 +15250,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     // And when, from the keeper's note or the stop seen landing, whichever way it was ended.
     const ended = Date.parse(String(get(parseTextContent(read), 'endedAt')));
     assert.ok(ended >= asked && ended <= Date.now(), `the run says when the stop ended it: ${output}`);
-    for (let waited = 0; waited < 10_000 && isAlive(game); waited += 250) {
-      await delay(250);
-    }
-    assert.equal(isAlive(game), false, `pid ${game} should be gone`);
+    assert.equal(await games.gone(game, 10_000), true, `pid ${game} should be gone`);
   };
   const replace = async (server: ServerProcess): Promise<void> => {
     const pid = server.child.pid;
@@ -15343,7 +15346,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
       `the start says how it ended the run before it: ${JSON.stringify(replacing)}`,
     );
     const replacement = asNumber(get(replacing, 'runtime', 'pid'));
-    games.push(replacement);
+    await games.meet(replacement);
     await stop(third, replacement, `gdharness ended pid ${replacement} through the keeper holding it.`);
 
     // A keeper answering that the game has gone while it runs: the stop waits on the process, so the
@@ -15373,7 +15376,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
         `a game still running is not stopped: ${JSON.stringify(answered)}`,
       );
       assert.equal(get(answered, 'stillGoing'), misled, JSON.stringify(answered));
-      assert.ok(isAlive(misled), `pid ${misled} is still running`);
+      assert.equal(await games.runs(misled), true, `pid ${misled} is still running`);
       process.kill(misled);
     } finally {
       liar.close();
@@ -15385,11 +15388,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
       await stop(fifth, windowed, `gdharness ended pid ${windowed} through the keeper holding it.`);
     }
   } finally {
-    for (const game of games) {
-      if (isAlive(game)) {
-        process.kill(game);
-      }
-    }
+    await games.end();
     for (const server of servers) {
       await server.stop().catch(() => undefined);
     }
@@ -15430,7 +15429,7 @@ async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
       GDHARNESS_CLOSE_WAIT_MS: '3000',
     },
   });
-  const games: number[] = [];
+  const games = new MetProcesses();
   const call = async (args: Record<string, unknown>): Promise<unknown> => {
     const response = await server.request(
       'tools/call',
@@ -15454,7 +15453,7 @@ async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
       true,
       `the game should announce: ${JSON.stringify(started)}`,
     );
-    games.push(asNumber(get(started, 'runtime', 'pid')));
+    await games.meet(asNumber(get(started, 'runtime', 'pid')));
     // The runtime is an autoload, in the tree before the main scene, so it can announce before the
     // scene's _ready has run. A stop that kills at once then met a game that had not reached it,
     // and its notes read [] on a loaded Windows runner. Each step is about a game that is running.
@@ -15606,11 +15605,7 @@ async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
     const last = await call({ op: 'stop' });
     assert.equal(get(last, 'endedThrough'), 'close', JSON.stringify(last));
   } finally {
-    for (const game of games) {
-      if (isAlive(game)) {
-        process.kill(game);
-      }
-    }
+    await games.end();
     await server.stop().catch(() => undefined);
     sweep(project);
     sweep(runtime);
@@ -16073,6 +16068,23 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
       // frame.
       assert.ok(Math.abs(rate + 280) < 14, `frame ${one.frame} moved at ${rate} a second: ${slide.said}`);
     }
+    // The call that started the slide is noted beside the last reading before it ran, and the tween
+    // it made steps in that frame, so the first move is the very next reading. The watch, the wait
+    // and the collection are not calls on the game.
+    assert.deepEqual(
+      asArray(get(slide.parsed, 'calls')).map((one) => [
+        get(one, 'call'),
+        get(one, 'path'),
+        get(one, 'method'),
+      ]),
+      [['runtime_invoke call', '/root/Main', 'slide']],
+      slide.said,
+    );
+    assert.equal(
+      asNumber(get(slide.parsed, 'calls', 0, 'frame')) + 1,
+      moving[0]?.frame,
+      `the slide moves on the reading after the call: ${slide.said}`,
+    );
     const again = await recorded(slid);
     assert.match(
       again.said,
@@ -16093,8 +16105,28 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
         `Watch ${clocked} records /root/Main:clock, a property, and is collected with runtime_wait recorded`,
       ),
     );
-    const clock = changesOf((await recorded(clocked)).parsed);
+    const clockAnswer = await recorded(clocked);
+    const clock = changesOf(clockAnswer.parsed);
     assert.ok(clock.length >= 20, JSON.stringify(clock));
+    // Both sets came after the twenty frames waited, one after the other, and Engine is a path too.
+    const sets = asArray(get(clockAnswer.parsed, 'calls')).map((one) => ({
+      call: get(one, 'call'),
+      path: get(one, 'path'),
+      property: get(one, 'property'),
+      frame: asNumber(get(one, 'frame')),
+    }));
+    assert.deepEqual(
+      sets.map(({ call: made, path, property }) => [made, path, property]),
+      [
+        ['runtime_invoke set', '/root/Main', 'jolting'],
+        ['runtime_invoke set', 'Engine', 'time_scale'],
+      ],
+      clockAnswer.said,
+    );
+    assert.ok(
+      (sets[0]?.frame ?? 0) >= 20 && (sets[1]?.frame ?? 0) >= (sets[0]?.frame ?? Infinity),
+      clockAnswer.said,
+    );
     const atArming = asNumber(clock[0]?.value);
     for (const one of clock) {
       assert.ok(
@@ -16490,7 +16522,7 @@ async function testAPointerOnTheHiddenDesktopIsNoted(): Promise<void> {
   const server = new ServerProcess({
     env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
   });
-  const games: number[] = [];
+  const games = new MetProcesses();
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -16547,7 +16579,7 @@ async function testAPointerOnTheHiddenDesktopIsNoted(): Promise<void> {
         ),
       );
       assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
-      games.push(asNumber(get(started, 'runtime', 'pid')));
+      await games.meet(asNumber(get(started, 'runtime', 'pid')));
       const answers = await pointed();
       await stopItsRun(server);
       return answers;
@@ -16587,11 +16619,7 @@ async function testAPointerOnTheHiddenDesktopIsNoted(): Promise<void> {
       }
     }
   } finally {
-    for (const game of games) {
-      if (isAlive(game)) {
-        process.kill(game);
-      }
-    }
+    await games.end();
     await server.stop();
     sweep(project);
     sweep(runtime);
@@ -16780,6 +16808,7 @@ async function testAGameSaysWhichRuntimeAddonItLoaded(): Promise<void> {
     env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
   });
   let game = 0;
+  const met = new MetProcesses();
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -16804,6 +16833,7 @@ async function testAGameSaysWhichRuntimeAddonItLoaded(): Promise<void> {
       `the game should have announced its runtime: ${textOf(started)}`,
     );
     game = asNumber(get(parseTextContent(started), 'runtime', 'pid'));
+    await met.meet(game);
     const announced: unknown = JSON.parse(readFileSync(join(runtime, `runtime-${game}.json`), 'utf8'));
     assert.equal(get(announced, 'addon_version'), SERVER_VERSION, JSON.stringify(announced));
     assert.equal(get(announced, 'addon_digest'), shippedRuntimeDigest(), JSON.stringify(announced));
@@ -16827,9 +16857,7 @@ async function testAGameSaysWhichRuntimeAddonItLoaded(): Promise<void> {
     );
     await stopItsRun(server);
   } finally {
-    if (game > 0 && isAlive(game)) {
-      process.kill(game);
-    }
+    await met.end();
     await server.stop();
     sweep(project);
     sweep(runtime);
@@ -22442,7 +22470,7 @@ async function testAQuietSceneIsNotServed(): Promise<void> {
   }
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-quiet-scenes-'));
   const project = join(scratch, 'project');
-  const ended: number[] = [];
+  const ended = new MetProcesses();
   try {
     mkdirSync(join(project, 'tests'), { recursive: true });
     mkdirSync(join(project, 'ui'), { recursive: true });
@@ -22516,7 +22544,7 @@ async function testAQuietSceneIsNotServed(): Promise<void> {
         said += String(chunk);
       });
       const pid = game.pid ?? 0;
-      ended.push(pid);
+      await ended.meet(pid);
       let announced = false;
       for (let waited = 0; waited < 60_000 && game.exitCode === null; waited += 100) {
         announced ||= existsSync(join(runtime, `runtime-${String(pid)}.json`));
@@ -22548,7 +22576,7 @@ async function testAQuietSceneIsNotServed(): Promise<void> {
     served('a bench profiled from its start', profiled, bench);
     const worker = Number(/WORKER (\d+)/.exec(profiled.said)?.[1] ?? '0');
     assert.ok(worker > 0, `the profiled bench started a worker:\n${profiled.said}`);
-    ended.push(worker);
+    await ended.meet(worker);
     let workerAnnounced = false;
     for (let waited = 0; waited < 60_000 && isAlive(worker); waited += 100) {
       workerAnnounced ||= existsSync(join(profiled.runtime, `runtime-${String(worker)}.json`));
@@ -22564,11 +22592,7 @@ async function testAQuietSceneIsNotServed(): Promise<void> {
     served('a screen', await run('res://ui/duel.tscn', quiet), 'res://ui/duel.tscn');
     served('a bench with no quiet folders', await run(bench, settings), bench);
   } finally {
-    for (const pid of ended) {
-      if (pid > 0 && isAlive(pid)) {
-        process.kill(pid);
-      }
-    }
+    await ended.end();
     sweep(scratch);
   }
 }
@@ -24626,6 +24650,26 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
       const alone = await call({ op: 'reimport', resourcePath: 'lone.png' });
       assert.deepEqual(asArray(get(alone, 'reimported')), ['res://lone.png'], JSON.stringify(alone));
       assert.equal(get(alone, 'alsoImported'), undefined, JSON.stringify(alone));
+      // A texture's import goes under .godot, so nothing is named as written into the project.
+      assert.equal(get(one, 'wroteInProject'), undefined, JSON.stringify(one));
+
+      // A translation's import writes one file per language beside its CSV (probe 186), which
+      // version control sees and the translations setting has to name.
+      writeFileSync(join(project, 'strings.csv'), 'keys,en,de\nGREETING,Hello,Hallo\n');
+      const translated = await call({ op: 'reimport', resourcePath: 'strings.csv' });
+      assert.deepEqual(
+        asArray(get(translated, 'reimported')),
+        ['res://strings.csv'],
+        JSON.stringify(translated),
+      );
+      assert.deepEqual(
+        get(translated, 'wroteInProject'),
+        { 'res://strings.csv': ['res://strings.en.translation', 'res://strings.de.translation'] },
+        `the translations the import wrote are named: ${JSON.stringify(translated)}`,
+      );
+      for (const made of ['strings.en.translation', 'strings.de.translation']) {
+        assert.ok(existsSync(join(project, made)), `and ${made} is there`);
+      }
 
       // An option, applied by the reimport that follows it.
       const set = await call({
@@ -26773,6 +26817,7 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
     env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir, GODOT_PATH: '' },
   });
   let pid = 0;
+  const met = new MetProcesses();
   try {
     await server.initialize('regression-test');
     const call = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
@@ -26823,6 +26868,7 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
     const started = parseTextContent(answered);
     const shown = textOf(answered) ?? JSON.stringify(answered);
     pid = asNumber(get(started, 'pid'), shown);
+    await met.meet(pid);
     assert.deepEqual(
       [
         get(started, 'started'),
@@ -26853,15 +26899,9 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
 
     const stopped = parseTextContent(await call({ op: 'stop' }));
     assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
-    const gone = Date.now() + 15_000;
-    while (alive(pid) && Date.now() < gone) {
-      await delay(100);
-    }
-    assert.equal(alive(pid), false, `stop ended it: ${JSON.stringify(stopped)}`);
+    assert.equal(await met.gone(pid, 15_000), true, `stop ended it: ${JSON.stringify(stopped)}`);
   } finally {
-    if (pid > 0 && alive(pid)) {
-      process.kill(pid);
-    }
+    await met.end();
     await server.stop();
     sweep(project, runtimeDir, saves);
   }
@@ -28489,44 +28529,59 @@ function testAHeadlessGameGivenAFixedRateRacesTheClock(): void {
         '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Fixed rate"\nrun/main_scene="res://main.tscn"\n',
       'main.tscn':
         '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      // The engine gives a frame no more delta than its physics steps allow, eight at 60 a second,
+      // and drops the rest: a frame stalled for 300ms left 0.86s of game time in a second, and a
+      // loaded macOS runner read 0.86 here. So the game counts what each frame ran past that cap,
+      // and keeping to the clock is game time and that together. Only past the cap: counting what
+      // a frame ran past its own delta would pass a game whose time fell behind on short frames.
       'main.gd': [
         'extends Node',
         '',
         'var game_time := 0.0',
+        'var lost := 0.0',
         'var began := 0',
+        'var last := 0',
         '',
         '',
         'func _ready() -> void:',
-        '\tbegan = Time.get_ticks_msec()',
+        '\tbegan = Time.get_ticks_usec()',
+        '\tlast = began',
         '',
         '',
         'func _process(delta: float) -> void:',
+        '\tvar now: int = Time.get_ticks_usec()',
+        '\tvar cap: float = float(Engine.max_physics_steps_per_frame) / Engine.physics_ticks_per_second',
+        '\tlost += maxf(0.0, (now - last) / 1000000.0 - cap)',
+        '\tlast = now',
         '\tgame_time += delta',
-        '\tif Time.get_ticks_msec() - began >= 1000:',
-        '\t\tprint("game seconds in one: %.2f" % game_time)',
+        '\tif now - began >= 1000000:',
+        '\t\tprint("game seconds in one: %.2f, past the cap: %.2f" % [game_time, lost])',
         '\t\tget_tree().quit()',
         '',
       ].join('\n'),
     });
-    const gameSeconds = (flags: readonly string[]): number => {
+    const gameSeconds = (flags: readonly string[]): { game: number; lost: number } => {
       const ran = spawnSyncHidden(godotPath, ['--headless', '--path', project, ...flags], {
         encoding: 'utf8',
         timeout: 60000,
       });
-      const said = /game seconds in one: ([\d.]+)/.exec(`${ran.stdout}${ran.stderr}`)?.[1];
-      assert.ok(said !== undefined, `the game said how far it got: ${ran.stdout}${ran.stderr}`);
-      return Number(said);
+      const said = /game seconds in one: ([\d.]+), past the cap: ([\d.]+)/.exec(`${ran.stdout}${ran.stderr}`);
+      assert.ok(said !== null, `the game said how far it got: ${ran.stdout}${ran.stderr}`);
+      return { game: Number(said[1]), lost: Number(said[2]) };
     };
-    const kept = gameSeconds([]);
-    assert.ok(kept >= 0.9 && kept < 2, `without the flag the game keeps to the clock: ${kept}`);
-    const capped = gameSeconds(['--max-fps', '60']);
-    assert.ok(capped >= 0.9 && capped < 2, `--max-fps alone keeps it to the clock: ${capped}`);
+    for (const [flags, what] of [
+      [[], 'without the flag the game keeps to the clock'],
+      [['--max-fps', '60'], '--max-fps alone keeps it to the clock'],
+    ] as const) {
+      const { game, lost } = gameSeconds(flags);
+      assert.ok(game + lost >= 0.9 && game < 2, `${what}: ${game} game seconds and ${lost} past the cap`);
+    }
     for (const flags of [
       ['--fixed-fps', '60'],
       ['--fixed-fps', '60', '--max-fps', '60'],
     ]) {
-      const raced = gameSeconds(flags);
-      assert.ok(raced > 60, `${flags.join(' ')}: more than a minute of game time in a second, got ${raced}`);
+      const { game } = gameSeconds(flags);
+      assert.ok(game > 60, `${flags.join(' ')}: more than a minute of game time in a second, got ${game}`);
     }
   } finally {
     sweep(project);
@@ -28985,6 +29040,7 @@ async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
   ] as const;
   for (const { round, inside, read } of rounds) {
     const spawned: number[] = [];
+    const met = new MetProcesses();
     const held: { game: ChildProcess | null } = { game: null };
     let playing = false;
     let announce: (() => void) | null = null;
@@ -29005,6 +29061,7 @@ async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
               held.game = game;
               game.stdout.once('data', (chunk: Buffer) => {
                 const worker = Number(String(chunk).trim());
+                void met.meet(game.pid ?? 0, worker);
                 announce = () => {
                   for (const pid of [game.pid ?? 0, worker]) {
                     spawned.push(pid);
@@ -29099,13 +29156,7 @@ async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
         { held },
       );
     } finally {
-      for (const pid of spawned) {
-        try {
-          process.kill(pid);
-        } catch {
-          // Gone already, with the game or on its own.
-        }
-      }
+      await met.end();
     }
   }
 }
@@ -35087,21 +35138,10 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
           { name: 'editor_run', arguments: { op: 'stop' } },
           ENGINE_CALL_TIMEOUT_MS,
         );
-        // Everything that announced in this fixture's own directory is this fixture's, so every
-        // one still alive after the stop is ended by the number its announcement carries, whether
-        // or not the fixture got as far as learning it: four workers were found running on this
-        // machine from runs that failed before the worker's number had been read.
-        for (const entry of readdirSync(runtimeDir)) {
-          const announced = /^runtime-(\d+)\.json$/.exec(entry);
-          const pid = announced === null ? 0 : Number(announced[1]);
-          if (pid > 0 && alive(pid)) {
-            try {
-              process.kill(pid);
-            } catch {
-              // Gone already.
-            }
-          }
-        }
+        // Everything that announced in this fixture's own directory is this fixture's: four
+        // workers were found running on this machine from runs that failed before the worker's
+        // number had been read.
+        await endWhatAnnouncedIn(runtimeDir);
       }
     },
     { realAddon: true, engine, playsWindowed: true },
@@ -35184,6 +35224,7 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
       const started = parseTextContent(startResponse) ?? { refused: textOf(startResponse) };
       const workers: number[] = [];
       let other = 0;
+      const met = new MetProcesses();
       try {
         assert.equal(
           get(started, 'runtime', 'mayYetAnnounce'),
@@ -35223,6 +35264,7 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
         workers.sort((a, b) => a - b);
         assert.equal(workers.length, 2, `${shape}: two workers: ${JSON.stringify(lines)}`);
         assert.ok(other > 0 && workers.every((pid) => pid > 0), `${shape}: every pid is a number`);
+        await met.meet(...workers, other);
         assert.ok(
           await cameTrue(() => workers.every(alive) && alive(other), 5_000),
           `${shape}: all three are up before the stop`,
@@ -35279,7 +35321,7 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
         );
         assert.match(text(get(stopped, 'note')), /it had started (was|were) left, named under childrenLeft/);
         assert.ok(
-          await cameTrue(() => workers.every((pid) => !alive(pid)), 10_000),
+          (await Promise.all(workers.map((pid) => met.gone(pid, 10_000)))).every(Boolean),
           `${shape}: and both worker processes are gone`,
         );
         // Under the console wrapper everything under it goes when it does, the bystander with the
@@ -35295,15 +35337,8 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
         const benchPid = get(started, 'pid');
         const tree = typeof benchPid === 'number' ? await processTree() : undefined;
         const under = tree === undefined || typeof benchPid !== 'number' ? [] : descendantsIn(tree, benchPid);
-        for (const pid of [...workers, other, ...under]) {
-          if (pid > 0 && alive(pid)) {
-            try {
-              process.kill(pid);
-            } catch {
-              // Gone already.
-            }
-          }
-        }
+        await met.meet(...under);
+        await met.end();
         await server.request(
           'tools/call',
           { name: 'editor_run', arguments: { op: 'stop' } },
@@ -35764,6 +35799,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
     { stdio: ['ignore', 'pipe', 'ignore'] },
   );
   let child = 0;
+  const met = new MetProcesses();
   try {
     assert.ok(typeof parent.pid === 'number');
     const printed = await new Promise<string>((resolve) => {
@@ -35775,6 +35811,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
       });
     });
     child = Number(printed.trim());
+    await met.meet(child);
     assert.ok(child > 0 && alive(child), 'the grandchild is there to be listed');
     const alive_ = await childrenOf(parent.pid);
     assert.deepEqual(alive_, [child], `listed under the living parent: ${JSON.stringify(alive_)}`);
@@ -35800,13 +35837,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
       assert.deepEqual(afterwards, [], `POSIX has handed the orphan to init: ${JSON.stringify(afterwards)}`);
     }
   } finally {
-    if (child > 0 && alive(child)) {
-      try {
-        process.kill(child);
-      } catch {
-        // Gone already.
-      }
-    }
+    await met.end();
     if (parent.exitCode === null && parent.signalCode === null) {
       parent.kill();
     }
@@ -35836,6 +35867,7 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
   const held: { bench: ChildProcess | null } = { bench: null };
   let worker = 0;
   let other = 0;
+  const met = new MetProcesses();
   let announceWorker = (): void => {
     throw new Error('the play should have set up the worker before the body announces it');
   };
@@ -35870,6 +35902,7 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
             const pids = JSON.parse(printed.trim()) as { worker: number; other: number };
             worker = pids.worker;
             other = pids.other;
+            await met.meet(worker, other);
             const announce = (pid: number): void => {
               writeFileSync(
                 join(runtimeDir, `runtime-${pid}.json`),
@@ -35909,12 +35942,10 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
             // Only once there is a worker: the start ends what this editor claims to be playing
             // before it plays, and a signal to pid 0 is a signal to this process's own group.
             if (worker > 0) {
-              try {
+              if ((await met.runs(worker)) === true) {
                 process.kill(worker);
-              } catch {
-                // Gone already.
               }
-              assert.ok(await cameTrue(() => !alive(worker), 5_000), 'the worker went with the stop');
+              assert.ok(await met.gone(worker, 5_000), 'the worker went with the stop');
             }
             return { ok: true };
           }
@@ -35957,8 +35988,8 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
           text(get(stopped, 'note')),
           /1 process it had started was left, named under childrenLeft/,
         );
-        assert.ok(await cameTrue(() => !alive(worker), 5_000), 'the worker is gone');
-        assert.ok(alive(other), 'and the other child is still there');
+        assert.ok(await met.gone(worker, 5_000), 'the worker is gone');
+        assert.equal(await met.runs(other), true, 'and the other child is still there');
         // The bench itself outlived the stop, so its announcement is not the stop's to take: a
         // file taken while its process runs hides a game, and the sweep judges this one by when
         // it started.
@@ -35972,15 +36003,7 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
       { env: { GDHARNESS_STOP_WAIT_MS: '2000' } },
     );
   } finally {
-    for (const pid of [worker, other]) {
-      if (pid > 0 && alive(pid)) {
-        try {
-          process.kill(pid);
-        } catch {
-          // Gone already.
-        }
-      }
-    }
+    await met.end();
     if (held.bench?.exitCode === null) {
       held.bench.kill();
     }
@@ -37882,6 +37905,7 @@ async function testARunOutlivesItsServer(): Promise<void> {
     GDHARNESS_PROJECT: projectDir,
   };
   let gamePid: number | null = null;
+  const met = new MetProcesses();
   try {
     writeFileSync(
       join(projectDir, 'project.godot'),
@@ -37913,6 +37937,7 @@ async function testARunOutlivesItsServer(): Promise<void> {
       );
       assert.equal(get(started, 'started'), true, JSON.stringify(started));
       gamePid = asNumber(get(started, 'pid'), 'the run needs a process of its own');
+      await met.meet(gamePid);
       assert.ok(gamePid > 0, `the run needs a process: ${JSON.stringify(started)}`);
     } finally {
       // A reconnect as the harness actually performs one: stdin ends, and the server shuts itself
@@ -37990,16 +38015,10 @@ async function testARunOutlivesItsServer(): Promise<void> {
     }, env);
 
     await delay(1000);
-    assert.equal(alive(gamePid), false, 'and a run with no handle is still one that stop can end');
+    assert.equal(await met.runs(gamePid), false, 'and a run with no handle is still one that stop can end');
     gamePid = null;
   } finally {
-    if (gamePid !== null && alive(gamePid)) {
-      try {
-        process.kill(gamePid);
-      } catch {
-        // Nothing left to clean up.
-      }
-    }
+    await met.end();
     sweep(projectDir, runtimeDir);
   }
 }
@@ -38043,6 +38062,7 @@ async function testARunOfAnotherProjectOutlivesItsServer(): Promise<void> {
   );
   const env = { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: serves };
   let gamePid: number | null = null;
+  const met = new MetProcesses();
   try {
     const first = new ServerProcess({ env });
     try {
@@ -38056,6 +38076,7 @@ async function testARunOfAnotherProjectOutlivesItsServer(): Promise<void> {
       );
       assert.equal(get(started, 'started'), true, JSON.stringify(started));
       gamePid = asNumber(get(started, 'pid'), 'the run needs a process of its own');
+      await met.meet(gamePid);
     } finally {
       first.child.stdin?.end();
     }
@@ -38098,16 +38119,10 @@ async function testARunOfAnotherProjectOutlivesItsServer(): Promise<void> {
     }, env);
 
     await delay(1000);
-    assert.equal(alive(gamePid), false, 'the stop ended the game');
+    assert.equal(await met.runs(gamePid), false, 'the stop ended the game');
     gamePid = null;
   } finally {
-    if (gamePid !== null && alive(gamePid)) {
-      try {
-        process.kill(gamePid);
-      } catch {
-        // Nothing left to clean up.
-      }
-    }
+    await met.end();
     sweep(serves, beside, elsewhere, runtimeDir);
   }
 }
@@ -41312,6 +41327,8 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
           ].join('\n'),
         ),
       ],
+      // shown_test.gd is gone from the project.
+      (path) => [big, small, edge].find((one) => one.path === path) ?? null,
     );
     assert.deepEqual(
       after[big.path],
@@ -41324,6 +41341,17 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'the rows of a case together',
     );
     assert.deepEqual(after[edge.path], times[edge.path], 'a suite that did not run keeps its times');
+    assert.deepEqual(
+      Object.keys(after).sort(),
+      [big.path, edge.path, small.path],
+      'and a suite the project no longer has is dropped',
+    );
+    // A case a suite that did not run no longer declares goes, and its time with it.
+    assert.deepEqual(
+      timesAfter(times, [], [], (path) => (path === edge.path ? suite(edge.path, ['test_e']) : null)),
+      { [edge.path]: { seconds: SPLIT_PAST_SECONDS - 5, cases: { test_e: 5 } } },
+      'a case no longer declared is dropped from a suite that did not run',
+    );
   } finally {
     sweep(project);
   }
@@ -42268,7 +42296,7 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-error-mode-'));
   const project = join(scratch, 'project');
   const runtime = join(scratch, 'runtime');
-  const started: number[] = [];
+  const started = new MetProcesses();
   const children: ChildProcess[] = [];
   const before = modes.own();
   try {
@@ -42323,7 +42351,7 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
       }
       const pid = existsSync(ready) ? Number(readFileSync(ready, 'utf8').trim()) : 0;
       assert.ok(pid > 0, `${what}: the engine started and said its pid`);
-      started.push(pid);
+      await started.meet(pid);
       return pid;
     };
     const assertReportable = (pid: number, what: string): void => {
@@ -42393,7 +42421,7 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
           typeof pid === 'number',
           `${what}: launched ${JSON.stringify(said)} ${ran.stdout} ${ran.stderr}`,
         );
-        started.push(pid);
+        await started.meet(pid);
         assert.equal(await readyPid(ready, what), pid, `${what}: the engine is the process launched`);
         assertReportable(pid, what);
         if (kept) {
@@ -42445,11 +42473,7 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
   } finally {
     modes.set(before);
     modes.close();
-    for (const pid of started) {
-      if (isAlive(pid)) {
-        process.kill(pid);
-      }
-    }
+    await started.end();
     for (const child of children) {
       child.kill();
     }
@@ -46805,6 +46829,62 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
       get(nudged, 'alsoChanged'),
       undefined,
       `one axis of a property given is that property, not another: ${JSON.stringify(nudged)}`,
+    );
+    for (const [answer, what] of [
+      [sized, 'an add to a file that loads as it reads'],
+      [filled, 'a set, whose own changes are under alsoChanged'],
+    ] as const) {
+      assert.equal(
+        get(answer, 'alsoSaved'),
+        undefined,
+        `${what} saves nothing else: ${JSON.stringify(answer)}`,
+      );
+    }
+
+    // A centred menu as a hand would write it (probe 183): anchors_preset gives it both grow
+    // directions as it loads, so a save names them on a node the call never touched, and a root
+    // Control written with no layout is saved with the one the engine gives it.
+    writeFileSync(
+      join(project, 'menu.tscn'),
+      '[gd_scene format=3]\n\n[node name="Main" type="Control"]\n\n' +
+        '[node name="Menu" type="VBoxContainer" parent="."]\nlayout_mode = 1\nanchors_preset = 8\n' +
+        'anchor_left = 0.5\nanchor_top = 0.5\nanchor_right = 0.5\nanchor_bottom = 0.5\n' +
+        'offset_left = -150.0\noffset_top = -80.0\noffset_right = 150.0\noffset_bottom = 80.0\n\n' +
+        '[node name="Title" type="Label" parent="Menu"]\nlayout_mode = 2\ntext = "Settings"\n',
+    );
+    const row = async (nodeName: string): Promise<unknown> =>
+      await call('scene_node', {
+        scenePath: 'res://menu.tscn',
+        op: 'add',
+        parentNodePath: 'Menu',
+        nodeType: 'HBoxContainer',
+        nodeName,
+      });
+    const first = await row('VolumeRow');
+    assert.equal(get(first, 'nodePath'), 'Menu/VolumeRow', JSON.stringify(first));
+    assert.deepEqual(
+      get(first, 'alsoSaved'),
+      [
+        { node: '.', property: 'layout_mode', saved: 3 },
+        { node: '.', property: 'anchors_preset', saved: 0 },
+        { node: 'Menu', property: 'grow_horizontal', saved: 2 },
+        { node: 'Menu', property: 'grow_vertical', saved: 2 },
+      ],
+      `the grow directions the preset gave the menu are named: ${JSON.stringify(first)}`,
+    );
+    const menu = readFileSync(join(project, 'menu.tscn'), 'utf8');
+    assert.match(
+      menu,
+      /type="Control"[^[]*layout_mode = 3\nanchors_preset = 0\n/,
+      'the file holds the root layout',
+    );
+    assert.match(menu, /parent="\."[^[]*grow_horizontal = 2\ngrow_vertical = 2\n/, 'and the grow directions');
+    const second = await row('SoundRow');
+    assert.equal(get(second, 'nodePath'), 'Menu/SoundRow', JSON.stringify(second));
+    assert.equal(
+      get(second, 'alsoSaved'),
+      undefined,
+      `once the file says them, a save names nothing else: ${JSON.stringify(second)}`,
     );
   } finally {
     await server.stop();
@@ -58587,17 +58667,35 @@ async function main(): Promise<void> {
       }
     }
   };
-  // A regression that hangs fails by name rather than taking the leg's whole budget with it: on
-  // the 1.1.49 release commit one hung on the Windows engine leg until the job's 25 minutes ran
-  // out, and a job ended that way uploads no log, so nothing said which test it was. The slowest
-  // took 79s on the Windows leg that first printed the times, so eight minutes is room for a
-  // loaded runner rather than a limit anything meets; the variable shortens it to check the deadline.
-  const deadlineMs = Number(process.env['GDHARNESS_REGRESSION_DEADLINE_MS'] ?? 8 * 60_000);
+  // A regression that hangs fails by name rather than taking the leg's whole budget with it: a job
+  // its own limit ends uploads no log, so nothing says which test it was. The slowest took 142s on
+  // the Windows leg, so five minutes is room for a loaded runner rather than a limit anything meets;
+  // the variable shortens it to check the deadline.
+  const deadlineMs = Number(process.env['GDHARNESS_REGRESSION_DEADLINE_MS'] ?? 5 * 60_000);
+  // The time the whole run has, which CI sets below the job's limit. A deadline alone did not keep
+  // inside it: a part takes about twelve minutes of a twenty-minute job, so a test hanging for its
+  // full deadline and the tests after it ran into the limit, and the job ended with no log again.
+  const budget = process.env['GDHARNESS_REGRESSION_BUDGET_MS'];
+  const budgetMs = budget === undefined ? Number.POSITIVE_INFINITY : Number(budget);
+  if (!(budgetMs > 0)) {
+    console.error(
+      `GDHARNESS_REGRESSION_BUDGET_MS is ${String(budget)}; it takes the run's time in milliseconds.`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  const runEnds = Date.now() + budgetMs;
   const ranPast: string[] = [];
-  for (const test of chosen) {
+  const unreached: string[] = [];
+  for (const [index, test] of chosen.entries()) {
+    if (Date.now() >= runEnds) {
+      unreached.push(...chosen.slice(index).map((left) => left.name));
+      break;
+    }
     sweepingFor(test.name);
     let passed = true;
     const began = Date.now();
+    const allowedMs = Math.min(deadlineMs, runEnds - began);
     let deadline: NodeJS.Timeout | undefined;
     const running = Promise.resolve().then(() => test());
     // A test that settles after its deadline has nobody waiting on it any more.
@@ -58608,8 +58706,15 @@ async function main(): Promise<void> {
         new Promise<never>((_resolve, reject) => {
           deadline = setTimeout(() => {
             ranPast.push(test.name);
-            reject(new Error(`${test.name} was still running ${deadlineMs / 1000}s after it started`));
-          }, deadlineMs);
+            const took = `${(allowedMs / 1000).toFixed(1)}s after it started`;
+            reject(
+              new Error(
+                allowedMs < deadlineMs
+                  ? `${test.name} was still running when the run's ${budgetMs / 1000}s ran out, ${took}`
+                  : `${test.name} was still running ${took}`,
+              ),
+            );
+          }, allowedMs);
         }),
       ]);
     } catch (error) {
@@ -58632,6 +58737,10 @@ async function main(): Promise<void> {
     if (took >= 5_000) {
       console.log(`${test.name} took ${(took / 1000).toFixed(1)}s`);
     }
+    if (ranPast.includes(test.name)) {
+      // Still running, it never reached its own stops and sweeps.
+      lookUnder(test.name, await stopServersOf(test.name));
+    }
     if (!passed || leftBehindBy(test.name)) {
       leftRunning(await endEnginesLeft(test.name));
     }
@@ -58641,10 +58750,20 @@ async function main(): Promise<void> {
 
   await reportUnswept();
 
-  if (failed.length > 0) {
-    console.error(`${failed.length} of ${chosen.length} regressions failed:`);
-    for (const name of failed) {
-      console.error(`  ${name}`);
+  if (failed.length > 0 || unreached.length > 0) {
+    if (failed.length > 0) {
+      console.error(`${failed.length} of ${chosen.length} regressions failed:`);
+      for (const name of failed) {
+        console.error(`  ${name}`);
+      }
+    }
+    if (unreached.length > 0) {
+      console.error(
+        `${unreached.length} of ${chosen.length} regressions were not reached before the run's ${budgetMs / 1000}s ran out:`,
+      );
+      for (const name of unreached) {
+        console.error(`  ${name}`);
+      }
     }
     process.exitCode = 1;
     // A test past its deadline is still running and holds whatever it opened, which would keep
