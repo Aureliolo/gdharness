@@ -395,9 +395,16 @@ import {
   textOf,
 } from './support/json-rpc.js';
 import { pixelPng, solidPng } from './support/png.js';
-import { listenOnAReservedPort, reservePort, ServerProcess } from './support/server.js';
+import { listenOnAReservedPort, reservePort, ServerProcess, stopServersOf } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
-import { endEnginesLeft, leftBehindBy, reportUnswept, sweep, sweepingFor } from './support/sweep.js';
+import {
+  endEnginesLeft,
+  leftBehindBy,
+  lookUnder,
+  reportUnswept,
+  sweep,
+  sweepingFor,
+} from './support/sweep.js';
 
 /**
  * Runs [param run] with a bridge port held by something else, handed to it to configure a server
@@ -58624,17 +58631,35 @@ async function main(): Promise<void> {
       }
     }
   };
-  // A regression that hangs fails by name rather than taking the leg's whole budget with it: on
-  // the 1.1.49 release commit one hung on the Windows engine leg until the job's 25 minutes ran
-  // out, and a job ended that way uploads no log, so nothing said which test it was. The slowest
-  // took 79s on the Windows leg that first printed the times, so eight minutes is room for a
-  // loaded runner rather than a limit anything meets; the variable shortens it to check the deadline.
-  const deadlineMs = Number(process.env['GDHARNESS_REGRESSION_DEADLINE_MS'] ?? 8 * 60_000);
+  // A regression that hangs fails by name rather than taking the leg's whole budget with it: a job
+  // its own limit ends uploads no log, so nothing says which test it was. The slowest took 142s on
+  // the Windows leg, so five minutes is room for a loaded runner rather than a limit anything meets;
+  // the variable shortens it to check the deadline.
+  const deadlineMs = Number(process.env['GDHARNESS_REGRESSION_DEADLINE_MS'] ?? 5 * 60_000);
+  // The time the whole run has, which CI sets below the job's limit. A deadline alone did not keep
+  // inside it: a part takes about twelve minutes of a twenty-minute job, so a test hanging for its
+  // full deadline and the tests after it ran into the limit, and the job ended with no log again.
+  const budget = process.env['GDHARNESS_REGRESSION_BUDGET_MS'];
+  const budgetMs = budget === undefined ? Number.POSITIVE_INFINITY : Number(budget);
+  if (!(budgetMs > 0)) {
+    console.error(
+      `GDHARNESS_REGRESSION_BUDGET_MS is ${String(budget)}; it takes the run's time in milliseconds.`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  const runEnds = Date.now() + budgetMs;
   const ranPast: string[] = [];
-  for (const test of chosen) {
+  const unreached: string[] = [];
+  for (const [index, test] of chosen.entries()) {
+    if (Date.now() >= runEnds) {
+      unreached.push(...chosen.slice(index).map((left) => left.name));
+      break;
+    }
     sweepingFor(test.name);
     let passed = true;
     const began = Date.now();
+    const allowedMs = Math.min(deadlineMs, runEnds - began);
     let deadline: NodeJS.Timeout | undefined;
     const running = Promise.resolve().then(() => test());
     // A test that settles after its deadline has nobody waiting on it any more.
@@ -58645,8 +58670,15 @@ async function main(): Promise<void> {
         new Promise<never>((_resolve, reject) => {
           deadline = setTimeout(() => {
             ranPast.push(test.name);
-            reject(new Error(`${test.name} was still running ${deadlineMs / 1000}s after it started`));
-          }, deadlineMs);
+            const took = `${(allowedMs / 1000).toFixed(1)}s after it started`;
+            reject(
+              new Error(
+                allowedMs < deadlineMs
+                  ? `${test.name} was still running when the run's ${budgetMs / 1000}s ran out, ${took}`
+                  : `${test.name} was still running ${took}`,
+              ),
+            );
+          }, allowedMs);
         }),
       ]);
     } catch (error) {
@@ -58669,6 +58701,10 @@ async function main(): Promise<void> {
     if (took >= 5_000) {
       console.log(`${test.name} took ${(took / 1000).toFixed(1)}s`);
     }
+    if (ranPast.includes(test.name)) {
+      // Still running, it never reached its own stops and sweeps.
+      lookUnder(test.name, await stopServersOf(test.name));
+    }
     if (!passed || leftBehindBy(test.name)) {
       leftRunning(await endEnginesLeft(test.name));
     }
@@ -58678,10 +58714,20 @@ async function main(): Promise<void> {
 
   await reportUnswept();
 
-  if (failed.length > 0) {
-    console.error(`${failed.length} of ${chosen.length} regressions failed:`);
-    for (const name of failed) {
-      console.error(`  ${name}`);
+  if (failed.length > 0 || unreached.length > 0) {
+    if (failed.length > 0) {
+      console.error(`${failed.length} of ${chosen.length} regressions failed:`);
+      for (const name of failed) {
+        console.error(`  ${name}`);
+      }
+    }
+    if (unreached.length > 0) {
+      console.error(
+        `${unreached.length} of ${chosen.length} regressions were not reached before the run's ${budgetMs / 1000}s ran out:`,
+      );
+      for (const name of unreached) {
+        console.error(`  ${name}`);
+      }
     }
     process.exitCode = 1;
     // A test past its deadline is still running and holds whatever it opened, which would keep
