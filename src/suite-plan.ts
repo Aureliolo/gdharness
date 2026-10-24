@@ -308,15 +308,6 @@ export function unitsOf(
   });
 }
 
-/**
- * [param suites] with every one that does not need a window taken as saying it runs headless, so the
- * windowed engine runs only those that do: a suite dealt there meets the machine's display, its
- * keyboard layout and screen among it, and one reading them passes or fails by where it was dealt.
- */
-export function windowOnlyWhereNeeded(suites: readonly DeclaredSuite[]): DeclaredSuite[] {
-  return suites.map((suite) => (suite.windowed ? suite : { ...suite, headless: true }));
-}
-
 /** What one engine is handed. */
 export interface EnginePlan {
   readonly suites: ReadonlyArray<{ readonly path: string; readonly cases: readonly string[] }>;
@@ -324,26 +315,28 @@ export interface EnginePlan {
   readonly skipping: readonly string[];
   readonly cost: number;
   readonly windowed: boolean;
+  /**
+   * The slot it runs in. The engines of one lane run one after another without giving the slot
+   * back, which is how a headless engine follows the windowed one.
+   */
+  readonly lane: number;
 }
 
 /** Every case function of each suite, by path, which the cases an engine leaves out are read against. */
 export type CasesBySuite = ReadonlyMap<string, readonly string[]>;
 
 /**
- * [param units] dealt to at most [param most] engines, slowest first, each to the engine with least
- * so far, and no more engines than it takes to keep each one busy for as long as the slowest unit
- * takes. The windowed units all go to the first engine, which then takes headless units like the
- * others, since an engine holding a few quick windowed suites alone sits idle while the rest carry
- * the run. A unit whose suite says it runs headless goes there only when the run was [param asked]
- * for one engine. Held to fewer than asked by the machine, it is still given an engine of its own,
- * and the engines past [param most] wait their turn.
+ * [param units] dealt to at most [param most] lanes, slowest first, each to the lane with least so
+ * far, and no more lanes than it takes to keep each one busy for as long as the slowest unit takes.
+ * The windowed units all go to one windowed engine holding nothing else: a suite dealt there meets
+ * the machine's display, its keyboard layout and screen among it, and runs about a tenth slower for
+ * drawing frames. A headless engine follows it in its lane, dealt as though it began when the
+ * windowed one ends, so the slot never sits idle once the windowed suites are done.
  */
-export function dealt(
-  units: readonly Unit[],
-  declared: CasesBySuite,
-  most: number,
-  asked = most,
-): EnginePlan[] {
+export function dealt(units: readonly Unit[], declared: CasesBySuite, most: number): EnginePlan[] {
+  if (units.length === 0) {
+    return [];
+  }
   const windowed = units.filter((unit) => unit.windowed);
   const headless = units
     .filter((unit) => !unit.windowed)
@@ -353,35 +346,36 @@ export function dealt(
         a.suite.localeCompare(b.suite) ||
         (a.cases[0] ?? '').localeCompare(b.cases[0] ?? ''),
     );
-  if (units.length === 0) {
-    return [];
-  }
   // The windowed units stay together, so for the count they are one unit as slow as all of them.
   const together = windowed.reduce((sum, unit) => sum + unit.cost, 0);
+  // A headless engine following them in their lane starts afresh.
+  const restart = windowed.length > 0 ? ENGINE_START_SECONDS : 0;
   const total = units.reduce((sum, unit) => sum + unit.cost, 0);
   const slowest = Math.max(together, headless[0]?.cost ?? 0);
-  // Two at least when a suite saying it runs headless would otherwise share the windowed engine,
-  // however little work the run holds, since there it would run with the window it said it did not need.
-  const apart = windowed.length > 0 && headless.some((unit) => unit.headless) ? 2 : 1;
   const count = Math.max(
-    Math.min(apart, asked),
+    1,
     Math.min(
       most,
       headless.length + (windowed.length > 0 ? 1 : 0),
       Math.ceil(total / Math.max(slowest, ENGINE_START_SECONDS)),
     ),
   );
-  const bins: Unit[][] = Array.from({ length: count }, (_, index) => (index === 0 ? [...windowed] : []));
-  const loads = Array.from({ length: count }, (_, index) => (index === 0 ? together : 0));
-  const pastTheWindow = windowed.length > 0 && count > 1 ? 1 : 0;
+  const bins: Unit[][] = Array.from({ length: count }, () => []);
+  const loads = Array.from({ length: count }, (_, lane) => (lane === 0 ? together + restart : 0));
   for (const unit of headless) {
-    const from = unit.headless ? pastTheWindow : 0;
-    const open = loads.slice(from);
-    const lightest = from + open.indexOf(Math.min(...open));
+    const lightest = loads.indexOf(Math.min(...loads));
     bins[lightest]?.push(unit);
     loads[lightest] = (loads[lightest] ?? 0) + unit.cost;
   }
-  return bins.map((bin, index) => planOf(bin, declared, index === 0 && windowed.length > 0));
+  return [
+    ...(windowed.length > 0 ? [planOf(windowed, declared, true, 0)] : []),
+    ...bins.flatMap((bin, lane) => (bin.length === 0 ? [] : [planOf(bin, declared, false, lane)])),
+  ];
+}
+
+/** How many slots [param plans] take at once: one a lane. */
+export function lanesOf(plans: readonly EnginePlan[]): number {
+  return new Set(plans.map((plan) => plan.lane)).size;
 }
 
 /** What the line announcing a run says of its window, after the number of engines. */
@@ -389,12 +383,18 @@ export function windowedSaid(plans: readonly EnginePlan[]): string {
   if (!plans.some((plan) => plan.windowed)) {
     return '';
   }
-  return plans.length === 1 ? ', with a window' : ', one of them windowed';
+  if (plans.length === 1) {
+    return ', with a window';
+  }
+  const followed = plans.some((plan) => !plan.windowed && plan.lane === 0);
+  return followed
+    ? ', one of them windowed and followed in its slot by a headless one'
+    : ', one of them windowed';
 }
 
 /**
- * The suites saying they run headless that a windowed engine holds, which happens only when the
- * run was asked for one engine and a suite in it needs a window.
+ * The suites saying they run headless that a windowed engine holds, which happens only in an
+ * ordered run, one engine, with a suite in it needing a window.
  */
 export function headlessInAWindow(plans: readonly EnginePlan[], units: readonly Unit[]): string[] {
   const said = new Set(units.filter((unit) => unit.headless).map((unit) => unit.suite));
@@ -410,10 +410,11 @@ export function inOneEngine(units: readonly Unit[], declared: CasesBySuite): Eng
     units,
     declared,
     units.some((unit) => unit.windowed),
+    0,
   );
 }
 
-function planOf(bin: readonly Unit[], declared: CasesBySuite, windowed: boolean): EnginePlan {
+function planOf(bin: readonly Unit[], declared: CasesBySuite, windowed: boolean, lane: number): EnginePlan {
   const held = new Map<string, string[]>();
   for (const unit of bin) {
     held.set(unit.suite, [...(held.get(unit.suite) ?? []), ...unit.cases]);
@@ -426,6 +427,7 @@ function planOf(bin: readonly Unit[], declared: CasesBySuite, windowed: boolean)
     skipping,
     cost: bin.reduce((sum, unit) => sum + unit.cost, 0),
     windowed,
+    lane,
   };
 }
 

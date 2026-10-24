@@ -33,8 +33,6 @@ command line itself is wrong.
   iterating only.
 - `--reach-also PATH`: a file every suite depends on, for `--changed-only`. May be given more than
   once.
-- `--window-only-needed`: keep the windowed engine to the suites that need a window, as though
-  every other suite declared `GDHARNESS_NEEDS_WINDOW = false`.
 - `--print-output`: print everything each engine printed, before the verdict, as for a benchmark
   written as a suite and run by hand. A gate never passes it.
 - `--runner`: print the path of the shipped runner and exit.
@@ -147,17 +145,17 @@ a headless engine delivers no input events. So does one calling gdUnit4's `scene
 declares nothing, which is a guess: a suite that uses the scene runner only to stand a scene up and
 read it declares `const GDHARNESS_NEEDS_WINDOW: bool = false` and runs headless. The declaration
 counts from the suite or any script it extends. All the windowed suites go to one windowed engine,
-which starts first and counts toward `--engines`, and which is then dealt the suites that declare
-nothing like the others, so a few quick windowed suites never leave it idle. A suite dealt there
-meets the real display server, so the screen size and scale, the keyboard layout and the display
-features it reports are the machine's rather than the headless server's, and setting the root
-viewport's size leaves it the window's. `--window-only-needed` keeps every suite that does not need
-a window out of it, for a project with suites reading any of those. A suite declaring `false` is
-therefore never dealt there while another engine runs, and a
-run that has a windowed suite and one declaring `false` starts two engines at least. On a machine
-with room for one engine, they run one after the other, and the line announcing the run says so.
-When the run is one engine (`--engines 1` or `--order`), the run names each suite declaring `false`
-that runs with the window before it starts. The windowed engine runs without
+which starts first, counts toward `--engines`, and runs nothing else: a suite dealt there would meet
+the real display server, so the screen size and scale, the keyboard layout and the display features
+it reports would be the machine's rather than the headless server's, setting the root viewport's
+size would leave it the window's, and it would run slower for drawing frames. Once the windowed
+engine ends, a headless engine follows it in the same slot without giving the slot back, dealt as
+though it began then, so a few quick windowed suites never leave a slot idle. With `--engines 1`
+the run is that one slot: the windowed engine, then a headless one. On a machine with room for
+fewer engines than asked for, the slots run one after the other, and the line announcing the run
+says so. An ordered run (`--order`) is one engine, so a suite in it needing a window gives the
+whole run one, and the run names each suite declaring `false` that runs with the window before it
+starts. The windowed engine runs without
 `--headless`, at the size `project.godot` gives its viewport, and with the Dummy audio driver like
 every other test engine. On Windows it runs on a desktop of its own, so its window never appears
 on the desktop in use or takes its focus. Elsewhere it uses the display there is; on a CI runner

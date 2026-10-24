@@ -347,15 +347,16 @@ import { SuiteFingerprints } from '../src/suite-fingerprint.js';
 import { exitNamed, funcOf, judgeEngine, readRun, secondsOf } from '../src/suite-judge.js';
 import {
   dealt,
+  type EnginePlan,
   headlessInAWindow,
   inOneEngine,
+  lanesOf,
   ProjectScripts,
   SPLIT_PAST_SECONDS,
   timesAfter,
   type Unit,
   unitsOf,
   windowedSaid,
-  windowOnlyWhereNeeded,
 } from '../src/suite-plan.js';
 import {
   inTurns,
@@ -24352,6 +24353,7 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
           ENGINE_CALL_TIMEOUT_MS,
         );
         const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        assert.notEqual(get(response, 'result', 'isError'), true, `${name} refused: ${blocks.join('\n')}`);
         return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
       };
       const behindByStatus = async (): Promise<{ path: string; reason: string }[]> =>
@@ -41016,31 +41018,34 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     );
     const declared = new Map([big, edge, shown, small].map((s) => [s.path, s.cases]));
     const plans = dealt(units, declared, 4);
-    // 32 s of units, the slowest 10 s, so four engines; the windowed units first in the first, then
-    // the rest slowest first to the lightest, a tie in cost going to the suite first by path. The
-    // windowed engine starts with 4 s, so it is the lightest when the fourth unit comes.
+    // 32 s of units, the slowest 10 s, so four lanes; the windowed units alone in the first, then the
+    // rest slowest first to the lightest lane, a tie in cost going to the suite first by path. The
+    // windowed lane starts at its 4 s and the 5 s a following engine takes to start, so the other
+    // three stay lighter and nothing follows it.
     assert.deepEqual(
       plans.map((plan) => [
+        plan.lane,
         plan.windowed,
         plan.cost,
         plan.suites.map((s) => [s.path, s.cases]),
         plan.skipping,
       ]),
       [
+        [0, true, 4, [[shown.path, ['test_m', 'test_n']]], []],
+        [1, false, 10, [[edge.path, ['test_e', 'test_f']]], []],
+        [2, false, 9, [[big.path, ['test_x', 'test_z']]], [`${big.path}:test_y`]],
         [
-          true,
-          8,
+          3,
+          false,
+          9,
           [
-            [shown.path, ['test_m', 'test_n']],
+            [big.path, ['test_y']],
             [small.path, ['test_s']],
           ],
-          [],
+          [`${big.path}:test_x`, `${big.path}:test_z`],
         ],
-        [false, 10, [[edge.path, ['test_e', 'test_f']]], []],
-        [false, 6, [[big.path, ['test_x']]], [`${big.path}:test_y`, `${big.path}:test_z`]],
-        [false, 8, [[big.path, ['test_y', 'test_z']]], [`${big.path}:test_x`]],
       ],
-      'the windowed engine first, taking headless units too, and each engine holding part of a split suite skipping the rest of it',
+      'the windowed engine holding only the windowed suites, and each engine holding part of a split suite skipping the rest of it',
     );
     for (const plan of plans) {
       const held = plan.suites.flatMap((s) => s.cases.map((c) => `${s.path}:${c}`));
@@ -41058,27 +41063,46 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'a few quick suites stay in one engine, with no window when none needs one',
     );
     assert.deepEqual(
-      dealt(units, declared, 1).map((plan) => [plan.windowed, plan.cost]),
-      [[true, 32]],
-      'one engine at most, the windowed one running everything',
+      dealt(units, declared, 1).map((plan) => [plan.lane, plan.windowed, plan.cost]),
+      [
+        [0, true, 4],
+        [0, false, 28],
+      ],
+      'one slot at most: the windowed engine, then a headless one running the rest',
     );
-    assert.equal(dealt(units, declared, 2).length, 2, 'the windowed engine counts toward the most');
+    const two = dealt(units, declared, 2);
+    assert.deepEqual(
+      [lanesOf(two), two.length],
+      [2, 3],
+      'the windowed engine takes a slot of the most, and a headless engine follows it there',
+    );
     assert.deepEqual(
       [
         plans,
         dealt(units, declared, 1),
+        dealt(
+          units.filter((u) => u.windowed),
+          declared,
+          4,
+        ),
         dealt(
           units.filter((u) => !u.windowed),
           declared,
           4,
         ),
       ].map(windowedSaid),
-      [', one of them windowed', ', with a window', ''],
-      'the run line says which engine has the window, and of a lone engine that it has one',
+      [
+        ', one of them windowed',
+        ', one of them windowed and followed in its slot by a headless one',
+        ', with a window',
+        '',
+      ],
+      'the run line says which engine has the window, what follows it, and of a lone engine that it has one',
     );
 
-    // A run whose one windowed suite is quick: kept to that suite alone, the windowed engine sat
-    // idle for most of the run while three engines carried 1100 s. Over four it is about a quarter.
+    // A run whose one windowed suite is quick: kept to that suite alone with nothing after it, its
+    // slot sat idle for most of the run while three engines carried 1100 s. With a headless engine
+    // following it there, each of the four slots carries about a quarter.
     const unit = (name: string, cost: number, isWindowed = false, isHeadless = false): Unit => ({
       suite: `res://tests/${name}_test.gd`,
       cases: [`test_${name}`],
@@ -41091,20 +41115,26 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       ...[227, 200, 180, 150, 120, 100, 60, 40, 23].map((cost, index) => unit(`h${String(index)}`, cost)),
     ];
     const shared = dealt(quick, new Map(quick.map((u) => [u.suite, u.cases])), 4);
-    assert.equal(shared.length, 4, 'every engine asked for is used');
-    assert.ok(
-      Math.max(...shared.map((plan) => plan.cost)) < 300,
-      `no engine carries much more than a quarter: ${shared.map((plan) => plan.cost).join(', ')}`,
+    assert.equal(lanesOf(shared), 4, 'every slot asked for is used');
+    const carried = [0, 1, 2, 3].map((lane) =>
+      shared.filter((plan) => plan.lane === lane).reduce((sum, plan) => sum + plan.cost, 0),
+    );
+    assert.ok(Math.max(...carried) < 300, `no slot carries much more than a quarter: ${carried.join(', ')}`);
+    assert.deepEqual(
+      shared.map((plan) => [plan.lane, plan.windowed]),
+      [
+        [0, true],
+        [0, false],
+        [1, false],
+        [2, false],
+        [3, false],
+      ],
+      'one windowed engine, and a headless one after it in its slot',
     );
     assert.deepEqual(
-      shared.map((plan) => plan.windowed),
-      [true, false, false, false],
-      'one windowed engine',
-    );
-    const inTheWindow = shared[0]?.suites.map((s) => s.path) ?? [];
-    assert.ok(
-      inTheWindow[0] === 'res://tests/scene_test.gd' && inTheWindow.length > 1,
-      `the windowed unit in the windowed engine, beside headless ones: ${JSON.stringify(inTheWindow)}`,
+      shared[0]?.suites.map((s) => s.path),
+      ['res://tests/scene_test.gd'],
+      'the windowed unit alone in the windowed engine',
     );
     // The windowed units are never split, so when together they are the slowest, they set how many
     // engines are worth starting.
@@ -41120,24 +41150,20 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       ],
       'two engines as busy as the windowed suite, rather than four with three of them waiting on it',
     );
-    // A suite saying it runs headless stays out of the windowed engine, even when that engine is the
-    // lightest: a suite sizing the root viewport got the window's size there and failed.
+    // A suite saying it runs headless is dealt as one declaring nothing, since neither is ever dealt
+    // to the windowed engine: a suite sizing the root viewport got the window's size there and failed.
     const said = [
       unit('scene', 18, true),
       ...[227, 200, 180, 150, 120, 100, 60, 40, 23].map((cost, index) =>
-        unit(`d${String(index)}`, cost, false, true),
+        unit(`h${String(index)}`, cost, false, true),
       ),
     ];
-    const kept = dealt(said, new Map(said.map((u) => [u.suite, u.cases])), 4);
+    const shape = (plans: readonly EnginePlan[]): unknown[] =>
+      plans.map((plan) => [plan.lane, plan.windowed, plan.suites.map((s) => s.path)]);
     assert.deepEqual(
-      kept.map((plan) => [plan.windowed, plan.suites.length]),
-      [
-        [true, 1],
-        [false, 3],
-        [false, 3],
-        [false, 3],
-      ],
-      'the windowed engine holding the windowed suite alone, and the declared ones dealt over the rest',
+      shape(dealt(said, new Map(said.map((u) => [u.suite, u.cases])), 4)),
+      shape(shared),
+      'the declared ones dealt as those declaring nothing',
     );
     assert.deepEqual(
       unitsOf(
@@ -41157,66 +41183,31 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       ],
       'saying it runs headless holds for a suite whole and for each case of one split',
     );
-    // --window-only-needed: a suite that declares nothing is dealt as one saying it runs headless,
-    // since a suite reading the keyboard layout or the screen passed or failed by where it was dealt.
-    const plainSuites = [
-      suite('res://tests/menu_test.gd', ['test_m'], true),
-      suite('res://tests/keys_test.gd', ['test_k']),
-      suite('res://tests/lay_test.gd', ['test_l']),
-    ];
-    const dealing = (suites: Parameters<typeof unitsOf>[0]): [boolean, string[]][] => {
-      const these = unitsOf(suites, {});
-      return dealt(these, new Map(these.map((u) => [u.suite, u.cases])), 4).map((plan) => [
-        plan.windowed,
-        plan.suites.map((s) => s.path),
-      ]);
-    };
-    assert.deepEqual(
-      dealing(plainSuites),
-      [[true, ['res://tests/menu_test.gd', 'res://tests/keys_test.gd', 'res://tests/lay_test.gd']]],
-      'without it, a few quick suites share the windowed engine',
-    );
-    assert.deepEqual(
-      dealing(windowOnlyWhereNeeded(plainSuites)),
-      [
-        [true, ['res://tests/menu_test.gd']],
-        [false, ['res://tests/keys_test.gd', 'res://tests/lay_test.gd']],
-      ],
-      'with it, the windowed engine runs only the suite needing a window',
-    );
+    // A few quick suites take one slot: the windowed engine runs only the one needing a window, since
+    // a suite reading the keyboard layout or the screen passed or failed by where it was dealt, and a
+    // headless engine follows it with the rest, whether they declare anything or not.
     const lone = [unit('menu', 1, true), unit('stood', 1, false, true), unit('plain', 1)];
     const loneDeclared = new Map(lone.map((u) => [u.suite, u.cases]));
-    const apart = dealt(lone, loneDeclared, 4);
-    assert.deepEqual(
-      apart.map((plan) => [plan.windowed, plan.suites.map((s) => s.path)]),
-      [
-        [true, ['res://tests/menu_test.gd']],
-        [false, ['res://tests/plain_test.gd', 'res://tests/stood_test.gd']],
-      ],
-      'two engines for a few quick suites when one says it runs headless beside one needing a window',
-    );
-    assert.deepEqual(headlessInAWindow(apart, lone), [], 'and none of them is said to run with a window');
-    assert.deepEqual(
-      headlessInAWindow(dealt(lone, loneDeclared, 1), lone),
-      ['res://tests/stood_test.gd'],
-      'in one engine, the suite saying it runs headless is named as running with the window',
-    );
-    const held = dealt(lone, loneDeclared, 1, 4);
-    assert.deepEqual(
-      held.map((plan) => [plan.windowed, plan.suites.map((s) => s.path)]),
-      [
-        [true, ['res://tests/menu_test.gd']],
-        [false, ['res://tests/plain_test.gd', 'res://tests/stood_test.gd']],
-      ],
-      'a machine with room for one engine of the four asked for still gives the suite an engine of its own',
-    );
-    assert.deepEqual(headlessInAWindow(held, lone), [], 'so it is not said to run with the window');
+    for (const most of [4, 1]) {
+      const apart = dealt(lone, loneDeclared, most);
+      assert.deepEqual(
+        apart.map((plan) => [plan.lane, plan.windowed, plan.suites.map((s) => s.path)]),
+        [
+          [0, true, ['res://tests/menu_test.gd']],
+          [0, false, ['res://tests/plain_test.gd', 'res://tests/stood_test.gd']],
+        ],
+        `with room for ${String(most)}, the windowed engine alone and a headless one after it in its slot`,
+      );
+      assert.deepEqual(headlessInAWindow(apart, lone), [], 'and none of them is said to run with a window');
+    }
     const memory = 'the machine has 5.7 GB of memory free';
-    assert.equal(roomSaid(2, { engines: 1, held: memory }, 4), `, one at a time, since ${memory}`);
-    assert.equal(roomSaid(3, { engines: 2, held: memory }, 4), `, 2 at a time, since ${memory}`);
-    assert.equal(roomSaid(2, { engines: 2, held: memory }, 4), `, of the 4 asked for, since ${memory}`);
-    assert.equal(roomSaid(1, { engines: 2, held: memory }, 4), '', 'fewer units than engines held nothing');
-    assert.equal(roomSaid(4, { engines: 4, held: undefined }, 4), '');
+    assert.equal(roomSaid(2, 1, 2, memory, 4), `, one at a time, since ${memory}`);
+    assert.equal(roomSaid(3, 2, 3, memory, 4), `, 2 at a time, since ${memory}`);
+    assert.equal(roomSaid(2, 2, 4, memory, 4), `, of the 4 asked for, since ${memory}`);
+    assert.equal(roomSaid(2, 2, 3, memory, 4), `, of the 4 asked for, since ${memory}`);
+    assert.equal(roomSaid(1, 1, 1, memory, 4), '', 'a run too small for a second lane was held by nothing');
+    assert.equal(roomSaid(2, 1, 1, memory, 4), '', 'nor a windowed engine and the one following it');
+    assert.equal(roomSaid(4, 4, 4, undefined, 4), '');
     let going = 0;
     let most = 0;
     const turned = await inTurns([30, 10, 20, 5], 2, async (wait, index) => {
@@ -41441,17 +41432,12 @@ function testTheTestCommandReadsItsOwnOptions(): void {
         '--order',
         '7',
         '--changed-only',
-        '--window-only-needed',
         '--print-output',
       ],
       tmpdir(),
     );
-    assert.deepEqual([read.windowOnlyNeeded, read.printOutput], [true, true]);
-    assert.deepEqual(
-      [testOptionsOf([], project).windowOnlyNeeded, testOptionsOf([], project).printOutput],
-      [false, false],
-      'both off unless asked for',
-    );
+    assert.equal(read.printOutput, true);
+    assert.equal(testOptionsOf([], project).printOutput, false, 'off unless asked for');
     assert.equal(read.projectPath, project, 'the project named first');
     assert.deepEqual(
       read.selected,
@@ -41789,12 +41775,8 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     });
     const stood = test('tests/stood_test.gd');
     assert.equal(stood.status, 0, stood.said);
-    // A loaded runner adds why it started fewer engines than asked for, which is no window.
-    assert.match(
-      stood.said,
-      /^1 test function in 1 suite over 1 engine(?:, of the \d+ asked for, since [^\n]*)?\.$/m,
-      stood.said,
-    );
+    // One suite needs one engine, so even a runner short of memory has nothing to say of its room.
+    assert.match(stood.said, /^1 test function in 1 suite over 1 engine\.$/m, stood.said);
     assert.doesNotMatch(stood.said, /windowed|with a window/, stood.said);
 
     const windowed = windowedRunRefused();
@@ -41811,51 +41793,31 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
           '',
         ].join('\n'),
       });
-      // One engine, so the headless suite has to run in the windowed engine beside the one that
-      // needs the window.
-      const shown = test('--engines', '1', 'tests/window_test.gd', 'tests/ok_test.gd');
-      assert.equal(shown.status, 0, shown.said);
-      assert.match(shown.said, /in 2 suites over 1 engine, with a window\./, shown.said);
-      assert.match(shown.said, /^Passed: \d+ cases in 2 suites across 1 engine/m, shown.said);
-      // Beside one needing a window, the suite saying it runs headless gets an engine of its own.
-      const beside = test('tests/window_test.gd', 'tests/stood_test.gd');
-      assert.equal(beside.status, 0, beside.said);
-      // A runner short of memory runs the two one after the other.
-      assert.match(
-        beside.said,
-        /in 2 suites over 2 engines, one of them windowed(?:, one at a time, since [^\n]*)?\.$/m,
-        beside.said,
-      );
-      assert.doesNotMatch(beside.said, /runs with a window here/, beside.said);
-      // A suite declaring nothing shares the windowed engine unless the run keeps it to the suites
-      // needing a window.
-      const kept = test('--window-only-needed', 'tests/window_test.gd', 'tests/ok_test.gd');
-      assert.equal(kept.status, 0, kept.said);
-      assert.match(
-        kept.said,
-        /in 2 suites over 2 engines, one of them windowed(?:, one at a time, since [^\n]*)?\.$/m,
-        kept.said,
-      );
-      const together = test('tests/window_test.gd', 'tests/ok_test.gd');
-      // A runner short of memory adds why it started fewer engines than asked for.
-      assert.match(
-        together.said,
-        /in 2 suites over 1 engine, with a window(?:, of the \d+ asked for, since [^\n]*)?\.$/m,
-        together.said,
-      );
-      // In one engine it has to share the window, and the run says so before it starts.
-      for (const [args, why] of [
-        [['--engines', '1'], 'the run has one engine'],
-        [['--order', 'reversed'], 'an ordered run is one engine'],
-      ] as const) {
-        const shared = test(...args, 'tests/window_test.gd', 'tests/stood_test.gd');
-        assert.ok(
-          shared.said.includes(
-            `res://tests/stood_test.gd says it runs headless and runs with a window here, since ${why} and a suite in it needs a window. Run it without the windowed suites to run it headless.`,
-          ),
-          shared.said,
-        );
+      // The windowed engine runs only the suite needing it, and a headless engine follows it in its
+      // slot with the rest, one declaring nothing or one saying it runs headless alike, and with one
+      // slot as with four. stood_test.gd fails in a window, which shows the follower ran headless.
+      for (const args of [['--engines', '1'], []]) {
+        for (const other of ['tests/ok_test.gd', 'tests/stood_test.gd']) {
+          const run = test(...args, 'tests/window_test.gd', other);
+          assert.equal(run.status, 0, run.said);
+          assert.match(
+            run.said,
+            /in 2 suites over 2 engines, one of them windowed and followed in its slot by a headless one\.$/m,
+            run.said,
+          );
+          assert.match(run.said, /^Passed: \d+ cases in 2 suites across 2 engines/m, run.said);
+          assert.doesNotMatch(run.said, /runs with a window here/, run.said);
+        }
       }
+      // An ordered run is one engine, so the suite has to share the window, and the run says so
+      // before it starts.
+      const shared = test('--order', 'reversed', 'tests/window_test.gd', 'tests/stood_test.gd');
+      assert.ok(
+        shared.said.includes(
+          'res://tests/stood_test.gd says it runs headless and runs with a window here, since an ordered run is one engine and a suite in it needs a window. Run it without the windowed suites to run it headless.',
+        ),
+        shared.said,
+      );
     } else {
       console.log(`test command windowed case skipped: ${windowed}`);
     }

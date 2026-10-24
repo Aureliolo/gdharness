@@ -3587,8 +3587,9 @@ function testEveryUseIsFound(godotPath: string): void {
     writeFileSync(
       join(dir, 'project.godot'),
       // An input action sharing a class's name is a key written bare, which only the rule that a
-      // class is used by name in code alone keeps from counting.
-      `${readFileSync(join(dir, 'project.godot'), 'utf8')}\n[autoload]\n\nAuto="*res://auto/autoload.gd"\n\n[application]\n\nrun/main_scene="uid://c4c550daekhi1"\n\n[input]\n\nEnemy={\n"deadzone": 0.5,\n"events": []\n}\n`,
+      // class is used by name in code alone keeps from counting. The autoload's name is one no
+      // shipped script's prose holds: named Auto, it was found in an addon comment opening "Auto".
+      `${readFileSync(join(dir, 'project.godot'), 'utf8')}\n[autoload]\n\nAutoProbe="*res://auto/autoload.gd"\n\n[application]\n\nrun/main_scene="uid://c4c550daekhi1"\n\n[input]\n\nEnemy={\n"deadzone": 0.5,\n"events": []\n}\n`,
     );
     mkdirSync(join(dir, 'addons', 'probe'), { recursive: true });
     writeFileSync(

@@ -58,6 +58,7 @@ import {
   type EnginePlan,
   headlessInAWindow,
   inOneEngine,
+  lanesOf,
   ProjectScripts,
   readTimes,
   SPLIT_PAST_SECONDS,
@@ -67,7 +68,6 @@ import {
   unitsOf,
   viewportOf,
   windowedSaid,
-  windowOnlyWhereNeeded,
   writeJson,
 } from './suite-plan.js';
 import { getLocalVersion } from './version.js';
@@ -91,8 +91,6 @@ export interface TestOptions {
   readonly importFirst: boolean;
   /** Every suite in one engine in this order: `reversed`, or shuffled by the seed. */
   readonly order: 'reversed' | number | null;
-  /** Keep the windowed engine to the suites needing a window, as though every other said `false`. */
-  readonly windowOnlyNeeded: boolean;
   /** Print what each engine printed, after the run and before its verdict. */
   readonly printOutput: boolean;
 }
@@ -126,7 +124,7 @@ const VALUED = new Set([
   '--reach-also',
   '--order',
 ]);
-const SWITCHES = new Set(['--changed-only', '--import', '--window-only-needed', '--print-output']);
+const SWITCHES = new Set(['--changed-only', '--import', '--print-output']);
 
 /** [param args], everything after `test`, read into options; relative paths are read from [param cwd]. */
 export function testOptionsOf(args: readonly string[], cwd: string): TestOptions {
@@ -171,7 +169,6 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
     importFirst: switches.has('--import'),
     order: order === undefined ? null : order === 'reversed' ? 'reversed' : seedOf(order),
-    windowOnlyNeeded: switches.has('--window-only-needed'),
     printOutput: switches.has('--print-output'),
   };
 }
@@ -503,7 +500,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       }
     }
     const times = readTimes(timesFile);
-    const units = unitsOf(options.windowOnlyNeeded ? windowOnlyWhereNeeded(suites) : suites, times);
+    const units = unitsOf(suites, times);
     const memory = await memoryAvailable();
     if (memory.unread !== undefined) {
       console.log(
@@ -513,12 +510,12 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     const room = roomFor(options.engines, availableParallelism(), memory.bytes, memory.said);
     const plans =
       options.order === null
-        ? dealt(units, declared, room.engines, options.engines)
+        ? dealt(units, declared, room.engines)
         : [inOneEngine(ordered(units, options.order), declared)];
     const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
     const how =
       options.order === null
-        ? `${windowedSaid(plans)}${roomSaid(plans.length, room, options.engines)}`
+        ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(units, declared, options.engines)), room.held, options.engines)}`
         : options.order === 'reversed'
           ? ', in reverse order of path'
           : `, shuffled by ${String(options.order)}`;
@@ -529,7 +526,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     if (windowedAnyway.length > 0) {
       const one = windowedAnyway.length === 1;
       console.log(
-        `${named(windowedAnyway)} ${options.windowOnlyNeeded ? `${one ? 'needs' : 'need'} no window, which --window-only-needed keeps ${one ? 'it' : 'them'} out of,` : `${one ? 'says it runs' : 'say they run'} headless`} and ${one ? 'runs' : 'run'} with a window here, since ${options.order === null ? 'the run has one engine' : 'an ordered run is one engine'} and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
+        `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since an ordered run is one engine and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
       );
     }
     const split = [...new Set(units.map((unit) => unit.suite))].filter(
@@ -540,7 +537,12 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(split)}.`,
       );
     }
-    let ran = await inTurns(plans, room.engines, (plan, index) => runEngine(launch, plan, index, units));
+    const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
+      plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
+    );
+    let ran = (await inTurns(lanes, room.engines, (lane) => runLane(launch, lane, units)))
+      .flat()
+      .sort((a, b) => a.index - b.index);
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
       console.log('An engine ran out of memory, so every engine that failed runs again, one at a time.');
       const again: EngineRan[] = [];
@@ -569,20 +571,23 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
 
 /**
  * What the line announcing a dealt run says of the machine's room, after the window: nothing unless
- * the room held [param engines] engines below the [param asked], since a run with fewer units than
- * engines was not held by anything.
+ * what [param held] it kept its [param lanes] below the [param unheld] it would have dealt with the
+ * [param asked] engines, since a run too small to fill more lanes was not held by anything. Its
+ * [param engines] run [param lanes] at a time.
  */
 export function roomSaid(
   engines: number,
-  room: { readonly engines: number; readonly held: string | undefined },
+  lanes: number,
+  unheld: number,
+  held: string | undefined,
   asked: number,
 ): string {
-  if (room.held === undefined || engines < room.engines) {
+  if (held === undefined || lanes >= unheld) {
     return '';
   }
-  return engines > room.engines
-    ? `, ${room.engines === 1 ? 'one' : String(room.engines)} at a time, since ${room.held}`
-    : `, of the ${String(asked)} asked for, since ${room.held}`;
+  return engines > lanes
+    ? `, ${lanes === 1 ? 'one' : String(lanes)} at a time, since ${held}`
+    : `, of the ${String(asked)} asked for, since ${held}`;
 }
 
 /** [param run] over every one of [param items], [param at] at most at a time, answered in their order. */
@@ -683,13 +688,38 @@ async function importProject(launch: Launch): Promise<string | null> {
   }
 }
 
-/** Runs [param plan] in an engine of its own once a slot is free, and judges what it printed. */
+/**
+ * Runs the engines of one lane one after another in a single slot, taken before the first and given
+ * back after the last, so another run on the machine cannot take it in between.
+ */
+async function runLane(
+  launch: Launch,
+  lane: ReadonlyArray<{ readonly plan: EnginePlan; readonly index: number }>,
+  units: readonly Unit[],
+): Promise<EngineRan[]> {
+  const lock = await launch.slots.take();
+  try {
+    const ran: EngineRan[] = [];
+    for (const { plan, index } of lane) {
+      ran.push(await runEngine(launch, plan, index, units, '', lock));
+    }
+    return ran;
+  } finally {
+    launch.slots.release(lock);
+  }
+}
+
+/**
+ * Runs [param plan] in an engine of its own, in the slot [param slot] when its lane holds one and
+ * otherwise once a slot is free, and judges what it printed.
+ */
 async function runEngine(
   launch: Launch,
   plan: EnginePlan,
   index: number,
   units: readonly Unit[],
   again = '',
+  slot: string | null = null,
 ): Promise<EngineRan> {
   const directory = join(launch.runDirectory, `engine-${String(index)}${again === '' ? '' : `-${again}`}`);
   mkdirSync(join(directory, 'user'), { recursive: true });
@@ -735,13 +765,15 @@ async function runEngine(
   const slowest = Math.max(0, ...units.filter((unit) => held.has(unit.suite)).map((unit) => unit.cost));
   const silence = Math.max(launch.silenceFloorSeconds, SILENCE_TIMES_SLOWEST * slowest);
   const log = join(directory, 'engine.log');
-  const lock = await launch.slots.take();
+  const lock = slot ?? (await launch.slots.take());
   const began = Date.now();
   let end: EngineEnd;
   try {
     end = await watched(launch, args, directory, log, plan.windowed, silence);
   } finally {
-    launch.slots.release(lock);
+    if (slot === null) {
+      launch.slots.release(lock);
+    }
   }
   const printed = readRun(readFileSync(log, 'utf8'));
   const assignment: EngineAssignment = {
