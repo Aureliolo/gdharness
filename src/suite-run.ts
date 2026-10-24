@@ -808,15 +808,40 @@ async function runEngine(
     selfTyped: launch.selfTyped,
     godotVersion: launch.godotVersion,
   };
+  const judged = judgeEngine(printed, assignment, end);
+  const written = reportsFault(join(directory, 'reports'));
   return {
     index,
     plan,
     printed,
-    verdict: judgeEngine(printed, assignment, end),
+    verdict: written === null ? judged : { ...judged, passed: false, faults: [...judged.faults, written] },
     log,
     seconds: (Date.now() - began) / 1000,
     again: again !== '',
   };
+}
+
+/** How many of the files written into a report folder that was turned off are named. */
+const REPORT_FILES_NAMED = 3;
+
+/**
+ * What fails an engine that wrote a file into [param reports], the folder its gdUnit4 reports go to,
+ * or null when it wrote none. The runner turns off both reports by marking their session hooks, so a
+ * file there means the gdUnit4 installed no longer reads that mark: every run then writes reports it
+ * was told not to, and the hook the runner reads the registration of is no proof of it.
+ */
+export function reportsFault(reports: string): string | null {
+  const files = existsSync(reports)
+    ? readdirSync(reports, { recursive: true, encoding: 'utf8' })
+        .filter((file) => statSync(join(reports, file)).isFile())
+        .sort()
+    : [];
+  if (files.length === 0) {
+    return null;
+  }
+  const shown = files.slice(0, REPORT_FILES_NAMED).map((file) => file.split(sep).join('/'));
+  const more = files.length - shown.length;
+  return `gdUnit4 wrote ${plural(files.length, 'file')} into ${reports} (${shown.join(', ')}${more > 0 ? ` and ${String(more)} more` : ''}), a report the runner had turned off, so the gdUnit4 installed no longer honours a session hook marked off; report it to gdharness with gdUnit4's version`;
 }
 
 /** Prints how the run went and answers the exit code: what failed, in full, then one line of totals. */

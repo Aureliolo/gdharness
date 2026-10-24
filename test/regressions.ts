@@ -405,7 +405,7 @@ import {
   unitsOf,
   windowedSaid,
 } from '../src/suite-plan.js';
-import { importFault, roomSaid, testOptionsOf, uncollectedSaid } from '../src/suite-run.js';
+import { importFault, reportsFault, roomSaid, testOptionsOf, uncollectedSaid } from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -40892,6 +40892,29 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     'it printed 2 engine errors and an engine warning, the first warning "first"',
     'both, counted apart',
   );
+  // The reports are turned off by marking their hooks, and only a file in the reports folder shows
+  // that gdUnit4 stopped reading the mark.
+  const reports = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-reports-'));
+  try {
+    assert.equal(reportsFault(join(reports, 'none')), null, 'a folder never made');
+    mkdirSync(join(reports, 'report_1'), { recursive: true });
+    assert.equal(reportsFault(reports), null, 'a folder made with nothing in it');
+    writeTree(reports, { 'report_1/index.html': '<html/>', 'report_1/results.xml': '<x/>' });
+    const turnedOff = `a report the runner had turned off, so the gdUnit4 installed no longer honours a session hook marked off; report it to gdharness with gdUnit4's version`;
+    assert.equal(
+      reportsFault(reports),
+      `gdUnit4 wrote 2 files into ${reports} (report_1/index.html, report_1/results.xml), ${turnedOff}`,
+      'a report written',
+    );
+    writeTree(reports, { 'report_1/css/a.css': '', 'report_1/css/b.css': '' });
+    assert.equal(
+      reportsFault(reports),
+      `gdUnit4 wrote 4 files into ${reports} (report_1/css/a.css, report_1/css/b.css, report_1/index.html and 1 more), ${turnedOff}`,
+      'the first few of many',
+    );
+  } finally {
+    sweep(reports);
+  }
   // Credited as an error is: one printed after a case's verdict is that case's while another follows.
   const afterVerdict = cannedRun([
     caseLine(S_TEST, 'test_a', 'STARTED'),

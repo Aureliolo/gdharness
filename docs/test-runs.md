@@ -140,8 +140,14 @@ an allocation fails at the commit limit however much physical memory is free.
   while gdUnit4 announces a session before it hands it to its hooks and its console, so a session
   hook of the runner's own fails the run, with gdUnit4's version, when it is handed another session
   or when the cases ran without one lookup reaching it. A report turned off by an option that
-  gdUnit4 no longer registers a hook for fails the run the same way. These checks run in the gdUnit4
-  the project installs, on every run.
+  gdUnit4 no longer registers a hook for fails the run the same way, and so does any file in an
+  engine's reports folder, since the runner turns both reports off by marking their hooks and a
+  file there means gdUnit4 no longer reads the mark. These checks run in the gdUnit4 the project
+  installs, on every run.
+- A script under the folders searched for suites that declares `test_` functions and is no suite,
+  because nothing it extends reaches `GdUnitTestSuite`. gdUnit4 runs none of its cases and says
+  nothing of it, so a suite whose `extends` names the wrong class would pass with no case run. The
+  run names the script beside the suites it did run.
 
 Each failure is printed with the lines that show it: a failing case's report, each unexpected error
 and the line after it, and the run's summary. When an engine was cut short and none of that explains
