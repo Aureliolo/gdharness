@@ -47570,7 +47570,10 @@ function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
   assert.deepEqual(proseFaults('godot `--path p -- -e` and `HEAD -- package.json`', true), []);
   assert.deepEqual(proseFaults('wait -- then go', false), [], 'a test line may hold a command line');
   assert.deepEqual(
-    proseFaults(`\`\`\`text\ngdharness spread a.tscn -- --seed=3\n\`\`\`\nwait -- then go\n\`\`\`\n${EM_DASH}\n\`\`\``, true),
+    proseFaults(
+      `\`\`\`text\ngdharness spread a.tscn -- --seed=3\n\`\`\`\nwait -- then go\n\`\`\`\n${EM_DASH}\n\`\`\``,
+      true,
+    ),
     ['line 4: a double hyphen used as a dash', 'line 6: an em dash'],
     'a fenced command line may hold its separator, and the prose after the fence is read again',
   );
