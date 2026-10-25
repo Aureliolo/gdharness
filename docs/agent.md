@@ -1,6 +1,6 @@
 # gdharness: install into a project
 
-For an agent. Version `{{version}}`. MCP server plus three Godot addons.
+For an agent. Version `{{version}}`. MCP server plus four Godot addons.
 
 ## Refuse
 
