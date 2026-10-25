@@ -309,6 +309,12 @@ its ops, which is what a client decides from whether to ask before a call. Resul
 `structuredContent`: Claude Code hands the model that field alone when a result has it, and every
 answer here that leads with prose or carries a notice would lose them.
 
+A call whose request carries a progress token is sent a progress notification at least every twenty
+seconds until it answers, whichever tool it is. Claude Code ends a call that has said nothing for
+thirty minutes, so a long `editor_run wait` was cut off while the game it watched kept running. A
+test run and a folder of diagnostics say how far they have got; any other call says it is still
+going and how long it has taken.
+
 `gdharness_editor`, the language server and the debug adapter are all inside the Godot editor you
 have open. `gdharness_runtime` is inside the running game. The spawned engine opens nothing and
 exits when the call is answered.
