@@ -43188,7 +43188,15 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     };
     const first = test('--import', 'tests/ok_test.gd', 'tests/declared_test.gd');
     assert.equal(first.status, 0, first.said);
-    assert.match(first.said, /^Passed: 4 cases in 2 suites across 1 engine, /m, first.said);
+    // Nothing is timed yet, so each suite has an engine of its own unless the machine's room holds
+    // the run back, which the first line then says.
+    assert.match(
+      first.said,
+      /asked for, since|at a time, since/.test(first.said)
+        ? /^Passed: 4 cases in 2 suites across 1 engine, /m
+        : /^Passed: 4 cases in 2 suites across 2 engines, /m,
+      first.said,
+    );
     assert.doesNotMatch(first.said, /The import was skipped/, 'a project never imported is imported');
     assert.match(
       first.said,
