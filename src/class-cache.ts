@@ -189,6 +189,25 @@ export function scriptsNaming(projectPath: string, classes: readonly string[]): 
   return naming.sort((a, b) => a.script.localeCompare(b.script));
 }
 
+/**
+ * The project's scripts declaring any of [param classes], in order of path: what a script naming
+ * one is compiled against, so they are reloaded before it. Godot keeps a parse of each script for
+ * others to resolve its class through, and a script declaring a renamed class still answered with
+ * the old name from that parse, so a script naming the new one failed on "Could not find class" in
+ * it until the declaring script was reloaded.
+ */
+export function scriptsDeclaring(projectPath: string, classes: readonly string[]): NamingScript[] {
+  const named = new Set(classes);
+  const declaring: NamingScript[] = [];
+  eachScript(projectPath, (script, source) => {
+    const declares = DECLARATION.exec(source)?.[1];
+    if (declares !== undefined && named.has(declares)) {
+      declaring.push({ script, tool: TOOL.test(codeOf(source)) });
+    }
+  });
+  return declaring.sort((a, b) => a.script.localeCompare(b.script));
+}
+
 /** The classes the cache lists, with the path each is recorded at, or null when there is none. */
 export function cachedClasses(projectPath: string): Map<string, string> | null {
   const cache = join(projectPath, '.godot', 'global_script_class_cache.cfg');

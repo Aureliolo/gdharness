@@ -52565,8 +52565,8 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     assert.deepEqual(asArray(get(answer, 'broughtIn') ?? []).map(String), ['CharteredRun'], said);
     assert.deepEqual(
       reloadsAskedFor,
-      ['res://charters_test.gd', 'res://refuses.gd', 'res://uses.gd'],
-      `the scripts naming the class are reloaded, and not the one declaring it or one that does not name it: ${said}`,
+      ['res://base.gd', 'res://charters_test.gd', 'res://refuses.gd', 'res://uses.gd'],
+      `the script declaring the class, then the scripts naming it, and not one that does not name it: ${said}`,
     );
     assert.deepEqual(
       asArray(get(answer, 'dependentsReloaded') ?? []).map(String),
@@ -52934,8 +52934,8 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
     const scanned = await rescan();
     assert.deepEqual(
       reloadsAskedFor,
-      ['res://kit/loader.gd', 'res://kit/manifest.gd', 'res://kit/loader.gd'],
-      `the loader, then the class it is compiled against, then the loader again: ${scanned.said}`,
+      ['res://kit/menu.gd', 'res://kit/loader.gd', 'res://kit/manifest.gd', 'res://kit/loader.gd'],
+      `the new class, the loader, then the class it is compiled against, then the loader again: ${scanned.said}`,
     );
     assert.deepEqual(
       behindAskedOf,
@@ -53308,8 +53308,8 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     );
     assert.deepEqual(
       reloadsAskedFor,
-      ['res://gate.gd'],
-      `and the script naming it is reloaded: ${finished.said}`,
+      ['res://addons/kit/licences/licences.gd', 'res://gate.gd'],
+      `and the script declaring it is reloaded, then the script naming it: ${finished.said}`,
     );
     assert.equal(get(finished.answer, 'ok'), true, finished.said);
     assert.equal(
@@ -53321,7 +53321,7 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     const again = await rescan();
     assert.deepEqual(
       reloadsAskedFor,
-      ['res://gate.gd'],
+      ['res://addons/kit/licences/licences.gd', 'res://gate.gd'],
       `a scan bringing nothing in reloads nothing: ${again.said}`,
     );
     assert.equal(get(again.answer, 'broughtIn'), undefined, again.said);
@@ -53349,8 +53349,13 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     );
     assert.deepEqual(
       reloadsAskedFor,
-      ['res://gate.gd', 'res://board.gd'],
-      `and reloads the script naming it: ${outlasted.said}`,
+      [
+        'res://addons/kit/licences/licences.gd',
+        'res://gate.gd',
+        'res://addons/kit/spots/spots.gd',
+        'res://board.gd',
+      ],
+      `and reloads the script declaring it, then the script naming it: ${outlasted.said}`,
     );
     assert.equal(get(outlasted.answer, 'ok'), true, outlasted.said);
   } finally {
