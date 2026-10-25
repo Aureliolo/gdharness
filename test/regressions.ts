@@ -57498,7 +57498,12 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     assert.doesNotMatch(fileOf('moves.tscn'), /tracks\/1\//, `one track: ${fileOf('moves.tscn')}`);
     assert.equal(
       textOf(await call(rotation([{ time: 0.5, value: 1 }]))),
-      'Track 0 already animates Body:rotation and has a key at 0.5 s, which keyframes[0] would replace. Nothing was written.',
+      'Track 0 already animates Body:rotation and has a key at 0.5 s, which keyframes[0] would replace. Nothing was written; replaceKeys true replaces it.',
+    );
+    assert.match(
+      fileOf('moves.tscn'),
+      /"values": \[0\.0, 1\.5, 3\.14, 6\.0\]/,
+      'the refused call wrote nothing',
     );
     // A property the node lacks is refused with the ones it has nearest, as a misspelt one usually
     // is among them.
@@ -57514,6 +57519,30 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       [get(inside, 'keys'), get(inside, 'pastLength')],
       [5, undefined],
       JSON.stringify(inside),
+    );
+    // replaceKeys is how one key's value changes: it takes the old key's place, which is named with
+    // what it held, beside a key at a new time.
+    const replacedKey = await written({
+      ...rotation([
+        { time: 0.5, value: 1 },
+        { time: 0.2, value: 2 },
+      ]),
+      replaceKeys: true,
+    });
+    assert.deepEqual(
+      [
+        get(replacedKey, 'keysReplaced'),
+        get(replacedKey, 'keysAdded'),
+        get(replacedKey, 'keys'),
+        get(replacedKey, 'existingTrack'),
+      ],
+      [[{ time: 0.5, was: 3.14 }], 1, 6, true],
+      JSON.stringify(replacedKey),
+    );
+    assert.match(
+      fileOf('moves.tscn'),
+      /"times": PackedFloat32Array\(0, 0\.1, 0\.2, 0\.25, 0\.5, 2\),[\s\S]*?"values": \[0\.0, 0\.5, 2\.0, 1\.5, 1\.0, 6\.0\]/,
+      fileOf('moves.tscn'),
     );
 
     const shorter = await written({
@@ -58058,6 +58087,13 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       [true, true, undefined],
       `a default fills what is not given: ${JSON.stringify(fits)}`,
     );
+    const recalled = await written({ ...calling([{ time: 0.1, args: ['bye'] }]), replaceKeys: true });
+    assert.deepEqual(
+      [get(recalled, 'keysReplaced'), get(recalled, 'keysAdded'), get(recalled, 'keys')],
+      [[{ time: 0.1, was: { method: 'cheer', args: ['hi'] } }], 0, 1],
+      `a method key replaced is named with its call: ${JSON.stringify(recalled)}`,
+    );
+    assert.match(fileOf('moves.tscn'), /"args": \["bye"\]/, fileOf('moves.tscn'));
     for (const [keyframes, method, misfit] of [
       [
         [
