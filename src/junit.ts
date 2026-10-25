@@ -840,11 +840,42 @@ function masked(expected: string, actual: string): boolean {
 
 const PRINTED_DICTIONARY = /^\{\n\t[\s\S]*\n {2}\}$/;
 
+/** The orphans one case or a suite's hooks left, as the runner named them. */
+export interface OrphansLeft {
+  readonly suite: string;
+  /** The case, as gdUnit4 names it on its verdict line, or `after` for the suite's hooks. */
+  readonly during: string;
+  readonly count: number;
+  /** Each node's class, its name and its script, as `Node "Sandbox" of res://sandbox.gd`. */
+  readonly nodes: string;
+}
+
+// Printed by the runner in src/godot/tests/listed.gd, ORPHANS_LEFT there.
+const ORPHANS_LEFT = /^gdharness orphans: (res:\/\/.+?\.(?:gd|cs)) > (.+?) left (\d+): (.+?)\s*$/;
+
+/** The orphans [param line] names, when it is the runner's line naming them. */
+export function orphansLeftOn(line: string): OrphansLeft | null {
+  const named = ORPHANS_LEFT.exec(line);
+  if (named === null) {
+    return null;
+  }
+  return { suite: named[1] ?? '', during: named[2] ?? '', count: Number(named[3]), nodes: named[4] ?? '' };
+}
+
+/** The sentences naming what [param left] left behind and what frees it. */
+export function orphansLeftSaid(left: OrphansLeft): string {
+  const nodes = left.count === 1 ? '1 node' : `${String(left.count)} nodes`;
+  const where = left.during === 'after' ? `${left.suite}'s hooks` : `${left.suite} > ${left.during}`;
+  return `${where} left ${nodes} neither freed nor in the tree, which gdUnit4 counts as orphans: ${left.nodes}. Free each one, or make it with auto_free(), which frees it once the case is over.`;
+}
+
 /** One suite that finished with nodes neither freed nor in the tree, and how many. */
 interface SuiteOrphans {
   /** The suite's script, as gdUnit4 names it on the line announcing the run. */
   readonly path: string;
   readonly orphans: number;
+  /** Each case or hook that left some, with the nodes, where the runner named them. */
+  readonly left: readonly OrphansLeft[];
 }
 
 /** What a run left behind, counted per suite and in total. */
@@ -877,7 +908,13 @@ export function orphansPrinted(printed: readonly string[]): OrphanReport {
   const suites: SuiteOrphans[] = [];
   let total: number | null = null;
   let running: string | null = null;
+  const named = new Map<string, OrphansLeft[]>();
   for (const line of printed) {
+    const left = orphansLeftOn(line);
+    if (left !== null) {
+      named.set(left.suite, [...(named.get(left.suite) ?? []), left]);
+      continue;
+    }
     const started = RUNNING_SUITE.exec(line);
     if (started?.[1] !== undefined) {
       running = started[1];
@@ -894,7 +931,7 @@ export function orphansPrinted(printed: readonly string[]): OrphanReport {
       continue;
     }
     if (running !== null && orphans > 0) {
-      suites.push({ path: running, orphans });
+      suites.push({ path: running, orphans, left: [] });
     }
     // Whether it counted any or not: the suite's statistics line is the end of its block, and the
     // next count belongs to whatever runs next rather than to this one.
@@ -904,7 +941,7 @@ export function orphansPrinted(printed: readonly string[]): OrphanReport {
     // Summed as a fallback, so a summary line this stops recognising costs the total and not the
     // per-suite rows, which are the part worth having.
     total: total ?? suites.reduce((sum, suite) => sum + suite.orphans, 0),
-    suites,
+    suites: suites.map((suite) => ({ ...suite, left: named.get(suite.path) ?? [] })),
   };
 }
 

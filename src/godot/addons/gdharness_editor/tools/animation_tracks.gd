@@ -58,7 +58,8 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 			)
 		)
 	var keyframes: Array = keyed[1]
-	var built: Array = _add_track(anim, track, target, target_path, keyframes)
+	var replacing: bool = GdhRead.as_bool(args.get("replaceKeys", false))
+	var built: Array = _add_track(anim, track, target, target_path, keyframes, replacing)
 	if not str(built[1]).is_empty():
 		return scene.refuse(str(built[1]))
 	var track_idx: int = built[0]
@@ -82,6 +83,10 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 	}
 	if built[3]:
 		answer["existingTrack"] = true
+	var replaced: Array = built[5]
+	if not replaced.is_empty():
+		answer["keysReplaced"] = replaced
+		answer["keysAdded"] = keyframes.size() - replaced.size()
 	if built[2] != null:
 		answer["methodFound"] = built[2]
 		# Written all the same, as a missing method is: the method may be changed next.
@@ -106,15 +111,16 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 
 
 ## Adds [param track] to [param anim] with [param keyframes], as [index, why not, methodFound,
-## existing, misfit]: methodFound is null for a property track, existing is whether the keys went
-## into a track the animation already had for that path, and misfit why a method key's arguments
-## cannot reach the method, or "".
+## existing, misfit, replaced]: methodFound is null for a property track, existing is whether the
+## keys went into a track the animation already had for that path, misfit why a method key's
+## arguments cannot reach the method, or "", and replaced each key [param replacing] let a keyframe
+## take the place of, as its time and what it held.
 ##
 ## Into that track rather than a second one beside it, as the editor keys a property it already
 ## animates: two tracks for one path both play, the later overriding the earlier, and a key meant
 ## to extend the motion was split off where reading the animation showed two halves.
 func _add_track(
-	anim: Animation, track: Dictionary, target: Node, target_path: String, keyframes: Array
+	anim: Animation, track: Dictionary, target: Node, target_path: String, keyframes: Array, replacing: bool
 ) -> Array:
 	var track_type: String = str(track.get("type", ""))
 	var keys: Array = []
@@ -125,21 +131,21 @@ func _add_track(
 	if track_type == "property":
 		var prop_name: String = str(track.get("property", ""))
 		if prop_name.is_empty():
-			return [-1, "track.property is required for property track", null, false, ""]
+			return _not_added("track.property is required for property track")
 		var values: Array = _key_values(target, prop_name, keyframes)
 		if not values[0]:
-			return [-1, values[1], null, false, ""]
+			return _not_added(str(values[1]))
 		keys = values[1]
 		path = NodePath(target_path + ":" + prop_name)
 	elif track_type == "method":
 		var method_name: String = str(track.get("method", ""))
 		if method_name.is_empty():
-			return [-1, "track.method is required for method track", null, false, ""]
+			return _not_added("track.method is required for method track")
 		for index: int in keyframes.size():
 			var keyframe: Dictionary = keyframes[index]
 			var given: Variant = keyframe.get("args", [])
 			if not given is Array:
-				return [-1, "keyframes[%d].args must be a list." % index, null, false, ""]
+				return _not_added("keyframes[%d].args must be a list." % index)
 			var raw: Array = given
 			var arguments: Array = _fitted(target, method_name, _parse_method_args(raw))
 			keys.append({"method": method_name, "args": arguments})
@@ -148,47 +154,60 @@ func _add_track(
 		method_found = target.has_method(method_name)
 		kind = Animation.TYPE_METHOD
 	else:
-		return [
-			-1,
+		return _not_added(
 			(
 				"add_track makes property and method tracks, and track.type is %s; remove_track takes any."
 				% track_type
-			),
-			null,
-			false,
-			""
-		]
+			)
+		)
 
 	var track_idx: int = anim.find_track(path, kind)
 	var existing: bool = track_idx >= 0
+	var replaced: Array[Dictionary] = []
 	if existing:
 		# Checked before any key goes in, since track_insert_key replaces a key at the same time
 		# without a word, and a refusal partway would leave the editor's scene half changed.
+		var values: GdhSerialisation = GdhSerialisation.new()
 		for index: int in keyframes.size():
 			var keyframe: Dictionary = keyframes[index]
 			var time: float = GdhRead.as_float(keyframe["time"])
-			if anim.track_find_key(track_idx, time, Animation.FIND_MODE_APPROX) >= 0:
-				return [
-					-1,
+			var key: int = anim.track_find_key(track_idx, time, Animation.FIND_MODE_APPROX)
+			if key < 0:
+				continue
+			if not replacing:
+				return _not_added(
 					(
 						(
 							"Track %d already animates %s and has a key at %s s, which keyframes[%d] would "
-							+ "replace. Nothing was written."
+							+ "replace. Nothing was written; replaceKeys true replaces it."
 						)
 						% [track_idx, str(path), _seconds(time), index]
-					),
-					null,
-					false,
-					""
-				]
+					)
+				)
+			# A method key's value is its call, {"method": ..., "args": [...]}. The time is as asked:
+			# the key's own, read back from a scene's 32-bit times, puts 0.1 at 0.100000001490116.
+			(
+				replaced
+				. append(
+					{
+						"time": time,
+						"was": values.serialize_value(anim.track_get_key_value(track_idx, key)),
+					}
+				)
+			)
 	else:
 		track_idx = anim.add_track(kind)
 		anim.track_set_path(track_idx, path)
 	for index: int in keyframes.size():
 		var keyframe: Dictionary = keyframes[index]
 		if anim.track_insert_key(track_idx, GdhRead.as_float(keyframe["time"]), keys[index]) < 0:
-			return [-1, "Keyframe %d could not be inserted." % index, null, false, ""]
-	return [track_idx, "", method_found, existing, misfit]
+			return _not_added("Keyframe %d could not be inserted." % index)
+	return [track_idx, "", method_found, existing, misfit, replaced]
+
+
+## What [method _add_track] answers when it added nothing, because of [param why].
+static func _not_added(why: String) -> Array:
+	return [-1, why, null, false, "", []]
 
 
 ## [param arguments] as [param method] on [param target] takes them: a whole number read as a

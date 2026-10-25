@@ -13,6 +13,7 @@ extends RefCounted
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
+const GdhShapes = preload("value_shapes.gd")
 
 
 ## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
@@ -515,18 +516,24 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 			scripted[str(declared.get("name", ""))] = true
 	var serialiser: GdhSerialisation = GdhSerialisation.new()
 	var properties: Dictionary = {}
-	for p: Dictionary in loaded.get_property_list():
+	# A Curve's points are read off one with none, since the engine has no default for point_0.
+	var fresh: Object = (
+		ClassDB.instantiate(loaded.get_class()) if GdhShapes.STORED_APART.has(loaded.get_class()) else null
+	)
+	for p: Dictionary in GdhShapes.read_properties(loaded):
 		var property: String = str(p.get("name", ""))
 		if property.is_empty() or property == "script":
-			continue
-		if not (GdhRead.as_int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
 			continue
 		var value: Variant = loaded.get(property)
 		if not include_defaults:
 			var default: Variant = (
 				script.get_property_default_value(property)
 				if scripted.has(property)
-				else ClassDB.class_get_property_default_value(loaded.get_class(), property)
+				else (
+					fresh.get(property)
+					if fresh != null
+					else ClassDB.class_get_property_default_value(loaded.get_class(), property)
+				)
 			)
 			if GdhSame.same(value, default):
 				continue

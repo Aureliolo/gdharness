@@ -7,6 +7,17 @@ extends RefCounted
 
 const GdhRead = preload("reading.gd")
 
+## The classes that store what the inspector shows, and a write takes, under other names: a Curve
+## keeps its points as _data, numbers and modes in one list, and its range as _limits, where the
+## inspector and resource_edit modify have point_count, point_0/position and min_value. A read
+## answering _data could not be written back the way it was read.
+const STORED_APART: Dictionary[String, Array] = {
+	"Curve": ["_data", "_limits"],
+	"Curve2D": ["_data"],
+	"Curve3D": ["_data"],
+}
+const HEADINGS: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP
+
 ## What each packed array holds, one value of which every element is fitted to.
 const PACKED_ELEMENTS: Dictionary = {
 	TYPE_PACKED_BYTE_ARRAY: TYPE_INT,
@@ -282,3 +293,24 @@ static func _unread(value: Variant, type: int) -> String:
 	if left.has("type") and not fields.has("_type"):
 		return note + ': a value names its type under "_type".'
 	return note + "."
+
+
+## The properties of [param object] a read answers with, as [method Object.get_property_list] gives
+## them: those it stores, with the inspector's own in place of what [constant STORED_APART] names.
+static func read_properties(object: Object) -> Array[Dictionary]:
+	var apart: Array = STORED_APART.get(object.get_class(), [])
+	var read: Array[Dictionary] = []
+	for property: Dictionary in object.get_property_list():
+		var usage: int = GdhRead.as_int(property.get("usage", 0))
+		var name: String = str(property.get("name", ""))
+		if usage & PROPERTY_USAGE_STORAGE:
+			if not apart.has(name):
+				read.append(property)
+		elif (
+			not apart.is_empty()
+			and usage & PROPERTY_USAGE_EDITOR
+			and not usage & HEADINGS
+			and name != "resource_path"
+		):
+			read.append(property)
+	return read

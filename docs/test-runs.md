@@ -141,6 +141,11 @@ an allocation fails at the commit limit however much physical memory is free.
   `0xC0000005 (STATUS_ACCESS_VIOLATION)`, or one of gdUnit4's, such as 101 for orphan nodes. gdUnit4's
   100, which it exits with when a case failed, is left out beside that case's own line. An engine
   that died on a Windows exception status also says how much memory was free as it ended.
+- Orphan nodes, by the case that left them, or the suite's hooks: each node's class, its name when
+  it has one, and its script, eight to a line and the rest counted. gdUnit4 names them only where a
+  case calls `collect_orphan_node_details()`, so the runner notes the orphans as each case and
+  suite starts and names what is new when gdUnit4 counts some. The suite fails with them, and 101
+  is left out beside the line.
 - An engine that printed nothing at all.
 - An engine ended for its silence or its deadline, or because an autoload did not start.
 - An engine whose banner names another version than `--godot-version` asks for.
@@ -286,6 +291,12 @@ start no more engines between them than there are slots. The MCP server's own en
 too: each headless operation, script check, export, `project_test` run and `editor_run check`
 waits for a slot before its engine starts. A game started with `editor_run start`, and one the
 editor plays, does not: someone is driving it for as long as it runs.
+
+A wait for a slot is said. A tool call that asked for progress hears it at once, and every 20
+seconds after. `gdharness test` and `gdharness spread` print a line once the wait passes 2 seconds,
+and again every 20 seconds while it lasts, one line however many of its engines are waiting; every
+other command prints it to standard error. The line names the directory and the count, so a gate
+that has gone quiet because the machine's other runs hold every slot says so.
 
 The directory and the count are the same for every tool on the machine:
 

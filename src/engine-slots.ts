@@ -111,6 +111,11 @@ const SLOT_WAIT_MS = 50;
  * silent by default, since a gate can hold every slot for far longer.
  */
 const WAIT_SAID_MS = 20_000;
+/**
+ * How long a command waits for a slot before it first says so: a slot given back at once is not
+ * worth a line, and a wait of minutes printing nothing reads as a hang.
+ */
+const COMMAND_WAIT_SAID_MS = 2000;
 /** How long a holder's start time, once read, is believed before it is read again. */
 const START_READ_MS = 10_000;
 
@@ -166,19 +171,28 @@ export async function ownStart(): Promise<number> {
   return said ?? Math.round(Date.now() - process.uptime() * 1000);
 }
 
-/** The engine slots in one directory, taken for this process. */
+/**
+ * The engine slots in one directory, taken for this process. [param say] is where a take given no
+ * listener of its own says it is waiting, a line at a time: a command's output, which several lanes
+ * waiting at once share, so it hears one line every interval rather than one from each. It is said
+ * only while this process holds no slot, since a run waiting behind its own engines is not held up
+ * by anyone else.
+ */
 export class EngineSlots {
   private readonly starts = new Map<number, { started: number | undefined; readAt: number }>();
   private readonly held = new Set<string>();
+  private saidAt = Number.NEGATIVE_INFINITY;
 
   readonly directory: string;
   readonly count: number;
   private readonly holder: SlotHolder;
+  private readonly say: ((line: string) => void) | undefined;
 
-  constructor(directory: string, count: number, holder: SlotHolder) {
+  constructor(directory: string, count: number, holder: SlotHolder, say?: (line: string) => void) {
     this.directory = directory;
     this.count = count;
     this.holder = holder;
+    this.say = say;
   }
 
   /** Takes a slot, waiting for one to come free, and answers its lock's path. */
@@ -195,9 +209,20 @@ export class EngineSlots {
           return lock;
         }
       }
-      if (waiting !== undefined && Date.now() - said >= WAIT_SAID_MS) {
-        said = Date.now();
-        waiting(said - began);
+      const now = Date.now();
+      if (waiting !== undefined) {
+        if (now - said >= WAIT_SAID_MS) {
+          said = now;
+          waiting(now - began);
+        }
+      } else if (
+        this.say !== undefined &&
+        this.held.size === 0 &&
+        now - began >= COMMAND_WAIT_SAID_MS &&
+        now - this.saidAt >= WAIT_SAID_MS
+      ) {
+        this.saidAt = now;
+        this.say(slotWaitSaid(now - began, this.count, this.directory));
       }
       await delay(SLOT_WAIT_MS, undefined, signal === undefined ? {} : { signal });
     }
@@ -300,6 +325,15 @@ export class EngineSlots {
 }
 
 let ours: Promise<EngineSlots> | undefined;
+let saidTo: ((line: string) => void) | undefined;
+
+/**
+ * Has a wait for a slot outside a call that reports progress said through [param say]: a command's
+ * own output. The server leaves it unset, because its standard output is the protocol.
+ */
+export function sayWaitsTo(say: (line: string) => void): void {
+  saidTo = say;
+}
 
 /**
  * The machine's slots as this process takes them for an engine of its own, outside a run that names
@@ -308,7 +342,9 @@ let ours: Promise<EngineSlots> | undefined;
 function processSlots(): Promise<EngineSlots> {
   ours ??= ownStart().then((started) => {
     const chosen = machineSlots();
-    return new EngineSlots(chosen.directory, chosen.count, { pid: process.pid, started });
+    return new EngineSlots(chosen.directory, chosen.count, { pid: process.pid, started }, (line) => {
+      saidTo?.(line);
+    });
   });
   return ours;
 }
