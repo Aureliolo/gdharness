@@ -42,7 +42,7 @@ import { NOT_INHERITED, RESOLVED_ELSEWHERE } from '../src/rename.js';
 import { readLatestRun } from '../src/run-record.js';
 import { frameFunctionsFor, queuedMessagesOf } from '../src/script-profile.js';
 import { SERVER_VERSION } from '../src/server-version.js';
-import { installAddons, RUNTIME_AUTOLOAD, writeLoader } from '../src/setup.js';
+import { EDITOR_PLUGINS, installAddons, RUNTIME_AUTOLOAD, writeLoader } from '../src/setup.js';
 import { type ChildProcess, spawnHidden, spawnSyncHidden } from '../src/spawn.js';
 import { endEnginesUnder } from './support/engines.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
@@ -317,6 +317,8 @@ interface Editor {
    */
   play: (args?: Record<string, unknown>) => Promise<unknown>;
   project: string;
+  /** Everything the editor has printed so far, which editor_output cannot read: it opened it. */
+  printed: () => string;
   /** The engine this editor is, for a case that needs a second one against the same project. */
   godotPath: string;
   /** What this editor was opened on, which is what it should be reporting it serves. */
@@ -653,6 +655,64 @@ const SCENE_FILES: Record<string, string[]> = {
     'shape = SubResource("RectangleShape2D_w")',
     '',
   ],
+  // The scripts the rename case renames in, there from the start as a game's are, so the editor's
+  // language server has parsed each one before it changes. A reload that compiled a subclass from
+  // that parse against its renamed base logged errors a script written afterwards never met.
+  'renamed/speaker.gd': [
+    'class_name Speaker',
+    'extends Node',
+    '',
+    '',
+    'func speak(times: int) -> String:',
+    '\treturn "x".repeat(times)',
+    '',
+    '',
+    'func twice() -> void:',
+    '\tspeak(2)',
+    '\tcall("speak", 1)',
+    '',
+  ],
+  'renamed/shouter.gd': [
+    'class_name Shouter',
+    'extends Speaker',
+    '',
+    '',
+    'func speak(times: int) -> String:',
+    '\treturn super.speak(times * 2)',
+    '',
+    '',
+    'func shout() -> void:',
+    '\tspeak(1)',
+    '',
+  ],
+  'renamed/listener.gd': [
+    'extends Node',
+    '',
+    'var heard: Speaker = Speaker.new()',
+    '',
+    '',
+    'class Echo:',
+    '\tfunc speak(times: int) -> int:',
+    '\t\treturn times',
+    '',
+    '',
+    'func listen(loud: Shouter) -> void:',
+    '\theard.speak(1)',
+    '\tloud.speak(2)',
+    '\tprint(Echo.new().speak(3))',
+    '',
+  ],
+  // A scene with a node running the base class, which the case opens as a game's editor has one
+  // open: auto_reload then loads the base again from its file once a rename writes it.
+  'renamed/stage.tscn': [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[ext_resource type="Script" path="res://renamed/speaker.gd" id="1_s"]',
+    '',
+    '[node name="Stage" type="Node"]',
+    'script = ExtResource("1_s")',
+    '',
+  ],
   // A variable that is not exported: set and read back like any property on a @tool script, and
   // kept by no file, which only reading the saved form can tell.
   'layers/tool_node.gd': ['@tool', 'extends Node', '', '@export var target: Node', 'var hidden: int = 0', ''],
@@ -732,7 +792,10 @@ function createProject(): string {
       'gdscript/warnings/static_called_on_instance=2',
       '',
       '[editor_plugins]',
-      'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg", "res://addons/fixture_hooks/plugin.cfg")',
+      // Every plugin setup enables: an editor without auto_reload never reloads an open scene's
+      // scripts from their files, and a reload of a script compiled against the base it replaces
+      // logged errors on a rename that this editor could not show.
+      `enabled=PackedStringArray(${[...EDITOR_PLUGINS, 'fixture_hooks'].map((name) => `"res://addons/${name}/plugin.cfg"`).join(', ')})`,
       '',
       // Not the engine's default, so the profiler's cap read from it differs from the one the addon
       // falls back on and a profile switched on without the server's number shows it.
@@ -1211,7 +1274,20 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     }
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
-    await body({ call, refusal, attempt, play, project, godotPath, lspPort, dapPort, server, serverEnv });
+    const printed = (): string => engineOutput.join('');
+    await body({
+      call,
+      refusal,
+      attempt,
+      play,
+      project,
+      printed,
+      godotPath,
+      lspPort,
+      dapPort,
+      server,
+      serverEnv,
+    });
     // A /proc that stopped answering would leave every later failure without its samples, unseen.
     if (process.platform === 'linux') {
       assert.notEqual(thread.account(), '', "the editor's main thread was sampled from /proc");
@@ -5113,22 +5189,28 @@ async function testAMemberRenameWaitsForTheClassesItTypesBy({
  * that the editor lets go of the old name: a scan alone keeps a class whose script has gone, and
  * every scan after it writes the class back into the cache at a path that is not there.
  */
-async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<void> {
+async function testARenameFollowsTheEngine({ call, project, printed }: Editor): Promise<void> {
   const dir = join(project, 'renamed');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    join(dir, 'speaker.gd'),
-    'class_name Speaker\nextends Node\n\n\nfunc speak(times: int) -> String:\n\treturn "x".repeat(times)\n\n\nfunc twice() -> void:\n\tspeak(2)\n\tcall("speak", 1)\n',
-  );
-  writeFileSync(
-    join(dir, 'shouter.gd'),
-    'class_name Shouter\nextends Speaker\n\n\nfunc speak(times: int) -> String:\n\treturn super.speak(times * 2)\n\n\nfunc shout() -> void:\n\tspeak(1)\n',
-  );
-  writeFileSync(
-    join(dir, 'listener.gd'),
-    'extends Node\n\nvar heard: Speaker = Speaker.new()\n\n\nclass Echo:\n\tfunc speak(times: int) -> int:\n\t\treturn times\n\n\nfunc listen(loud: Shouter) -> void:\n\theard.speak(1)\n\tloud.speak(2)\n\tprint(Echo.new().speak(3))\n',
-  );
-  await call('editor_rescan', { projectPath: project });
+  await hook(project, { op: 'open', path: 'res://renamed/stage.tscn' });
+  // The errors the editor has logged about these scripts. A reload compiling a script's old text
+  // against its renamed base logged "not found in base" and "Compiler bug" lines that read as a
+  // broken rename, a moment before the reload from the file compiled it clean.
+  const loggedAbout = (): string[] => {
+    const lines = printed().split(/\r?\n/);
+    return lines
+      .map((line, at) => (/^(?:SCRIPT )?ERROR:/.test(line) ? lines.slice(at, at + 3).join(' ') : ''))
+      .filter((said) => said.includes('res://renamed/'));
+  };
+  const loggedBefore = loggedAbout();
+  // auto_reload looks at the open scene's scripts once a second, and its reload of the base is what
+  // the subclass was compiled against, so the log is read once it has said it reloaded.
+  const autoReloaded = async (times: number): Promise<void> => {
+    const said = (): number => printed().split('reloading: res://renamed/speaker.gd').length - 1;
+    for (let waited = 0; said() < times && waited < 15_000; waited += 250) {
+      await delay(250);
+    }
+    assert.ok(said() >= times, `auto_reload reloaded the open scene's script:\n${printed().slice(-3000)}`);
+  };
 
   const member = await call('script_edit', {
     op: 'rename',
@@ -5138,6 +5220,8 @@ async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<v
     newName: 'utter',
   });
   assert.equal(get(member, 'ok'), true, `the member rename settled: ${JSON.stringify(member)}`);
+  await autoReloaded(1);
+  assert.deepEqual(loggedAbout(), loggedBefore, 'reloading after the member rename logged no error');
   assert.deepEqual(get(member, 'overridesRenamed'), ['res://renamed/shouter.gd'], JSON.stringify(member));
   const shouter = readFileSync(join(dir, 'shouter.gd'), 'utf8');
   assert.match(
@@ -5182,6 +5266,24 @@ async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<v
     `every changed script was reloaded, the subclass after its base: ${JSON.stringify(member)}`,
   );
 
+  // A class renamed where it is declared, in the script the open scene runs, and named by the
+  // scripts beside it: the scan brings the new name in and reloads them, and they resolve it through
+  // the parse the editor keeps of the declaring script, which still said Speaker after auto_reload
+  // had loaded the file again, until the declaring script was reloaded.
+  const kept = await call('script_edit', {
+    op: 'rename',
+    projectPath: project,
+    scriptPath: 'res://renamed/speaker.gd',
+    symbol: 'Speaker',
+    newName: 'Talker',
+  });
+  assert.equal(get(kept, 'ok'), true, `the class rename settled: ${JSON.stringify(kept)}`);
+  assert.match(readFileSync(join(dir, 'listener.gd'), 'utf8'), /var heard: Talker = Talker\.new\(\)/);
+  assert.match(readFileSync(join(dir, 'shouter.gd'), 'utf8'), /^class_name Shouter\nextends Talker\n/);
+  await autoReloaded(2);
+  assert.deepEqual(loggedAbout(), loggedBefore, 'reloading after the class rename logged no error');
+  await hook(project, { op: 'open', path: 'res://main.tscn' });
+
   // An autoload naming the script, which the move rewrites in project.godot and the editor has to
   // take from there, or it saves the old path back the next time it saves its settings.
   await call('project_settings', {
@@ -5194,7 +5296,7 @@ async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<v
     op: 'rename',
     projectPath: project,
     scriptPath: 'res://renamed/speaker.gd',
-    symbol: 'Speaker',
+    symbol: 'Talker',
     newName: 'Orator',
     newScriptPath: 'res://renamed/orator.gd',
   });
@@ -5220,7 +5322,7 @@ async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<v
   );
   const cache = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
   assert.match(cache, /"class": &"Orator",[\s\S]*?"path": "res:\/\/renamed\/orator\.gd"/);
-  assert.doesNotMatch(cache, /&"Speaker"/);
+  assert.doesNotMatch(cache, /&"(?:Speaker|Talker)"/);
   for (const script of ['shouter.gd', 'listener.gd', 'orator.gd']) {
     const diagnostics = await call('script_diagnostics', {
       projectPath: project,

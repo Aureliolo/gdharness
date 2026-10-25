@@ -56,7 +56,15 @@ func reload_script(args: Dictionary) -> Dictionary:
 	if not ResourceLoader.exists(path):
 		return {"ok": false, "error": "No script at " + path}
 
-	var loaded: Resource = load(path)
+	# The copy the editor holds, when it holds one, and otherwise a load that reads the file, rather
+	# than load(): a load recompiles a script whose base has been reloaded from the text it holds,
+	# which is the text before the file changed. A rename reloading a base and then its subclass
+	# logged "not found in base" for the subclass's old call to the renamed method, a moment before
+	# the reload below compiled it clean.
+	var cached: Resource = ResourceLoader.get_cached_ref(path)
+	var loaded: Resource = (
+		cached if cached != null else ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	)
 	var script: GDScript = loaded as GDScript
 	if script == null:
 		return {"ok": false, "error": path + " is not a GDScript"}
