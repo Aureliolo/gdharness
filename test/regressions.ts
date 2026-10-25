@@ -45,7 +45,7 @@ import {
 } from '../src/boot-note.js';
 import { breakpointNotePath, readBreakpointNote, writeBreakpointNote } from '../src/breakpoint-note.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
-import { callProgress, withCallSignal } from '../src/call-signal.js';
+import { callProgress, stillGoingSaid, withCallSignal } from '../src/call-signal.js';
 import {
   type Contradicted,
   cachedClasses,
@@ -42428,6 +42428,132 @@ function windowSuite(declared: string): string {
 }
 
 /**
+ * Every call whose client asked for progress hears from the server while it runs, whichever tool
+ * it is. Only test runs and the diagnostics loop reported, so Claude Code's thirty-minute idle limit
+ * cut off a forty-five-minute `editor_run wait` while the game it watched kept running.
+ */
+async function testEveryLongCallIsHeardFrom(): Promise<void> {
+  assert.equal(stillGoingSaid('editor_run', 'wait', 125_400), 'editor_run wait is still going; 2m 5s in.');
+  assert.equal(stillGoingSaid('editor_status', null, 3200), 'editor_status is still going; 3s in.');
+  const still = { everyMs: 60, said: (elapsedMs: number) => `still ${String(elapsedMs)}` };
+
+  // A call that says nothing is sent the heartbeat, again and again, and nothing once it has answered.
+  const quiet: { number: number; message: string }[] = [];
+  await withCallSignal(
+    undefined,
+    () => delay(260),
+    (number, message) => {
+      quiet.push({ number, message });
+    },
+    still,
+  );
+  const heard = quiet.length;
+  assert.ok(heard >= 3 && quiet.every((each) => each.message.startsWith('still ')), JSON.stringify(quiet));
+  assert.ok(
+    quiet.every((each, at) => at === 0 || each.number > (quiet[at - 1]?.number ?? 0)),
+    `with numbers that rise: ${JSON.stringify(quiet)}`,
+  );
+  await delay(200);
+  assert.equal(quiet.length, heard, `and stops when the call answers: ${JSON.stringify(quiet)}`);
+
+  // A call that reports for itself more often than the interval is never sent the heartbeat on top.
+  const busy: string[] = [];
+  await withCallSignal(
+    undefined,
+    async () => {
+      for (let at = 0; at < 8; at += 1) {
+        callProgress()?.(at, 'own');
+        await delay(30);
+      }
+    },
+    (_number, message) => {
+      busy.push(message);
+    },
+    still,
+  );
+  assert.deepEqual(busy, Array(8).fill('own'), 'a call reporting for itself is left to say its own');
+
+  // And one that falls silent after reporting is heard from again an interval after its last word.
+  const lapsed: string[] = [];
+  await withCallSignal(
+    undefined,
+    async () => {
+      callProgress()?.(0, 'own');
+      await delay(150);
+    },
+    (_number, message) => {
+      lapsed.push(message);
+    },
+    still,
+  );
+  assert.ok(
+    lapsed[0] === 'own' && lapsed.slice(1).some((message) => message.startsWith('still ')),
+    JSON.stringify(lapsed),
+  );
+
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names nothing usable.');
+    }
+    console.log('long call regression: engine half skipped (Godot not found)');
+    return;
+  }
+  // Through a real server: a wait on a game that runs past the interval, which says nothing of its own.
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-call-'));
+  const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="LongCall"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tawait get_tree().create_timer(25.0).timeout\n\tget_tree().quit()\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    await server.initialize('regression-test');
+    const started = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, op: 'start', headless: true } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(started, 'through'), 'gdharness', JSON.stringify(started));
+    const waited = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { op: 'wait', timeoutMs: 60_000 },
+          _meta: { progressToken: 'waiting' },
+        },
+        90_000,
+      ),
+    );
+    assert.equal(get(waited, 'running'), false, `the wait saw the game end: ${JSON.stringify(waited)}`);
+    const told = server.notifications
+      .filter((message) => message.method === 'notifications/progress')
+      .map((message) => (isRecord(message.params) ? message.params : {}))
+      .filter((params) => params['progressToken'] === 'waiting')
+      .map((params) => text(params['message']));
+    assert.ok(
+      told.length >= 1 &&
+        told.every((message) => /^editor_run wait is still going; \d+s in\.$/.test(message)),
+      `a wait that says nothing of its own is told it is still going: ${JSON.stringify(told)}`,
+    );
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * One budget of engines for the whole machine, which every engine gdharness starts waits on.
  *
  * Each game's gate once took four slots of its own checkout's, so a machine running three gates and
@@ -61007,6 +61133,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
   testTheLspCommandFindsTheEditorsPort,
+  testEveryLongCallIsHeardFrom,
   testEveryEngineWaitsForAMachineSlot,
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,

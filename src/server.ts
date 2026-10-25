@@ -37,7 +37,14 @@ import { autoloadNotCompiled, scriptsAutoloaded } from './autoload-failure.js';
 import { halfAsLongAgain, MAIN_SCENE, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
-import { type CallProgress, callProgress, callSignal, withCallSignal } from './call-signal.js';
+import {
+  CALL_HEARTBEAT_MS,
+  type CallProgress,
+  callProgress,
+  callSignal,
+  stillGoingSaid,
+  withCallSignal,
+} from './call-signal.js';
 import {
   cachedAtMissingPaths,
   cachedClasses,
@@ -4436,6 +4443,10 @@ class GodotServer {
           ctx.mcpReq.signal,
           () => this.answered(spec.name, checked.op ?? '', args),
           progress,
+          {
+            everyMs: CALL_HEARTBEAT_MS,
+            said: (elapsedMs) => stillGoingSaid(spec.name, checked.op, elapsedMs),
+          },
         );
         return this.withinTheClientsLimit(spec.name, this.withFeedbackNotice(this.withUpdateNotice(answer)));
       } finally {
