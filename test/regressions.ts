@@ -47095,6 +47095,8 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
       assert.ok(existsSync(marker), `setup should have written the marker removed here for ${addon}`);
       rmSync(marker);
     }
+    // And the tests addon gone, as from a release before it existed, which the upgrade adds.
+    rmSync(join(projectDir, 'addons', 'gdharness_tests'), { recursive: true });
 
     // Two git worktrees of the project, which an upgrade here does not reach: one with addons
     // releases behind, named with the command that upgrades it, and one already on this version,
@@ -47128,6 +47130,18 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
     assert.ok(!upgraded.output.includes(level), `and one already on this version is not: ${upgraded.output}`);
     assert.match(upgraded.output, /an unmarked copy -> /, upgraded.output);
     assert.match(upgraded.output, /replaced .*gdharness_editor/, upgraded.output);
+    // A folder the upgrade adds is named as new, so a project filtering the addons by name extends
+    // its filters; the ones it replaced are not.
+    assert.match(
+      upgraded.output,
+      /^installed .*gdharness_tests\n {2}addons\/gdharness_tests\/ is new to this project: a \.gitignore entry or export filter naming gdharness's addons one by one has to name it too$/m,
+      upgraded.output,
+    );
+    assert.equal(
+      [...upgraded.output.matchAll(/is new to this project/g)].length,
+      1,
+      `and only it: ${upgraded.output}`,
+    );
     assert.match(upgraded.output, /Restart it with the\s+editor_launch restart/, upgraded.output);
     assert.ok(existsSync(digestMarker), 'and the upgrade writes the digest back');
     // And the value it read is still the value it writes, which is what made the refusal absurd.

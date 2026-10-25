@@ -266,8 +266,8 @@ function filled(text: string, markup = true): string {
 const PARTS = [
   {
     kicker: 'Inside Godot',
-    title: 'Three addons',
-    body: 'They make the open editor and the running game answerable, and reload the editor when files change on disk.',
+    title: 'Four addons',
+    body: 'They make the open editor and the running game answerable, reload the editor when files change on disk, and give test suites waits, steps and input.',
     link: 'architecture.html',
     linkText: 'How it works',
   },
@@ -354,8 +354,9 @@ function renderHomeText(): string {
     '',
     '## Three parts',
     '',
-    '**Inside Godot.** Three addons in your project. They make the open editor and the running game',
-    'answerable, and reload the editor when files change on disk.',
+    '**Inside Godot.** Four addons in your project. They make the open editor and the running game',
+    'answerable, reload the editor when files change on disk, and give test suites waits, steps and',
+    'input.',
     '',
     `**The MCP server.** ${TOOL_COUNT} tools named \`domain_verb\`, and four \`godot://\` resources. An`,
     'unknown op or argument is refused with the valid set listed, and every answer is read back from',
@@ -635,8 +636,8 @@ function renderLlmsTxt(): string {
   const lines = [
     '# gdharness',
     '',
-    '> A harness for driving a Godot 4 project from an agent: three addons that make the editor',
-    '> and the running game answerable, a server that puts them in front of an agent as tools,',
+    '> A harness for driving a Godot 4 project from an agent: four addons that make the editor',
+    '> and the running game answerable and help its test suites, a server that puts them in front of an agent as tools,',
     '> engine operations that answer with nothing open, and a command line that installs it all.',
     '',
     `Version ${SERVER_VERSION}. Every release is signed and carries a build attestation, and the`,

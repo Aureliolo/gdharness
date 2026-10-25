@@ -154,6 +154,29 @@ for (const [file, pattern, actual] of WRITTEN_COUNTS) {
     `${file} states a count the repository no longer has`,
   );
 }
+// Every count of the addons written in words, wherever it is: the one sentence held above said four
+// while the skill, the agent's install page and the site said three, and a project that ignored and
+// export-filtered the addons by name took the skill's word and shipped the fourth.
+const addonCount = readdirSync(new URL('../src/godot/addons', import.meta.url)).length;
+const addonCounts = [
+  'README.md',
+  ...['docs', 'src', 'scripts', '.github'].flatMap((root) =>
+    readdirSync(new URL(`../${root}`, import.meta.url), { recursive: true })
+      .map((path) => `${root}/${String(path).replaceAll('\\', '/')}`)
+      .filter((path) => /\.(md|ts|gd)$/.test(path)),
+  ),
+].flatMap((file) =>
+  [...readFileSync(new URL(`../${file}`, import.meta.url), 'utf8').matchAll(/\b(\w+) (?:Godot )?addons\b/gi)]
+    .filter((found) => NUMBER_WORDS.includes((found[1] ?? '').toLowerCase()))
+    .map((found) => ({ file, word: (found[1] ?? '').toLowerCase() })),
+);
+assert.ok(
+  addonCounts.length >= 6,
+  `the addons are counted in words in the skill, the install guide, the agent page and the site: ${JSON.stringify(addonCounts)}`,
+);
+for (const { file, word } of addonCounts) {
+  assert.equal(word, NUMBER_WORDS[addonCount], `${file} counts the addons as ${word}`);
+}
 
 assert.match(
   serverManifest.description,

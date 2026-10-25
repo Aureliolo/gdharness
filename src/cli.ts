@@ -526,6 +526,13 @@ async function upgrade(): Promise<void> {
   const digestBefore = installedEditorDigest(projectPath);
   for (const addon of installAddons(projectPath)) {
     console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
+    // An upgrade adding a folder lands it beside the ones a project has already named in its
+    // .gitignore or export filters, which then show it as untracked or ship it.
+    if (!addon.replaced) {
+      console.log(
+        `  addons/${addon.name}/ is new to this project: a .gitignore entry or export filter naming gdharness's addons one by one has to name it too`,
+      );
+    }
   }
   const enabled = await enablePlugins(godot, projectPath, EDITOR_PLUGINS);
   for (const [index, outcome] of enabled.entries()) {
