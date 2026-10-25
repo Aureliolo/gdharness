@@ -424,10 +424,14 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
   mkdirSync(runDirectory, { recursive: true });
   const logs = new RunLogs(runDirectory, keptRuns === testRuns ? null : join(keptRuns, runName));
   const chosen = machineSlots({ directory: options.slotsDirectory, count: options.slotCount });
-  const slots = new EngineSlots(chosen.directory, chosen.count, {
-    pid: process.pid,
-    started: await ownStart(),
-  });
+  const slots = new EngineSlots(
+    chosen.directory,
+    chosen.count,
+    { pid: process.pid, started: await ownStart() },
+    (line) => {
+      console.log(line);
+    },
+  );
   const running = new Set<() => void>();
   const interrupted = (): void => {
     for (const end of running) {

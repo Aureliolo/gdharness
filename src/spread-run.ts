@@ -239,7 +239,14 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   mkdirSync(shareDirectory, { recursive: true });
   const chosen = machineSlots({ directory: options.slotsDirectory, count: options.slotCount });
   const slotCount = chosen.count;
-  const slots = new EngineSlots(chosen.directory, slotCount, { pid: process.pid, started: await ownStart() });
+  const slots = new EngineSlots(
+    chosen.directory,
+    slotCount,
+    { pid: process.pid, started: await ownStart() },
+    (line) => {
+      console.log(`[spread] ${line}`);
+    },
+  );
   const launch: EngineLaunch = {
     godotPath,
     projectPath: options.projectPath,

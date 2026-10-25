@@ -42554,6 +42554,29 @@ async function testEveryLongCallIsHeardFrom(): Promise<void> {
 }
 
 /**
+ * Has a process of its own hold the slot at [param lock] for [param ms], as another run on the
+ * machine would, and answers once the lock is written. A synchronous spawn after it still sees it
+ * given back, since the holder runs on its own clock.
+ */
+async function slotHeldElsewhere(lock: string, ms: number): Promise<ReturnType<typeof spawnHidden>> {
+  const holder = spawnHidden(
+    process.execPath,
+    [
+      '-e',
+      `const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(lock)}, JSON.stringify({ pid: process.pid, started: Math.round(Date.now() - process.uptime() * 1000) }));
+setTimeout(() => { fs.rmSync(${JSON.stringify(lock)}, { force: true }); }, ${String(ms)});`,
+    ],
+    { stdio: 'ignore' },
+  );
+  for (let looked = 0; looked < 100 && !existsSync(lock); looked += 1) {
+    await delay(50);
+  }
+  assert.ok(existsSync(lock), `the holder wrote ${lock}`);
+  return holder;
+}
+
+/**
  * One budget of engines for the whole machine, which every engine gdharness starts waits on.
  *
  * Each game's gate once took four slots of its own checkout's, so a machine running three gates and
@@ -42650,6 +42673,81 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
   );
   assert.deepEqual(sent, [5, 6, 7, 8]);
 
+  // A command hears a wait past two seconds once, however many of its lanes wait, and a take with a
+  // listener of its own says nothing to the command.
+  const lined = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slot-lines-'));
+  const lineHeld = join(lined, '0.lock');
+  const me = { pid: process.pid, started: await ownStart() };
+  const oneSlot = `the one engine slot on this machine (${lined}) is in use, by a gate or another tool, and the engine starts when one is given back.`;
+  try {
+    writeFileSync(lineHeld, JSON.stringify(me));
+    const lines: string[] = [];
+    const lanes = new EngineSlots(lined, 1, me, (line) => {
+      lines.push(line);
+    });
+    const unheard: string[] = [];
+    const listened = new EngineSlots(lined, 1, me, (line) => {
+      unheard.push(line);
+    });
+    const told: number[] = [];
+    const takes = [
+      { slots: lanes, taking: lanes.take() },
+      { slots: lanes, taking: lanes.take() },
+      {
+        slots: listened,
+        taking: listened.take(undefined, (waitedMs) => {
+          told.push(waitedMs);
+        }),
+      },
+    ];
+    await delay(2600);
+    rmSync(lineHeld);
+    const taken = await Promise.all(
+      takes.map(async ({ slots, taking }) => {
+        const lock = await taking;
+        await delay(10);
+        slots.release(lock);
+        return lock;
+      }),
+    );
+    assert.deepEqual(taken, [lineHeld, lineHeld, lineHeld], 'every lane takes the slot in turn');
+    assert.equal(lines.length, 1, lines.join('\n'));
+    const line = lines[0] ?? '';
+    assert.match(line, /^Waiting [23] s so far for an engine: /, line);
+    assert.ok(line.endsWith(oneSlot), line);
+    assert.deepEqual([told.length, unheard], [1, []], `told at ${told.join(', ')}: ${unheard.join('\n')}`);
+
+    writeFileSync(lineHeld, JSON.stringify(me));
+    const brief: string[] = [];
+    const briefly = new EngineSlots(lined, 1, me, (line) => {
+      brief.push(line);
+    });
+    const shortTake = briefly.take();
+    await delay(500);
+    rmSync(lineHeld);
+    const shortLock = await shortTake;
+    briefly.release(shortLock);
+    assert.deepEqual([shortLock, brief], [lineHeld, []], 'a wait of half a second takes the slot unsaid');
+
+    const queued: string[] = [];
+    const run = new EngineSlots(lined, 1, me, (line) => {
+      queued.push(line);
+    });
+    const first = await run.take();
+    const second = run.take();
+    await delay(2600);
+    run.release(first);
+    const secondLock = await second;
+    run.release(secondLock);
+    assert.deepEqual(
+      [first, secondLock, queued],
+      [lineHeld, lineHeld, []],
+      'a run waiting behind its own engine is held up by nobody else and says nothing',
+    );
+  } finally {
+    sweep(lined);
+  }
+
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -42709,6 +42807,25 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, readdirSync(slots)],
       [null, process.pid, ['0.lock']],
       `the command waits behind the slot held, and takes no other: ${said}`,
+    );
+    // From the command's own start of its wait, which comes after it has found its engine.
+    for (let looked = 0; looked < 100 && !said.includes('for an engine'); looked += 1) {
+      await delay(100);
+    }
+    const waitLines = said.split('\n').filter((line) => line.includes('for an engine'));
+    assert.equal(waitLines.length, 1, said);
+    assert.match(
+      waitLines[0] ?? '',
+      /^gdharness: Waiting [23] s so far for an engine: the one engine slot on this machine \(/,
+      said,
+    );
+    assert.ok(
+      waitLines[0]
+        ?.trimEnd()
+        .endsWith(
+          `(${slots}) is in use, by a gate or another tool, and the engine starts when one is given back.`,
+        ),
+      said,
     );
     rmSync(ours);
     assert.ok(await heldBy(classes.pid, 30_000), `then takes the slot given back: ${said}`);
@@ -43016,7 +43133,7 @@ function testTheTestHelpersWaitStepAndPress(): void {
  * the fault named: a worker that played no arm, one that went another way through the arms, one
  * that printed an error, a gathering run that skipped an arm, and an outcome that is an object.
  */
-function testASpreadBenchGathersTheTableItPlaysAlone(): void {
+async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
   // The share each worker plays and the faults read from what they say they played, without an engine.
   assert.deepEqual(
     [0, 1, 2].map((index) => shareOf(10, index, 3)),
@@ -43165,6 +43282,34 @@ function testASpreadBenchGathersTheTableItPlaysAlone(): void {
       `the same table to the last digit: ${spread.said}`,
     );
     assert.match(spread.said, /^\[spread\] 3 of 3 workers done, worker \d in \d+\.\d s$/m, spread.said);
+
+    // Held up by a slot someone else holds, a spread says so once for all its workers, and says
+    // nothing while they queue behind each other in the one slot.
+    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 3500);
+    const queued = cli(
+      'spread',
+      project,
+      'bench/bench.tscn',
+      '--workers',
+      '3',
+      '--slots',
+      slots,
+      '--slot-count',
+      '1',
+    );
+    holder.kill();
+    assert.equal(queued.status, 0, queued.said);
+    assert.deepEqual(
+      queued.said.split(/\r?\n/).filter((line) => line.includes('for an engine')).length,
+      1,
+      queued.said,
+    );
+    assert.match(
+      queued.said,
+      /^\[spread\] Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by a gate or another tool, and the engine starts when one is given back\.$/m,
+      queued.said,
+    );
+    assert.deepEqual(table(queued.said), table(aloneSaid), queued.said);
     assert.match(
       spread.said,
       /^Spread: 17 runs in 2 arms over 3 workers, \d+\.\d s; the longest worker took \d+\.\d s\.$/m,
@@ -43257,7 +43402,7 @@ function testASpreadBenchGathersTheTableItPlaysAlone(): void {
   }
 }
 
-function testTheTestCommandRunsAndJudgesAProject(): void {
+async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
@@ -43791,6 +43936,22 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       readdirSync(join(keptUnder ?? '', 'engine-0')).filter((name) => !name.endsWith('.log')),
       [],
       'only the logs are copied, not the engine user folder or the reports',
+    );
+
+    // A run held up by a slot someone else holds says so once, whatever its engines.
+    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 3500);
+    const heldUp = test('--slot-count', '1', 'tests/ok_test.gd', 'tests/declared_test.gd');
+    holder.kill();
+    assert.equal(heldUp.status, 0, heldUp.said);
+    assert.equal(
+      heldUp.said.split(/\r?\n/).filter((line) => line.includes('for an engine')).length,
+      1,
+      heldUp.said,
+    );
+    assert.match(
+      heldUp.said,
+      /^Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by a gate or another tool, and the engine starts when one is given back\.$/m,
+      heldUp.said,
     );
   } finally {
     sweep(project, slots, checkouts);

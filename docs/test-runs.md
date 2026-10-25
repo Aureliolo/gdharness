@@ -287,6 +287,12 @@ too: each headless operation, script check, export, `project_test` run and `edit
 waits for a slot before its engine starts. A game started with `editor_run start`, and one the
 editor plays, does not: someone is driving it for as long as it runs.
 
+A wait for a slot is said. A tool call that asked for progress hears it at once, and every 20
+seconds after. `gdharness test` and `gdharness spread` print a line once the wait passes 2 seconds,
+and again every 20 seconds while it lasts, one line however many of its engines are waiting; every
+other command prints it to standard error. The line names the directory and the count, so a gate
+that has gone quiet because the machine's other runs hold every slot says so.
+
 The directory and the count are the same for every tool on the machine:
 
 - The directory is `GODOT_ENGINE_SLOTS` when that is set and not empty. Otherwise it is
