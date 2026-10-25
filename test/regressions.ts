@@ -16108,10 +16108,16 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
       if (before === undefined || asNumber(one.value) === 700) {
         continue;
       }
-      const rate = (asNumber(one.value) - asNumber(before.value)) / (one.game_time - before.game_time);
-      // Game time is answered to a ten-thousandth of a second, a twentieth of the rate over a short
-      // frame.
-      assert.ok(Math.abs(rate + 280) < 14, `frame ${one.frame} moved at ${rate} a second: ${slide.said}`);
+      const took = one.game_time - before.game_time;
+      const rate = (asNumber(one.value) - asNumber(before.value)) / took;
+      // Game time is answered whole, so what is left is the position, held as a 32-bit float: one
+      // step of it between 512 and 1024 is 2^-14, which a frame a tenth of a millisecond long, as a
+      // macOS runner gave, turns into most of a pixel a second.
+      const most = 0.5 + 2 ** -14 / took;
+      assert.ok(
+        Math.abs(rate + 280) < most,
+        `frame ${one.frame} moved at ${rate} a second over ${took} s: ${slide.said}`,
+      );
     }
     // The call that started the slide is noted beside the last reading before it ran, and the tween
     // it made steps in that frame, so the first move is the very next reading. The watch, the wait

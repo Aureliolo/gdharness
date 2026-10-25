@@ -233,13 +233,17 @@ function createProject(godotPath: string): string {
   return dir;
 }
 
+/** A script run, with how long the engine took, its start included. */
+type ScriptRun = SpawnSyncReturns<string> & { ms: number };
+
 function runScript(
   godotPath: string,
   projectDir: string,
   scriptPath: string,
   extraArgs: string[] = [],
-): SpawnSyncReturns<string> {
-  return spawnSyncHidden(
+): ScriptRun {
+  const began = performance.now();
+  const run = spawnSyncHidden(
     godotPath,
     ['--headless', '--path', projectDir, '--script', scriptPath, ...extraArgs],
     {
@@ -247,6 +251,21 @@ function runScript(
       timeout: 180000,
     },
   );
+  return { ...run, ms: Math.round(performance.now() - began) };
+}
+
+/**
+ * Why a script run failed. A Windows runner's engine once exited 127 having printed nothing, not
+ * even its banner, and the time it ran is what tells an engine that never started from one that
+ * stopped partway.
+ */
+function failedRun(
+  name: string,
+  run: { status: number | null; signal: string | null; ms: number },
+  output: string,
+): Error {
+  const said = output.trim() === '' ? 'it printed nothing' : output.trim();
+  return new Error(`${name} failed (${run.status ?? run.signal}) after ${run.ms} ms:\n${said}`);
 }
 
 /**
@@ -307,7 +326,7 @@ function runFixture(godotPath: string, projectDir: string, name: string): unknow
   const run = runScript(godotPath, projectDir, scriptPath);
   const output = `${run.stdout}\n${run.stderr}`;
   if (run.status !== 0) {
-    throw new Error(`${name} failed (${run.status ?? run.signal}):\n${output.trim()}`);
+    throw failedRun(name, run, output);
   }
   assertNoEngineErrors(name, output, PROVOKED[name]);
   const payload = lastJsonLine(run.stdout, name);
@@ -623,7 +642,7 @@ function runOperation(
   const output = `${run.stdout}\n${run.stderr}`;
 
   if (run.status !== 0) {
-    throw new Error(`${operation} failed (${run.status ?? run.signal}):\n${output.trim()}`);
+    throw failedRun(operation, run, output);
   }
   // Anything on stderr from an operation that succeeded is the engine complaining about
   // something the operation did, a leaked object or a resource still in use at exit included,
@@ -653,6 +672,7 @@ interface OperationRun {
   signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
+  ms: number;
   /** What the operation wrote to its answer file, or null when it wrote none. */
   answer: unknown;
 }
@@ -679,7 +699,14 @@ function runOperationScript(
   const run = runScript(godotPath, projectDir, script, [operation, `@file:${paramsPath}`, answerPath]);
   const answer = existsSync(answerPath) ? (JSON.parse(readFileSync(answerPath, 'utf8')) as unknown) : null;
   rmSync(answerPath, { force: true });
-  return { status: run.status, signal: run.signal, stdout: run.stdout, stderr: run.stderr, answer };
+  return {
+    status: run.status,
+    signal: run.signal,
+    stdout: run.stdout,
+    stderr: run.stderr,
+    ms: run.ms,
+    answer,
+  };
 }
 
 /** The exit status, output and answer of an operation that is expected to refuse. */

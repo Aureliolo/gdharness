@@ -892,10 +892,12 @@ class GdhTrace:
 		elif value is Dictionary:
 			var map: Dictionary = value
 			_last = map.duplicate(true)
+		# Game time unrounded: a frame can be a tenth of a millisecond long, and a rate worked out over
+		# one from times cut to a ten-thousandth was off by its own size.
 		var change: Dictionary = {
 			"frame": frame,
 			"elapsed_ms": elapsed,
-			"game_time": snappedf(game_time, 0.0001),
+			"game_time": game_time,
 			"value": values.serialize(value),
 		}
 		if changes.size() < MOST_CHANGES:
