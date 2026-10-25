@@ -7,10 +7,11 @@
  * added, and their other cases left out.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { nearest } from './nearest.js';
 import { projectFiles } from './project-scan.js';
+import { ProjectScripts } from './suite-plan.js';
 
 /** One case asked for, by the entry that asked for it and the suite file it is in. */
 interface SelectedTest {
@@ -28,12 +29,17 @@ export interface TestSelection {
 }
 
 /**
- * The cases each suite file declares, by the name gdUnit4 runs them under: a function at the top
- * level whose name starts with test_, as its discoverer finds them.
+ * The cases a suite file runs, by the name gdUnit4 runs them under: a function at the top level
+ * whose name starts with test_, its own and those of the project's scripts it extends, as its
+ * discoverer finds them. Read from the file alone, a suite inheriting every case from a base suite
+ * was refused as declaring none, and an inherited case could be neither asked for nor left out.
  */
-function casesIn(projectPath: string, suite: string): string[] {
-  const text = readFileSync(join(projectPath, suite.slice('res://'.length)), 'utf8');
-  return [...text.matchAll(/^func\s+(test_\w*)\s*\(/gm)].map((match) => match[1] ?? '');
+function casesIn(scripts: ProjectScripts, suite: string): readonly string[] {
+  return (
+    scripts.suite(suite)?.cases ??
+    scripts.script(suite)?.funcs.filter((name) => name.startsWith('test_')) ??
+    []
+  );
 }
 
 /**
@@ -42,11 +48,12 @@ function casesIn(projectPath: string, suite: string): string[] {
  * say so, and the answer was its whole console with exit code 0 beside passed false.
  */
 export function scriptsWithoutCases(projectPath: string, asked: readonly string[]): string[] {
+  const scripts = new ProjectScripts(projectPath);
   return asked.filter(
     (path) =>
       path.endsWith('.gd') &&
       existsSync(join(projectPath, path.slice('res://'.length))) &&
-      casesIn(projectPath, path).length === 0,
+      casesIn(scripts, path).length === 0,
   );
 }
 
@@ -83,8 +90,9 @@ export function selectTests(
   if (entries.length === 0) {
     return { ok: false, reason: 'tests is an empty list: name a case, or leave tests out to run every one.' };
   }
+  const scripts = new ProjectScripts(projectPath);
   const declared = suitesUnder(projectPath, asked).flatMap((suite) =>
-    casesIn(projectPath, suite).map((test) => ({ suite, test })),
+    casesIn(scripts, suite).map((test) => ({ suite, test })),
   );
   const nameOf = (suite: string): string => basename(suite, '.gd');
   const selected: SelectedTest[] = [];

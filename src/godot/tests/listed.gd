@@ -80,6 +80,11 @@ class GdhRunner:
 	var together: GDScript = null
 	## The cases dealt by their rows, by `res://suite.gd:test_case`.
 	var row_shares: Dictionary[String, GdhRowShare] = {}
+	## The cases to leave out, by `res://suite.gd:test_case` of the suite running them. gdUnit4's own
+	## list is matched against the script declaring a case, which for a case a suite inherits is its
+	## base, so an inherited case left out under its suite ran in every engine the suite was dealt to,
+	## and a case of `res://tests/a_test.gd` was also left out of `res://more/tests/a_test.gd`.
+	var left_out: Dictionary[String, bool] = {}
 	## The cases gdUnit4 said it finished, which [GdhSessionCheck] holds the session's lookups against.
 	var cases_ended: int = 0
 	## The marker of the shutdown walk's oldest end, made as the run starts.
@@ -106,10 +111,40 @@ class GdhRunner:
 			return options
 		return options_of(OS.get_cmdline_args(), own_path)
 
+	## gdUnit4's own discovery, with each case filed under the suite it was found in before it is
+	## asked whether to leave the case out. gdUnit4 files a case under the script declaring it, which
+	## for a case a suite inherits is its base: its reports added such a case to no suite, so
+	## project_test counted none of them, and a parameterised one ran as a suite of the base's own,
+	## outside the suite inheriting it and its hooks, and was judged a case that suite never ran.
+	func discover_tests() -> Array[GdUnitTestCase]:
+		var added: Signal = GdUnitSignals.instance().gdunit_test_discover_added
+		_test_cases = _runner_config.test_cases()
+		var scanner: GdUnitTestSuiteScanner = GdUnitTestSuiteScanner.new()
+		for path: String in _included_tests:
+			for script: Script in scanner.scan(path):
+				var suite: String = script.resource_path
+				var found: Callable = func(test: GdUnitTestCase) -> void:
+					filed_under(test, suite)
+					if not is_skipped(test):
+						_test_cases.append(test)
+						added.emit(test)
+				GdUnitTestDiscoverer.discover_tests(script, found)
+		return _test_cases
+
+	## [param test] as a case of the suite at [param suite], under which gdUnit4 groups, reports and
+	## leaves out its cases.
+	static func filed_under(test: GdUnitTestCase, suite: String) -> void:
+		if test.suite_resource_path == suite and test.source_file == suite:
+			return
+		test.suite_resource_path = suite
+		test.source_file = suite
+		test.suite_name = suite.get_file().get_basename()
+		test._build_fully_qualified_name(suite)
+
 	## gdUnit4 asks this of every case it finds, a parameterised case once a row, each row carrying
 	## its index.
 	func is_skipped(test: GdUnitTestCase) -> bool:
-		if super(test):
+		if left_out.has("%s:%s" % [test.suite_resource_path, test.test_name]) or super(test):
 			return true
 		var share: GdhRowShare = row_shares.get("%s:%s" % [test.suite_resource_path, test.test_name], null)
 		if share == null or not share.leaves_out(test.attribute_index):
@@ -348,7 +383,11 @@ static func started(given: PackedStringArray) -> GdhRunner:
 	if not expected_out.is_empty():
 		write_expected(expected_out, suites)
 	runner.add_test_suites(suites)
-	runner.skip_test_suites(listed(asked, SKIPPING))
+	for entry: String in listed(asked, SKIPPING):
+		if is_one_case(entry):
+			runner.left_out[entry] = true
+		else:
+			runner.skip_test_suite(entry)
 	runner.row_shares = row_shares_of(listed(asked, ROWS))
 	# Added to the list itself rather than through `register`, which saves every hook it holds into
 	# `project.godot`.
@@ -424,6 +463,19 @@ static func listed(args: PackedStringArray, flag: String) -> PackedStringArray:
 		if not line.strip_edges().is_empty():
 			var _named: bool = named.append(line.strip_edges())
 	return named
+
+
+## Whether [param entry] of a [constant SKIPPING] file names one case of one suite file, as
+## `res://suite.gd:test_case`, rather than a suite or a case by gdUnit4's looser names, which go to
+## gdUnit4 as they are.
+static func is_one_case(entry: String) -> bool:
+	var at: int = entry.rfind(":")
+	return (
+		entry.begins_with("res://")
+		and at > "res://".length()
+		and entry.substr(0, at).ends_with(".gd")
+		and entry.substr(at + 1).is_valid_ascii_identifier()
+	)
 
 
 ## The row shares [param lines] of a [constant ROWS] file give, by case.
