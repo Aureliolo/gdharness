@@ -167,9 +167,10 @@ under the main checkout, and the output names the copy, since a gate running in 
 commit removes the worktree once the run ends. Before
 the verdict, a run over several engines says what each took beside what it was dealt, so an uneven
 deal is told from a slow suite, and a run of several suites names its five slowest. The last lines
-count the problems and name the run's directory. A run that passes leaves no logs, and
-the next run removes the logs of runs that have ended; `--print-output` prints every engine's
-output before the verdict, whether the run passed or not.
+count the problems and name the run's directory. A run that passes leaves no logs. A failed run
+keeps its logs until five later runs have failed, so the run that tries to reproduce a crash does
+not remove the log that explains it; `--print-output` prints every engine's output before the
+verdict, whether the run passed or not.
 
 ## Errors and warnings a suite expects
 
