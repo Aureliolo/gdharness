@@ -105,6 +105,40 @@ export interface TestOptions {
   readonly order: 'reversed' | number | null;
   /** Print what each engine printed, after the run and before its verdict. */
   readonly printOutput: boolean;
+  /** Where the run writes its result as JSON ([type RunResult]), or null for nowhere. */
+  readonly resultFile: string | null;
+}
+
+/**
+ * A run's result as `--result` writes it, for a gate that acts on more than the exit code: the
+ * slowest suites past its own budget, say, or which engine's log to keep.
+ */
+export interface RunResult {
+  readonly passed: boolean;
+  /** From the command starting to its verdict. */
+  readonly seconds: number;
+  /** Every problem the output lists, one sentence each, the engine's named before its own. */
+  readonly problems: readonly string[];
+  /** Each suite an engine closed, slowest first. */
+  readonly suites: readonly {
+    readonly path: string;
+    readonly seconds: number;
+    /** gdUnit4's word for it, such as `PASSED` or `FAILED`. */
+    readonly verdict: string;
+    readonly engine: number;
+  }[];
+  readonly engines: readonly {
+    readonly index: number;
+    readonly seconds: number;
+    /** What the deal expected it to take, from the times kept. */
+    readonly dealt: number;
+    readonly passed: boolean;
+    readonly windowed: boolean;
+    /** Where its whole output is kept, or null once a passing run has removed it. */
+    readonly log: string | null;
+  }[];
+  /** The directory every engine's output is kept under, or null when the run removed it. */
+  readonly logs: string | null;
 }
 
 /** How many of the slowest suites the run names at its end. */
@@ -124,6 +158,7 @@ const VALUED = new Set([
   '--tests',
   '--reach-also',
   '--order',
+  '--result',
 ]);
 const SWITCHES = new Set(['--changed-only', '--import', '--print-output']);
 
@@ -175,6 +210,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     importFirst: switches.has('--import'),
     order: order === undefined ? null : order === 'reversed' ? 'reversed' : seedOf(order),
     printOutput: switches.has('--print-output'),
+    resultFile: last('--result') === undefined ? null : resolve(cwd, last('--result') ?? ''),
   };
 }
 
@@ -186,7 +222,6 @@ function seedOf(value: string): number {
   return seed;
 }
 
-/** The suites a run is asked for, each with the cases asked of it. */
 /** The directories a run with nothing selected looks for suites in. */
 function rootsOf(options: TestOptions): readonly string[] {
   return options.roots.length > 0
@@ -219,6 +254,7 @@ export function uncollectedSaid(
   });
 }
 
+/** The suites a run is asked for, each with the cases asked of it. */
 function selectedSuites(scripts: ProjectScripts, options: TestOptions): DeclaredSuite[] {
   const roots = rootsOf(options);
   if (options.selected.length === 0) {
@@ -419,6 +455,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       const imported = await importProject(launch);
       if (imported !== null) {
         logs.keep();
+        writeEarlyResult(options.resultFile, startedAt, [`the import failed: ${imported}`], logs.shown);
         console.log(`The import failed, so no suite ran: ${imported}`);
         return 1;
       }
@@ -447,6 +484,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       if (suites.length === 0) {
         console.log('Nothing has changed since every suite last passed.');
         rmSync(runDirectory, { recursive: true, force: true });
+        writeEarlyResult(options.resultFile, startedAt, uncollected, null);
         if (uncollected.length === 0) {
           return 0;
         }
@@ -559,6 +597,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       startedAt,
       logs,
       options.printOutput,
+      options.resultFile,
     );
   } finally {
     process.off('SIGINT', interrupted);
@@ -852,6 +891,7 @@ function report(
   startedAt: number,
   logs: RunLogs,
   printOutput: boolean,
+  resultFile: string | null,
 ): number {
   // Ahead of the verdict, so the last lines are still how the run went.
   if (printOutput) {
@@ -920,14 +960,23 @@ function report(
       `The engines took ${ran.map((engine) => `${engine.seconds.toFixed(1)} s`).join(', ')}, dealt ${ran.map((engine) => `${engine.plan.cost.toFixed(1)} s`).join(', ')}.`,
     );
   }
-  const slowest = ran
+  const closed = ran
     .flatMap((engine) =>
       [...engine.printed.suites.values()].flatMap((suite) =>
-        suite.closed === null ? [] : [{ path: suite.path, seconds: suite.closed.seconds }],
+        suite.closed === null
+          ? []
+          : [
+              {
+                path: suite.path,
+                seconds: suite.closed.seconds,
+                verdict: suite.closed.verdict,
+                engine: engine.index,
+              },
+            ],
       ),
     )
-    .sort((a, b) => b.seconds - a.seconds)
-    .slice(0, SLOWEST_NAMED);
+    .sort((a, b) => b.seconds - a.seconds);
+  const slowest = closed.slice(0, SLOWEST_NAMED);
   if (slowest.length > 1) {
     console.log(
       `The slowest suites: ${slowest.map((suite) => `${suite.path} ${suite.seconds.toFixed(1)} s`).join(', ')}.`,
@@ -935,12 +984,39 @@ function report(
   }
   const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s; the longest engine took ${longest.toFixed(1)} s.`;
   console.log('');
-  if (failed.length === 0 && across.length === 0 && uncollected.length === 0) {
+  const passed = failed.length === 0 && across.length === 0 && uncollected.length === 0;
+  if (passed) {
     rmSync(logs.directory, { recursive: true, force: true });
+  } else {
+    logs.keep();
+  }
+  if (resultFile !== null) {
+    writeJson(resultFile, {
+      passed,
+      seconds: took,
+      problems: [
+        ...failed.flatMap((engine) =>
+          engine.verdict.faults.map((fault) => `engine ${String(engine.index)}: ${fault}`),
+        ),
+        ...across,
+        ...uncollected,
+      ],
+      suites: closed,
+      engines: ran.map((engine) => ({
+        index: engine.index,
+        seconds: engine.seconds,
+        dealt: engine.plan.cost,
+        passed: engine.verdict.passed,
+        windowed: engine.plan.windowed,
+        log: passed ? null : logs.named(engine.log),
+      })),
+      logs: passed ? null : logs.shown,
+    } satisfies RunResult);
+  }
+  if (passed) {
     console.log(`Passed: ${totals}`);
     return 0;
   }
-  logs.keep();
   const problems = failed.reduce(
     (sum, engine) => sum + engine.verdict.faults.length,
     across.length + uncollected.length,
@@ -948,6 +1024,25 @@ function report(
   console.log(`Failed: ${plural(problems, 'problem')}, listed above. Ran ${totals}`);
   console.log(`Every engine's output is kept under ${logs.shown} until the next run.`);
   return 1;
+}
+
+/** Writes a result for a run that started no engine to [param file], when the run was asked for one. */
+function writeEarlyResult(
+  file: string | null,
+  startedAt: number,
+  problems: readonly string[],
+  logs: string | null,
+): void {
+  if (file !== null) {
+    writeJson(file, {
+      passed: problems.length === 0,
+      seconds: (Date.now() - startedAt) / 1000,
+      problems,
+      suites: [],
+      engines: [],
+      logs,
+    } satisfies RunResult);
+  }
 }
 
 /** Lists [param uncollected], the scripts declaring cases gdUnit4 never runs, under a heading of their own. */

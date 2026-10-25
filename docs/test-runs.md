@@ -45,6 +45,14 @@ command line itself is wrong.
   once.
 - `--print-output`: print everything each engine printed, before the verdict, as for a benchmark
   written as a suite and run by hand. A gate never passes it.
+- `--result FILE`: write the run's result to `FILE` as JSON, for a gate that acts on more than the
+  exit code. It holds `passed`, `seconds`, `problems` (every problem the output lists, one sentence
+  each, an engine's prefixed with `engine N:`), `suites` (each suite an engine closed, slowest first,
+  with its `path`, `seconds`, gdUnit4's `verdict` and the `engine` that ran it), `engines` (each
+  with its `index`, `seconds`, the `dealt` seconds the times kept had it at, `passed`, `windowed`
+  and the `log` its output is kept in) and `logs`, the directory every engine's output is kept
+  under. `log` and `logs` are null once a passing run has removed them. A run that failed its
+  import, or had nothing left to run under `--changed-only`, writes empty `suites` and `engines`.
 - `--runner`: print the path of the shipped runner and exit.
 
 ## Which suites run

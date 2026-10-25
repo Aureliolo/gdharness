@@ -405,7 +405,14 @@ import {
   unitsOf,
   windowedSaid,
 } from '../src/suite-plan.js';
-import { importFault, reportsFault, roomSaid, testOptionsOf, uncollectedSaid } from '../src/suite-run.js';
+import {
+  importFault,
+  type RunResult,
+  reportsFault,
+  roomSaid,
+  testOptionsOf,
+  uncollectedSaid,
+} from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -42158,11 +42165,19 @@ function testTheTestCommandReadsItsOwnOptions(): void {
         '7',
         '--changed-only',
         '--print-output',
+        '--result',
+        'out/result.json',
       ],
       tmpdir(),
     );
     assert.equal(read.printOutput, true);
     assert.equal(testOptionsOf([], project).printOutput, false, 'off unless asked for');
+    assert.equal(
+      read.resultFile,
+      join(tmpdir(), 'out', 'result.json'),
+      'a result file read from where it ran',
+    );
+    assert.equal(testOptionsOf([], project).resultFile, null, 'and none unless asked for');
     assert.equal(read.projectPath, project, 'the project named first');
     assert.deepEqual(
       read.selected,
@@ -43074,8 +43089,24 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     );
     assert.equal(failing.status, 1, failing.said);
 
-    const noisy = test('tests/ok_test.gd', 'tests/declared_test.gd', 'tests/noisy_test.gd', '--changed-only');
+    const resultFile = join(checkouts, 'result.json');
+    const resultOf = (): RunResult => JSON.parse(readFileSync(resultFile, 'utf8')) as RunResult;
+    const noisy = test(
+      'tests/ok_test.gd',
+      'tests/declared_test.gd',
+      'tests/noisy_test.gd',
+      '--changed-only',
+      '--result',
+      resultFile,
+    );
     assert.equal(noisy.status, 1, noisy.said);
+    assert.deepEqual(
+      resultOf().problems,
+      [
+        `engine 0: an engine error in res://tests/noisy_test.gd > test_noisy: nobody said this; if the suite prints it on purpose, list its text under "test_noisy" in the suite's GDHARNESS_EXPECTED_ERRORS`,
+      ],
+      "the result holds an engine's problem, named by its engine",
+    );
     assert.match(
       noisy.said,
       /^2 suites passed with everything they reach as it stands now, and are not run: res:\/\/tests\/ok_test\.gd, res:\/\/tests\/declared_test\.gd\.$/m,
@@ -43144,9 +43175,31 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
         'extends GdUnitTestSuite\n\nfunc test_kept() -> void:\n\tassert_int(1).is_equal(1)\n',
       'tests/stray/misnamed_test.gd': 'extends Node\n\nfunc test_lost() -> void:\n\tpass\n',
     });
-    const strayRun = test('tests/stray');
+    const strayRun = test('tests/stray', '--result', resultFile);
     rmSync(join(project, 'tests', 'stray'), { recursive: true });
     assert.equal(strayRun.status, 1, strayRun.said);
+    const strayResult = resultOf();
+    assert.equal(strayResult.passed, false, 'the result says the run failed');
+    assert.deepEqual(
+      strayResult.problems.map((problem) => problem.split(' declares ')[0]),
+      ['res://tests/stray/misnamed_test.gd'],
+      'with the problem the output lists',
+    );
+    assert.deepEqual(
+      strayResult.suites.map(({ path, verdict, engine }) => [path, verdict, engine]),
+      [['res://tests/stray/kept_test.gd', 'PASSED', 0]],
+      'and the suite that ran',
+    );
+    assert.equal(strayResult.engines.length, 1, JSON.stringify(strayResult));
+    assert.ok(
+      existsSync(strayResult.engines[0]?.log ?? ''),
+      `whose log is kept: ${JSON.stringify(strayResult)}`,
+    );
+    assert.equal(
+      strayResult.logs,
+      dirname(dirname(strayResult.engines[0]?.log ?? '')),
+      'under the run directory',
+    );
     assert.match(strayRun.said, /^--- scripts among the suites that gdUnit4 never runs:$/m, strayRun.said);
     assert.match(
       strayRun.said,
@@ -43159,8 +43212,31 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       strayRun.said,
     );
 
-    const everything = test('tests/ok_test.gd', 'tests/declared_test.gd');
+    const everything = test('tests/ok_test.gd', 'tests/declared_test.gd', '--result', resultFile);
     assert.equal(everything.status, 0, everything.said);
+    const passedResult = resultOf();
+    assert.deepEqual(
+      [
+        passedResult.passed,
+        passedResult.problems,
+        passedResult.logs,
+        passedResult.engines.map((one) => one.log),
+      ],
+      [true, [], null, [null]],
+      'a passing run removes its logs, and its result says so',
+    );
+    assert.deepEqual(
+      passedResult.suites.map((suite) => suite.path).sort(),
+      ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
+      'every suite it ran',
+    );
+    assert.ok(
+      passedResult.suites.every(
+        (suite, at) =>
+          suite.verdict === 'PASSED' && suite.seconds <= (passedResult.suites[at - 1]?.seconds ?? Infinity),
+      ),
+      `slowest first: ${JSON.stringify(passedResult.suites)}`,
+    );
     assert.doesNotMatch(everything.said, /are not run/, 'without the flag, every suite runs');
     assert.doesNotMatch(everything.said, /Dealt out case by case/, 'nothing took long enough to split');
 
