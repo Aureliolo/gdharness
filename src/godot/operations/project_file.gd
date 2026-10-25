@@ -5,10 +5,14 @@ extends RefCounted
 ## The engine writes each section's keys in the order it registered them, and an engine running a
 ## script registers them in another order than the editor does, so a one-setting change moved lines
 ## nobody touched across several sections and a commit of it read as a rewrite. The save is still the
-## engine's, for what only it gets right: the header and each value's text. The order is taken from
-## the file as it was, and so is every line of a key the call did not change: the engine leaves out
-## each key at its default, so a project holding `unsafe_call_argument=0` on purpose lost the line to
-## a change of another key.
+## engine's, for what only it gets right: the header and the text of each value the call changed.
+## The order is taken from the file as it was, and so is every line of a key the call did not change,
+## because the engine writes its settings as it holds them rather than as the file had them. It
+## leaves out each key at its default, so a project holding `unsafe_call_argument=0` on purpose lost
+## the line to a change of another key. It writes a dictionary with its keys sorted, so gdUnit4's
+## session hooks, which run in the order listed, changed order. And it writes what a
+## `project_settings_override` file laid over the project, so a player's window mode in the user
+## directory became the game's default.
 
 const PATH: String = "res://project.godot"
 
@@ -35,30 +39,48 @@ static func save(changed: PackedStringArray) -> Error:
 	return OK
 
 
-## [param written] with its sections and their keys put in the order [param before] has them, and
-## each line [param before] has for a key [param written] lacks put back, unless that key's setting
-## is in [param changed]. Every other line of the result is a line of [param written], so nothing the
-## engine wrote is lost or changed.
+## [param before] with the lines of the settings in [param changed] as [param written] has them: one
+## the engine wrote goes in its place, or where the engine put it relative to its neighbours when it
+## is new, and one the engine left out leaves the file. Every other line is [param before]'s, in its
+## place, and a key the engine wrote that the file did not hold and the call did not change stays out.
+## The header is [param written]'s.
 static func in_order_of(before: String, written: String, changed: PackedStringArray) -> String:
 	var old: Dictionary = _parsed(before)
 	var fresh: Dictionary = _parsed(written)
 	var old_sections: Array[Dictionary] = old["sections"]
-	var fresh_sections: Array[Dictionary] = fresh["sections"]
+	var all_fresh: Array[Dictionary] = fresh["sections"]
+
+	var old_text: Dictionary[String, Dictionary] = {}
+	for section: Dictionary in old_sections:
+		var texts: Dictionary[String, String] = {}
+		for entry: Dictionary in section["entries"]:
+			texts[str(entry["key"])] = str(entry["text"])
+		old_text[str(section["name"])] = texts
 
 	var by_name: Dictionary[String, Dictionary] = {}
 	var fresh_names: Array[String] = []
+	var fresh_sections: Array[Dictionary] = []
 	var entry_of: Dictionary[String, Dictionary] = {}
 	var fresh_keys: Dictionary[String, Array] = {}
-	for section: Dictionary in fresh_sections:
+	for section: Dictionary in all_fresh:
 		var name: String = section["name"]
-		by_name[name] = section
-		fresh_names.append(name)
+		var held: Dictionary = old_text.get(name, {})
 		var texts: Dictionary[String, String] = {}
 		var keys: Array[String] = []
 		for entry: Dictionary in section["entries"]:
 			var key: String = entry["key"]
-			texts[key] = str(entry["text"])
+			if changed.has(_setting_of(name, key)):
+				texts[key] = str(entry["text"])
+			elif held.has(key):
+				texts[key] = str(held[key])
+			else:
+				continue
 			keys.append(key)
+		if keys.is_empty():
+			continue
+		by_name[name] = section
+		fresh_names.append(name)
+		fresh_sections.append(section)
 		entry_of[name] = texts
 		fresh_keys[name] = keys
 

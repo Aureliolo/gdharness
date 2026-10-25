@@ -19832,6 +19832,16 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
  * loader stays on disk and correct, and a suite that exercises the script rather than reading
  * project.godot passes either way.
  */
+function testTheLoaderPassesAGamesOwnLint(): void {
+  // The loader is written outside addons/, where a game's own GDScript gate reads it, and it has to
+  // stay byte for byte what gdharness ships, so the game cannot rewrap it. gdlint's default line
+  // length is 100, and this repository's own 110 let a 101-character line through.
+  const lines = readFileSync(shippedLoader(), 'utf8').split(/\r?\n/);
+  assert.ok(lines.length > 20, `the shipped loader is read: ${lines.length} lines`);
+  const long = lines.flatMap((line, at) => (line.length > 100 ? [`${at + 1}: ${line.length}`] : []));
+  assert.deepEqual(long, [], "every line of the loader is within gdlint's default 100 characters");
+}
+
 function testOnlyOurOwnAutoloadIsRewritten(): void {
   assert.equal(autoloadIsOurs('res://gdharness/loader.gd'), true, 'the loader gdharness writes');
   assert.equal(
@@ -50201,10 +50211,19 @@ async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
     'gdscript/warnings/unsafe_call_argument=0\ngdscript/warnings/unused_variable=1\n' +
     'gdscript/warnings/untyped_declaration=1\n';
   const filter = 'textures/canvas_textures/default_texture_filter=1\n';
+  // The engine writes a dictionary with its keys sorted, and gdUnit4 runs session hooks in the order
+  // listed, so these two are listed the other way round.
+  const hooks =
+    'hooks/session_hooks={\n"res://tests/headless_hook.gd": true,\n"res://addons/kit/warm_hook.gd": true\n}\n';
+  // What an override file lays over the project is what the engine holds and saves. A game keeps a
+  // player's window there, in user://; one under res:// is laid over the same way and stays in the
+  // fixture's directory.
+  const override = 'config/project_settings_override="res://player.cfg"\n';
+  writeFileSync(join(project, 'player.cfg'), '[display]\n\nwindow/size/mode=3\n');
   writeFileSync(
     join(project, 'project.godot'),
-    'config_version=5\n\n[application]\n\nconfig/name="Lines"\n\n' +
-      `[debug]\n\n${warning}\n[rendering]\n\n${filter}`,
+    `config_version=5\n\n[application]\n\nconfig/name="Lines"\n${override}\n` +
+      `[debug]\n\n${warning}\n[gdunit4]\n\n${hooks}\n[rendering]\n\n${filter}`,
   );
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
@@ -50230,6 +50249,14 @@ async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
     assert.ok(
       file().includes(`[rendering]\n\n${filter}`),
       `and so does a section holding only one: ${file()}`,
+    );
+    assert.ok(
+      file().includes(`[gdunit4]\n\n${hooks}`),
+      `a dictionary keeps its keys in the order the file had them: ${file()}`,
+    );
+    assert.ok(
+      !file().includes('window/size/mode') && !file().includes('[display]'),
+      `and what the override file laid over the project stays out of it: ${file()}`,
     );
 
     const tagged = await settings({
@@ -60755,6 +60782,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testParametersReachTheEngine,
   testAFinishedRunCanStillBeRead,
   testOnlyOurOwnAutoloadIsRewritten,
+  testTheLoaderPassesAGamesOwnLint,
   testAnExitCodeOutlivesTheServerThatSawIt,
   testRunNotesAreKeptPerProject,
   testAStopThatSignalsNothingSaysSo,
