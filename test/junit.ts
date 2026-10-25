@@ -456,7 +456,7 @@ function testASuiteWithASpaceInItsPathKeepsItsOrphans(): void {
   ]);
   assert.deepEqual(
     found.suites,
-    [{ path: 'res://my tests/docket_test.gd', orphans: 2 }],
+    [{ path: 'res://my tests/docket_test.gd', orphans: 2, left: [] }],
     JSON.stringify(found),
   );
 }
@@ -571,7 +571,9 @@ function testOrphansAreReadOffTheConsole(): void {
     '	test_recruits	STATUS: PASSED	13ms',
     'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |	PASSED',
     'Run Test Suite: res://test/docket_test.gd',
+    'gdharness orphans: res://test/docket_test.gd > test_posts left 3: Timer, Node "Board" of res://board.gd, Label',
     '	test_posts	STATUS: PASSED	9ms',
+    'gdharness orphans: res://test/docket_test.gd > after left 1: Node2D "Pin"',
     'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |	WARNING',
     'Overall Summary: 5 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |',
     'Executed test suites: (2/2)',
@@ -579,10 +581,25 @@ function testOrphansAreReadOffTheConsole(): void {
 
   const found = orphansPrinted(printed);
   assert.equal(found.total, 4, 'the run total comes off the summary line');
+  const docket = 'res://test/docket_test.gd';
   assert.deepEqual(
     found.suites,
-    [{ path: 'res://test/docket_test.gd', orphans: 4 }],
-    'named per suite, and a suite that left none is not a warning',
+    [
+      {
+        path: docket,
+        orphans: 4,
+        left: [
+          {
+            suite: docket,
+            during: 'test_posts',
+            count: 3,
+            nodes: 'Timer, Node "Board" of res://board.gd, Label',
+          },
+          { suite: docket, during: 'after', count: 1, nodes: 'Node2D "Pin"' },
+        ],
+      },
+    ],
+    'named per suite with what the runner named in it, and a suite that left none is not a warning',
   );
 
   // A clean run says nothing, which must stay nothing rather than becoming an empty warning.
