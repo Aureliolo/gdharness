@@ -38561,6 +38561,16 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
           quickTook > Number(get(quick, 'time')) * 1000,
         `tookMs covers the whole call and so more than the cases' own time, and the run without its import stays under its limit: ${JSON.stringify(quick)}`,
       );
+      // And says which step the time went to: the parts add up to the whole, the import step holds
+      // the import, and the engine step holds the cases' own time.
+      const by = (answer: unknown, step: string): number => Number(get(answer, 'tookMsBy', step));
+      assert.ok(
+        ['classes', 'import', 'engine'].every((step) => by(quick, step) >= 0) &&
+          by(quick, 'classes') + by(quick, 'import') + by(quick, 'engine') === quickTook &&
+          by(quick, 'import') >= quickImport &&
+          by(quick, 'engine') > Number(get(quick, 'time')) * 1000,
+        `tookMsBy splits tookMs into its steps: ${JSON.stringify(quick)}`,
+      );
       const steady = await run('res://steady');
       assert.equal(
         get(steady, 'hung'),
@@ -38569,8 +38579,8 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       );
       assert.equal(get(steady, 'timedOut'), true, JSON.stringify(steady));
       assert.ok(
-        Number(get(steady, 'tookMs')) >= 12_000,
-        `a run killed at its limit took at least the limit: ${JSON.stringify(steady)}`,
+        Number(get(steady, 'tookMs')) >= 12_000 && by(steady, 'engine') >= 12_000,
+        `a run killed at its limit took at least the limit, in its engine step: ${JSON.stringify(steady)}`,
       );
       assert.match(
         String(get(steady, 'verdict')),

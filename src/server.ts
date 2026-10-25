@@ -7203,6 +7203,7 @@ class GodotServer {
     // After the rebuild, so classes still says what the files declared that the cache lacked,
     // whatever the import writes into the cache after it.
     const rebuildWaited = scanWaitIn(classes.payload);
+    const rebuiltAt = Date.now();
     const importWaited = scanWaitAnswer(
       await this.afterTheImport(
         project.value.path,
@@ -7210,6 +7211,7 @@ class GodotServer {
         await this.importWhatChanged(project.value.path),
       ),
     );
+    const importedAt = Date.now();
     const waitedMs = (rebuildWaited.waitedForEditorScanMs ?? 0) + (importWaited.waitedForEditorScanMs ?? 0);
     const scanNote = importWaited.scanNote ?? rebuildWaited.scanNote;
     const scanned = {
@@ -7356,7 +7358,15 @@ class GodotServer {
         `No tests ran: ${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the engine could not be started on a desktop of its own: ${helperFailed}`,
       );
     }
-    const tookMs = Date.now() - began;
+    const endedAt = Date.now();
+    const tookMs = endedAt - began;
+    // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
+    // nothing in the answer said which step the time went to.
+    const tookMsBy = {
+      classes: rebuiltAt - began,
+      import: importedAt - rebuiltAt,
+      engine: endedAt - importedAt,
+    };
     // Read again once the run is over, so a run that ended between two looks answers as one that
     // was stopped: whether it got through its suites first is a race, and what they said about
     // code that did not compile is not an answer either way.
@@ -7551,6 +7561,7 @@ class GodotServer {
                 verdict,
                 tests: 0,
                 tookMs,
+                tookMsBy,
                 exitCode,
                 exitSignal: run.exitSignal ?? undefined,
                 hung,
@@ -7799,6 +7810,7 @@ class GodotServer {
       skipped: report.skipped,
       time: report.time,
       tookMs,
+      tookMsBy,
       failed,
       failedWithoutDetail: briefed > 0 ? briefed : undefined,
       hookFailures: hookFailures.length > 0 ? hookFailures : undefined,
