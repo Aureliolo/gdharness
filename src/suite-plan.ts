@@ -416,6 +416,8 @@ export interface Unit {
    */
   readonly row?: { readonly index: number; readonly rest: boolean };
   readonly cost: number;
+  /** Whether every case in it has a time of its own, rather than [member cost] being a guess. */
+  readonly timed: boolean;
   readonly windowed: boolean;
   readonly headless: boolean;
 }
@@ -448,6 +450,7 @@ export function unitsOf(
   return suites.flatMap((suite) => {
     const time = times[suite.path];
     const costOf = (func: string): number => time?.cases[func] ?? caseCost;
+    const timedCase = (func: string): boolean => time?.cases[func] !== undefined;
     const around =
       time === undefined
         ? aroundCost
@@ -457,6 +460,7 @@ export function unitsOf(
       suite: suite.path,
       cases: suite.cases,
       cost: whole,
+      timed: suite.cases.every(timedCase),
       windowed: suite.windowed,
       headless: suite.headless,
     };
@@ -471,6 +475,7 @@ export function unitsOf(
             suite: suite.path,
             cases: [func],
             cost: around + costOf(func),
+            timed: timedCase(func),
             windowed: false,
             headless: suite.headless,
           },
@@ -481,6 +486,7 @@ export function unitsOf(
         cases: [func],
         row: { index, rest: index === rows.length - 1 },
         cost: around + seconds,
+        timed: true,
         windowed: false,
         headless: suite.headless,
       }));
@@ -513,6 +519,11 @@ export type CasesBySuite = ReadonlyMap<string, readonly string[]>;
  * the machine's display, its keyboard layout and screen among it, and runs about a tenth slower for
  * drawing frames. A headless engine follows it in its lane, dealt as though it began when the
  * windowed one ends, so the slot never sits idle once the windowed suites are done.
+ *
+ * A headless unit with no time of its own adds a lane: what it costs is a guess at the project's
+ * median case, and a suite just split out of a slow one or a project's first run is anything but.
+ * Priced at the guess, three suites of 80 s each, two of them new, went to one engine of the three
+ * asked for.
  */
 export function dealt(units: readonly Unit[], declared: CasesBySuite, most: number): EnginePlan[] {
   if (units.length === 0) {
@@ -539,7 +550,8 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
     Math.min(
       most,
       headless.length + (windowed.length > 0 ? 1 : 0),
-      Math.ceil(total / Math.max(slowest, ENGINE_START_SECONDS)),
+      Math.ceil(total / Math.max(slowest, ENGINE_START_SECONDS)) +
+        headless.filter((unit) => !unit.timed).length,
     ),
   );
   const bins: Unit[][] = Array.from({ length: count }, () => []);

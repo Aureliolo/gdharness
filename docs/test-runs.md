@@ -106,8 +106,10 @@ when a row that any engine found ran in none of them or in more than one. Units 
 dealt slowest first, each to the engine with the least so far. A run starts no more engines than
 `--engines`, the machine's processors (or `--cores`), or its
 free memory allows once 4 GB is left for everything else at 1.5 GB an engine, and no more than it
-takes to keep each one busy for as long as the slowest unit or 5 seconds, whichever is longer. A
-run held below `--engines` by processors or memory says which on its first line. On macOS the free
+takes to keep each one busy for as long as the slowest unit or 5 seconds, whichever is longer, plus
+one for each unit with a case never timed: the median is a guess, and a suite just split out of a
+slow one, or every suite of a project's first run, is unlikely to cost it. A run held below
+`--engines` by processors or memory says which on its first line. On macOS the free
 memory is the share the system itself counts as free, which includes the cache it can give back. On
 Windows it is the smaller of the physical memory free and what the system can still commit, since
 an allocation fails at the commit limit however much physical memory is free.
