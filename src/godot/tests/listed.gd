@@ -25,6 +25,13 @@ const ROWS: String = "--rows-in"
 ## that is not parameterised. gdUnit4 prints nothing for a case it skips, and the caller needs every
 ## row an engine found to tell one that no engine ran.
 const LEFT_OUT: String = "gdharness left out"
+## Printed after a case or a suite's hooks that gdUnit4 says left orphan nodes, as
+## `res://suite.gd > test_case left 2: Node "Sandbox" of res://sandbox.gd, Timer "Timer"`, with
+## `after` for the suite's hooks. gdUnit4 names them only where a case calls
+## collect_orphan_node_details(), and otherwise counts them.
+const ORPHANS_LEFT: String = "gdharness orphans:"
+## How many orphans one line names before it counts the rest.
+const ORPHANS_NAMED: int = 8
 ## The flags turning off a report, with the gdUnit4 hook that writes it. A gate reads what a run
 ## prints, and each report finds every case it hears of in the session to write them all out as the
 ## run ends; project_test reads the JUnit one and turns off only the HTML one.
@@ -89,6 +96,13 @@ class GdhRunner:
 	var cases_ended: int = 0
 	## The marker of the shutdown walk's oldest end, made as the run starts.
 	var walk_scripts: Array[GDScript] = []
+	## The orphan nodes as the running case and the running suite began, and those already named in
+	## the suite, so each line names only what its own case or hooks left.
+	var orphans_at_case: Dictionary[int, bool] = {}
+	var orphans_at_suite: Dictionary[int, bool] = {}
+	var orphans_named: Dictionary[int, bool] = {}
+	## The suite running, which a case's own event does not carry.
+	var suite_running: String = ""
 
 	## As the run ends, the marker of the walk's newest end, and every script held past the walk, on
 	## an engine whose walk can stop part way ([GdhShutdownWalk]).
@@ -156,11 +170,68 @@ class GdhRunner:
 	## is announced: everything that reads the session, the hooks, the cases and the console printing
 	## every case, is handed it after this.
 	func _on_gdunit_event(event: GdUnitEvent) -> void:
-		if event.type() == GdUnitEvent.SESSION_START:
-			_test_session = GdhIndexedSession.of(_test_session)
-		elif event.type() == GdUnitEvent.TESTCASE_AFTER:
-			cases_ended += 1
+		match event.type():
+			GdUnitEvent.SESSION_START:
+				_test_session = GdhIndexedSession.of(_test_session)
+			GdUnitEvent.TESTSUITE_BEFORE:
+				suite_running = event.resource_path()
+				orphans_at_suite = orphan_ids()
+				orphans_named.clear()
+			GdUnitEvent.TESTCASE_BEFORE:
+				orphans_at_case = orphan_ids()
+			GdUnitEvent.TESTCASE_AFTER:
+				cases_ended += 1
 		super(event)
+		# After gdUnit4's own report of the case, so the line falls under it.
+		if event.type() == GdUnitEvent.TESTCASE_AFTER:
+			name_orphans(event, event.test_name(), orphans_at_case)
+		elif event.type() == GdUnitEvent.TESTSUITE_AFTER:
+			name_orphans(event, "after", orphans_at_suite)
+
+	## Prints the orphans [param event] counts that were not there in [param before], under
+	## [constant ORPHANS_LEFT], once each in a suite.
+	func name_orphans(event: GdUnitEvent, during: String, before: Dictionary[int, bool]) -> void:
+		if event.orphan_nodes() == 0:
+			return
+		var named: PackedStringArray = []
+		var count: int = 0
+		for id: int in orphan_ids():
+			var node: Node = instance_from_id(id) as Node
+			if node == null or before.has(id) or orphans_named.has(id):
+				continue
+			orphans_named[id] = true
+			count += 1
+			if named.size() < ORPHANS_NAMED:
+				var _named: bool = named.append(described(node))
+		if count == 0:
+			return
+		var more: String = "" if count <= named.size() else ", and %d more" % (count - named.size())
+		print(
+			"%s %s > %s left %d: %s%s" % [ORPHANS_LEFT, suite_running, during, count, ", ".join(named), more]
+		)
+
+	## The nodes outside every tree that are not on their way out, by instance id, as gdUnit4 counts
+	## them: one queued for deletion is freed at the end of the frame.
+	static func orphan_ids() -> Dictionary[int, bool]:
+		var ids: Dictionary[int, bool] = {}
+		for id: int in Node.get_orphan_node_ids():
+			var node: Node = instance_from_id(id) as Node
+			if node != null and not node.is_queued_for_deletion():
+				ids[id] = true
+		return ids
+
+	## [param node] as an orphan line names it: its class, its name when it was given one, and its
+	## script when it has one.
+	static func described(node: Node) -> String:
+		var said: String = node.get_class()
+		if not node.name.is_empty():
+			said += ' "%s"' % node.name
+		var attached: Variant = node.get_script()
+		if attached is Script:
+			var script: Script = attached
+			if not script.resource_path.is_empty():
+				said += " of " + script.resource_path
+		return said
 
 	## [param args] with everything up to the script at [param own] given as gdUnit4's tool name. The
 	## path is compared with its separators and, on Windows, its case folded, since the engine

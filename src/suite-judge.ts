@@ -18,7 +18,7 @@ import {
   walkStoppedPartWay,
 } from './engine-leaks.js';
 import type { LogEntry } from './game-log.js';
-import { scriptErrorsPrinted } from './junit.js';
+import { type OrphansLeft, orphansLeftOn, orphansLeftSaid, scriptErrorsPrinted } from './junit.js';
 
 /** One case as the run reported it finishing. */
 interface CaseRan {
@@ -81,6 +81,8 @@ export interface RunPrinted {
   readonly leftOut: ReadonlyMap<string, readonly (number | null)[]>;
   /** The version the engine's banner gives, such as `4.7.2.stable.official.ed1daf0bf`, or null. */
   readonly engineVersion: string | null;
+  /** The orphans each case or suite's hooks left, as the runner named them. */
+  readonly orphansLeft: readonly OrphansLeft[];
 }
 
 const SUITE_OPENED = /^Run Test Suite:\s*(res:\/\/.+?\.gd)\s*$/;
@@ -170,11 +172,17 @@ export function readRun(printed: string): RunPrinted {
     afterCase = [];
   };
   const leftOut = new Map<string, (number | null)[]>();
+  const orphansLeft: OrphansLeft[] = [];
   let engineVersion: string | null = null;
   for (const [at, line] of lines.entries()) {
     const banner: RegExpExecArray | null = engineVersion === null ? BANNER.exec(line) : null;
     if (banner !== null) {
       engineVersion = banner[1] ?? null;
+      continue;
+    }
+    const orphaned = orphansLeftOn(line);
+    if (orphaned !== null) {
+      orphansLeft.push(orphaned);
       continue;
     }
     const left = LEFT_OUT.exec(line);
@@ -278,7 +286,19 @@ export function readRun(printed: string): RunPrinted {
   const unloadable = scriptErrorsPrinted(lines).map(
     (error) => `${error.path}${error.line === null ? '' : `:${String(error.line)}`}: ${error.message}`,
   );
-  return { lines, suites, errors, leaks, starved, executed, unloadable, stoppedIn, leftOut, engineVersion };
+  return {
+    lines,
+    suites,
+    errors,
+    leaks,
+    starved,
+    executed,
+    unloadable,
+    stoppedIn,
+    leftOut,
+    engineVersion,
+    orphansLeft,
+  };
 }
 
 // What Godot prints before an error raised while it was printing another. It writes the pair
@@ -410,9 +430,10 @@ const MEMORY_EXITS = new Set([0xc0000017, 0xc000012d]);
  * failing case ends on reads as the engine having crashed beside the failure.
  */
 const GDUNIT_FAILED = 100;
+const GDUNIT_ORPHANS = 101;
 const GDUNIT_EXITS: ReadonlyMap<number, string> = new Map([
   [GDUNIT_FAILED, "gdUnit4's code for a case that failed or errored"],
-  [101, "gdUnit4's code for orphan nodes left behind"],
+  [GDUNIT_ORPHANS, "gdUnit4's code for orphan nodes left behind"],
   [103, "gdUnit4's code for a suite that cannot run headless"],
   [104, "gdUnit4's code for a Godot version it does not support"],
   [105, "gdUnit4's code for scripts that did not compile"],
@@ -525,10 +546,12 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   const faults: string[] = [];
   const failing = new Set<string>();
   const shownAt = new Set<number>();
-  // gdUnit4's 100 beside a case that failed says only what that case's own line says.
+  // gdUnit4's 100 beside a case that failed says only what that case's own line says, and its 101
+  // beside the orphans the runner named only what those say.
   const explained =
-    end.code === GDUNIT_FAILED &&
-    [...printed.suites.values()].some((suite) => suite.cases.some((ran) => ran.verdict === 'FAILED'));
+    (end.code === GDUNIT_FAILED &&
+      [...printed.suites.values()].some((suite) => suite.cases.some((ran) => ran.verdict === 'FAILED'))) ||
+    (end.code === GDUNIT_ORPHANS && printed.orphansLeft.length > 0);
   if (end.ended !== null) {
     faults.push(end.ended);
   } else if (end.code !== 0 && !explained) {
@@ -624,6 +647,12 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
         }
       }
     }
+  }
+  // Failing the suite, as the run it fails is: recorded as passed, a suite leaving orphans was
+  // skipped by the next run that skips what passed, which then passed.
+  for (const left of printed.orphansLeft) {
+    faults.push(orphansLeftSaid(left));
+    failing.add(left.suite);
   }
   const unexpected = unexpectedErrors(
     printed,

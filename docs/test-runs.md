@@ -141,6 +141,11 @@ an allocation fails at the commit limit however much physical memory is free.
   `0xC0000005 (STATUS_ACCESS_VIOLATION)`, or one of gdUnit4's, such as 101 for orphan nodes. gdUnit4's
   100, which it exits with when a case failed, is left out beside that case's own line. An engine
   that died on a Windows exception status also says how much memory was free as it ended.
+- Orphan nodes, by the case that left them, or the suite's hooks: each node's class, its name when
+  it has one, and its script, eight to a line and the rest counted. gdUnit4 names them only where a
+  case calls `collect_orphan_node_details()`, so the runner notes the orphans as each case and
+  suite starts and names what is new when gdUnit4 counts some. The suite fails with them, and 101
+  is left out beside the line.
 - An engine that printed nothing at all.
 - An engine ended for its silence or its deadline, or because an autoload did not start.
 - An engine whose banner names another version than `--godot-version` asks for.

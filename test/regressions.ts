@@ -42556,7 +42556,11 @@ async function testEveryLongCallIsHeardFrom(): Promise<void> {
 /**
  * Has a process of its own hold the slot at [param lock] for [param ms], as another run on the
  * machine would, and answers once the lock is written. A synchronous spawn after it still sees it
- * given back, since the holder runs on its own clock.
+ * given back, since the holder runs on its own clock. The lock names the start the platform reports
+ * for the holder, as a taker reads it: the holder's own reckoning from its uptime landed more than
+ * the tolerance away on a loaded machine, and the slot was taken as free at once. Hold it for some
+ * seconds past the two a command waits before saying so: a command asks the platform for its own
+ * start before it takes a slot, and on a loaded machine that question took most of three and a half.
  */
 async function slotHeldElsewhere(lock: string, ms: number): Promise<ReturnType<typeof spawnHidden>> {
   const holder = spawnHidden(
@@ -42564,15 +42568,19 @@ async function slotHeldElsewhere(lock: string, ms: number): Promise<ReturnType<t
     [
       '-e',
       `const fs = require('node:fs');
-fs.writeFileSync(${JSON.stringify(lock)}, JSON.stringify({ pid: process.pid, started: Math.round(Date.now() - process.uptime() * 1000) }));
-setTimeout(() => { fs.rmSync(${JSON.stringify(lock)}, { force: true }); }, ${String(ms)});`,
+const written = setInterval(() => {
+  if (fs.existsSync(${JSON.stringify(lock)})) {
+    clearInterval(written);
+    setTimeout(() => { fs.rmSync(${JSON.stringify(lock)}, { force: true }); }, ${String(ms)});
+  }
+}, 20);`,
     ],
     { stdio: 'ignore' },
   );
-  for (let looked = 0; looked < 100 && !existsSync(lock); looked += 1) {
-    await delay(50);
-  }
-  assert.ok(existsSync(lock), `the holder wrote ${lock}`);
+  const pid = holder.pid ?? 0;
+  const started = (await startTimesOf([pid])).get(pid);
+  assert.ok(started !== undefined, `the platform says when the holder ${String(pid)} started`);
+  writeFileSync(lock, JSON.stringify({ pid, started }));
   return holder;
 }
 
@@ -43285,7 +43293,7 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
 
     // Held up by a slot someone else holds, a spread says so once for all its workers, and says
     // nothing while they queue behind each other in the one slot.
-    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 3500);
+    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 8000);
     const queued = cli(
       'spread',
       project,
@@ -43939,7 +43947,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
 
     // A run held up by a slot someone else holds says so once, whatever its engines.
-    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 3500);
+    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 8000);
     const heldUp = test('--slot-count', '1', 'tests/ok_test.gd', 'tests/declared_test.gd');
     holder.kill();
     assert.equal(heldUp.status, 0, heldUp.said);
@@ -44474,6 +44482,130 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
     );
     assert.equal(get(one, 'tests'), 1, `and it alone: ${JSON.stringify(one)}`);
     assert.deepEqual(readdirSync(slots), [], 'every slot given back');
+  } finally {
+    await server.stop();
+    sweep(project, slots);
+  }
+}
+
+/**
+ * The orphan nodes a case or a suite's hooks leave are named, with the case. gdUnit4 names them only
+ * where a case calls collect_orphan_node_details(), so a run said "exited 101" and nothing else, and
+ * a game found Sandbox nodes held through a static only by printing Node.print_orphan_nodes() at the
+ * end of the case. And the suite was recorded as passed, so the next run skipping what passed
+ * skipped it and passed.
+ */
+async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('orphan naming regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-orphans-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-orphans-slots-'));
+  const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Orphans"\n',
+      'tests/sandbox.gd': 'extends Node\n\nstatic var kept: Array[Node] = []\n',
+      'tests/leak_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        'const Sandbox = preload("res://tests/sandbox.gd")',
+        '',
+        '',
+        'func before() -> void:',
+        '\tvar setUp := Node2D.new()',
+        '\tsetUp.name = "SetUp"',
+        '\tSandbox.kept.append(setUp)',
+        '',
+        '',
+        'func test_leaks() -> void:',
+        '\tvar held: Node = Sandbox.new()',
+        '\theld.name = "Sandbox"',
+        '\tSandbox.kept.append(held)',
+        '\tSandbox.kept.append(Timer.new())',
+        '\tassert_int(1).is_equal(1)',
+        '',
+        '',
+        'func test_many() -> void:',
+        '\tfor at: int in 10:',
+        '\t\tvar each := Node.new()',
+        '\t\teach.name = "Each%d" % at',
+        '\t\tSandbox.kept.append(each)',
+        '\tassert_int(1).is_equal(1)',
+        '',
+        '',
+        'func test_clean() -> void:',
+        '\tauto_free(Node.new())',
+        '\tassert_int(2).is_equal(2)',
+        '',
+      ].join('\n'),
+      'tests/clean_test.gd':
+        'extends GdUnitTestSuite\n\n\nfunc test_fine() -> void:\n\tassert_int(1).is_equal(1)\n',
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const ran = spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'test', project, '--slots', slots, '--import'],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, GODOT_PATH: godotPath },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const said = `${ran.stdout}${ran.stderr}`;
+    assert.equal(ran.status, 1, said);
+    const free = 'Free each one, or make it with auto_free(), which frees it once the case is over.';
+    const named = said.split(/\r?\n/).filter((line) => line.includes('which gdUnit4 counts as orphans'));
+    assert.deepEqual(
+      named.map((line) => line.trim()),
+      [
+        `res://tests/leak_test.gd > test_leaks left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Timer, Node "Sandbox" of res://tests/sandbox.gd. ${free}`,
+        `res://tests/leak_test.gd > test_many left 10 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: ${Array.from({ length: 8 }, (_, at) => `Node "Each${String(at)}"`).join(', ')}, and 2 more. ${free}`,
+        `res://tests/leak_test.gd's hooks left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node2D "SetUp". ${free}`,
+      ],
+      said,
+    );
+    assert.doesNotMatch(said, /exited 101/, `the code says nothing the lines do not: ${said}`);
+    // The suite that left them is not one that passed, and the clean one beside it is.
+    const passed = JSON.parse(
+      readFileSync(join(project, '.godot', 'gdharness', 'suite-passed.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(passed).sort(), ['res://tests/clean_test.gd'], JSON.stringify(passed));
+
+    await server.initialize('regression-test');
+    const response = await server.request(
+      'tools/call',
+      { name: 'project_test', arguments: { projectPath: project, path: 'res://tests/leak_test.gd' } },
+      ENGINE_CALL_TIMEOUT_MS * 3,
+    );
+    const content = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+    const answer = JSON.parse(content.find((part) => part.trimStart().startsWith('{')) ?? '{}') as unknown;
+    const warning = asArray(get(answer, 'warnings')).find((entry) => get(entry, 'kind') === 'orphans');
+    assert.deepEqual(
+      get(warning, 'left'),
+      [
+        { case: 'test_leaks', count: 2, nodes: 'Timer, Node "Sandbox" of res://tests/sandbox.gd' },
+        {
+          case: 'test_many',
+          count: 10,
+          nodes: `${Array.from({ length: 8 }, (_, at) => `Node "Each${String(at)}"`).join(', ')}, and 2 more`,
+        },
+        { case: 'after', count: 1, nodes: 'Node2D "SetUp"' },
+      ],
+      JSON.stringify(answer),
+    );
+    assert.match(
+      String(get(warning, 'message')),
+      /^res:\/\/tests\/leak_test\.gd > test_leaks left 2 nodes /,
+      JSON.stringify(warning),
+    );
   } finally {
     await server.stop();
     sweep(project, slots);
@@ -61564,6 +61696,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
   testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly,
+  testAnOrphanIsNamedWithTheCaseThatLeftIt,
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
   testProjectTestJudgesItsRunAsTheGateDoes,
