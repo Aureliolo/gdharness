@@ -7877,7 +7877,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 154;
+const READ_IN_WORDS = 155;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -42554,6 +42554,37 @@ async function testEveryLongCallIsHeardFrom(): Promise<void> {
 }
 
 /**
+ * Has a process of its own hold the slot at [param lock] for [param ms], as another run on the
+ * machine would, and answers once the lock is written. A synchronous spawn after it still sees it
+ * given back, since the holder runs on its own clock. The lock names the start the platform reports
+ * for the holder, as a taker reads it: the holder's own reckoning from its uptime landed more than
+ * the tolerance away on a loaded machine, and the slot was taken as free at once. Hold it for some
+ * seconds past the two a command waits before saying so: a command asks the platform for its own
+ * start before it takes a slot, and on a loaded machine that question took most of three and a half.
+ */
+async function slotHeldElsewhere(lock: string, ms: number): Promise<ReturnType<typeof spawnHidden>> {
+  const holder = spawnHidden(
+    process.execPath,
+    [
+      '-e',
+      `const fs = require('node:fs');
+const written = setInterval(() => {
+  if (fs.existsSync(${JSON.stringify(lock)})) {
+    clearInterval(written);
+    setTimeout(() => { fs.rmSync(${JSON.stringify(lock)}, { force: true }); }, ${String(ms)});
+  }
+}, 20);`,
+    ],
+    { stdio: 'ignore' },
+  );
+  const pid = holder.pid ?? 0;
+  const started = (await startTimesOf([pid])).get(pid);
+  assert.ok(started !== undefined, `the platform says when the holder ${String(pid)} started`);
+  writeFileSync(lock, JSON.stringify({ pid, started }));
+  return holder;
+}
+
+/**
  * One budget of engines for the whole machine, which every engine gdharness starts waits on.
  *
  * Each game's gate once took four slots of its own checkout's, so a machine running three gates and
@@ -42650,6 +42681,81 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
   );
   assert.deepEqual(sent, [5, 6, 7, 8]);
 
+  // A command hears a wait past two seconds once, however many of its lanes wait, and a take with a
+  // listener of its own says nothing to the command.
+  const lined = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slot-lines-'));
+  const lineHeld = join(lined, '0.lock');
+  const me = { pid: process.pid, started: await ownStart() };
+  const oneSlot = `the one engine slot on this machine (${lined}) is in use, by a gate or another tool, and the engine starts when one is given back.`;
+  try {
+    writeFileSync(lineHeld, JSON.stringify(me));
+    const lines: string[] = [];
+    const lanes = new EngineSlots(lined, 1, me, (line) => {
+      lines.push(line);
+    });
+    const unheard: string[] = [];
+    const listened = new EngineSlots(lined, 1, me, (line) => {
+      unheard.push(line);
+    });
+    const told: number[] = [];
+    const takes = [
+      { slots: lanes, taking: lanes.take() },
+      { slots: lanes, taking: lanes.take() },
+      {
+        slots: listened,
+        taking: listened.take(undefined, (waitedMs) => {
+          told.push(waitedMs);
+        }),
+      },
+    ];
+    await delay(2600);
+    rmSync(lineHeld);
+    const taken = await Promise.all(
+      takes.map(async ({ slots, taking }) => {
+        const lock = await taking;
+        await delay(10);
+        slots.release(lock);
+        return lock;
+      }),
+    );
+    assert.deepEqual(taken, [lineHeld, lineHeld, lineHeld], 'every lane takes the slot in turn');
+    assert.equal(lines.length, 1, lines.join('\n'));
+    const line = lines[0] ?? '';
+    assert.match(line, /^Waiting [23] s so far for an engine: /, line);
+    assert.ok(line.endsWith(oneSlot), line);
+    assert.deepEqual([told.length, unheard], [1, []], `told at ${told.join(', ')}: ${unheard.join('\n')}`);
+
+    writeFileSync(lineHeld, JSON.stringify(me));
+    const brief: string[] = [];
+    const briefly = new EngineSlots(lined, 1, me, (line) => {
+      brief.push(line);
+    });
+    const shortTake = briefly.take();
+    await delay(500);
+    rmSync(lineHeld);
+    const shortLock = await shortTake;
+    briefly.release(shortLock);
+    assert.deepEqual([shortLock, brief], [lineHeld, []], 'a wait of half a second takes the slot unsaid');
+
+    const queued: string[] = [];
+    const run = new EngineSlots(lined, 1, me, (line) => {
+      queued.push(line);
+    });
+    const first = await run.take();
+    const second = run.take();
+    await delay(2600);
+    run.release(first);
+    const secondLock = await second;
+    run.release(secondLock);
+    assert.deepEqual(
+      [first, secondLock, queued],
+      [lineHeld, lineHeld, []],
+      'a run waiting behind its own engine is held up by nobody else and says nothing',
+    );
+  } finally {
+    sweep(lined);
+  }
+
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -42709,6 +42815,25 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, readdirSync(slots)],
       [null, process.pid, ['0.lock']],
       `the command waits behind the slot held, and takes no other: ${said}`,
+    );
+    // From the command's own start of its wait, which comes after it has found its engine.
+    for (let looked = 0; looked < 100 && !said.includes('for an engine'); looked += 1) {
+      await delay(100);
+    }
+    const waitLines = said.split('\n').filter((line) => line.includes('for an engine'));
+    assert.equal(waitLines.length, 1, said);
+    assert.match(
+      waitLines[0] ?? '',
+      /^gdharness: Waiting [23] s so far for an engine: the one engine slot on this machine \(/,
+      said,
+    );
+    assert.ok(
+      waitLines[0]
+        ?.trimEnd()
+        .endsWith(
+          `(${slots}) is in use, by a gate or another tool, and the engine starts when one is given back.`,
+        ),
+      said,
     );
     rmSync(ours);
     assert.ok(await heldBy(classes.pid, 30_000), `then takes the slot given back: ${said}`);
@@ -43016,7 +43141,7 @@ function testTheTestHelpersWaitStepAndPress(): void {
  * the fault named: a worker that played no arm, one that went another way through the arms, one
  * that printed an error, a gathering run that skipped an arm, and an outcome that is an object.
  */
-function testASpreadBenchGathersTheTableItPlaysAlone(): void {
+async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
   // The share each worker plays and the faults read from what they say they played, without an engine.
   assert.deepEqual(
     [0, 1, 2].map((index) => shareOf(10, index, 3)),
@@ -43165,6 +43290,34 @@ function testASpreadBenchGathersTheTableItPlaysAlone(): void {
       `the same table to the last digit: ${spread.said}`,
     );
     assert.match(spread.said, /^\[spread\] 3 of 3 workers done, worker \d in \d+\.\d s$/m, spread.said);
+
+    // Held up by a slot someone else holds, a spread says so once for all its workers, and says
+    // nothing while they queue behind each other in the one slot.
+    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 8000);
+    const queued = cli(
+      'spread',
+      project,
+      'bench/bench.tscn',
+      '--workers',
+      '3',
+      '--slots',
+      slots,
+      '--slot-count',
+      '1',
+    );
+    holder.kill();
+    assert.equal(queued.status, 0, queued.said);
+    assert.deepEqual(
+      queued.said.split(/\r?\n/).filter((line) => line.includes('for an engine')).length,
+      1,
+      queued.said,
+    );
+    assert.match(
+      queued.said,
+      /^\[spread\] Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by a gate or another tool, and the engine starts when one is given back\.$/m,
+      queued.said,
+    );
+    assert.deepEqual(table(queued.said), table(aloneSaid), queued.said);
     assert.match(
       spread.said,
       /^Spread: 17 runs in 2 arms over 3 workers, \d+\.\d s; the longest worker took \d+\.\d s\.$/m,
@@ -43257,7 +43410,7 @@ function testASpreadBenchGathersTheTableItPlaysAlone(): void {
   }
 }
 
-function testTheTestCommandRunsAndJudgesAProject(): void {
+async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
@@ -43792,6 +43945,22 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       [],
       'only the logs are copied, not the engine user folder or the reports',
     );
+
+    // A run held up by a slot someone else holds says so once, whatever its engines.
+    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 8000);
+    const heldUp = test('--slot-count', '1', 'tests/ok_test.gd', 'tests/declared_test.gd');
+    holder.kill();
+    assert.equal(heldUp.status, 0, heldUp.said);
+    assert.equal(
+      heldUp.said.split(/\r?\n/).filter((line) => line.includes('for an engine')).length,
+      1,
+      heldUp.said,
+    );
+    assert.match(
+      heldUp.said,
+      /^Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by a gate or another tool, and the engine starts when one is given back\.$/m,
+      heldUp.said,
+    );
   } finally {
     sweep(project, slots, checkouts);
   }
@@ -44313,6 +44482,130 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
     );
     assert.equal(get(one, 'tests'), 1, `and it alone: ${JSON.stringify(one)}`);
     assert.deepEqual(readdirSync(slots), [], 'every slot given back');
+  } finally {
+    await server.stop();
+    sweep(project, slots);
+  }
+}
+
+/**
+ * The orphan nodes a case or a suite's hooks leave are named, with the case. gdUnit4 names them only
+ * where a case calls collect_orphan_node_details(), so a run said "exited 101" and nothing else, and
+ * a game found Sandbox nodes held through a static only by printing Node.print_orphan_nodes() at the
+ * end of the case. And the suite was recorded as passed, so the next run skipping what passed
+ * skipped it and passed.
+ */
+async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('orphan naming regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-orphans-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-orphans-slots-'));
+  const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Orphans"\n',
+      'tests/sandbox.gd': 'extends Node\n\nstatic var kept: Array[Node] = []\n',
+      'tests/leak_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        'const Sandbox = preload("res://tests/sandbox.gd")',
+        '',
+        '',
+        'func before() -> void:',
+        '\tvar setUp := Node2D.new()',
+        '\tsetUp.name = "SetUp"',
+        '\tSandbox.kept.append(setUp)',
+        '',
+        '',
+        'func test_leaks() -> void:',
+        '\tvar held: Node = Sandbox.new()',
+        '\theld.name = "Sandbox"',
+        '\tSandbox.kept.append(held)',
+        '\tSandbox.kept.append(Timer.new())',
+        '\tassert_int(1).is_equal(1)',
+        '',
+        '',
+        'func test_many() -> void:',
+        '\tfor at: int in 10:',
+        '\t\tvar each := Node.new()',
+        '\t\teach.name = "Each%d" % at',
+        '\t\tSandbox.kept.append(each)',
+        '\tassert_int(1).is_equal(1)',
+        '',
+        '',
+        'func test_clean() -> void:',
+        '\tauto_free(Node.new())',
+        '\tassert_int(2).is_equal(2)',
+        '',
+      ].join('\n'),
+      'tests/clean_test.gd':
+        'extends GdUnitTestSuite\n\n\nfunc test_fine() -> void:\n\tassert_int(1).is_equal(1)\n',
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const ran = spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'test', project, '--slots', slots, '--import'],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, GODOT_PATH: godotPath },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const said = `${ran.stdout}${ran.stderr}`;
+    assert.equal(ran.status, 1, said);
+    const free = 'Free each one, or make it with auto_free(), which frees it once the case is over.';
+    const named = said.split(/\r?\n/).filter((line) => line.includes('which gdUnit4 counts as orphans'));
+    assert.deepEqual(
+      named.map((line) => line.trim()),
+      [
+        `res://tests/leak_test.gd > test_leaks left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Timer, Node "Sandbox" of res://tests/sandbox.gd. ${free}`,
+        `res://tests/leak_test.gd > test_many left 10 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: ${Array.from({ length: 8 }, (_, at) => `Node "Each${String(at)}"`).join(', ')}, and 2 more. ${free}`,
+        `res://tests/leak_test.gd's hooks left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node2D "SetUp". ${free}`,
+      ],
+      said,
+    );
+    assert.doesNotMatch(said, /exited 101/, `the code says nothing the lines do not: ${said}`);
+    // The suite that left them is not one that passed, and the clean one beside it is.
+    const passed = JSON.parse(
+      readFileSync(join(project, '.godot', 'gdharness', 'suite-passed.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(passed).sort(), ['res://tests/clean_test.gd'], JSON.stringify(passed));
+
+    await server.initialize('regression-test');
+    const response = await server.request(
+      'tools/call',
+      { name: 'project_test', arguments: { projectPath: project, path: 'res://tests/leak_test.gd' } },
+      ENGINE_CALL_TIMEOUT_MS * 3,
+    );
+    const content = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+    const answer = JSON.parse(content.find((part) => part.trimStart().startsWith('{')) ?? '{}') as unknown;
+    const warning = asArray(get(answer, 'warnings')).find((entry) => get(entry, 'kind') === 'orphans');
+    assert.deepEqual(
+      get(warning, 'left'),
+      [
+        { case: 'test_leaks', count: 2, nodes: 'Timer, Node "Sandbox" of res://tests/sandbox.gd' },
+        {
+          case: 'test_many',
+          count: 10,
+          nodes: `${Array.from({ length: 8 }, (_, at) => `Node "Each${String(at)}"`).join(', ')}, and 2 more`,
+        },
+        { case: 'after', count: 1, nodes: 'Node2D "SetUp"' },
+      ],
+      JSON.stringify(answer),
+    );
+    assert.match(
+      String(get(warning, 'message')),
+      /^res:\/\/tests\/leak_test\.gd > test_leaks left 2 nodes /,
+      JSON.stringify(warning),
+    );
   } finally {
     await server.stop();
     sweep(project, slots);
@@ -46114,10 +46407,10 @@ async function testGdUnitRunner(): Promise<void> {
           JSON.stringify(long, null, 2),
         );
         // gdUnit4's orphans are the nodes outside the tree, and the warning once called them the
-        // ones still in it.
+        // ones still in it. The case that left them is named however much was printed after it.
         assert.match(
           text(get(long, 'warnings', 0, 'message')),
-          /^2 nodes built during this suite were neither freed nor in the tree when it finished, which gdUnit4 counts as orphans\. Free each one, or make it with auto_free\(\)/,
+          /^res:\/\/test\/long\/a_leaves_test\.gd > test_leaves_a_node left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Node, Node\. Free each one, or make it with auto_free\(\)/,
           JSON.stringify(long, null, 2),
         );
 
@@ -50232,14 +50525,56 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     // A resource built into a file is a new object each time the file loads, and the check that a
     // save kept what was set compared objects, so every one written into a resource file was
     // refused as a property the file does not keep.
-    await written({ growth: { _type: 'Curve', max_value: 50 } });
+    const point = { _type: 'Vector2', x: 0.5, y: 20 };
+    await written({ growth: { _type: 'Curve', max_value: 50, point_count: 1, 'point_0/position': point } });
     assert.match(file(), /^growth = SubResource\("[^"]+"\)$/m);
     assert.match(file(), /^_limits = \[0\.0, 50\.0, 0\.0, 1\.0\]$/m);
     const grown = parseTextContent(
       await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' }),
     );
-    assert.deepEqual(get(grown, 'properties', 'growth'), { _type: 'Curve', _limits: [0, 50, 0, 1] });
+    // In the inspector's names, which the write took, rather than the _limits and _data it stores.
+    const growth = {
+      _type: 'Curve',
+      max_value: 50,
+      point_count: 1,
+      'point_0/position': point,
+      'point_0/right_tangent': 0,
+      'point_0/right_mode': 0,
+    };
+    assert.deepEqual(get(grown, 'properties', 'growth'), growth, JSON.stringify(grown));
+    await written({ growth: { _type: 'Curve' } });
     await written({ growth: get(grown, 'properties', 'growth') });
+    assert.deepEqual(
+      get(
+        parseTextContent(await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' })),
+        'properties',
+        'growth',
+      ),
+      growth,
+      'and what was read writes back as it was',
+    );
+    // So is a Curve read as a file of its own.
+    writeFileSync(
+      join(project, 'ease.tres'),
+      '[gd_resource type="Curve" format=3]\n\n[resource]\n_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(1, 1), 0.0, 0.0, 0, 0]\npoint_count = 2\n',
+    );
+    assert.deepEqual(
+      get(
+        parseTextContent(await request('resource_edit', { op: 'read', resourcePath: 'res://ease.tres' })),
+        'properties',
+      ),
+      {
+        point_count: 2,
+        'point_0/position': { x: 0, y: 0, _type: 'Vector2' },
+        'point_0/right_tangent': 0,
+        'point_0/right_mode': 0,
+        'point_1/position': { x: 1, y: 1, _type: 'Vector2' },
+        'point_1/left_tangent': 0,
+        'point_1/left_mode': 0,
+      },
+      'a Curve file reads in the names a write takes',
+    );
+    rmSync(join(project, 'ease.tres'));
     // Comparing built-in resources by what they hold meets one that holds itself, and has to end.
     // The check after the save compares the one set with the one the file loads, two objects that
     // each hold themselves, which only a script can make: this one's setter links the ring to
@@ -57337,7 +57672,12 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     assert.doesNotMatch(fileOf('moves.tscn'), /tracks\/1\//, `one track: ${fileOf('moves.tscn')}`);
     assert.equal(
       textOf(await call(rotation([{ time: 0.5, value: 1 }]))),
-      'Track 0 already animates Body:rotation and has a key at 0.5 s, which keyframes[0] would replace. Nothing was written.',
+      'Track 0 already animates Body:rotation and has a key at 0.5 s, which keyframes[0] would replace. Nothing was written; replaceKeys true replaces it.',
+    );
+    assert.match(
+      fileOf('moves.tscn'),
+      /"values": \[0\.0, 1\.5, 3\.14, 6\.0\]/,
+      'the refused call wrote nothing',
     );
     // A property the node lacks is refused with the ones it has nearest, as a misspelt one usually
     // is among them.
@@ -57353,6 +57693,30 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       [get(inside, 'keys'), get(inside, 'pastLength')],
       [5, undefined],
       JSON.stringify(inside),
+    );
+    // replaceKeys is how one key's value changes: it takes the old key's place, which is named with
+    // what it held, beside a key at a new time.
+    const replacedKey = await written({
+      ...rotation([
+        { time: 0.5, value: 1 },
+        { time: 0.2, value: 2 },
+      ]),
+      replaceKeys: true,
+    });
+    assert.deepEqual(
+      [
+        get(replacedKey, 'keysReplaced'),
+        get(replacedKey, 'keysAdded'),
+        get(replacedKey, 'keys'),
+        get(replacedKey, 'existingTrack'),
+      ],
+      [[{ time: 0.5, was: 3.14 }], 1, 6, true],
+      JSON.stringify(replacedKey),
+    );
+    assert.match(
+      fileOf('moves.tscn'),
+      /"times": PackedFloat32Array\(0, 0\.1, 0\.2, 0\.25, 0\.5, 2\),[\s\S]*?"values": \[0\.0, 0\.5, 2\.0, 1\.5, 1\.0, 6\.0\]/,
+      fileOf('moves.tscn'),
     );
 
     const shorter = await written({
@@ -57897,6 +58261,13 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       [true, true, undefined],
       `a default fills what is not given: ${JSON.stringify(fits)}`,
     );
+    const recalled = await written({ ...calling([{ time: 0.1, args: ['bye'] }]), replaceKeys: true });
+    assert.deepEqual(
+      [get(recalled, 'keysReplaced'), get(recalled, 'keysAdded'), get(recalled, 'keys')],
+      [[{ time: 0.1, was: { method: 'cheer', args: ['hi'] } }], 0, 1],
+      `a method key replaced is named with its call: ${JSON.stringify(recalled)}`,
+    );
+    assert.match(fileOf('moves.tscn'), /"args": \["bye"\]/, fileOf('moves.tscn'));
     for (const [keyframes, method, misfit] of [
       [
         [
@@ -61325,6 +61696,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
   testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly,
+  testAnOrphanIsNamedWithTheCaseThatLeftIt,
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
   testProjectTestJudgesItsRunAsTheGateDoes,

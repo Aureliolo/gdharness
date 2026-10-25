@@ -698,14 +698,12 @@ func _describe_built_in(resource: Resource) -> Dictionary:
 		else:
 			described["_type"] = str(script.get_global_name())
 	var fresh: Object = _fresh(script)
-	for property: Dictionary in resource.get_property_list():
+	if fresh == null and GdhShapes.STORED_APART.has(resource.get_class()):
+		fresh = ClassDB.instantiate(resource.get_class())
+	for property: Dictionary in GdhShapes.read_properties(resource):
 		var usage: int = property.get("usage", 0)
 		var name: String = str(property.get("name", ""))
-		if (
-			not (usage & PROPERTY_USAGE_STORAGE)
-			or name == "script"
-			or (name.begins_with("resource_") and name != "resource_name")
-		):
+		if name == "script" or (name.begins_with("resource_") and name != "resource_name"):
 			continue
 		var held: Variant = resource.get(name)
 		var default: Variant = ClassDB.class_get_property_default_value(resource.get_class(), name)

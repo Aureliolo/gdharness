@@ -159,6 +159,7 @@ import {
   hookFailuresPrinted,
   ignoredLeftOut,
   ignoredYetRan,
+  orphansLeftSaid,
   orphansPrinted,
   parseJUnit,
   type ScriptError,
@@ -7612,7 +7613,13 @@ class GodotServer {
       path: suite.path,
       name: report.suites.find((entry) => entry.path === suite.path)?.name ?? suite.path,
       orphans: suite.orphans,
-      message: `${suite.orphans === 1 ? '1 node' : `${String(suite.orphans)} nodes`} built during this suite ${suite.orphans === 1 ? 'was' : 'were'} neither freed nor in the tree when it finished, which gdUnit4 counts as orphans. Free each one, or make it with auto_free(), which frees it once the case is over.`,
+      ...(suite.left.length > 0
+        ? { left: suite.left.map(({ during, count, nodes }) => ({ case: during, count, nodes })) }
+        : {}),
+      message:
+        suite.left.length > 0
+          ? suite.left.map(orphansLeftSaid).join(' ')
+          : `${suite.orphans === 1 ? '1 node' : `${String(suite.orphans)} nodes`} built during this suite ${suite.orphans === 1 ? 'was' : 'were'} neither freed nor in the tree when it finished, which gdUnit4 counts as orphans. Free each one, or make it with auto_free(), which frees it once the case is over.`,
     }));
     // A suite that passed every case has nothing to say that the totals do not, and a whole tier
     // of them is most of the answer: a hundred and three clean suites came back as fifteen

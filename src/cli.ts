@@ -9,6 +9,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { serverServing } from './bridge-announce.js';
 import { EngineUsageError } from './engine-launch.js';
+import { sayWaitsTo } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
@@ -859,6 +860,12 @@ async function spread(): Promise<void> {
 
 async function main(): Promise<void> {
   await letWindowsReportCrashes();
+  if (command !== undefined) {
+    // Standard error, because the LSP bridge's standard output is its protocol.
+    sayWaitsTo((line) => {
+      console.error(`gdharness: ${line}`);
+    });
+  }
   if (command === 'test') {
     await test();
     return;
