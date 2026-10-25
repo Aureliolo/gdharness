@@ -40,7 +40,11 @@ func records() -> Array[Record]:
 
 
 func priced() -> Dictionary:
-	return {"lamp": _records[0], 7: _records[1], "count": 2}
+	return {"lamp": _records[0], 7: _records[1], "7": _records[0], "count": 2}
+
+
+func named() -> Dictionary:
+	return {"lamp": _records[0], &"rope": _records[1], "count": 2}
 
 
 func counts() -> Array:
@@ -299,15 +303,15 @@ func _check_each_returned_object_is_read() -> void:
 	if everything.get("result_properties") != expected:
 		_fail("every variable of each record comes back with it: %s" % str(everything))
 	var keyed: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Game", "method": "priced", "properties": ["worth", "nope"]}
+		"call_method", {"path": "/root/Game", "method": "named", "properties": ["worth", "nope"]}
 	)
 	var missing: Array = keyed.get("result_properties_missing", [])
 	if (
-		keyed.get("result_properties") != {"lamp": {"worth": 3}, "7": {"worth": 1}, "count": null}
+		keyed.get("result_properties") != {"lamp": {"worth": 3}, "rope": {"worth": 1}, "count": null}
 		or missing.size() != 2
 		or not str(missing[0]).begins_with("[lamp] ")
 		or not str(missing[0]).ends_with("has no property nope; its script declares id, worth")
-		or not str(missing[1]).begins_with("[7] ")
+		or not str(missing[1]).begins_with("[rope] ")
 	):
 		_fail(
 			(
@@ -315,6 +319,23 @@ func _check_each_returned_object_is_read() -> void:
 				% str(keyed)
 			)
 		)
+	# A key 7 and a key "7" are one key once both are text, so a dictionary whose keys are not all
+	# text is read in the shape result gives it, as entries.
+	var mixed: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Game", "method": "priced", "properties": ["worth", "nope"]}
+	)
+	var entries: Array = [["lamp", {"worth": 3}], [7, {"worth": 1}], ["7", {"worth": 3}], ["count", null]]
+	var mixed_missing: Array = mixed.get("result_properties_missing", [])
+	var said: Array = mixed_missing.map(func(why: Variant) -> String: return str(why).get_slice(" ", 0))
+	if (
+		mixed.get("result_properties") != {"_type": "Dictionary", "entries": entries}
+		or said != ['["lamp"]', "[7]", '["7"]']
+	):
+		_fail("a dictionary keyed by more than text is read as entries, each key kept: %s" % str(mixed))
+	var shown: Dictionary = mixed.get("result", {}) if mixed.get("result") is Dictionary else {}
+	var shown_entries: Array = shown.get("entries", []) if shown.get("entries") is Array else []
+	if shown.get("_type") != "Dictionary" or shown_entries.size() != 4:
+		_fail("in the shape result itself has: %s" % str(mixed))
 	var numbers: Dictionary = await node._execute_command(
 		"call_method", {"path": "/root/Game", "method": "counts", "properties": true}
 	)

@@ -711,10 +711,23 @@ func _read_off_result(result: Variant, asked: Variant) -> Dictionary:
 		return _read_off_many(read_each, list, "Array", missing)
 	if result is Dictionary:
 		var map: Dictionary = result
+		# In the shape result gives the dictionary: keyed by text only when every key is text, since
+		# a key 7 and a key "7" are one key once both are text, and one of them was lost.
+		var texts: bool = map.keys().all(
+			func(key: Variant) -> bool: return key is String or key is StringName
+		)
 		var read_by_key: Dictionary = {}
+		var entries: Array = []
 		for key: Variant in map:
-			read_by_key[str(key)] = _read_off_element(map[key], "[%s]" % str(key), asked, missing)
-		return _read_off_many(read_by_key, map.values(), "Dictionary", missing)
+			var shown: Variant = _values.serialize(key)
+			var named: String = "[%s]" % (str(key) if texts else JSON.stringify(shown, "", false))
+			var got: Variant = _read_off_element(map[key], named, asked, missing)
+			if texts:
+				read_by_key[str(key)] = got
+			else:
+				entries.append([shown, got])
+		var shaped: Variant = read_by_key if texts else {"_type": "Dictionary", "entries": entries}
+		return _read_off_many(shaped, map.values(), "Dictionary", missing)
 	if result is Object and not is_instance_valid(result):
 		return {
 			"properties_note": "the call answered an object that has since been freed, so nothing was read"
