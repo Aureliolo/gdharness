@@ -19839,22 +19839,29 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
 }
 
 /**
- * Which autoload entries this tool may rewrite: the shipped loader, and the addon's own script that
- * earlier versions wrote.
- *
- * Covered without an engine as well as through the CLI, because the engine-backed test is skipped
- * on any machine without Godot. Nothing else in a project can see the difference: a project's own
- * loader stays on disk and correct, and a suite that exercises the script rather than reading
- * project.godot passes either way.
+ * The shipped loader passes the checks a game runs on its own files. It is written outside addons/,
+ * where a game's gates read it, and it has to stay byte for byte what gdharness ships, so the game
+ * cannot reword it to fit them.
  */
 function testTheLoaderPassesAGamesOwnLint(): void {
-  // The loader is written outside addons/, where a game's own GDScript gate reads it, and it has to
-  // stay byte for byte what gdharness ships, so the game cannot rewrap it. gdlint's default line
-  // length is 100, and this repository's own 110 let a 101-character line through.
   const lines = readFileSync(shippedLoader(), 'utf8').split(/\r?\n/);
   assert.ok(lines.length > 20, `the shipped loader is read: ${lines.length} lines`);
+  // gdlint's default line length is 100, and this repository's own 110 let a 101-character line
+  // through.
   const long = lines.flatMap((line, at) => (line.length > 100 ? [`${at + 1}: ${line.length}`] : []));
   assert.deepEqual(long, [], "every line of the loader is within gdlint's default 100 characters");
+  // A game's check on cited files reads a backticked span as a path when its first folder holds a
+  // file the repository tracks. Once the loader is committed, gdharness/ is such a folder, so the
+  // setting `gdharness/runtime/serve_script_runs` in its comment was refused as a missing file.
+  const spans = lines.flatMap((line, at) =>
+    [...line.matchAll(/`([^`]*)`/g)].map((match) => ({ at: at + 1, span: match[1] ?? '' })),
+  );
+  assert.ok(spans.length > 0, `the loader's backticked spans are read: ${JSON.stringify(spans)}`);
+  assert.deepEqual(
+    spans.filter(({ span }) => span.includes('/')),
+    [],
+    'no backticked span in the loader reads as a path',
+  );
 }
 
 /**
@@ -19890,6 +19897,15 @@ function testAFailedRunsLogsOutlastTheNextRun(): void {
   }
 }
 
+/**
+ * Which autoload entries this tool may rewrite: the shipped loader, and the addon's own script that
+ * earlier versions wrote.
+ *
+ * Covered without an engine as well as through the CLI, because the engine-backed test is skipped
+ * on any machine without Godot. Nothing else in a project can see the difference: a project's own
+ * loader stays on disk and correct, and a suite that exercises the script rather than reading
+ * project.godot passes either way.
+ */
 function testOnlyOurOwnAutoloadIsRewritten(): void {
   assert.equal(autoloadIsOurs('res://gdharness/loader.gd'), true, 'the loader gdharness writes');
   assert.equal(
@@ -41562,15 +41578,15 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     };
     const units = unitsOf([big, edge, shown, small], times);
     assert.deepEqual(
-      units.map((unit) => [unit.suite, unit.cases, unit.cost]),
+      units.map((unit) => [unit.suite, unit.cases, unit.cost, unit.timed]),
       [
-        [big.path, ['test_x'], 6],
-        [big.path, ['test_y'], 5],
-        [big.path, ['test_z'], 3],
-        [edge.path, ['test_e', 'test_f'], 10],
-        [shown.path, ['test_m', 'test_n'], 4],
+        [big.path, ['test_x'], 6, true],
+        [big.path, ['test_y'], 5, true],
+        [big.path, ['test_z'], 3, true],
+        [edge.path, ['test_e', 'test_f'], 10, true],
+        [shown.path, ['test_m', 'test_n'], 4, true],
         // Untimed: the median case, and no time around its cases, which is the median of the others.
-        [small.path, ['test_s'], 4],
+        [small.path, ['test_s'], 4, false],
       ],
       'past the split, case by case with the time around them; at it, whole; a windowed one whole',
     );
@@ -41613,12 +41629,63 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         'and never a case it holds',
       );
     }
+    const quickly = suite('res://tests/t_test.gd', ['test_t']);
+    const quickTimes = {
+      [small.path]: { seconds: 1, cases: { test_s: 1 } },
+      [quickly.path]: { seconds: 1, cases: { test_t: 1 } },
+    };
     assert.deepEqual(
-      dealt(unitsOf([small, suite('res://tests/t_test.gd', ['test_t'])], {}), declared, 4).map(
-        (plan) => plan.windowed,
-      ),
+      dealt(unitsOf([small, quickly], quickTimes), declared, 4).map((plan) => plan.windowed),
       [false],
       'a few quick suites stay in one engine, with no window when none needs one',
+    );
+    // A slow suite split in three, the old file keeping its record under a case name it no longer
+    // has and the two new files none, all went to one engine of the three asked for: priced at the
+    // project's median case, the three looked like seconds of work.
+    const faces = [1, 2, 3].map((part) =>
+      suite(`res://tests/faces_${String(part)}_test.gd`, [
+        `test_part_${String(part)}`,
+        `test_fits_${String(part)}`,
+      ]),
+    );
+    const splitTimes = {
+      [faces[0]?.path ?? '']: { seconds: 262, cases: { test_every_screen_fits: 260 } },
+      ...Object.fromEntries(
+        [1, 2, 3, 4, 5].map((index) => [
+          `res://tests/q${String(index)}_test.gd`,
+          { seconds: 0.5, cases: { test_q: 0.5 } },
+        ]),
+      ),
+    };
+    const facesDeclared = new Map(faces.map((s) => [s.path, s.cases]));
+    assert.deepEqual(
+      dealt(unitsOf(faces, splitTimes), facesDeclared, 3).map((plan) => plan.suites.map((s) => s.path)),
+      faces.map((s) => [s.path]),
+      'suites with no time of their own each get an engine while there is room',
+    );
+    assert.equal(
+      dealt(unitsOf(faces, splitTimes), facesDeclared, 2).length,
+      2,
+      'and no more engines than the run may have',
+    );
+    // A project's first run: nothing is timed, so every case costs the 0.02 s guess, and a whole
+    // gate looked like one engine's work.
+    const firsts = Array.from({ length: 12 }, (_, index) =>
+      suite(`res://tests/f${String(index)}_test.gd`, ['test_f']),
+    );
+    const firstsDeclared = new Map(firsts.map((s) => [s.path, s.cases]));
+    assert.equal(
+      dealt(unitsOf(firsts, {}), firstsDeclared, 4).length,
+      4,
+      'a first run takes every engine it may have',
+    );
+    const timedOnce = Object.fromEntries(
+      firsts.map((s) => [s.path, { seconds: 0.1, cases: { test_f: 0.1 } }]),
+    );
+    assert.equal(
+      dealt(unitsOf(firsts, timedOnce), firstsDeclared, 4).length,
+      1,
+      'and once they are timed as quick, the next run of the same suites takes one',
     );
     assert.deepEqual(
       dealt(units, declared, 1).map((plan) => [plan.lane, plan.windowed, plan.cost]),
@@ -41665,6 +41732,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       suite: `res://tests/${name}_test.gd`,
       cases: [`test_${name}`],
       cost,
+      timed: true,
       windowed: isWindowed,
       headless: isHeadless,
     });
@@ -43120,7 +43188,15 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     };
     const first = test('--import', 'tests/ok_test.gd', 'tests/declared_test.gd');
     assert.equal(first.status, 0, first.said);
-    assert.match(first.said, /^Passed: 4 cases in 2 suites across 1 engine, /m, first.said);
+    // Nothing is timed yet, so each suite has an engine of its own unless the machine's room holds
+    // the run back, which the first line then says.
+    assert.match(
+      first.said,
+      /asked for, since|at a time, since/.test(first.said)
+        ? /^Passed: 4 cases in 2 suites across 1 engine, /m
+        : /^Passed: 4 cases in 2 suites across 2 engines, /m,
+      first.said,
+    );
     assert.doesNotMatch(first.said, /The import was skipped/, 'a project never imported is imported');
     assert.match(
       first.said,
@@ -46974,6 +47050,7 @@ function testTheShippedLoaderBringsTheRuntimeUpFirst(): void {
         'func _ready() -> void:',
         '\tvar found: Node = get_node_or_null("/root/GdharnessRuntime/GdharnessRuntime")',
         '\tprint("runtime before main: %s" % (found != null and found.is_node_ready()))',
+        '\tprint("serving: %s" % get_node("/root/GdharnessRuntime").call("serving"))',
         '\tget_tree().quit.call_deferred()',
         '',
       ].join('\n'),
@@ -46999,6 +47076,7 @@ function testTheShippedLoaderBringsTheRuntimeUpFirst(): void {
     // A clone without the addon: the loader finds nothing to bring up, and says nothing about it.
     const bare = play();
     assert.match(bare, /^runtime before main: false$/m, bare);
+    assert.match(bare, /^serving: false$/m, `the loader answers that nothing serves: ${bare}`);
     assert.doesNotMatch(bare, /ERROR/, `nothing is missing when the addon is not there: ${bare}`);
     assert.deepEqual(readdirSync(runtime), [], 'and no runtime announced');
 
@@ -47014,6 +47092,41 @@ function testTheShippedLoaderBringsTheRuntimeUpFirst(): void {
     assert.doesNotMatch(served, /ERROR/, served);
     // Printed once it serves; the announcement itself is taken back as the game quits.
     assert.match(served, /\[gdharness\] runtime listening on [\d.]+:\d+, announced at /, served);
+    assert.match(served, /^serving: true$/m, `and the loader says it serves: ${served}`);
+
+    // A script run has the loader and the runtime under it, and the runtime refuses to serve it, so
+    // whether the node is there no longer tells a suite which engine it is in.
+    writeFileSync(
+      join(project, 'probe.gd'),
+      [
+        'extends SceneTree',
+        '',
+        '',
+        'func _initialize() -> void:',
+        '\tvar asked: Error = process_frame.connect(_ask, CONNECT_ONE_SHOT) as Error',
+        '\tassert(asked == OK)',
+        '',
+        '',
+        'func _ask() -> void:',
+        '\tvar loader: Node = root.get_node_or_null("GdharnessRuntime")',
+        '\tvar inner: Node = root.get_node_or_null("GdharnessRuntime/GdharnessRuntime")',
+        '\tprint("script run: %s, %s, serving %s" % [loader != null, inner != null, loader.call("serving")])',
+        '\tquit()',
+        '',
+      ].join('\n'),
+    );
+    const scripted = spawnSyncHidden(godotPath, ['--headless', '--path', project, '-s', 'res://probe.gd'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+    });
+    const said = stripVTControlCharacters(`${scripted.stdout}${scripted.stderr}`);
+    assert.equal(scripted.status, 0, said);
+    assert.match(
+      said,
+      /^script run: true, true, serving false$/m,
+      `a script run has both nodes and is not served: ${said}`,
+    );
   } finally {
     sweep(project, runtime);
   }
