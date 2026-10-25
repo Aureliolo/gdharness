@@ -7,9 +7,18 @@
  * docs/test-runs.md describes it for the games, the slot scheme included.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
@@ -96,6 +105,40 @@ export interface TestOptions {
   readonly order: 'reversed' | number | null;
   /** Print what each engine printed, after the run and before its verdict. */
   readonly printOutput: boolean;
+  /** Where the run writes its result as JSON ([type RunResult]), or null for nowhere. */
+  readonly resultFile: string | null;
+}
+
+/**
+ * A run's result as `--result` writes it, for a gate that acts on more than the exit code: the
+ * slowest suites past its own budget, say, or which engine's log to keep.
+ */
+export interface RunResult {
+  readonly passed: boolean;
+  /** From the command starting to its verdict. */
+  readonly seconds: number;
+  /** Every problem the output lists, one sentence each, the engine's named before its own. */
+  readonly problems: readonly string[];
+  /** Each suite an engine closed, slowest first. */
+  readonly suites: readonly {
+    readonly path: string;
+    readonly seconds: number;
+    /** gdUnit4's word for it, such as `PASSED` or `FAILED`. */
+    readonly verdict: string;
+    readonly engine: number;
+  }[];
+  readonly engines: readonly {
+    readonly index: number;
+    readonly seconds: number;
+    /** What the deal expected it to take, from the times kept. */
+    readonly dealt: number;
+    readonly passed: boolean;
+    readonly windowed: boolean;
+    /** Where its whole output is kept, or null once a passing run has removed it. */
+    readonly log: string | null;
+  }[];
+  /** The directory every engine's output is kept under, or null when the run removed it. */
+  readonly logs: string | null;
 }
 
 /** How many of the slowest suites the run names at its end. */
@@ -115,6 +158,7 @@ const VALUED = new Set([
   '--tests',
   '--reach-also',
   '--order',
+  '--result',
 ]);
 const SWITCHES = new Set(['--changed-only', '--import', '--print-output']);
 
@@ -166,6 +210,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     importFirst: switches.has('--import'),
     order: order === undefined ? null : order === 'reversed' ? 'reversed' : seedOf(order),
     printOutput: switches.has('--print-output'),
+    resultFile: last('--result') === undefined ? null : resolve(cwd, last('--result') ?? ''),
   };
 }
 
@@ -177,14 +222,41 @@ function seedOf(value: string): number {
   return seed;
 }
 
+/** The directories a run with nothing selected looks for suites in. */
+function rootsOf(options: TestOptions): readonly string[] {
+  return options.roots.length > 0
+    ? options.roots
+    : TEST_DIRECTORIES.filter((root) => existsSync(join(options.projectPath, root))).map(
+        (root) => `res://${root}`,
+      );
+}
+
+/** The directories the run searched for suites: those of a run with nothing selected, or those selected. */
+function searchedRoots(options: TestOptions): readonly string[] {
+  return options.selected.length === 0
+    ? rootsOf(options)
+    : options.selected.filter((entry) => {
+        const directory = join(options.projectPath, entry.slice('res://'.length));
+        return existsSync(directory) && statSync(directory).isDirectory();
+      });
+}
+
+/**
+ * What fails a run of the scripts [param found] names, each declaring cases gdUnit4 never runs
+ * because it is no suite, one sentence a script.
+ */
+export function uncollectedSaid(
+  found: readonly { readonly path: string; readonly cases: readonly string[] }[],
+): string[] {
+  return found.map(({ path, cases }) => {
+    const one = cases.length === 1;
+    return `${path} declares ${named(cases)} and does not extend GdUnitTestSuite, directly or through what it extends, so gdUnit4 never runs ${one ? 'it' : 'them'}: extend GdUnitTestSuite, or take the test_ prefix off ${one ? 'a function that is' : 'functions that are'} no case`;
+  });
+}
+
 /** The suites a run is asked for, each with the cases asked of it. */
 function selectedSuites(scripts: ProjectScripts, options: TestOptions): DeclaredSuite[] {
-  const roots =
-    options.roots.length > 0
-      ? options.roots
-      : TEST_DIRECTORIES.filter((root) => existsSync(join(options.projectPath, root))).map(
-          (root) => `res://${root}`,
-        );
+  const roots = rootsOf(options);
   if (options.selected.length === 0) {
     const found = scripts.suitesUnder(roots);
     if (found.length === 0) {
@@ -270,9 +342,53 @@ interface EngineRan {
   readonly again: boolean;
 }
 
+/**
+ * Where a run's logs are read once it is over. The engines write them inside the project, where
+ * the folder gdUnit4 writes its reports to has to be, since it takes that folder as a `res://` path.
+ * A project that is a worktree of another checkout also gets a copy of a failed run's logs beside
+ * the main checkout: a gate running in a worktree of the commit removes it once the run ends, and
+ * the logs with it.
+ */
+class RunLogs {
+  readonly directory: string;
+  private readonly kept: string | null;
+
+  constructor(directory: string, kept: string | null) {
+    this.directory = directory;
+    this.kept = kept;
+  }
+
+  /** Where the run's logs are read once it is over. */
+  get shown(): string {
+    return this.kept ?? this.directory;
+  }
+
+  /** [param path], a file the run writes, as it is named once the run is over. */
+  named(path: string): string {
+    return this.kept === null ? path : join(this.kept, relative(this.directory, path));
+  }
+
+  /**
+   * Copies the logs beside the main checkout, once they are complete, when they go there: each
+   * engine's own, one folder down, and not what the engine wrote in its user folder below that.
+   */
+  keep(): void {
+    if (this.kept === null) {
+      return;
+    }
+    for (const file of readdirSync(this.directory, { recursive: true, encoding: 'utf8' })) {
+      if (file.endsWith('.log') && file.split(sep).length === 2) {
+        mkdirSync(dirname(join(this.kept, file)), { recursive: true });
+        copyFileSync(join(this.directory, file), join(this.kept, file));
+      }
+    }
+  }
+}
+
 /** What starting a run's engines needs, the same for every engine of it. */
 interface Launch extends EngineLaunch {
   readonly runDirectory: string;
+  readonly logs: RunLogs;
   readonly slots: EngineSlots;
   readonly silenceFloorSeconds: number;
   readonly selfTyped: readonly SelfTypedExport[];
@@ -292,13 +408,20 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
   const timesFile = join(state, 'suite-times.json');
   const passedFile = join(state, 'suite-passed.json');
   let suites = selectedSuites(scripts, options);
+  const uncollected = uncollectedSaid(scripts.uncollectedUnder(searchedRoots(options)));
   // Whole, whatever the selection asked of them: the cases an engine is to leave out are the rest.
   const wholeSuites = suites.map((suite) => scripts.suite(suite.path) ?? suite);
   const declared: CasesBySuite = new Map(wholeSuites.map((suite) => [suite.path, suite.cases]));
   const testRuns = join(options.projectPath, '.godot', 'gdharness', 'test-runs');
+  const keptRuns = join(state, 'test-runs');
   sweepRunDirectories(testRuns);
-  const runDirectory = join(testRuns, `${String(startedAt)}-${String(process.pid)}`);
+  if (keptRuns !== testRuns) {
+    sweepRunDirectories(keptRuns);
+  }
+  const runName = `${String(startedAt)}-${String(process.pid)}`;
+  const runDirectory = join(testRuns, runName);
   mkdirSync(runDirectory, { recursive: true });
+  const logs = new RunLogs(runDirectory, keptRuns === testRuns ? null : join(keptRuns, runName));
   const chosen = machineSlots({ directory: options.slotsDirectory, count: options.slotCount });
   const slots = new EngineSlots(chosen.directory, chosen.count, {
     pid: process.pid,
@@ -318,6 +441,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     godotPath,
     projectPath: options.projectPath,
     runDirectory,
+    logs,
     slots,
     silenceFloorSeconds: options.silenceSeconds,
     deadlineSeconds: options.deadlineSeconds,
@@ -330,6 +454,8 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     if (options.importFirst) {
       const imported = await importProject(launch);
       if (imported !== null) {
+        logs.keep();
+        writeEarlyResult(options.resultFile, startedAt, [`the import failed: ${imported}`], logs.shown);
         console.log(`The import failed, so no suite ran: ${imported}`);
         return 1;
       }
@@ -358,7 +484,14 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       if (suites.length === 0) {
         console.log('Nothing has changed since every suite last passed.');
         rmSync(runDirectory, { recursive: true, force: true });
-        return 0;
+        writeEarlyResult(options.resultFile, startedAt, uncollected, null);
+        if (uncollected.length === 0) {
+          return 0;
+        }
+        printUncollected(uncollected);
+        console.log('');
+        console.log(`Failed: ${plural(uncollected.length, 'problem')}, listed above.`);
+        return 1;
       }
     }
     const times = readTimes(timesFile);
@@ -460,9 +593,11 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     return report(
       ran,
       across.map((fault) => fault.fault),
+      uncollected,
       startedAt,
-      runDirectory,
+      logs,
       options.printOutput,
+      options.resultFile,
     );
   } finally {
     process.off('SIGINT', interrupted);
@@ -531,6 +666,25 @@ function recordPassed(
 }
 
 /**
+ * Why the import engine that printed [param printed] failed, by the errors and warnings it printed,
+ * or null. Godot's import exits 0 whatever it printed, and warns of a file it imported wrongly as
+ * often as it errs on one it could not import.
+ */
+export function importFault(printed: RunPrinted): string | null {
+  const first = printed.errors[0];
+  if (first === undefined) {
+    return null;
+  }
+  const warnings = printed.errors.filter((error) => error.warning).length;
+  const errors = printed.errors.length - warnings;
+  const counted = [
+    ...(errors === 0 ? [] : [errors === 1 ? 'an engine error' : `${String(errors)} engine errors`]),
+    ...(warnings === 0 ? [] : [warnings === 1 ? 'an engine warning' : `${String(warnings)} engine warnings`]),
+  ].join(' and ');
+  return `it printed ${counted}, the first ${first.warning ? 'warning' : 'error'} ${JSON.stringify(first.text)}`;
+}
+
+/**
  * Imports the project once before the suites, as its own engine in a slot, answering why it failed
  * or null. Skipped when every imported file is current and the class cache lists every class the
  * scripts declare, which is all an import would change for the suites.
@@ -566,7 +720,7 @@ async function importProject(launch: Launch): Promise<string | null> {
       launch.silenceFloorSeconds,
     );
     if (ended.ended !== null || ended.code !== 0) {
-      return `${ended.ended ?? `the engine exited ${exitNamed(ended.code ?? 0)}`}; everything it printed is in ${log}`;
+      return `${ended.ended ?? `the engine exited ${exitNamed(ended.code ?? 0)}`}; everything it printed is in ${launch.logs.named(log)}`;
     }
     // Godot's import exits 0 whatever it printed, and a suite run on a failed import reads what
     // the import left behind.
@@ -574,13 +728,10 @@ async function importProject(launch: Launch): Promise<string | null> {
     const wrongEngine =
       launch.godotVersion === null ? null : versionFault(printed.engineVersion, launch.godotVersion);
     if (wrongEngine !== null) {
-      return `${wrongEngine}; everything it printed is in ${log}`;
+      return `${wrongEngine}; everything it printed is in ${launch.logs.named(log)}`;
     }
-    const errors = printed.errors.filter((error) => !error.warning);
-    if (errors.length > 0) {
-      return `it printed ${errors.length === 1 ? 'an engine error' : `${String(errors.length)} engine errors`}, the first ${JSON.stringify(errors[0]?.text ?? '')}; everything it printed is in ${log}`;
-    }
-    return null;
+    const fault = importFault(printed);
+    return fault === null ? null : `${fault}; everything it printed is in ${launch.logs.named(log)}`;
   } finally {
     launch.slots.release(lock);
   }
@@ -696,24 +847,51 @@ async function runEngine(
     selfTyped: launch.selfTyped,
     godotVersion: launch.godotVersion,
   };
+  const judged = judgeEngine(printed, assignment, end);
+  const written = reportsFault(join(directory, 'reports'));
   return {
     index,
     plan,
     printed,
-    verdict: judgeEngine(printed, assignment, end),
+    verdict: written === null ? judged : { ...judged, passed: false, faults: [...judged.faults, written] },
     log,
     seconds: (Date.now() - began) / 1000,
     again: again !== '',
   };
 }
 
+/** How many of the files written into a report folder that was turned off are named. */
+const REPORT_FILES_NAMED = 3;
+
+/**
+ * What fails an engine that wrote a file into [param reports], the folder its gdUnit4 reports go to,
+ * or null when it wrote none. The runner turns off both reports by marking their session hooks, so a
+ * file there means the gdUnit4 installed no longer reads that mark: every run then writes reports it
+ * was told not to, and the hook the runner reads the registration of is no proof of it.
+ */
+export function reportsFault(reports: string): string | null {
+  const files = existsSync(reports)
+    ? readdirSync(reports, { recursive: true, encoding: 'utf8' })
+        .filter((file) => statSync(join(reports, file)).isFile())
+        .sort()
+    : [];
+  if (files.length === 0) {
+    return null;
+  }
+  const shown = files.slice(0, REPORT_FILES_NAMED).map((file) => file.split(sep).join('/'));
+  const more = files.length - shown.length;
+  return `gdUnit4 wrote ${plural(files.length, 'file')} into ${reports} (${shown.join(', ')}${more > 0 ? ` and ${String(more)} more` : ''}), a report the runner had turned off, so the gdUnit4 installed no longer honours a session hook marked off; report it to gdharness with gdUnit4's version`;
+}
+
 /** Prints how the run went and answers the exit code: what failed, in full, then one line of totals. */
 function report(
   ran: readonly EngineRan[],
   across: readonly string[],
+  uncollected: readonly string[],
   startedAt: number,
-  runDirectory: string,
+  logs: RunLogs,
   printOutput: boolean,
+  resultFile: string | null,
 ): number {
   // Ahead of the verdict, so the last lines are still how the run went.
   if (printOutput) {
@@ -751,7 +929,7 @@ function report(
         console.log(line);
       }
     }
-    console.log(`everything it printed: ${engine.log}`);
+    console.log(`everything it printed: ${logs.named(engine.log)}`);
   }
   for (const engine of ran.filter((one) => one.verdict.notes.length > 0)) {
     console.log('');
@@ -767,6 +945,7 @@ function report(
       console.log(`  ${fault}`);
     }
   }
+  printUncollected(uncollected);
   const cases = ran.reduce(
     (sum, engine) => sum + [...engine.printed.suites.values()].reduce((n, s) => n + s.cases.length, 0),
     0,
@@ -781,14 +960,23 @@ function report(
       `The engines took ${ran.map((engine) => `${engine.seconds.toFixed(1)} s`).join(', ')}, dealt ${ran.map((engine) => `${engine.plan.cost.toFixed(1)} s`).join(', ')}.`,
     );
   }
-  const slowest = ran
+  const closed = ran
     .flatMap((engine) =>
       [...engine.printed.suites.values()].flatMap((suite) =>
-        suite.closed === null ? [] : [{ path: suite.path, seconds: suite.closed.seconds }],
+        suite.closed === null
+          ? []
+          : [
+              {
+                path: suite.path,
+                seconds: suite.closed.seconds,
+                verdict: suite.closed.verdict,
+                engine: engine.index,
+              },
+            ],
       ),
     )
-    .sort((a, b) => b.seconds - a.seconds)
-    .slice(0, SLOWEST_NAMED);
+    .sort((a, b) => b.seconds - a.seconds);
+  const slowest = closed.slice(0, SLOWEST_NAMED);
   if (slowest.length > 1) {
     console.log(
       `The slowest suites: ${slowest.map((suite) => `${suite.path} ${suite.seconds.toFixed(1)} s`).join(', ')}.`,
@@ -796,13 +984,75 @@ function report(
   }
   const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s; the longest engine took ${longest.toFixed(1)} s.`;
   console.log('');
-  if (failed.length === 0 && across.length === 0) {
-    rmSync(runDirectory, { recursive: true, force: true });
+  const passed = failed.length === 0 && across.length === 0 && uncollected.length === 0;
+  if (passed) {
+    rmSync(logs.directory, { recursive: true, force: true });
+  } else {
+    logs.keep();
+  }
+  if (resultFile !== null) {
+    writeJson(resultFile, {
+      passed,
+      seconds: took,
+      problems: [
+        ...failed.flatMap((engine) =>
+          engine.verdict.faults.map((fault) => `engine ${String(engine.index)}: ${fault}`),
+        ),
+        ...across,
+        ...uncollected,
+      ],
+      suites: closed,
+      engines: ran.map((engine) => ({
+        index: engine.index,
+        seconds: engine.seconds,
+        dealt: engine.plan.cost,
+        passed: engine.verdict.passed,
+        windowed: engine.plan.windowed,
+        log: passed ? null : logs.named(engine.log),
+      })),
+      logs: passed ? null : logs.shown,
+    } satisfies RunResult);
+  }
+  if (passed) {
     console.log(`Passed: ${totals}`);
     return 0;
   }
-  const problems = failed.reduce((sum, engine) => sum + engine.verdict.faults.length, across.length);
+  const problems = failed.reduce(
+    (sum, engine) => sum + engine.verdict.faults.length,
+    across.length + uncollected.length,
+  );
   console.log(`Failed: ${plural(problems, 'problem')}, listed above. Ran ${totals}`);
-  console.log(`Every engine's output is kept under ${runDirectory} until the next run.`);
+  console.log(`Every engine's output is kept under ${logs.shown} until the next run.`);
   return 1;
+}
+
+/** Writes a result for a run that started no engine to [param file], when the run was asked for one. */
+function writeEarlyResult(
+  file: string | null,
+  startedAt: number,
+  problems: readonly string[],
+  logs: string | null,
+): void {
+  if (file !== null) {
+    writeJson(file, {
+      passed: problems.length === 0,
+      seconds: (Date.now() - startedAt) / 1000,
+      problems,
+      suites: [],
+      engines: [],
+      logs,
+    } satisfies RunResult);
+  }
+}
+
+/** Lists [param uncollected], the scripts declaring cases gdUnit4 never runs, under a heading of their own. */
+function printUncollected(uncollected: readonly string[]): void {
+  if (uncollected.length === 0) {
+    return;
+  }
+  console.log('');
+  console.log('--- scripts among the suites that gdUnit4 never runs:');
+  for (const fault of uncollected) {
+    console.log(`  ${fault}`);
+  }
 }

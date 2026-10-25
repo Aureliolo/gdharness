@@ -45,6 +45,14 @@ command line itself is wrong.
   once.
 - `--print-output`: print everything each engine printed, before the verdict, as for a benchmark
   written as a suite and run by hand. A gate never passes it.
+- `--result FILE`: write the run's result to `FILE` as JSON, for a gate that acts on more than the
+  exit code. It holds `passed`, `seconds`, `problems` (every problem the output lists, one sentence
+  each, an engine's prefixed with `engine N:`), `suites` (each suite an engine closed, slowest first,
+  with its `path`, `seconds`, gdUnit4's `verdict` and the `engine` that ran it), `engines` (each
+  with its `index`, `seconds`, the `dealt` seconds the times kept had it at, `passed`, `windowed`
+  and the `log` its output is kept in) and `logs`, the directory every engine's output is kept
+  under. `log` and `logs` are null once a passing run has removed them. A run that failed its
+  import, or had nothing left to run under `--changed-only`, writes empty `suites` and `engines`.
 - `--runner`: print the path of the shipped runner and exit.
 
 ## Which suites run
@@ -140,14 +148,23 @@ an allocation fails at the commit limit however much physical memory is free.
   while gdUnit4 announces a session before it hands it to its hooks and its console, so a session
   hook of the runner's own fails the run, with gdUnit4's version, when it is handed another session
   or when the cases ran without one lookup reaching it. A report turned off by an option that
-  gdUnit4 no longer registers a hook for fails the run the same way. These checks run in the gdUnit4
-  the project installs, on every run.
+  gdUnit4 no longer registers a hook for fails the run the same way, and so does any file in an
+  engine's reports folder, since the runner turns both reports off by marking their hooks and a
+  file there means gdUnit4 no longer reads the mark. These checks run in the gdUnit4 the project
+  installs, on every run.
+- A script under the folders searched for suites that declares `test_` functions and is no suite,
+  because nothing it extends reaches `GdUnitTestSuite`. gdUnit4 runs none of its cases and says
+  nothing of it, so a suite whose `extends` names the wrong class would pass with no case run. The
+  run names the script beside the suites it did run.
 
 Each failure is printed with the lines that show it: a failing case's report, each unexpected error
 and the line after it, and the run's summary. When an engine was cut short and none of that explains
 it, its last 60 lines. The engine's whole output stays in
 `.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names and which
-opens with the engine's verdict, so the file says why even for an engine that printed nothing. Before
+opens with the engine's verdict, so the file says why even for an engine that printed nothing. A
+project that is a worktree of another checkout has the logs of a failed run copied to the same place
+under the main checkout, and the output names the copy, since a gate running in a worktree of the
+commit removes the worktree once the run ends. Before
 the verdict, a run over several engines says what each took beside what it was dealt, so an uneven
 deal is told from a slow suite, and a run of several suites names its five slowest. The last lines
 count the problems and name the run's directory. A run that passes leaves no logs, and
@@ -179,8 +196,12 @@ refused changes with nothing but a warning: an `after_test` setting the root's
 embedding windows for every later suite, and the run passed. A suite that prints one on purpose
 declares it in `GDHARNESS_EXPECTED_WARNINGS`, keyed the same way, with the text after `WARNING:` and
 its space. A text declared as an error does not accept a warning, or the reverse. A warning printed
-outside every suite, as the engine starts or exits, is not judged, and neither is the one Godot
-prints when it falls back to another rendering driver.
+outside every suite fails the run as an error there does: it comes from an autoload, a session hook
+or the game's own code, and no suite can declare it. So does one the `--import` engine prints. A
+warning outside every suite that the engine's platform layer or a rendering driver raised, as its
+`at:` line names a file under `platform/` or `drivers/`, is about the machine and is not judged: a
+windowed engine on a macOS runner's virtual GPU warns that it is switching to ANGLE, and one falling
+back to another rendering driver says so.
 
 `project_test` judges a run's errors and warnings by the same declarations, and names what fails it
 under `undeclaredErrors` and `declaredNotPrinted`, a warning marked `warning: true`.

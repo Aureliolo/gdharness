@@ -405,7 +405,14 @@ import {
   unitsOf,
   windowedSaid,
 } from '../src/suite-plan.js';
-import { roomSaid, testOptionsOf } from '../src/suite-run.js';
+import {
+  importFault,
+  type RunResult,
+  reportsFault,
+  roomSaid,
+  testOptionsOf,
+  uncollectedSaid,
+} from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -40858,16 +40865,85 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     [`an engine warning in ${S_TEST} > test_a: pushed from the case${warnIt}`],
     'a warning a script pushes',
   );
-  // Outside every suite a warning is the engine's own, starting or exiting.
+  // Outside every suite a warning is the project's, from an autoload or a session hook, unless the
+  // engine's platform layer or a driver raised it, which is the machine: a macOS runner's virtual
+  // GPU warns as the display server starts.
+  const machineWarned = [
+    'WARNING: Virtual Machine detected, switching to ANGLE.',
+    '     at: DisplayServerMacOS (platform/macos/display_server_macos.mm:3837)',
+    'WARNING: a driver said this',
+    '     at: initialize (drivers/vulkan/rendering_context_driver_vulkan.cpp:915)',
+  ];
   const engineOwn = warnedRun([]).replace(
     'https://godotengine.org',
-    'https://godotengine.org\nWARNING: the engine said this as it started',
+    [
+      'https://godotengine.org',
+      ...machineWarned,
+      'WARNING: an autoload said this as it started',
+      '     at: _ready (scene/main/node.cpp:300)',
+    ].join('\n'),
+  );
+  const outside = judgeEngine(
+    readRun(`${engineOwn}\r\nUSER WARNING: and a session hook this as it ended`),
+    handed(['test_a']),
+    clean,
   );
   assert.deepEqual(
-    judgeEngine(readRun(`${engineOwn}\r\nWARNING: and this as it exited`), handed(['test_a']), clean).faults,
-    [],
+    outside.faults,
+    [
+      'an engine warning outside every suite: an autoload said this as it started',
+      'an engine warning outside every suite: and a session hook this as it ended',
+    ],
     'warnings outside every suite',
   );
+  assert.deepEqual(outside.passedSuites, [S_TEST], 'charged to no suite');
+  const machineInACase = judgeEngine(
+    readRun(warnedRun(machineWarned.slice(0, 2))),
+    handed(['test_a']),
+    clean,
+  );
+  assert.deepEqual(
+    machineInACase.faults,
+    [`an engine warning in ${S_TEST} > test_a: Virtual Machine detected, switching to ANGLE.${warnIt}`],
+    "a case's own warning is judged wherever the engine raised it",
+  );
+  // The import engine opens no suite, so everything it warns is outside one.
+  const imported = (lines: readonly string[]): string =>
+    ['Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org', ...lines].join('\n');
+  assert.equal(importFault(readRun(imported(['[ 100% ] first_scan_filesystem']))), null, 'a clean import');
+  assert.equal(
+    importFault(readRun(imported(['WARNING: res://dot.svg: the image is larger than it can import']))),
+    'it printed an engine warning, the first warning "res://dot.svg: the image is larger than it can import"',
+    'an import that only warned',
+  );
+  assert.equal(
+    importFault(readRun(imported(['WARNING: first', 'ERROR: second', 'ERROR: third']))),
+    'it printed 2 engine errors and an engine warning, the first warning "first"',
+    'both, counted apart',
+  );
+  // The reports are turned off by marking their hooks, and only a file in the reports folder shows
+  // that gdUnit4 stopped reading the mark.
+  const reports = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-reports-'));
+  try {
+    assert.equal(reportsFault(join(reports, 'none')), null, 'a folder never made');
+    mkdirSync(join(reports, 'report_1'), { recursive: true });
+    assert.equal(reportsFault(reports), null, 'a folder made with nothing in it');
+    writeTree(reports, { 'report_1/index.html': '<html/>', 'report_1/results.xml': '<x/>' });
+    const turnedOff = `a report the runner had turned off, so the gdUnit4 installed no longer honours a session hook marked off; report it to gdharness with gdUnit4's version`;
+    assert.equal(
+      reportsFault(reports),
+      `gdUnit4 wrote 2 files into ${reports} (report_1/index.html, report_1/results.xml), ${turnedOff}`,
+      'a report written',
+    );
+    writeTree(reports, { 'report_1/css/a.css': '', 'report_1/css/b.css': '' });
+    assert.equal(
+      reportsFault(reports),
+      `gdUnit4 wrote 4 files into ${reports} (report_1/css/a.css, report_1/css/b.css, report_1/index.html and 1 more), ${turnedOff}`,
+      'the first few of many',
+    );
+  } finally {
+    sweep(reports);
+  }
   // Credited as an error is: one printed after a case's verdict is that case's while another follows.
   const afterVerdict = cannedRun([
     caseLine(S_TEST, 'test_a', 'STARTED'),
@@ -41292,6 +41368,9 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'tests/deep/path_test.gd': `extends "../base_suite.gd"\n${cases('test_by_path')}`,
       'tests/res_test.gd': `extends "res://tests/base_suite.gd"\n${cases()}`,
       'tests/helper.gd': `extends Node\n${cases('test_not_a_suite')}`,
+      'tests/typo_test.gd': `extends GdUnitTestSuit\n${cases('test_t', 'helper', 'test_s')}`,
+      'tests/deep/stray.gd': `extends RefCounted\n${cases('test_deep')}`,
+      'tests/deep/quiet.gd': `extends RefCounted\n${cases('helper')}`,
       'tests/empty_test.gd': 'extends GdUnitTestSuite\n',
       'tests/window_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_NEEDS_WINDOW: bool = true\n${cases('test_w')}`,
       'tests/scene_test.gd': `extends GdUnitTestSuite\n\nfunc test_s() -> void:\n\tvar r := scene_runner("res://x.tscn")\n`,
@@ -41324,6 +41403,26 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       ],
       'every suite under the root, its cases own and inherited, which need a window and which say they run headless',
     );
+    // A script declaring cases that is no suite runs none of them, and gdUnit4 says nothing of it.
+    const noSuite = [
+      { path: 'res://tests/deep/stray.gd', cases: ['test_deep'] },
+      { path: 'res://tests/helper.gd', cases: ['test_not_a_suite'] },
+      { path: 'res://tests/typo_test.gd', cases: ['test_s', 'test_t'] },
+    ];
+    assert.deepEqual(
+      scripts.uncollectedUnder(['res://tests']),
+      noSuite,
+      'every script with cases and no suite',
+    );
+    assert.deepEqual(scripts.uncollectedUnder(['res://other']), [], 'and only under the roots searched');
+    assert.deepEqual(
+      uncollectedSaid(noSuite.slice(1)),
+      [
+        'res://tests/helper.gd declares test_not_a_suite and does not extend GdUnitTestSuite, directly or through what it extends, so gdUnit4 never runs it: extend GdUnitTestSuite, or take the test_ prefix off a function that is no case',
+        'res://tests/typo_test.gd declares test_s, test_t and does not extend GdUnitTestSuite, directly or through what it extends, so gdUnit4 never runs them: extend GdUnitTestSuite, or take the test_ prefix off functions that are no case',
+      ],
+      'one sentence a script, for one case and for two',
+    );
     assert.deepEqual(scripts.searchedAsTold(['res://tests', 'res://other/']), [
       'res://tests',
       'res://other/',
@@ -41350,6 +41449,16 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'a search leaves the folders the project names out',
     );
     assert.deepEqual(paths(told.suitesUnder(['res://tests/deep'])), ['res://tests/deep/path_test.gd']);
+    assert.deepEqual(
+      told.uncollectedUnder(['res://tests']),
+      noSuite.slice(1),
+      'a folder left out of the search is left out of this too',
+    );
+    assert.deepEqual(
+      told.uncollectedUnder(['res://tests/deep']),
+      noSuite.slice(0, 1),
+      'unless it is searched',
+    );
     assert.deepEqual(paths(told.suitesUnder(['res://other/'])), ['res://other/outside_test.gd']);
     assert.deepEqual(
       told
@@ -42078,11 +42187,19 @@ function testTheTestCommandReadsItsOwnOptions(): void {
         '7',
         '--changed-only',
         '--print-output',
+        '--result',
+        'out/result.json',
       ],
       tmpdir(),
     );
     assert.equal(read.printOutput, true);
     assert.equal(testOptionsOf([], project).printOutput, false, 'off unless asked for');
+    assert.equal(
+      read.resultFile,
+      join(tmpdir(), 'out', 'result.json'),
+      'a result file read from where it ran',
+    );
+    assert.equal(testOptionsOf([], project).resultFile, null, 'and none unless asked for');
     assert.equal(read.projectPath, project, 'the project named first');
     assert.deepEqual(
       read.selected,
@@ -42873,6 +42990,7 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-command-'));
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
+  const checkouts = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-checkouts-'));
   try {
     // The Compatibility renderer, since the windowed cases are about where suites run and not about
     // rendering: on a GitHub macOS runner, whose GPU is virtual, Godot's Metal driver under Forward+
@@ -42988,13 +43106,29 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     rmSync(join(project, 'broken.svg.import'), { force: true });
     assert.match(
       failing.said,
-      /^The import failed, so no suite ran: it printed (?:an engine error|\d+ engine errors), the first ".+"; everything it printed is in .+import\.log$/m,
+      /^The import failed, so no suite ran: it printed (?:an engine error|\d+ engine errors)(?: and (?:an engine warning|\d+ engine warnings))?, the first (?:error|warning) ".+"; everything it printed is in .+import\.log$/m,
       failing.said,
     );
     assert.equal(failing.status, 1, failing.said);
 
-    const noisy = test('tests/ok_test.gd', 'tests/declared_test.gd', 'tests/noisy_test.gd', '--changed-only');
+    const resultFile = join(checkouts, 'result.json');
+    const resultOf = (): RunResult => JSON.parse(readFileSync(resultFile, 'utf8')) as RunResult;
+    const noisy = test(
+      'tests/ok_test.gd',
+      'tests/declared_test.gd',
+      'tests/noisy_test.gd',
+      '--changed-only',
+      '--result',
+      resultFile,
+    );
     assert.equal(noisy.status, 1, noisy.said);
+    assert.deepEqual(
+      resultOf().problems,
+      [
+        `engine 0: an engine error in res://tests/noisy_test.gd > test_noisy: nobody said this; if the suite prints it on purpose, list its text under "test_noisy" in the suite's GDHARNESS_EXPECTED_ERRORS`,
+      ],
+      "the result holds an engine's problem, named by its engine",
+    );
     assert.match(
       noisy.said,
       /^2 suites passed with everything they reach as it stands now, and are not run: res:\/\/tests\/ok_test\.gd, res:\/\/tests\/declared_test\.gd\.$/m,
@@ -43056,8 +43190,75 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       'a failing suite is not kept as passed, so the next run asks it again',
     );
 
-    const everything = test('tests/ok_test.gd', 'tests/declared_test.gd');
+    // A directory searched with a script in it declaring a case and extending the wrong class: the
+    // suite beside it runs, and the run fails naming the script.
+    writeTree(project, {
+      'tests/stray/kept_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_kept() -> void:\n\tassert_int(1).is_equal(1)\n',
+      'tests/stray/misnamed_test.gd': 'extends Node\n\nfunc test_lost() -> void:\n\tpass\n',
+    });
+    const strayRun = test('tests/stray', '--result', resultFile);
+    rmSync(join(project, 'tests', 'stray'), { recursive: true });
+    assert.equal(strayRun.status, 1, strayRun.said);
+    const strayResult = resultOf();
+    assert.equal(strayResult.passed, false, 'the result says the run failed');
+    assert.deepEqual(
+      strayResult.problems.map((problem) => problem.split(' declares ')[0]),
+      ['res://tests/stray/misnamed_test.gd'],
+      'with the problem the output lists',
+    );
+    assert.deepEqual(
+      strayResult.suites.map(({ path, verdict, engine }) => [path, verdict, engine]),
+      [['res://tests/stray/kept_test.gd', 'PASSED', 0]],
+      'and the suite that ran',
+    );
+    assert.equal(strayResult.engines.length, 1, JSON.stringify(strayResult));
+    assert.ok(
+      existsSync(strayResult.engines[0]?.log ?? ''),
+      `whose log is kept: ${JSON.stringify(strayResult)}`,
+    );
+    assert.equal(
+      strayResult.logs,
+      dirname(dirname(strayResult.engines[0]?.log ?? '')),
+      'under the run directory',
+    );
+    assert.match(strayRun.said, /^--- scripts among the suites that gdUnit4 never runs:$/m, strayRun.said);
+    assert.match(
+      strayRun.said,
+      /^ {2}res:\/\/tests\/stray\/misnamed_test\.gd declares test_lost and does not extend GdUnitTestSuite, /m,
+      strayRun.said,
+    );
+    assert.match(
+      strayRun.said,
+      /^Failed: 1 problem, listed above\. Ran 1 case in 1 suite across 1 engine, /m,
+      strayRun.said,
+    );
+
+    const everything = test('tests/ok_test.gd', 'tests/declared_test.gd', '--result', resultFile);
     assert.equal(everything.status, 0, everything.said);
+    const passedResult = resultOf();
+    assert.deepEqual(
+      [
+        passedResult.passed,
+        passedResult.problems,
+        passedResult.logs,
+        passedResult.engines.map((one) => one.log),
+      ],
+      [true, [], null, [null]],
+      'a passing run removes its logs, and its result says so',
+    );
+    assert.deepEqual(
+      passedResult.suites.map((suite) => suite.path).sort(),
+      ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
+      'every suite it ran',
+    );
+    assert.ok(
+      passedResult.suites.every(
+        (suite, at) =>
+          suite.verdict === 'PASSED' && suite.seconds <= (passedResult.suites[at - 1]?.seconds ?? Infinity),
+      ),
+      `slowest first: ${JSON.stringify(passedResult.suites)}`,
+    );
     assert.doesNotMatch(everything.said, /are not run/, 'without the flag, every suite runs');
     assert.doesNotMatch(everything.said, /Dealt out case by case/, 'nothing took long enough to split');
 
@@ -43271,8 +43472,39 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     } else {
       console.log(`test command windowed case skipped: ${windowed}`);
     }
+
+    // A gate running in a worktree of the commit removes it once the run ends, and the logs with it,
+    // so a failed run's logs are copied beside the main checkout and named there.
+    const entry = join(checkouts, 'main', '.git', 'worktrees', 'gate');
+    mkdirSync(entry, { recursive: true });
+    writeFileSync(join(entry, 'commondir'), '../..\n');
+    writeTree(join(checkouts, 'main', 'game'), { 'project.godot': 'config_version=5\n' });
+    const gated = join(checkouts, 'gate', 'game');
+    cpSync(project, gated, { recursive: true, filter: (from) => !from.includes(`${sep}test-runs`) });
+    writeFileSync(join(checkouts, 'gate', '.git'), `gitdir: ${entry.replaceAll('\\', '/')}\n`);
+    const inGate = spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'test', gated, '--slots', slots, 'tests/noisy_test.gd'],
+      { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+    );
+    const gateSaid = `${inGate.stdout}${inGate.stderr}`;
+    assert.equal(inGate.status, 1, gateSaid);
+    const keptUnder = /^Every engine's output is kept under (.+) until the next run\.$/m.exec(gateSaid)?.[1];
+    const mainRuns = join(checkouts, 'main', 'game', '.godot', 'gdharness', 'test-runs');
+    assert.equal(dirname(keptUnder ?? ''), mainRuns, `named beside the main checkout: ${gateSaid}`);
+    const namedLog = /^everything it printed: (.+)$/m.exec(gateSaid)?.[1] ?? '';
+    assert.ok(namedLog.startsWith(keptUnder ?? '\0'), `and so is the engine's log: ${gateSaid}`);
+    rmSync(join(checkouts, 'gate'), { recursive: true, force: true });
+    const keptLog = readFileSync(namedLog, 'utf8');
+    assert.match(keptLog, /^gdharness: engine 0: 1 suite, /, 'the copy opens with the verdict');
+    assert.match(keptLog, /nobody said this/, 'and holds what the engine printed');
+    assert.deepEqual(
+      readdirSync(join(keptUnder ?? '', 'engine-0')).filter((name) => !name.endsWith('.log')),
+      [],
+      'only the logs are copied, not the engine user folder or the reports',
+    );
   } finally {
-    sweep(project, slots);
+    sweep(project, slots, checkouts);
   }
 }
 
