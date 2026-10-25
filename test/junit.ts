@@ -15,6 +15,7 @@ import {
   LONGEST_DETAIL,
   MalformedReportError,
   MOST_REPORTS_SHOWN,
+  orphansLeftSaid,
   orphansPrinted,
   parseJUnit,
   RENDERED_AWAY_NOTE,
@@ -600,6 +601,23 @@ function testOrphansAreReadOffTheConsole(): void {
       },
     ],
     'named per suite with what the runner named in it, and a suite that left none is not a warning',
+  );
+  // A hook's auto_free() frees at the suite's end rather than the case's, and a suite whose cases
+  // never began cannot tell its two hooks apart.
+  const said = (during: string, count: number): string =>
+    orphansLeftSaid({ suite: docket, during, count, nodes: 'Node "Pin"' });
+  assert.equal(
+    said('test_posts', 2),
+    'res://test/docket_test.gd > test_posts left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Pin". Free each one, or make it with auto_free(), which frees it once the case is over.',
+  );
+  assert.equal(
+    said('before', 1),
+    `res://test/docket_test.gd's before() left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Pin". Free each one, or make it with auto_free(), which frees it once the suite is over.`,
+  );
+  assert.match(said('after', 1), /^res:\/\/test\/docket_test\.gd's after\(\) left 1 node /);
+  assert.match(
+    said('before or after', 1),
+    /^res:\/\/test\/docket_test\.gd's before\(\) or after\(\) left 1 node .+ once the suite is over\.$/,
   );
 
   // A clean run says nothing, which must stay nothing rather than becoming an empty warning.

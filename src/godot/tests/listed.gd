@@ -101,6 +101,10 @@ class GdhRunner:
 	var orphans_at_case: Dictionary[int, bool] = {}
 	var orphans_at_suite: Dictionary[int, bool] = {}
 	var orphans_named: Dictionary[int, bool] = {}
+	## The orphans new as the suite's first case began, which its before() made, and whether a case
+	## has begun: gdUnit4 counts both hooks' orphans at the suite's end.
+	var orphans_from_before: Dictionary[int, bool] = {}
+	var case_began: bool = false
 	## The suite running, which a case's own event does not carry.
 	var suite_running: String = ""
 
@@ -177,37 +181,54 @@ class GdhRunner:
 				suite_running = event.resource_path()
 				orphans_at_suite = orphan_ids()
 				orphans_named.clear()
+				orphans_from_before.clear()
+				case_began = false
 			GdUnitEvent.TESTCASE_BEFORE:
 				orphans_at_case = orphan_ids()
+				if not case_began:
+					case_began = true
+					for id: int in new_orphans(orphans_at_suite):
+						orphans_from_before[id] = true
 			GdUnitEvent.TESTCASE_AFTER:
 				cases_ended += 1
 		super(event)
 		# After gdUnit4's own report of the case, so the line falls under it.
-		if event.type() == GdUnitEvent.TESTCASE_AFTER:
-			name_orphans(event, event.test_name(), orphans_at_case)
-		elif event.type() == GdUnitEvent.TESTSUITE_AFTER:
-			name_orphans(event, "after", orphans_at_suite)
-
-	## Prints the orphans [param event] counts that were not there in [param before], under
-	## [constant ORPHANS_LEFT], once each in a suite.
-	func name_orphans(event: GdUnitEvent, during: String, before: Dictionary[int, bool]) -> void:
 		if event.orphan_nodes() == 0:
 			return
-		var named: PackedStringArray = []
-		var count: int = 0
+		if event.type() == GdUnitEvent.TESTCASE_AFTER:
+			say_left(event.test_name(), new_orphans(orphans_at_case))
+		elif event.type() == GdUnitEvent.TESTSUITE_AFTER:
+			var left: Array[int] = new_orphans(orphans_at_suite)
+			if not case_began:
+				say_left("before or after", left)
+				return
+			say_left("before", left.filter(func(id: int) -> bool: return orphans_from_before.has(id)))
+			say_left("after", left.filter(func(id: int) -> bool: return not orphans_from_before.has(id)))
+
+	## The orphans now that were not there in [param before] and no line has named yet.
+	func new_orphans(before: Dictionary[int, bool]) -> Array[int]:
+		var found: Array[int] = []
 		for id: int in orphan_ids():
-			var node: Node = instance_from_id(id) as Node
-			if node == null or before.has(id) or orphans_named.has(id):
-				continue
-			orphans_named[id] = true
-			count += 1
-			if named.size() < ORPHANS_NAMED:
-				var _named: bool = named.append(described(node))
-		if count == 0:
+			if not before.has(id) and not orphans_named.has(id):
+				found.append(id)
+		return found
+
+	## Prints the orphans [param ids] as left by [param during], under [constant ORPHANS_LEFT], once
+	## each in a suite.
+	func say_left(during: String, ids: Array[int]) -> void:
+		if ids.is_empty():
 			return
-		var more: String = "" if count <= named.size() else ", and %d more" % (count - named.size())
+		var named: PackedStringArray = []
+		for id: int in ids:
+			orphans_named[id] = true
+			if named.size() < ORPHANS_NAMED:
+				var _named: bool = named.append(described(instance_from_id(id) as Node))
+		var more: String = "" if ids.size() <= named.size() else ", and %d more" % (ids.size() - named.size())
 		print(
-			"%s %s > %s left %d: %s%s" % [ORPHANS_LEFT, suite_running, during, count, ", ".join(named), more]
+			(
+				"%s %s > %s left %d: %s%s"
+				% [ORPHANS_LEFT, suite_running, during, ids.size(), ", ".join(named), more]
+			)
 		)
 
 	## The nodes outside every tree that are not on their way out, by instance id, as gdUnit4 counts

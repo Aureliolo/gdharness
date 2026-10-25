@@ -126,7 +126,9 @@ an allocation fails at the commit limit however much physical memory is free.
   and a case that ran without being planned.
 - A suite that reports a failure while all its cases passed, which is a failing `before` or `after`.
 - A run that printed no summary or ran no case, or a script gdUnit4 could not load.
-- Objects, resources or memory pages still held as the engine exits. Godot never frees a script that
+- Objects, resources, memory pages or a server's RIDs still held as the engine exits. A RID made
+  through a server and never freed shows only as `1 RID of type "CanvasItem" was leaked.`, with no
+  object counted beside it. Godot never frees a script that
   exports an array or dictionary typed with its own class, such as `@export var parts: Array[Item]`
   in the script declaring `Item`, so a run that loads one always ends this way; the verdict names
   each such script in the project. Typed with a class it extends instead, as `Array[Resource]`, it
@@ -141,11 +143,13 @@ an allocation fails at the commit limit however much physical memory is free.
   `0xC0000005 (STATUS_ACCESS_VIOLATION)`, or one of gdUnit4's, such as 101 for orphan nodes. gdUnit4's
   100, which it exits with when a case failed, is left out beside that case's own line. An engine
   that died on a Windows exception status also says how much memory was free as it ended.
-- Orphan nodes, by the case that left them, or the suite's hooks: each node's class, its name when
-  it has one, and its script, eight to a line and the rest counted. gdUnit4 names them only where a
-  case calls `collect_orphan_node_details()`, so the runner notes the orphans as each case and
-  suite starts and names what is new when gdUnit4 counts some. The suite fails with them, and 101
-  is left out beside the line.
+- Orphan nodes, by the case that left them, or the suite's `before()` or `after()`: each node's
+  class, its name when it has one, and its script, eight to a line and the rest counted. gdUnit4
+  names them only where a case calls `collect_orphan_node_details()`, so the runner notes the
+  orphans as each case and suite starts and names what is new when gdUnit4 counts some. gdUnit4
+  counts both hooks' orphans as the suite ends; those already there as its first case began are
+  `before()`'s, and in a suite whose cases never began the two are named together. The suite fails
+  with them, and 101 is left out beside the line.
 - An engine that printed nothing at all.
 - An engine ended for its silence or its deadline, or because an autoload did not start.
 - An engine whose banner names another version than `--godot-version` asks for.
