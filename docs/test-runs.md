@@ -404,7 +404,14 @@ an engine on it directly. It is started with `-s <path>` from outside the projec
 gdUnit4's own options, then after `--`:
 
 - `--suites-in FILE`: the suites to run, one `res://` path a line, in order.
-- `--skipping-in FILE`: the cases to leave out, `res://a_test.gd:test_x` a line.
+- `--skipping-in FILE`: the cases to leave out, `res://a_test.gd:test_x` a line. Such a line leaves
+  out that case of that suite alone, a case the suite inherits included; any other line is passed
+  to gdUnit4's `-i` as it is.
+
+The runner files every case under the suite it was found in. gdUnit4 files a case under the script
+declaring it, so on its own its reports leave out every case a suite inherits, and an inherited
+parameterised case runs as a suite of the base's own, outside the suite that inherits it.
+
 - `--html-report-off` and `--junit-report-off`: no HTML report, and no JUnit report.
 - `--compile-together`: compile the suites together beside every class of the game before running
   them, so every script that does not compile is named.

@@ -44150,6 +44150,176 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
 }
 
 /**
+ * A case a suite inherits is left out of that suite alone. gdUnit4 matches a leave-out against the
+ * script declaring a case, so a game's shell suite extending a kit's base suites, dealt out case by
+ * case once it passed 10 s, ran every inherited case in each engine it was dealt to, and the run
+ * failed on cases nobody asked for while every case passed. The same match left a case of
+ * `res://tests/shell_test.gd` out of `res://tests/more/tests/shell_test.gd` too. gdUnit4's reports
+ * added an inherited case to no suite, so project_test counted none, and an inherited parameterised
+ * case ran as a suite of the base's own, outside the suites inheriting it. And project_test read a
+ * suite's cases from its own file, so it refused a suite inheriting all of them as having none and
+ * could not be asked for an inherited case.
+ */
+async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('inherited case regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inherited-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inherited-slots-'));
+  const cases = (...names: string[]): string[] =>
+    names.flatMap((name) => [
+      '',
+      '',
+      `func ${name}() -> void:`,
+      `\tprint("CASE %s:${name} IN %d" % [get_script().resource_path, OS.get_process_id()])`,
+      '\tassert_bool(true).is_true()',
+    ]);
+  const suite = (extendsAs: string, ...names: string[]): string =>
+    [`extends ${extendsAs}`, ...cases(...names), ''].join('\n');
+  const shell = 'res://tests/shell_test.gd';
+  const sibling = 'res://tests/sibling_test.gd';
+  const nested = 'res://tests/more/tests/shell_test.gd';
+  const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Inherited"\n',
+      'addons/kit/tests/kit_base_suite.gd': [
+        'class_name KitBaseSuite',
+        'extends GdUnitTestSuite',
+        ...cases('test_base_a', 'test_base_b'),
+        '',
+        '',
+        'func test_base_rows(row: int, test_parameters := [[1], [2]]) -> void:',
+        '\tprint("CASE %s:test_base_rows/%d IN %d" % [get_script().resource_path, row, OS.get_process_id()])',
+        '\tassert_int(row).is_greater(0)',
+        '',
+      ].join('\n'),
+      'addons/kit/tests/kit_shell_suite.gd': [
+        'class_name KitShellSuite',
+        'extends KitBaseSuite',
+        ...cases('test_shell_a'),
+        '',
+      ].join('\n'),
+      'tests/shell_test.gd': suite('KitShellSuite', 'test_own_a', 'test_own_b', 'test_own_c'),
+      'tests/sibling_test.gd': suite('KitShellSuite', 'test_sibling'),
+      'tests/more/tests/shell_test.gd': suite('GdUnitTestSuite', 'test_own_a', 'test_own_b'),
+      'tests/bare_test.gd': suite('KitShellSuite'),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, ...args],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, GODOT_PATH: godotPath },
+          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+        },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    // Every case of every suite, a parameterised one a row, each as the suite running it says.
+    const inherited = ['test_base_a', 'test_base_b', 'test_base_rows/1', 'test_base_rows/2', 'test_shell_a'];
+    const expected = [
+      ...[...inherited, 'test_own_a', 'test_own_b', 'test_own_c'].map((name) => `${shell}:${name}`),
+      ...[...inherited, 'test_sibling'].map((name) => `${sibling}:${name}`),
+      ...['test_own_a', 'test_own_b'].map((name) => `${nested}:${name}`),
+      ...inherited.map((name) => `res://tests/bare_test.gd:${name}`),
+    ].sort();
+    const ranOf = (said: string): string[] =>
+      [...said.matchAll(/^CASE (\S+) IN \d+\s*$/gm)].map((found) => found[1] ?? '').sort();
+    const first = test('--import', '--engines', '1', '--print-output');
+    assert.equal(first.status, 0, first.said);
+    assert.deepEqual(ranOf(first.said), expected, `one engine runs every case once: ${first.said}`);
+
+    // The shell suite slow enough to be dealt out case by case, and the rest quick enough to go whole.
+    const timesFile = join(project, '.godot', 'gdharness', 'suite-times.json');
+    const times = JSON.parse(readFileSync(timesFile, 'utf8')) as SuiteTimes;
+    writeFileSync(
+      timesFile,
+      JSON.stringify({
+        ...times,
+        [shell]: {
+          seconds: 36,
+          cases: Object.fromEntries(
+            [
+              'test_base_a',
+              'test_base_b',
+              'test_base_rows',
+              'test_shell_a',
+              'test_own_a',
+              'test_own_b',
+              'test_own_c',
+            ].map((name) => [name, 5]),
+          ),
+        },
+      }),
+    );
+    const split = test('--engines', '2', '--print-output');
+    assert.equal(split.status, 0, `every case passed, and none ran unasked: ${split.said}`);
+    assert.deepEqual(
+      ranOf(split.said),
+      expected,
+      `two engines run every case once between them: ${split.said}`,
+    );
+    // Two engines need about seven gigabytes free, which the macOS runner does not have.
+    if (split.said.includes('over 1 engine, of the 2 asked for, since')) {
+      console.log('inherited cases: held to one engine, so the shell suite ran whole');
+    } else {
+      assert.match(
+        split.said,
+        /^Dealt out case by case, since it took more than 10 s last time: res:\/\/tests\/shell_test\.gd\.$/m,
+        split.said,
+      );
+      const pids = new Set(
+        [...split.said.matchAll(/^CASE res:\/\/tests\/shell_test\.gd:\S+ IN (\d+)\s*$/gm)].map(
+          (found) => found[1],
+        ),
+      );
+      assert.equal(pids.size, 2, `the shell suite's cases ran over both engines: ${split.said}`);
+    }
+
+    // project_test reads a suite's cases as the run does: one inheriting all of them is a suite,
+    // and an inherited case can be asked for by name.
+    await server.initialize('regression-test');
+    const call = async (args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request(
+        'tools/call',
+        { name: 'project_test', arguments: { projectPath: project, ...args } },
+        ENGINE_CALL_TIMEOUT_MS * 3,
+      );
+      const content = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+      return JSON.parse(content.find((part) => part.trimStart().startsWith('{')) ?? '{}') as unknown;
+    };
+    // Counted from gdUnit4's report, which filed an inherited case under its base and so left it out.
+    const whole = await call({ path: shell });
+    assert.equal(get(whole, 'passed'), true, JSON.stringify(whole));
+    assert.equal(get(whole, 'tests'), 8, `every case the suite runs is counted: ${JSON.stringify(whole)}`);
+    const bare = await call({ path: 'res://tests/bare_test.gd' });
+    assert.equal(get(bare, 'passed'), true, `a suite inheriting every case is run: ${JSON.stringify(bare)}`);
+    assert.equal(get(bare, 'tests'), 5, JSON.stringify(bare));
+    const one = await call({ path: shell, tests: ['shell_test:test_base_b'] });
+    assert.equal(
+      get(one, 'passed'),
+      true,
+      `an inherited case asked for by name runs: ${JSON.stringify(one)}`,
+    );
+    assert.equal(get(one, 'tests'), 1, `and it alone: ${JSON.stringify(one)}`);
+    assert.deepEqual(readdirSync(slots), [], 'every slot given back');
+  } finally {
+    await server.stop();
+    sweep(project, slots);
+  }
+}
+
+/**
  * project_test judges the engine errors a run printed as `gdharness test` does, looks where it
  * looks, and counts a case a suite inherits as run.
  */
@@ -61140,6 +61310,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTestCommandRunsAndJudgesAProject,
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
+  testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly,
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
   testProjectTestJudgesItsRunAsTheGateDoes,
