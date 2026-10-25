@@ -67,6 +67,7 @@ import {
   notReloadedNote,
   type ReloadedFirst,
   reloadDifference,
+  scriptsDeclaring,
   scriptsNaming,
   staleAnalysisNote,
   staleClassNames,
@@ -13831,11 +13832,19 @@ class GodotServer {
    * reporting "Could not find base class" to the language server after the rescan had answered
    * clean, until it was reloaded by hand. Each is reloaded as `reloadScript` reloads one: from the
    * file, keeping the state of what uses it.
+   *
+   * The scripts declaring the classes go first, since the others are compiled against them. One
+   * that does not compile is named by the scripts that fail on it, which try it again.
    */
   private async reloadDependents(
     projectPath: string,
     classes: readonly string[],
   ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[]; reloadedFirst: ReloadedFirst[] }> {
+    for (const { script, tool } of scriptsDeclaring(projectPath, classes)) {
+      if (!tool) {
+        await this.reloadOnce(script);
+      }
+    }
     return await this.reloadInEditor(scriptsNaming(projectPath, classes), projectPath);
   }
 
