@@ -192,17 +192,32 @@ export class ProjectScripts {
    * the folders [constant NOT_SEARCHED_SETTING] names unless the root is at or inside one.
    */
   suitesUnder(roots: readonly string[]): DeclaredSuite[] {
-    const searched = roots.map((root) => root.replace(/\/+$/, ''));
+    return this.searched(roots).flatMap((path) => this.suite(path) ?? []);
+  }
+
+  /**
+   * The scripts under [param roots], searched as [method suitesUnder] searches them, that declare a
+   * case and are no suite, each with the cases it declares. gdUnit4 never runs them and says nothing
+   * of it, so a suite whose `extends` names the wrong class passes with none of its cases run.
+   */
+  uncollectedUnder(roots: readonly string[]): { readonly path: string; readonly cases: readonly string[] }[] {
+    return this.searched(roots).flatMap((path) => {
+      const cases = this.script(path)?.funcs.filter((name) => name.startsWith(CASE_PREFIX)) ?? [];
+      return cases.length === 0 || this.suite(path) !== null ? [] : [{ path, cases: [...cases].sort() }];
+    });
+  }
+
+  private searched(roots: readonly string[]): string[] {
+    const trimmed = roots.map((root) => root.replace(/\/+$/, ''));
     return [...this.sources.keys()]
       .filter((path) =>
-        searched.some(
+        trimmed.some(
           (root) =>
             path.startsWith(`${root}/`) &&
             !this.notSearched.some((folder) => within(path, folder) && !within(root, folder)),
         ),
       )
-      .sort()
-      .flatMap((path) => this.suite(path) ?? []);
+      .sort();
   }
 
   /**

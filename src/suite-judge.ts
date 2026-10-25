@@ -101,6 +101,9 @@ const LEFT_OUT = /^gdharness left out (res:\/\/.+?\.gd) > ([^:\s]+):(-?\d+)\s*$/
 // is the engine probing a driver: a windowed engine on a machine without a Vulkan surface prints
 // two and then runs its cases on Direct3D 12 or OpenGL.
 const DRIVER_FALLBACK = /^\s*WARNING: Your video card drivers .*, switching to /;
+// The line under a warning naming where in the engine it was raised, when that is the platform layer
+// or a rendering driver: `at: DisplayServerMacOS (platform/macos/display_server_macos.mm:3837)`.
+const MACHINE_WARNED = /^\s*at: .*\((?:\.\/)?(?:platform|drivers)\//;
 // gdUnit4's own report of the orphans a case or suite left, printed with a WARNING prefix. The
 // orphans are reported from the suite's statistics; read as a warning no suite declared, the line
 // came back as one more fault, with advice to declare it rather than free the nodes.
@@ -238,9 +241,14 @@ export function readRun(printed: string): RunPrinted {
       continue;
     }
     const error = ERROR_LINE.exec(line);
-    // A warning counts only inside a suite. Outside every suite it is the engine's own as it starts
-    // or exits, which no suite can declare; the leaks it reports at exit are read above.
-    const warned = error === null && open !== null ? WARNING_LINE.exec(line) : null;
+    // Outside every suite too, where one is the project's own, from an autoload, a session hook or
+    // the import, except one the engine's platform layer or a rendering driver raised: those are
+    // about the machine, as a windowed engine on a macOS runner's virtual GPU warns that it is
+    // switching to ANGLE as its display server starts. The leaks it reports at exit are read above.
+    const warned =
+      error === null && !(open === null && MACHINE_WARNED.test(lines[at + 1] ?? ''))
+        ? WARNING_LINE.exec(line)
+        : null;
     const found = error ?? warned;
     if (found === null) {
       continue;
@@ -612,7 +620,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   for (const error of unexpected.printed) {
     faults.push(
       error.suite === null
-        ? `an engine error outside every suite: ${error.text}`
+        ? `an engine ${error.warning ? 'warning' : 'error'} outside every suite: ${error.text}`
         : `an engine ${error.warning ? 'warning' : 'error'} in ${error.suite} > ${error.during ?? ''}: ${error.text}; ${declaringAdvice(error.during ?? '', error.warning)}`,
     );
     if (error.suite !== null) {
