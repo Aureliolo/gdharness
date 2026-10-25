@@ -46407,10 +46407,10 @@ async function testGdUnitRunner(): Promise<void> {
           JSON.stringify(long, null, 2),
         );
         // gdUnit4's orphans are the nodes outside the tree, and the warning once called them the
-        // ones still in it.
+        // ones still in it. The case that left them is named however much was printed after it.
         assert.match(
           text(get(long, 'warnings', 0, 'message')),
-          /^2 nodes built during this suite were neither freed nor in the tree when it finished, which gdUnit4 counts as orphans\. Free each one, or make it with auto_free\(\)/,
+          /^res:\/\/test\/long\/a_leaves_test\.gd > test_leaves_a_node left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Node, Node\. Free each one, or make it with auto_free\(\)/,
           JSON.stringify(long, null, 2),
         );
 
