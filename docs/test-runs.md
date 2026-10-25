@@ -196,10 +196,12 @@ refused changes with nothing but a warning: an `after_test` setting the root's
 embedding windows for every later suite, and the run passed. A suite that prints one on purpose
 declares it in `GDHARNESS_EXPECTED_WARNINGS`, keyed the same way, with the text after `WARNING:` and
 its space. A text declared as an error does not accept a warning, or the reverse. A warning printed
-outside every suite fails the run as an error there does, since a clean run prints none as the
-engine starts or exits: it comes from an autoload, a session hook or the game's own code, and no
-suite can declare it. So does one the `--import` engine prints. The one Godot prints when it falls
-back to another rendering driver is not judged.
+outside every suite fails the run as an error there does: it comes from an autoload, a session hook
+or the game's own code, and no suite can declare it. So does one the `--import` engine prints. A
+warning outside every suite that the engine's platform layer or a rendering driver raised, as its
+`at:` line names a file under `platform/` or `drivers/`, is about the machine and is not judged: a
+windowed engine on a macOS runner's virtual GPU warns that it is switching to ANGLE, and one falling
+back to another rendering driver says so.
 
 `project_test` judges a run's errors and warnings by the same declarations, and names what fails it
 under `undeclaredErrors` and `declaredNotPrinted`, a warning marked `warning: true`.

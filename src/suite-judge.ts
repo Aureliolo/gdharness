@@ -101,6 +101,9 @@ const LEFT_OUT = /^gdharness left out (res:\/\/.+?\.gd) > ([^:\s]+):(-?\d+)\s*$/
 // is the engine probing a driver: a windowed engine on a machine without a Vulkan surface prints
 // two and then runs its cases on Direct3D 12 or OpenGL.
 const DRIVER_FALLBACK = /^\s*WARNING: Your video card drivers .*, switching to /;
+// The line under a warning naming where in the engine it was raised, when that is the platform layer
+// or a rendering driver: `at: DisplayServerMacOS (platform/macos/display_server_macos.mm:3837)`.
+const MACHINE_WARNED = /^\s*at: .*\((?:\.\/)?(?:platform|drivers)\//;
 // gdUnit4's own report of the orphans a case or suite left, printed with a WARNING prefix. The
 // orphans are reported from the suite's statistics; read as a warning no suite declared, the line
 // came back as one more fault, with advice to declare it rather than free the nodes.
@@ -238,10 +241,14 @@ export function readRun(printed: string): RunPrinted {
       continue;
     }
     const error = ERROR_LINE.exec(line);
-    // Outside every suite too: a clean run prints none as the engine starts or exits, so one there
-    // is the project's own, from an autoload, a session hook or the import. The leaks it reports at
-    // exit are read above.
-    const warned = error === null ? WARNING_LINE.exec(line) : null;
+    // Outside every suite too, where one is the project's own, from an autoload, a session hook or
+    // the import, except one the engine's platform layer or a rendering driver raised: those are
+    // about the machine, as a windowed engine on a macOS runner's virtual GPU warns that it is
+    // switching to ANGLE as its display server starts. The leaks it reports at exit are read above.
+    const warned =
+      error === null && !(open === null && MACHINE_WARNED.test(lines[at + 1] ?? ''))
+        ? WARNING_LINE.exec(line)
+        : null;
     const found = error ?? warned;
     if (found === null) {
       continue;

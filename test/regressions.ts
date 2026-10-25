@@ -40865,11 +40865,23 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     [`an engine warning in ${S_TEST} > test_a: pushed from the case${warnIt}`],
     'a warning a script pushes',
   );
-  // Outside every suite a warning is the project's, from an autoload or a session hook: a clean run
-  // prints none there.
+  // Outside every suite a warning is the project's, from an autoload or a session hook, unless the
+  // engine's platform layer or a driver raised it, which is the machine: a macOS runner's virtual
+  // GPU warns as the display server starts.
+  const machineWarned = [
+    'WARNING: Virtual Machine detected, switching to ANGLE.',
+    '     at: DisplayServerMacOS (platform/macos/display_server_macos.mm:3837)',
+    'WARNING: a driver said this',
+    '     at: initialize (drivers/vulkan/rendering_context_driver_vulkan.cpp:915)',
+  ];
   const engineOwn = warnedRun([]).replace(
     'https://godotengine.org',
-    'https://godotengine.org\nWARNING: an autoload said this as it started',
+    [
+      'https://godotengine.org',
+      ...machineWarned,
+      'WARNING: an autoload said this as it started',
+      '     at: _ready (scene/main/node.cpp:300)',
+    ].join('\n'),
   );
   const outside = judgeEngine(
     readRun(`${engineOwn}\r\nUSER WARNING: and a session hook this as it ended`),
@@ -40885,6 +40897,16 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     'warnings outside every suite',
   );
   assert.deepEqual(outside.passedSuites, [S_TEST], 'charged to no suite');
+  const machineInACase = judgeEngine(
+    readRun(warnedRun(machineWarned.slice(0, 2))),
+    handed(['test_a']),
+    clean,
+  );
+  assert.deepEqual(
+    machineInACase.faults,
+    [`an engine warning in ${S_TEST} > test_a: Virtual Machine detected, switching to ANGLE.${warnIt}`],
+    "a case's own warning is judged wherever the engine raised it",
+  );
   // The import engine opens no suite, so everything it warns is outside one.
   const imported = (lines: readonly string[]): string =>
     ['Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org', ...lines].join('\n');
