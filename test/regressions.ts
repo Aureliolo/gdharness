@@ -50393,14 +50393,56 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     // A resource built into a file is a new object each time the file loads, and the check that a
     // save kept what was set compared objects, so every one written into a resource file was
     // refused as a property the file does not keep.
-    await written({ growth: { _type: 'Curve', max_value: 50 } });
+    const point = { _type: 'Vector2', x: 0.5, y: 20 };
+    await written({ growth: { _type: 'Curve', max_value: 50, point_count: 1, 'point_0/position': point } });
     assert.match(file(), /^growth = SubResource\("[^"]+"\)$/m);
     assert.match(file(), /^_limits = \[0\.0, 50\.0, 0\.0, 1\.0\]$/m);
     const grown = parseTextContent(
       await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' }),
     );
-    assert.deepEqual(get(grown, 'properties', 'growth'), { _type: 'Curve', _limits: [0, 50, 0, 1] });
+    // In the inspector's names, which the write took, rather than the _limits and _data it stores.
+    const growth = {
+      _type: 'Curve',
+      max_value: 50,
+      point_count: 1,
+      'point_0/position': point,
+      'point_0/right_tangent': 0,
+      'point_0/right_mode': 0,
+    };
+    assert.deepEqual(get(grown, 'properties', 'growth'), growth, JSON.stringify(grown));
+    await written({ growth: { _type: 'Curve' } });
     await written({ growth: get(grown, 'properties', 'growth') });
+    assert.deepEqual(
+      get(
+        parseTextContent(await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' })),
+        'properties',
+        'growth',
+      ),
+      growth,
+      'and what was read writes back as it was',
+    );
+    // So is a Curve read as a file of its own.
+    writeFileSync(
+      join(project, 'ease.tres'),
+      '[gd_resource type="Curve" format=3]\n\n[resource]\n_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(1, 1), 0.0, 0.0, 0, 0]\npoint_count = 2\n',
+    );
+    assert.deepEqual(
+      get(
+        parseTextContent(await request('resource_edit', { op: 'read', resourcePath: 'res://ease.tres' })),
+        'properties',
+      ),
+      {
+        point_count: 2,
+        'point_0/position': { x: 0, y: 0, _type: 'Vector2' },
+        'point_0/right_tangent': 0,
+        'point_0/right_mode': 0,
+        'point_1/position': { x: 1, y: 1, _type: 'Vector2' },
+        'point_1/left_tangent': 0,
+        'point_1/left_mode': 0,
+      },
+      'a Curve file reads in the names a write takes',
+    );
+    rmSync(join(project, 'ease.tres'));
     // Comparing built-in resources by what they hold meets one that holds itself, and has to end.
     // The check after the save compares the one set with the one the file loads, two objects that
     // each hold themselves, which only a script can make: this one's setter links the ring to
