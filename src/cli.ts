@@ -6,7 +6,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { serverServing } from './bridge-announce.js';
 import { EngineUsageError } from './engine-launch.js';
 import { letWindowsReportCrashes } from './error-mode.js';
@@ -179,6 +179,13 @@ async function registerRuntime(godot: HeadlessEngine, projectPath: string): Prom
     }
     if (before !== 'current') {
       console.log(`  commit ${at} with project.godot, since the entry names it`);
+    }
+    // Two games' gates refused their first export after the loader came in: each allows only the
+    // top-level folders it knows into a pack.
+    if (before === 'missing') {
+      console.log(
+        `  every export carries ${dirname(RUNTIME_AUTOLOAD.path)}/, since the entry names it, and the loader does nothing in a release build: a check or export filter that keeps unknown top-level folders out of a pack has to allow it`,
+      );
     }
     return;
   }

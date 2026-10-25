@@ -47188,6 +47188,9 @@ function testCommandLineSetup(): void {
       'and setup says the loader is to be committed',
     );
     assert.doesNotMatch(setup.stdout, /runtime off/, 'rather than to turn it off before an export');
+    const ships =
+      /^ {2}every export carries gdharness\/, since the entry names it, and the loader does nothing in a release build: a check or export filter that keeps unknown top-level folders out of a pack has to allow it$/m;
+    assert.match(setup.stdout, ships, 'and that its new folder goes into every export');
 
     const healthy = cli('doctor', projectDir, '--json');
     assert.equal(healthy.status, 0, `doctor after setup:\n${healthy.stdout}${healthy.stderr}`);
@@ -47210,6 +47213,7 @@ function testCommandLineSetup(): void {
     );
     const rewritten = cli('runtime', 'on', projectDir);
     assert.match(rewritten.stdout, /and the loader written again, since it differed/, rewritten.stdout);
+    assert.doesNotMatch(rewritten.stdout, ships, 'a folder the project already ships is not news');
     assert.equal(loaderState(projectDir), 'current');
     // CRLF, as git on Windows checks the file out, is the same loader.
     writeFileSync(loaderFile, readFileSync(shippedLoader(), 'utf8').replaceAll('\n', '\r\n'));
@@ -47225,7 +47229,9 @@ function testCommandLineSetup(): void {
       'the loader goes with the entry, and its folder',
     );
     assert.equal(get(JSON.parse(cli('doctor', projectDir, '--json').stdout), 'runtimeAutoload'), false);
-    assert.equal(cli('runtime', 'on', projectDir).status, 0);
+    const backOn = cli('runtime', 'on', projectDir);
+    assert.equal(backOn.status, 0, backOn.stdout);
+    assert.match(backOn.stdout, ships, `runtime on bringing the folder back says so too: ${backOn.stdout}`);
     assert.match(readFileSync(join(projectDir, 'project.godot'), 'utf8'), loaderEntry);
 
     // The entry earlier versions wrote names the addon's own script. Doctor says so, and turning the
