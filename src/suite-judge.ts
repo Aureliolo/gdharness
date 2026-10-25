@@ -64,7 +64,7 @@ export interface RunPrinted {
   readonly lines: readonly string[];
   readonly suites: ReadonlyMap<string, SuitePrinted>;
   readonly errors: readonly PrintedError[];
-  /** Lines saying objects, resources or memory pages were still held as the engine exited. */
+  /** Lines saying objects, resources, memory pages or RIDs were still held as the engine exited. */
   readonly leaks: readonly string[];
   /** Lines saying the engine ran out of memory, or a decode the memory pressure starved. */
   readonly starved: readonly string[];

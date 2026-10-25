@@ -41100,11 +41100,14 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     ],
     'leaks at exit, each once and not again as an engine error',
   );
-  // As the engine words them now, one instance in the singular.
+  // As the engine words them now, one instance in the singular. A RID made through a server and
+  // never freed is reported by the server alone, with no object counted beside it.
   for (const said of [
     'WARNING: 1 ObjectDB instance was leaked at exit (run with `--verbose` for details).',
     'WARNING: 2 ObjectDB instances were leaked at exit (run with `--verbose` for details).',
     'ERROR: 1 resources still in use at exit (run with --verbose for details).',
+    'WARNING: 1 RID of type "CanvasItem" was leaked.',
+    'WARNING: 3 RIDs of type "CanvasItem" were leaked.',
   ]) {
     assert.deepEqual(
       judgeEngine(readRun(`${rows([1])}\n${said}`), declaredRows, clean).faults,
@@ -44525,6 +44528,12 @@ async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
         '\tSandbox.kept.append(setUp)',
         '',
         '',
+        'func after() -> void:',
+        '\tvar tearDown := Node3D.new()',
+        '\ttearDown.name = "TearDown"',
+        '\tSandbox.kept.append(tearDown)',
+        '',
+        '',
         'func test_leaks() -> void:',
         '\tvar held: Node = Sandbox.new()',
         '\theld.name = "Sandbox"',
@@ -44562,13 +44571,15 @@ async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
     const said = `${ran.stdout}${ran.stderr}`;
     assert.equal(ran.status, 1, said);
     const free = 'Free each one, or make it with auto_free(), which frees it once the case is over.';
+    const freeHooked = 'Free each one, or make it with auto_free(), which frees it once the suite is over.';
     const named = said.split(/\r?\n/).filter((line) => line.includes('which gdUnit4 counts as orphans'));
     assert.deepEqual(
       named.map((line) => line.trim()),
       [
         `res://tests/leak_test.gd > test_leaks left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Timer, Node "Sandbox" of res://tests/sandbox.gd. ${free}`,
         `res://tests/leak_test.gd > test_many left 10 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: ${Array.from({ length: 8 }, (_, at) => `Node "Each${String(at)}"`).join(', ')}, and 2 more. ${free}`,
-        `res://tests/leak_test.gd's hooks left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node2D "SetUp". ${free}`,
+        `res://tests/leak_test.gd's before() left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node2D "SetUp". ${freeHooked}`,
+        `res://tests/leak_test.gd's after() left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node3D "TearDown". ${freeHooked}`,
       ],
       said,
     );
@@ -44597,7 +44608,8 @@ async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
           count: 10,
           nodes: `${Array.from({ length: 8 }, (_, at) => `Node "Each${String(at)}"`).join(', ')}, and 2 more`,
         },
-        { case: 'after', count: 1, nodes: 'Node2D "SetUp"' },
+        { case: 'before', count: 1, nodes: 'Node2D "SetUp"' },
+        { case: 'after', count: 1, nodes: 'Node3D "TearDown"' },
       ],
       JSON.stringify(answer),
     );
