@@ -97,9 +97,11 @@ import {
   EngineUsageError,
   heldToCores,
   inTurns,
+  KEPT_RUN_DIRECTORIES,
   macMemoryLevel,
   memoryRoomOf,
   roomFor,
+  sweepRunDirectories,
   windowsCommitLeft,
 } from '../src/engine-launch.js';
 import {
@@ -195,6 +197,7 @@ import {
   ancestorsIn,
   childrenOf,
   descendantsIn,
+  linuxStartEarliest,
   listingFailure,
   type ProcessTree,
   parseProcessTable,
@@ -10073,11 +10076,14 @@ async function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): Promise<void
       at >= before - STARTED_AFTER_ANNOUNCING_MS && at <= Date.now() + STARTED_AFTER_ANNOUNCING_MS,
       `and the start it gives is the one just seen, to the second the platform rounds to: ${at} against ${before}`,
     );
-    // And within the second POSIX dates a start to, and never late. ps dated a Linux start from the
-    // boot time in whole seconds and then cut it to the second, up to two seconds early, and a
-    // game's restart was refused as having begun before the run that made it.
+    // And within what the platform's reading can be early by, and never late. ps dated a Linux start
+    // from the boot time in whole seconds and then cut it to the second, up to two seconds early, and
+    // a game's restart was refused as having begun before the run that made it. /proc's reading is
+    // cut to the second and the tick, and a runner dated one 1008 ms early; macOS's ps cuts to the
+    // second.
     const after = Date.now();
-    const early = process.platform === 'win32' ? 50 : 1000;
+    const early =
+      process.platform === 'win32' ? 50 : process.platform === 'linux' ? await linuxStartEarliest() : 1000;
     assert.ok(
       at >= before - early && at <= after,
       `dated no more than ${early} ms early and never late: ${at} against ${before} to ${after}`,
@@ -13025,48 +13031,57 @@ function testASuccessorIsTheEngineStartedAsTheGameExited(): void {
   const other = { pid: 24, startedAt: exitedAt - 40, command: 'node helper.js' };
   const orphan = { pid: 25, startedAt: notBefore - 5, command: run('--path /p') };
   assert.deepEqual(
-    successorAmong([worker, restarted, other, orphan], 11, engine, notBefore, exitedAt, false),
+    successorAmong([worker, restarted, other, orphan], 11, engine, notBefore, exitedAt, 0),
     restarted,
     'the engine started as the game exited',
   );
   assert.equal(
-    successorAmong([worker, other], 11, engine, notBefore, exitedAt, false),
+    successorAmong([worker, other], 11, engine, notBefore, exitedAt, 0),
     null,
     'a worker started long before the exit is not the successor',
   );
   const late = { ...worker, startedAt: exitedAt - RESTARTED_WITHIN_MS };
   assert.deepEqual(
-    successorAmong([late], 11, engine, notBefore, exitedAt, false),
+    successorAmong([late], 11, engine, notBefore, exitedAt, 0),
     late,
     'the edge of the window',
   );
   assert.equal(
-    successorAmong([{ ...late, startedAt: late.startedAt - 1 }], 11, engine, notBefore, exitedAt, false),
+    successorAmong([{ ...late, startedAt: late.startedAt - 1 }], 11, engine, notBefore, exitedAt, 0),
     null,
     'and one before it',
   );
   const close = { ...orphan, startedAt: exitedAt - 10 };
   assert.equal(
-    successorAmong([{ ...close, startedAt: notBefore - 1 }], 11, engine, notBefore, notBefore + 100, false),
+    successorAmong([{ ...close, startedAt: notBefore - 1 }], 11, engine, notBefore, notBefore + 100, 0),
     null,
     'a process older than the game is no successor of it, however near its exit',
   );
   assert.equal(
-    successorAmong([restarted, { ...restarted, pid: 26 }], 11, engine, notBefore, exitedAt, false),
+    successorAmong([restarted, { ...restarted, pid: 26 }], 11, engine, notBefore, exitedAt, 0),
     null,
     'two candidates are not chosen between',
   );
   assert.equal(
-    successorAmong([{ ...restarted, pid: 11 }], 11, engine, notBefore, exitedAt, false),
+    successorAmong([{ ...restarted, pid: 11 }], 11, engine, notBefore, exitedAt, 0),
     null,
     'the exited process is not its own successor',
   );
   const cut = { ...restarted, startedAt: exitedAt - RESTARTED_WITHIN_MS - 900 };
-  assert.equal(successorAmong([cut], 11, engine, notBefore, exitedAt, false), null, 'to the millisecond');
+  assert.equal(successorAmong([cut], 11, engine, notBefore, exitedAt, 0), null, 'to the millisecond');
   assert.deepEqual(
-    successorAmong([cut], 11, engine, notBefore, exitedAt, true),
+    successorAmong([cut], 11, engine, notBefore, exitedAt, 1000),
     cut,
     'and a second of slack where starts are cut to the second',
+  );
+  // Linux's reading is cut twice, the boot time to the second and the start to the tick, and a CI
+  // runner dated a start 1008 ms early.
+  const ticked = { ...restarted, startedAt: exitedAt - RESTARTED_WITHIN_MS - 1008 };
+  assert.equal(successorAmong([ticked], 11, engine, notBefore, exitedAt, 1000), null, 'past a second');
+  assert.deepEqual(
+    successorAmong([ticked], 11, engine, notBefore, exitedAt, 1010),
+    ticked,
+    'is within the second and the tick that reading can be early by',
   );
 }
 
@@ -19840,6 +19855,39 @@ function testTheLoaderPassesAGamesOwnLint(): void {
   assert.ok(lines.length > 20, `the shipped loader is read: ${lines.length} lines`);
   const long = lines.flatMap((line, at) => (line.length > 100 ? [`${at + 1}: ${line.length}`] : []));
   assert.deepEqual(long, [], "every line of the loader is within gdlint's default 100 characters");
+}
+
+/**
+ * The sweep before a run keeps the logs of the most recent runs that ended without passing. It
+ * removed all of them, so running the one suite that had crashed an engine, to reproduce it, took
+ * the log that explained the crash.
+ */
+function testAFailedRunsLogsOutlastTheNextRun(): void {
+  const runs = mkdtempSync(join(tmpdir(), 'gdharness-kept-runs-'));
+  try {
+    const ended = spawnSyncHidden(process.execPath, ['-e', '0']).pid;
+    assert.ok(ended > 0, `a process that has ended: ${String(ended)}`);
+    const endedRuns = Array.from({ length: KEPT_RUN_DIRECTORIES + 2 }, (_, at) => `${1000 + at}-${ended}`);
+    // The oldest by start time, which is not the order the directory lists them in.
+    const live = `999-${String(process.pid)}`;
+    for (const entry of [...endedRuns, live, 'stray']) {
+      mkdirSync(join(runs, entry, 'engine-0'), { recursive: true });
+      writeFileSync(join(runs, entry, 'engine-0', 'engine.log'), entry);
+    }
+    sweepRunDirectories(runs);
+    assert.deepEqual(
+      readdirSync(runs).sort(),
+      [...endedRuns.slice(2), live].sort(),
+      'the five newest ended runs and the one still going stay, and the rest go',
+    );
+    assert.equal(
+      readFileSync(join(runs, endedRuns.at(-1) ?? '', 'engine-0', 'engine.log'), 'utf8'),
+      endedRuns.at(-1),
+      'with their logs',
+    );
+  } finally {
+    rmSync(runs, { recursive: true, force: true });
+  }
 }
 
 function testOnlyOurOwnAutoloadIsRewritten(): void {
@@ -40990,7 +41038,14 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     "gdUnit4's own code by its meaning, so it does not read as a crash",
   );
   assert.equal(exitNamed(101), "101 (gdUnit4's code for orphan nodes left behind)", 'orphans');
-  assert.equal(exitNamed(3), '3', 'a code nothing names stays a number');
+  assert.equal(
+    exitNamed(5),
+    "5 (a code neither Godot nor gdUnit4 ends with, so most likely a quit(5) in the project's code the engine ran)",
+    'a small code nothing of ours ends with is the project asking for it',
+  );
+  assert.equal(exitNamed(1), '1', "the engine's own failure stays a number");
+  assert.equal(exitNamed(255), '255', 'and so does its failure at start');
+  assert.equal(exitNamed(70000), '70000', 'a code nothing names stays a number');
   assert.equal(
     judgeEngine(readRun(rows([1])), declaredRows, { code: 0xc000012d, signal: null, ended: null }).starved,
     true,
@@ -42957,7 +43012,11 @@ function testASpreadBenchGathersTheTableItPlaysAlone(): void {
     );
     const error = broken('error');
     assert.match(error, /^ {2}worker-2: it printed an engine error, the first "worker two broke"$/m, error);
-    assert.match(error, /^Every engine's output is kept under .+spread-runs.+ until the next run\.$/m, error);
+    assert.match(
+      error,
+      /^Every engine's output is kept under .+spread-runs.+ until 5 later runs have failed\.$/m,
+      error,
+    );
     const workerLog = /^what worker-0 printed: (.+)$/m.exec(error)?.[1] ?? '';
     const workerSaid = readFileSync(workerLog.trim(), 'utf8');
     assert.match(
@@ -43173,7 +43232,7 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     );
     assert.match(
       noisy.said,
-      /^Every engine's output is kept under .*test-runs[\\/]\d+-\d+ until the next run\.$/m,
+      /^Every engine's output is kept under .*test-runs[\\/]\d+-\d+ until 5 later runs have failed\.$/m,
       noisy.said,
     );
 
@@ -43287,6 +43346,10 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     assert.equal(quiet.status, 0, quiet.said);
     assert.match(quiet.said, /^Passed: 1 case in 1 suite across 1 engine, /m, quiet.said);
     assert.ok(!quiet.said.includes('frames per second: 4f2a'), quiet.said);
+    // The failed runs above keep their logs, so what this one leaves is read against them.
+    const runsOf = (): string[] =>
+      existsSync(join(state, 'test-runs')) ? readdirSync(join(state, 'test-runs')).sort() : [];
+    const before = runsOf();
     const told = test('tests/says_test.gd', '--print-output');
     assert.equal(told.status, 0, told.said);
     assert.match(
@@ -43298,11 +43361,7 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       !told.said.includes(String.fromCharCode(0x1b)),
       'without the codes that clear the screen and colour the lines',
     );
-    assert.equal(
-      existsSync(join(state, 'test-runs')) && readdirSync(join(state, 'test-runs')).length > 0,
-      false,
-      'and the run still keeps no logs once it has printed them',
-    );
+    assert.deepEqual(runsOf(), before, 'and the run still keeps no logs once it has printed them');
 
     const reversed = test('tests/ok_test.gd', 'tests/declared_test.gd', '--order', 'reversed');
     assert.match(reversed.said, /over 1 engine, in reverse order of path\.$/m, reversed.said);
@@ -43505,7 +43564,9 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     );
     const gateSaid = `${inGate.stdout}${inGate.stderr}`;
     assert.equal(inGate.status, 1, gateSaid);
-    const keptUnder = /^Every engine's output is kept under (.+) until the next run\.$/m.exec(gateSaid)?.[1];
+    const keptUnder = /^Every engine's output is kept under (.+) until 5 later runs have failed\.$/m.exec(
+      gateSaid,
+    )?.[1];
     const mainRuns = join(checkouts, 'main', 'game', '.godot', 'gdharness', 'test-runs');
     assert.equal(dirname(keptUnder ?? ''), mainRuns, `named beside the main checkout: ${gateSaid}`);
     const namedLog = /^everything it printed: (.+)$/m.exec(gateSaid)?.[1] ?? '';
@@ -60785,6 +60846,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFinishedRunCanStillBeRead,
   testOnlyOurOwnAutoloadIsRewritten,
   testTheLoaderPassesAGamesOwnLint,
+  testAFailedRunsLogsOutlastTheNextRun,
   testAnExitCodeOutlivesTheServerThatSawIt,
   testRunNotesAreKeptPerProject,
   testAStopThatSignalsNothingSaysSo,
