@@ -15,10 +15,11 @@ import { codeOf } from './gdscript-source.js';
 /**
  * The engine's own lines saying what it still held as it exited. One instance is "1 ObjectDB
  * instance was leaked", which a pattern for the plural let through, so a run keeping one object
- * passed.
+ * passed. A server's own objects are counted apart, as `3 RIDs of type "CanvasItem" were leaked.`
+ * for three Node2D never freed, and a RID made through a server and never freed shows only there.
  */
 export const EXIT_LEAK =
-  /ObjectDB instances? (?:was |were )?leaked at exit|resources? still in use at exit|Pages in use exist at exit/;
+  /ObjectDB instances? (?:was |were )?leaked at exit|resources? still in use at exit|Pages in use exist at exit|RIDs? of type ["'][^"']+["'] (?:was|were) leaked/;
 
 /**
  * What the test runner's markers print as the engine's shutdown clears the newest script and the

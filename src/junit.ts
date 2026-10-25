@@ -843,7 +843,10 @@ const PRINTED_DICTIONARY = /^\{\n\t[\s\S]*\n {2}\}$/;
 /** The orphans one case or a suite's hooks left, as the runner named them. */
 export interface OrphansLeft {
   readonly suite: string;
-  /** The case, as gdUnit4 names it on its verdict line, or `after` for the suite's hooks. */
+  /**
+   * The case, as gdUnit4 names it on its verdict line, or the hook: `before` or `after`, and
+   * `before or after` in a suite whose cases never began, where the two cannot be told apart.
+   */
   readonly during: string;
   readonly count: number;
   /** Each node's class, its name and its script, as `Node "Sandbox" of res://sandbox.gd`. */
@@ -862,11 +865,18 @@ export function orphansLeftOn(line: string): OrphansLeft | null {
   return { suite: named[1] ?? '', during: named[2] ?? '', count: Number(named[3]), nodes: named[4] ?? '' };
 }
 
+const HOOKS_LEFT = new Map([
+  ['before', 'before()'],
+  ['after', 'after()'],
+  ['before or after', 'before() or after()'],
+]);
+
 /** The sentences naming what [param left] left behind and what frees it. */
 export function orphansLeftSaid(left: OrphansLeft): string {
   const nodes = left.count === 1 ? '1 node' : `${String(left.count)} nodes`;
-  const where = left.during === 'after' ? `${left.suite}'s hooks` : `${left.suite} > ${left.during}`;
-  return `${where} left ${nodes} neither freed nor in the tree, which gdUnit4 counts as orphans: ${left.nodes}. Free each one, or make it with auto_free(), which frees it once the case is over.`;
+  const hook = HOOKS_LEFT.get(left.during);
+  const where = hook === undefined ? `${left.suite} > ${left.during}` : `${left.suite}'s ${hook}`;
+  return `${where} left ${nodes} neither freed nor in the tree, which gdUnit4 counts as orphans: ${left.nodes}. Free each one, or make it with auto_free(), which frees it once the ${hook === undefined ? 'case' : 'suite'} is over.`;
 }
 
 /** One suite that finished with nodes neither freed nor in the tree, and how many. */
