@@ -23,17 +23,69 @@ interface Call {
 const current = new AsyncLocalStorage<Call>();
 
 /**
- * Runs [param answer] with [param signal] as the call's own, and [param progress] as the way it
- * reports, which is there only when the client asked for progress with a token.
+ * How long a call whose client asked for progress goes without a notification before it is sent
+ * one saying it is still going. Claude Code ends a call that says nothing for thirty minutes, and
+ * the SDK's own default is a minute.
  */
-export function withCallSignal<T>(
+export const CALL_HEARTBEAT_MS = 20_000;
+
+/** The message a call of [param tool] and [param op] is sent [param elapsedMs] in. */
+export function stillGoingSaid(tool: string, op: string | null, elapsedMs: number): string {
+  const seconds = Math.floor(elapsedMs / 1000);
+  const took = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${op === null || op === '' ? tool : `${tool} ${op}`} is still going; ${took} in.`;
+}
+
+/** What a call says, and how often, when it has said nothing else for that long. */
+export interface StillGoing {
+  readonly everyMs: number;
+  readonly said: (elapsedMs: number) => string;
+}
+
+/**
+ * Runs [param answer] with [param signal] as the call's own, and [param progress] as the way it
+ * reports, which is there only when the client asked for progress with a token. Such a call is
+ * also sent [param still] whenever it has said nothing for its interval: only the calls that
+ * reported for themselves were heard during a long wait, so a game watched for forty-five minutes
+ * was cut off at thirty while it was still running.
+ */
+export async function withCallSignal<T>(
   signal: AbortSignal | undefined,
   answer: () => Promise<T>,
   progress?: CallProgress,
+  still?: StillGoing,
 ): Promise<T> {
-  return signal === undefined && progress === undefined
-    ? answer()
-    : current.run({ signal, progress: progress === undefined ? undefined : risingOnly(progress) }, answer);
+  if (progress === undefined) {
+    return signal === undefined ? answer() : current.run({ signal, progress: undefined }, answer);
+  }
+  const began = Date.now();
+  const rising = risingOnly(progress);
+  let going = still;
+  let quiet: NodeJS.Timeout | undefined;
+  const rearm = (): void => {
+    clearTimeout(quiet);
+    if (going === undefined) {
+      return;
+    }
+    const { everyMs, said } = going;
+    quiet = setTimeout(() => {
+      const elapsed = Date.now() - began;
+      told(Math.floor(elapsed / 1000), said(elapsed));
+    }, everyMs);
+    quiet.unref();
+  };
+  const told: CallProgress = (number, message) => {
+    rising(number, message);
+    rearm();
+  };
+  rearm();
+  try {
+    return await current.run({ signal, progress: told }, answer);
+  } finally {
+    // A ticker of the call's own can still fire once after it has answered.
+    going = undefined;
+    clearTimeout(quiet);
+  }
 }
 
 /**
