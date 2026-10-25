@@ -22,6 +22,7 @@ import {
   EngineUsageError,
   godotNamed,
   inTurns,
+  KEPT_RUN_DIRECTORIES,
   memoryAvailable,
   plural,
   resPathOf,
@@ -432,6 +433,8 @@ function failed(
   for (const engine of engines) {
     console.log(`what ${engine.name} printed: ${engine.log}`);
   }
-  console.log(`Every engine's output is kept under ${runDirectory} until the next run.`);
+  console.log(
+    `Every engine's output is kept under ${runDirectory} until ${String(KEPT_RUN_DIRECTORIES)} later runs have failed.`,
+  );
   return 1;
 }

@@ -97,4 +97,4 @@ It fails after the gathering when the gathering engine printed an error or exite
 other than 0, or never asked for an arm the workers played. The gathering engine's output is
 printed either way, followed by the faults, so a table printed by a run that failed is marked as
 one. Each engine's output is in `.godot/gdharness/spread-runs/<start>-<pid>/<engine>/engine.log`,
-which a failed run names and keeps until the next run.
+which a failed run names and keeps until five later runs have failed.

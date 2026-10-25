@@ -29,6 +29,7 @@ import {
   godotNamed,
   homeOf,
   inTurns,
+  KEPT_RUN_DIRECTORIES,
   MOST_ENGINES,
   memoryAvailable,
   plural,
@@ -1022,7 +1023,9 @@ function report(
     across.length + uncollected.length,
   );
   console.log(`Failed: ${plural(problems, 'problem')}, listed above. Ran ${totals}`);
-  console.log(`Every engine's output is kept under ${logs.shown} until the next run.`);
+  console.log(
+    `Every engine's output is kept under ${logs.shown} until ${String(KEPT_RUN_DIRECTORIES)} later runs have failed.`,
+  );
   return 1;
 }
 

@@ -58,8 +58,10 @@ export async function startTimesOf(pids: readonly number[]): Promise<Map<number,
  * can be read: the boot time the kernel gives in whole seconds, plus the start in ticks after it, as
  * psutil's create_time() reads it.
  *
- * Up to a second early and never late, and the same number in every process that asks, since the
- * boot time is the kernel's. `ps -o lstart` adds the same two and then cuts the sum to the second,
+ * Never late, and early by up to a second for the boot time's cut and a tick for the start's, as
+ * [method linuxStartEarliest] answers; a CI runner dated one 1008 ms early. The same number in every
+ * process that asks, since the boot time is the kernel's. `ps -o lstart` adds the same two and then
+ * cuts the sum to the second,
  * up to two seconds early: on a CI runner the process a game restarted itself into was dated before
  * the run that made it had begun, past the second a comparison allows, and refused as older than the
  * run. A boot instant worked out as now less the uptime is finer, but each process works out its own
@@ -92,6 +94,14 @@ export async function linuxStartTimes(pids: readonly number[]): Promise<Map<numb
     }
   }
   return began;
+}
+
+/**
+ * The most [method linuxStartTimes] can date a start early, in milliseconds: just under a second
+ * for the boot time, cut to the second, and just under a tick for the start, cut to the tick.
+ */
+export async function linuxStartEarliest(): Promise<number> {
+  return 1000 + Math.ceil(1000 / ((await ticksPerSecond()) ?? 100));
 }
 
 let ticksAnswered: number | undefined;

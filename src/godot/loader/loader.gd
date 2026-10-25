@@ -1,5 +1,5 @@
 extends Node
-## Brings gdharness's runtime up in a debug build that has its addon, and does nothing anywhere else.
+## Brings gdharness's runtime up in a debug build that has its addon, and does nothing elsewhere.
 ##
 ## `project.godot` names this file rather than the addon's script. `addons/` is often not committed
 ## and exports leave it out, so an entry naming the addon boots a fresh clone or an exported build

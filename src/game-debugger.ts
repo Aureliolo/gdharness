@@ -823,8 +823,8 @@ export class GameDebugger {
   /**
    * What [param expression] comes to at [param frame], worked out by the game itself with the
    * frame's locals, the globals and every global class in scope and the frame's instance as self.
-   * Values come back as text, and an object as its class and id only, so this is what reads into
-   * one: `wave.spawned` where the frame's variables show `wave` as `<RefCounted#…>`.
+   * Values come back as text, and an object as its class and instance id only, so this is what
+   * reads into one: `wave.spawned` where the frame's variables show `wave` as `<RefCounted#…>`.
    */
   private async evaluate(frame: number, expression: string): Promise<DebugAnswer> {
     const held = this.held;

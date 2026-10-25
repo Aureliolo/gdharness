@@ -2,7 +2,7 @@ import { readlinkSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
-import { linuxStartTimes, readCommandLine } from './process-children.js';
+import { linuxStartEarliest, linuxStartTimes, readCommandLine } from './process-children.js';
 import { runHidden, spawnHidden } from './spawn.js';
 
 /**
@@ -47,8 +47,9 @@ export interface Followed {
  * The one process in [param listed] that [param exitedPid] restarted itself into as it exited, or
  * null when there is not exactly one: the engine [param engine] run again, started after
  * [param notBefore] (before the exited process existed, a number its orphans kept is not a link to
- * it) and no earlier than [param RESTARTED_WITHIN_MS] before [param exitedAt]. [param secondsOnly]
- * for a listing whose starts are cut to the second.
+ * it) and no earlier than [param RESTARTED_WITHIN_MS] before [param exitedAt]. [param early] is how
+ * many milliseconds the listing can date a start before it happened: none for one read to the
+ * instant, a second for one cut to the second, and a second and a tick for Linux's.
  */
 export function successorAmong(
   listed: readonly ListedSuccessor[],
@@ -56,17 +57,16 @@ export function successorAmong(
   engine: string,
   notBefore: number,
   exitedAt: number,
-  secondsOnly: boolean,
+  early: number,
 ): ListedSuccessor | null {
-  const slack = secondsOnly ? 1000 : 0;
   const fold = (name: string): string => (process.platform === 'win32' ? name.toLowerCase() : name);
   const wanted = fold(basename(engine.replaceAll('\\', '/')));
   const found = listed.filter(
     (one) =>
       one.pid !== exitedPid &&
       fold(readCommandLine(one.command).executable) === wanted &&
-      one.startedAt + slack >= notBefore &&
-      one.startedAt + slack >= exitedAt - RESTARTED_WITHIN_MS,
+      one.startedAt + early >= notBefore &&
+      one.startedAt + early >= exitedAt - RESTARTED_WITHIN_MS,
   );
   return found.length === 1 ? (found[0] ?? null) : null;
 }
@@ -176,7 +176,7 @@ async function followOnWindows(
       candidates.push({ pid: Number(fields[1]), startedAt: Number(fields[2]), command: fields[3].trim() });
     }
   }
-  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, false);
+  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, 0);
   holder.stdin.end(successor === null ? '\n' : `${String(successor.pid)}\n`);
   if (successor === null) {
     return null;
@@ -195,9 +195,10 @@ async function followOnPosix(
   exitedAt: number,
   transcript: string,
 ): Promise<Followed | null> {
-  // Linux dates a start from /proc, up to a second early, where its ps dates it up to two seconds
-  // early, past the slack; see linuxStartTimes. macOS's ps cuts it to the second.
+  // Linux dates a start from /proc, up to a second and a tick early, where its ps dates it up to two
+  // seconds early; see linuxStartTimes. macOS's ps cuts it to the second.
   const linux = process.platform === 'linux';
+  const early = linux ? await linuxStartEarliest() : 1000;
   let printed: string;
   try {
     // In the C locale, since lstart is a date in words and the words are the ones Date.parse reads.
@@ -232,7 +233,7 @@ async function followOnPosix(
   }
   // Asked of the engines that started in time only, since each answer is a look at another process.
   const timely = listed.filter(
-    (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, true) !== null,
+    (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, early) !== null,
   );
   const ours = canonical(transcript);
   const candidates: ListedSuccessor[] = [];
@@ -242,7 +243,7 @@ async function followOnPosix(
       candidates.push(one);
     }
   }
-  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, true);
+  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, early);
   if (successor === null) {
     return null;
   }

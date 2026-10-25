@@ -97,9 +97,11 @@ import {
   EngineUsageError,
   heldToCores,
   inTurns,
+  KEPT_RUN_DIRECTORIES,
   macMemoryLevel,
   memoryRoomOf,
   roomFor,
+  sweepRunDirectories,
   windowsCommitLeft,
 } from '../src/engine-launch.js';
 import {
@@ -195,6 +197,7 @@ import {
   ancestorsIn,
   childrenOf,
   descendantsIn,
+  linuxStartEarliest,
   listingFailure,
   type ProcessTree,
   parseProcessTable,
@@ -10073,11 +10076,14 @@ async function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): Promise<void
       at >= before - STARTED_AFTER_ANNOUNCING_MS && at <= Date.now() + STARTED_AFTER_ANNOUNCING_MS,
       `and the start it gives is the one just seen, to the second the platform rounds to: ${at} against ${before}`,
     );
-    // And within the second POSIX dates a start to, and never late. ps dated a Linux start from the
-    // boot time in whole seconds and then cut it to the second, up to two seconds early, and a
-    // game's restart was refused as having begun before the run that made it.
+    // And within what the platform's reading can be early by, and never late. ps dated a Linux start
+    // from the boot time in whole seconds and then cut it to the second, up to two seconds early, and
+    // a game's restart was refused as having begun before the run that made it. /proc's reading is
+    // cut to the second and the tick, and a runner dated one 1008 ms early; macOS's ps cuts to the
+    // second.
     const after = Date.now();
-    const early = process.platform === 'win32' ? 50 : 1000;
+    const early =
+      process.platform === 'win32' ? 50 : process.platform === 'linux' ? await linuxStartEarliest() : 1000;
     assert.ok(
       at >= before - early && at <= after,
       `dated no more than ${early} ms early and never late: ${at} against ${before} to ${after}`,
@@ -13025,48 +13031,57 @@ function testASuccessorIsTheEngineStartedAsTheGameExited(): void {
   const other = { pid: 24, startedAt: exitedAt - 40, command: 'node helper.js' };
   const orphan = { pid: 25, startedAt: notBefore - 5, command: run('--path /p') };
   assert.deepEqual(
-    successorAmong([worker, restarted, other, orphan], 11, engine, notBefore, exitedAt, false),
+    successorAmong([worker, restarted, other, orphan], 11, engine, notBefore, exitedAt, 0),
     restarted,
     'the engine started as the game exited',
   );
   assert.equal(
-    successorAmong([worker, other], 11, engine, notBefore, exitedAt, false),
+    successorAmong([worker, other], 11, engine, notBefore, exitedAt, 0),
     null,
     'a worker started long before the exit is not the successor',
   );
   const late = { ...worker, startedAt: exitedAt - RESTARTED_WITHIN_MS };
   assert.deepEqual(
-    successorAmong([late], 11, engine, notBefore, exitedAt, false),
+    successorAmong([late], 11, engine, notBefore, exitedAt, 0),
     late,
     'the edge of the window',
   );
   assert.equal(
-    successorAmong([{ ...late, startedAt: late.startedAt - 1 }], 11, engine, notBefore, exitedAt, false),
+    successorAmong([{ ...late, startedAt: late.startedAt - 1 }], 11, engine, notBefore, exitedAt, 0),
     null,
     'and one before it',
   );
   const close = { ...orphan, startedAt: exitedAt - 10 };
   assert.equal(
-    successorAmong([{ ...close, startedAt: notBefore - 1 }], 11, engine, notBefore, notBefore + 100, false),
+    successorAmong([{ ...close, startedAt: notBefore - 1 }], 11, engine, notBefore, notBefore + 100, 0),
     null,
     'a process older than the game is no successor of it, however near its exit',
   );
   assert.equal(
-    successorAmong([restarted, { ...restarted, pid: 26 }], 11, engine, notBefore, exitedAt, false),
+    successorAmong([restarted, { ...restarted, pid: 26 }], 11, engine, notBefore, exitedAt, 0),
     null,
     'two candidates are not chosen between',
   );
   assert.equal(
-    successorAmong([{ ...restarted, pid: 11 }], 11, engine, notBefore, exitedAt, false),
+    successorAmong([{ ...restarted, pid: 11 }], 11, engine, notBefore, exitedAt, 0),
     null,
     'the exited process is not its own successor',
   );
   const cut = { ...restarted, startedAt: exitedAt - RESTARTED_WITHIN_MS - 900 };
-  assert.equal(successorAmong([cut], 11, engine, notBefore, exitedAt, false), null, 'to the millisecond');
+  assert.equal(successorAmong([cut], 11, engine, notBefore, exitedAt, 0), null, 'to the millisecond');
   assert.deepEqual(
-    successorAmong([cut], 11, engine, notBefore, exitedAt, true),
+    successorAmong([cut], 11, engine, notBefore, exitedAt, 1000),
     cut,
     'and a second of slack where starts are cut to the second',
+  );
+  // Linux's reading is cut twice, the boot time to the second and the start to the tick, and a CI
+  // runner dated a start 1008 ms early.
+  const ticked = { ...restarted, startedAt: exitedAt - RESTARTED_WITHIN_MS - 1008 };
+  assert.equal(successorAmong([ticked], 11, engine, notBefore, exitedAt, 1000), null, 'past a second');
+  assert.deepEqual(
+    successorAmong([ticked], 11, engine, notBefore, exitedAt, 1010),
+    ticked,
+    'is within the second and the tick that reading can be early by',
   );
 }
 
@@ -16108,10 +16123,16 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
       if (before === undefined || asNumber(one.value) === 700) {
         continue;
       }
-      const rate = (asNumber(one.value) - asNumber(before.value)) / (one.game_time - before.game_time);
-      // Game time is answered to a ten-thousandth of a second, a twentieth of the rate over a short
-      // frame.
-      assert.ok(Math.abs(rate + 280) < 14, `frame ${one.frame} moved at ${rate} a second: ${slide.said}`);
+      const took = one.game_time - before.game_time;
+      const rate = (asNumber(one.value) - asNumber(before.value)) / took;
+      // Game time is answered whole, so what is left is the position, held as a 32-bit float: one
+      // step of it between 512 and 1024 is 2^-14, which a frame a tenth of a millisecond long, as a
+      // macOS runner gave, turns into most of a pixel a second.
+      const most = 0.5 + 2 ** -14 / took;
+      assert.ok(
+        Math.abs(rate + 280) < most,
+        `frame ${one.frame} moved at ${rate} a second over ${took} s: ${slide.said}`,
+      );
     }
     // The call that started the slide is noted beside the last reading before it ran, and the tween
     // it made steps in that frame, so the first move is the very next reading. The watch, the wait
@@ -19826,6 +19847,49 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
  * loader stays on disk and correct, and a suite that exercises the script rather than reading
  * project.godot passes either way.
  */
+function testTheLoaderPassesAGamesOwnLint(): void {
+  // The loader is written outside addons/, where a game's own GDScript gate reads it, and it has to
+  // stay byte for byte what gdharness ships, so the game cannot rewrap it. gdlint's default line
+  // length is 100, and this repository's own 110 let a 101-character line through.
+  const lines = readFileSync(shippedLoader(), 'utf8').split(/\r?\n/);
+  assert.ok(lines.length > 20, `the shipped loader is read: ${lines.length} lines`);
+  const long = lines.flatMap((line, at) => (line.length > 100 ? [`${at + 1}: ${line.length}`] : []));
+  assert.deepEqual(long, [], "every line of the loader is within gdlint's default 100 characters");
+}
+
+/**
+ * The sweep before a run keeps the logs of the most recent runs that ended without passing. It
+ * removed all of them, so running the one suite that had crashed an engine, to reproduce it, took
+ * the log that explained the crash.
+ */
+function testAFailedRunsLogsOutlastTheNextRun(): void {
+  const runs = mkdtempSync(join(tmpdir(), 'gdharness-kept-runs-'));
+  try {
+    const ended = spawnSyncHidden(process.execPath, ['-e', '0']).pid;
+    assert.ok(ended > 0, `a process that has ended: ${String(ended)}`);
+    const endedRuns = Array.from({ length: KEPT_RUN_DIRECTORIES + 2 }, (_, at) => `${1000 + at}-${ended}`);
+    // The oldest by start time, which is not the order the directory lists them in.
+    const live = `999-${String(process.pid)}`;
+    for (const entry of [...endedRuns, live, 'stray']) {
+      mkdirSync(join(runs, entry, 'engine-0'), { recursive: true });
+      writeFileSync(join(runs, entry, 'engine-0', 'engine.log'), entry);
+    }
+    sweepRunDirectories(runs);
+    assert.deepEqual(
+      readdirSync(runs).sort(),
+      [...endedRuns.slice(2), live].sort(),
+      'the five newest ended runs and the one still going stay, and the rest go',
+    );
+    assert.equal(
+      readFileSync(join(runs, endedRuns.at(-1) ?? '', 'engine-0', 'engine.log'), 'utf8'),
+      endedRuns.at(-1),
+      'with their logs',
+    );
+  } finally {
+    rmSync(runs, { recursive: true, force: true });
+  }
+}
+
 function testOnlyOurOwnAutoloadIsRewritten(): void {
   assert.equal(autoloadIsOurs('res://gdharness/loader.gd'), true, 'the loader gdharness writes');
   assert.equal(
@@ -40974,7 +41038,14 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     "gdUnit4's own code by its meaning, so it does not read as a crash",
   );
   assert.equal(exitNamed(101), "101 (gdUnit4's code for orphan nodes left behind)", 'orphans');
-  assert.equal(exitNamed(3), '3', 'a code nothing names stays a number');
+  assert.equal(
+    exitNamed(5),
+    "5 (a code neither Godot nor gdUnit4 ends with, so most likely a quit(5) in the project's code the engine ran)",
+    'a small code nothing of ours ends with is the project asking for it',
+  );
+  assert.equal(exitNamed(1), '1', "the engine's own failure stays a number");
+  assert.equal(exitNamed(255), '255', 'and so does its failure at start');
+  assert.equal(exitNamed(70000), '70000', 'a code nothing names stays a number');
   assert.equal(
     judgeEngine(readRun(rows([1])), declaredRows, { code: 0xc000012d, signal: null, ended: null }).starved,
     true,
@@ -42941,7 +43012,11 @@ function testASpreadBenchGathersTheTableItPlaysAlone(): void {
     );
     const error = broken('error');
     assert.match(error, /^ {2}worker-2: it printed an engine error, the first "worker two broke"$/m, error);
-    assert.match(error, /^Every engine's output is kept under .+spread-runs.+ until the next run\.$/m, error);
+    assert.match(
+      error,
+      /^Every engine's output is kept under .+spread-runs.+ until 5 later runs have failed\.$/m,
+      error,
+    );
     const workerLog = /^what worker-0 printed: (.+)$/m.exec(error)?.[1] ?? '';
     const workerSaid = readFileSync(workerLog.trim(), 'utf8');
     assert.match(
@@ -43157,7 +43232,7 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     );
     assert.match(
       noisy.said,
-      /^Every engine's output is kept under .*test-runs[\\/]\d+-\d+ until the next run\.$/m,
+      /^Every engine's output is kept under .*test-runs[\\/]\d+-\d+ until 5 later runs have failed\.$/m,
       noisy.said,
     );
 
@@ -43271,6 +43346,10 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     assert.equal(quiet.status, 0, quiet.said);
     assert.match(quiet.said, /^Passed: 1 case in 1 suite across 1 engine, /m, quiet.said);
     assert.ok(!quiet.said.includes('frames per second: 4f2a'), quiet.said);
+    // The failed runs above keep their logs, so what this one leaves is read against them.
+    const runsOf = (): string[] =>
+      existsSync(join(state, 'test-runs')) ? readdirSync(join(state, 'test-runs')).sort() : [];
+    const before = runsOf();
     const told = test('tests/says_test.gd', '--print-output');
     assert.equal(told.status, 0, told.said);
     assert.match(
@@ -43282,11 +43361,7 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
       !told.said.includes(String.fromCharCode(0x1b)),
       'without the codes that clear the screen and colour the lines',
     );
-    assert.equal(
-      existsSync(join(state, 'test-runs')) && readdirSync(join(state, 'test-runs')).length > 0,
-      false,
-      'and the run still keeps no logs once it has printed them',
-    );
+    assert.deepEqual(runsOf(), before, 'and the run still keeps no logs once it has printed them');
 
     const reversed = test('tests/ok_test.gd', 'tests/declared_test.gd', '--order', 'reversed');
     assert.match(reversed.said, /over 1 engine, in reverse order of path\.$/m, reversed.said);
@@ -43489,7 +43564,9 @@ function testTheTestCommandRunsAndJudgesAProject(): void {
     );
     const gateSaid = `${inGate.stdout}${inGate.stderr}`;
     assert.equal(inGate.status, 1, gateSaid);
-    const keptUnder = /^Every engine's output is kept under (.+) until the next run\.$/m.exec(gateSaid)?.[1];
+    const keptUnder = /^Every engine's output is kept under (.+) until 5 later runs have failed\.$/m.exec(
+      gateSaid,
+    )?.[1];
     const mainRuns = join(checkouts, 'main', 'game', '.godot', 'gdharness', 'test-runs');
     assert.equal(dirname(keptUnder ?? ''), mainRuns, `named beside the main checkout: ${gateSaid}`);
     const namedLog = /^everything it printed: (.+)$/m.exec(gateSaid)?.[1] ?? '';
@@ -48595,8 +48672,9 @@ function testEveryToolNamedInProseIsATool(): void {
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
   // editor caches its class reference in, the name every resource stores, and the gdUnit4 call a
   // suite that drives a scene makes, which is what puts it in the windowed engine, and the project
-  // setting that turns that guess off. Named one by one rather than matched by a pattern, so a new
-  // word of this shape has to be looked at once and called a tool or called vocabulary.
+  // setting that turns that guess off, and the engine setting naming a file laid over the project's
+  // settings, which a write keeps out of project.godot. Named one by one rather than matched by a
+  // pattern, so a new word of this shape has to be looked at once and called a tool or vocabulary.
   const notTools = new Set([
     'project_path',
     'project_classes',
@@ -48628,6 +48706,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'editor_servers',
     'scene_runner',
     'scene_runner_needs_window',
+    'project_settings_override',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
@@ -50195,10 +50274,19 @@ async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
     'gdscript/warnings/unsafe_call_argument=0\ngdscript/warnings/unused_variable=1\n' +
     'gdscript/warnings/untyped_declaration=1\n';
   const filter = 'textures/canvas_textures/default_texture_filter=1\n';
+  // The engine writes a dictionary with its keys sorted, and gdUnit4 runs session hooks in the order
+  // listed, so these two are listed the other way round.
+  const hooks =
+    'hooks/session_hooks={\n"res://tests/headless_hook.gd": true,\n"res://addons/kit/warm_hook.gd": true\n}\n';
+  // What an override file lays over the project is what the engine holds and saves. A game keeps a
+  // player's window there, in user://; one under res:// is laid over the same way and stays in the
+  // fixture's directory.
+  const override = 'config/project_settings_override="res://player.cfg"\n';
+  writeFileSync(join(project, 'player.cfg'), '[display]\n\nwindow/size/mode=3\n');
   writeFileSync(
     join(project, 'project.godot'),
-    'config_version=5\n\n[application]\n\nconfig/name="Lines"\n\n' +
-      `[debug]\n\n${warning}\n[rendering]\n\n${filter}`,
+    `config_version=5\n\n[application]\n\nconfig/name="Lines"\n${override}\n` +
+      `[debug]\n\n${warning}\n[gdunit4]\n\n${hooks}\n[rendering]\n\n${filter}`,
   );
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
@@ -50224,6 +50312,14 @@ async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
     assert.ok(
       file().includes(`[rendering]\n\n${filter}`),
       `and so does a section holding only one: ${file()}`,
+    );
+    assert.ok(
+      file().includes(`[gdunit4]\n\n${hooks}`),
+      `a dictionary keeps its keys in the order the file had them: ${file()}`,
+    );
+    assert.ok(
+      !file().includes('window/size/mode') && !file().includes('[display]'),
+      `and what the override file laid over the project stays out of it: ${file()}`,
     );
 
     const tagged = await settings({
@@ -60749,6 +60845,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testParametersReachTheEngine,
   testAFinishedRunCanStillBeRead,
   testOnlyOurOwnAutoloadIsRewritten,
+  testTheLoaderPassesAGamesOwnLint,
+  testAFailedRunsLogsOutlastTheNextRun,
   testAnExitCodeOutlivesTheServerThatSawIt,
   testRunNotesAreKeptPerProject,
   testAStopThatSignalsNothingSaysSo,

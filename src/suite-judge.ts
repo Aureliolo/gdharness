@@ -418,6 +418,13 @@ const GDUNIT_EXITS: ReadonlyMap<number, string> = new Map([
   [105, "gdUnit4's code for scripts that did not compile"],
 ]);
 
+/**
+ * The codes the engine itself ends with: 1 for a failure, 255 for one at start. Any other small code
+ * an engine running suites exits with was asked for by something it ran, and an engine that ended
+ * on 5 at the start of a suite, with nothing said of it, was taken for a crash.
+ */
+const GODOT_EXITS = new Set([1, 255]);
+
 /** The exit code as a person reads it: a Windows status by name and in hex, gdUnit4's by meaning. */
 export function exitNamed(code: number): string {
   const unsigned = code >>> 0;
@@ -426,7 +433,13 @@ export function exitNamed(code: number): string {
     return `0x${unsigned.toString(16).toUpperCase()} (${status})`;
   }
   const gdunit = GDUNIT_EXITS.get(code);
-  return gdunit === undefined ? String(code) : `${String(code)} (${gdunit})`;
+  if (gdunit !== undefined) {
+    return `${String(code)} (${gdunit})`;
+  }
+  if (code > 0 && code < 256 && !GODOT_EXITS.has(code)) {
+    return `${String(code)} (a code neither Godot nor gdUnit4 ends with, so most likely a quit(${String(code)}) in the project's code the engine ran)`;
+  }
+  return String(code);
 }
 
 /**

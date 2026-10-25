@@ -694,12 +694,27 @@ static func _reads_the_result(asked: Variant) -> bool:
 
 ## What [param asked] reads off the object a call answered with: every variable its script declares
 ## when [param asked] is true, or the properties a list names, each a path walked from the object.
+## Off each object of a list or a dictionary the call answered with too, in the result's shape.
 ##
-## In the same answer because an object handed back is otherwise only its class and an id, and
-## reading one field of it meant finding the same object again by a path into the game's private
-## state, which works only where the caller already knows a key. A name that is not there is listed
-## rather than refusing the answer, since the call has run by then and its result is what was asked.
+## In the same answer because an object handed back is otherwise only its class and its instance
+## id, and reading one field of it meant finding the same object again by a path into the game's
+## private state, which works only where the caller already knows a key; a catalogue of records
+## handed back as a list took one call per record. A name that is not there is listed rather than
+## refusing the answer, since the call has run by then and its result is what was asked.
 func _read_off_result(result: Variant, asked: Variant) -> Dictionary:
+	var missing: Array[String] = []
+	if result is Array:
+		var list: Array = result
+		var read_each: Array = []
+		for index: int in list.size():
+			read_each.append(_read_off_element(list[index], "[%d]" % index, asked, missing))
+		return _read_off_many(read_each, list, "Array", missing)
+	if result is Dictionary:
+		var map: Dictionary = result
+		var read_by_key: Dictionary = {}
+		for key: Variant in map:
+			read_by_key[str(key)] = _read_off_element(map[key], "[%s]" % str(key), asked, missing)
+		return _read_off_many(read_by_key, map.values(), "Dictionary", missing)
 	if result is Object and not is_instance_valid(result):
 		return {
 			"properties_note": "the call answered an object that has since been freed, so nothing was read"
@@ -710,6 +725,49 @@ func _read_off_result(result: Variant, asked: Variant) -> Dictionary:
 			"the call answered %s, which has no properties to read" % type_string(typeof(result))
 		}
 	var object: Object = result
+	var one: Dictionary = _read_off_object(object, asked)
+	missing = one["missing"]
+	var answered: Dictionary = {"result_properties": one["read"]}
+	if not missing.is_empty():
+		answered["result_properties_missing"] = missing
+	return answered
+
+
+## What was read off one element of a list or a dictionary a call answered with, or null for one
+## that is no object; why a name was not there goes into [param missing], led by [param named].
+func _read_off_element(element: Variant, named: String, asked: Variant, missing: Array[String]) -> Variant:
+	if not element is Object:
+		return null
+	if not is_instance_valid(element):
+		missing.append("%s is an object that has since been freed" % named)
+		return null
+	var object: Object = element
+	var one: Dictionary = _read_off_object(object, asked)
+	var whys: Array[String] = one["missing"]
+	for why: String in whys:
+		missing.append("%s %s" % [named, why])
+	return one["read"]
+
+
+## The answer for a list or a dictionary, [param read] holding what each element gave, unless none
+## of [param elements] is an object.
+static func _read_off_many(
+	read: Variant, elements: Array, shape: String, missing: Array[String]
+) -> Dictionary:
+	if not elements.any(func(element: Variant) -> bool: return element is Object):
+		return {
+			"properties_note":
+			"the call answered %s with no object in it, so there are no properties to read" % shape
+		}
+	var answered: Dictionary = {"result_properties": read}
+	if not missing.is_empty():
+		answered["result_properties_missing"] = missing
+	return answered
+
+
+## What [param asked] reads off [param object], under read, and why each name it could not read is
+## not there, under missing.
+func _read_off_object(object: Object, asked: Variant) -> Dictionary:
 	var wanted: Array[String] = []
 	if asked is Array:
 		for name: Variant in asked:
@@ -724,10 +782,7 @@ func _read_off_result(result: Variant, asked: Variant) -> Dictionary:
 			missing.append(str(walked["message"]))
 		else:
 			read[path] = _values.serialize(walked["value"])
-	var answered: Dictionary = {"result_properties": read}
-	if not missing.is_empty():
-		answered["result_properties_missing"] = missing
-	return answered
+	return {"read": read, "missing": missing}
 
 
 ## The variables the script attached to [param object] declares, in the order it declares them.

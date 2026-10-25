@@ -18,9 +18,33 @@ class Charter:
 	var terms: Array = ["first"]
 
 
+class Record:
+	extends RefCounted
+
+	var id: StringName
+	var worth: int
+
+	func _init(named: StringName, priced: int) -> void:
+		id = named
+		worth = priced
+
+
 var day: int = 0
 var roster: Array = [1, 2]
 var _entries: Dictionary = {"royal": Charter.new()}
+var _records: Array[Record] = [Record.new(&"lamp", 3), Record.new(&"rope", 1)]
+
+
+func records() -> Array[Record]:
+	return _records
+
+
+func priced() -> Dictionary:
+	return {"lamp": _records[0], 7: _records[1], "count": 2}
+
+
+func counts() -> Array:
+	return [1, 2]
 
 
 func advance() -> void:
@@ -83,6 +107,7 @@ func _run() -> void:
 	await _check_only_reads_are_called()
 	await _check_reading_calls_take_literal_arguments()
 	await _check_a_returned_object_is_read()
+	await _check_each_returned_object_is_read()
 
 	node._cleanup()
 	# Not checked: the directory is gone either way by the time the fixture tears itself down.
@@ -251,3 +276,61 @@ func _check_a_returned_object_is_read() -> void:
 	)
 	if not str(bracketed.get("message", "")).contains("takes its arguments under args"):
 		_fail("arguments in the brackets of the method called are refused: %s" % str(bracketed))
+
+
+## #1231: a call answering a list or a dictionary of records reads each record in the same answer,
+## and the id beside a returned object is its instance id, whatever the record calls id.
+func _check_each_returned_object_is_read() -> void:
+	var listed: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Game", "method": "records", "properties": ["id"]}
+	)
+	if listed.get("result_properties") != [{"id": &"lamp"}, {"id": &"rope"}]:
+		_fail("the id each record of a list declares is read off it: %s" % str(listed))
+	var described: Array = listed.get("result", []) if listed.get("result") is Array else []
+	var first: Dictionary = described[0] if not described.is_empty() and described[0] is Dictionary else {}
+	var records: Array = game.get("_records")
+	var instance: Object = records[0]
+	if _whole(first.get("id")) != str(instance.get_instance_id()):
+		_fail("and the id beside the object is its instance id: %s" % str(first))
+	var everything: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Game", "method": "records", "properties": true}
+	)
+	var expected: Array = [{"id": &"lamp", "worth": 3}, {"id": &"rope", "worth": 1}]
+	if everything.get("result_properties") != expected:
+		_fail("every variable of each record comes back with it: %s" % str(everything))
+	var keyed: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Game", "method": "priced", "properties": ["worth", "nope"]}
+	)
+	var missing: Array = keyed.get("result_properties_missing", [])
+	if (
+		keyed.get("result_properties") != {"lamp": {"worth": 3}, "7": {"worth": 1}, "count": null}
+		or missing.size() != 2
+		or not str(missing[0]).begins_with("[lamp] ")
+		or not str(missing[0]).ends_with("has no property nope; its script declares id, worth")
+		or not str(missing[1]).begins_with("[7] ")
+	):
+		_fail(
+			(
+				"a dictionary's records are read under its keys, and what is not there named by key: %s"
+				% str(keyed)
+			)
+		)
+	var numbers: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Game", "method": "counts", "properties": true}
+	)
+	if (
+		numbers.has("result_properties")
+		or not str(numbers.get("properties_note", "")).contains("Array with no object in it")
+	):
+		_fail("a list holding no object says so: %s" % str(numbers))
+
+
+## The text of a whole number in an answer, which comes tagged once a double cannot hold it.
+static func _whole(answered: Variant) -> String:
+	if answered is Dictionary:
+		var tagged: Dictionary = answered
+		return str(tagged.get("value"))
+	if answered is float:
+		var number: float = answered
+		return str(int(number))
+	return str(answered)

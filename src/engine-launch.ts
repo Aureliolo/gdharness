@@ -139,18 +139,33 @@ export function homeOf(projectPath: string): string {
 }
 
 /**
- * Removes what earlier runs left in [param runs], each a `<start>-<pid>` directory, other than a
- * run still going.
+ * How many directories of runs that have ended a sweep leaves. A run that passes removes its own,
+ * so those left are runs that failed or were cut off, and the next run is usually the one trying to
+ * reproduce the failure: removing every one took the log of an engine that died mid-run with it.
  */
-export function sweepRunDirectories(runs: string): void {
+export const KEPT_RUN_DIRECTORIES = 5;
+
+/**
+ * Removes what earlier runs left in [param runs], each a `<start>-<pid>` directory, other than a
+ * run still going and the [param kept] most recent of those that have ended.
+ */
+export function sweepRunDirectories(runs: string, kept = KEPT_RUN_DIRECTORIES): void {
   if (!existsSync(runs)) {
     return;
   }
+  const ended: { entry: string; started: number }[] = [];
   for (const entry of readdirSync(runs)) {
-    const pid = Number(/^\d+-(\d+)$/.exec(entry)?.[1]);
-    if (!Number.isInteger(pid) || !alive(pid)) {
+    const named = /^(\d+)-(\d+)$/.exec(entry);
+    const pid = Number(named?.[2]);
+    if (!Number.isInteger(pid)) {
       rmSync(join(runs, entry), { recursive: true, force: true });
+    } else if (!alive(pid)) {
+      ended.push({ entry, started: Number(named?.[1]) });
     }
+  }
+  ended.sort((a, b) => b.started - a.started);
+  for (const { entry } of ended.slice(kept)) {
+    rmSync(join(runs, entry), { recursive: true, force: true });
   }
 }
 
