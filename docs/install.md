@@ -292,6 +292,15 @@ suite starts sixteen engines at once would otherwise announce sixteen games unde
 answer a `runtime_*` call from whichever replied first. Set
 `gdharness/runtime/serve_script_runs` to true in `project.godot` to drive a `-s` script on purpose.
 
+The loader's node, `/root/GdharnessRuntime`, is there in every engine all the same, a script run's
+included, so whether it exists says nothing about whether gdharness can reach the game. A test that
+needs to know asks `get_node("/root/GdharnessRuntime").serving()`, which is true only while the
+runtime under it is listening.
+
+The loader lives in its own top-level folder, `gdharness/`, and the export carries it, since the
+autoload names it. A check that refuses unexpected top-level folders in an exported pack has to
+allow that one.
+
 A scene that is not the game, such as a bench, is handed to the engine the way a screen is, so it
 is served like the game unless you list its folder. Set `gdharness/runtime/quiet_scenes_under` to
 the `res://` folders of such scenes, for example `PackedStringArray("res://tests/")`; a run started

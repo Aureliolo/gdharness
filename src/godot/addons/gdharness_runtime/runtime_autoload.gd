@@ -245,6 +245,14 @@ func _wait_for_the_profiler() -> void:
 		OS.delay_msec(1)
 
 
+## Whether this runtime is listening for gdharness's server. It is not in a release build, a script
+## run, a scene the project keeps quiet, an engine `gdharness spread` started, or a game that could
+## not have its port, though the node is there in all of them, so ask this rather than whether the
+## node exists.
+func serving() -> bool:
+	return _enabled and _server != null and _server.is_listening()
+
+
 func _ready() -> void:
 	name = "GdharnessRuntime"
 	# The TCP control loop runs in _process. With the default PROCESS_MODE_INHERIT it stops
