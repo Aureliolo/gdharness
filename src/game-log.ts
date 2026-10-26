@@ -103,7 +103,28 @@ export function forAnswer(entries: readonly LogEntry[]): readonly ReportedEntry[
 function reported(entry: LogEntry): ReportedEntry {
   return entry.detail.length === 0
     ? { index: entry.index, severity: entry.severity, source: entry.source, text: entry.text }
-    : { ...entry, detail: framesCollapsed(entry.detail) };
+    : { ...entry, ...scriptRaising(entry.detail), detail: framesCollapsed(entry.detail) };
+}
+
+/** `at: _on_greet (res://ui.gd:27)`, or a backtrace frame, `[0] _on_greet (res://ui.gd:27)`. */
+const LOCATION = /^(?:at: |\[\d+\] )(.+) \((res:\/\/.+):(\d+)\)$/;
+
+/**
+ * The project script and line an entry points at: its `at:` line when that names one, and
+ * otherwise the innermost backtrace frame that does.
+ *
+ * push_error and push_warning print the engine's own function as the `at:` line, so the first
+ * location an entry carried was `core/variant/variant_utility.cpp` and the script that raised it
+ * was three lines down, in a backtrace that goes on into whatever called it.
+ */
+function scriptRaising(detail: readonly string[]): Pick<ReportedEntry, 'script' | 'line' | 'function'> {
+  for (const line of detail) {
+    const match = LOCATION.exec(line);
+    if (match?.[1] !== undefined && match[2] !== undefined && match[3] !== undefined) {
+      return { script: match[2], line: Number(match[3]), function: match[1] };
+    }
+  }
+  return {};
 }
 
 const FRAME = /^\[(\d+)\] (.+)$/;
@@ -208,7 +229,13 @@ function repeatedCycle(frames: readonly Frame[], from: number): { period: number
 }
 
 /** An entry on its way out: the same fields, with `detail` there only when it says something. */
-export type ReportedEntry = Omit<LogEntry, 'detail'> & { readonly detail?: readonly string[] };
+export type ReportedEntry = Omit<LogEntry, 'detail'> & {
+  readonly detail?: readonly string[];
+  /** The project script, line and function the entry points at, when it names one. */
+  readonly script?: string;
+  readonly line?: number;
+  readonly function?: string;
+};
 
 /** An entry standing for every identical one, with how many there were when more than one. */
 export type FoldedEntry = ReportedEntry & { readonly times?: number };

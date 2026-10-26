@@ -4,7 +4,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { GameLog } from '../src/game-log.js';
+import { forAnswer, GameLog } from '../src/game-log.js';
 
 function testHeadlinesKeepTheirDetail(): void {
   const log = new GameLog();
@@ -255,6 +255,55 @@ function testACrashIsAnErrorWithItsReport(): void {
   assert.equal(quoted.count('error'), 0, JSON.stringify(quoted.all));
 }
 
+/**
+ * An entry answers with the project script and line it points at. A push_error's at: line is the
+ * engine's own push_error, and the call that raised it is the first frame of the backtrace, above
+ * the frames of whatever called the game: the lines are as a headless 4.7.2 game printed them.
+ */
+function testAnEntrySaysTheScriptItPointsAt(): void {
+  const log = new GameLog();
+  log.append(
+    'transcript',
+    [
+      'ERROR: greet pressed with no name',
+      '   at: push_error (core/variant/variant_utility.cpp:1023)',
+      '   GDScript backtrace (most recent call first):',
+      '       [0] _on_greet (res://ui.gd:27)',
+      '       [1] _press_button (res://addons/gdharness_runtime/runtime_input.gd:827)',
+      'SCRIPT ERROR: Parse Error: Function "speak()" not found in base Speaker.',
+      '   at: GDScript::reload (res://renamed/shouter.gd:6)',
+      '   GDScript backtrace (most recent call first):',
+      '       [0] reload_script (res://addons/gdharness_editor/tools/class_tools.gd:99)',
+      'ERROR: Condition "!is_inside_tree()" is true.',
+      '   at: get_global_transform (scene/2d/node_2d.cpp:415)',
+      'just a print',
+      '',
+    ].join('\n'),
+  );
+  const [pushed, parse, engine, print] = forAnswer(log.all);
+  assert.deepEqual(
+    [pushed?.script, pushed?.line, pushed?.function],
+    ['res://ui.gd', 27, '_on_greet'],
+    `a push_error is the game's call, not the engine's push_error: ${JSON.stringify(pushed)}`,
+  );
+  assert.equal(pushed?.detail?.length, 4, 'and the lines it was read from stay');
+  assert.deepEqual(
+    [parse?.script, parse?.line, parse?.function],
+    ['res://renamed/shouter.gd', 6, 'GDScript::reload'],
+    `an at: line naming a script is where the entry points, ahead of its backtrace: ${JSON.stringify(parse)}`,
+  );
+  assert.ok(engine !== undefined && print !== undefined);
+  for (const nowhere of [engine, print]) {
+    assert.deepEqual(
+      ['script', 'line', 'function'].filter((field) => field in nowhere),
+      [],
+      `an entry naming no script says none: ${JSON.stringify(nowhere)}`,
+    );
+  }
+  assert.equal(engine.detail?.[0], 'at: get_global_transform (scene/2d/node_2d.cpp:415)');
+}
+
+testAnEntrySaysTheScriptItPointsAt();
 testACrashIsAnErrorWithItsReport();
 testAFilteredReadDoesNotConsumeWhatItDidNotReport();
 testHeadlinesKeepTheirDetail();

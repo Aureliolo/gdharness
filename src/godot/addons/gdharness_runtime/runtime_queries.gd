@@ -4,6 +4,7 @@ extends RefCounted
 ## question, where one is on screen, a property's value, the metrics. What it changes, a property
 ## written or a method called, is in runtime_changes.gd.
 
+const GdhFrames = preload("runtime_frames.gd")
 const GdhPaths = preload("runtime_paths.gd")
 const GdhRead = preload("reading.gd")
 const GdhSays = preload("runtime_says.gd")
@@ -28,24 +29,18 @@ const READ_LIMIT: int = 500
 ## and said nothing, and a caller told to raise a number that stays put concludes the screen moved.
 const LIMIT_CEILING: int = 5000
 
-## How many frames the frame time is the mean of: two seconds at sixty frames a second.
-const FRAMES_TIMED: int = 120
-
 var _host: Node
 var _values: GdhValues
-## How long each of the last frames took, oldest first, in microseconds, as the game timed them.
-var _frame_usec: PackedInt64Array = PackedInt64Array()
-## How many physics steps ran in each of those frames, in the same order.
-var _frame_physics: PackedInt64Array = PackedInt64Array()
-var _last_frame_usec: int = 0
-var _last_physics_frames: int = 0
+var _frames: GdhFrames
 
 
 ## The host is the autoload, which is how the tree is reached: it is not in one when the
-## modules are built, and a fixture may put it in one later.
-func _init(host: Node, values: GdhValues) -> void:
+## modules are built, and a fixture may put it in one later. [param frames] is the autoload's,
+## timing the frames since the runtime's first.
+func _init(host: Node, values: GdhValues, frames: GdhFrames) -> void:
 	_host = host
 	_values = values
+	_frames = frames
 
 
 ## The tree under a node, to a depth, with every stored property on each node when asked for all
@@ -801,30 +796,6 @@ func get_property(params: Dictionary) -> Dictionary:
 	}
 
 
-## Called by the autoload once a frame, whatever else it does that frame, with the time it was called.
-##
-## The engine's own monitors do not follow the frame: TIME_PROCESS and the frame rate are set once a
-## second, the first to the slowest process step of that second, so a game whose frames took 16.7ms
-## read 45ms for a second at a time, and a change to the game showed only on the next second's
-## worst frame. The time between two of these calls is the frame as it passed, physics and the wait
-## for the display included.
-##
-## The physics steps are counted beside it because the engine steps physics from the wall clock and
-## nothing else reports how many it took: a game drawing sixty frames a second whose brew advanced
-## by physics steps moved a tenth as far as the frames promised, and every reading available said
-## the game was running well.
-func note_frame(now_usec: int) -> void:
-	var physics: int = Engine.get_physics_frames()
-	if _last_frame_usec > 0:
-		var _grew: bool = _frame_usec.push_back(now_usec - _last_frame_usec)
-		var _stepped: bool = _frame_physics.push_back(physics - _last_physics_frames)
-		if _frame_usec.size() > FRAMES_TIMED:
-			_frame_usec.remove_at(0)
-			_frame_physics.remove_at(0)
-	_last_frame_usec = now_usec
-	_last_physics_frames = physics
-
-
 ## Whether the frame waits for the display, which sets its floor: a game with vsync on cannot
 ## finish a frame sooner than the display refreshes, however little it does.
 static func _vsync() -> String:
@@ -843,15 +814,15 @@ static func _vsync() -> String:
 
 func get_metrics(params: Dictionary) -> Dictionary:
 	var metrics: Array = params.get("metrics", [])
-	var timed: int = _frame_usec.size()
+	var timed: int = _frames.usec.size()
 	var total_usec: int = 0
 	var slowest_usec: int = 0
-	for one: int in _frame_usec:
+	for one: int in _frames.usec:
 		total_usec += one
 		slowest_usec = maxi(slowest_usec, one)
 	# Null rather than zero before a frame has been timed: no frame took no time.
 	var steps: int = 0
-	for one: int in _frame_physics:
+	for one: int in _frames.physics:
 		steps += one
 	var frame_time: Variant = null
 	var frame_time_max: Variant = null
