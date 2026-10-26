@@ -4,8 +4,22 @@
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   "files": {
     // .claude holds tool-managed git worktrees, each a full copy of the repository with its own
-    // configuration, and Biome refuses to run when it finds a second root.
-    "includes": ["**", "!build", "!dist", "!site", "!node_modules", "!.venv", "!.claude", "!**/*.html"],
+    // configuration, and Biome refuses to run when it finds a second root. Prettier owns the
+    // Markdown and the YAML, and Biome's own Markdown formatting drops the blank line markdownlint
+    // wants before a list.
+    "includes": [
+      "**",
+      "!build",
+      "!dist",
+      "!site",
+      "!node_modules",
+      "!.venv",
+      "!.claude",
+      "!**/*.html",
+      "!**/*.md",
+      "!**/*.yml",
+      "!**/*.yaml"
+    ],
     // test/regressions.ts is one suite in one file, run by name through one loose matcher, and it
     // passed the default of a mebibyte. Past the limit Biome skips the file and warns, which the
     // lint gate fails on, so the file is read rather than split to fit a performance default.
