@@ -85,16 +85,19 @@ static func button_event(
 ## [param answer], saying so when one of [param points] lies outside [param viewport]: the GUI picks
 ## what is under the pointer only inside it, so such a press or motion reaches no control, and its
 ## answer read the same as one that landed.
+##
+## The points are window pixels and the visible rect is canvas units, which differ by the window's
+## content scale and any letterbox offset, so the rect is taken into window pixels first.
 static func outside_noted(answer: Dictionary, viewport: Viewport, points: Array[Vector2]) -> Dictionary:
-	var shown: Rect2 = viewport.get_visible_rect()
+	var shown: Rect2 = viewport.get_final_transform() * viewport.get_visible_rect()
 	for point: Vector2 in points:
 		if not shown.has_point(point):
 			answer["outside_viewport"] = (
 				(
-					"%s is outside the window's viewport, %s, so no control there receives it; the game's"
+					"%s is outside the window's viewport, %s in window pixels, so no control there receives"
 					% [point, shown]
 				)
-				+ " _input and _unhandled_input still do."
+				+ " it; the game's _input and _unhandled_input still do."
 			)
 			break
 	return answer
