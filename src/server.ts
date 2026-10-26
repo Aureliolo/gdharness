@@ -3225,11 +3225,18 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       : reading.runtimeAddon === null
         ? " The run's project is no longer at its path, so whether it had the gdharness runtime addon, which switches the profiler off as the game quits so the engine sends its totals, cannot be read."
         : ' This project has no gdharness runtime addon, which switches the profiler off as the game quits so the engine sends its totals: setup installs it.';
+  const dropped = totals.dropped ?? 0;
+  const droppedNote =
+    dropped > 0
+      ? ` The game's debugger queue dropped ${dropped === 1 ? 'one message' : `${dropped} messages`}, the engine reported, and those can be a frame or the totals: the queue holds as many as the project's network/limits/debugger/max_queued_messages, and raising it makes room.`
+      : '';
   // Said only of a run that has ended, whose totals will not come now.
   const totalsWithheld =
-    reading.runtimeAddon === true
-      ? ' The runtime addon switches the profiler off as the game quits, and did not here: either it was no longer running in this game by then, which a project can arrange for some scenes; or the game ended without taking its tree down, as a crash or a kill does; or the totals did not reach the debugger before the game exited, which the game then says in its output.'
-      : addonNote;
+    dropped > 0
+      ? droppedNote
+      : reading.runtimeAddon === true
+        ? ' The runtime addon switches the profiler off as the game quits, and did not here: either it was no longer running in this game by then, which a project can arrange for some scenes; or the game ended without taking its tree down, as a crash or a kill does; or the totals did not reach the debugger before the game exited, which the game then says in its output.'
+        : addonNote;
   if (totals.complete && reading.running) {
     notes.push(
       `The engine's totals arrived while the game is still running, which it sends only when the profiler is switched off, so ${reading.through === 'editor' ? "the editor's Profiler tab or the game itself, through EngineDebugger," : 'the game itself, through EngineDebugger,'} switched it off before the game ended. They cover the run up to then and nothing after.`,
@@ -3271,7 +3278,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
   }
   if (table.addonFunctions > 0) {
     notes.push(
-      `The gdharness runtime addon's own functions took ${table.addonMs}ms of self time over ${table.addonFunctions === 1 ? 'one function' : `${table.addonFunctions} functions`}, answering tools such as runtime_invoke and sending the profile. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs, since they are not the game's work, though that time was spent in the game's frames.`,
+      `The gdharness runtime's own functions, its addon's and those of the loader that starts it, took ${table.addonMs}ms of self time over ${table.addonFunctions === 1 ? 'one function' : `${table.addonFunctions} functions`}, starting the runtime as the game starts, answering tools such as runtime_invoke and sending the profile. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs, since they are not the game's work, though that time was spent in the game's process.`,
     );
   }
   notes.push(...cappedNotes(totals));

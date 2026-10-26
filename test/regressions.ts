@@ -1224,6 +1224,32 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   into('servers:profile_total', [9, 0, 0, 0, 0, 0, 0, 10, 0, 2, 0.5, 0.5, 0, 1, 1, 0.1, 0.1, 0]);
   assert.equal(tight.snapshot().totalCapped, true, 'and totals at the cap are said to be');
 
+  // What the game's debugger queue dropped, as the engine reports it once the queue has room: an
+  // error message whose fields are the engine's OutputError, the count in its description. Another
+  // error the game reported is not a drop.
+  const overflow = (count: number): unknown[] => [
+    0,
+    0,
+    1,
+    20,
+    '',
+    '',
+    0,
+    'TOO_MANY_MESSAGES',
+    `Too many messages! ${count} messages were dropped. Profiling might misbheave, try raising 'network/limits/debugger/max_queued_messages' in project setting.`,
+    false,
+    0,
+  ];
+  const lossy = new ProfileAggregate(1000, 2);
+  assert.equal(lossy.snapshot().dropped, undefined, 'nothing dropped is left out');
+  lossy.take({ message: 'error', thread: 1, data: overflow(12) as never }, 2000);
+  lossy.take(
+    { message: 'error', thread: 1, data: [0, 0, 1, 20, 'res://w.gd', 'f', 3, 'oops', '', false, 0] as never },
+    2000,
+  );
+  lossy.take({ message: 'error', thread: 1, data: overflow(3) as never }, 2000);
+  assert.equal(lossy.snapshot().dropped, 15, JSON.stringify(lossy.snapshot()));
+
   assert.deepEqual(signatureParts('res://w.gd::10::Work.busy'), {
     script: 'res://w.gd',
     line: 10,
@@ -1310,6 +1336,19 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     /setup installs it|no gdharness runtime addon/,
     'a project with the addon is not told to install it',
   );
+  // The engine said its queue dropped messages, which is then the reason rather than three guesses.
+  for (const [dropped, said] of [
+    [1, 'one message'],
+    [40, '40 messages'],
+  ] as const) {
+    assert.match(
+      say({ totals: { ...partial, dropped } }),
+      new RegExp(
+        `^These are the 3 frames that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off\\. The game's debugger queue dropped ${said}, the engine reported, and those can be a frame or the totals: the queue holds as many as the project's network/limits/debugger/max_queued_messages, and raising it makes room\\. Not in them is any script time`,
+      ),
+    );
+  }
+  assert.doesNotMatch(say({ totals: { ...partial, dropped: 2 } }), /did not here/);
   assert.match(
     say({ totals: partial, runtimeAddon: false }),
     /switched off\. This project has no gdharness runtime addon, .*: setup installs it\. Not in them is any script time/,
@@ -2081,22 +2120,27 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     },
     'res://main.gd::15::press': { calls: 3, selfSeconds: 0.003, totalSeconds: 0.0035 },
     'res://main.gd::11::step': { calls: 3, selfSeconds: 0.0005, totalSeconds: 0.0005 },
+    // The loader setup writes outside addons/, compiling the runtime in its _ready: probe 198 found it
+    // at the top of a profile at 779ms, read as the game's costliest function.
+    'res://gdharness/loader.gd::27::_ready': { calls: 1, selfSeconds: 0.779, totalSeconds: 0.78 },
+    // A script of the game's own beside the loader, which is not gdharness's for sharing its folder.
+    'res://gdharness/loader_menu.gd::4::open': { calls: 1, selfSeconds: 0.0002, totalSeconds: 0.0002 },
   });
   const servedTable = profiledFunctions(served, 1);
   assert.deepEqual(
     [servedTable.functions.map((one) => one.function), servedTable.counted, servedTable.scriptMs],
-    [['press'], 2, 3.5],
-    "a limit of one returns the game's costliest function, and the addon's rows count nowhere in the game's",
+    [['press'], 3, 3.7],
+    "a limit of one returns the game's costliest function, and the runtime's rows count nowhere in the game's",
   );
   const servedAnswer = answer({ totals: served });
   assert.deepEqual(
     [get(servedAnswer, 'runtimeAddonMs'), get(servedAnswer, 'runtimeAddonFunctions')],
-    [7, 2],
-    'the addon is summed apart rather than dropped',
+    [786, 3],
+    'the addon and its loader are summed apart rather than dropped',
   );
   assert.match(
     String(servedAnswer['note']),
-    /The gdharness runtime addon's own functions took 7ms of self time over 2 functions, answering tools such as runtime_invoke and sending the profile\. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs/,
+    /The gdharness runtime's own functions, its addon's and those of the loader that starts it, took 786ms of self time over 3 functions, starting the runtime as the game starts, answering tools such as runtime_invoke and sending the profile\. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs/,
     `the note says where the addon's time went: ${String(servedAnswer['note'])}`,
   );
   assert.equal(
@@ -38856,13 +38900,42 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
         '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
     );
+    // A first frame naming as many functions as the profiler takes, one message each, which is more
+    // than a socket's buffers hold: a debugger reading none of it leaves most in the game's queue.
+    const named = 2000;
+    writeFileSync(
+      join(project, 'loud.gd'),
+      [
+        'extends Node',
+        '',
+        ...Array.from({ length: named }, (_, i) => `func f${i}() -> int:\n\treturn ${i}\n`),
+        'func _ready() -> void:',
+        '\tvar sum := 0',
+        ...Array.from({ length: named }, (_, i) => `\tsum += f${i}()`),
+        '\tprint(sum)',
+        '\tawait get_tree().process_frame',
+        '\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'loud.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://loud.gd" id="1"]\n\n' +
+        '[node name="Loud" type="Node"]\nscript = ExtResource("1")\n',
+    );
     // One run under a stand-in debugger that sends the switch [param switchAfterMs] after the game
-    // connects, or never when null: the calls of marker it counted, and what the game printed.
+    // connects, or never when null, and reads nothing for [param behindMs] after it connects: the
+    // calls of marker it counted, whether the totals came, whether the game had gone before the
+    // debugger read again, and what the game printed.
     const run = async (
       fromTheStart: boolean,
       switchAfterMs: number | null,
-    ): Promise<{ calls: number; said: string }> => {
+      behindMs = 0,
+      scene = 'res://main.tscn',
+    ): Promise<{ calls: number; complete: boolean; asked: string[]; goneUnread: boolean; said: string }> => {
       const debuggerServer = createServer();
+      // The game's asks for an answer and its totals, in the order they arrived.
+      const asked: string[] = [];
       const port = await listenOnAReservedPort(debuggerServer);
       // The cap the server asks for, from the engine's default debugger queue. A smaller one caps the
       // totals the engine sends, in its own order, and the runtime addon's functions alone can fill it.
@@ -38871,10 +38944,20 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
       // Read once the game has gone and its debugger connection has closed: the last messages, the
       // totals among them, can still be arriving after the process has exited.
       let connectionClosed: Promise<void> = Promise.resolve();
+      let readingAgain = false;
       debuggerServer.on('connection', (socket) => {
         const stream = new DebuggerStream();
         if (switchAfterMs !== null) {
           setTimeout(() => socket.write(profilerOn(cap)), switchAfterMs);
+        }
+        // A debugger fallen behind, as a keeper on a loaded runner is: what the game sends waits in
+        // its own queue meanwhile, the totals and the word that they were sent among it.
+        if (behindMs > 0) {
+          socket.pause();
+          setTimeout(() => {
+            readingAgain = true;
+            socket.resume();
+          }, behindMs);
         }
         socket.on('data', (chunk: Buffer) => {
           for (const received of stream.push(chunk)) {
@@ -38883,6 +38966,12 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
             }
             if ('message' in received && received.message === 'gdharness:profile_sent') {
               socket.write(framedCommand('gdharness:profile_received', []));
+            }
+            if (
+              'message' in received &&
+              (received.message === 'gdharness:profile_sent' || received.message === 'servers:profile_total')
+            ) {
+              asked.push(received.message);
             }
             aggregate.take(received, Date.now());
           }
@@ -38905,6 +38994,7 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
           `tcp://127.0.0.1:${port}`,
           '--skip-breakpoints',
           '--ignore-error-breaks',
+          scene,
         ],
         {
           env: fromTheStart
@@ -38926,6 +39016,7 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
         }),
       );
       clearTimeout(limit);
+      const goneUnread = behindMs > 0 && !readingAgain;
       await connectionClosed;
       debuggerServer.close();
       const totals = aggregate.snapshot();
@@ -38937,7 +39028,10 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
       );
       return {
         calls: row?.calls ?? 0,
-        said: `${said}\ntotals complete: ${totals.complete}, capped: ${totals.totalCapped}, functions: ${Object.keys(totals.functions).length}, frames: ${totals.frames}, main.gd: ${JSON.stringify(sent)}`,
+        complete: totals.complete,
+        asked,
+        goneUnread,
+        said: `${said}\ntotals complete: ${totals.complete}, capped: ${totals.totalCapped}, functions: ${Object.keys(totals.functions).length}, frames: ${totals.frames}, dropped by the game's queue: ${totals.dropped ?? 0}, gone before the debugger read again: ${goneUnread}, main.gd: ${JSON.stringify(sent)}`,
       };
     };
 
@@ -38958,6 +39052,39 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
       never.said,
       /was started to be profiled from its start, and the profiler was not on 5000 ms later/,
       `with no switch coming, the game carries on after its wait and says so:\n${never.said}`,
+    );
+
+    // A debugger six seconds behind, past the three a quitting game gives one that may never answer.
+    // Started for a profile by gdharness, the game's debugger is one that answers, so the game waits
+    // for it and its totals arrive; a fixed three seconds lost them on a loaded macOS runner.
+    const behind = await run(true, 0, 6000, 'res://loud.tscn');
+    assert.deepEqual(
+      [behind.complete, behind.goneUnread],
+      [true, false],
+      `a debugger that fell behind is waited for and still gets the totals:\n${behind.said}`,
+    );
+    assert.doesNotMatch(behind.said, /did not confirm/, behind.said);
+    // And the game waited for that debugger to read everything before it switched the profiler off,
+    // so the totals and the names they bring went into an empty queue: without it the queue still held
+    // the first frame's names, and the engine dropped the totals in one run of four here.
+    assert.deepEqual(
+      behind.asked,
+      ['gdharness:profile_sent', 'servers:profile_total', 'gdharness:profile_sent'],
+      behind.said,
+    );
+    // Not told, the debugger could be any, which may never answer: the game gives up after the short
+    // wait, says so, and has gone before the debugger reads again. Whether its totals survive it is
+    // the platform's: Linux's socket buffer holds what the game wrote last, and they arrive anyway.
+    const unknown = await run(false, 0, 9000, 'res://loud.tscn');
+    assert.deepEqual(
+      [
+        unknown.said.includes(
+          "[gdharness] the debugger did not confirm the profiler's totals within 3000 ms",
+        ),
+        unknown.goneUnread,
+      ],
+      [true, true],
+      `a debugger not known to answer holds the exit for the short wait only:\n${unknown.said}`,
     );
   } finally {
     sweep(project);
@@ -48394,13 +48521,42 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     assert.ok(bridged.has(command), `the editor addon answers ${command}, which nothing sends`);
   }
 
-  const runtime = namesIn(
-    'src/godot/addons/gdharness_runtime/runtime_autoload.gd',
-    /^\t\t"([a-z_]+)": _[a-z_]+(?:\.[a-z_]+)?,$/gm,
-    'runtime commands',
-    22,
+  const runtimeDir = 'src/godot/addons/gdharness_runtime';
+  const own = namesIn(
+    `${runtimeDir}/runtime_autoload.gd`,
+    /^\t\t"([a-z_]+)": _[a-z_]+,$/gm,
+    "runtime's own commands",
+    3,
     /\t_commands = \{\n([\s\S]*?)\n\t\}/,
   );
+  // The module commands name their module and method as strings, which the compiler does not
+  // check the way it checked the Callables they replaced, so each is looked for in its module.
+  const autoloadSource = readFileSync(`${runtimeDir}/runtime_autoload.gd`, 'utf8');
+  const moduleFiles = new Map(
+    [...autoloadSource.matchAll(/^const ([A-Z_]+): String = "(runtime_[a-z_]+\.gd)"$/gm)].map((match) => [
+      match[1] ?? '',
+      match[2] ?? '',
+    ]),
+  );
+  const moduleCommands = [
+    ...(/\nconst MODULE_COMMANDS: Dictionary = \{\n([\s\S]*?)\n\}/.exec(autoloadSource)?.[1] ?? '').matchAll(
+      /^\t"([a-z_]+)": \[([A-Z_]+), "([a-z_]+)"\],$/gm,
+    ),
+  ];
+  assert.ok(
+    moduleCommands.length >= 26,
+    `only ${moduleCommands.length} module commands were read from the runtime's MODULE_COMMANDS, which holds 26`,
+  );
+  for (const [, command, constant, method] of moduleCommands) {
+    const file = moduleFiles.get(constant ?? '');
+    assert.ok(file, `${command} is answered by ${constant}, which names no module file`);
+    assert.match(
+      readFileSync(`${runtimeDir}/${file}`, 'utf8'),
+      new RegExp(`^func ${method}\\(`, 'm'),
+      `${command} is answered by ${method} in ${file}, which the module does not define`,
+    );
+  }
+  const runtime = new Set([...own, ...moduleCommands.map((match) => match[1] ?? '')]);
   const asked = namesSent(
     /(?:handleRuntimeCommand|runtimeRequest)\([^,]*,?\s*'([a-z_]+)'/g,
     'runtime commands',

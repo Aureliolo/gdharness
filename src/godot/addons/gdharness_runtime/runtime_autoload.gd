@@ -10,18 +10,60 @@ extends Node
 ## wanted. Both directions of the socket carry one JSON object per line. Every request names an
 ## id and the reply carries it back.
 
-const GdhAccessibility = preload("runtime_accessibility.gd")
-const GdhCapture = preload("runtime_capture.gd")
-const GdhChanges = preload("runtime_changes.gd")
 const GdhErrorReport = preload("error_report.gd")
-const GdhInputCommands = preload("runtime_input.gd")
-const GdhPad = preload("runtime_pad.gd")
-const GdhQueries = preload("runtime_queries.gd")
+const GdhFrames = preload("runtime_frames.gd")
 const GdhRead = preload("reading.gd")
-const GdhTargets = preload("runtime_targets.gd")
-const GdhTyping = preload("runtime_typing.gd")
-const GdhValues = preload("runtime_values.gd")
-const GdhWaits = preload("runtime_waits.gd")
+
+## Where the modules are loaded from. Kept in step with the markers below.
+const ADDON_DIR: String = "res://addons/gdharness_runtime/"
+
+## The modules that answer commands, loaded at the first command one answers rather than preloaded.
+## A preload compiles as this script parses, and the modules are twelve thousand lines: compiling
+## them took most of a second of every debug start, in games nobody asks anything, a bench's quiet
+## workers and script runs among them.
+const QUERIES: String = "runtime_queries.gd"
+const CHANGES: String = "runtime_changes.gd"
+const INPUT: String = "runtime_input.gd"
+const TYPING: String = "runtime_typing.gd"
+const PAD: String = "runtime_pad.gd"
+const CAPTURE: String = "runtime_capture.gd"
+const WAITS: String = "runtime_waits.gd"
+const ACCESSIBILITY: String = "runtime_accessibility.gd"
+const VALUES: String = "runtime_values.gd"
+
+## Every module command, by the name a request uses, as the module and the method that answers it.
+const MODULE_COMMANDS: Dictionary = {
+	"get_tree": [QUERIES, "get_tree"],
+	"find_nodes": [QUERIES, "find_nodes"],
+	"read_text": [QUERIES, "read_text"],
+	"get_rect": [QUERIES, "get_rect"],
+	"get_property": [QUERIES, "get_property"],
+	"set_property": [CHANGES, "set_property"],
+	"call_method": [CHANGES, "call_method"],
+	"get_metrics": [QUERIES, "get_metrics"],
+	"get_accessibility": [ACCESSIBILITY, "get_accessibility"],
+	"capture_screenshot": [CAPTURE, "capture_screenshot"],
+	"capture_viewport": [CAPTURE, "capture_viewport"],
+	"inject_action": [INPUT, "inject_action"],
+	"inject_key": [INPUT, "inject_key"],
+	"inject_text": [TYPING, "inject_text"],
+	"inject_mouse_click": [INPUT, "inject_mouse_click"],
+	"inject_mouse_motion": [INPUT, "inject_mouse_motion"],
+	"inject_mouse_drag": [INPUT, "inject_mouse_drag"],
+	"inject_joypad_button": [PAD, "inject_joypad_button"],
+	"inject_joypad_motion": [PAD, "inject_joypad_motion"],
+	"click": [INPUT, "click"],
+	"choose": [TYPING, "choose"],
+	"wait_frames": [WAITS, "wait_frames"],
+	"wait_signal": [WAITS, "wait_signal"],
+	"watch_signal": [WAITS, "watch_signal"],
+	"watch_recorded": [WAITS, "recorded"],
+	"wait_until": [WAITS, "wait_until"],
+}
+
+## The size the engine gives a headless game's root viewport. Kept in step with
+## `HEADLESS_VIEWPORT` in runtime_targets.gd, which this script does not load as it starts.
+const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
 
 const PROTOCOL: int = 3
 const DEFAULT_BIND_ADDRESS: String = "127.0.0.1"
@@ -38,9 +80,13 @@ const PROFILE_CAPTURE: String = "gdharness"
 const PROFILE_SENT: String = "gdharness:profile_sent"
 const PROFILE_RECEIVED: String = "gdharness:profile_received"
 
-## The longest a quitting game waits for that answer. A debugger that never gives one, such as an
-## editor without the gdharness addon, holds every profiled exit this long.
+## The longest a quitting game waits for that answer from a debugger that may not give one, such as
+## an editor without the gdharness addon, which holds every profiled exit this long.
 const PROFILE_CONFIRM_MS: int = 3000
+
+## The longest it waits for a debugger gdharness gave it, which answers once it has read that far:
+## long enough for one far behind, and an end for one that has hung.
+const PROFILE_ANSWERED_MS: int = 60000
 
 ## How many times the empty function is called to measure what the profiler costs per call: enough
 ## that the clock's microsecond steps are lost in the sum, and a few milliseconds of one frame.
@@ -100,19 +146,20 @@ const ERROR_REPORT_NAME: String = "runtime-%d.log"
 const VERSION_MARKER: String = "res://addons/gdharness_runtime/.gdharness-version"
 const DIGEST_MARKER: String = "res://addons/gdharness_runtime/.gdharness-digest"
 
-var values: GdhValues = GdhValues.new()
+## The values module every other module reads and writes values with, one for them all, loaded with
+## the first of them.
+var values: RefCounted:
+	get:
+		if _values == null:
+			_values = _loaded(VALUES).new()
+		return _values
 
-# The modules are members and not locals of _init, because a Callable holds its object by id
-# rather than by reference, and a module referenced only by the Callables in the command table
-# would be freed on the way out of _init, leaving every command "unknown".
-var _queries: GdhQueries = GdhQueries.new(self, values)
-var _changes: GdhChanges = GdhChanges.new(self, values)
-var _input: GdhInputCommands = GdhInputCommands.new(self, values)
-var _typing: GdhTyping = GdhTyping.new(self)
-var _pad: GdhPad = GdhPad.new(self)
-var _capture: GdhCapture = GdhCapture.new(self, values)
-var _waits: GdhWaits = GdhWaits.new(self, values)
-var _accessibility: GdhAccessibility = GdhAccessibility.new(self)
+var _values: RefCounted
+var _frames: GdhFrames = GdhFrames.new()
+## Each module loaded so far, by its file. Held here because a Callable holds its object by id
+## rather than by reference, and a module referenced only by the Callable answering one command
+## would be freed once it answered.
+var _modules: Dictionary = {}
 
 var _server: TCPServer
 var _clients: Array[StreamPeerTCP] = []
@@ -132,7 +179,7 @@ var _announcement: String = ""
 ## Held for as long as the game runs: a Logger the engine has is kept by reference, and one
 ## that goes away mid-run takes the report with it.
 var _errors: GdhErrorReport
-## Every command, by the name a request uses, as the module method that answers it.
+## The commands this script answers itself, by the name a request uses.
 var _commands: Dictionary = {}
 ## The addon this game loaded, read once at start: an upgrade rewrites the markers under a running
 ## game, whose code stays what it loaded, and reading them later would call that code current.
@@ -151,36 +198,51 @@ var _profiler_calibrated: bool = false
 func _init() -> void:
 	_commands = {
 		"ping": _ping,
-		"get_tree": _queries.get_tree,
-		"find_nodes": _queries.find_nodes,
-		"read_text": _queries.read_text,
-		"get_rect": _queries.get_rect,
-		"get_property": _queries.get_property,
-		"set_property": _changes.set_property,
-		"call_method": _changes.call_method,
-		"get_metrics": _queries.get_metrics,
-		"get_accessibility": _accessibility.get_accessibility,
-		"capture_screenshot": _capture.capture_screenshot,
-		"capture_viewport": _capture.capture_viewport,
-		"inject_action": _input.inject_action,
-		"inject_key": _input.inject_key,
-		"inject_text": _typing.inject_text,
-		"inject_mouse_click": _input.inject_mouse_click,
-		"inject_mouse_motion": _input.inject_mouse_motion,
-		"inject_mouse_drag": _input.inject_mouse_drag,
-		"inject_joypad_button": _pad.inject_joypad_button,
-		"inject_joypad_motion": _pad.inject_joypad_motion,
-		"click": _input.click,
-		"choose": _typing.choose,
-		"wait_frames": _waits.wait_frames,
-		"wait_signal": _waits.wait_signal,
-		"watch_signal": _waits.watch_signal,
-		"watch_recorded": _waits.recorded,
-		"wait_until": _waits.wait_until,
 		"send_profile": _send_profile_now,
 		"close_game": _close_game,
 	}
 	_wait_for_the_profiler()
+
+
+## The script of the module in [param file], compiled at the first call that needs it.
+static func _loaded(file: String) -> GDScript:
+	return load(ADDON_DIR + file) as GDScript
+
+
+## The module in [param file], built at its first command with what it is built with.
+func _module(file: String) -> Object:
+	var made: Object = _modules.get(file)
+	if made != null:
+		return made
+	var script: GDScript = _loaded(file)
+	match file:
+		QUERIES:
+			made = script.new(self, values, _frames)
+		TYPING, PAD, ACCESSIBILITY:
+			made = script.new(self)
+		_:
+			made = script.new(self, values)
+	_modules[file] = made
+	_frames.skip_this_frame()
+	return made
+
+
+## What answers [param command], loading its module if no command has needed it yet, or an invalid
+## Callable for a command nothing answers.
+func _handler(command: String) -> Callable:
+	if _commands.has(command):
+		return _commands[command]
+	var answered_by: Array = MODULE_COMMANDS.get(command, [])
+	if answered_by.is_empty():
+		return Callable()
+	var file: String = answered_by[0]
+	var method: String = answered_by[1]
+	return Callable(_module(file), method)
+
+
+## Every command the runtime answers, its own and the modules', loaded or not.
+func _command_names() -> Array:
+	return _commands.keys() + MODULE_COMMANDS.keys()
 
 
 ## Gives a game with no window the size the project opens its window at. Measured: a
@@ -195,7 +257,7 @@ func _size_a_windowless_game() -> void:
 	if DisplayServer.get_name() != "headless" or _script_run() or not OS.is_debug_build():
 		return
 	var root: Window = get_tree().root
-	if Vector2(root.size) != GdhTargets.HEADLESS_VIEWPORT:
+	if Vector2(root.size) != HEADLESS_VIEWPORT:
 		return
 	root.size = Vector2i(_window_dimension("width", 1152), _window_dimension("height", 648))
 
@@ -305,30 +367,52 @@ func _exit_tree() -> void:
 ## every other node's _exit_tree, so what those do is counted. A project that sent this node away
 ## mid-run had the profiler switched off then, and its run answered as complete with none of the
 ## frames after it.
+##
+## The debugger reads in order, so its answer comes once it has read everything the game queued
+## before the totals, and a debugger that has fallen behind answers late rather than not at all. A
+## debugger gdharness gave this game, the keeper of a run the server started or an editor with the
+## gdharness addon, is waited for until it answers; a fixed three seconds lost the totals of a run
+## whose first frame named 1536 functions, on a loaded runner that read them slower than that. Any
+## other debugger may never answer, and holds the exit for the short wait only.
+##
+## The debugger is asked once before the profiler goes off as well, so the totals go into an empty
+## queue. They name each function no frame did, one message apiece, and with the names of a large
+## first frame still queued for a debugger behind on its reading, they did not fit and the engine
+## dropped them. One that does not answer that is not asked again, as it would not answer the second.
 func _send_the_profile() -> void:
 	if not (EngineDebugger.is_active() and EngineDebugger.is_profiling("servers")):
 		return
-	_profile_received = false
 	if not EngineDebugger.has_capture(PROFILE_CAPTURE):
 		EngineDebugger.register_message_capture(PROFILE_CAPTURE, _on_debugger_message)
+	var answers: bool = _profiled_from_start or OS.get_environment(EDITOR_PID_VARIABLE).is_valid_int()
+	var waits: int = PROFILE_ANSWERED_MS if answers else PROFILE_CONFIRM_MS
+	var drained: bool = _debugger_answered(waits)
 	EngineDebugger.profiler_enable("servers", false)
-	EngineDebugger.send_message(PROFILE_SENT, [])
-	var deadline: int = Time.get_ticks_msec() + PROFILE_CONFIRM_MS
-	while not _profile_received and Time.get_ticks_msec() < deadline:
-		for _poll: int in POLLS_PER_READ:
-			EngineDebugger.line_poll()
-		OS.delay_msec(5)
+	var confirmed: bool = drained and _debugger_answered(waits)
 	EngineDebugger.unregister_message_capture(PROFILE_CAPTURE)
-	if not _profile_received:
+	if not confirmed:
 		print(
 			(
 				(
 					"[gdharness] the debugger did not confirm the profiler's totals within %d ms, so the"
 					+ " profile may be the frames that arrived without them"
 				)
-				% PROFILE_CONFIRM_MS
+				% waits
 			)
 		)
+
+
+## Sends the debugger the message it answers once it has read everything sent before it, and waits
+## up to [param waits] ms for the answer, polling for it since the game's loop is over.
+func _debugger_answered(waits: int) -> bool:
+	_profile_received = false
+	EngineDebugger.send_message(PROFILE_SENT, [])
+	var deadline: int = Time.get_ticks_msec() + waits
+	while not _profile_received and Time.get_ticks_msec() < deadline:
+		for _poll: int in POLLS_PER_READ:
+			EngineDebugger.line_poll()
+		OS.delay_msec(5)
+	return _profile_received
 
 
 ## The totals sent now, for a stop that is about to end the game without letting it quit: ended by
@@ -395,7 +479,7 @@ func _report_errors() -> void:
 func _process(_delta: float) -> void:
 	if not _enabled or _server == null:
 		return
-	_queries.note_frame(Time.get_ticks_usec())
+	_frames.note_frame(Time.get_ticks_usec())
 	_calibrate_the_profiler()
 
 	# Every connection waiting rather than one a frame: the engine queues eight a game has not
@@ -678,7 +762,7 @@ func _send_welcome(client: StreamPeerTCP) -> void:
 		str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
 	)
 	welcome["type"] = "welcome"
-	welcome["commands"] = _commands.keys()
+	welcome["commands"] = _command_names()
 	_send_response(client, welcome)
 
 
@@ -716,13 +800,16 @@ func _handle_message(client: StreamPeerTCP, line: String) -> void:
 
 
 func _execute_command(command: String, params: Dictionary) -> Dictionary:
-	var handler: Callable = _commands.get(command, Callable())
+	var handler: Callable = _handler(command)
 	if not handler.is_valid():
 		return {
 			"type": "error",
-			"message": "Unknown command: %s. Commands: %s" % [command, ", ".join(_commands.keys())]
+			"message": "Unknown command: %s. Commands: %s" % [command, ", ".join(_command_names())]
 		}
-	_waits.saw_call(command, params)
+	# Only a waits module already loaded can have a trace running to record the call in.
+	var waits: Object = _modules.get(WAITS)
+	if waits != null:
+		var _seen: Variant = waits.call(&"saw_call", command, params)
 	var answer: Variant = await handler.call(params)
 	return answer
 
