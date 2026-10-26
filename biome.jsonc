@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.2/schema.json",
   // A file git does not track is nobody's source, whichever of git's ignore lists names it.
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   "files": {
