@@ -186,6 +186,7 @@ import {
   runArguments,
   SAVES_NOT_MOVED_NOTE,
   savesStayPut,
+  startedAs,
   userDataIn,
 } from './launch.js';
 import { freeLibraryCopies } from './library-copies.js';
@@ -9437,14 +9438,31 @@ class GodotServer {
     // one there is doing it to keep "off by decision" and "absent" apart, and losing it silently
     // hands the choice back to the engine. Measured downstream: one restart took
     // `gdscript/warnings/return_value_discarded=0` out and changed nothing else.
+    // As the editor being replaced was started, unless the call says otherwise. Taken from the call
+    // alone, a restart with no arguments put a window on the desktop of somebody working, in place
+    // of an editor opened hidden. Read before the quit, so an editor whose start cannot be read is
+    // refused while it is still running rather than replaced on a guess.
+    let hidden = args['hidden'] === true;
+    let silent = resolveSilent(args['silent']);
+    if (mine && (typeof args['hidden'] !== 'boolean' || typeof args['silent'] !== 'boolean')) {
+      const was = before.editorPid === undefined ? null : await runningAs(before.editorPid);
+      if (was?.kind === 'commandLine') {
+        const as = startedAs(was.text);
+        hidden = typeof args['hidden'] === 'boolean' ? args['hidden'] : as.hidden;
+        silent = typeof args['silent'] === 'boolean' ? args['silent'] : as.silent;
+      } else if (typeof args['hidden'] !== 'boolean') {
+        const why =
+          was === null ? 'the operating system would not say' : (was.unread ?? 'it gave no command line');
+        return this.createErrorResponse(
+          `How the editor (pid ${before.editorPid ?? 'unknown'}) was started could not be read (${why}), so whether it was hidden cannot be told and it was left running.`,
+          ['Pass hidden: true to bring it back with no window, or hidden: false to bring it back visible'],
+        );
+      }
+    }
+
     const settingsBefore = this.settingKeysOf(before.projectPath);
     const asked = mine
-      ? await this.startItAgain(
-          before.projectPath ?? '',
-          before.editorPid,
-          args['hidden'] === true,
-          resolveSilent(args['silent']),
-        )
+      ? await this.startItAgain(before.projectPath ?? '', before.editorPid, hidden, silent)
       : await this.handleViaBridge('restart_editor', {});
     if (asked.isError === true) {
       return asked;
@@ -9483,6 +9501,8 @@ class GodotServer {
     // are between reading it and putting the value back.
     return this.jsonTextResponse({
       restarted: true,
+      // One opened by hand restarts itself, which only an editor with a window can do.
+      hidden: mine && hidden,
       editorPid: now.editorPid,
       addonVersion: now.addonVersion,
       serverVersion: SERVER_VERSION,

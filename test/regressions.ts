@@ -5373,10 +5373,15 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
 }
 
 /**
- * An editor this server opens or starts again makes no sound unless the call asks for it.
+ * An editor this server opens makes no sound unless the call asks for it, and one it starts again
+ * comes back hidden and silent as it was started unless the call says otherwise.
  *
  * A session's run once played a game's music on the owner's machine, and an editor plays sound of
- * its own: a tool script, a preview, a scene running in the viewport. The engine is a stand-in that
+ * its own: a tool script, a preview, a scene running in the viewport. A restart taken from the call
+ * alone brought an editor opened hidden back as a window on the desktop of somebody working, so the
+ * editor being restarted carries on its command line what it was started with, and one whose
+ * command line cannot be read, because its process has gone, is refused before it is asked to go.
+ * The engine is a stand-in that
  * exits at once, since what is checked is what the editor was started with, which the answer
  * carries. A visible stand-in on Windows starts through the helper on the desktop in use, so those
  * cases run on Windows only where windows may open.
@@ -5395,20 +5400,69 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     const at = argv.indexOf('--audio-driver');
     return at >= 0 && argv[at + 1] === 'Dummy';
   };
-  const cases = [
+  // `was` is what the editor being restarted was started with, which a restart reads off its process
+  // for whatever the call leaves out; null is a process gone before it is read.
+  const cases: readonly {
+    how: string;
+    act: 'open' | 'restart';
+    was?: readonly string[] | null;
+    args: Record<string, boolean>;
+    silent: boolean;
+    visible: boolean;
+  }[] = [
     { how: 'opened visible', act: 'open', args: {}, silent: true, visible: true },
     { how: 'opened visible with sound', act: 'open', args: { silent: false }, silent: false, visible: true },
     { how: 'opened hidden', act: 'open', args: { hidden: true }, silent: false, visible: false },
-    { how: 'started again hidden', act: 'restart', args: { hidden: true }, silent: false, visible: false },
-    { how: 'started again', act: 'restart', args: {}, silent: true, visible: true },
+    {
+      how: 'started again hidden',
+      act: 'restart',
+      was: ['--audio-driver', 'Dummy'],
+      args: { hidden: true },
+      silent: false,
+      visible: false,
+    },
+    {
+      how: 'started again as it was, hidden',
+      act: 'restart',
+      was: ['--headless'],
+      args: {},
+      silent: false,
+      visible: false,
+    },
+    {
+      how: 'started again',
+      act: 'restart',
+      was: ['--audio-driver', 'Dummy'],
+      args: {},
+      silent: true,
+      visible: true,
+    },
+    {
+      how: 'started again as it was, with sound',
+      act: 'restart',
+      was: [],
+      args: {},
+      silent: false,
+      visible: true,
+    },
     {
       how: 'started again with sound',
       act: 'restart',
+      was: ['--audio-driver', 'Dummy'],
       args: { silent: false },
       silent: false,
       visible: true,
     },
-  ] as const;
+    {
+      how: 'started again visible',
+      act: 'restart',
+      was: ['--headless'],
+      args: { hidden: false },
+      silent: true,
+      visible: true,
+    },
+    { how: 'started again unread', act: 'restart', was: null, args: {}, silent: false, visible: false },
+  ];
   let ran = 0;
   for (const one of cases) {
     if (one.visible && !visibleHere) {
@@ -5429,14 +5483,28 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
         GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '20000',
       },
     });
-    // The editor being restarted: a process that holds its pid until it is asked to go.
+    // The editor being restarted: a process that holds its pid until it is asked to go, carrying on
+    // its command line the arguments an editor would have been started with.
     const holder =
       one.act === 'restart'
-        ? spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
-            detached: true,
-            stdio: 'ignore',
-          })
+        ? spawnHidden(
+            process.execPath,
+            [
+              '-e',
+              one.was === null ? 'process.exit(0)' : 'setTimeout(() => {}, 120000)',
+              '--',
+              '-e',
+              ...(one.was ?? []),
+              '--path',
+              project,
+            ],
+            { detached: true, stdio: 'ignore' },
+          )
         : null;
+    if (one.was === null && holder !== null && holder.exitCode === null) {
+      await new Promise((resolve) => holder.once('exit', resolve));
+    }
+    let quitAsked = false;
     const sockets: WebSocket[] = [];
     const connect = async (): Promise<WebSocket> => {
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
@@ -5465,6 +5533,7 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
         first.on('message', (data: Buffer) => {
           const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string; id?: string };
           if (message.type === 'tool_invoke' && message.tool === 'quit_editor') {
+            quitAsked = true;
             first.send(
               JSON.stringify({
                 type: 'tool_result',
@@ -5497,14 +5566,29 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
           }
         }
         assert.ok(greeted, `${one.how}: the editor being restarted greets as one a server opened`);
-        answer = parseTextContent(
-          await server.request(
-            'tools/call',
-            { name: 'editor_launch', arguments: { op: 'restart', ...one.args } },
-            60_000,
-          ),
+        const reply = await server.request(
+          'tools/call',
+          { name: 'editor_launch', arguments: { op: 'restart', ...one.args } },
+          60_000,
         );
+        if (one.was === null) {
+          const said = textOf(reply) ?? '';
+          assert.equal(get(reply, 'result', 'isError'), true, `${one.how}: refused: ${said}`);
+          assert.match(
+            said,
+            new RegExp(
+              `How the editor \\(pid ${holder?.pid}\\) was started could not be read .*Pass hidden: true`,
+              's',
+            ),
+            `${one.how}: naming the editor and what to pass: ${said}`,
+          );
+          assert.equal(quitAsked, false, `${one.how}: and the editor was not asked to go`);
+          ran += 1;
+          continue;
+        }
+        answer = parseTextContent(reply);
         assert.equal(get(answer, 'restarted'), true, `${one.how}: ${JSON.stringify(answer)}`);
+        assert.equal(get(answer, 'hidden'), !one.visible, `${one.how}: saying which way it came back`);
         // Carried through the quit and the launch: an editor this server opened is started again
         // here, and its answer to the quit is the only account of what it saved.
         assert.deepEqual(
@@ -5519,6 +5603,11 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
         `${one.how}: the answer carries what it was started with: ${JSON.stringify(answer)}`,
       );
       assert.equal(silence(argv), one.silent, `${one.how}: silent ${String(one.silent)}: ${argv.join(' ')}`);
+      assert.equal(
+        argv.includes('--headless'),
+        !one.visible,
+        `${one.how}: hidden ${String(!one.visible)}: ${argv.join(' ')}`,
+      );
       ran += 1;
     } finally {
       for (const socket of sockets) {
