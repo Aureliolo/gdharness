@@ -1156,8 +1156,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   };
   take('servers:function_signature', ['res://w.gd::6::Work.square', 0]);
   take('servers:function_signature', ['res://w.gd::10::Work.busy', 1]);
-  const frame = (calls: number): unknown[] => [
-    7,
+  const frame = (calls: number, numbered = 7): unknown[] => [
+    numbered,
     0.016,
     0.01,
     0,
@@ -1183,7 +1183,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     0,
   ];
   take('servers:profile_frame', frame(100));
-  take('servers:profile_frame', frame(50));
+  take('servers:profile_frame', frame(50, 9));
   take('servers:profile_frame', [1, 2, 3]);
   const summed = aggregate.snapshot();
   assert.deepEqual(
@@ -1196,6 +1196,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     [2, false, 1, 150],
     JSON.stringify(summed),
   );
+  // The game's own numbers for the frames read, which the unreadable one does not move.
+  assert.deepEqual([summed.firstFrame, summed.lastFrame], [7, 9], JSON.stringify(summed));
   take('servers:profile_total', [9, 0, 0, 0, 0, 0, 0, 5, 0, 200, 0.5, 0.5, 0]);
   const whole = aggregate.snapshot();
   assert.deepEqual(
@@ -1310,6 +1312,34 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     answer({ totals: totals({}) })['note'],
     undefined,
     'the engine’s own totals need nothing said',
+  );
+  // Where the frames begin and whether any between them went missing, from the game's own numbers.
+  // A run without the runtime addon on a loaded runner summed 12 of its scene's 30 frames, and
+  // nothing in the answer said which 12.
+  const numbered = (firstFrame: number, lastFrame: number, frames: number, runtimeAddon = false): string =>
+    say({ runtimeAddon, totals: { ...totals({}), complete: false, firstFrame, lastFrame, frames } });
+  assert.match(
+    numbered(18, 29, 12),
+    / The profiler came on at the game's frame 18, so its first 18 frames are not in these, the main scene's _ready among them: without the runtime addon nothing holds the game's start until the profiler is on\./,
+  );
+  assert.match(
+    numbered(1, 29, 29, true),
+    / The profiler came on at the game's frame 1, so its first frame is not in these, the main scene's _ready among them\.(?: |$)/,
+  );
+  assert.match(
+    numbered(0, 29, 27),
+    / 3 of the game's frames between the first and the last that arrived did not arrive, so their script time is not in these\./,
+  );
+  assert.match(numbered(0, 29, 29), / One of the game's frames between the first and the last/);
+  assert.doesNotMatch(
+    numbered(0, 29, 30),
+    /came on at the game's frame|did not arrive/,
+    'all 30 from the start',
+  );
+  assert.match(
+    numbered(0, 29, 30),
+    /^These are the 30 frames that arrived, summed/,
+    'which still says what it is',
   );
   // Totals with the game still going: something switched the profiler off early, and what can have
   // depends on who is the game's debugger.
@@ -40022,14 +40052,33 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       const summed = await profiledRun('frames', true);
       const summedShown = JSON.stringify(summed);
       assert.equal(get(summed, 'complete'), false, summedShown);
-      assert.ok(Number(get(summed, 'frames')) >= 25, `the frames that reached it: ${summedShown}`);
       assert.match(
         String(get(summed, 'note')),
         /frames that arrived, summed, without the engine's own totals/,
         summedShown,
       );
+      // Which of the scene's 30 frames arrive is the engine's timing: nothing holds the start for the
+      // profiler without the runtime addon, and the queue is not emptied at the exit. Measured here
+      // as all 30, and on a loaded Linux runner as 12. What holds either way is that the frames that
+      // came are counted once each, in an unbroken run of the game's own numbers, and that frames
+      // missed at the start are said.
+      const frames = asNumber(get(summed, 'frames'));
+      const firstFrame = asNumber(get(summed, 'firstFrame'));
+      const lastFrame = asNumber(get(summed, 'lastFrame'));
+      assert.ok(
+        frames >= 1 && firstFrame >= 0 && lastFrame <= 29,
+        `the scene's frames, 0 to 29: ${summedShown}`,
+      );
+      assert.equal(lastFrame - firstFrame + 1, frames, `an unbroken run of them: ${summedShown}`);
       const perFrame = asArray(get(summed, 'functions')).find((one) => get(one, 'function') === 'each_frame');
-      assert.ok(Number(get(perFrame, 'calls')) >= 25, `called once a frame: ${summedShown}`);
+      assert.equal(get(perFrame, 'calls'), frames, `called once a frame: ${summedShown}`);
+      if (firstFrame > 0) {
+        assert.match(
+          String(get(summed, 'note')),
+          new RegExp(`The profiler came on at the game's frame ${firstFrame},`),
+          summedShown,
+        );
+      }
 
       // The runtime leaving mid-run is not the game quitting: the profiler stays on and the frames
       // after it are counted, rather than the engine's totals arriving then and nothing after them.
