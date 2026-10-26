@@ -713,6 +713,17 @@ const SCENE_FILES: Record<string, string[]> = {
     'script = ExtResource("1_s")',
     '',
   ],
+  // A scene the auto_reload case opens and whose script it writes as it opens.
+  'watched/watched.gd': ['extends Node', '', 'const LEVEL: int = 1', ''],
+  'watched/watched.tscn': [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[ext_resource type="Script" path="res://watched/watched.gd" id="1_w"]',
+    '',
+    '[node name="Watched" type="Node"]',
+    'script = ExtResource("1_w")',
+    '',
+  ],
   // A variable that is not exported: set and read back like any property on a @tool script, and
   // kept by no file, which only reading the saved form can tell.
   'layers/tool_node.gd': ['@tool', 'extends Node', '', '@export var target: Node', 'var hidden: int = 0', ''],
@@ -5178,6 +5189,43 @@ async function testAMemberRenameWaitsForTheClassesItTypesBy({
 }
 
 /**
+ * auto_reload reloads a script written as its scene opens, and one written twice in a second.
+ *
+ * It took up an opened scene's scripts at its next poll, up to a second after the scene opened, so a
+ * file written in between was first seen already changed and was never reloaded: a rename made
+ * straight after its scene was opened left the editor on the old text, and the rename case waited
+ * for a reload that never came, once, on a Linux runner. And it compared modification times, which are whole
+ * seconds, so a second write inside the second of the first went unseen. That one is written here
+ * with its time set back to the first write's, which is what a write inside the same second leaves.
+ */
+async function testAutoReloadMissesNoWrite({ project, printed }: Editor): Promise<void> {
+  const script = join(project, 'watched', 'watched.gd');
+  const before = readFileSync(script, 'utf8');
+  const reloads = (): number => printed().split('reloading: res://watched/watched.gd').length - 1;
+  const reloaded = async (times: number, what: string): Promise<void> => {
+    for (let waited = 0; reloads() < times && waited < 5000; waited += 100) {
+      await delay(100);
+    }
+    assert.equal(reloads(), times, `${what}:\n${printed().slice(-2000)}`);
+  };
+  try {
+    const already = reloads();
+    await hook(project, { op: 'open', path: 'res://watched/watched.tscn' });
+    writeFileSync(script, before.replace('LEVEL: int = 1', 'LEVEL: int = 2'));
+    await reloaded(already + 1, 'a script written as its scene opened is reloaded');
+    const first = statSync(script).mtime;
+    writeFileSync(script, before.replace('LEVEL: int = 1', 'LEVEL: int = 3'));
+    utimesSync(script, first, first);
+    await reloaded(already + 2, 'and one written again inside the same second');
+    // Three more polls, so a write reloaded again and again would have shown.
+    await delay(3000);
+    assert.equal(reloads(), already + 2, 'each write reloaded once');
+  } finally {
+    writeFileSync(script, before);
+  }
+}
+
+/**
  * A rename against a real editor and its language server.
  *
  * The member half holds what Godot 4.7.2 was measured to answer: the references of a method's own
@@ -7488,6 +7536,7 @@ async function main(): Promise<void> {
     ['testAChangedUidIsReadByTheRescan', testAChangedUidIsReadByTheRescan],
     ['testAMemberRenameWaitsForTheClassesItTypesBy', testAMemberRenameWaitsForTheClassesItTypesBy],
     ['testARenameFollowsTheEngine', testARenameFollowsTheEngine],
+    ['testAutoReloadMissesNoWrite', testAutoReloadMissesNoWrite],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],
