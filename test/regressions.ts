@@ -122,6 +122,7 @@ import {
   START_TOLERANCE_MS,
   slotWaitSaid,
   UNWRITTEN_MS,
+  WAITING_FOLDER,
 } from '../src/engine-slots.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
@@ -41565,6 +41566,92 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
   }
 }
 
+/**
+ * A take that finds every slot held keeps a mark of its wait for as long as it waits, and only then.
+ *
+ * The games' gates read the marks to leave the time `gdharness test` stood waiting for slots others
+ * held out of their own clocks, so a mark missing while it waits counts the wait against the gate,
+ * and one left behind counts the rest of the run as waiting. Python, which those gates are written
+ * in, opens a file without delete sharing, and Windows will not remove a file opened so; a lock
+ * given back while one reads it has to be removed once the read ends, or the slot stays taken.
+ */
+async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
+  const marks = join(directory, WAITING_FOLDER);
+  const marked = (): string[] => (existsSync(marks) ? readdirSync(marks).sort() : []);
+  const markedSoon = async (count: number): Promise<string[]> => {
+    const until = Date.now() + 5000;
+    while (marked().length !== count && Date.now() < until) {
+      await delay(20);
+    }
+    return marked();
+  };
+  try {
+    const holder = { pid: process.pid, started: await ownStart() };
+    const slots = new EngineSlots(directory, 1, holder);
+    const first = await slots.take();
+    assert.deepEqual(marked(), [], 'a slot free at once is taken without a mark');
+
+    const waited = slots.take(AbortSignal.timeout(10_000));
+    const one = await markedSoon(1);
+    assert.equal(one.length, 1, 'a take finding every slot held marks its wait');
+    assert.match(one[0] ?? '', new RegExp(`^${String(process.pid)}-\\d+\\.json$`), 'named by pid and wait');
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(marks, one[0] ?? ''), 'utf8')),
+      holder,
+      'holding what its lock will',
+    );
+    const besideIt = new AbortController();
+    const another = slots.take(besideIt.signal);
+    const two = await markedSoon(2);
+    assert.equal(new Set(two).size, 2, 'each wait in a process has a mark of its own');
+
+    slots.release(first);
+    assert.equal(await waited, first, 'the wait takes the slot given back');
+    assert.deepEqual(await markedSoon(1), [two.find((name) => name !== one[0])], 'and its mark is gone');
+    besideIt.abort();
+    await assert.rejects(another, /abort/i, 'an aborted wait');
+    assert.deepEqual(await markedSoon(0), [], 'takes its mark with it');
+
+    const ending = new AbortController();
+    const left = slots.take(ending.signal);
+    assert.equal((await markedSoon(1)).length, 1, 'a wait still going as the process ends');
+    slots.releaseAll();
+    assert.deepEqual(marked(), [], 'has its mark taken by giving back everything');
+    assert.equal(existsSync(first), false, 'as the slot is');
+    ending.abort();
+    await left.catch(() => undefined);
+
+    if (process.platform === 'win32') {
+      const lock = await slots.take();
+      const reader = spawnHidden(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `$f = [IO.File]::Open('${lock.replaceAll("'", "''")}', 'Open', 'Read', 'ReadWrite'); 'held'; Start-Sleep -Milliseconds 300; $f.Close()`,
+        ],
+        { stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      try {
+        await new Promise<void>((settle) => {
+          reader.stdout.once('data', () => {
+            settle();
+          });
+        });
+        slots.release(lock);
+        assert.equal(existsSync(lock), false, 'a lock given back while another process reads it is removed');
+      } finally {
+        reader.kill();
+        await exitOf(reader);
+      }
+    }
+  } finally {
+    sweep(directory);
+  }
+}
+
 /** Writes [param files] under [param root], by path. */
 function writeTree(root: string, files: Readonly<Record<string, string>>): void {
   for (const [path, text] of Object.entries(files)) {
@@ -61857,6 +61944,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunIsJudgedOnEverythingItPrinted,
   testTheScriptsGodotNeverFreesAreFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
+  testAWaitForASlotKeepsAMarkUntilItEnds,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
