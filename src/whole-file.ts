@@ -52,3 +52,26 @@ export function writeWhole(path: string, text: string): boolean {
     }
   }
 }
+
+/**
+ * Removes [param path], waiting out a reader that holds it open, and answers whether it is gone.
+ *
+ * Python opens a file without delete sharing, and Windows will not remove a file opened so: the
+ * games' tools read the slot locks and the wait marks every half second, and a lock left behind by
+ * a removal that landed on such a read names a live holder and keeps its slot for the whole run.
+ */
+export function removeWhole(path: string): boolean {
+  const until = Date.now() + HELD_FILE_MS;
+  for (;;) {
+    try {
+      rmSync(path, { force: true });
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      if (!HELD_BY_A_READER.has(code) || Date.now() >= until) {
+        return false;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_FILE_RETRY_MS);
+    }
+  }
+}

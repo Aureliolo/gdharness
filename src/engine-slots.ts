@@ -15,6 +15,11 @@
  * and removes the steal file. A steal file older than {@link UNWRITTEN_MS} is a taker that died
  * holding it.
  *
+ * A taker that finds every slot held keeps a mark, `<directory>/waiting/<pid>-<n>.json` holding
+ * what its lock will, until its take ends, so that a gate counting its own time can tell a wait for
+ * slots others hold from its own work. A mark whose holder has gone is free by the same rule as a
+ * lock.
+ *
  * One directory and one count serve the whole machine, whichever project an engine is for: every
  * game's gate, bench and tool, and this server's own engines, draw on the same budget. The directory
  * is `$XDG_CACHE_HOME/gdharness/slots` where that variable is set, else
@@ -35,6 +40,7 @@ import { alive } from './alive.js';
 import { callProgress, callSignal } from './call-signal.js';
 import { EngineUsageError } from './engine-launch.js';
 import { startTimesOf } from './process-children.js';
+import { removeWhole } from './whole-file.js';
 
 /** The variable naming the slot directory in place of the machine's. */
 export const SLOTS_VARIABLE = 'GODOT_ENGINE_SLOTS';
@@ -118,6 +124,10 @@ const WAIT_SAID_MS = 20_000;
 const COMMAND_WAIT_SAID_MS = 2000;
 /** How long a holder's start time, once read, is believed before it is read again. */
 const START_READ_MS = 10_000;
+/** The folder, inside the slots', of the marks takers keep while they wait. */
+export const WAITING_FOLDER = 'waiting';
+/** The waits this process has marked, which makes each mark's name its own. */
+let waitsMarked = 0;
 
 /** Who holds a lock, as its file says. */
 export interface SlotHolder {
@@ -181,6 +191,7 @@ export async function ownStart(): Promise<number> {
 export class EngineSlots {
   private readonly starts = new Map<number, { started: number | undefined; readAt: number }>();
   private readonly held = new Set<string>();
+  private readonly marks = new Set<string>();
   private saidAt = Number.NEGATIVE_INFINITY;
 
   readonly directory: string;
@@ -195,43 +206,78 @@ export class EngineSlots {
     this.say = say;
   }
 
-  /** Takes a slot, waiting for one to come free, and answers its lock's path. */
+  /**
+   * Takes a slot, waiting for one to come free, and answers its lock's path. A take that finds every
+   * slot held keeps a mark of its wait until it ends, however it ends.
+   */
   async take(signal?: AbortSignal, waiting?: (waitedMs: number) => void): Promise<string> {
     mkdirSync(this.directory, { recursive: true });
     const began = Date.now();
     let said = Number.NEGATIVE_INFINITY;
-    for (;;) {
-      signal?.throwIfAborted();
-      for (let slot = 0; slot < this.count; slot += 1) {
-        const lock = join(this.directory, `${String(slot)}.lock`);
-        if (this.made(lock) || (await this.takenOver(lock))) {
-          this.held.add(lock);
-          return lock;
+    let mark: string | undefined;
+    try {
+      for (;;) {
+        signal?.throwIfAborted();
+        for (let slot = 0; slot < this.count; slot += 1) {
+          const lock = join(this.directory, `${String(slot)}.lock`);
+          if (this.made(lock) || (await this.takenOver(lock))) {
+            this.held.add(lock);
+            return lock;
+          }
         }
-      }
-      const now = Date.now();
-      if (waiting !== undefined) {
-        if (now - said >= WAIT_SAID_MS) {
-          said = now;
-          waiting(now - began);
+        mark ??= this.waitMarked();
+        const now = Date.now();
+        if (waiting !== undefined) {
+          if (now - said >= WAIT_SAID_MS) {
+            said = now;
+            waiting(now - began);
+          }
+        } else if (
+          this.say !== undefined &&
+          this.held.size === 0 &&
+          now - began >= COMMAND_WAIT_SAID_MS &&
+          now - this.saidAt >= WAIT_SAID_MS
+        ) {
+          this.saidAt = now;
+          this.say(slotWaitSaid(now - began, this.count, this.directory));
         }
-      } else if (
-        this.say !== undefined &&
-        this.held.size === 0 &&
-        now - began >= COMMAND_WAIT_SAID_MS &&
-        now - this.saidAt >= WAIT_SAID_MS
-      ) {
-        this.saidAt = now;
-        this.say(slotWaitSaid(now - began, this.count, this.directory));
+        await delay(SLOT_WAIT_MS, undefined, signal === undefined ? {} : { signal });
       }
-      await delay(SLOT_WAIT_MS, undefined, signal === undefined ? {} : { signal });
+    } finally {
+      if (mark !== undefined && this.marks.delete(mark)) {
+        removeWhole(mark);
+      }
     }
+  }
+
+  /**
+   * Puts down the mark of a wait and answers its path, or undefined when it could not be made, which
+   * the next look tries again.
+   */
+  private waitMarked(): string | undefined {
+    const marks = join(this.directory, WAITING_FOLDER);
+    waitsMarked += 1;
+    const mark = join(marks, `${String(this.holder.pid)}-${String(waitsMarked)}.json`);
+    try {
+      mkdirSync(marks, { recursive: true });
+    } catch {
+      return undefined;
+    }
+    if (!this.made(mark)) {
+      return undefined;
+    }
+    this.marks.add(mark);
+    return mark;
   }
 
   /** Gives back every slot this process holds, as it ends. */
   releaseAll(): void {
     for (const lock of this.held) {
       this.release(lock);
+    }
+    for (const mark of this.marks) {
+      this.marks.delete(mark);
+      removeWhole(mark);
     }
   }
 
@@ -240,7 +286,7 @@ export class EngineSlots {
     this.held.delete(lock);
     try {
       if (holderOf(readFileSync(lock, 'utf8'))?.pid === this.holder.pid) {
-        rmSync(lock, { force: true });
+        removeWhole(lock);
       }
     } catch {
       // Already gone.

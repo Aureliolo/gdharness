@@ -122,6 +122,7 @@ import {
   START_TOLERANCE_MS,
   slotWaitSaid,
   UNWRITTEN_MS,
+  WAITING_FOLDER,
 } from '../src/engine-slots.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
@@ -446,6 +447,7 @@ import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
 import { pixelPng, solidPng } from './support/png.js';
 import { listenOnAReservedPort, reservePort, ServerProcess, stopServersOf } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
+import { leftInSlots } from './support/slots.js';
 import {
   endEnginesLeft,
   leftBehindBy,
@@ -41565,6 +41567,102 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
   }
 }
 
+/**
+ * A take that finds every slot held keeps a mark of its wait for as long as it waits, and only then.
+ *
+ * The games' gates read the marks to leave the time `gdharness test` stood waiting for slots others
+ * held out of their own clocks, so a mark missing while it waits counts the wait against the gate,
+ * and one left behind counts the rest of the run as waiting. Python, which those gates are written
+ * in, opens a file without delete sharing, and Windows will not remove a file opened so; a lock
+ * given back while one reads it has to be removed once the read ends, or the slot stays taken.
+ */
+async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
+  const marks = join(directory, WAITING_FOLDER);
+  const marked = (): string[] => (existsSync(marks) ? readdirSync(marks).sort() : []);
+  const markedSoon = async (count: number): Promise<string[]> => {
+    const until = Date.now() + 5000;
+    while (marked().length !== count && Date.now() < until) {
+      await delay(20);
+    }
+    return marked();
+  };
+  // Every wait ends with the case, so one whose assertion failed does not keep the suite running.
+  const stop = new AbortController();
+  const pending: Promise<unknown>[] = [];
+  try {
+    const holder = { pid: process.pid, started: await ownStart() };
+    const slots = new EngineSlots(directory, 1, holder);
+    const waitFor = (signal?: AbortSignal): Promise<string> => {
+      const taken = slots.take(signal === undefined ? stop.signal : AbortSignal.any([stop.signal, signal]));
+      pending.push(taken.catch(() => undefined));
+      return taken;
+    };
+    const first = await slots.take();
+    assert.deepEqual(marked(), [], 'a slot free at once is taken without a mark');
+
+    const waited = waitFor();
+    const one = await markedSoon(1);
+    assert.equal(one.length, 1, 'a take finding every slot held marks its wait');
+    assert.match(one[0] ?? '', new RegExp(`^${String(process.pid)}-\\d+\\.json$`), 'named by pid and wait');
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(marks, one[0] ?? ''), 'utf8')),
+      holder,
+      'holding what its lock will',
+    );
+    const besideIt = new AbortController();
+    const another = waitFor(besideIt.signal);
+    const two = await markedSoon(2);
+    assert.equal(new Set(two).size, 2, 'each wait in a process has a mark of its own');
+
+    slots.release(first);
+    assert.equal(await waited, first, 'the wait takes the slot given back');
+    assert.deepEqual(await markedSoon(1), [two.find((name) => name !== one[0])], 'and its mark is gone');
+    besideIt.abort();
+    await assert.rejects(another, /abort/i, 'an aborted wait');
+    assert.deepEqual(await markedSoon(0), [], 'takes its mark with it');
+
+    const ending = new AbortController();
+    const left = waitFor(ending.signal);
+    assert.equal((await markedSoon(1)).length, 1, 'a wait still going as the process ends');
+    slots.releaseAll();
+    assert.deepEqual(marked(), [], 'has its mark taken by giving back everything');
+    assert.equal(existsSync(first), false, 'as the slot is');
+    ending.abort();
+    await left.catch(() => undefined);
+
+    if (process.platform === 'win32') {
+      const lock = await slots.take();
+      const reader = spawnHidden(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `$f = [IO.File]::Open('${lock.replaceAll("'", "''")}', 'Open', 'Read', 'ReadWrite'); 'held'; Start-Sleep -Milliseconds 300; $f.Close()`,
+        ],
+        { stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      try {
+        await new Promise<void>((settle) => {
+          reader.stdout.once('data', () => {
+            settle();
+          });
+        });
+        slots.release(lock);
+        assert.equal(existsSync(lock), false, 'a lock given back while another process reads it is removed');
+      } finally {
+        reader.kill();
+        await exitOf(reader);
+      }
+    }
+  } finally {
+    stop.abort();
+    await Promise.all(pending);
+    sweep(directory);
+  }
+}
+
 /** Writes [param files] under [param root], by path. */
 function writeTree(root: string, files: Readonly<Record<string, string>>): void {
   for (const [path, text] of Object.entries(files)) {
@@ -42942,9 +43040,9 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
     });
     await delay(3000);
     assert.deepEqual(
-      [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, readdirSync(slots)],
-      [null, process.pid, ['0.lock']],
-      `the command waits behind the slot held, and takes no other: ${said}`,
+      [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, leftInSlots(slots)],
+      [null, process.pid, ['0.lock', `${WAITING_FOLDER}/${String(classes.pid)}-1.json`]],
+      `the command waits behind the slot held, takes no other, and marks its wait: ${said}`,
     );
     // From the command's own start of its wait, which comes after it has found its engine.
     for (let looked = 0; looked < 100 && !said.includes('for an engine'); looked += 1) {
@@ -42969,7 +43067,11 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
     assert.ok(await heldBy(classes.pid, 30_000), `then takes the slot given back: ${said}`);
     assert.equal(await ended, 0, said);
     assert.match(said, /"path": "res:\/\/\.godot\/global_script_class_cache\.cfg"/, said);
-    assert.deepEqual(readdirSync(slots), [], `and gives it back: ${said}`);
+    assert.deepEqual(
+      leftInSlots(slots),
+      [],
+      `and gives it back, its mark gone since it took the slot: ${said}`,
+    );
 
     await hold();
     const server = new ServerProcess({ env });
@@ -43001,7 +43103,7 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       assert.ok(await heldBy(server.child.pid, 30_000), 'then its engine runs in the slot given back');
       const checked = JSON.parse(textOf(await checking) ?? '{}') as unknown;
       assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
-      assert.deepEqual(readdirSync(slots), [], 'and the server gives it back once the run is read');
+      assert.deepEqual(leftInSlots(slots), [], 'and the server gives it back once the run is read');
     } finally {
       await server.stop();
     }
@@ -43646,7 +43748,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
       'both passed',
     );
-    assert.deepEqual(readdirSync(slots), [], 'every slot given back');
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
     assert.equal(
       existsSync(join(project, '.godot', 'gdharness', 'test-runs')) &&
         readdirSync(join(project, '.godot', 'gdharness', 'test-runs')).length > 0,
@@ -43958,7 +44060,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       new RegExp(`^Failed: ${String(faultLines.length)} problems, listed above\\.`, 'm'),
       hung.said,
     );
-    assert.deepEqual(readdirSync(slots), [], 'its slot given back too');
+    assert.deepEqual(leftInSlots(slots), [], 'its slot given back too');
 
     // An autoload that cannot start makes every suite after it meaningless, so the run ends there
     // rather than reporting cases that ran without it.
@@ -44442,7 +44544,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       );
       assert.equal(rowsTimed(), rows, `${what}: and every row is timed afterwards`);
     }
-    assert.deepEqual(readdirSync(slots), [], 'every slot given back');
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
     sweep(project, slots);
   }
@@ -44611,7 +44713,7 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
       `an inherited case asked for by name runs: ${JSON.stringify(one)}`,
     );
     assert.equal(get(one, 'tests'), 1, `and it alone: ${JSON.stringify(one)}`);
-    assert.deepEqual(readdirSync(slots), [], 'every slot given back');
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
     await server.stop();
     sweep(project, slots);
@@ -61857,6 +61959,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunIsJudgedOnEverythingItPrinted,
   testTheScriptsGodotNeverFreesAreFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
+  testAWaitForASlotKeepsAMarkUntilItEnds,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
