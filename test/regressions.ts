@@ -43984,10 +43984,13 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
         passedResult.passed,
         passedResult.problems,
         passedResult.logs,
-        passedResult.engines.map((one) => one.log),
+        passedResult.engines.length > 0,
+        passedResult.engines.filter((one) => one.log !== null),
       ],
-      [true, [], null, [null]],
-      'a passing run removes its logs, and its result says so',
+      [true, [], null, true, []],
+      // However many engines the suites' last times dealt them to: two quick suites go to two once
+      // they took more than 5 s together, and a slow runner's earlier runs here can measure that.
+      `a passing run removes its logs, and its result says so: ${JSON.stringify(passedResult.engines)} ${JSON.stringify(passedResult.suites)}`,
     );
     assert.deepEqual(
       passedResult.suites.map((suite) => suite.path).sort(),
