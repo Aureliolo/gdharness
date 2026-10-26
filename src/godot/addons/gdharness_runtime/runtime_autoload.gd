@@ -10,18 +10,60 @@ extends Node
 ## wanted. Both directions of the socket carry one JSON object per line. Every request names an
 ## id and the reply carries it back.
 
-const GdhAccessibility = preload("runtime_accessibility.gd")
-const GdhCapture = preload("runtime_capture.gd")
-const GdhChanges = preload("runtime_changes.gd")
 const GdhErrorReport = preload("error_report.gd")
-const GdhInputCommands = preload("runtime_input.gd")
-const GdhPad = preload("runtime_pad.gd")
-const GdhQueries = preload("runtime_queries.gd")
+const GdhFrames = preload("runtime_frames.gd")
 const GdhRead = preload("reading.gd")
-const GdhTargets = preload("runtime_targets.gd")
-const GdhTyping = preload("runtime_typing.gd")
-const GdhValues = preload("runtime_values.gd")
-const GdhWaits = preload("runtime_waits.gd")
+
+## Where the modules are loaded from. Kept in step with the markers below.
+const ADDON_DIR: String = "res://addons/gdharness_runtime/"
+
+## The modules that answer commands, loaded at the first command one answers rather than preloaded.
+## A preload compiles as this script parses, and the modules are twelve thousand lines: compiling
+## them took most of a second of every debug start, in games nobody asks anything, a bench's quiet
+## workers and script runs among them.
+const QUERIES: String = "runtime_queries.gd"
+const CHANGES: String = "runtime_changes.gd"
+const INPUT: String = "runtime_input.gd"
+const TYPING: String = "runtime_typing.gd"
+const PAD: String = "runtime_pad.gd"
+const CAPTURE: String = "runtime_capture.gd"
+const WAITS: String = "runtime_waits.gd"
+const ACCESSIBILITY: String = "runtime_accessibility.gd"
+const VALUES: String = "runtime_values.gd"
+
+## Every module command, by the name a request uses, as the module and the method that answers it.
+const MODULE_COMMANDS: Dictionary = {
+	"get_tree": [QUERIES, "get_tree"],
+	"find_nodes": [QUERIES, "find_nodes"],
+	"read_text": [QUERIES, "read_text"],
+	"get_rect": [QUERIES, "get_rect"],
+	"get_property": [QUERIES, "get_property"],
+	"set_property": [CHANGES, "set_property"],
+	"call_method": [CHANGES, "call_method"],
+	"get_metrics": [QUERIES, "get_metrics"],
+	"get_accessibility": [ACCESSIBILITY, "get_accessibility"],
+	"capture_screenshot": [CAPTURE, "capture_screenshot"],
+	"capture_viewport": [CAPTURE, "capture_viewport"],
+	"inject_action": [INPUT, "inject_action"],
+	"inject_key": [INPUT, "inject_key"],
+	"inject_text": [TYPING, "inject_text"],
+	"inject_mouse_click": [INPUT, "inject_mouse_click"],
+	"inject_mouse_motion": [INPUT, "inject_mouse_motion"],
+	"inject_mouse_drag": [INPUT, "inject_mouse_drag"],
+	"inject_joypad_button": [PAD, "inject_joypad_button"],
+	"inject_joypad_motion": [PAD, "inject_joypad_motion"],
+	"click": [INPUT, "click"],
+	"choose": [TYPING, "choose"],
+	"wait_frames": [WAITS, "wait_frames"],
+	"wait_signal": [WAITS, "wait_signal"],
+	"watch_signal": [WAITS, "watch_signal"],
+	"watch_recorded": [WAITS, "recorded"],
+	"wait_until": [WAITS, "wait_until"],
+}
+
+## The size the engine gives a headless game's root viewport. Kept in step with
+## `HEADLESS_VIEWPORT` in runtime_targets.gd, which this script does not load as it starts.
+const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
 
 const PROTOCOL: int = 3
 const DEFAULT_BIND_ADDRESS: String = "127.0.0.1"
@@ -104,19 +146,20 @@ const ERROR_REPORT_NAME: String = "runtime-%d.log"
 const VERSION_MARKER: String = "res://addons/gdharness_runtime/.gdharness-version"
 const DIGEST_MARKER: String = "res://addons/gdharness_runtime/.gdharness-digest"
 
-var values: GdhValues = GdhValues.new()
+## The values module every other module reads and writes values with, one for them all, loaded with
+## the first of them.
+var values: RefCounted:
+	get:
+		if _values == null:
+			_values = _loaded(VALUES).new()
+		return _values
 
-# The modules are members and not locals of _init, because a Callable holds its object by id
-# rather than by reference, and a module referenced only by the Callables in the command table
-# would be freed on the way out of _init, leaving every command "unknown".
-var _queries: GdhQueries = GdhQueries.new(self, values)
-var _changes: GdhChanges = GdhChanges.new(self, values)
-var _input: GdhInputCommands = GdhInputCommands.new(self, values)
-var _typing: GdhTyping = GdhTyping.new(self)
-var _pad: GdhPad = GdhPad.new(self)
-var _capture: GdhCapture = GdhCapture.new(self, values)
-var _waits: GdhWaits = GdhWaits.new(self, values)
-var _accessibility: GdhAccessibility = GdhAccessibility.new(self)
+var _values: RefCounted
+var _frames: GdhFrames = GdhFrames.new()
+## Each module loaded so far, by its file. Held here because a Callable holds its object by id
+## rather than by reference, and a module referenced only by the Callable answering one command
+## would be freed once it answered.
+var _modules: Dictionary = {}
 
 var _server: TCPServer
 var _clients: Array[StreamPeerTCP] = []
@@ -136,7 +179,7 @@ var _announcement: String = ""
 ## Held for as long as the game runs: a Logger the engine has is kept by reference, and one
 ## that goes away mid-run takes the report with it.
 var _errors: GdhErrorReport
-## Every command, by the name a request uses, as the module method that answers it.
+## The commands this script answers itself, by the name a request uses.
 var _commands: Dictionary = {}
 ## The addon this game loaded, read once at start: an upgrade rewrites the markers under a running
 ## game, whose code stays what it loaded, and reading them later would call that code current.
@@ -155,36 +198,51 @@ var _profiler_calibrated: bool = false
 func _init() -> void:
 	_commands = {
 		"ping": _ping,
-		"get_tree": _queries.get_tree,
-		"find_nodes": _queries.find_nodes,
-		"read_text": _queries.read_text,
-		"get_rect": _queries.get_rect,
-		"get_property": _queries.get_property,
-		"set_property": _changes.set_property,
-		"call_method": _changes.call_method,
-		"get_metrics": _queries.get_metrics,
-		"get_accessibility": _accessibility.get_accessibility,
-		"capture_screenshot": _capture.capture_screenshot,
-		"capture_viewport": _capture.capture_viewport,
-		"inject_action": _input.inject_action,
-		"inject_key": _input.inject_key,
-		"inject_text": _typing.inject_text,
-		"inject_mouse_click": _input.inject_mouse_click,
-		"inject_mouse_motion": _input.inject_mouse_motion,
-		"inject_mouse_drag": _input.inject_mouse_drag,
-		"inject_joypad_button": _pad.inject_joypad_button,
-		"inject_joypad_motion": _pad.inject_joypad_motion,
-		"click": _input.click,
-		"choose": _typing.choose,
-		"wait_frames": _waits.wait_frames,
-		"wait_signal": _waits.wait_signal,
-		"watch_signal": _waits.watch_signal,
-		"watch_recorded": _waits.recorded,
-		"wait_until": _waits.wait_until,
 		"send_profile": _send_profile_now,
 		"close_game": _close_game,
 	}
 	_wait_for_the_profiler()
+
+
+## The script of the module in [param file], compiled at the first call that needs it.
+static func _loaded(file: String) -> GDScript:
+	return load(ADDON_DIR + file) as GDScript
+
+
+## The module in [param file], built at its first command with what it is built with.
+func _module(file: String) -> Object:
+	var made: Object = _modules.get(file)
+	if made != null:
+		return made
+	var script: GDScript = _loaded(file)
+	match file:
+		QUERIES:
+			made = script.new(self, values, _frames)
+		TYPING, PAD, ACCESSIBILITY:
+			made = script.new(self)
+		_:
+			made = script.new(self, values)
+	_modules[file] = made
+	_frames.skip_this_frame()
+	return made
+
+
+## What answers [param command], loading its module if no command has needed it yet, or an invalid
+## Callable for a command nothing answers.
+func _handler(command: String) -> Callable:
+	if _commands.has(command):
+		return _commands[command]
+	var answered_by: Array = MODULE_COMMANDS.get(command, [])
+	if answered_by.is_empty():
+		return Callable()
+	var file: String = answered_by[0]
+	var method: String = answered_by[1]
+	return Callable(_module(file), method)
+
+
+## Every command the runtime answers, its own and the modules', loaded or not.
+func _command_names() -> Array:
+	return _commands.keys() + MODULE_COMMANDS.keys()
 
 
 ## Gives a game with no window the size the project opens its window at. Measured: a
@@ -199,7 +257,7 @@ func _size_a_windowless_game() -> void:
 	if DisplayServer.get_name() != "headless" or _script_run() or not OS.is_debug_build():
 		return
 	var root: Window = get_tree().root
-	if Vector2(root.size) != GdhTargets.HEADLESS_VIEWPORT:
+	if Vector2(root.size) != HEADLESS_VIEWPORT:
 		return
 	root.size = Vector2i(_window_dimension("width", 1152), _window_dimension("height", 648))
 
@@ -421,7 +479,7 @@ func _report_errors() -> void:
 func _process(_delta: float) -> void:
 	if not _enabled or _server == null:
 		return
-	_queries.note_frame(Time.get_ticks_usec())
+	_frames.note_frame(Time.get_ticks_usec())
 	_calibrate_the_profiler()
 
 	# Every connection waiting rather than one a frame: the engine queues eight a game has not
@@ -704,7 +762,7 @@ func _send_welcome(client: StreamPeerTCP) -> void:
 		str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
 	)
 	welcome["type"] = "welcome"
-	welcome["commands"] = _commands.keys()
+	welcome["commands"] = _command_names()
 	_send_response(client, welcome)
 
 
@@ -742,13 +800,16 @@ func _handle_message(client: StreamPeerTCP, line: String) -> void:
 
 
 func _execute_command(command: String, params: Dictionary) -> Dictionary:
-	var handler: Callable = _commands.get(command, Callable())
+	var handler: Callable = _handler(command)
 	if not handler.is_valid():
 		return {
 			"type": "error",
-			"message": "Unknown command: %s. Commands: %s" % [command, ", ".join(_commands.keys())]
+			"message": "Unknown command: %s. Commands: %s" % [command, ", ".join(_command_names())]
 		}
-	_waits.saw_call(command, params)
+	# Only a waits module already loaded can have a trace running to record the call in.
+	var waits: Object = _modules.get(WAITS)
+	if waits != null:
+		var _seen: Variant = waits.call(&"saw_call", command, params)
 	var answer: Variant = await handler.call(params)
 	return answer
 

@@ -217,10 +217,12 @@ func _check_a_script_class_without_a_name() -> void:
 	# element while building the list, and the list that comes back shorter is refused, not written.
 	var lax: Callable = func(_given: Variant, _declared: String, _script: Script) -> Dictionary:
 		return {"object": root.get_node("Plain")}
-	var built: Dictionary = node.values.typed_like(["/root/Plain"], holder.get("squad"), lax)
+	var built: Dictionary = node.values.call(&"typed_like", ["/root/Plain"], holder.get("squad"), lax)
 	if not str(built.get("message", "")).contains("would not take its elements"):
 		_fail("a typed list the engine builds shorter is refused: %s" % str(built))
-	var built_map: Dictionary = node.values.typed_like({"a": "/root/Plain"}, holder.get("by_name"), lax)
+	var built_map: Dictionary = node.values.call(
+		&"typed_like", {"a": "/root/Plain"}, holder.get("by_name"), lax
+	)
 	if not str(built_map.get("message", "")).contains("would not take its entries"):
 		_fail("and so is a typed map: %s" % str(built_map))
 	var taken: Dictionary = await _write("squad", ["/root/Walker", "null"])

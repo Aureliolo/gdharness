@@ -981,11 +981,11 @@ func _check() -> void:
 	await _check_calling_a_step_along_the_path(hero, button)
 	await _check_a_node_path_that_reaches_past_a_node()
 
-	var serialised: Variant = node.values.serialize(hero)
+	var serialised: Variant = node.values.call(&"serialize", hero)
 	if serialised != {"_type": "Node", "class": "Node2D", "path": "/root/Level/Hero"}:
 		_fail("a node in the tree serialises with its path: %s" % str(serialised))
 	var loose: Node = Node.new()
-	var loose_fields: Dictionary = node.values.serialize(loose)
+	var loose_fields: Dictionary = node.values.call(&"serialize", loose)
 	if loose_fields.get("_type") != "Object" or loose_fields.get("class") != "Node":
 		_fail("a node outside the tree serialises as a plain object: %s" % str(loose_fields))
 	if loose_fields.has("path"):
