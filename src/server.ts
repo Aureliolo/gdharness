@@ -3278,7 +3278,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
   }
   if (table.addonFunctions > 0) {
     notes.push(
-      `The gdharness runtime addon's own functions took ${table.addonMs}ms of self time over ${table.addonFunctions === 1 ? 'one function' : `${table.addonFunctions} functions`}, answering tools such as runtime_invoke and sending the profile. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs, since they are not the game's work, though that time was spent in the game's frames.`,
+      `The gdharness runtime's own functions, its addon's and those of the loader that starts it, took ${table.addonMs}ms of self time over ${table.addonFunctions === 1 ? 'one function' : `${table.addonFunctions} functions`}, starting the runtime as the game starts, answering tools such as runtime_invoke and sending the profile. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs, since they are not the game's work, though that time was spent in the game's process.`,
     );
   }
   notes.push(...cappedNotes(totals));

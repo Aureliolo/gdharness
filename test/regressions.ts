@@ -2120,22 +2120,27 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     },
     'res://main.gd::15::press': { calls: 3, selfSeconds: 0.003, totalSeconds: 0.0035 },
     'res://main.gd::11::step': { calls: 3, selfSeconds: 0.0005, totalSeconds: 0.0005 },
+    // The loader setup writes outside addons/, compiling the runtime in its _ready: probe 198 found it
+    // at the top of a profile at 779ms, read as the game's costliest function.
+    'res://gdharness/loader.gd::27::_ready': { calls: 1, selfSeconds: 0.779, totalSeconds: 0.78 },
+    // A script of the game's own beside the loader, which is not gdharness's for sharing its folder.
+    'res://gdharness/loader_menu.gd::4::open': { calls: 1, selfSeconds: 0.0002, totalSeconds: 0.0002 },
   });
   const servedTable = profiledFunctions(served, 1);
   assert.deepEqual(
     [servedTable.functions.map((one) => one.function), servedTable.counted, servedTable.scriptMs],
-    [['press'], 2, 3.5],
-    "a limit of one returns the game's costliest function, and the addon's rows count nowhere in the game's",
+    [['press'], 3, 3.7],
+    "a limit of one returns the game's costliest function, and the runtime's rows count nowhere in the game's",
   );
   const servedAnswer = answer({ totals: served });
   assert.deepEqual(
     [get(servedAnswer, 'runtimeAddonMs'), get(servedAnswer, 'runtimeAddonFunctions')],
-    [7, 2],
-    'the addon is summed apart rather than dropped',
+    [786, 3],
+    'the addon and its loader are summed apart rather than dropped',
   );
   assert.match(
     String(servedAnswer['note']),
-    /The gdharness runtime addon's own functions took 7ms of self time over 2 functions, answering tools such as runtime_invoke and sending the profile\. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs/,
+    /The gdharness runtime's own functions, its addon's and those of the loader that starts it, took 786ms of self time over 3 functions, starting the runtime as the game starts, answering tools such as runtime_invoke and sending the profile\. They are left out of functions, functionsCounted and scriptMs and summed under runtimeAddonMs/,
     `the note says where the addon's time went: ${String(servedAnswer['note'])}`,
   );
   assert.equal(
@@ -38920,13 +38925,14 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
     );
     // One run under a stand-in debugger that sends the switch [param switchAfterMs] after the game
     // connects, or never when null, and reads nothing for [param behindMs] after it connects: the
-    // calls of marker it counted, whether the totals came, and what the game printed.
+    // calls of marker it counted, whether the totals came, whether the game had gone before the
+    // debugger read again, and what the game printed.
     const run = async (
       fromTheStart: boolean,
       switchAfterMs: number | null,
       behindMs = 0,
       scene = 'res://main.tscn',
-    ): Promise<{ calls: number; complete: boolean; asked: string[]; said: string }> => {
+    ): Promise<{ calls: number; complete: boolean; asked: string[]; goneUnread: boolean; said: string }> => {
       const debuggerServer = createServer();
       // The game's asks for an answer and its totals, in the order they arrived.
       const asked: string[] = [];
@@ -38938,6 +38944,7 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
       // Read once the game has gone and its debugger connection has closed: the last messages, the
       // totals among them, can still be arriving after the process has exited.
       let connectionClosed: Promise<void> = Promise.resolve();
+      let readingAgain = false;
       debuggerServer.on('connection', (socket) => {
         const stream = new DebuggerStream();
         if (switchAfterMs !== null) {
@@ -38947,7 +38954,10 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
         // its own queue meanwhile, the totals and the word that they were sent among it.
         if (behindMs > 0) {
           socket.pause();
-          setTimeout(() => socket.resume(), behindMs);
+          setTimeout(() => {
+            readingAgain = true;
+            socket.resume();
+          }, behindMs);
         }
         socket.on('data', (chunk: Buffer) => {
           for (const received of stream.push(chunk)) {
@@ -39006,6 +39016,7 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
         }),
       );
       clearTimeout(limit);
+      const goneUnread = behindMs > 0 && !readingAgain;
       await connectionClosed;
       debuggerServer.close();
       const totals = aggregate.snapshot();
@@ -39019,7 +39030,8 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
         calls: row?.calls ?? 0,
         complete: totals.complete,
         asked,
-        said: `${said}\ntotals complete: ${totals.complete}, capped: ${totals.totalCapped}, functions: ${Object.keys(totals.functions).length}, frames: ${totals.frames}, dropped by the game's queue: ${totals.dropped ?? 0}, main.gd: ${JSON.stringify(sent)}`,
+        goneUnread,
+        said: `${said}\ntotals complete: ${totals.complete}, capped: ${totals.totalCapped}, functions: ${Object.keys(totals.functions).length}, frames: ${totals.frames}, dropped by the game's queue: ${totals.dropped ?? 0}, gone before the debugger read again: ${goneUnread}, main.gd: ${JSON.stringify(sent)}`,
       };
     };
 
@@ -39046,7 +39058,11 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
     // Started for a profile by gdharness, the game's debugger is one that answers, so the game waits
     // for it and its totals arrive; a fixed three seconds lost them on a loaded macOS runner.
     const behind = await run(true, 0, 6000, 'res://loud.tscn');
-    assert.equal(behind.complete, true, `a debugger that fell behind still gets the totals:\n${behind.said}`);
+    assert.deepEqual(
+      [behind.complete, behind.goneUnread],
+      [true, false],
+      `a debugger that fell behind is waited for and still gets the totals:\n${behind.said}`,
+    );
     assert.doesNotMatch(behind.said, /did not confirm/, behind.said);
     // And the game waited for that debugger to read everything before it switched the profiler off,
     // so the totals and the names they bring went into an empty queue: without it the queue still held
@@ -39057,17 +39073,18 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
       behind.said,
     );
     // Not told, the debugger could be any, which may never answer: the game gives up after the short
-    // wait, says so, and the totals still queued go with it.
-    const unknown = await run(false, 0, 6000, 'res://loud.tscn');
+    // wait, says so, and has gone before the debugger reads again. Whether its totals survive it is
+    // the platform's: Linux's socket buffer holds what the game wrote last, and they arrive anyway.
+    const unknown = await run(false, 0, 9000, 'res://loud.tscn');
     assert.deepEqual(
       [
         unknown.said.includes(
           "[gdharness] the debugger did not confirm the profiler's totals within 3000 ms",
         ),
-        unknown.complete,
+        unknown.goneUnread,
       ],
-      [true, false],
-      `a debugger not known to answer holds the exit for the short wait only, and loses the totals:\n${unknown.said}`,
+      [true, true],
+      `a debugger not known to answer holds the exit for the short wait only:\n${unknown.said}`,
     );
   } finally {
     sweep(project);

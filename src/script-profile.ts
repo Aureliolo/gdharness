@@ -24,6 +24,7 @@ import {
 } from './gdscript-source.js';
 import { type DebuggerMessage, framedCommand, type GodotValue, type SentValue } from './godot-variant.js';
 import { parseProjectGodot } from './resources.js';
+import { RUNTIME_AUTOLOAD } from './setup.js';
 import { writeWhole } from './whole-file.js';
 
 /** One function's totals, keyed by the signature the engine compiled into it. */
@@ -341,10 +342,11 @@ const ms = (seconds: number): number => Math.round(seconds * 1_000_000) / 1000;
  * and its time is measured from the engine's start rather than from its own, which would put it at
  * the top of every table with a time longer than the run.
  *
- * The runtime addon's functions are summed apart, as `addonMs` over `addonFunctions`: they are
- * gdharness answering its tools inside the game, a `runtime_invoke` costing more than many a press it
- * makes, and among the game's rows they would read as the game's cost and take its places under the
- * limit.
+ * The runtime addon's functions and its loader's are summed apart, as `addonMs` over
+ * `addonFunctions`: they are gdharness starting its runtime and answering its tools inside the game, a
+ * `runtime_invoke` costing more than many a press it makes and the loader's compile of the runtime
+ * most of a second, and among the game's rows they would read as the game's cost and take its places
+ * under the limit.
  */
 export function profiledFunctions(
   totals: ProfileTotals,
@@ -393,8 +395,12 @@ const RUNTIME_SCRIPT = 'gdharness_runtime/runtime_autoload.gd';
 const PROFILER_PROBE = '_profiler_probe';
 const PROFILER_CALIBRATOR = '_calibrate_the_profiler';
 
+/** The loader `project.godot` names, which compiles and starts the runtime in its `_ready`. */
+const RUNTIME_LOADER = `res://${RUNTIME_AUTOLOAD.path}`;
+
 function isRuntimeAddon(signature: string): boolean {
-  return signatureParts(signature).script.startsWith(RUNTIME_ADDON);
+  const { script } = signatureParts(signature);
+  return script.startsWith(RUNTIME_ADDON) || script === RUNTIME_LOADER;
 }
 
 /** Whether [param signature] is the runtime addon measuring the profiler, which is not the game's. */
