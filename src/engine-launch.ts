@@ -31,7 +31,7 @@ import {
 import { Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
-import { type EngineEnd, readRun } from './suite-judge.js';
+import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
 import { askWindows } from './windows-ask.js';
 
 /** A command line `test` or `spread` cannot act on, which the CLI answers with exit code 2. */
@@ -321,6 +321,10 @@ export function heldToCores(
  * [param silenceSeconds], has run past the run's deadline, or an autoload has failed to start. Its
  * user data is a `user` folder in [param directory], so two engines never write one save or
  * settings file.
+ *
+ * [param silenceIn] lengthens the silence for what was running as the engine fell silent, read from
+ * what it had printed; it is asked only once a silence passes [param silenceSeconds], since a long
+ * log is read whole each time.
  */
 export async function watchedEngine(
   launch: EngineLaunch,
@@ -328,6 +332,7 @@ export async function watchedEngine(
   directory: string,
   log: string,
   silenceSeconds: number,
+  silenceIn?: (printed: RunPrinted) => number,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
   const env = { ...process.env, APPDATA: user, XDG_DATA_HOME: user };
@@ -409,6 +414,8 @@ export async function watchedEngine(
     const started = Date.now();
     let lastGrowth = started;
     let text = '';
+    // The silence allowed for what the log shows running, read once for each size it reaches.
+    let allowed = { size: -1, seconds: silenceSeconds };
     while (!finished.now) {
       await delay(LOOK_MS);
       // Silence alone never ends an engine that keeps printing, such as a case warning every frame.
@@ -430,13 +437,23 @@ export async function watchedEngine(
           stop();
         }
       } else if (ended === null && Date.now() - lastGrowth > silenceSeconds * 1000) {
-        const stoppedIn = readRun(text).stoppedIn;
+        if (allowed.size !== size) {
+          allowed = {
+            size,
+            seconds:
+              silenceIn === undefined ? silenceSeconds : Math.max(silenceSeconds, silenceIn(readRun(text))),
+          };
+        }
+        if (Date.now() - lastGrowth <= allowed.seconds * 1000) {
+          continue;
+        }
+        const { stoppedIn } = readRun(text);
         // A helper that never wrote the pid never started the engine, which is a start that hung.
         const unstarted =
           helper !== null && !existsSync(helper.pid)
             ? `, and it never started ${helper.how}: ${helperStep(helper.step)}`
             : '';
-        ended = `the engine printed nothing for ${String(silenceSeconds)} s${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended${unstarted}`;
+        ended = `the engine printed nothing for ${String(allowed.seconds)} s${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended${unstarted}`;
         stop();
       }
     }

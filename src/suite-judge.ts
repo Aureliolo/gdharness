@@ -75,6 +75,11 @@ export interface RunPrinted {
   /** What was running as the printed lines end: a case, a suite's hook, or null outside every suite. */
   readonly stoppedIn: string | null;
   /**
+   * The same as [member stoppedIn], read: the suite open as the printed lines end and the case
+   * running in it, `before` in its first hook, or null between its cases and after them.
+   */
+  readonly running: { readonly suite: string; readonly during: string | null } | null;
+  /**
    * The rows the engine found and left to the others, by `path > func`; null for a case that is no
    * row. gdUnit4 prints nothing for them, so without these a row no engine was dealt goes unseen.
    */
@@ -134,7 +139,7 @@ export function funcOf(name: string): string {
 }
 
 /** The row a printed case name is, `test_params:3 (…)` being row 3, or null when it is no row. */
-function rowOf(name: string): number | null {
+export function rowOf(name: string): number | null {
   const row = /^[^:]+:(\d+)(?: |$)/.exec(name)?.[1];
   return row === undefined ? null : Number(row);
 }
@@ -295,6 +300,7 @@ export function readRun(printed: string): RunPrinted {
     executed,
     unloadable,
     stoppedIn,
+    running: last === null ? null : { suite: last.path, during },
     leftOut,
     engineVersion,
     orphansLeft,
