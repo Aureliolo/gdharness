@@ -43040,13 +43040,8 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
     });
     await delay(3000);
     assert.deepEqual(
-      [
-        classes.exitCode,
-        holderOf(readFileSync(ours, 'utf8'))?.pid,
-        readdirSync(slots).filter((name) => name !== WAITING_FOLDER),
-        readdirSync(join(slots, WAITING_FOLDER)),
-      ],
-      [null, process.pid, ['0.lock'], [`${String(classes.pid)}-1.json`]],
+      [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, leftInSlots(slots)],
+      [null, process.pid, ['0.lock', `${WAITING_FOLDER}/${String(classes.pid)}-1.json`]],
       `the command waits behind the slot held, takes no other, and marks its wait: ${said}`,
     );
     // From the command's own start of its wait, which comes after it has found its engine.
