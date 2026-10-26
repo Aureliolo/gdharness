@@ -5234,7 +5234,7 @@ async function testAutoReloadMissesNoWrite({ project, printed }: Editor): Promis
  * without it, on a macOS runner. Written here from outside once the edit is made, which is the state
  * that poll met.
  */
-async function testAutoReloadKeepsUnsavedEdits({ project, printed }: Editor): Promise<void> {
+async function testAutoReloadKeepsUnsavedEdits({ call, project, printed }: Editor): Promise<void> {
   const path = 'res://watched/watched.tscn';
   const file = join(project, 'watched', 'watched.tscn');
   const before = readFileSync(file, 'utf8');
@@ -5259,8 +5259,10 @@ async function testAutoReloadKeepsUnsavedEdits({ project, printed }: Editor): Pr
     assert.deepEqual(get(kept, 'children'), ['Unsaved'], `the edit is kept: ${JSON.stringify(kept)}`);
     assert.ok(asArray(get(kept, 'unsaved')).includes(path), `and still unsaved: ${JSON.stringify(kept)}`);
 
-    // Once saved, a write is reloaded again.
-    await hook(project, { op: 'save_scenes' });
+    // Once saved, a write is reloaded again. This scene alone, since other cases leave scenes of
+    // their own unsaved, and in front, the only tab auto_reload reloads.
+    await call('scene_create', { projectPath: project, scenePath: path, op: 'save' });
+    await hook(project, { op: 'open', path });
     writeFileSync(file, before);
     let back: unknown = null;
     for (let waited = 0; waited < 5000; waited += 250) {
