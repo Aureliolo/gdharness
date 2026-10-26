@@ -52,11 +52,13 @@ import {
   type EngineEnd,
   type EngineVerdict,
   exitNamed,
+  funcOf,
   judgeEngine,
   named,
   type RunPrinted,
   readExpected,
   readRun,
+  rowOf,
   rowsAcross,
   versionFault,
 } from './suite-judge.js';
@@ -71,6 +73,7 @@ import {
   ProjectScripts,
   readTimes,
   SPLIT_PAST_SECONDS,
+  type SuiteTimes,
   TEST_DIRECTORIES,
   timesAfter,
   type Unit,
@@ -144,8 +147,36 @@ export interface RunResult {
 
 /** How many of the slowest suites the run names at its end. */
 const SLOWEST_NAMED = 5;
-/** How many times its slowest unit an engine may print nothing for. */
-const SILENCE_TIMES_SLOWEST = 4;
+/** How many times the last time of what it is running an engine may print nothing for. */
+const SILENCE_TIMES_TAKEN = 4;
+
+/**
+ * How long an engine may print nothing while in [param running], at least [param floorSeconds]:
+ * four times the case's last time from [param times], the row's for a row of one, or the time its
+ * suite spent outside its cases while in a hook or between cases. Read from what is running rather
+ * than from the slowest suite the engine was dealt, so one long suite does not leave every suite
+ * beside it hanging for that long.
+ */
+export function silenceWhile(
+  running: RunPrinted['running'],
+  times: SuiteTimes,
+  floorSeconds: number,
+): number {
+  const time = running === null ? undefined : times[running.suite];
+  if (running === null || time === undefined) {
+    return floorSeconds;
+  }
+  let taken: number | undefined;
+  if (running.during === null || running.during === 'before') {
+    const cases = Object.values(time.cases).reduce((sum, seconds) => sum + seconds, 0);
+    taken = Math.max(0, time.seconds - cases);
+  } else {
+    const func = funcOf(running.during);
+    const row = rowOf(running.during);
+    taken = (row === null ? undefined : time.rows?.[func]?.[row]) ?? time.cases[func];
+  }
+  return Math.max(floorSeconds, SILENCE_TIMES_TAKEN * (taken ?? 0));
+}
 
 const VALUED = new Set([
   '--engines',
@@ -564,7 +595,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
       plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
     );
-    let ran = (await inTurns(lanes, room.engines, (lane) => runLane(launch, lane, units)))
+    let ran = (await inTurns(lanes, room.engines, (lane) => runLane(launch, lane, times)))
       .flat()
       .sort((a, b) => a.index - b.index);
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
@@ -572,7 +603,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       const again: EngineRan[] = [];
       for (const engine of ran) {
         again.push(
-          engine.verdict.passed ? engine : await runEngine(launch, engine.plan, engine.index, units, 'again'),
+          engine.verdict.passed ? engine : await runEngine(launch, engine.plan, engine.index, times, 'again'),
         );
       }
       ran = again;
@@ -749,13 +780,13 @@ async function importProject(launch: Launch): Promise<string | null> {
 async function runLane(
   launch: Launch,
   lane: ReadonlyArray<{ readonly plan: EnginePlan; readonly index: number }>,
-  units: readonly Unit[],
+  times: SuiteTimes,
 ): Promise<EngineRan[]> {
   const lock = await launch.slots.take();
   try {
     const ran: EngineRan[] = [];
     for (const { plan, index } of lane) {
-      ran.push(await runEngine(launch, plan, index, units, '', lock));
+      ran.push(await runEngine(launch, plan, index, times, '', lock));
     }
     return ran;
   } finally {
@@ -771,7 +802,7 @@ async function runEngine(
   launch: Launch,
   plan: EnginePlan,
   index: number,
-  units: readonly Unit[],
+  times: SuiteTimes,
   again = '',
   slot: string | null = null,
 ): Promise<EngineRan> {
@@ -831,15 +862,14 @@ async function runEngine(
     '--expected-out',
     expectedFile,
   ];
-  const held = new Set(plan.suites.map((suite) => suite.path));
-  const slowest = Math.max(0, ...units.filter((unit) => held.has(unit.suite)).map((unit) => unit.cost));
-  const silence = Math.max(launch.silenceFloorSeconds, SILENCE_TIMES_SLOWEST * slowest);
   const log = join(directory, 'engine.log');
   const lock = slot ?? (await launch.slots.take());
   const began = Date.now();
   let end: EngineEnd;
   try {
-    end = await watchedEngine(launch, args, directory, log, silence);
+    end = await watchedEngine(launch, args, directory, log, launch.silenceFloorSeconds, (printed) =>
+      silenceWhile(printed.running, times, launch.silenceFloorSeconds),
+    );
   } finally {
     if (slot === null) {
       launch.slots.release(lock);
