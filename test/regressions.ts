@@ -48521,13 +48521,42 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     assert.ok(bridged.has(command), `the editor addon answers ${command}, which nothing sends`);
   }
 
-  const runtime = namesIn(
-    'src/godot/addons/gdharness_runtime/runtime_autoload.gd',
-    /^\t\t"([a-z_]+)": _[a-z_]+(?:\.[a-z_]+)?,$/gm,
-    'runtime commands',
-    22,
+  const runtimeDir = 'src/godot/addons/gdharness_runtime';
+  const own = namesIn(
+    `${runtimeDir}/runtime_autoload.gd`,
+    /^\t\t"([a-z_]+)": _[a-z_]+,$/gm,
+    "runtime's own commands",
+    3,
     /\t_commands = \{\n([\s\S]*?)\n\t\}/,
   );
+  // The module commands name their module and method as strings, which the compiler does not
+  // check the way it checked the Callables they replaced, so each is looked for in its module.
+  const autoloadSource = readFileSync(`${runtimeDir}/runtime_autoload.gd`, 'utf8');
+  const moduleFiles = new Map(
+    [...autoloadSource.matchAll(/^const ([A-Z_]+): String = "(runtime_[a-z_]+\.gd)"$/gm)].map((match) => [
+      match[1] ?? '',
+      match[2] ?? '',
+    ]),
+  );
+  const moduleCommands = [
+    ...(/\nconst MODULE_COMMANDS: Dictionary = \{\n([\s\S]*?)\n\}/.exec(autoloadSource)?.[1] ?? '').matchAll(
+      /^\t"([a-z_]+)": \[([A-Z_]+), "([a-z_]+)"\],$/gm,
+    ),
+  ];
+  assert.ok(
+    moduleCommands.length >= 26,
+    `only ${moduleCommands.length} module commands were read from the runtime's MODULE_COMMANDS, which holds 26`,
+  );
+  for (const [, command, constant, method] of moduleCommands) {
+    const file = moduleFiles.get(constant ?? '');
+    assert.ok(file, `${command} is answered by ${constant}, which names no module file`);
+    assert.match(
+      readFileSync(`${runtimeDir}/${file}`, 'utf8'),
+      new RegExp(`^func ${method}\\(`, 'm'),
+      `${command} is answered by ${method} in ${file}, which the module does not define`,
+    );
+  }
+  const runtime = new Set([...own, ...moduleCommands.map((match) => match[1] ?? '')]);
   const asked = namesSent(
     /(?:handleRuntimeCommand|runtimeRequest)\([^,]*,?\s*'([a-z_]+)'/g,
     'runtime commands',
