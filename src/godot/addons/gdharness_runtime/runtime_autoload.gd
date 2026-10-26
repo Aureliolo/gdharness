@@ -38,9 +38,13 @@ const PROFILE_CAPTURE: String = "gdharness"
 const PROFILE_SENT: String = "gdharness:profile_sent"
 const PROFILE_RECEIVED: String = "gdharness:profile_received"
 
-## The longest a quitting game waits for that answer. A debugger that never gives one, such as an
-## editor without the gdharness addon, holds every profiled exit this long.
+## The longest a quitting game waits for that answer from a debugger that may not give one, such as
+## an editor without the gdharness addon, which holds every profiled exit this long.
 const PROFILE_CONFIRM_MS: int = 3000
+
+## The longest it waits for a debugger gdharness gave it, which answers once it has read that far:
+## long enough for one far behind, and an end for one that has hung.
+const PROFILE_ANSWERED_MS: int = 60000
 
 ## How many times the empty function is called to measure what the profiler costs per call: enough
 ## that the clock's microsecond steps are lost in the sum, and a few milliseconds of one frame.
@@ -305,30 +309,52 @@ func _exit_tree() -> void:
 ## every other node's _exit_tree, so what those do is counted. A project that sent this node away
 ## mid-run had the profiler switched off then, and its run answered as complete with none of the
 ## frames after it.
+##
+## The debugger reads in order, so its answer comes once it has read everything the game queued
+## before the totals, and a debugger that has fallen behind answers late rather than not at all. A
+## debugger gdharness gave this game, the keeper of a run the server started or an editor with the
+## gdharness addon, is waited for until it answers; a fixed three seconds lost the totals of a run
+## whose first frame named 1536 functions, on a loaded runner that read them slower than that. Any
+## other debugger may never answer, and holds the exit for the short wait only.
+##
+## The debugger is asked once before the profiler goes off as well, so the totals go into an empty
+## queue. They name each function no frame did, one message apiece, and with the names of a large
+## first frame still queued for a debugger behind on its reading, they did not fit and the engine
+## dropped them. One that does not answer that is not asked again, as it would not answer the second.
 func _send_the_profile() -> void:
 	if not (EngineDebugger.is_active() and EngineDebugger.is_profiling("servers")):
 		return
-	_profile_received = false
 	if not EngineDebugger.has_capture(PROFILE_CAPTURE):
 		EngineDebugger.register_message_capture(PROFILE_CAPTURE, _on_debugger_message)
+	var answers: bool = _profiled_from_start or OS.get_environment(EDITOR_PID_VARIABLE).is_valid_int()
+	var waits: int = PROFILE_ANSWERED_MS if answers else PROFILE_CONFIRM_MS
+	var drained: bool = _debugger_answered(waits)
 	EngineDebugger.profiler_enable("servers", false)
-	EngineDebugger.send_message(PROFILE_SENT, [])
-	var deadline: int = Time.get_ticks_msec() + PROFILE_CONFIRM_MS
-	while not _profile_received and Time.get_ticks_msec() < deadline:
-		for _poll: int in POLLS_PER_READ:
-			EngineDebugger.line_poll()
-		OS.delay_msec(5)
+	var confirmed: bool = drained and _debugger_answered(waits)
 	EngineDebugger.unregister_message_capture(PROFILE_CAPTURE)
-	if not _profile_received:
+	if not confirmed:
 		print(
 			(
 				(
 					"[gdharness] the debugger did not confirm the profiler's totals within %d ms, so the"
 					+ " profile may be the frames that arrived without them"
 				)
-				% PROFILE_CONFIRM_MS
+				% waits
 			)
 		)
+
+
+## Sends the debugger the message it answers once it has read everything sent before it, and waits
+## up to [param waits] ms for the answer, polling for it since the game's loop is over.
+func _debugger_answered(waits: int) -> bool:
+	_profile_received = false
+	EngineDebugger.send_message(PROFILE_SENT, [])
+	var deadline: int = Time.get_ticks_msec() + waits
+	while not _profile_received and Time.get_ticks_msec() < deadline:
+		for _poll: int in POLLS_PER_READ:
+			EngineDebugger.line_poll()
+		OS.delay_msec(5)
+	return _profile_received
 
 
 ## The totals sent now, for a stop that is about to end the game without letting it quit: ended by

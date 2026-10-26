@@ -57,6 +57,11 @@ export interface ProfileTotals {
   readonly frameFunctions?: number;
   readonly cappedFrames?: number;
   readonly totalCapped?: boolean;
+  /**
+   * How many messages the game's debugger queue dropped, as the engine reported them, which can
+   * hold a frame or the totals themselves.
+   */
+  readonly dropped?: number;
 }
 
 /**
@@ -146,6 +151,13 @@ export function withEngineArguments(args: readonly string[], extra: readonly str
   return user < 0 ? [...args, ...extra] : [...args.slice(0, user), ...extra, ...args.slice(user)];
 }
 
+/**
+ * The error a game's debugger reports when its queue dropped messages, and the count in its
+ * description: "Too many messages! 12 messages were dropped. ..."
+ */
+const QUEUE_OVERFLOW = 'TOO_MANY_MESSAGES';
+const DROPPED_COUNT = /(\d+) messages were dropped/;
+
 /** Sums a run's profile frames into totals per function. */
 export class ProfileAggregate {
   private readonly names = new Map<number, string>();
@@ -156,6 +168,7 @@ export class ProfileAggregate {
   private unreadable = 0;
   private cappedFrames = 0;
   private totalCapped = false;
+  private dropped = 0;
   private readonly startedAt: number;
   private readonly frameFunctions: number;
 
@@ -170,7 +183,11 @@ export class ProfileAggregate {
       this.unreadable += 1;
       return;
     }
-    if (received.message === 'servers:function_signature') {
+    if (received.message === 'error' && received.data[7] === QUEUE_OVERFLOW) {
+      // Sent once the queue has room again, with how many went since the last such report.
+      const said = typeof received.data[8] === 'string' ? DROPPED_COUNT.exec(received.data[8]) : null;
+      this.dropped += said === null ? 1 : Number(said[1]);
+    } else if (received.message === 'servers:function_signature') {
       const [name, id] = received.data;
       if (typeof name === 'string' && typeof id === 'number') {
         this.names.set(id, name);
@@ -257,6 +274,7 @@ export class ProfileAggregate {
       frameFunctions: this.frameFunctions,
       cappedFrames: this.cappedFrames,
       totalCapped: this.totalCapped,
+      ...(this.dropped > 0 ? { dropped: this.dropped } : {}),
     };
   }
 }
@@ -454,14 +472,17 @@ export function totalsSince(
   shrunk += Object.keys(mark.functions).filter(
     (signature) => now.functions[signature] === undefined && (mark.functions[signature]?.calls ?? 0) > 0,
   ).length;
+  const { dropped: droppedInAll, ...kept } = now;
+  const dropped = (droppedInAll ?? 0) - (mark.dropped ?? 0);
   return {
     totals: {
-      ...now,
+      ...kept,
       frames: now.frames - mark.frames,
       unreadable: Math.max(0, now.unreadable - mark.unreadable),
       ...(now.cappedFrames === undefined
         ? {}
         : { cappedFrames: Math.max(0, now.cappedFrames - (mark.cappedFrames ?? 0)) }),
+      ...(dropped > 0 ? { dropped } : {}),
       functions,
     },
     shrunk,
