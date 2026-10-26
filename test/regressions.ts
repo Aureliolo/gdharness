@@ -447,6 +447,7 @@ import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
 import { pixelPng, solidPng } from './support/png.js';
 import { listenOnAReservedPort, reservePort, ServerProcess, stopServersOf } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
+import { leftInSlots } from './support/slots.js';
 import {
   endEnginesLeft,
   leftBehindBy,
@@ -43039,9 +43040,14 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
     });
     await delay(3000);
     assert.deepEqual(
-      [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, readdirSync(slots)],
-      [null, process.pid, ['0.lock']],
-      `the command waits behind the slot held, and takes no other: ${said}`,
+      [
+        classes.exitCode,
+        holderOf(readFileSync(ours, 'utf8'))?.pid,
+        readdirSync(slots).filter((name) => name !== WAITING_FOLDER),
+        readdirSync(join(slots, WAITING_FOLDER)),
+      ],
+      [null, process.pid, ['0.lock'], [`${String(classes.pid)}-1.json`]],
+      `the command waits behind the slot held, takes no other, and marks its wait: ${said}`,
     );
     // From the command's own start of its wait, which comes after it has found its engine.
     for (let looked = 0; looked < 100 && !said.includes('for an engine'); looked += 1) {
@@ -43066,7 +43072,11 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
     assert.ok(await heldBy(classes.pid, 30_000), `then takes the slot given back: ${said}`);
     assert.equal(await ended, 0, said);
     assert.match(said, /"path": "res:\/\/\.godot\/global_script_class_cache\.cfg"/, said);
-    assert.deepEqual(readdirSync(slots), [], `and gives it back: ${said}`);
+    assert.deepEqual(
+      leftInSlots(slots),
+      [],
+      `and gives it back, its mark gone since it took the slot: ${said}`,
+    );
 
     await hold();
     const server = new ServerProcess({ env });
@@ -43098,7 +43108,7 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       assert.ok(await heldBy(server.child.pid, 30_000), 'then its engine runs in the slot given back');
       const checked = JSON.parse(textOf(await checking) ?? '{}') as unknown;
       assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
-      assert.deepEqual(readdirSync(slots), [], 'and the server gives it back once the run is read');
+      assert.deepEqual(leftInSlots(slots), [], 'and the server gives it back once the run is read');
     } finally {
       await server.stop();
     }
@@ -43743,7 +43753,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
       'both passed',
     );
-    assert.deepEqual(readdirSync(slots), [], 'every slot given back');
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
     assert.equal(
       existsSync(join(project, '.godot', 'gdharness', 'test-runs')) &&
         readdirSync(join(project, '.godot', 'gdharness', 'test-runs')).length > 0,
@@ -44055,7 +44065,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       new RegExp(`^Failed: ${String(faultLines.length)} problems, listed above\\.`, 'm'),
       hung.said,
     );
-    assert.deepEqual(readdirSync(slots), [], 'its slot given back too');
+    assert.deepEqual(leftInSlots(slots), [], 'its slot given back too');
 
     // An autoload that cannot start makes every suite after it meaningless, so the run ends there
     // rather than reporting cases that ran without it.
@@ -44539,7 +44549,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       );
       assert.equal(rowsTimed(), rows, `${what}: and every row is timed afterwards`);
     }
-    assert.deepEqual(readdirSync(slots), [], 'every slot given back');
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
     sweep(project, slots);
   }
@@ -44708,7 +44718,7 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
       `an inherited case asked for by name runs: ${JSON.stringify(one)}`,
     );
     assert.equal(get(one, 'tests'), 1, `and it alone: ${JSON.stringify(one)}`);
-    assert.deepEqual(readdirSync(slots), [], 'every slot given back');
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
     await server.stop();
     sweep(project, slots);
