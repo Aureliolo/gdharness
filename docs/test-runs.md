@@ -330,7 +330,20 @@ the slots. A tool of a game's own that starts engines takes them the same way:
    Then remove the steal file. On Windows a lock another process holds open cannot be removed;
    leave it, since that process still has the slot.
 5. When nothing is free, look again 50 ms later.
-6. When done, remove the lock, but only if it still names your pid.
+6. From the first look that finds every slot held until the take ends, however it ends, keep a mark
+   of the wait: `<directory>/waiting/<pid>-<n>.json`, with `n` unique within your process, made
+   exclusively as a lock is (create the folder first if it is missing) and holding what your lock
+   will.
+7. When done, remove the lock, but only if it still names your pid.
+
+On Windows, Python opens a file without delete sharing, and a lock or mark open in another process
+cannot be removed until it is closed. gdharness retries a removal refused so for a second; a tool
+of a game's own that removes them should do the same.
+
+The marks are how a gate that counts its own time tells a wait for slots others hold from its own
+work: `gdharness test`, `gdharness spread` and the server's own engines keep one whenever they wait.
+A reader skips a mark that is still empty or names no holder, since it is being written, and
+removes one whose holder has gone, by the same rule as a lock.
 
 The start time is what tells a holder from a later process given its pid. Windows reports a
 process's creation time to the millisecond, and `ps -o lstart` on macOS only to the second, which
