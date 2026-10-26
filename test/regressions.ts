@@ -41586,13 +41586,21 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
     }
     return marked();
   };
+  // Every wait ends with the case, so one whose assertion failed does not keep the suite running.
+  const stop = new AbortController();
+  const pending: Promise<unknown>[] = [];
   try {
     const holder = { pid: process.pid, started: await ownStart() };
     const slots = new EngineSlots(directory, 1, holder);
+    const waitFor = (signal?: AbortSignal): Promise<string> => {
+      const taken = slots.take(signal === undefined ? stop.signal : AbortSignal.any([stop.signal, signal]));
+      pending.push(taken.catch(() => undefined));
+      return taken;
+    };
     const first = await slots.take();
     assert.deepEqual(marked(), [], 'a slot free at once is taken without a mark');
 
-    const waited = slots.take(AbortSignal.timeout(10_000));
+    const waited = waitFor();
     const one = await markedSoon(1);
     assert.equal(one.length, 1, 'a take finding every slot held marks its wait');
     assert.match(one[0] ?? '', new RegExp(`^${String(process.pid)}-\\d+\\.json$`), 'named by pid and wait');
@@ -41602,7 +41610,7 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
       'holding what its lock will',
     );
     const besideIt = new AbortController();
-    const another = slots.take(besideIt.signal);
+    const another = waitFor(besideIt.signal);
     const two = await markedSoon(2);
     assert.equal(new Set(two).size, 2, 'each wait in a process has a mark of its own');
 
@@ -41614,7 +41622,7 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
     assert.deepEqual(await markedSoon(0), [], 'takes its mark with it');
 
     const ending = new AbortController();
-    const left = slots.take(ending.signal);
+    const left = waitFor(ending.signal);
     assert.equal((await markedSoon(1)).length, 1, 'a wait still going as the process ends');
     slots.releaseAll();
     assert.deepEqual(marked(), [], 'has its mark taken by giving back everything');
@@ -41648,6 +41656,8 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
       }
     }
   } finally {
+    stop.abort();
+    await Promise.all(pending);
     sweep(directory);
   }
 }
