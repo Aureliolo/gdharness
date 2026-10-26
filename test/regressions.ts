@@ -414,6 +414,7 @@ import {
   type RunResult,
   reportsFault,
   roomSaid,
+  silenceWhile,
   testOptionsOf,
   uncollectedSaid,
 } from '../src/suite-run.js';
@@ -40862,6 +40863,75 @@ function testAnEngineRunIsReadCaseByCase(): void {
 }
 
 /**
+ * An engine may be silent for as long as what it is running last took, four times over, and no
+ * longer than the floor for anything that took less.
+ *
+ * The limit was four times the slowest suite dealt to the engine, so a suite taking 350 s let every
+ * suite beside it hang for 1,400 s: a game's focus walk looping without end in another suite ran for
+ * twenty minutes before it was ended. Read from the log, a case is held to its own time.
+ */
+function testAnEngineMayBeSilentAsLongAsWhatItRuns(): void {
+  const OTHER = 'res://tests/other_test.gd';
+  const times: SuiteTimes = {
+    [S_TEST]: { seconds: 360, cases: { test_slow: 350, test_p: 6 }, rows: { test_p: [1, 5] } },
+    [OTHER]: { seconds: 2, cases: { test_quick: 1 } },
+  };
+  const runningAfter = (...lines: string[]): ReturnType<typeof readRun>['running'] =>
+    readRun(lines.join('\n')).running;
+  const opened = (suite: string): string => `Run Test Suite: ${suite}`;
+  const closed =
+    'Statistics: | 1 tests cases | 0 error | 0 failed | 0 flaky | 0 skipped | 0 orphans | PASSED 2s 0ms';
+
+  const inSlow = runningAfter(opened(S_TEST), caseLine(S_TEST, 'test_slow', 'STARTED'));
+  assert.deepEqual(inSlow, { suite: S_TEST, during: 'test_slow' }, 'the case running is read');
+  assert.equal(silenceWhile(inSlow, times, 300), 1400, 'a long case has four times its own time');
+
+  const inQuick = runningAfter(
+    opened(S_TEST),
+    caseLine(S_TEST, 'test_slow', 'STARTED'),
+    caseLine(S_TEST, 'test_slow', 'PASSED', '350s 0ms'),
+    closed,
+    opened(OTHER),
+    caseLine(OTHER, 'test_quick', 'STARTED'),
+  );
+  assert.deepEqual(inQuick, { suite: OTHER, during: 'test_quick' }, 'the next suite in the same engine');
+  assert.equal(silenceWhile(inQuick, times, 300), 300, 'and a quick case beside it has the floor');
+  assert.equal(silenceWhile(inQuick, times, 0.5), 4, 'which is the least it has');
+
+  const inRow = runningAfter(opened(S_TEST), caseLine(S_TEST, 'test_p:1 (2)', 'STARTED'));
+  assert.equal(silenceWhile(inRow, times, 1), 20, "a row has its own row's time");
+  assert.equal(
+    silenceWhile({ suite: S_TEST, during: 'test_p:7 (8)' }, times, 1),
+    24,
+    'and a row not timed its case whole',
+  );
+
+  const inBefore = runningAfter(opened(S_TEST));
+  assert.deepEqual(inBefore, { suite: S_TEST, during: 'before' }, 'a suite in its first hook');
+  assert.equal(silenceWhile(inBefore, times, 1), 16, 'has what the suite spent outside its cases');
+  const between = runningAfter(
+    opened(S_TEST),
+    caseLine(S_TEST, 'test_slow', 'STARTED'),
+    caseLine(S_TEST, 'test_slow', 'PASSED', '350s 0ms'),
+  );
+  assert.deepEqual(between, { suite: S_TEST, during: null }, 'between its cases');
+  assert.equal(silenceWhile(between, times, 1), 16, 'too');
+
+  assert.equal(runningAfter(opened(S_TEST), closed), null, 'outside every suite');
+  assert.equal(silenceWhile(null, times, 300), 300, 'is the floor');
+  assert.equal(
+    silenceWhile({ suite: 'res://tests/new_test.gd', during: 'test_new' }, times, 300),
+    300,
+    'as is a suite never timed',
+  );
+  assert.equal(
+    silenceWhile({ suite: OTHER, during: 'test_added' }, times, 300),
+    300,
+    'and a case never timed',
+  );
+}
+
+/**
  * An engine's run is judged on everything it printed, not its exit code.
  *
  * Each condition has passed a run another one let through: gdUnit4 exits 0 having run nothing, a
@@ -44061,6 +44131,30 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       hung.said,
     );
     assert.deepEqual(leftInSlots(slots), [], 'its slot given back too');
+
+    // A suite timed as long beside it in the same engine leaves the hanging case its own silence:
+    // held to the slowest suite dealt, it would wait out the case's 60 s timer and end unjudged.
+    const timesKept = readFileSync(timesFile, 'utf8');
+    writeFileSync(
+      timesFile,
+      JSON.stringify({
+        ...(JSON.parse(timesKept) as object),
+        'res://tests/ok_test.gd': { seconds: 201, cases: { test_one: 100, test_two: 100 } },
+        'res://tests/hang_test.gd': { seconds: 0.6, cases: { test_hangs: 0.5 } },
+      }),
+    );
+    const besideALongOne = test('tests/ok_test.gd', 'tests/hang_test.gd', '--engines', '1', '--silence', '4');
+    writeFileSync(timesFile, timesKept);
+    assert.match(
+      besideALongOne.said,
+      /^ {2}the engine printed nothing for 4 s while running res:\/\/tests\/hang_test\.gd > test_hangs, so it was ended$/m,
+      besideALongOne.said,
+    );
+    assert.match(
+      besideALongOne.said,
+      /^--- engine \d+: 2 suites, /m,
+      `both in one engine: ${besideALongOne.said}`,
+    );
 
     // An autoload that cannot start makes every suite after it meaningless, so the run ends there
     // rather than reporting cases that ran without it.
@@ -61956,6 +62050,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGdUnitRunner,
   testTheShippedRunnerRunsAFileOfSuites,
   testAnEngineRunIsReadCaseByCase,
+  testAnEngineMayBeSilentAsLongAsWhatItRuns,
   testAnEngineRunIsJudgedOnEverythingItPrinted,
   testTheScriptsGodotNeverFreesAreFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,

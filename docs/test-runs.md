@@ -262,8 +262,12 @@ runs windowed suites there can set `rendering/rendering_device/driver.macos` to 
 
 ## Silence and memory
 
-An engine that prints nothing for 300 seconds, or for four times its slowest unit's last time when
-that is longer, is ended, and the case it was in is named. `--silence` changes the 300. Silence
+An engine that prints nothing for 300 seconds is ended, and the case it was in is named.
+`--silence` changes the 300. Something that took longer last time has four times its own last time:
+a case its case's time, a row of a parameterised case its row's, and a suite's hooks, and the
+stretch between its cases, the time the suite spent outside its cases. The limit follows what the
+engine is running, not the slowest suite dealt to it, so a long suite does not let a suite beside it
+hang for as long. Silence
 never ends an engine that keeps printing, such as a case warning every frame; `--deadline` ends any
 engine that has run that many seconds, naming the case it was in. An engine whose autoload did not
 start is ended as soon as it says so, since nothing a suite reports without it means anything.
