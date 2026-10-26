@@ -33906,6 +33906,10 @@ async function testALayeredWordIsOneSignAndAShapeHasExtent(): Promise<void> {
           label('Deep', 'Again/Help', 'Zurück', 0, 0) +
           label('Away', '.', 'Weiter', -3000, 200) +
           label('Peek', 'Away', 'Weiter', 3010, 0) +
+          // A page named for a screen reader by the title its heading draws, which it does not draw.
+          '[node name="Page" type="Control" parent="."]\noffset_left = 10.0\noffset_top = 300.0\n' +
+          'offset_right = 400.0\noffset_bottom = 400.0\naccessibility_name = "Titel"\n\n' +
+          label('Title', 'Page', 'Titel', 0, 0) +
           '[node name="Floor" type="StaticBody2D" parent="."]\nposition = Vector2(400, 500)\n\n' +
           '[node name="Shape" type="CollisionShape2D" parent="Floor"]\nshape = SubResource("floor")\n\n' +
           '[node name="Picture" type="Sprite2D" parent="."]\nposition = Vector2(100, 100)\n' +
@@ -33966,11 +33970,20 @@ async function testALayeredWordIsOneSignAndAShapeHasExtent(): Promise<void> {
           `a copy whose original is left out of view is the one sign: ${JSON.stringify(single)}`,
         );
         assert.equal(get(single, 'distinct'), undefined, JSON.stringify(single));
+        const titled = await call('runtime_inspect', { op: 'find', says: 'Titel' });
+        assert.deepEqual(
+          asArray(get(titled, 'nodes')).map((node) => [text(get(node, 'path')), get(node, 'copyOf') ?? null]),
+          [
+            ['/root/Main/Page', null],
+            ['/root/Main/Page/Title', null],
+          ],
+          `the page is found by its name, and the heading drawn under it copies nothing: ${JSON.stringify(titled)}`,
+        );
 
         const read = await call('runtime_inspect', { op: 'text', nodePath: '/root/Main' });
         assert.deepEqual(
           get(read, 'lines'),
-          ['Zurück', 'Zurück', 'Hilfe', 'Zurück', 'Weiter'],
+          ['Zurück', 'Zurück', 'Hilfe', 'Zurück', 'Weiter', 'Titel'],
           `each sign once, and a word inside a different sign its own: ${JSON.stringify(read)}`,
         );
         assert.equal(get(read, 'copies'), 3, JSON.stringify(read));
@@ -33987,7 +34000,7 @@ async function testALayeredWordIsOneSignAndAShapeHasExtent(): Promise<void> {
         });
         assert.deepEqual(
           [get(everything, 'lines'), get(everything, 'copies')],
-          [['Zurück', 'Zurück', 'Hilfe', 'Zurück', 'Weiter'], 4],
+          [['Zurück', 'Zurück', 'Hilfe', 'Zurück', 'Weiter', 'Titel'], 4],
           `with the original out of view read too, its copy reads once with it: ${JSON.stringify(everything)}`,
         );
 

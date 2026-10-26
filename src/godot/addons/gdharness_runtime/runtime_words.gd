@@ -20,19 +20,25 @@ extends RefCounted
 ## A label is asked about first and read directly, because a screen is mostly labels and this runs
 ## for each of them on every look a wait takes.
 static func said_by(node: Node) -> String:
+	var own: String = drawn_by(node)
+	# A control showing a picture rather than words is named for a player who cannot see it, and that
+	# name is the one the words a caller asks by are meant for: the rail's "Out" tab is a square with
+	# an icon on it, and a click on "Out" found only the words around it.
+	if own.is_empty() and node is Control and not node is Label and not draws_a_list(node):
+		var control: Control = node
+		return control.atr(control.accessibility_name).strip_edges()
+	return own
+
+
+## The words [param node] draws: what [method said_by] answers, without the name a control is given
+## for a player who cannot see it, which nothing on the screen shows.
+static func drawn_by(node: Node) -> String:
 	var label: Label = node as Label
 	if label != null:
 		return _label_says(label)
 	if draws_a_list(node):
 		return "\n".join(lines_said_by(node))
-	var own: String = _text_of(node)
-	# A control showing a picture rather than words is named for a player who cannot see it, and that
-	# name is the one the words a caller asks by are meant for: the rail's "Out" tab is a square with
-	# an icon on it, and a click on "Out" found only the words around it.
-	if own.is_empty() and node is Control:
-		var control: Control = node
-		return control.atr(control.accessibility_name).strip_edges()
-	return own
+	return _text_of(node)
 
 
 ## Every line [param node] draws for a player to read, one to an entry: a label's one line, or each
@@ -55,10 +61,12 @@ static func lines_said_by(node: Node) -> Array[String]:
 	return lines
 
 
-## The node [param node] is drawn as a copy of, or null: the nearest node above it that says
-## anything, when it says the same words, followed up while that one is a copy in turn. A word drawn
+## The node [param node] is drawn as a copy of, or null: the nearest node above it that draws any
+## words, when it draws the same ones, followed up while that one is a copy in turn. A word drawn
 ## with an outline or a glow is often a label holding copies of itself, offset or tinted, and a
-## player reads one sign where a find counted four.
+## player reads one sign where a find counted four. Drawn words only: a page's root named for a
+## screen reader by the title its heading shows draws nothing, and taken for the original it left
+## the heading read as a copy of words nobody reads.
 static func copied_from(node: Node) -> Node:
 	var chain: Array[Node] = copied_through(node)
 	return null if chain.is_empty() else chain.back()
@@ -68,12 +76,12 @@ static func copied_from(node: Node) -> Node:
 ## [method copied_from], which is the last of them.
 static func copied_through(node: Node) -> Array[Node]:
 	var chain: Array[Node] = []
-	var words: String = said_by(node)
+	var words: String = drawn_by(node)
 	if words.is_empty():
 		return chain
 	var above: Node = node.get_parent()
 	while above != null:
-		var said: String = said_by(above)
+		var said: String = drawn_by(above)
 		if not said.is_empty():
 			if said != words:
 				break

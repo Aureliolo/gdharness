@@ -2089,7 +2089,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       find: {
         effect: 'read',
         summary:
-          'the paths of every node matching className, script, namePattern, group or says, with property read off each, hidden ones included unless includeHidden says otherwise; with it false, a control drawn wholly outside the viewport or a ScrollContainer is left out too. A match drawn under a matching node saying the same words, as an outline or a glow copy is, names that node under copyOf, and the answer counts the rest under distinct',
+          'the paths of every node matching className, script, namePattern, group or says, with property read off each, hidden ones included unless includeHidden says otherwise; with it false, a control drawn wholly outside the viewport or a ScrollContainer is left out too. A match drawn under a matching node drawing the same words, as an outline or a glow copy is, names that node under copyOf (a name given only for a screen reader is not drawn, so a node holding one is never what a copy copies), and the answer counts the rest under distinct',
         requires: [],
       },
       rect: {
