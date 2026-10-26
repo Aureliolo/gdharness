@@ -3274,8 +3274,9 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       ? 0
       : totals.lastFrame - totals.firstFrame + 1 - totals.frames - totals.unreadable;
   if (unarrived > 0) {
+    const howMany = unarrived === 1 ? 'One' : String(unarrived);
     notes.push(
-      `${unarrived === 1 ? "One of the game's frames" : `${unarrived} of the game's frames`} between the first and the last that arrived did not arrive, so ${unarrived === 1 ? 'its' : 'their'} script time is not in these.`,
+      `${howMany} of the game's frames between the first and the last that arrived did not arrive, so ${unarrived === 1 ? 'its' : 'their'} script time is not in these.`,
     );
   }
   if (table.superCallers > 0) {
