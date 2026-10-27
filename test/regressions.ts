@@ -1156,8 +1156,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   };
   take('servers:function_signature', ['res://w.gd::6::Work.square', 0]);
   take('servers:function_signature', ['res://w.gd::10::Work.busy', 1]);
-  const frame = (calls: number): unknown[] => [
-    7,
+  const frame = (calls: number, numbered = 7): unknown[] => [
+    numbered,
     0.016,
     0.01,
     0,
@@ -1183,7 +1183,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     0,
   ];
   take('servers:profile_frame', frame(100));
-  take('servers:profile_frame', frame(50));
+  take('servers:profile_frame', frame(50, 9));
   take('servers:profile_frame', [1, 2, 3]);
   const summed = aggregate.snapshot();
   assert.deepEqual(
@@ -1196,6 +1196,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     [2, false, 1, 150],
     JSON.stringify(summed),
   );
+  // The game's own numbers for the frames read, which the unreadable one does not move.
+  assert.deepEqual([summed.firstFrame, summed.lastFrame], [7, 9], JSON.stringify(summed));
   take('servers:profile_total', [9, 0, 0, 0, 0, 0, 0, 5, 0, 200, 0.5, 0.5, 0]);
   const whole = aggregate.snapshot();
   assert.deepEqual(
@@ -1310,6 +1312,34 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     answer({ totals: totals({}) })['note'],
     undefined,
     'the engine’s own totals need nothing said',
+  );
+  // Where the frames begin and whether any between them went missing, from the game's own numbers.
+  // A run without the runtime addon on a loaded runner summed 12 of its scene's 30 frames, and
+  // nothing in the answer said which 12.
+  const numbered = (firstFrame: number, lastFrame: number, frames: number, runtimeAddon = false): string =>
+    say({ runtimeAddon, totals: { ...totals({}), complete: false, firstFrame, lastFrame, frames } });
+  assert.match(
+    numbered(18, 29, 12),
+    / The profiler came on at the game's frame 18, so its first 18 frames are not in these, the main scene's _ready among them: without the runtime addon nothing holds the game's start until the profiler is on\./,
+  );
+  assert.match(
+    numbered(1, 29, 29, true),
+    / The profiler came on at the game's frame 1, so its first frame is not in these, the main scene's _ready among them\.(?: |$)/,
+  );
+  assert.match(
+    numbered(0, 29, 27),
+    / 3 of the game's frames between the first and the last that arrived did not arrive, so their script time is not in these\./,
+  );
+  assert.match(numbered(0, 29, 29), / One of the game's frames between the first and the last/);
+  assert.doesNotMatch(
+    numbered(0, 29, 30),
+    /came on at the game's frame|did not arrive/,
+    'all 30 from the start',
+  );
+  assert.match(
+    numbered(0, 29, 30),
+    /^These are the 30 frames that arrived, summed/,
+    'which still says what it is',
   );
   // Totals with the game still going: something switched the profiler off early, and what can have
   // depends on who is the game's debugger.
@@ -5373,10 +5403,15 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
 }
 
 /**
- * An editor this server opens or starts again makes no sound unless the call asks for it.
+ * An editor this server opens makes no sound unless the call asks for it, and one it starts again
+ * comes back hidden and silent as it was started unless the call says otherwise.
  *
  * A session's run once played a game's music on the owner's machine, and an editor plays sound of
- * its own: a tool script, a preview, a scene running in the viewport. The engine is a stand-in that
+ * its own: a tool script, a preview, a scene running in the viewport. A restart taken from the call
+ * alone brought an editor opened hidden back as a window on the desktop of somebody working, so the
+ * editor being restarted carries on its command line what it was started with, and one whose
+ * command line cannot be read, because its process has gone, is refused before it is asked to go.
+ * The engine is a stand-in that
  * exits at once, since what is checked is what the editor was started with, which the answer
  * carries. A visible stand-in on Windows starts through the helper on the desktop in use, so those
  * cases run on Windows only where windows may open.
@@ -5395,20 +5430,69 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     const at = argv.indexOf('--audio-driver');
     return at >= 0 && argv[at + 1] === 'Dummy';
   };
-  const cases = [
+  // `was` is what the editor being restarted was started with, which a restart reads off its process
+  // for whatever the call leaves out; null is a process gone before it is read.
+  const cases: readonly {
+    how: string;
+    act: 'open' | 'restart';
+    was?: readonly string[] | null;
+    args: Record<string, boolean>;
+    silent: boolean;
+    visible: boolean;
+  }[] = [
     { how: 'opened visible', act: 'open', args: {}, silent: true, visible: true },
     { how: 'opened visible with sound', act: 'open', args: { silent: false }, silent: false, visible: true },
     { how: 'opened hidden', act: 'open', args: { hidden: true }, silent: false, visible: false },
-    { how: 'started again hidden', act: 'restart', args: { hidden: true }, silent: false, visible: false },
-    { how: 'started again', act: 'restart', args: {}, silent: true, visible: true },
+    {
+      how: 'started again hidden',
+      act: 'restart',
+      was: ['--audio-driver', 'Dummy'],
+      args: { hidden: true },
+      silent: false,
+      visible: false,
+    },
+    {
+      how: 'started again as it was, hidden',
+      act: 'restart',
+      was: ['--headless'],
+      args: {},
+      silent: false,
+      visible: false,
+    },
+    {
+      how: 'started again',
+      act: 'restart',
+      was: ['--audio-driver', 'Dummy'],
+      args: {},
+      silent: true,
+      visible: true,
+    },
+    {
+      how: 'started again as it was, with sound',
+      act: 'restart',
+      was: [],
+      args: {},
+      silent: false,
+      visible: true,
+    },
     {
       how: 'started again with sound',
       act: 'restart',
+      was: ['--audio-driver', 'Dummy'],
       args: { silent: false },
       silent: false,
       visible: true,
     },
-  ] as const;
+    {
+      how: 'started again visible',
+      act: 'restart',
+      was: ['--headless'],
+      args: { hidden: false },
+      silent: true,
+      visible: true,
+    },
+    { how: 'started again unread', act: 'restart', was: null, args: {}, silent: false, visible: false },
+  ];
   let ran = 0;
   for (const one of cases) {
     if (one.visible && !visibleHere) {
@@ -5429,14 +5513,28 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
         GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '20000',
       },
     });
-    // The editor being restarted: a process that holds its pid until it is asked to go.
+    // The editor being restarted: a process that holds its pid until it is asked to go, carrying on
+    // its command line the arguments an editor would have been started with.
     const holder =
       one.act === 'restart'
-        ? spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
-            detached: true,
-            stdio: 'ignore',
-          })
+        ? spawnHidden(
+            process.execPath,
+            [
+              '-e',
+              one.was === null ? 'process.exit(0)' : 'setTimeout(() => {}, 120000)',
+              '--',
+              '-e',
+              ...(one.was ?? []),
+              '--path',
+              project,
+            ],
+            { detached: true, stdio: 'ignore' },
+          )
         : null;
+    if (one.was === null && holder !== null && holder.exitCode === null) {
+      await new Promise((resolve) => holder.once('exit', resolve));
+    }
+    let quitAsked = false;
     const sockets: WebSocket[] = [];
     const connect = async (): Promise<WebSocket> => {
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
@@ -5465,6 +5563,7 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
         first.on('message', (data: Buffer) => {
           const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string; id?: string };
           if (message.type === 'tool_invoke' && message.tool === 'quit_editor') {
+            quitAsked = true;
             first.send(
               JSON.stringify({
                 type: 'tool_result',
@@ -5497,14 +5596,29 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
           }
         }
         assert.ok(greeted, `${one.how}: the editor being restarted greets as one a server opened`);
-        answer = parseTextContent(
-          await server.request(
-            'tools/call',
-            { name: 'editor_launch', arguments: { op: 'restart', ...one.args } },
-            60_000,
-          ),
+        const reply = await server.request(
+          'tools/call',
+          { name: 'editor_launch', arguments: { op: 'restart', ...one.args } },
+          60_000,
         );
+        if (one.was === null) {
+          const said = textOf(reply) ?? '';
+          assert.equal(get(reply, 'result', 'isError'), true, `${one.how}: refused: ${said}`);
+          assert.match(
+            said,
+            new RegExp(
+              `How the editor \\(pid ${holder?.pid}\\) was started could not be read .*Pass hidden: true`,
+              's',
+            ),
+            `${one.how}: naming the editor and what to pass: ${said}`,
+          );
+          assert.equal(quitAsked, false, `${one.how}: and the editor was not asked to go`);
+          ran += 1;
+          continue;
+        }
+        answer = parseTextContent(reply);
         assert.equal(get(answer, 'restarted'), true, `${one.how}: ${JSON.stringify(answer)}`);
+        assert.equal(get(answer, 'hidden'), !one.visible, `${one.how}: saying which way it came back`);
         // Carried through the quit and the launch: an editor this server opened is started again
         // here, and its answer to the quit is the only account of what it saved.
         assert.deepEqual(
@@ -5519,6 +5633,11 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
         `${one.how}: the answer carries what it was started with: ${JSON.stringify(answer)}`,
       );
       assert.equal(silence(argv), one.silent, `${one.how}: silent ${String(one.silent)}: ${argv.join(' ')}`);
+      assert.equal(
+        argv.includes('--headless'),
+        !one.visible,
+        `${one.how}: hidden ${String(!one.visible)}: ${argv.join(' ')}`,
+      );
       ran += 1;
     } finally {
       for (const socket of sockets) {
@@ -33787,6 +33906,10 @@ async function testALayeredWordIsOneSignAndAShapeHasExtent(): Promise<void> {
           label('Deep', 'Again/Help', 'Zurück', 0, 0) +
           label('Away', '.', 'Weiter', -3000, 200) +
           label('Peek', 'Away', 'Weiter', 3010, 0) +
+          // A page named for a screen reader by the title its heading draws, which it does not draw.
+          '[node name="Page" type="Control" parent="."]\noffset_left = 10.0\noffset_top = 300.0\n' +
+          'offset_right = 400.0\noffset_bottom = 400.0\naccessibility_name = "Titel"\n\n' +
+          label('Title', 'Page', 'Titel', 0, 0) +
           '[node name="Floor" type="StaticBody2D" parent="."]\nposition = Vector2(400, 500)\n\n' +
           '[node name="Shape" type="CollisionShape2D" parent="Floor"]\nshape = SubResource("floor")\n\n' +
           '[node name="Picture" type="Sprite2D" parent="."]\nposition = Vector2(100, 100)\n' +
@@ -33847,11 +33970,20 @@ async function testALayeredWordIsOneSignAndAShapeHasExtent(): Promise<void> {
           `a copy whose original is left out of view is the one sign: ${JSON.stringify(single)}`,
         );
         assert.equal(get(single, 'distinct'), undefined, JSON.stringify(single));
+        const titled = await call('runtime_inspect', { op: 'find', says: 'Titel' });
+        assert.deepEqual(
+          asArray(get(titled, 'nodes')).map((node) => [text(get(node, 'path')), get(node, 'copyOf') ?? null]),
+          [
+            ['/root/Main/Page', null],
+            ['/root/Main/Page/Title', null],
+          ],
+          `the page is found by its name, and the heading drawn under it copies nothing: ${JSON.stringify(titled)}`,
+        );
 
         const read = await call('runtime_inspect', { op: 'text', nodePath: '/root/Main' });
         assert.deepEqual(
           get(read, 'lines'),
-          ['Zurück', 'Zurück', 'Hilfe', 'Zurück', 'Weiter'],
+          ['Zurück', 'Zurück', 'Hilfe', 'Zurück', 'Weiter', 'Titel'],
           `each sign once, and a word inside a different sign its own: ${JSON.stringify(read)}`,
         );
         assert.equal(get(read, 'copies'), 3, JSON.stringify(read));
@@ -33868,7 +34000,7 @@ async function testALayeredWordIsOneSignAndAShapeHasExtent(): Promise<void> {
         });
         assert.deepEqual(
           [get(everything, 'lines'), get(everything, 'copies')],
-          [['Zurück', 'Zurück', 'Hilfe', 'Zurück', 'Weiter'], 4],
+          [['Zurück', 'Zurück', 'Hilfe', 'Zurück', 'Weiter', 'Titel'], 4],
           `with the original out of view read too, its copy reads once with it: ${JSON.stringify(everything)}`,
         );
 
@@ -39933,14 +40065,33 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       const summed = await profiledRun('frames', true);
       const summedShown = JSON.stringify(summed);
       assert.equal(get(summed, 'complete'), false, summedShown);
-      assert.ok(Number(get(summed, 'frames')) >= 25, `the frames that reached it: ${summedShown}`);
       assert.match(
         String(get(summed, 'note')),
         /frames that arrived, summed, without the engine's own totals/,
         summedShown,
       );
+      // Which of the scene's 30 frames arrive is the engine's timing: nothing holds the start for the
+      // profiler without the runtime addon, and the queue is not emptied at the exit. Measured here
+      // as all 30, and on a loaded Linux runner as 12. What holds either way is that the frames that
+      // came are counted once each, in an unbroken run of the game's own numbers, and that frames
+      // missed at the start are said.
+      const frames = asNumber(get(summed, 'frames'));
+      const firstFrame = asNumber(get(summed, 'firstFrame'));
+      const lastFrame = asNumber(get(summed, 'lastFrame'));
+      assert.ok(
+        frames >= 1 && firstFrame >= 0 && lastFrame <= 29,
+        `the scene's frames, 0 to 29: ${summedShown}`,
+      );
+      assert.equal(lastFrame - firstFrame + 1, frames, `an unbroken run of them: ${summedShown}`);
       const perFrame = asArray(get(summed, 'functions')).find((one) => get(one, 'function') === 'each_frame');
-      assert.ok(Number(get(perFrame, 'calls')) >= 25, `called once a frame: ${summedShown}`);
+      assert.equal(get(perFrame, 'calls'), frames, `called once a frame: ${summedShown}`);
+      if (firstFrame > 0) {
+        assert.match(
+          String(get(summed, 'note')),
+          new RegExp(`The profiler came on at the game's frame ${firstFrame},`),
+          summedShown,
+        );
+      }
 
       // The runtime leaving mid-run is not the game quitting: the profiler stays on and the frames
       // after it are counted, rather than the engine's totals arriving then and nothing after them.

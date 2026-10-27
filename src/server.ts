@@ -186,6 +186,7 @@ import {
   runArguments,
   SAVES_NOT_MOVED_NOTE,
   savesStayPut,
+  startedAs,
   userDataIn,
 } from './launch.js';
 import { freeLibraryCopies } from './library-copies.js';
@@ -3260,6 +3261,24 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       `These are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off.${totalsWithheld} Not in them is any script time after the last frame sent: a frame still queued as the game exited, since the engine stops sending without emptying its queue, and what scripts did as it quit, such as in _exit_tree. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame.`,
     );
   }
+  // The engine numbers a game's frames from 0, so a profile of a run started profiled whose first
+  // frame is numbered above that missed the start, which nothing else in it shows.
+  const unprofiled = totals.firstFrame ?? 0;
+  if (reading.through === 'gdharness' && unprofiled > 0) {
+    notes.push(
+      `The profiler came on at the game's frame ${unprofiled}, so ${unprofiled === 1 ? 'its first frame is' : `its first ${unprofiled} frames are`} not in these, the main scene's _ready among them${reading.runtimeAddon === true ? '' : ": without the runtime addon nothing holds the game's start until the profiler is on"}.`,
+    );
+  }
+  const unarrived =
+    totals.firstFrame === undefined || totals.lastFrame === undefined
+      ? 0
+      : totals.lastFrame - totals.firstFrame + 1 - totals.frames - totals.unreadable;
+  if (unarrived > 0) {
+    const howMany = unarrived === 1 ? 'One' : String(unarrived);
+    notes.push(
+      `${howMany} of the game's frames between the first and the last that arrived did not arrive, so ${unarrived === 1 ? 'its' : 'their'} script time is not in these.`,
+    );
+  }
   if (table.superCallers > 0) {
     notes.push(
       `${table.superCallers === 1 ? 'One function calls' : `${table.superCallers} functions call`} through super, marked selfIncludesSuper: the engine takes every other call out of the caller's self time, and not a super call, so ${table.superCallers === 1 ? 'its' : 'their'} selfMs holds the overridden function's time, which that function's own row counts again. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it.`,
@@ -3293,6 +3312,8 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     connected: true,
     complete: totals.complete,
     frames: totals.frames,
+    firstFrame: totals.firstFrame,
+    lastFrame: totals.lastFrame,
     coveredMs: reading.coveredMs,
     scriptMs: table.scriptMs,
     perCallOverheadUs: table.perCallUs ?? undefined,
@@ -9437,14 +9458,31 @@ class GodotServer {
     // one there is doing it to keep "off by decision" and "absent" apart, and losing it silently
     // hands the choice back to the engine. Measured downstream: one restart took
     // `gdscript/warnings/return_value_discarded=0` out and changed nothing else.
+    // As the editor being replaced was started, unless the call says otherwise. Taken from the call
+    // alone, a restart with no arguments put a window on the desktop of somebody working, in place
+    // of an editor opened hidden. Read before the quit, so an editor whose start cannot be read is
+    // refused while it is still running rather than replaced on a guess.
+    let hidden = args['hidden'] === true;
+    let silent = resolveSilent(args['silent']);
+    if (mine && (typeof args['hidden'] !== 'boolean' || typeof args['silent'] !== 'boolean')) {
+      const was = before.editorPid === undefined ? null : await runningAs(before.editorPid);
+      if (was?.kind === 'commandLine') {
+        const as = startedAs(was.text);
+        hidden = typeof args['hidden'] === 'boolean' ? args['hidden'] : as.hidden;
+        silent = typeof args['silent'] === 'boolean' ? args['silent'] : as.silent;
+      } else if (typeof args['hidden'] !== 'boolean') {
+        const why =
+          was === null ? 'the operating system would not say' : (was.unread ?? 'it gave no command line');
+        return this.createErrorResponse(
+          `How the editor (pid ${before.editorPid ?? 'unknown'}) was started could not be read (${why}), so whether it was hidden cannot be told and it was left running.`,
+          ['Pass hidden: true to bring it back with no window, or hidden: false to bring it back visible'],
+        );
+      }
+    }
+
     const settingsBefore = this.settingKeysOf(before.projectPath);
     const asked = mine
-      ? await this.startItAgain(
-          before.projectPath ?? '',
-          before.editorPid,
-          args['hidden'] === true,
-          resolveSilent(args['silent']),
-        )
+      ? await this.startItAgain(before.projectPath ?? '', before.editorPid, hidden, silent)
       : await this.handleViaBridge('restart_editor', {});
     if (asked.isError === true) {
       return asked;
@@ -9483,6 +9521,8 @@ class GodotServer {
     // are between reading it and putting the value back.
     return this.jsonTextResponse({
       restarted: true,
+      // One opened by hand restarts itself, which only an editor with a window can do.
+      hidden: mine && hidden,
       editorPid: now.editorPid,
       addonVersion: now.addonVersion,
       serverVersion: SERVER_VERSION,

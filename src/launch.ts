@@ -277,6 +277,53 @@ export function editorArguments(
 }
 
 /**
+ * Whether an editor was started hidden and silent, read off the command line the operating system
+ * reports for its process.
+ *
+ * A restart is told nothing else about the editor it replaces: a server that did not open it never
+ * saw its arguments, and the greeting carries none. Read as words, so a flag is matched whole and
+ * `--audio-driver` with the word after it. A hidden editor is silent whatever it was given, which is
+ * what one brought back visible keeps.
+ */
+export function startedAs(commandLine: string): { hidden: boolean; silent: boolean } {
+  const words = commandLineWords(commandLine);
+  const hidden = words.includes('--headless');
+  const driver = words.indexOf('--audio-driver');
+  return { hidden, silent: hidden || (driver >= 0 && words[driver + 1] === 'Dummy') };
+}
+
+/**
+ * [param line] split into its words: on white space outside double quotes, with the quotes taken
+ * out. Windows reports a command line as the one string it was started with; the other platforms'
+ * readings arrive as words joined by spaces and have no quotes to take out.
+ */
+function commandLineWords(line: string): string[] {
+  const words: string[] = [];
+  let word = '';
+  let inWord = false;
+  let quoted = false;
+  for (const character of line) {
+    if (character === '"') {
+      quoted = !quoted;
+      inWord = true;
+    } else if (!quoted && /\s/.test(character)) {
+      if (inWord) {
+        words.push(word);
+      }
+      word = '';
+      inWord = false;
+    } else {
+      word += character;
+      inWord = true;
+    }
+  }
+  if (inWord) {
+    words.push(word);
+  }
+  return words;
+}
+
+/**
  * What a server puts in the environment of an editor it opens, so that the editor can say who
  * opened it and the answer decides who may open it again.
  *
