@@ -426,6 +426,19 @@ export const SPLIT_PAST_SECONDS = 10;
  */
 const ENGINE_START_SECONDS = 5;
 
+/**
+ * What a suite must cost to be dealt out over [param engines] engines: an engine's even share of
+ * the run, and never less than [constant SPLIT_PAST_SECONDS]. Units go slowest first to the engine
+ * with least, so a whole suite within its share is balanced by the rest, and a split there gains
+ * nothing while every further engine its cases land in pays its shared setup again: what a case
+ * memoises for the cases after it is in that case's time, not the suite's. A suite of 12.8 s in a
+ * run of three 300 s engines was split over all three and built its 1.2 s setup in each.
+ */
+export function splitPastFor(suites: readonly DeclaredSuite[], times: SuiteTimes, engines: number): number {
+  const whole = unitsOf(suites, times, Number.POSITIVE_INFINITY).reduce((sum, unit) => sum + unit.cost, 0);
+  return Math.max(SPLIT_PAST_SECONDS, whole / Math.max(1, engines));
+}
+
 /** Some of one suite's cases, dealt to an engine together. */
 export interface Unit {
   readonly suite: string;

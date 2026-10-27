@@ -75,6 +75,7 @@ import {
   Shares,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
+  splitPastFor,
   TEST_DIRECTORIES,
   timesAfter,
   type Unit,
@@ -524,7 +525,6 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       }
     }
     const times = readTimes(timesFile);
-    const units = unitsOf(suites, times);
     const memory = await memoryAvailable();
     if (memory.unread !== undefined) {
       console.log(
@@ -546,6 +546,12 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         'macOS offers no way to hold a process to some processors, so --cores holds only the number of engines here.',
       );
     }
+    const splitPast = splitPastFor(suites, times, room.engines);
+    const units = unitsOf(suites, times, splitPast);
+    const past =
+      splitPast > SPLIT_PAST_SECONDS
+        ? `an engine's share of this run (${String(Math.round(splitPast))} s)`
+        : `${String(SPLIT_PAST_SECONDS)} s`;
     const plans =
       options.order === null
         ? dealt(units, declared, room.engines)
@@ -572,7 +578,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     );
     if (plans.length > 1 && split.length > 0) {
       console.log(
-        `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(split)}.`,
+        `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${past} last time: ${named(split)}.`,
       );
     }
     const byRows = [
@@ -582,14 +588,12 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     ];
     if (plans.length > 1 && byRows.length > 0) {
       console.log(
-        `Dealt out row by row, since ${byRows.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(byRows)}.`,
+        `Dealt out row by row, since ${byRows.length === 1 ? 'it' : 'each'} took more than ${past} last time: ${named(byRows)}.`,
       );
     }
     // Said beside the deal, so a suite past the split in one engine reads as asked for, not missed.
     const keptWhole = units.flatMap((unit) =>
-      unit.cost > SPLIT_PAST_SECONDS &&
-      !unit.windowed &&
-      suites.some((s) => s.path === unit.suite && s.together)
+      unit.cost > splitPast && !unit.windowed && suites.some((s) => s.path === unit.suite && s.together)
         ? [unit.suite]
         : [],
     );

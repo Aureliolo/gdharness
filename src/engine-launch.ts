@@ -14,10 +14,12 @@ import {
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { availableParallelism, freemem, totalmem } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
+import type { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive, exitOf } from './alive.js';
 import {
@@ -317,7 +319,7 @@ export function heldToCores(
 
 /**
  * Starts the engine with [param args], both its streams into [param log] through one handle so
- * their lines stay in the order printed, and waits for it, ending it once it has printed nothing for
+ * their lines stay in the order printed (on Windows one pipe, copied into the log), and waits for it, ending it once it has printed nothing for
  * [param silenceSeconds], has run past the run's deadline, or an autoload has failed to start. Its
  * user data is a `user` folder in [param directory], so two engines never write one save or
  * settings file.
@@ -339,6 +341,7 @@ export async function watchedEngine(
   const output = openSync(log, 'w');
   let child: ChildProcess;
   let stop: () => void;
+  let piped: readonly Readable[] | null = null;
   let helper: {
     readonly error: string;
     readonly how: string;
@@ -370,11 +373,16 @@ export async function watchedEngine(
         stop: stopFile,
         step: helper.step,
       });
-      child = spawnHidden(wrapper.command, wrapper.args, {
-        stdio: ['ignore', output, output],
+      // A pipe, copied into the log here: an engine on Windows spends 1.5 to 4 ms on every line it
+      // writes to a file and 0.04 ms on one written to a pipe, and gdUnit4 prints a dozen a case. The
+      // helper hands the engine its stdout for both streams, so their lines stay in order.
+      const helped = spawnHidden(wrapper.command, wrapper.args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
         cwd: directory,
       });
+      piped = [helped.stdout, helped.stderr];
+      child = helped;
       stop = () => {
         writeFileSync(stopFile, '');
       };
@@ -391,7 +399,9 @@ export async function watchedEngine(
       };
     }
   } finally {
-    closeSync(output);
+    if (piped === null) {
+      closeSync(output);
+    }
   }
   launch.running.add(stop);
   let ended: string | null = null;
@@ -404,6 +414,7 @@ export async function watchedEngine(
       });
     }),
   ]);
+  const copied = piped === null ? null : copiedInto(output, piped, exited);
   const finished = { now: false };
   void exited.then(() => {
     finished.now = true;
@@ -464,12 +475,56 @@ export async function watchedEngine(
   const { code, signal } = await exited;
   // Read as soon as it is known, while the machine is still as the engine left it.
   const freeBytes = code !== null && code >>> 0 >= WINDOWS_EXCEPTION ? freemem() : undefined;
+  if (copied !== null) {
+    await copied;
+    closeSync(output);
+  }
   // The helper's own failure reaches only its file, and the exit code it leaves says nothing.
   const failed = helper === null ? null : helperFailure(helper.error);
   if (failed !== null && helper !== null) {
     ended ??= `the engine could not be started ${helper.how}: ${failed}`;
   }
   return { code, signal, ended, ...(freeBytes === undefined ? {} : { freeBytes }) };
+}
+
+/**
+ * How long the streams of an engine that has exited are drained for: a process it started and
+ * handed them to holds them open, and the run would otherwise wait on that process.
+ */
+const DRAIN_MS = 5000;
+
+/**
+ * Writes everything [param streams] carry into [param output] as it arrives, and settles once all
+ * have ended, or [param DRAIN_MS] after [param exited] settles for those still held open. A write
+ * that fails stops the writing, not the reading, so the engine is never left blocked on a full pipe.
+ */
+function copiedInto(output: number, streams: readonly Readable[], exited: Promise<unknown>): Promise<void> {
+  let writing = true;
+  const ended = streams.map(
+    (stream) =>
+      new Promise<void>((settle) => {
+        stream.on('data', (chunk: Buffer) => {
+          if (!writing) {
+            return;
+          }
+          try {
+            writeSync(output, chunk);
+          } catch {
+            // The log then ends short, and the run is judged on what it holds.
+            writing = false;
+          }
+        });
+        stream.once('close', settle);
+      }),
+  );
+  const all = Promise.all(ended).then(() => undefined);
+  const drained = exited.then(() => delay(DRAIN_MS, undefined, { ref: false }));
+  return Promise.race([all, drained]).then(() => {
+    writing = false;
+    for (const stream of streams) {
+      stream.destroy();
+    }
+  });
 }
 
 /** Ends [param child] and everything it started: Godot's console build is a wrapper around the engine. */

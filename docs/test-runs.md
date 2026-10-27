@@ -22,8 +22,8 @@ command line itself is wrong.
 - `--engines N`: at most this many engines, 4 by default.
 - `--slots DIR`: the slot directory, the machine's own by default (see
   [Engine slots](#engine-slots)).
-- `--slot-count N`: how many slots that directory has; by default a fifth of the processors, at
-  least one.
+- `--slot-count N`: how many slots that directory has; by default half the processors, at least
+  one.
 - `--silence S`: the shortest silence that ends an engine, in seconds; 300 by default.
 - `--deadline S`: the most seconds one engine may run, printing or not, the import's included. No
   limit by default.
@@ -99,18 +99,21 @@ deleted or renamed, and a case its suite no longer declares, with its seconds ta
 A run that printed only some rows of a case, because it was dealt them or cut short, keeps the old
 times of the rest.
 
-A suite costing more than 10 seconds, with more than one case, is dealt out case by case, and an
-engine holding part of it skips the rest; the run names each suite it dealt out that way. A
-parameterised case that costs more than 10 seconds by itself, with at least two rows timed, is dealt
-out row by row, in a suite of any number of cases. Each engine holding some of its rows runs only
-those, and the one holding the last row also runs any row the times do not know, so a row added
-since they were taken still runs once. The run names each case it dealt out that way, and fails
-when a row that any engine found ran in none of them or in more than one. A suite declaring
+A suite costing more than an engine's even share of the run, the cost of every suite over the
+engines there is room for, and more than 10 seconds, with more than one case, is dealt out case by
+case, and an engine holding part of it skips the rest; the run names each suite it dealt out that
+way. A suite within its share is balanced by the rest, and split it would build what its cases share
+again in every engine they land in. A parameterised case that costs more than that by itself, with
+at least two rows timed, is dealt out row by row, in a suite of any number of cases. Each engine
+holding some of its rows runs only those, and the one holding the last row also runs any row the
+times do not know, so a row added since they were taken still runs once. The run names each case
+it dealt out that way, and fails when a row that any engine found ran in none of them or in more
+than one. A suite declaring
 `const GDHARNESS_TOGETHER: bool = true` is never dealt out by case or by row, and goes to one engine
 whole: its cases share work kept in the suite, such as a memoised setup, which every engine holding
 part of it would do again. The declaration counts from the suite or any script it extends, the
 nearest one deciding, so a suite can say `false` over a base saying `true`. A run over several
-engines names each such suite it kept whole past the 10 seconds. Units are
+engines names each such suite it kept whole past that cost. Units are
 dealt slowest first, each to the engine with the least so far. A run starts no more engines than
 `--engines`, the machine's processors (or `--cores`), or its
 free memory allows once 4 GB is left for everything else at 1.5 GB an engine, and no more than it
@@ -331,7 +334,9 @@ The directory and the count are the same for every tool on the machine:
   then `%LOCALAPPDATA%\gdharness\slots` on Windows, and `~/.cache/gdharness/slots` everywhere
   else.
 - The count is `GODOT_ENGINE_SLOT_COUNT` when that is set, a whole number above 0. Otherwise it is
-  a fifth of the processors the machine offers, rounded down, and at least one.
+  half the processors the machine offers, rounded down, and at least one. A test engine was
+  measured at half to most of one processor, so at a fifth the machine stood half idle while
+  gates waited in line for engines.
 - A command's `--slots` and `--slot-count` come before both.
 
 `--engines` is how many engines one run would like, and is not the slot count: a gate given its

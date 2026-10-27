@@ -102,6 +102,7 @@ import {
   memoryRoomOf,
   roomFor,
   sweepRunDirectories,
+  watchedEngine,
   windowsCommitLeft,
 } from '../src/engine-launch.js';
 import {
@@ -407,6 +408,7 @@ import {
   Shares,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
+  splitPastFor,
   timesAfter,
   type Unit,
   unitsOf,
@@ -43175,6 +43177,25 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       ],
       'past the split, case by case with the time around them; at it, whole; a windowed one whole',
     );
+    // 30 s of suites whole: 12, 10, 4 and the untimed one's 4.
+    const four = [big, edge, shown, small];
+    assert.equal(
+      splitPastFor(four, times, 4),
+      SPLIT_PAST_SECONDS,
+      'never under the floor, past 7.5 s a share',
+    );
+    assert.equal(splitPastFor(four, times, 2), 15, "an engine's share of the run");
+    assert.equal(splitPastFor(four, times, 0), 30, 'and the whole run for one engine, or none said');
+    assert.deepEqual(
+      unitsOf(four, times, splitPastFor(four, times, 2)).map((unit) => [unit.suite, unit.cases.length]),
+      [
+        [big.path, 3],
+        [edge.path, 2],
+        [shown.path, 2],
+        [small.path, 1],
+      ],
+      'a suite within its share is kept whole, so what its cases share is built once',
+    );
     const declared = new Map([big, edge, shown, small].map((s) => [s.path, s.cases]));
     const plans = dealt(units, declared, 4);
     // 32 s of units, the slowest 10 s, so four lanes; the windowed units alone in the first, then the
@@ -44289,11 +44310,11 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       'the cache home on every platform',
       machine({ XDG_CACHE_HOME: join(sep, 'cache'), LOCALAPPDATA: join(sep, 'local') }, 'win32'),
       join(sep, 'cache', 'gdharness', 'slots'),
-      6,
+      16,
     ],
     [
       "Windows' local data without one",
-      machine({ XDG_CACHE_HOME: '', LOCALAPPDATA: join(sep, 'local') }, 'win32', 4),
+      machine({ XDG_CACHE_HOME: '', LOCALAPPDATA: join(sep, 'local') }, 'win32', 3),
       join(sep, 'local', 'gdharness', 'slots'),
       1,
     ],
@@ -44301,7 +44322,7 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       'the home cache elsewhere',
       machine({ LOCALAPPDATA: join(sep, 'local') }, 'linux', 10),
       join(sep, 'home', 'me', '.cache', 'gdharness', 'slots'),
-      2,
+      5,
     ],
     [
       'Windows with neither',
@@ -45462,7 +45483,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       split.said,
       split.said.includes('over 1 engine, of the 2 asked for, since')
         ? /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since the machine has \d+\.\d GB of memory free, 4\.0 GB of it kept for everything else and 1\.5 GB taken for each engine\.$/m
-        : /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than 10 s last time: res:\/\/tests\/ok_test\.gd\.$/m,
+        : /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
       split.said,
     );
     // The same run held to one processor starts one engine and says so; a machine short of memory
@@ -45985,6 +46006,118 @@ async function testAnEngineIsHeldToTheProcessorsAsked(): Promise<void> {
 }
 
 /**
+ * An engine started for a run writes to a pipe on Windows, copied into its log, and to the log file
+ * itself elsewhere. The stream is the property the cost depends on: an engine on Windows spent 1.5
+ * to 4 ms on each line written to a file and 0.04 ms on one written to a pipe. Either way the log
+ * holds both streams in the order printed, up to the line printed as the engine quits.
+ */
+async function testAnEngineWritesItsLogThroughAPipeOnWindows(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('engine stream regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-stream-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(
+      join(project, 'speak.gd'),
+      [
+        'extends SceneTree',
+        '',
+        '',
+        'func _init() -> void:',
+        '\tvar names := {OS.STD_HANDLE_PIPE: "a pipe", OS.STD_HANDLE_FILE: "a file"}',
+        '\tprint("stdout is %s" % names.get(OS.get_stdout_type(), "neither"))',
+        '\tfor i in 3:',
+        '\t\tprint("out %d" % i)',
+        '\t\tprinterr("err %d" % i)',
+        '\tprint("the last line")',
+        '\tquit()',
+        '',
+      ].join('\n'),
+    );
+    const directory = join(project, 'engine');
+    mkdirSync(directory);
+    const log = join(directory, 'engine.log');
+    const launch = {
+      godotPath,
+      projectPath: project,
+      deadlineSeconds: 120,
+      running: new Set<() => void>(),
+      cores: null,
+    };
+    const end = await watchedEngine(
+      launch,
+      ['--headless', '--path', project, '-s', 'res://speak.gd'],
+      directory,
+      log,
+      60,
+    );
+    const text = readFileSync(log, 'utf8');
+    assert.equal(end.ended, null, text);
+    assert.equal(end.code, 0, text);
+    const said = text.split(/\r?\n/).filter((line) => /^(stdout is|out \d|err \d|the last line)/.test(line));
+    assert.deepEqual(
+      said,
+      [
+        `stdout is ${process.platform === 'win32' ? 'a pipe' : 'a file'}`,
+        'out 0',
+        'err 0',
+        'out 1',
+        'err 1',
+        'out 2',
+        'err 2',
+        'the last line',
+      ],
+      text,
+    );
+    if (process.platform !== 'win32') {
+      return;
+    }
+    // Godot's own create_process hands a child none of its handles, so the stand-in is a runtime
+    // whose detached child inherits the pipe, prints after its parent has exited, and then holds the
+    // pipe open far longer than the drain waits.
+    const linger = [
+      "const { spawn } = require('node:child_process');",
+      "const child = spawn(process.execPath, ['-e', 'setTimeout(() => { console.log(\"the late line\"); setTimeout(() => {}, 30000); }, 1500)'],",
+      "  { stdio: ['ignore', 'inherit', 'inherit'], detached: true, windowsHide: true });",
+      "console.log('lingering ' + child.pid);",
+      'child.unref();',
+    ].join('\n');
+    const held = join(project, 'held');
+    mkdirSync(held);
+    const began = Date.now();
+    const heldEnd = await watchedEngine(
+      { ...launch, godotPath: process.execPath },
+      ['-e', linger],
+      held,
+      join(held, 'engine.log'),
+      60,
+    );
+    const seconds = (Date.now() - began) / 1000;
+    const heldText = readFileSync(join(held, 'engine.log'), 'utf8');
+    const lingering = Number(/^lingering (\d+)/m.exec(heldText)?.[1]);
+    try {
+      process.kill(lingering);
+    } catch {
+      // Gone already.
+    }
+    assert.equal(heldEnd.code, 0, heldText);
+    assert.match(heldText, /^the late line$/m, 'what arrives after the exit is still copied');
+    assert.ok(
+      seconds < 20,
+      `and the run is not held until the child lets go: ${String(seconds)} s\n${heldText}`,
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * A project with no extension list, as a fresh clone has, is given one naming every manifest the
  * editor's scan would find, so the import that follows loads the extensions; one with a list keeps it.
  */
@@ -46126,7 +46259,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       }
       assert.match(
         run.said,
-        /^Dealt out row by row, since it took more than 10 s last time: res:\/\/tests\/matrix_test\.gd > test_face\.$/m,
+        /^Dealt out row by row, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/matrix_test\.gd > test_face\.$/m,
         `${what}: ${run.said}`,
       );
       assert.equal(new Set([...ran.values()].flat()).size, 2, `${what}: over both engines: ${run.said}`);
@@ -46162,6 +46295,40 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
         kept.said,
       );
     }
+
+    // Saying nothing, beside two suites that make an engine's share of the run larger than its 31 s:
+    // dealt whole, since the others balance it, and split it would set up once an engine. Split, its
+    // rows would go to both engines, one at a time after the 20 s each of the others.
+    const other = 'extends GdUnitTestSuite\n\n\nfunc test_other() -> void:\n\tpass\n';
+    writeTree(project, {
+      'tests/matrix_test.gd': matrix(6),
+      'tests/other_a_test.gd': other,
+      'tests/other_b_test.gd': other,
+    });
+    writeFileSync(
+      timesFile,
+      JSON.stringify({
+        ...(JSON.parse(slowed(6)) as SuiteTimes),
+        'res://tests/other_a_test.gd': { seconds: 20, cases: { test_other: 20 } },
+        'res://tests/other_b_test.gd': { seconds: 20, cases: { test_other: 20 } },
+      }),
+    );
+    const shared = test('--engines', '2', '--print-output');
+    assert.equal(shared.status, 0, shared.said);
+    const sharedRan = ranIn(shared.said);
+    assert.deepEqual(
+      [
+        [...sharedRan].map(([row, pids]) => [row, pids.length]).sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
+        new Set([...sharedRan.values()].flat()).size,
+      ],
+      [Array.from({ length: 6 }, (_, row) => [row, 1]), 1],
+      `a suite within an engine's share runs every row once, in one engine: ${shared.said}`,
+    );
+    // Two engines, so the rows met in one by the deal, unless held to one as on the macOS runner.
+    if (!shared.said.includes('over 1 engine, of the 2 asked for, since')) {
+      assert.match(shared.said, /^4 test functions in 3 suites over 2 engines\.$/m, shared.said);
+    }
+    assert.doesNotMatch(shared.said, /^(Dealt out|Kept whole)/m, shared.said);
     assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
     sweep(project, slots);
@@ -46294,7 +46461,7 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
     } else {
       assert.match(
         split.said,
-        /^Dealt out case by case, since it took more than 10 s last time: res:\/\/tests\/shell_test\.gd\.$/m,
+        /^Dealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/shell_test\.gd\.$/m,
         split.said,
       );
       const pids = new Set(
@@ -64006,6 +64173,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnOrphanIsNamedWithTheCaseThatLeftIt,
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
+  testAnEngineWritesItsLogThroughAPipeOnWindows,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,
   testATestRunSaysHowFarItHasGot,
