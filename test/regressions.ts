@@ -16871,6 +16871,7 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
 
       const moved = await call('runtime_input', { op: 'mouse_motion', nodePath: drawn, x: 157, y: 186 });
       assert.deepEqual(get(moved, 'position'), [98.5, 103], `${how}: ${JSON.stringify(moved)}`);
+      assert.equal(get(moved, 'hovered'), drawn, `${how}: the motion says what it left the pointer over`);
       assert.deepEqual(
         (await record(drawn)).motions.at(-1),
         [157, 186],
@@ -16887,6 +16888,10 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
         frames: 4,
       });
       assert.deepEqual(get(dragged, 'from'), [35, 100], `${how}: ${JSON.stringify(dragged)}`);
+      assert.equal(get(dragged, 'hovered'), drawn, `${how}: and the drag: ${JSON.stringify(dragged)}`);
+      // Off every control, so null is told apart from an answer that never reads the hover.
+      const away = await call('runtime_input', { op: 'mouse_motion', x: 600, y: 20 });
+      assert.equal(get(away, 'hovered'), null, `${how}: over nothing: ${JSON.stringify(away)}`);
       const afterDrag = await record(drawn);
       assert.deepEqual(afterDrag.presses.at(-1), [30, 180], `${how}: the drag pressed where it was named`);
       assert.deepEqual(afterDrag.motions.at(-1), [280, 190], `${how}: and moved to where it ends`);
@@ -16938,6 +16943,7 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
         assert.deepEqual(get(there, 'position'), [150, 80], thereShown);
         const hovered = await call('runtime_input', { op: 'mouse_motion', nodePath: native, x: 40, y: 20 });
         assert.equal(get(hovered, 'window'), '/root/Main/Native', JSON.stringify(hovered));
+        assert.equal(get(hovered, 'hovered'), native, JSON.stringify(hovered));
         const pressed = await call('runtime_input', { op: 'click', nodePath: native, x: 170, y: 30 });
         assert.equal(get(pressed, 'landed'), true, JSON.stringify(pressed));
         const nativeRecord = await record(native);
@@ -30052,7 +30058,7 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
       const account = server.stderr
         .split('\n')
         .filter((line) =>
-          /announce wait ended|playing_status did not|playing_status answered after|Tool (playing_status|play_scene)/.test(
+          /announce wait ended|After the play|playing_status did not|playing_status answered after|Tool (playing_status|play_scene)/.test(
             line,
           ),
         )

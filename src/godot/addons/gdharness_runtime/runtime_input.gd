@@ -132,6 +132,28 @@ func _held_in(viewport: Viewport) -> int:
 	return Input.get_mouse_button_mask() if viewport == _host.get_tree().root else _pushed_held
 
 
+## The viewport whose GUI says what is under the pointer: the named node's own, which for a node in
+## an embedded window is not [param viewport], the one the events went into. Read before the events,
+## since they may free the node.
+static func _own_of(aim: Dictionary, viewport: Viewport) -> Viewport:
+	if not aim.has("node"):
+		return viewport
+	var named: Node = aim["node"]
+	return named.get_viewport()
+
+
+## The path of the control under the pointer in [param own], or null, read once the events are
+## handled: a motion and a drag answered nothing of where they left the pointer, so a hover could be
+## checked only by what the game did about it.
+func _hovered_path(own: Viewport) -> Variant:
+	if not is_instance_valid(own):
+		return null
+	var hovered: Control = _hover.hovered_in(own)
+	if hovered == null:
+		return null
+	return str(hovered.get_path())
+
+
 ## The movement a pointer arriving at [param position] carries, which is the distance from where
 ## the last injected event put it, and none at all for the first. The arrival is recorded, with how
 ## long it took: at least a frame, since two motions sent in one frame did not cross the screen in
@@ -328,11 +350,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var supplied: bool = _follow_in(viewport, position)
 	var at: Array[Vector2] = [position]
 	var where: Dictionary = GdhMouse.where(aim, viewport, at)
-	# Read now, since the press may free the node the points were named in.
-	var own: Viewport = viewport
-	if aim.has("node"):
-		var named: Node = aim["node"]
-		own = named.get_viewport()
+	var own: Viewport = _own_of(aim, viewport)
 	# A double click's first click goes whole before it, as [method _click_button] sends one.
 	if double and held and not notch:
 		_send(viewport, GdhMouse.button_event(position, button, true, false, _held_in(viewport)))
@@ -353,10 +371,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		_send(viewport, GdhMouse.button_event(position, button, false, false, _held_in(viewport)))
 	# Input hands the events on at the next frame, so the control under the pointer is read after it.
 	await _host.get_tree().process_frame
-	var hovered: Control = _hover.hovered_in(own) if is_instance_valid(own) else null
-	var hovered_path: Variant = null
-	if hovered != null:
-		hovered_path = str(hovered.get_path())
+	var hovered_path: Variant = _hovered_path(own)
 
 	var answer: Dictionary = {
 		"type": "input_injected",
@@ -404,13 +419,17 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 	var supplied: bool = _follow_in(viewport, position)
 	var at: Array[Vector2] = [position]
 	var where: Dictionary = GdhMouse.where(aim, viewport, at)
+	var own: Viewport = _own_of(aim, viewport)
 	_send(viewport, _motion(position, relative, _held_in(viewport)))
+	# Input hands the motion on at the next frame, and the hover follows it there.
+	await _host.get_tree().process_frame
 
 	var answer: Dictionary = {
 		"type": "input_injected",
 		"input_type": "mouse_motion",
 		"position": [position.x, position.y],
-		"relative": [relative.x, relative.y]
+		"relative": [relative.x, relative.y],
+		"hovered": _hovered_path(own),
 	}
 	answer.merge(where)
 	return _pointer_noted(_hover_noted(answer, supplied))
@@ -462,6 +481,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 	var _moved: Vector2 = _arrive(start)
 	var supplied: bool = _follow_in(viewport, start)
 	var where: Dictionary = GdhMouse.where(aim, viewport, points)
+	var hovered_in: Viewport = _own_of(aim, viewport)
 	_send(viewport, GdhMouse.button_event(start, button, true, false, _held_in(viewport)))
 	var travelled: Vector2 = Vector2.ZERO
 	var sent: int = 0
@@ -500,6 +520,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 		"button": button,
 		"motions": frames,
 		"relative_total": [travelled.x, travelled.y],
+		"hovered": _hovered_path(hovered_in),
 	}
 	answer.merge(where)
 	return _pointer_noted(_hover_noted(answer, supplied))

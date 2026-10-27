@@ -10713,8 +10713,20 @@ class GodotServer {
     // with it and the answer could explain the loss but not undo it. Written here as it is drained,
     // the run survives its server the way a spawned one does.
     const startedAt = Date.now();
+    // The steps between the play and the announce wait say how long each took, as the ones before
+    // the play do: on the Windows leg the wait began 705 ms after a play whose game announced at 300,
+    // and found it at once, with nothing to say which of these held the server. Two of them rename
+    // over a file and wait out a process holding it open, which blocks for up to a second.
+    const steps: string[] = [];
+    let stepFrom = startedAt;
+    const step = (name: string): void => {
+      const now = Date.now();
+      steps.push(`${name} ${now - stepFrom}ms`);
+      stepFrom = now;
+    };
     const transcript = openTranscript(startedAt);
     closeSync(transcript.fd);
+    step('transcript');
     const playAnswer = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     const which = playOf(playAnswer);
     const played: GodotProcess = {
@@ -10735,6 +10747,7 @@ class GodotServer {
     };
     this.activeProcess = played;
     this.noteTheLatestRun({ projectPath, pid: null, startedAt });
+    step('latest run');
     this.watchThePlayedConsole();
     writeEditorRunNote({
       projectPath,
@@ -10742,7 +10755,10 @@ class GodotServer {
       startedAt,
       ...(which === null ? {} : { play: which }),
     });
+    step('run note');
     sweepTranscripts();
+    step('sweep');
+    this.logDebug(`After the play: ${steps.join(', ')}`);
 
     return this.jsonTextResponse({
       started: true,
