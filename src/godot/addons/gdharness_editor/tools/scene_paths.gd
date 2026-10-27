@@ -15,6 +15,7 @@ const GdhHeadlessCheck = preload("../headless_check.gd")
 const GdhRead = preload("../reading.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSceneUids = preload("../scene_uids.gd")
+const GdhScriptPaths = preload("script_paths.gd")
 ## PROPERTY_HINT_NO_NODEPATH, which marks a property the editor's rename skips. It is not bound for
 ## scripts, and follows PROPERTY_HINT_ONESHOT in the engine's list.
 const HINT_NO_NODEPATH: int = PROPERTY_HINT_ONESHOT + 1
@@ -25,6 +26,14 @@ var retargeted: Array[Dictionary] = []
 var not_retargeted: Array[Dictionary] = []
 ## Each path naming a deleted node, or a node below one, which now names nothing.
 var still_naming: Array[Dictionary] = []
+## Each line of a script on a node naming a node that moved or went by the path it had, as
+## {scenePath, nodePath, script, line, from, to}, to absent for a deleted node. Code is left as it
+## was, as the editor's own rename leaves it.
+var scripts_naming: Array[Dictionary] = []
+## The script lines already named, so one shared by an instance and its scene is named once.
+var _lines: Dictionary = {}
+## The paths each script names, by the script, read once however many nodes it is on.
+var _named_in: Dictionary = {}
 ## The files beside a scene holding a rewritten track, each to the resource saved there.
 var _homes: Dictionary = {}
 ## Each track rewritten in an animation one of [member _homes] keeps, as [animation, track, the path
@@ -87,6 +96,7 @@ func carry(scene: GdhSceneFile, moves: Dictionary) -> int:
 		var mixer: AnimationMixer = node as AnimationMixer
 		if mixer != null:
 			_tracks(mixer, now)
+		_scripts(node, was, now)
 	return retargeted.size() - before
 
 
@@ -146,7 +156,43 @@ func answer() -> Dictionary:
 		fields["notRetargeted"] = not_retargeted
 	if not still_naming.is_empty():
 		fields["stillNaming"] = still_naming
+	if not scripts_naming.is_empty():
+		fields["scriptsNaming"] = scripts_naming
 	return fields
+
+
+## Names each line of the scripts on [param node], its own and those it extends, that names from
+## where the node was a node the move took, by the path that no longer reaches it.
+func _scripts(node: Node, was: String, now: String) -> void:
+	var script: Script = node.get_script()
+	while script is GDScript:
+		var file: String = script.resource_path
+		if not _named_in.has(script):
+			var source: String = script.source_code
+			if source.is_empty() and FileAccess.file_exists(file):
+				source = FileAccess.get_file_as_string(file)
+			_named_in[script] = GdhScriptPaths.named(source)
+		var listed: Array[Dictionary] = _named_in[script]
+		for named: Dictionary in listed:
+			var path: String = named["path"]
+			var key: String = "%s:%d:%s" % [file, named["line"], path]
+			if _lines.has(key):
+				continue
+			var after: Array = _after(NodePath(path), was, now)
+			if after[0] == UNCHANGED:
+				continue
+			_lines[key] = true
+			var record: Dictionary = {
+				"scenePath": _scene.path,
+				"nodePath": now,
+				"script": file,
+				"line": named["line"],
+				"from": path,
+			}
+			if after[0] == REWRITTEN:
+				record["to"] = after[1]
+			scripts_naming.append(record)
+		script = script.get_base_script()
 
 
 ## Puts back each track rewritten outside the scene whose record [param matching] takes, or that is
@@ -294,6 +340,8 @@ func _after(path: NodePath, was: String, now: String) -> Array:
 	if holder.get_node_or_null(NodePath(path.get_concatenated_names())) == target:
 		return [UNCHANGED, ""]
 	var to: String = str(holder.get_path_to(target, unique))
+	if unique:
+		to = _unique_to(start, target, to)
 	if path.get_subname_count() > 0:
 		to += ":" + path.get_concatenated_subnames()
 	return [REWRITTEN, to]
@@ -303,6 +351,17 @@ func _after(path: NodePath, was: String, now: String) -> Array:
 func _names_nothing(path: NodePath, now: String) -> bool:
 	var holder: Node = _scene.root.get_node_or_null(now)
 	return holder != null and holder.get_node_or_null(NodePath(path.get_concatenated_names())) == null
+
+
+## The path to [param target] through the unique node that was at [param start], written through its
+## unique name as the path being carried was, or [param otherwise] when it is no longer unique. The
+## engine's own unique path is given only from a node with the same owner, so never from the root.
+func _unique_to(start: String, target: Node, otherwise: String) -> String:
+	var through: Node = _scene.root.get_node_or_null(moved(start, _moves))
+	if through == null or not through.unique_name_in_owner:
+		return otherwise
+	var rest: String = str(through.get_path_to(target))
+	return "%" + through.name + ("" if rest == "." else "/" + rest)
 
 
 ## Where the node a path held by the node at [param now] names as %[param name] was: one marked

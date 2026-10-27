@@ -16594,6 +16594,389 @@ async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
 }
 
 /**
+ * A click that misses its control answers in full when what it pressed instead frees that control.
+ *
+ * Reported from a game whose room rebuilds its pointer spots, Buttons whose mouse_filter is ignore,
+ * when a click changes the room: a click on a spot by nodePath answered `{}`, and the game's log held
+ * "Invalid access to property or key 'mouse_filter' on a base object of type 'previously freed'",
+ * because why_not_landed read the spot's filter after the press had freed it. A control under a
+ * cover that frees both on the press is the same fault on the other branch, the cover's path.
+ */
+async function testAClickThatFreesWhatItMissedAnswers(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('click that frees what it missed regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-freed-miss-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-freed-miss-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Freed miss"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[display]\n\nwindow/size/viewport_width=320\nwindow/size/viewport_height=180\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Control',
+        '',
+        'var rebuilt: int = 0',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar _room: int = $Room.gui_input.connect(_on_room)',
+        '\tvar _cover: int = $Cover.gui_input.connect(_on_cover)',
+        '',
+        '',
+        'func _on_room(event: InputEvent) -> void:',
+        '\tvar press: InputEventMouseButton = event as InputEventMouseButton',
+        '\tif press != null and press.pressed:',
+        '\t\tfor spot: Node in get_tree().get_nodes_in_group("spots"):',
+        '\t\t\tspot.queue_free()',
+        '\t\trebuilt += 1',
+        '\t\tprint("room rebuilt %d" % rebuilt)',
+        '',
+        '',
+        'func _on_cover(event: InputEvent) -> void:',
+        '\tvar press: InputEventMouseButton = event as InputEventMouseButton',
+        '\tif press != null and press.pressed:',
+        '\t\t$Covered.queue_free()',
+        '\t\t$Cover.queue_free()',
+        '\t\trebuilt += 1',
+        '\t\tprint("cover taken down %d" % rebuilt)',
+        '',
+        '',
+        'func record() -> int:',
+        '\treturn rebuilt',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\noffset_right = 320.0\noffset_bottom = 180.0\nmouse_filter = 2\nscript = ExtResource("1")\n\n' +
+        '[node name="Room" type="Control" parent="."]\noffset_right = 320.0\noffset_bottom = 180.0\n\n' +
+        '[node name="Spot" type="Button" parent="." groups=["spots"]]\noffset_left = 10.0\noffset_top = 10.0\noffset_right = 60.0\noffset_bottom = 40.0\nmouse_filter = 2\ntext = "S"\n\n' +
+        '[node name="Covered" type="Button" parent="."]\noffset_left = 10.0\noffset_top = 80.0\noffset_right = 60.0\noffset_bottom = 110.0\ntext = "C"\n\n' +
+        '[node name="Cover" type="Panel" parent="."]\noffset_top = 70.0\noffset_right = 80.0\noffset_bottom = 120.0\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return parseTextContent(response) ?? textOf(response);
+    };
+    const started = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+
+    const spot = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Spot' });
+    const spotShown = JSON.stringify(spot);
+    assert.equal(get(spot, 'type'), 'clicked', `a whole answer: ${spotShown}`);
+    assert.equal(get(spot, 'landed'), false, spotShown);
+    assert.equal(get(spot, 'hovered'), '/root/Main/Room', spotShown);
+    assert.equal(get(spot, 'control_afterwards'), 'freed', spotShown);
+    assert.match(String(get(spot, 'why_not_landed')), /Spot's mouse_filter is ignore/, spotShown);
+
+    const covered = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Covered' });
+    const coveredShown = JSON.stringify(covered);
+    assert.equal(get(covered, 'type'), 'clicked', `a whole answer: ${coveredShown}`);
+    assert.equal(get(covered, 'landed'), false, coveredShown);
+    assert.equal(get(covered, 'control_afterwards'), 'freed', coveredShown);
+    assert.match(
+      String(get(covered, 'why_not_landed')),
+      /\/root\/Main\/Cover is drawn over it/,
+      coveredShown,
+    );
+
+    const rebuilt = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'record' });
+    assert.equal(get(rebuilt, 'result'), 2, `each press reached what it went to: ${JSON.stringify(rebuilt)}`);
+    const printed = JSON.stringify(await call('editor_output', { op: 'run' }));
+    assert.match(printed, /room rebuilt 1/, `the game printed the room's rebuild: ${printed}`);
+    assert.match(printed, /cover taken down 2/, `and the cover's: ${printed}`);
+    assert.doesNotMatch(printed, /previously freed/, `and nothing read a freed control: ${printed}`);
+    await stopItsRun(server);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
+ * A pointer call aims at a point in a named node's own space, and reaches it in a native window.
+ *
+ * Reported from a game with subwindow embedding off whose second window holds one Control that
+ * draws its buttons and hit-tests them in _gui_input: mouse_click took only the game's window
+ * pixels, which do not reach a native window, and click pressed the control's centre alone, so no
+ * drawn button could be pressed or hovered. Each control here records the press and motion positions
+ * it reads. The holder is moved and scaled, so the node's space and the window's pixels differ, and
+ * one window is embedded, reached through the game's window, and named by its own pixels.
+ */
+async function testAPointerAimsInsideANamedNode(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('pointer inside a named node regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-aimed-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-aimed-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Aimed"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[display]\n\nwindow/size/viewport_width=640\nwindow/size/viewport_height=360\n' +
+        'window/size/borderless=true\nwindow/size/no_focus=true\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'drawn.gd'),
+      [
+        'extends Control',
+        '',
+        'var presses: Array = []',
+        'var motions: Array = []',
+        '',
+        '',
+        'func _gui_input(event: InputEvent) -> void:',
+        '\tvar press: InputEventMouseButton = event as InputEventMouseButton',
+        '\tif press != null and press.pressed:',
+        '\t\tpresses.append([press.position.x, press.position.y])',
+        '\tvar motion: InputEventMouseMotion = event as InputEventMouseMotion',
+        '\tif motion != null:',
+        '\t\tmotions.append([motion.position.x, motion.position.y])',
+        '',
+        '',
+        'func record() -> Dictionary:',
+        '\treturn {"presses": presses, "motions": motions}',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Control',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tif DisplayServer.get_name() == "headless":',
+        '\t\treturn',
+        "\t# A native window beside the game's, which the game's window pixels cannot reach.",
+        '\tvar screen: Rect2i = DisplayServer.screen_get_usable_rect()',
+        '\tget_window().position = Vector2i(screen.end.x - 660, screen.position.y + 16)',
+        '\tvar native: Window = Window.new()',
+        '\tnative.name = "Native"',
+        '\tnative.borderless = true',
+        '\tnative.unfocusable = true',
+        '\tnative.size = Vector2i(200, 100)',
+        '\tnative.position = Vector2i(screen.end.x - 880, screen.position.y + 16)',
+        '\tvar drawn: Control = Control.new()',
+        '\tdrawn.name = "Drawn"',
+        '\tdrawn.set_script(load("res://drawn.gd"))',
+        '\tdrawn.size = Vector2(200, 100)',
+        '\tnative.add_child(drawn)',
+        "\t# Embedding cannot change while a window is shown, and the embedded one is the headless half's.",
+        '\t$Popup.free()',
+        '\tget_tree().root.gui_embed_subwindows = false',
+        '\tadd_child(native)',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=3 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n' +
+        '[ext_resource type="Script" path="res://drawn.gd" id="2"]\n\n' +
+        '[node name="Main" type="Control"]\noffset_right = 640.0\noffset_bottom = 360.0\nmouse_filter = 2\nscript = ExtResource("1")\n\n' +
+        '[node name="Plain" type="Node" parent="."]\n\n' +
+        '[node name="Holder" type="Control" parent="."]\noffset_left = 20.0\noffset_top = 10.0\noffset_right = 20.0\noffset_bottom = 10.0\nscale = Vector2(0.5, 0.5)\nmouse_filter = 2\n\n' +
+        '[node name="Drawn" type="Control" parent="Holder"]\noffset_right = 600.0\noffset_bottom = 230.0\nscript = ExtResource("2")\n\n' +
+        '[node name="Popup" type="Window" parent="."]\nposition = Vector2i(330, 150)\nsize = Vector2i(300, 200)\nunfocusable = true\ncontent_scale_factor = 2.0\n\n' +
+        '[node name="Inside" type="Control" parent="Popup"]\noffset_right = 300.0\noffset_bottom = 200.0\nscript = ExtResource("2")\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return parseTextContent(response) ?? textOf(response);
+    };
+    const record = async (nodePath: string): Promise<{ presses: unknown[]; motions: unknown[] }> => {
+      const read = await call('runtime_invoke', { op: 'call', nodePath, method: 'record' });
+      return get(read, 'result') as { presses: unknown[]; motions: unknown[] };
+    };
+    const run = async (headless: boolean): Promise<void> => {
+      const how = headless ? 'headless' : 'windowed';
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless,
+        runtimeWaitMs: headless ? 30_000 : WINDOWED_BOOT_MS,
+      });
+      assert.equal(get(started, 'runtime', 'listening'), true, `${how}: ${JSON.stringify(started)}`);
+      const drawn = '/root/Main/Holder/Drawn';
+
+      const clicked = await call('runtime_input', { op: 'click', nodePath: drawn, x: 157, y: 186 });
+      const clickedShown = `${how}: ${JSON.stringify(clicked)}`;
+      assert.equal(get(clicked, 'landed'), true, clickedShown);
+      assert.deepEqual(
+        get(clicked, 'position'),
+        { x: 98.5, y: 103, _type: 'Vector2' },
+        `in the window's pixels: ${clickedShown}`,
+      );
+      assert.deepEqual((await record(drawn)).presses, [[157, 186]], `${how}: click pressed the point named`);
+
+      const mouse = await call('runtime_input', { op: 'mouse_click', nodePath: drawn, x: 442, y: 186 });
+      const mouseShown = `${how}: ${JSON.stringify(mouse)}`;
+      assert.equal(get(mouse, 'path'), drawn, mouseShown);
+      assert.deepEqual(get(mouse, 'position'), [241, 103], `in the window's pixels: ${mouseShown}`);
+      assert.equal(get(mouse, 'window'), undefined, `the game's own window: ${mouseShown}`);
+      assert.equal(get(mouse, 'hovered'), drawn, mouseShown);
+      assert.deepEqual(
+        (await record(drawn)).presses,
+        [
+          [157, 186],
+          [442, 186],
+        ],
+        `${how}: mouse_click pressed the point named`,
+      );
+
+      const moved = await call('runtime_input', { op: 'mouse_motion', nodePath: drawn, x: 157, y: 186 });
+      assert.deepEqual(get(moved, 'position'), [98.5, 103], `${how}: ${JSON.stringify(moved)}`);
+      assert.equal(get(moved, 'hovered'), drawn, `${how}: the motion says what it left the pointer over`);
+      assert.deepEqual(
+        (await record(drawn)).motions.at(-1),
+        [157, 186],
+        `${how}: the motion reached the point`,
+      );
+
+      const dragged = await call('runtime_input', {
+        op: 'mouse_drag',
+        nodePath: drawn,
+        x: 30,
+        y: 180,
+        toX: 280,
+        toY: 190,
+        frames: 4,
+      });
+      assert.deepEqual(get(dragged, 'from'), [35, 100], `${how}: ${JSON.stringify(dragged)}`);
+      assert.equal(get(dragged, 'hovered'), drawn, `${how}: and the drag: ${JSON.stringify(dragged)}`);
+      // Off every control, so null is told apart from an answer that never reads the hover.
+      const away = await call('runtime_input', { op: 'mouse_motion', x: 600, y: 20 });
+      assert.equal(get(away, 'hovered'), null, `${how}: over nothing: ${JSON.stringify(away)}`);
+      const afterDrag = await record(drawn);
+      assert.deepEqual(afterDrag.presses.at(-1), [30, 180], `${how}: the drag pressed where it was named`);
+      assert.deepEqual(afterDrag.motions.at(-1), [280, 190], `${how}: and moved to where it ends`);
+
+      if (headless) {
+        // A Window's own space is its pixels, which a content scale of 2 makes twice its canvas; this
+        // one is embedded, so the events go through the game's.
+        const inPopup = await call('runtime_input', {
+          op: 'mouse_click',
+          nodePath: '/root/Main/Popup',
+          x: 50,
+          y: 60,
+        });
+        const inPopupShown = JSON.stringify(inPopup);
+        assert.deepEqual(get(inPopup, 'position'), [380, 210], inPopupShown);
+        assert.equal(get(inPopup, 'hovered'), '/root/Main/Popup/Inside', inPopupShown);
+        assert.deepEqual((await record('/root/Main/Popup/Inside')).presses, [[25, 30]], 'inside the window');
+      }
+
+      const plain = textOf(
+        await server.request(
+          'tools/call',
+          {
+            name: 'runtime_input',
+            arguments: { op: 'mouse_motion', nodePath: '/root/Main/Plain', x: 1, y: 1 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.match(
+        plain ?? '',
+        /\/root\/Main\/Plain is a Node, and the points are in a Control's, a Node2D's or a Window's own space/,
+        `${how}: ${plain}`,
+      );
+      const half = textOf(
+        await server.request(
+          'tools/call',
+          { name: 'runtime_input', arguments: { op: 'click', nodePath: drawn, x: 10 } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.match(half ?? '', /x and y are both needed/, `${how}: ${half}`);
+
+      if (!headless) {
+        const native = '/root/Main/Native/Drawn';
+        const there = await call('runtime_input', { op: 'mouse_click', nodePath: native, x: 150, y: 80 });
+        const thereShown = JSON.stringify(there);
+        assert.equal(get(there, 'window'), '/root/Main/Native', thereShown);
+        assert.deepEqual(get(there, 'position'), [150, 80], thereShown);
+        const hovered = await call('runtime_input', { op: 'mouse_motion', nodePath: native, x: 40, y: 20 });
+        assert.equal(get(hovered, 'window'), '/root/Main/Native', JSON.stringify(hovered));
+        assert.equal(get(hovered, 'hovered'), native, JSON.stringify(hovered));
+        const pressed = await call('runtime_input', { op: 'click', nodePath: native, x: 170, y: 30 });
+        assert.equal(get(pressed, 'landed'), true, JSON.stringify(pressed));
+        const nativeRecord = await record(native);
+        assert.deepEqual(
+          nativeRecord.presses,
+          [
+            [150, 80],
+            [170, 30],
+          ],
+          `the native window's control pressed at each point named: ${JSON.stringify(nativeRecord)}`,
+        );
+        assert.ok(
+          nativeRecord.motions.some((at) => JSON.stringify(at) === '[40,20]'),
+          `and given the motion: ${JSON.stringify(nativeRecord)}`,
+        );
+      }
+      await stopItsRun(server);
+    };
+    await run(true);
+    const refused = windowedRunRefused();
+    if (refused === null) {
+      await run(false);
+    } else {
+      console.log(`pointer inside a named node: the windowed half skipped (${refused})`);
+    }
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A headless game lays out at the size the project opens its window at, and says it has no window
  * when a click or a capture needs one.
  *
@@ -29045,6 +29428,10 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
  * again, both still held. What only the crash handling makes true is the crash entry being an error
  * with its backtrace, which is what fails when it is broken; test/game-log.ts holds the count for a
  * report with no line before it.
+ *
+ * The prints before the crash are what explains it, and a check's run is kept nowhere editor_output
+ * reads, so the check answers them itself. A model-driven probe was told `printedLinesNotShown: 3`
+ * and then "No game is running" by editor_output, with no way to read the three.
  */
 async function testACrashedRunIsNeverClean(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -29064,7 +29451,9 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
     );
     writeFileSync(
       join(projectDir, 'main.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tprint("about to crash")\n\tboom()\n\n\nfunc boom() -> void:\n\tOS.crash("deliberate")\n',
+      'extends Node\n\n\nfunc _ready() -> void:\n\tfor i in 60:\n\t\tprint("line %d" % i)\n' +
+        '\tfor i in 3:\n\t\tprint("again")\n\tprint("about to crash")\n\tboom()\n\n\n' +
+        'func boom() -> void:\n\tOS.crash("deliberate")\n',
     );
     writeFileSync(
       join(projectDir, 'main.tscn'),
@@ -29076,7 +29465,7 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
         /Program crashed with signal \d+/.test(text(get(entry, 'text'))),
       );
     const backtraced = (entry: unknown): boolean =>
-      asArray(get(entry, 'detail') ?? []).some((line) => text(line).includes('boom (res://main.gd:10)'));
+      asArray(get(entry, 'detail') ?? []).some((line) => text(line).includes('boom (res://main.gd:14)'));
     await withStdioServer(
       async (call) => {
         const checked: unknown = JSON.parse(
@@ -29088,9 +29477,31 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
         const checkCrash = theCrash(checked);
         assert.equal(get(checkCrash, 'severity'), 'error', `the crash is an entry, as an error: ${said}`);
         assert.ok(backtraced(checkCrash), `with its GDScript backtrace: ${said}`);
-        assert.ok(
-          asNumber(get(checked, 'printedLinesNotShown')) >= 1,
-          `and the print it left out is counted: ${said}`,
+        // A check's run is kept nowhere else, so its prints are read here or not at all: the newest
+        // fifty distinct ones, the repeat folded, and the rest counted.
+        const printed = asArray(get(checked, 'printed')).map((entry) => [
+          text(get(entry, 'text')),
+          get(entry, 'times'),
+        ]);
+        assert.equal(printed.length, 50, said);
+        const again = printed.findIndex(([line]) => line === 'again');
+        assert.deepEqual(
+          printed.slice(again, again + 2),
+          [
+            ['again', 3],
+            ['about to crash', undefined],
+          ],
+          said,
+        );
+        // The newest are kept: the crash handler's own lines come after the game's, so the cut falls
+        // a little past line 10 rather than at a number this case could fix.
+        const firstShown = text(printed[0]?.[0]);
+        assert.match(firstShown, /^line 1\d$/, said);
+        const afterTheCheck = await call('editor_output', {});
+        assert.match(
+          afterTheCheck,
+          /^No game is running\. The editor_run check \d+s ago kept no run: its answer held what the game printed, under entries and printed\./,
+          afterTheCheck,
         );
 
         const started: unknown = JSON.parse(
@@ -29117,6 +29528,17 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
           theCrash(output) !== undefined,
           `editor_output names the crash as an error: ${JSON.stringify(output)}`,
         );
+        // The started run prints what the check's did, so what comes before the first line the
+        // check showed is what it counted as left out.
+        const lines = asArray(
+          get(JSON.parse(await call('editor_output', { severity: 'info', limit: 500 })), 'entries'),
+        ).filter((entry) => get(entry, 'severity') === 'info');
+        const cut = lines.findIndex((entry) => text(get(entry, 'text')) === firstShown);
+        assert.ok(cut > 10, JSON.stringify(lines));
+        const before = lines
+          .slice(0, cut)
+          .reduce((sum: number, entry) => sum + asNumber(get(entry, 'times') ?? 1), 0);
+        assert.equal(get(checked, 'printedLinesNotShown'), before, said);
       },
       { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
@@ -29675,7 +30097,7 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
       const account = server.stderr
         .split('\n')
         .filter((line) =>
-          /announce wait ended|playing_status did not|playing_status answered after|Tool (playing_status|play_scene)/.test(
+          /announce wait ended|After the play|playing_status did not|playing_status answered after|Tool (playing_status|play_scene)/.test(
             line,
           ),
         )
@@ -51239,6 +51661,11 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       await axis({ 'position:z': 1 }),
       'Node2D.position is a Vector2, so it has no z; it has x, y.',
     );
+    // With no script and nothing near, the refusal alone left nothing to try.
+    assert.equal(
+      await axis({ zzz: 1 }),
+      'Node2D has no property zzz; editor_classes info with className Node2D and includeInherited true lists the ones it has.',
+    );
     assert.equal(
       await axis({ 'position:z': 1, visible: false }),
       'Node2D.position is a Vector2, so it has no z; it has x, y. None of the 2 properties given was written.',
@@ -59456,7 +59883,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "What this saved names res://parts/big_crate.tscn by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
+      "What this saved names res://parts/big_crate.tscn by path rather than by uid, which loads the same. A uid in a file's own header is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, so a uid written now would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -60278,7 +60705,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
+      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid, which loads the same. A uid in a file's own header is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, so a uid written now would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
@@ -60654,6 +61081,209 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
     );
     assert.equal(fileOf('lane.tscn'), lane['lane.tscn'], 'the scene is as it was');
     assert.equal(fileOf('lane_lib.tres'), lane['lane_lib.tres'], 'and so is the library it plays');
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A script that reads a node by its path breaks when the node is renamed, moved or deleted, and code
+ * is left as it was, as the editor's own rename leaves it, so each such line is named with the path
+ * that reaches the node now. A model-driven probe renamed a label `main.gd` read as `$Status`, got
+ * an answer saying nothing, and found out only when the game failed to boot.
+ *
+ * The lines that name nothing are as much the case as the ones that do: a path in a string or a
+ * comment, a `%` that is a division's remainder by a constant named like a unique node, and a
+ * get_node called on another node. A script on an instance's root is read in both scenes and named
+ * once, and a script the attached one extends is read too.
+ */
+async function testAMovedNodeNamesTheScriptLinesReadingIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('script lines regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-script-lines-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-script-lines-rt-'));
+  const hud = [
+    'extends CanvasLayer',
+    '',
+    'const Day: int = 7',
+    '',
+    '@onready var gold: Label = $Bar/Gold',
+    '@onready var day: Label = get_node("Bar/Day")',
+    'var note: String = "costs $Bar/Gold"',
+    '# $Bar/Gold in a comment',
+    'var week: int = 30 % Day',
+    '',
+    '',
+    'func _ready() -> void:',
+    '\tprint($"Bar/Gold".text)',
+    '\tprint(self.get_node_or_null(^"Bar/Gold"))',
+    '\tprint(other().get_node("Bar/Gold"))',
+    '',
+    '',
+    'func other() -> Node:',
+    '\treturn self',
+    '',
+    '',
+    'func today() -> Label:',
+    '\treturn %Day',
+    '',
+    '',
+    'func shown() -> String:',
+    '\treturn "%s" % $Bar/Gold.text',
+    '',
+  ];
+  const main = [
+    'extends "res://base.gd"',
+    '',
+    '@onready var status: Label = $Status',
+    '@onready var gold: Label = $Hud/Bar/Gold',
+    '@onready var sign_label: Label = $Sign',
+    '',
+  ];
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Script lines"\n',
+    'hud.gd': hud.join('\n'),
+    'main.gd': main.join('\n'),
+    'base.gd': 'extends Node\n\n\nfunc toast() -> Node:\n\treturn $Toast\n',
+    'hud.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://hud.gd" id="1_hud"]\n\n' +
+      // The root's own unique path, which the engine's get_path_to gives only from a node it owns.
+      '[node name="Hud" type="CanvasLayer"]\nscript = ExtResource("1_hud")\nmetadata/day = NodePath("%Day")\n\n' +
+      '[node name="Bar" type="HBoxContainer" parent="."]\n\n' +
+      '[node name="Gold" type="Label" parent="Bar"]\n\n' +
+      '[node name="Day" type="Label" parent="Bar"]\nunique_name_in_owner = true\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1_main"]\n' +
+      '[ext_resource type="PackedScene" path="res://hud.tscn" id="2_hud"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1_main")\n\n' +
+      '[node name="Status" type="Label" parent="."]\n\n[node name="Toast" type="Label" parent="."]\n\n' +
+      '[node name="Sign" type="Label" parent="."]\n\n[node name="Overlay" type="Control" parent="."]\n\n' +
+      '[node name="Hud" parent="." instance=ExtResource("2_hud")]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  // The line of a script holding a fragment, counted from 1, so the cases below say what they mean.
+  const at = (script: string[], fragment: string): number => {
+    const index = script.findIndex((line) => line.includes(fragment));
+    assert.ok(index >= 0, fragment);
+    return index + 1;
+  };
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<unknown> => {
+    const result = await server.request(
+      'tools/call',
+      { name: 'scene_node', arguments: { projectPath: project, ...args } },
+      240_000,
+    );
+    const parsed = parseTextContent(result);
+    assert.ok(parsed !== null, `scene_node ${String(args['op'])} answered: ${JSON.stringify(result)}`);
+    return parsed;
+  };
+  const named = (answer: unknown): string[] =>
+    asArray(get(answer, 'scriptsNaming') ?? [])
+      .map((entry) => {
+        const to = get(entry, 'to');
+        return (
+          `${text(get(entry, 'scenePath')).replace('res://', '')} ${text(get(entry, 'nodePath'))} ` +
+          `${text(get(entry, 'script')).replace('res://', '')}:${asNumber(get(entry, 'line'))} ` +
+          `${text(get(entry, 'from'))}${to === undefined ? '' : ` -> ${text(to)}`}`
+        );
+      })
+      .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('script-lines');
+
+    const coins = await call({
+      op: 'set',
+      scenePath: 'hud.tscn',
+      nodePath: 'Bar/Gold',
+      properties: { name: 'Coins' },
+    });
+    assert.deepEqual(
+      named(coins),
+      [
+        `hud.tscn . hud.gd:${at(hud, '= $Bar/Gold')} Bar/Gold -> Bar/Coins`,
+        `hud.tscn . hud.gd:${at(hud, '$"Bar/Gold"')} Bar/Gold -> Bar/Coins`,
+        `hud.tscn . hud.gd:${at(hud, 'self.get_node_or_null')} Bar/Gold -> Bar/Coins`,
+        `hud.tscn . hud.gd:${at(hud, '% $Bar/Gold')} Bar/Gold -> Bar/Coins`,
+        `main.tscn . main.gd:${at(main, '$Hud/Bar/Gold')} Hud/Bar/Gold -> Hud/Bar/Coins`,
+      ],
+      JSON.stringify(coins),
+    );
+    assert.equal(
+      readFileSync(join(project, 'hud.gd'), 'utf8'),
+      files['hud.gd'],
+      'the script is left as it was',
+    );
+
+    const date = await call({
+      op: 'set',
+      scenePath: 'hud.tscn',
+      nodePath: 'Bar/Day',
+      properties: { name: 'Date' },
+    });
+    assert.deepEqual(
+      named(date),
+      [
+        `hud.tscn . hud.gd:${at(hud, 'get_node("Bar/Day")')} Bar/Day -> Bar/Date`,
+        `hud.tscn . hud.gd:${at(hud, 'return %Day')} %Day -> %Date`,
+      ],
+      JSON.stringify(date),
+    );
+    assert.deepEqual(
+      asArray(get(date, 'retargeted')).map(
+        (entry) => `${text(get(entry, 'from'))} -> ${text(get(entry, 'to'))}`,
+      ),
+      ['%Day -> %Date'],
+      JSON.stringify(date),
+    );
+    assert.ok(
+      readFileSync(join(project, 'hud.tscn'), 'utf8').includes('metadata/day = NodePath("%Date")'),
+      readFileSync(join(project, 'hud.tscn'), 'utf8'),
+    );
+
+    const goldLabel = await call({
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Status',
+      properties: { name: 'GoldLabel' },
+    });
+    assert.deepEqual(
+      named(goldLabel),
+      [`main.tscn . main.gd:${at(main, '$Status')} Status -> GoldLabel`],
+      JSON.stringify(goldLabel),
+    );
+
+    const toast = await call({
+      op: 'reparent',
+      scenePath: 'main.tscn',
+      nodePath: 'Toast',
+      newParentPath: 'Overlay',
+    });
+    assert.deepEqual(named(toast), ['main.tscn . base.gd:5 Toast -> Overlay/Toast'], JSON.stringify(toast));
+
+    const sign = await call({ op: 'delete', scenePath: 'main.tscn', nodePath: 'Sign' });
+    assert.deepEqual(named(sign), [`main.tscn . main.gd:${at(main, '$Sign')} Sign`], JSON.stringify(sign));
+    assert.equal(readFileSync(join(project, 'main.gd'), 'utf8'), files['main.gd'], 'and so is this one');
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
@@ -61262,6 +61892,8 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
       '[node name="Pair" type="CharacterBody2D" parent="."]\n',
       '[node name="Agent" type="NavigationAgent2D" parent="Pair"]\n',
       '[node name="Link" type="NavigationLink2D" parent="Pair"]\n',
+      // Beside the regions rather than under one, so no bake here reads it.
+      '[node name="Crate" type="StaticBody2D" parent="."]\n',
     ].join('\n'),
     // Its obstacles come from a group, and one is outside the region.
     'outline.tres': `[gd_resource type="NavigationPolygon" format=3]\n\n[resource]\noutlines = Array[PackedVector2Array]([${square(300)}])\nsource_geometry_mode = 1\nsource_geometry_group_name = &"walls"\n`,
@@ -61418,6 +62050,14 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
       [1, 4],
       textOf(plain) ?? '',
     );
+    // Nothing read leaves the whole square walkable, which the counts alone do not tell from a bake
+    // that read the crate; the walls under the other regions are theirs and go unnamed.
+    assert.equal(
+      get(parseTextContent(plain), 'note'),
+      "No obstacle was read from the region's children (source mode root_node_children), so all the outlines enclose is walkable, less the agent_radius 10.0 kept from their edges. Crate (a StaticBody2D) is outside what was read; the bake reads a node elsewhere once it is in the group navigation_polygon_source_geometry_group and source_geometry_mode is groups_with_children, or once it is moved under the region.",
+      textOf(plain) ?? '',
+    );
+    assert.equal(get(parseTextContent(walled), 'note'), undefined, textOf(walled) ?? '');
 
     const covered = await bake('walled.tscn', 'Covered');
     assert.equal(
@@ -61475,7 +62115,7 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
     );
     assert.equal(
       textOf(await bake('walled.tscn', 'Walker')),
-      'Walker is a CharacterBody2D, not a NavigationRegion2D or a NavigationRegion3D.',
+      "Walker is a CharacterBody2D, not a NavigationRegion2D or a NavigationRegion3D; the scene's are at Region, Covered, Bare, Blank.",
     );
     const inheriting = readFileSync(join(project, 'inherits.tscn'), 'utf8');
     const base = readFileSync(join(project, 'walled.tscn'), 'utf8');
@@ -62251,6 +62891,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASceneKeepsItsOwnValuesForAnotherScenesNodes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,
+  testAMovedNodeNamesTheScriptLinesReadingIt,
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
@@ -62527,6 +63168,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWatchRecordsAPropertyEveryFrame,
   testAClickReachesAControlInAScaledWindow,
   testAClickInAWindowNothingEnteredPresses,
+  testAClickThatFreesWhatItMissedAnswers,
+  testAPointerAimsInsideANamedNode,
   testAHeadlessGameSaysItHasNoWindow,
   testTheKeeperAnswersAStop,
   testTheKeeperAnswersItsDebuggersQuestions,

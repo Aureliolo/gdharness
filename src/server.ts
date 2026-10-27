@@ -3466,6 +3466,9 @@ function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading[
 
 /** How many distinct engine entries a test run's answer carries, the newest kept. */
 const MOST_ENGINE_ENTRIES = 200;
+
+/** How many distinct ordinary lines a check's answer carries, the newest kept. */
+const MOST_PRINTED_LINES = 50;
 /** How many distinct undeclared engine errors a test run's answer names, the first kept. */
 const MOST_UNDECLARED_ERRORS = 20;
 
@@ -3796,6 +3799,8 @@ class GodotServer {
   private readonly godotBridge: GodotBridge;
   private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
   private activeProcess: GodotProcess | null = null;
+  // When this server last answered an editor_run check, whose run is kept nowhere afterwards.
+  private lastCheckAt: number | null = null;
   private readonly updates = new UpdateCheck(SERVER_VERSION);
   private noticedUpdate = false;
   private callsSinceNotice = 0;
@@ -5306,6 +5311,8 @@ class GodotServer {
                 ? {}
                 : { says: readNonEmptyString(args, 'says') }),
               ...(args['index'] === undefined ? {} : { index: args['index'] }),
+              ...(args['x'] === undefined ? {} : { x: args['x'] }),
+              ...(args['y'] === undefined ? {} : { y: args['y'] }),
             },
             { tool: 'runtime_input', op },
           );
@@ -10711,8 +10718,20 @@ class GodotServer {
     // with it and the answer could explain the loss but not undo it. Written here as it is drained,
     // the run survives its server the way a spawned one does.
     const startedAt = Date.now();
+    // The steps between the play and the announce wait say how long each took, as the ones before
+    // the play do: on the Windows leg the wait began 705 ms after a play whose game announced at 300,
+    // and found it at once, with nothing to say which of these held the server. Two of them rename
+    // over a file and wait out a process holding it open, which blocks for up to a second.
+    const steps: string[] = [];
+    let stepFrom = startedAt;
+    const step = (name: string): void => {
+      const now = Date.now();
+      steps.push(`${name} ${now - stepFrom}ms`);
+      stepFrom = now;
+    };
     const transcript = openTranscript(startedAt);
     closeSync(transcript.fd);
+    step('transcript');
     const playAnswer = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     const which = playOf(playAnswer);
     const played: GodotProcess = {
@@ -10733,6 +10752,7 @@ class GodotServer {
     };
     this.activeProcess = played;
     this.noteTheLatestRun({ projectPath, pid: null, startedAt });
+    step('latest run');
     this.watchThePlayedConsole();
     writeEditorRunNote({
       projectPath,
@@ -10740,7 +10760,10 @@ class GodotServer {
       startedAt,
       ...(which === null ? {} : { play: which }),
     });
+    step('run note');
     sweepTranscripts();
+    step('sweep');
+    this.logDebug(`After the play: ${steps.join(', ')}`);
 
     return this.jsonTextResponse({
       started: true,
@@ -12086,7 +12109,13 @@ class GodotServer {
     const record =
       everyRunRecord().find((one) => mine === null || !isSameDirectory(one.projectPath, mine)) ?? null;
     if (record === null) {
-      return `No game is running.${noEditor} Start one with editor_run.`;
+      // A caller looks here for a check's lines, and "No game is running" alone sent it looking for a
+      // run that never existed.
+      const checked =
+        this.lastCheckAt === null
+          ? ''
+          : ` The editor_run check ${Math.round((Date.now() - this.lastCheckAt) / 1000)}s ago kept no run: its answer held what the game printed, under entries and printed.`;
+      return `No game is running.${checked}${noEditor} Start one with editor_run.`;
     }
     const ours =
       mine === null
@@ -12275,7 +12304,12 @@ class GodotServer {
     // check's run is read nowhere but here, so an answer keeping only the problems would drop
     // everything the flag was passed for.
     const floor: Severity = engineArgs.includes('--verbose') ? 'info' : 'warning';
-    const printed = boot.log.count('info');
+    // Apart from the problems, so a chatty boot never pushes an error out of entries; a check's run
+    // is kept nowhere for editor_output, so lines left out here cannot be read at all.
+    const ordinary = boot.log.all.filter((entry) => entry.severity === 'info');
+    const printed = floor === 'warning' ? foldedRepeats(ordinary).slice(-MOST_PRINTED_LINES) : [];
+    const shown = printed.reduce((sum, entry) => sum + (entry.times ?? 1), 0);
+    this.lastCheckAt = Date.now();
     return this.jsonTextResponse({
       booted: !hung && boot.exitCode === 0 && errors === 0,
       hung,
@@ -12289,9 +12323,11 @@ class GodotServer {
       argsNote: engineFlagsNote(userArgs),
       ...scanWaitAnswer(scanned),
       savesNote: asked.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
-      // Counted rather than left to be inferred: entries holding no ordinary line read as a run that
-      // printed nothing, beside a run that printed and was not shown.
-      printedLinesNotShown: floor === 'warning' && printed > 0 ? printed : undefined,
+      printed: printed.length > 0 ? printed : undefined,
+      // Counted rather than left to be inferred: a printed list holding the newest lines reads as
+      // a run that printed only those.
+      printedLinesNotShown:
+        floor === 'warning' && ordinary.length > shown ? ordinary.length - shown : undefined,
       ...foldedEntriesAnswer(boot.log, floor),
     });
   }

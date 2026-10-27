@@ -204,9 +204,11 @@ static func follow(changed: String, old_path: String, new_path: String, carried:
 			file.close()
 			GdhSceneFile.refresh(scene_path)
 			followed.append(scene_path)
-		if moves.is_empty() or not text.contains("NodePath("):
+		var holds_paths: bool = text.contains("NodePath(")
+		# A script is only read, for the lines naming the node, so it does not need the file written.
+		if moves.is_empty() or not (holds_paths or text.contains('Script"')):
 			continue
-		if not unsaved.is_empty() and not new_path.is_empty():
+		if holds_paths and not unsaved.is_empty() and not new_path.is_empty():
 			not_followed.append({"scenePath": scene_path, "reason": unsaved})
 			continue
 		var before: int = carried.retargeted.size()

@@ -1113,6 +1113,13 @@ The scene tools never touch the editor's open scene. Each one works on a copy of
   saved after the scene, and the editor shares that resource with every scene using it, so a write
   that is refused puts its tracks back. A delete rewrites nothing and lists what is left naming the
   deleted node under `stillNaming`, since dropping a track loses its keys.
+- Scripts are code and are left as they were, as the editor leaves them, but a line reading a moved
+  node as `$Status` fails once the move is saved. `script_paths.gd` reads the paths a script names
+  from its tokens (`$Path`, `%Unique`, and a string handed to `get_node` and its kin on the node
+  itself), and `scene_paths.gd` works each out from the node the script is on as it does a NodePath
+  value. Every line whose path no longer reaches its node is listed under `scriptsNaming`, with the
+  path that would. `scene_kin.gd` follows a move into a scene that holds a script and no NodePath for
+  this, and a script read in two scenes, as on an instance's root, is listed once.
 - It packs the copy and instantiates the pack before writing anything, and each tool checks its change
   in that result, which is what loading the file will give. A property the node took but the file does
   not keep, such as a variable a `@tool` script does not export, is refused there.
