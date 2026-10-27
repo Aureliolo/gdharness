@@ -3995,6 +3995,8 @@ async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<
  * naming it next was refused by the editor until somebody called editor_rescan.
  */
 async function testACreatedClassIsOneTheEditorSees({ call, project }: Editor): Promise<void> {
+  // Left in the project: an editor holds a class whose script is removed until it restarts, so a
+  // removal here would show up in every later rescan's cacheDropped.
   const created = await call('script_edit', {
     projectPath: project,
     scriptPath: 'res://created_class.gd',
@@ -4002,20 +4004,14 @@ async function testACreatedClassIsOneTheEditorSees({ call, project }: Editor): P
     className: 'CreatedClass',
     extends: 'RefCounted',
   });
-  try {
-    assert.deepEqual(
-      [get(created, 'registered'), get(created, 'editorRescanned'), get(created, 'unseenByEditor')],
-      [true, true, undefined],
-      `the editor scanned for it and sees it: ${text(created)}`,
-    );
-    const rebuilt = await call('project_import', { projectPath: project, op: 'refresh_classes' });
-    assert.equal(get(rebuilt, 'classesUnchecked'), undefined, `the editor answered: ${text(rebuilt)}`);
-    assert.equal(get(rebuilt, 'unseenByEditor'), undefined, `asked again, it holds it: ${text(rebuilt)}`);
-  } finally {
-    rmSync(join(project, 'created_class.gd'), { force: true });
-    rmSync(join(project, 'created_class.gd.uid'), { force: true });
-    await call('editor_rescan', { projectPath: project });
-  }
+  assert.deepEqual(
+    [get(created, 'registered'), get(created, 'editorRescanned'), get(created, 'unseenByEditor')],
+    [true, true, undefined],
+    `the editor scanned for it and sees it: ${text(created)}`,
+  );
+  const rebuilt = await call('project_import', { projectPath: project, op: 'refresh_classes' });
+  assert.equal(get(rebuilt, 'classesUnchecked'), undefined, `the editor answered: ${text(rebuilt)}`);
+  assert.equal(get(rebuilt, 'unseenByEditor'), undefined, `asked again, it holds it: ${text(rebuilt)}`);
 }
 
 /**
