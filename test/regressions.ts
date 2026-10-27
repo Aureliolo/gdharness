@@ -15535,6 +15535,47 @@ async function testTheKeeperAnswersAStop(): Promise<void> {
 }
 
 /**
+ * The fixtures' record of the processes they met follows a number to the process now under it, and
+ * calls one met without a start unsaid rather than gone. Windows hands a freed number out again
+ * within seconds, and testAStopGoesThroughTheKeeper read a game it had started as not running while
+ * it ran, which a number kept at an earlier game's start answers. This process stands in for every
+ * holder, so the number is alive, and each case says what the platform answers when asked.
+ */
+async function testAMetNumberIsTheProcessUnderItNow(): Promise<void> {
+  const pid = process.pid;
+  const answering = (answers: (number | undefined)[]): MetProcesses => {
+    let asked = 0;
+    return new MetProcesses(async (pids) => {
+      const start = answers[Math.min(asked, answers.length - 1)];
+      asked += 1;
+      return Promise.resolve(
+        new Map(start === undefined ? [] : pids.map((one): [number, number] => [one, start])),
+      );
+    });
+  };
+
+  const reused = answering([100, 100, 200, 200, 200]);
+  await reused.meet(pid);
+  assert.equal(await reused.runs(pid), true, 'the process met runs');
+  assert.equal(await reused.runs(pid), false, 'another process under the number is not the one met');
+  await reused.meet(pid);
+  assert.equal(await reused.runs(pid), true, 'met again, the number is the process under it now');
+
+  const askedAgain = answering([undefined, 400]);
+  await askedAgain.meet(pid);
+  assert.equal(await askedAgain.runs(pid), true, 'a start the platform did not give is asked for again');
+
+  const neverSaid = answering([undefined, undefined, 300]);
+  await neverSaid.meet(pid);
+  assert.equal(
+    await neverSaid.runs(pid),
+    'unsaid',
+    'a process met with no start is neither running nor gone',
+  );
+  assert.equal(await neverSaid.gone(pid), false, 'and is not taken for gone while its number runs');
+}
+
+/**
  * A stop ends a run through the keeper holding it, whichever server asks, and does without it when
  * the keeper does not answer.
  *
@@ -63656,6 +63697,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeptGamesStackAndValuesRead,
   testAPauseAnswersWithTheGamesOwnScript,
   testAnExitedGamesLastMessagesAreRead,
+  testAMetNumberIsTheProcessUnderItNow,
   testAStopGoesThroughTheKeeper,
   testAStopAsksTheGameToCloseFirst,
   testAStartStopsWaitingForAGameThatIsOver,
