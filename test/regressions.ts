@@ -2524,8 +2524,10 @@ async function withFakeLanguageServer<T>(
   initializeAfterMs = 0,
   listenOn = 0,
   symbols: readonly unknown[] = GODOT_SYMBOLS,
+  publishesBeforeGoing = Number.POSITIVE_INFINITY,
 ): Promise<T> {
   const sockets = new Set<Socket>();
+  let published = 0;
 
   const server = createServer((socket) => {
     sockets.add(socket);
@@ -2599,6 +2601,12 @@ async function withFakeLanguageServer<T>(
                 }),
               },
             });
+            published += 1;
+            // An editor closing partway through a call: nothing listens on the port after this.
+            if (published >= publishesBeforeGoing) {
+              server.close();
+              for (const open of sockets) open.destroy();
+            }
           }
         } else if (message.method === 'textDocument/documentSymbol') {
           send({ jsonrpc: '2.0', id: message.id, result: symbols });
@@ -8046,7 +8054,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 155;
+const READ_IN_WORDS = 156;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -22058,6 +22066,54 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     );
     const entryFor = (scriptPath: string): unknown =>
       asArray(get(all, 'scripts')).find((entry) => get(entry, 'scriptPath') === scriptPath);
+
+    // A language server that answers the first script and is gone before the second: the rest are
+    // compiled by the engine, and the answer says which checked how many rather than naming one.
+    await withFakeLanguageServer(
+      (uri) => uri,
+      async (lspPort) => {
+        const parted = new ServerProcess({
+          env: {
+            GODOT_PATH: engine,
+            GDHARNESS_RUNTIME_DIR: runtimeDir,
+            GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+            GDHARNESS_LSP_PORT: String(lspPort),
+          },
+        });
+        try {
+          await parted.initialize('regression-test');
+          const mixed = await parted.request(
+            'tools/call',
+            {
+              name: 'script_diagnostics',
+              arguments: { projectPath: project, scriptPath: ['checked/fine.gd', 'checked/broken.gd'] },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+          const both = parseTextContent(mixed);
+          assert.deepEqual(
+            [
+              get(both, 'scriptsChecked'),
+              get(both, 'nothingReported'),
+              get(both, 'errors'),
+              get(both, 'checkedBy'),
+              get(both, 'checkedByLanguageServer'),
+            ],
+            [2, ['checked/fine.gd'], 2, 'language server, then engine', 1],
+            textOf(mixed) ?? JSON.stringify(mixed),
+          );
+        } finally {
+          await parted.stop();
+        }
+      },
+      undefined,
+      [],
+      undefined,
+      0,
+      0,
+      GODOT_SYMBOLS,
+      1,
+    );
     const dependent = entryFor('checked/dependent.gd');
     assert.deepEqual(
       [get(dependent, 'diagnostics'), get(dependent, 'dependenciesWithErrors')],
