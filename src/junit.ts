@@ -492,17 +492,38 @@ export interface HookFailure {
   readonly message: string;
 }
 
-// Printed under the suite's `finalize()` report, on one line with the location once colours are off:
-// `  Expecting: 'true' but is 'false'	at 'before' in res://test/hooked_test.gd:5`.
+// Printed under the suite's `finalize()` report, the location after a tab on the message's last
+// line once colours are off: `  Expecting: 'true' but is 'false'	at 'before' in res://test/hooked_test.gd:5`.
 const HOOK_FAILURE = /^\s*(.*?)\s*\tat '(before|after)' in (res:\/\/.+?):(\d+)\s*$/;
+const REPORT_HEADING = /\bfinalize\(\)\s+Report:\s*$/;
+const REPORT_END = /^\s*Statistics:/;
 
-/** Every hook failure [param printed] names, in the order printed. */
+/**
+ * Every hook failure [param printed] names, in the order printed.
+ *
+ * An assertion's message can run over several lines, as `assert_int`'s does (`Expecting:`, the
+ * value, `but was`, the value), so a message is every line since the report's heading or the hook
+ * before it: read from its last line alone, a hook expecting 4 that met 3 was reported as "3".
+ */
 export function hookFailuresPrinted(printed: readonly string[]): HookFailure[] {
+  let above: string[] | null = null;
   return printed.flatMap((line) => {
+    if (REPORT_HEADING.test(line)) {
+      above = [];
+      return [];
+    }
+    if (REPORT_END.test(line)) {
+      above = null;
+      return [];
+    }
     const found = HOOK_FAILURE.exec(line);
-    return found === null
-      ? []
-      : [{ hook: found[2] ?? '', path: found[3] ?? '', line: Number(found[4]), message: found[1] ?? '' }];
+    if (found === null) {
+      above?.push(line.trim());
+      return [];
+    }
+    const message = [...(above ?? []), found[1] ?? ''].filter((part) => part !== '').join(' ');
+    above = [];
+    return [{ hook: found[2] ?? '', path: found[3] ?? '', line: Number(found[4]), message }];
   });
 }
 
