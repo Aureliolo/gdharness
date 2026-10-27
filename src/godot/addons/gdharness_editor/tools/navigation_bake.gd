@@ -24,8 +24,26 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 	var at: String = scene.path_of(region)
 	var flat: bool = region is NavigationRegion2D
 	if not flat and not region is NavigationRegion3D:
-		return scene.refuse(
-			"%s is a %s, not a NavigationRegion2D or a NavigationRegion3D." % [at, region.get_class()]
+		var regions: PackedStringArray = []
+		for node: Node in _all_under(scene.root):
+			if node is NavigationRegion2D or node is NavigationRegion3D:
+				var _named: bool = regions.append(scene.path_of(node))
+		return (
+			scene
+			. refuse(
+				(
+					"%s is a %s, not a NavigationRegion2D or a NavigationRegion3D; %s."
+					% [
+						at,
+						region.get_class(),
+						(
+							"the scene has none, and scene_node add puts one in"
+							if regions.is_empty()
+							else "the scene's are at %s" % ", ".join(regions)
+						),
+					]
+				)
+			)
 		)
 	var property: String = "navigation_polygon" if flat else "navigation_mesh"
 	var held: Resource = region.get(property)
@@ -64,6 +82,8 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 		)
 	if polygons == 0:
 		answer["note"] = _why_empty(held, flat, parsed)
+	elif flat and not parsed:
+		answer["note"] = _nothing_read(scene, held)
 	if not flat and not Engine.is_editor_hint() and _reads_meshes(region, held):
 		answer["meshesNote"] = (
 			"The engine's warning that it had to parse RenderingServer meshes at runtime is about a "
@@ -97,7 +117,7 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 
 
 ## Reads the source geometry for [param held] off a copy of the region at [param at] and bakes it
-## into [param held], answering whether the copy gave any geometry.
+## into [param held], answering whether the copy gave any geometry: in 2D, any obstacle.
 static func _parse_and_bake(scene: GdhSceneFile, at: String, held: Resource, flat: bool) -> bool:
 	var copy: Node = scene.root.duplicate(Node.DUPLICATE_GROUPS)
 	var reading: Resource = held.duplicate()
@@ -116,7 +136,12 @@ static func _parse_and_bake(scene: GdhSceneFile, at: String, held: Resource, fla
 		var outline: NavigationPolygon = reading
 		var geometry: NavigationMeshSourceGeometryData2D = NavigationMeshSourceGeometryData2D.new()
 		NavigationServer2D.parse_source_geometry_data(outline, geometry, region)
-		found = geometry.has_data()
+		# has_data() counts only traversable outlines, so a bake carving every obstacle it read would
+		# still say it read nothing.
+		found = (
+			not geometry.get_obstruction_outlines().is_empty()
+			or not geometry.get_projected_obstructions().is_empty()
+		)
 		var polygon: NavigationPolygon = held
 		NavigationServer2D.bake_from_source_geometry_data(polygon, geometry)
 	else:
@@ -213,6 +238,58 @@ static func _why_empty(held: Resource, flat: bool, parsed: bool) -> String:
 		"The geometry read gave no floor an agent of agent_height %s and agent_radius %s can stand on."
 		% [mesh.agent_height, mesh.agent_radius]
 	)
+
+
+## Why a 2D bake of [param held] left the whole outline walkable: no obstacle was read, and which
+## nodes of [param scene] that give obstacles are under no region. A tile layer beside the region
+## rather than under it is the usual cause, and the bake alone does not show it.
+static func _nothing_read(scene: GdhSceneFile, held: Resource) -> String:
+	var polygon: NavigationPolygon = held
+	var said: String = (
+		(
+			"No obstacle was read from %s, so all the outlines enclose is walkable, less the "
+			+ "agent_radius %s kept from their edges."
+		)
+		% [
+			_source_said(polygon.source_geometry_mode, polygon.source_geometry_group_name),
+			polygon.agent_radius
+		]
+	)
+	var outside: PackedStringArray = []
+	for node: Node in _all_under(scene.root):
+		var gives: bool = (
+			node is TileMapLayer
+			or node is StaticBody2D
+			or node is MeshInstance2D
+			or node is Polygon2D
+			or node is NavigationObstacle2D
+		)
+		if gives and not _in_a_region(node):
+			var _named: bool = outside.append("%s (a %s)" % [scene.path_of(node), node.get_class()])
+	if outside.is_empty():
+		return said
+	return (
+		(
+			"%s %s %s outside what was read; the bake reads a node elsewhere once it is in the group %s and "
+			+ "source_geometry_mode is groups_with_children, or once it is moved under the region."
+		)
+		% [
+			said,
+			", ".join(outside),
+			"is" if outside.size() == 1 else "are",
+			polygon.source_geometry_group_name,
+		]
+	)
+
+
+## Whether [param node] is under a 2D region, this one or another, whose obstacle it then is.
+static func _in_a_region(node: Node) -> bool:
+	var above: Node = node.get_parent()
+	while above != null:
+		if above is NavigationRegion2D:
+			return true
+		above = above.get_parent()
+	return false
 
 
 static func _source_said(mode: int, group: String) -> String:

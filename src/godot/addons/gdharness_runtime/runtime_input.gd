@@ -46,6 +46,9 @@ var _pointer_placed: bool = false
 var _pointer_at_usec: int = 0
 var _arrival_seconds: float = 1.0 / 60.0
 
+## The buttons a press pushed into a window other than the game's holds, which Input never hears of.
+var _pushed_held: int = 0
+
 
 func _init(host: Node, values: GdhValues) -> void:
 	_host = host
@@ -94,18 +97,61 @@ static func _hover_noted(answer: Dictionary, supplied: bool) -> Dictionary:
 			"This window has had no pointer enter from the operating system, and with subwindow"
 			+ " embedding off Godot hovers nothing in a native window until it has, so a Button there"
 			+ " takes no press. The runtime gave the controls under the pointer the hover the engine"
-			+ " would have: their mouse_entered and mouse_exited, and the hover a Button presses on."
+			+ " would have: their mouse_entered and mouse_exited, and the hover a Button presses on,"
+			+ " and told the window the pointer is in it, so a motion reaches the control under it."
 			+ " Viewport.gui_get_hovered_control() still answers null in this window. Said once a run;"
 			+ " hover_supplied marks every answer it applies to."
 		)
 	return answer
 
 
-## Hovers what is under [param position] in the game's window, where the pointer events Input is
-## given go, when the engine cannot: see runtime_hover.gd.
-func _follow_in_the_window(position: Vector2) -> bool:
-	var root: Window = _host.get_tree().root
-	return _hover.follow(root, root.get_final_transform().affine_inverse() * position)
+## Hovers what is under [param position], in [param viewport]'s pixels, when the engine cannot: see
+## runtime_hover.gd.
+func _follow_in(viewport: Viewport, position: Vector2) -> bool:
+	return _hover.follow(viewport, viewport.get_final_transform().affine_inverse() * position)
+
+
+## Sends one event of a mouse_click, mouse_motion or mouse_drag into [param viewport]: through Input
+## for the game's own window, and pushed into any other, as a click sends one, since Input reaches
+## only the game's window. Input keeps the buttons held from the events it is given, so the ones a
+## pushed press holds are kept here for the motions and the release after it.
+func _send(viewport: Viewport, event: InputEventMouse) -> void:
+	if viewport == _host.get_tree().root:
+		Input.parse_input_event(event)
+		return
+	# A press can close the window it went to, and its release then has nowhere to go.
+	if not is_instance_valid(viewport):
+		return
+	if event is InputEventMouseButton:
+		_pushed_held = event.button_mask
+	viewport.push_input(event)
+
+
+## The buttons held in [param viewport] before the next event sent there.
+func _held_in(viewport: Viewport) -> int:
+	return Input.get_mouse_button_mask() if viewport == _host.get_tree().root else _pushed_held
+
+
+## The viewport whose GUI says what is under the pointer: the named node's own, which for a node in
+## an embedded window is not [param viewport], the one the events went into. Read before the events,
+## since they may free the node.
+static func _own_of(aim: Dictionary, viewport: Viewport) -> Viewport:
+	if not aim.has("node"):
+		return viewport
+	var named: Node = aim["node"]
+	return named.get_viewport()
+
+
+## The path of the control under the pointer in [param own], or null, read once the events are
+## handled: a motion and a drag answered nothing of where they left the pointer, so a hover could be
+## checked only by what the game did about it.
+func _hovered_path(own: Viewport) -> Variant:
+	if not is_instance_valid(own):
+		return null
+	var hovered: Control = _hover.hovered_in(own)
+	if hovered == null:
+		return null
+	return str(hovered.get_path())
 
 
 ## The movement a pointer arriving at [param position] carries, which is the distance from where
@@ -266,10 +312,17 @@ func inject_key(params: Dictionary) -> Dictionary:
 ## `pressed` is how a caller asks for one half, the way a drag is made: true holds the button down,
 ## false lets go of one being held.
 func inject_mouse_click(params: Dictionary) -> Dictionary:
+	var aimed: Variant = GdhMouse.aim_of(params, _host.get_tree().root)
+	if aimed is String:
+		return {"type": "error", "message": aimed}
+	var aim: Dictionary = aimed
 	var point: Variant = GdhMouse.read_point(params, "x", "y")
 	if point is String:
 		return {"type": "error", "message": point}
-	var position: Vector2 = point
+	var local: Vector2 = point
+	var placed: Dictionary = GdhMouse.carried(aim, local, _host.get_tree().root)
+	var viewport: Viewport = placed["viewport"]
+	var position: Vector2 = placed["position"]
 	var button: int = GdhMouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
 		return GdhMouse.no_such_button(params.get("button"))
@@ -294,50 +347,47 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	# A button pressed somewhere puts the pointer there: the motion after a held press measures
 	# its drag from the press, which is where a real pointer would be.
 	var _moved: Vector2 = _arrive(position)
-	var supplied: bool = _follow_in_the_window(position)
+	var supplied: bool = _follow_in(viewport, position)
+	var at: Array[Vector2] = [position]
+	var where: Dictionary = GdhMouse.where(aim, viewport, at)
+	var own: Viewport = _own_of(aim, viewport)
 	# A double click's first click goes whole before it, as [method _click_button] sends one.
 	if double and held and not notch:
-		Input.parse_input_event(GdhMouse.button_event(position, button, true, false))
+		_send(viewport, GdhMouse.button_event(position, button, true, false, _held_in(viewport)))
 		await _host.get_tree().process_frame
-		Input.parse_input_event(GdhMouse.button_event(position, button, false, false))
+		_send(viewport, GdhMouse.button_event(position, button, false, false, _held_in(viewport)))
 		await _host.get_tree().process_frame
-	var press: InputEventMouseButton = GdhMouse.button_event(position, button, whole or held, double)
-	Input.parse_input_event(press)
+	var press: InputEventMouseButton = GdhMouse.button_event(
+		position, button, whole or held, double, _held_in(viewport)
+	)
+	_send(viewport, press)
 	var lasted: Variant = null
 	if notch:
-		Input.parse_input_event(GdhMouse.button_event(position, button, false, false))
+		_send(viewport, GdhMouse.button_event(position, button, false, false, _held_in(viewport)))
 	elif whole:
 		# A frame between the halves at least, as inject_action has, so a control that acts on the
 		# press and one that acts on the release each get a frame to do it in.
 		lasted = await GdhValues.hold(_host.get_tree(), frames)
-		Input.parse_input_event(GdhMouse.button_event(position, button, false, false))
+		_send(viewport, GdhMouse.button_event(position, button, false, false, _held_in(viewport)))
 	# Input hands the events on at the next frame, so the control under the pointer is read after it.
 	await _host.get_tree().process_frame
-	var hovered: Control = _hover.hovered_in(_host.get_viewport())
-	var hovered_path: Variant = null
-	if hovered != null:
-		hovered_path = str(hovered.get_path())
+	var hovered_path: Variant = _hovered_path(own)
 
-	var at: Array[Vector2] = [position]
-	var said: Dictionary = _pointer_noted(
-		_hover_noted(
-			{
-				"type": "input_injected",
-				"input_type": "mouse_click",
-				"held_frames": GdhValues.held_answer(whole and not notch, frames),
-				"held_for": lasted,
-				"position": [position.x, position.y],
-				"button": button,
-				"hovered": hovered_path,
-				"actions": GdhValues.actions_of(press),
-				"pressed": held and not whole,
-				"whole": whole,
-				"double": double
-			},
-			supplied
-		)
-	)
-	return GdhMouse.outside_noted(said, _host.get_viewport(), at)
+	var answer: Dictionary = {
+		"type": "input_injected",
+		"input_type": "mouse_click",
+		"held_frames": GdhValues.held_answer(whole and not notch, frames),
+		"held_for": lasted,
+		"position": [position.x, position.y],
+		"button": button,
+		"hovered": hovered_path,
+		"actions": GdhValues.actions_of(press),
+		"pressed": held and not whole,
+		"whole": whole,
+		"double": double
+	}
+	answer.merge(where)
+	return _pointer_noted(_hover_noted(answer, supplied))
 
 
 ## Moves the pointer to a position, with the movement the event carries taken from where the
@@ -349,32 +399,40 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 ## would have carried. A relative the caller gives is kept, since a game may want to read a motion
 ## the position does not show.
 func inject_mouse_motion(params: Dictionary) -> Dictionary:
+	var aimed: Variant = GdhMouse.aim_of(params, _host.get_tree().root)
+	if aimed is String:
+		return {"type": "error", "message": aimed}
+	var aim: Dictionary = aimed
 	var point: Variant = GdhMouse.read_point(params, "x", "y")
 	if point is String:
 		return {"type": "error", "message": point}
-	var position: Vector2 = point
+	var local: Vector2 = point
+	var placed: Dictionary = GdhMouse.carried(aim, local, _host.get_tree().root)
+	var viewport: Viewport = placed["viewport"]
+	var position: Vector2 = placed["position"]
 	var relative: Vector2 = _arrive(position)
 	if params.has("relativeX") or params.has("relativeY"):
 		relative = Vector2(
 			GdhRead.as_float(params.get("relativeX", 0.0)), GdhRead.as_float(params.get("relativeY", 0.0))
 		)
 
-	var supplied: bool = _follow_in_the_window(position)
-	Input.parse_input_event(_motion(position, relative))
-
+	var supplied: bool = _follow_in(viewport, position)
 	var at: Array[Vector2] = [position]
-	var said: Dictionary = _pointer_noted(
-		_hover_noted(
-			{
-				"type": "input_injected",
-				"input_type": "mouse_motion",
-				"position": [position.x, position.y],
-				"relative": [relative.x, relative.y]
-			},
-			supplied
-		)
-	)
-	return GdhMouse.outside_noted(said, _host.get_viewport(), at)
+	var where: Dictionary = GdhMouse.where(aim, viewport, at)
+	var own: Viewport = _own_of(aim, viewport)
+	_send(viewport, _motion(position, relative, _held_in(viewport)))
+	# Input hands the motion on at the next frame, and the hover follows it there.
+	await _host.get_tree().process_frame
+
+	var answer: Dictionary = {
+		"type": "input_injected",
+		"input_type": "mouse_motion",
+		"position": [position.x, position.y],
+		"relative": [relative.x, relative.y],
+		"hovered": _hovered_path(own),
+	}
+	answer.merge(where)
+	return _pointer_noted(_hover_noted(answer, supplied))
 
 
 ## Drags with a mouse button from one point to another, through any points between, as a hand does:
@@ -387,10 +445,21 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 ## Each motion goes in a frame of its own because the engine merges the motions it is given within
 ## one frame into a single event, as it does a real mouse's, and a game counting motions counts one.
 func inject_mouse_drag(params: Dictionary) -> Dictionary:
+	var aimed: Variant = GdhMouse.aim_of(params, _host.get_tree().root)
+	if aimed is String:
+		return {"type": "error", "message": aimed}
+	var aim: Dictionary = aimed
 	var stroke: Variant = GdhMouse.stroke_of(params)
 	if stroke is String:
 		return {"type": "error", "message": stroke}
-	var points: Array[Vector2] = stroke
+	# Carried once, before the press: a hand drags across the screen, not along a node that moves.
+	var named: Array[Vector2] = stroke
+	var points: Array[Vector2] = []
+	var viewport: Viewport = _host.get_tree().root
+	for local: Vector2 in named:
+		var placed: Dictionary = GdhMouse.carried(aim, local, _host.get_tree().root)
+		viewport = placed["viewport"]
+		points.append(placed["position"])
 	var button: int = GdhMouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
 		return GdhMouse.no_such_button(params.get("button"))
@@ -410,85 +479,51 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 	var start: Vector2 = points[0]
 	var end: Vector2 = points[points.size() - 1]
 	var _moved: Vector2 = _arrive(start)
-	var supplied: bool = _follow_in_the_window(start)
-	Input.parse_input_event(GdhMouse.button_event(start, button, true, false))
+	var supplied: bool = _follow_in(viewport, start)
+	var where: Dictionary = GdhMouse.where(aim, viewport, points)
+	var hovered_in: Viewport = _own_of(aim, viewport)
+	_send(viewport, GdhMouse.button_event(start, button, true, false, _held_in(viewport)))
 	var travelled: Vector2 = Vector2.ZERO
-	for step: int in range(1, frames + 1):
+	var sent: int = 0
+	for step: int in range(1, frames + 2):
 		await _host.get_tree().process_frame
+		# A window other than the game's can be closed by what the stroke moves, and nothing is left
+		# for the rest of it to go to.
+		if not is_instance_valid(viewport):
+			return {
+				"type": "error",
+				"message":
+				(
+					(
+						"%s was freed after the press and %d of %d motions, so the rest of the stroke"
+						+ " and the release went nowhere"
+					)
+					% [where["window"], sent, frames]
+				)
+			}
+		if step > frames:
+			break
 		var at: Vector2 = GdhMouse.along(points, lengths, float(step) / frames)
 		var relative: Vector2 = _arrive(at)
 		travelled += relative
-		supplied = _follow_in_the_window(at) or supplied
-		Input.parse_input_event(_motion(at, relative))
+		supplied = _follow_in(viewport, at) or supplied
+		_send(viewport, _motion(at, relative, _held_in(viewport)))
+		sent += 1
+	_send(viewport, GdhMouse.button_event(end, button, false, false, _held_in(viewport)))
 	await _host.get_tree().process_frame
-	Input.parse_input_event(GdhMouse.button_event(end, button, false, false))
-	await _host.get_tree().process_frame
 
-	var said: Dictionary = _pointer_noted(
-		_hover_noted(
-			{
-				"type": "input_injected",
-				"input_type": "mouse_drag",
-				"from": [start.x, start.y],
-				"to": [end.x, end.y],
-				"button": button,
-				"motions": frames,
-				"relative_total": [travelled.x, travelled.y],
-			},
-			supplied
-		)
-	)
-	return GdhMouse.outside_noted(said, _host.get_viewport(), points)
-
-
-## Whether [param centre] is somewhere a click can reach it: inside the viewport, and inside every
-## ScrollContainer between the control and the root, each of which clips what it holds.
-static func _in_sight(control: Control, viewport: Viewport, centre: Vector2) -> bool:
-	return viewport.get_visible_rect().has_point(centre) and _clipped_by(control, centre) == null
-
-
-## The ScrollContainer between [param control] and its viewport that clips [param centre] away from
-## it, or null when none does. Not past the viewport: one holding a dialog is in another space.
-static func _clipped_by(control: Control, centre: Vector2) -> ScrollContainer:
-	var walking: Node = control.get_parent()
-	while walking != null and not (walking is Viewport):
-		var holder: ScrollContainer = walking as ScrollContainer
-		# Carried into the same space the centre is in, which is the canvas rather than the
-		# container's own: the two are only the same while nothing above it is transformed.
-		if holder != null:
-			var seen: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
-			if not seen.has_point(centre):
-				return holder
-		walking = walking.get_parent()
-	return null
-
-
-## Scrolls whatever is holding [param control] until it is on screen, and answers whether the view
-## moved.
-##
-## Innermost container first and outwards, a frame apart. A container moves what it holds on the
-## next layout pass rather than inside the call, and the next one out works out where the control is
-## from where it is drawn, so asked in the same frame it scrolled to where the control had been.
-## Moved means a scroll value changed: a container asked to show what it already shows moves
-## nothing, and answering true for it said the view had moved when it had not. Only the containers in
-## the control's own viewport: one holding a dialog scrolls the page behind it, not the dialog.
-func _scroll_into_view(control: Control) -> bool:
-	var moved: bool = false
-	var walking: Variant = control.get_parent()
-	while walking != null and not (walking is Viewport):
-		var step: Node = walking
-		var holder: ScrollContainer = step as ScrollContainer
-		if holder != null:
-			var before: Vector2i = Vector2i(holder.scroll_horizontal, holder.scroll_vertical)
-			holder.ensure_control_visible(control)
-			if Vector2i(holder.scroll_horizontal, holder.scroll_vertical) != before:
-				moved = true
-				await _host.get_tree().process_frame
-				# A panel that rebuilds itself can go in the frame this waited.
-				if not is_instance_valid(control) or not is_instance_valid(holder):
-					return moved
-		walking = step.get_parent()
-	return moved
+	var answer: Dictionary = {
+		"type": "input_injected",
+		"input_type": "mouse_drag",
+		"from": [start.x, start.y],
+		"to": [end.x, end.y],
+		"button": button,
+		"motions": frames,
+		"relative_total": [travelled.x, travelled.y],
+		"hovered": _hovered_path(hovered_in),
+	}
+	answer.merge(where)
+	return _pointer_noted(_hover_noted(answer, supplied))
 
 
 ## A whole click on a Control: the pointer moves onto it, the button goes down, a frame passes,
@@ -525,6 +560,9 @@ func click(params: Dictionary) -> Dictionary:
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
+	var named_point: Variant = GdhMouse.point_in(params, node, node_path, item != null)
+	if named_point is String:
+		return {"type": "error", "message": named_point}
 	if node is Node3D:
 		var spatial: Node3D = node
 		return await _click_in_the_world(node_path, spatial, params)
@@ -544,6 +582,9 @@ func click(params: Dictionary) -> Dictionary:
 	var aim: Vector2 = control.size * 0.5
 	var at_centre: bool = true
 	var item_scrolled: bool = false
+	if named_point != null:
+		aim = named_point
+		at_centre = false
 	if item != null:
 		var found_by_words: Dictionary = found
 		var placed_item: Dictionary = await GdhItems.in_view(
@@ -555,7 +596,7 @@ func click(params: Dictionary) -> Dictionary:
 		at_centre = false
 		item_scrolled = placed_item["scrolled"]
 	var rich: RichTextLabel = control as RichTextLabel
-	if found != null and rich != null:
+	if found != null and rich != null and named_point == null:
 		var placed: Dictionary = GdhTargets.point_on_words(rich, wanted)
 		var found_here: Dictionary = found
 		if placed.has("point"):
@@ -583,8 +624,8 @@ func click(params: Dictionary) -> Dictionary:
 	# the click went to that instead and said so. Measured on a hall whose staff panel had been
 	# scrolled past: the button was at y 69 and its container started at y 166.
 	var scrolled: bool = item_scrolled
-	if not _in_sight(control, own, local):
-		scrolled = await _scroll_into_view(control) or item_scrolled
+	if not GdhScreen.in_sight(control, own, local):
+		scrolled = await GdhScreen.scroll_into_view(control, _host.get_tree()) or item_scrolled
 		var left: String = GdhValues.afterwards(control)
 		if left != "in_tree":
 			return {
@@ -600,7 +641,7 @@ func click(params: Dictionary) -> Dictionary:
 	# A control taller or wider than what shows it has its centre out of sight at every scroll, and
 	# a player clicks the part they can see. Refused, it was called a control nothing could click.
 	var on_part: bool = false
-	if at_centre and not _in_sight(control, own, local):
+	if at_centre and not GdhScreen.in_sight(control, own, local):
 		var part: Variant = GdhScreen.shown_part(control)
 		if part is Rect2:
 			var seen: Rect2 = part
@@ -619,7 +660,8 @@ func click(params: Dictionary) -> Dictionary:
 	# that silently reached nothing: outside the viewport it is drawn in, outside the one that shows
 	# that on the screen, or clipped away by a ScrollContainer that would not scroll it into view.
 	# Each is said of the viewport or container at fault, with its own rect and the point in it.
-	var out_there: String = _out_of_reach(control, node_path, local, reached, scrolled)
+	var aimed: String = "its centre" if named_point == null else "the point %s clicked" % [named_point]
+	var out_there: String = _out_of_reach(control, node_path, local, reached, scrolled, aimed)
 	if not out_there.is_empty():
 		return {"type": "error", "message": out_there}
 	var button: int = GdhMouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))
@@ -647,8 +689,21 @@ func click(params: Dictionary) -> Dictionary:
 	if hovered != null:
 		hovered_path = str(hovered.get_path())
 	var landed: bool = hovered == control or (hovered != null and control.is_ancestor_of(hovered))
-	# Asked only of a miss, before the press restacks windows: hovered missed a window over it.
-	var cover: Node = null if landed else GdhTargets.drawn_over(control)
+	# Why a miss missed, said before the press: the press can free the control and what covers it, and
+	# a click on a pointer spot that rebuilt its room errored reading the freed spot's filter and
+	# answered nothing. The cover is asked before the press restacks windows too: hovered missed a
+	# window over it.
+	var why_not_landed: String = ""
+	# A Label and a TextureRect ignore the pointer unless told otherwise, so the click goes to what is
+	# under them, and landed false with that control as hovered said nothing of why.
+	if not landed and control.mouse_filter == Control.MOUSE_FILTER_IGNORE:
+		why_not_landed = (
+			"%s's mouse_filter is ignore, so the pointer passes through it to what is under it" % node_path
+		)
+	elif not landed:
+		var cover: Node = GdhTargets.drawn_over(control)
+		if cover != null:
+			why_not_landed = "%s is drawn over it at the point clicked" % cover.get_path()
 
 	# The link a rich label says was pressed, which is its own word for what the press reached.
 	var links: Array = []
@@ -690,14 +745,8 @@ func click(params: Dictionary) -> Dictionary:
 	}
 	if on_part:
 		answer["pressed_on"] = "the middle of the part on screen, since no scroll brings its centre into view"
-	# A Label and a TextureRect ignore the pointer unless told otherwise, so the click goes to what is
-	# under them, and landed false with that control as hovered said nothing of why.
-	if not landed and control.mouse_filter == Control.MOUSE_FILTER_IGNORE:
-		answer["why_not_landed"] = (
-			"%s's mouse_filter is ignore, so the pointer passes through it to what is under it" % node_path
-		)
-	elif cover != null:
-		answer["why_not_landed"] = "%s is drawn over it at the point clicked" % cover.get_path()
+	if not why_not_landed.is_empty():
+		answer["why_not_landed"] = why_not_landed
 	if found != null:
 		answer["found"] = found
 	if was_pressed != null:
@@ -750,14 +799,15 @@ func _takes_no_click(control: Control, node_path: String) -> String:
 	return ""
 
 
-## Why a click at [param control]'s centre would reach nothing, or "" when it would reach it: the
-## centre outside the viewport it is drawn in, at [param local]; outside the viewport showing that
-## one on the screen, which [param reached] holds with the centre there; or clipped away by a
-## ScrollContainer holding it. A refusal names the viewport or container at fault and the point in
-## that one's own space, since naming another printed a point inside the rect it was said to be
-## outside. The note on a game with no window goes only on the viewport that is the window's.
+## Why a click at [param control]'s centre, or at the point [param aimed] names, would reach nothing,
+## or "" when it would reach it: the point outside the viewport it is drawn in, at [param local];
+## outside the viewport showing that one on the screen, which [param reached] holds with the point
+## there; or clipped away by a ScrollContainer holding it. A refusal names the viewport or container
+## at fault and the point in that one's own space, since naming another printed a point inside the
+## rect it was said to be outside. The note on a game with no window goes only on the viewport that
+## is the window's.
 func _out_of_reach(
-	control: Control, node_path: String, local: Vector2, reached: Dictionary, scrolled: bool
+	control: Control, node_path: String, local: Vector2, reached: Dictionary, scrolled: bool, aimed: String
 ) -> String:
 	var after: String = (
 		". It was scrolled as far as what holds it goes and is still out there" if scrolled else ""
@@ -769,16 +819,17 @@ func _out_of_reach(
 			continue
 		var which: String = "" if viewport == _host.get_tree().root else " of %s" % viewport.get_path()
 		return (
-			"%s has its centre at %s, outside the viewport%s %s, so nothing can click it%s%s"
-			% [node_path, point, which, viewport.get_visible_rect(), after, _no_window_note(viewport)]
+			"%s has %s at %s, outside the viewport%s %s, so nothing can click it%s%s"
+			% [node_path, aimed, point, which, viewport.get_visible_rect(), after, _no_window_note(viewport)]
 		)
-	var holder: ScrollContainer = _clipped_by(control, local)
+	var holder: ScrollContainer = GdhScreen.clipped_by(control, local)
 	if holder == null:
 		return ""
 	return (
-		"%s has its centre at %s, outside the part of %s that shows it, so nothing can click it%s"
+		"%s has %s at %s, outside the part of %s that shows it, so nothing can click it%s"
 		% [
 			node_path,
+			aimed,
 			local,
 			holder.get_path(),
 			after if scrolled else ". It could not be scrolled into view",
@@ -898,7 +949,7 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	var supplied: bool = _hover.follow(arriving, reached_point)
 	# Read before the press, for the reason the Control click reads it: what the caller needs to
 	# know is whether a panel is sitting over the room, and the press is what would change it.
-	var through: Dictionary = _through_the_interface(out)
+	var through: Dictionary = GdhScreen.through_the_interface(out, _hover)
 	var hovered_path: Variant = through["hovered"]
 
 	var _press: InputEventMouseButton = await _click_button(arriving, position, button, double)
@@ -924,61 +975,6 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	)
 
 
-## Whether a pointer on its way out through [param out], the steps [method GdhScreen.steps_out]
-## answers, gets past the interface in every viewport, as {"landed", "hovered"}: the path of the
-## control that took it, or of the one under it that let it by, or null.
-##
-## In the viewport the node is drawn in, a control under the pointer takes it unless it and every
-## control holding it let the pointer pass. In each viewport outside that one, the pointer has to be
-## over what shows the one inside: the SubViewportContainer, with nothing drawn over it, or inside
-## the embedded window. Read in the first viewport alone, a click beside a container that is smaller
-## than what it shows, or under a panel drawn over the container, answered landed.
-func _through_the_interface(out: Array[Dictionary]) -> Dictionary:
-	var first_under: Variant = null
-	for step: Dictionary in out:
-		var viewport: Viewport = step["viewport"]
-		var through: Variant = step["through"]
-		var hovered: Control = _hover.hovered_in(viewport)
-		if through is Window:
-			var window: Window = through
-			var point: Vector2 = step["point"]
-			if not Rect2(window.position, window.size).has_point(point):
-				return {"landed": false, "hovered": _path_or_null(hovered)}
-			continue
-		if through is SubViewportContainer:
-			if hovered != through:
-				return {"landed": false, "hovered": _path_or_null(hovered)}
-			continue
-		if hovered != null and not _passes_on(hovered):
-			return {"landed": false, "hovered": str(hovered.get_path())}
-		if hovered != null and first_under == null:
-			first_under = str(hovered.get_path())
-	return {"landed": true, "hovered": first_under}
-
-
-## Whether a pointer over [param control] goes on past the interface: a control that lets it pass
-## hands it to the one holding it, and one that stops it takes it, up to a control drawn on its own
-## or something that is not a control. Measured on 4.7.2: a HUD over the room letting the pointer
-## pass answered not landed while the game's own input took the press. A script on a control that
-## lets it pass can still take the event for itself, which nothing outside it can see.
-static func _passes_on(control: Control) -> bool:
-	var walk: Node = control
-	while walk is Control:
-		var at: Control = walk
-		if at.get_mouse_filter_with_override() == Control.MOUSE_FILTER_STOP:
-			return false
-		if at.top_level:
-			break
-		walk = at.get_parent()
-	return true
-
-
-static func _path_or_null(node: Node) -> Variant:
-	if node == null:
-		return null
-	return str(node.get_path())
-
-
 ## The buttons a real pointer event carries are the ones held as it happens, and Input keeps that
 ## from every button event it is given, injected ones included, so a motion between a held click
 ## and its release is a drag to a control that reads the mask rather than remembering the click.
@@ -987,7 +983,7 @@ static func _path_or_null(node: Node) -> Variant:
 ## menu ignores a motion with none, so that one opening under a resting pointer lights nothing: a
 ## motion over an open drop-down's item answered as injected and the menu highlighted nothing. A
 ## motion that goes nowhere still has none, as a resting pointer does.
-func _motion(position: Vector2, relative: Vector2) -> InputEventMouseMotion:
+func _motion(position: Vector2, relative: Vector2, held: int = -1) -> InputEventMouseMotion:
 	var event: InputEventMouseMotion = InputEventMouseMotion.new()
 	event.position = position
 	event.global_position = position
@@ -995,5 +991,5 @@ func _motion(position: Vector2, relative: Vector2) -> InputEventMouseMotion:
 	event.screen_relative = relative
 	event.velocity = relative / _arrival_seconds
 	event.screen_velocity = event.velocity
-	event.button_mask = Input.get_mouse_button_mask()
+	event.button_mask = Input.get_mouse_button_mask() if held < 0 else held
 	return event

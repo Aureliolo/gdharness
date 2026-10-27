@@ -184,11 +184,11 @@ func _check_mouse(input: GdhInputCommands) -> void:
 	if short.get("type", "") != "error" or not refusal.contains("x and y"):
 		_fail("a point missing y should be refused: %s" % JSON.stringify(short))
 
-	var motion: Dictionary = input.inject_mouse_motion({"x": 1, "y": 2, "relativeX": 3, "relativeY": 4})
+	var motion: Dictionary = await input.inject_mouse_motion({"x": 1, "y": 2, "relativeX": 3, "relativeY": 4})
 	if motion.get("position", []) != [1.0, 2.0] or motion.get("relative", []) != [3.0, 4.0]:
 		_fail("flat motion: %s" % JSON.stringify(motion))
 
-	var position_only: Dictionary = input.inject_mouse_motion({"position": [5, 6]})
+	var position_only: Dictionary = await input.inject_mouse_motion({"position": [5, 6]})
 	if position_only.get("type", "") != "error":
 		_fail("a position list is not a point: %s" % JSON.stringify(position_only))
 
@@ -646,7 +646,7 @@ func _check_a_click_opening_a_menu_over_itself(input: GdhInputCommands) -> void:
 	# the menu is an embedded window, so the root viewport has to hand the motion on, and the item
 	# under it is the one the menu draws hovered and holds as focused.
 	var over_second: Vector2 = Vector2(menu.position) + Vector2(menu.size) * Vector2(0.5, 0.75)
-	var moved: Dictionary = input.inject_mouse_motion({"x": over_second.x, "y": over_second.y})
+	var moved: Dictionary = await input.inject_mouse_motion({"x": over_second.x, "y": over_second.y})
 	await root.get_tree().process_frame
 	await root.get_tree().process_frame
 	if menu.get_focused_item() != 1:

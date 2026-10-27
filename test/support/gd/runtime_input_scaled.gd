@@ -85,7 +85,7 @@ func _check_a_button(input: GdhInputCommands, at: Rect2, scaled: String) -> void
 ## Moves the pointer to [param at] in window pixels, and answers what the command said once the
 ## motion has been delivered.
 func _moved(input: GdhInputCommands, at: Vector2) -> Dictionary:
-	var said: Dictionary = input.inject_mouse_motion({"x": at.x, "y": at.y})
+	var said: Dictionary = await input.inject_mouse_motion({"x": at.x, "y": at.y})
 	await process_frame
 	await process_frame
 	return said

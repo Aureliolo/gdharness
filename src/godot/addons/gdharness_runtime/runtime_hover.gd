@@ -27,6 +27,11 @@ var _supplied: Dictionary[int, Array] = {}
 var _listened: Dictionary[int, bool] = {}
 var _inside: Dictionary[int, bool] = {}
 
+## The windows told here that the pointer is in them, and whether the telling is under way, since the
+## window answers it with the same mouse_entered the platform's enter sends.
+var _told: Dictionary[int, bool] = {}
+var _telling: bool = false
+
 ## Whether a script on a control declares `_has_point`, per script, since the search asks it of
 ## every control it passes.
 var _shapes: Dictionary[Script, bool] = {}
@@ -51,8 +56,24 @@ func follow(viewport: Viewport, point: Vector2) -> bool:
 	if not cannot_hover(window) or window.gui_get_hovered_control() != null:
 		_drop(window, 0)
 		return false
+	_tell_entered(window)
 	_hover(window, point)
 	return _supplied.has(window.get_instance_id())
+
+
+## Tells [param window] the pointer is in it, as Viewport.notify_mouse_entered is documented for
+## input pushed into a viewport. A native window hands a motion to the control under it only once
+## told, and only the platform's enter tells it: a motion pushed there reached no control's
+## _gui_input, so a control that draws its parts could be pressed and never hovered. Once a window,
+## until the platform says the pointer left it, since telling it twice is a warning.
+func _tell_entered(window: Window) -> void:
+	var id: int = window.get_instance_id()
+	if _told.get(id, false):
+		return
+	_told[id] = true
+	_telling = true
+	window.notify_mouse_entered()
+	_telling = false
 
 
 ## The control hovered in [param viewport], by the engine or by this.
@@ -82,12 +103,15 @@ func _listen(window: Window) -> void:
 
 
 func _entered(window: Window) -> void:
+	if _telling:
+		return
 	_inside[window.get_instance_id()] = true
 	_drop(window, 0)
 
 
 func _left(window: Window) -> void:
 	_inside[window.get_instance_id()] = false
+	_told[window.get_instance_id()] = false
 
 
 ## Viewport::_update_mouse_over for [param point]: the control under it entered, from the outermost

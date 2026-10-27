@@ -215,7 +215,8 @@ static func offered(said: String, word: String, names: Array) -> String:
 ## [param said], the refusal for [param property], which [param target] does not declare, with the
 ## names it declares nearest it when any are, as a misspelt one is usually one of them, or else the
 ## variables its script declares. The engine's own are not listed when none is near, since an object
-## has a hundred, while a script's are the few a caller most likely meant.
+## has a hundred, while a script's are the few a caller most likely meant; an object with no script
+## is told where they are listed instead, since the refusal alone left nothing to try.
 static func near_property(said: String, target: Object, property: String) -> String:
 	var headings: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP
 	var names: Array[String] = []
@@ -233,8 +234,15 @@ static func near_property(said: String, target: Object, property: String) -> Str
 	var close: PackedStringArray = nearest(property, PackedStringArray(names))
 	if not close.is_empty():
 		return "%s; the nearest it has %s %s" % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
-	if scripted.is_empty():
+	# With a script that declares nothing readable, as one that does not compile, the name is likelier
+	# the script's than the class's, so the class's list would point the wrong way.
+	if scripted.is_empty() and target.get_script() != null:
 		return said
+	if scripted.is_empty():
+		return (
+			"%s; editor_classes info with className %s and includeInherited true lists the ones it has"
+			% [said, target.get_class()]
+		)
 	scripted.sort()
 	return "%s; its script declares %s" % [said, ", ".join(PackedStringArray(scripted))]
 
