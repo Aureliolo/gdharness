@@ -24459,8 +24459,8 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         'var held: int = 5  # a trailing note',
         '',
         '',
-        'func place(at: Vector2 = Vector2(1, 2), tint: Color = Color(1, 0, 0, 1), name: String = "a,b") -> void:',
-        '\tprint(at, tint, name)',
+        'func place(at: Vector2 = Vector2(1, 2), tint: Color = Color(1, 0, 0, 1), name: String = "a,b", by: Node = null) -> void:',
+        '\tprint(at, tint, name, by)',
         '',
         '',
         // A body on the declaration's own line, carrying a bracket and a colon of its own. The
@@ -24738,6 +24738,8 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
               ['tint', 'Color', 'Color(1, 0, 0, 1)'],
               // The comma here is inside the string, so it separates nothing.
               ['name', 'String', '"a,b"'],
+              // A default of null written out is the text "null", apart from none written at all.
+              ['by', 'Node', 'null'],
             ],
           ],
           // The last bracket on this line belongs to the body, not to the signature, and the last
