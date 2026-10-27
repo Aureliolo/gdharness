@@ -51430,6 +51430,33 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
       undefined,
       `once the file says them, a save names nothing else: ${JSON.stringify(second)}`,
     );
+
+    // A set on the menu itself: the grow directions are gained on the node the call names, and the
+    // set did not move them, so they are under alsoSaved rather than alsoChanged.
+    writeFileSync(
+      join(project, 'menu_set.tscn'),
+      '[gd_scene format=3]\n\n[node name="Main" type="Control"]\nlayout_mode = 3\nanchors_preset = 0\n\n' +
+        '[node name="Menu" type="VBoxContainer" parent="."]\nlayout_mode = 1\nanchors_preset = 8\n' +
+        'anchor_left = 0.5\nanchor_top = 0.5\nanchor_right = 0.5\nanchor_bottom = 0.5\n' +
+        'offset_left = -150.0\noffset_top = -80.0\noffset_right = 150.0\noffset_bottom = 80.0\n',
+    );
+    const named = await call('scene_node', {
+      scenePath: 'res://menu_set.tscn',
+      op: 'set',
+      nodePath: 'Menu',
+      properties: { tooltip_text: 'Settings' },
+    });
+    assert.deepEqual(
+      [get(named, 'alsoSaved'), get(named, 'alsoChanged')],
+      [
+        [
+          { node: 'Menu', property: 'grow_horizontal', saved: 2 },
+          { node: 'Menu', property: 'grow_vertical', saved: 2 },
+        ],
+        undefined,
+      ],
+      `the lines the named node gained are said: ${JSON.stringify(named)}`,
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
