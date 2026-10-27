@@ -115,6 +115,7 @@ import {
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import {
   EngineSlots,
+  FolderChanges,
   holderOf,
   lockIsFree,
   machineSlots,
@@ -41771,6 +41772,72 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
 }
 
 /**
+ * A wait for a slot looks when the slots' folder changes, and otherwise once a second.
+ *
+ * The lane measured a wait looking every 50 ms at some 2.7% of a core for each waiting taker, for
+ * as long as a gate held every slot, charged to the waiting gate. Counted here as looks rather than
+ * processor time: the slot is given back 2.5 s into the wait, which a wait polling as before met
+ * with some fifty looks. The wake on a change is held apart from the wait: when the looks by the
+ * clock fall depends on how long the platform takes to say when a holder started, so a release
+ * taken soon after it can be the clock's doing. A wait given a minute is woken only by the change.
+ */
+async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slot-wait-'));
+  let giveBack: NodeJS.Timeout | undefined;
+  try {
+    const changes = new FolderChanges(directory);
+    try {
+      const waited = changes.next(60_000, 50, undefined).then(() => Date.now());
+      await delay(300);
+      const changedAt = Date.now();
+      writeFileSync(join(directory, 'changed'), '');
+      const wokenAt = await Promise.race([waited, delay(5000).then(() => Number.POSITIVE_INFINITY)]);
+      assert.ok(
+        wokenAt - changedAt < 1000,
+        `a change in the folder ends the wait: ${String(wokenAt - changedAt)} ms after it`,
+      );
+      const quietFrom = Date.now();
+      await changes.next(200, 50, undefined);
+      assert.ok(Date.now() - quietFrom >= 150, 'and with none, the clock does');
+    } finally {
+      changes.close();
+      rmSync(join(directory, 'changed'), { force: true });
+    }
+
+    const me = { pid: process.pid, started: await ownStart() };
+    const holding = new EngineSlots(directory, 1, me);
+    const lock = await holding.take();
+    class Counted extends EngineSlots {
+      looks = 0;
+      override async takeFree(): Promise<string | null> {
+        this.looks += 1;
+        return super.takeFree();
+      }
+    }
+    const slots = new Counted(directory, 1, me);
+    let releasedAt = Number.POSITIVE_INFINITY;
+    giveBack = setTimeout(() => {
+      releasedAt = Date.now();
+      holding.release(lock);
+    }, 2500);
+    const taken = await slots.take();
+    const takenAt = Date.now();
+    console.log(
+      `slot wait: ${String(slots.looks)} looks, the slot taken ${String(takenAt - releasedAt)} ms after it was given back`,
+    );
+    assert.equal(taken, lock, 'the slot given back is the one taken');
+    assert.ok(
+      slots.looks <= 8,
+      `a wait of 2.5 s looks a few times, not every 50 ms: ${String(slots.looks)} looks`,
+    );
+    slots.release(taken);
+  } finally {
+    clearTimeout(giveBack);
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * The slots are freed only once their holder has gone, and taken over by one taker at a time.
  *
  * A lock names its holder by pid and start time, since a pid alone is reissued: a live process with
@@ -62510,6 +62577,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunIsJudgedOnEverythingItPrinted,
   testTheScriptsGodotNeverFreesAreFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
+  testASlotWaitLooksWhenTheSlotsChange,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAFingerprintFollowsWhatASuiteReaches,

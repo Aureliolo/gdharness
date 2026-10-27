@@ -31,7 +31,17 @@
  * scheme is written out in docs/test-runs.md for them, and a change here is a change there.
  */
 
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from 'node:fs';
+import {
+  closeSync,
+  type FSWatcher,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  watch,
+  writeSync,
+} from 'node:fs';
 import { availableParallelism, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
@@ -110,8 +120,19 @@ function nonEmpty(value: string | undefined): string | undefined {
 export const START_TOLERANCE_MS = 2000;
 /** How long a lock may stay empty before its taker is taken to have died writing it. */
 export const UNWRITTEN_MS = 10_000;
-/** How long between looks at a full set of slots. */
-const SLOT_WAIT_MS = 50;
+/**
+ * How long a wait at a full set of slots goes without looking when nothing in their folder changes:
+ * the look that finds a holder gone without giving its slot back. Every slot given back changes the
+ * folder, and a wait looked twenty times a second before, some 2.7% of a core for each waiting
+ * taker for as long as a gate held the slots.
+ */
+const SLOT_LOOK_MS = 1000;
+/**
+ * How long after a change in the folder a wait looks, so the several events one release reaches a
+ * watcher as are taken as one look, made as soon after the release as the twentieth of a second the
+ * looks used to be apart.
+ */
+const SLOT_SETTLE_MS = 50;
 /**
  * How often a wait for a slot says it is still waiting: inside the minute the SDK lets a call stay
  * silent by default, since a gate can hold every slot for far longer.
@@ -128,6 +149,60 @@ const START_READ_MS = 10_000;
 export const WAITING_FOLDER = 'waiting';
 /** The waits this process has marked, which makes each mark's name its own. */
 let waitsMarked = 0;
+
+/**
+ * The changes in a folder, waited for one at a time. A folder that cannot be watched is waited on
+ * by the clock alone, which still finds every slot given back, a look later.
+ */
+export class FolderChanges {
+  private changed = false;
+  private wake: (() => void) | null = null;
+  private readonly watcher: FSWatcher | null;
+
+  constructor(directory: string) {
+    let watcher: FSWatcher | null = null;
+    try {
+      watcher = watch(directory, () => {
+        this.changed = true;
+        this.wake?.();
+      });
+      watcher.on('error', () => {
+        watcher?.close();
+      });
+    } catch {
+      watcher = null;
+    }
+    this.watcher = watcher;
+  }
+
+  /**
+   * Waits for a change, then [param settleMs] more, or [param lookMs] with none, or until
+   * [param signal] aborts.
+   */
+  async next(lookMs: number, settleMs: number, signal: AbortSignal | undefined): Promise<void> {
+    if (!this.changed) {
+      await new Promise<void>((resolve) => {
+        const done = (): void => {
+          clearTimeout(timer);
+          this.wake = null;
+          signal?.removeEventListener('abort', done);
+          resolve();
+        };
+        const timer = setTimeout(done, lookMs);
+        this.wake = done;
+        signal?.addEventListener('abort', done, { once: true });
+      });
+    }
+    if (this.changed && signal?.aborted !== true) {
+      await delay(settleMs, undefined, signal === undefined ? {} : { signal }).catch(() => undefined);
+    }
+    this.changed = false;
+  }
+
+  close(): void {
+    this.watcher?.close();
+  }
+}
 
 /** Who holds a lock, as its file says. */
 export interface SlotHolder {
@@ -215,6 +290,7 @@ export class EngineSlots {
     const began = Date.now();
     let said = Number.NEGATIVE_INFINITY;
     let mark: string | undefined;
+    let changes: FolderChanges | undefined;
     try {
       for (;;) {
         signal?.throwIfAborted();
@@ -238,9 +314,15 @@ export class EngineSlots {
           this.saidAt = now;
           this.say(slotWaitSaid(now - began, this.count, this.directory));
         }
-        await delay(SLOT_WAIT_MS, undefined, signal === undefined ? {} : { signal });
+        if (changes === undefined) {
+          // Looked at again once watched, since a slot given back before the watch began says nothing.
+          changes = new FolderChanges(this.directory);
+          continue;
+        }
+        await changes.next(SLOT_LOOK_MS, SLOT_SETTLE_MS, signal);
       }
     } finally {
+      changes?.close();
       if (mark !== undefined && this.marks.delete(mark)) {
         removeWhole(mark);
       }
