@@ -32943,14 +32943,14 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
     const answered = await server.request(
       'tools/call',
       { name: 'runtime_inspect', arguments: { op: 'accessibility' } },
-      60_000,
+      ENGINE_CALL_TIMEOUT_MS,
     );
     for (const asked of alsoAsk) {
       narrowed.push(
         await server.request(
           'tools/call',
           { name: 'runtime_inspect', arguments: { op: 'accessibility', ...asked } },
-          60_000,
+          ENGINE_CALL_TIMEOUT_MS,
         ),
       );
     }

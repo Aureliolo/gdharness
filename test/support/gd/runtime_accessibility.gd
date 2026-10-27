@@ -64,6 +64,15 @@ func _run() -> void:
 		failures.append("a read's time is split as: %s" % JSON.stringify(took))
 	if not Accessibility._took("began 1100\n", 1000, 2000).is_empty():
 		failures.append("a client that never loaded UI Automation splits nothing")
+	# A cold start has its own budget, and the walks theirs from when UI Automation was seen loaded,
+	# so a start taking most of a minute still leaves the walks all of theirs.
+	var deadlines: Array[int] = [
+		Accessibility._deadline(1000, -1, 1),
+		Accessibility._deadline(1000, 40000, 1),
+		Accessibility._deadline(1000, 40000, 2),
+	]
+	if deadlines != [46000, 55000, 63000]:
+		failures.append("a client is stopped at %s" % JSON.stringify(deadlines))
 
 	node._cleanup()
 	# Not checked: the directory is gone either way by the time the fixture tears itself down.

@@ -2074,7 +2074,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'integer',
         minimum: 1,
         description:
-          'How long to wait for the answer before answering pending with a requestId, which runtime_invoke op result collects the reply by. Default 10000, or GDHARNESS_RUNTIME_TIMEOUT_MS; accessibility defaults to 30000 or that, whichever is longer.',
+          'How long to wait for the answer before answering pending with a requestId, which runtime_invoke op result collects the reply by. Default 10000, or GDHARNESS_RUNTIME_TIMEOUT_MS; accessibility defaults to 75000 or that, whichever is longer, since a cold PowerShell on a loaded machine can take most of a minute to start.',
       },
     },
     requires: [],

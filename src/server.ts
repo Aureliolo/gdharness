@@ -5216,7 +5216,9 @@ class GodotServer {
               { tool: 'runtime_inspect', op, patience },
             );
           case 'accessibility':
-            // Starting PowerShell and walking the tree until it settles takes longer than a query.
+            // Starting PowerShell and walking the tree until it settles takes longer than a query: the
+            // game allows 45 s for a cold PowerShell and 15 s a window for the walks, and waiting
+            // that out answers a slow machine's read rather than a pending one.
             return await this.handleRuntimeCommand(
               'get_accessibility',
               {
@@ -5232,7 +5234,7 @@ class GodotServer {
               {
                 tool: 'runtime_inspect',
                 op,
-                patience: readPositiveNumber(args, 'timeoutMs') ?? Math.max(30_000, this.runtimeTimeoutMs()),
+                patience: readPositiveNumber(args, 'timeoutMs') ?? Math.max(75_000, this.runtimeTimeoutMs()),
               },
             );
           default:

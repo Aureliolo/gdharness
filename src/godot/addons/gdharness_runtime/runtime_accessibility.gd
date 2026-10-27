@@ -18,9 +18,15 @@ const SETTLE_MS: int = 8000
 ## How long a window with nothing in it is walked before the client stops: a game building its tree
 ## fills the window within a few frames of being asked, and one building none never does.
 const EMPTY_MS: int = 4000
-## How long the client may take beyond that, starting PowerShell and loading UI Automation included,
-## before it is stopped and the call answers that it did not finish.
-const START_MS: int = 15000
+## How long starting PowerShell and loading UI Automation may take before the client is stopped. It
+## waits on the machine alone: a warm start takes under a second, and a cold one on a loaded Windows
+## runner took the whole of a single 23 s budget meant for the walk as well.
+const START_MS: int = 45000
+## How long the walks may take beyond [constant SETTLE_MS] a window once UI Automation is loaded,
+## kept short since a walk that overruns is a window that does not answer.
+const WALK_SLACK_MS: int = 7000
+## How often the progress file is read while the client runs.
+const LOOK_MS: int = 250
 ## Deep enough for any interface a game builds, and inside the hundred levels ConvertTo-Json stops
 ## at, which are two to a level of the tree.
 const MOST_LEVELS: int = 40
@@ -266,16 +272,27 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 		return _refused("PowerShell could not be started from %s to read the tree" % shell)
 	# Waited out a frame at a time rather than blocking: the client's questions are answered on the
 	# game's main thread, which a blocking wait would hold, and neither side would move.
-	var deadline: int = Time.get_ticks_msec() + SETTLE_MS + START_MS
+	# Two budgets, so a slow start is never charged to the walk: one for PowerShell to begin and load
+	# UI Automation, and once it has, one for the walks.
+	var began_at: int = Time.get_ticks_msec()
+	var deadline: int = _deadline(began_at, -1, handles.size())
+	var walking: bool = false
+	var looked_at: int = began_at
 	while OS.is_process_running(pid):
-		if Time.get_ticks_msec() > deadline:
+		var now: int = Time.get_ticks_msec()
+		if not walking and now - looked_at >= LOOK_MS:
+			looked_at = now
+			if FileAccess.get_file_as_string(progress).contains("loaded "):
+				walking = true
+				deadline = _deadline(began_at, now, handles.size())
+		if now > deadline:
 			var _killed: Error = OS.kill(pid)
 			var reached: String = _reached(FileAccess.get_file_as_string(progress), started_ms)
 			var _gone: Error = DirAccess.remove_absolute(progress)
 			return _refused(
 				(
 					"UI Automation had not read the tree after %d ms, so it was stopped: %s"
-					% [SETTLE_MS + START_MS, reached]
+					% [now - began_at, reached]
 				)
 			)
 		await _host.get_tree().process_frame
@@ -691,6 +708,16 @@ static func _unnamed_text(element: Dictionary) -> int:
 			var inner: Dictionary = child
 			total += _unnamed_text(inner)
 	return total
+
+
+## When a client started at [param began_at] is stopped, in ticks: [constant START_MS] after it began
+## while UI Automation is loading ([param loaded_at] -1), and once it was seen loaded at
+## [param loaded_at], [constant SETTLE_MS] for each of [param windows] and [constant WALK_SLACK_MS]
+## after that.
+static func _deadline(began_at: int, loaded_at: int, windows: int) -> int:
+	if loaded_at < 0:
+		return began_at + START_MS
+	return loaded_at + SETTLE_MS * maxi(1, windows) + WALK_SLACK_MS
 
 
 ## The stages [param progress] marks, each with the Unix time in ms it was reached, as an array of
