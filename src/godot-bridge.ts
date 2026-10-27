@@ -121,6 +121,8 @@ interface GodotReadyMessage {
   debug_port: number;
   /** Whether a debug session opening is told the editor's breakpoints, or takes them away. */
   syncs_breakpoints: boolean;
+  /** Whether the editor runs headless, with no window anybody can see. */
+  hidden: boolean;
   /** Whether a gdharness server started this editor, which decides who may start it again. */
   opened_by_a_server: boolean;
   /** Whether another editor started this one, and so none of the arguments it was given reached it. */
@@ -137,6 +139,7 @@ const GREETING_FIELDS: Readonly<Record<string, 'string' | 'number' | 'boolean'>>
   dap_port: 'number',
   debug_port: 'number',
   syncs_breakpoints: 'boolean',
+  hidden: 'boolean',
   opened_by_a_server: 'boolean',
   started_by_an_editor: 'boolean',
 };
@@ -223,6 +226,8 @@ interface GodotConnectionInfo {
    * it here, so false is the setting turned off again by hand.
    */
   syncsBreakpoints?: boolean | undefined;
+  /** Whether the editor runs headless, with no window anybody can see. */
+  hidden?: boolean | undefined;
   /**
    * True while the bridge reads the command line of a process that greeted without a server's
    * mark, before it is taken as the editor. Until then it is not counted as connected.
@@ -253,6 +258,7 @@ interface BridgeStatus {
   openedByAServer?: boolean | undefined;
   startedByAnEditor?: boolean | undefined;
   syncsBreakpoints?: boolean | undefined;
+  hidden?: boolean | undefined;
   /** The last engine run turned away for being one job that quits rather than an editor. */
   turnedAway?: TurnedAway | undefined;
   /** A process has greeted and is being looked up before it is taken as the editor. */
@@ -647,6 +653,7 @@ export class GodotBridge extends EventEmitter {
       openedByAServer: editor?.openedByAServer,
       startedByAnEditor: editor?.startedByAnEditor,
       syncsBreakpoints: editor?.syncsBreakpoints,
+      hidden: editor?.hidden,
       turnedAway: this.turnedAway ?? undefined,
       identifying: identifying ? true : undefined,
       pendingRequests: this.requestsInFlight().length,
@@ -899,6 +906,7 @@ export class GodotBridge extends EventEmitter {
           this.connectionInfo.openedByAServer = message.opened_by_a_server;
           this.connectionInfo.startedByAnEditor = message.started_by_an_editor;
           this.connectionInfo.syncsBreakpoints = message.syncs_breakpoints;
+          this.connectionInfo.hidden = message.hidden;
           this.log('info', `Godot ready: ${message.project_path}`);
           this.connectionInfo.greeted = true;
           if (!message.opened_by_a_server && this.oneShotReader !== null) {
