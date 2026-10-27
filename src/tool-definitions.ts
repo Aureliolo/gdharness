@@ -859,7 +859,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'array',
         items: { type: 'string' },
         description:
-          'Suites or cases to leave out, as "suite_name" or "suite_name:test_name". A bare test name is read as a suite name and leaves out nothing; an entry that named a case which ran all the same comes back under ignoreNotApplied with the form that would have left it out. Every case the list left out comes back under ignored as suite_name:test_name, so a run called passed says what it did not run, and an entry naming no suite or case under path comes back under ignoreUnmatched.',
+          'Suites, cases or rows to leave out, as "suite_name", "suite_name:test_name", or "suite_name:test_name:N" for one row of a parameterised case, N being the zero-based index gdUnit4 reports the row under: a failure named "test_name:2 (3, 4)" is the third row, and the name can be passed back as reported. A bare test name is read as a suite name and leaves out nothing; an entry that named a case which ran all the same comes back under ignoreNotApplied with the form that would have left it out. Every case the list left out comes back under ignored as suite_name:test_name, and every row as suite_name:test_name:N, so a run called passed says what it did not run, and an entry naming no suite, case or row under path comes back under ignoreUnmatched.',
       },
       tests: {
         type: 'array',

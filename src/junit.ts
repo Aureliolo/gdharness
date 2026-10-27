@@ -262,41 +262,106 @@ export function ignoredYetRan(report: TestReport, ignored: readonly string[]): I
 }
 
 /**
+ * What the runner prints before each row of a parameterised case an ignore entry left out, kept in
+ * step with IGNORED_ROW in listed.gd.
+ */
+const IGNORED_ROW_LINE = /^gdharness ignored (res:\/\/.+?\.gd > [^:\s]+:\d+)\s*$/;
+
+/**
+ * One row of a parameterised case as an ignore entry names it, `suite_name:test_name:N` with N the
+ * index gdUnit4 reports the row under, and anything gdUnit4 prints after the index allowed, so the
+ * name a failure was reported under can be passed back as it came.
+ */
+function rowNamed(entry: string): { suite: string; test: string; row: number } | null {
+  const named = /^(.+):([A-Za-z_]\w*):(\d+)(?:\s.*)?$/.exec(entry.replace('res://', ''));
+  return named === null ? null : { suite: named[1] ?? '', test: named[2] ?? '', row: Number(named[3]) };
+}
+
+type DeclaredSuites = ReadonlyArray<{ readonly path: string; readonly cases: readonly string[] }>;
+
+const suiteNameOf = (path: string): string => (path.split('/').at(-1) ?? path).replace(/\.gd$/, '');
+
+function declaring(
+  declared: DeclaredSuites,
+  suite: string,
+  test: string | null,
+): Array<{ path: string; test: string }> {
+  return declared
+    .filter((one) => suiteNameOf(one.path) === suite || one.path.includes(suite))
+    .flatMap((one) =>
+      one.cases
+        .filter((name) => test === null || name === test)
+        .map((name) => ({ path: one.path, test: name })),
+    );
+}
+
+/**
+ * [param ignored] as the runner is given it. gdUnit4 reads `suite:case:row` as the case and leaves
+ * out every row of it, so an entry naming one row is handed over as `res://suite.gd:case:row` for
+ * each suite under the run's paths, [param declared], that declares the case, and as nothing when
+ * none does.
+ */
+export function ignoredForTheRunner(ignored: readonly string[], declared: DeclaredSuites): string[] {
+  return ignored.flatMap((entry) => {
+    const row = rowNamed(entry);
+    return row === null
+      ? [entry]
+      : declaring(declared, row.suite, row.test).map((one) => `${one.path}:${one.test}:${String(row.row)}`);
+  });
+}
+
+/** The rows the runner said it left out for an ignore entry, as `res://suite.gd > test_name:N`. */
+export function rowsIgnoredIn(printed: readonly string[]): Set<string> {
+  return new Set(printed.flatMap((line) => IGNORED_ROW_LINE.exec(line)?.[1] ?? []));
+}
+
+/**
  * What [param ignored] left out, read against the cases the suites under the run's paths declare,
- * [param declared]: each case an entry names that the report does not hold, as `suite_name:test_name`,
- * and each entry naming no case there at all. A run that left a case out was answered passed with
- * nothing saying a case had not run, and an entry spelt wrong left out nothing and said nothing.
+ * [param declared], and the rows the runner said it left out, [param rowsIgnored]: each case an entry
+ * names that the report does not hold, as `suite_name:test_name`, each row as
+ * `suite_name:test_name:N`, and each entry naming no case or row there at all. A run that left a case
+ * out was answered passed with nothing saying a case had not run, and an entry spelt wrong left out
+ * nothing and said nothing.
  */
 export function ignoredLeftOut(
   report: TestReport,
   ignored: readonly string[],
-  declared: ReadonlyArray<{ readonly path: string; readonly cases: readonly string[] }>,
+  declared: DeclaredSuites,
+  rowsIgnored: ReadonlySet<string> = new Set(),
 ): { leftOut: string[]; unmatched: string[] } {
-  const nameOf = (path: string): string => (path.split('/').at(-1) ?? path).replace(/\.gd$/, '');
   const leftOut = new Set<string>();
   const unmatched: string[] = [];
   for (const entry of ignored) {
+    const row = rowNamed(entry);
+    if (row !== null) {
+      const rows = declaring(declared, row.suite, row.test).filter((one) =>
+        rowsIgnored.has(`${one.path} > ${one.test}:${String(row.row)}`),
+      );
+      if (rows.length === 0) {
+        unmatched.push(entry);
+      }
+      for (const one of rows) {
+        leftOut.add(`${suiteNameOf(one.path)}:${one.test}:${String(row.row)}`);
+      }
+      continue;
+    }
     const bare = entry.replace('res://', '');
     const at = bare.lastIndexOf(':');
     const suiteNamed = at === -1 ? bare : bare.slice(0, at);
     const testNamed = at === -1 ? null : bare.slice(at + 1);
-    const named = declared
-      .filter((suite) => nameOf(suite.path) === suiteNamed || suite.path.includes(suiteNamed))
-      .flatMap((suite) =>
-        suite.cases.filter((one) => testNamed === null || one === testNamed).map((test) => ({ suite, test })),
-      );
+    const named = declaring(declared, suiteNamed, testNamed);
     if (named.length === 0) {
       unmatched.push(entry);
       continue;
     }
-    for (const { suite, test } of named) {
+    for (const { path, test } of named) {
       const reported = report.suites
-        .filter((ran) => ran.path === suite.path || (ran.path === null && ran.name === nameOf(suite.path)))
+        .filter((ran) => ran.path === path || (ran.path === null && ran.name === suiteNameOf(path)))
         .some((ran) =>
           ran.cases.some((one) => one.name === test || new RegExp(`^${test}\\W`).test(one.name)),
         );
       if (!reported) {
-        leftOut.add(`${nameOf(suite.path)}:${test}`);
+        leftOut.add(`${suiteNameOf(path)}:${test}`);
       }
     }
   }

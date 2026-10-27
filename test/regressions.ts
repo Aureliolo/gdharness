@@ -40532,7 +40532,9 @@ async function testATestRunsFlagsAreJudgedFirst(): Promise<void> {
  * with `--verbose` for details)", project_test refused engineArgs, and the leak took a bisection by
  * hand to find. The same report: `ignore` given test function names ran nine cases of nine, since
  * gdUnit4 leaves a case out only as suite_name:test_name. The form the answer gives back is then
- * used, so the remedy is shown to work rather than read.
+ * used, so the remedy is shown to work rather than read. A probe then named one failing row of a
+ * parameterised case as it was reported: every row of the case was left out, none was listed, and
+ * the entry was answered as matching nothing.
  */
 async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -40565,6 +40567,18 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
         '',
         'func test_other() -> void:',
         '\tassert_bool(true).is_true()',
+        '',
+      ].join('\n'),
+    );
+    mkdirSync(join(projectDir, 'rows'));
+    writeFileSync(
+      join(projectDir, 'rows', 'rows_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_rows(value: int, test_parameters := [[1], [2], [3]]) -> void:',
+        '\tassert_int(value).is_less(3)',
         '',
       ].join('\n'),
     );
@@ -40643,8 +40657,26 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
       assert.deepEqual(get(typo, 'ignoreUnmatched'), [misspelt], JSON.stringify(typo));
       assert.match(
         text(get(typo, 'note')),
-        new RegExp(`${misspelt} names no suite or case under the paths run, so it left nothing out\\.`),
+        new RegExp(`${misspelt} names no suite, case or row under the paths run, so it left nothing out\\.`),
         JSON.stringify(typo),
+      );
+
+      // One row of a parameterised case, named as its failure was reported. gdUnit4 reads
+      // suite:case:row as the case, so the entry left every row out and said it had matched nothing.
+      const rows = await run({ path: 'res://rows' });
+      const failedRow = text(get(asArray(get(rows, 'failed'))[0], 'name'));
+      assert.match(failedRow, /^test_rows:2\b/, JSON.stringify(rows));
+      const oneRow = await run({ path: 'res://rows', ignore: [`rows_test:${failedRow}`] });
+      assert.deepEqual(
+        [get(oneRow, 'passed'), get(oneRow, 'tests'), get(oneRow, 'ignored'), get(oneRow, 'ignoreUnmatched')],
+        [true, 2, ['rows_test:test_rows:2'], undefined],
+        `the row alone is left out and named: ${JSON.stringify(oneRow)}`,
+      );
+      const noRow = await run({ path: 'res://rows', ignore: ['rows_test:test_rows:5'] });
+      assert.deepEqual(
+        [get(noRow, 'tests'), get(noRow, 'ignored'), get(noRow, 'ignoreUnmatched')],
+        [3, undefined, ['rows_test:test_rows:5']],
+        `a row the case does not have leaves nothing out and says so: ${JSON.stringify(noRow)}`,
       );
 
       // What the engine still holds at exit fails the run as it fails gdharness test's, read off the
@@ -41513,6 +41545,8 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   // A verbose engine names what it held: objects counted by class, most first, and the resources
   // still in use with the project's own before its addons', eight named and the rest counted.
   const addonScripts = Array.from({ length: 8 }, (_, at) => `res://addons/kit/part_${String(at)}.gd`);
+  const REFCOUNTED_SAID =
+    'A RefCounted alive at exit is held by a cycle of references (two holding each other, or one holding a lambda that captures it) or by an Object never freed, rather than by a node left out of the tree; a WeakRef on one side of the cycle, or clearing the reference once done, frees it.';
   const verboseLeak = [
     rows([1]),
     'WARNING: 4 ObjectDB instances were leaked at exit (run with `--verbose` for details).',
@@ -41531,7 +41565,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     judgeEngine(readRun(verboseLeak), declaredRows, clean).faults,
     [
       'the engine exited holding what it should have freed: WARNING: 4 ObjectDB instances were leaked at exit (run with `--verbose` for details).',
-      `the engine exited holding what it should have freed: ERROR: 10 resources still in use at exit. The engine named them: objects left alive: 3 RefCounted, 1 GDScript; resources still in use: res://game/guide.gd, res://game/book.gd, ${addonScripts.slice(0, 6).join(', ')}, and 2 more.`,
+      `the engine exited holding what it should have freed: ERROR: 10 resources still in use at exit. The engine named them: objects left alive: 3 RefCounted, 1 GDScript; resources still in use: res://game/guide.gd, res://game/book.gd, ${addonScripts.slice(0, 6).join(', ')}, and 2 more. ${REFCOUNTED_SAID}`,
     ],
     'a verbose run names what was held after the last count',
   );
@@ -41544,9 +41578,22 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
       clean,
     ).faults,
     [
-      'the engine exited holding what it should have freed: WARNING: 1 ObjectDB instance was leaked at exit (run with `--verbose` for details). The engine named them: objects left alive: 1 RefCounted.',
+      `the engine exited holding what it should have freed: WARNING: 1 ObjectDB instance was leaked at exit (run with \`--verbose\` for details). The engine named them: objects left alive: 1 RefCounted. ${REFCOUNTED_SAID}`,
     ],
     'and objects alone when no resource was still in use',
+  );
+  assert.deepEqual(
+    judgeEngine(
+      readRun(
+        `${rows([1])}\nWARNING: 1 ObjectDB instance was leaked at exit (run with \`--verbose\` for details).\nLeaked instance: Node:1 - Reference count: 0`,
+      ),
+      declaredRows,
+      clean,
+    ).faults,
+    [
+      'the engine exited holding what it should have freed: WARNING: 1 ObjectDB instance was leaked at exit (run with `--verbose` for details). The engine named them: objects left alive: 1 Node.',
+    ],
+    'and says what holds a RefCounted only when one was left',
   );
 
   // Below 4.8 the runner's markers say whether the engine's shutdown cleared every script. One that
@@ -47272,7 +47319,7 @@ async function testGdUnitRunner(): Promise<void> {
           },
           {
             passed: false,
-            verdict: 'passed; nothing at res://test/gone_test.gd and res://gone',
+            verdict: 'nothing at res://test/gone_test.gd and res://gone',
             tests: 1,
             suitesPassed: 1,
             missing: ['res://test/gone_test.gd', 'res://gone'],

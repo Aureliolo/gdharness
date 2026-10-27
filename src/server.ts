@@ -159,11 +159,13 @@ import {
   failedWithin,
   finishesASuite,
   hookFailuresPrinted,
+  ignoredForTheRunner,
   ignoredLeftOut,
   ignoredYetRan,
   orphansLeftSaid,
   orphansPrinted,
   parseJUnit,
+  rowsIgnoredIn,
   type ScriptError,
   scriptErrorsPrinted,
   suitesPrinted,
@@ -7272,6 +7274,12 @@ class GodotServer {
     const ours = `gdharness-reports/${randomUUID()}`;
     const reports = `res://.godot/${ours}`;
     const ignored = readStringArray(args, 'ignore') ?? [];
+    const declaredUnder =
+      ignored.length === 0
+        ? []
+        : asked.flatMap((path) =>
+            path.endsWith('.gd') ? (projectScripts.suite(path) ?? []) : projectScripts.suitesUnder([path]),
+          );
     // The engine's application data directory, beside the folder user:// is made in, so the
     // lists are not among what a suite finds there.
     const userData = scratchDirectory('tests');
@@ -7282,7 +7290,10 @@ class GodotServer {
     const engineLog = join(userData, 'engine.log');
     const expectedFile = join(userData, 'expected.json');
     writeFileSync(suitesFile, `${(selection.value?.suites ?? asked).join('\n')}\n`);
-    writeFileSync(skippingFile, `${[...ignored, ...(selection.value?.ignore ?? [])].join('\n')}\n`);
+    writeFileSync(
+      skippingFile,
+      `${[...ignoredForTheRunner(ignored, declaredUnder), ...(selection.value?.ignore ?? [])].join('\n')}\n`,
+    );
     const viewport = windowed ? viewportOf(project.value.path) : null;
     const sharing = needs.headless.filter((path) => !leftOut.has(basename(path, '.gd')));
     const windowSaid =
@@ -7535,7 +7546,13 @@ class GodotServer {
             (exitCode === null ? undefined : verdicts[exitCode]) ??
             howItExited(run));
     const nothingAt = missing.join(' and ');
-    const verdict = missing.length === 0 ? ranAs : `${ranAs}; nothing at ${nothingAt}`;
+    // gdUnit4's passed is about the paths that were there, and a run of fewer is not called one.
+    const verdict =
+      missing.length === 0
+        ? ranAs
+        : ranAs === 'passed'
+          ? `nothing at ${nothingAt}`
+          : `${ranAs}; nothing at ${nothingAt}`;
     const missingNote =
       missing.length === 0
         ? undefined
@@ -7780,18 +7797,7 @@ class GodotServer {
     const uncaughtFolded = foldedRepeats(uncaught.map(aboveTheRunner));
     const listedAsUncaught = new Set(uncaughtFolded.map((entry) => entry.index));
     const notApplied = ignoredYetRan(report, ignored);
-    const scripts = ignored.length === 0 ? null : new ProjectScripts(project.value.path);
-    const ignoreRead = ignoredLeftOut(
-      report,
-      ignored,
-      asked.flatMap((path) =>
-        scripts === null
-          ? []
-          : path.endsWith('.gd')
-            ? (scripts.suite(path) ?? [])
-            : scripts.suitesUnder([path]),
-      ),
-    );
+    const ignoreRead = ignoredLeftOut(report, ignored, declaredUnder, rowsIgnoredIn(said));
     // A bare case name is already answered under ignoreNotApplied, with the form that would work.
     const unmatched = ignoreRead.unmatched.filter((entry) => !notApplied.some((one) => one.entry === entry));
     // A case read from its file that gdUnit4 never reported, which is a run of less than was asked
@@ -7831,7 +7837,8 @@ class GodotServer {
         testsNotRun.length === 0,
       verdict: [
         // gdUnit4's word for the exit, which is not the run's when something below fails it.
-        verdict === 'passed' && undeclaredPrinted.length + declaredNotPrinted.length + countedLeaks.length > 0
+        verdict === 'passed' &&
+        undeclaredPrinted.length + declaredNotPrinted.length + countedLeaks.length + testsNotRun.length > 0
           ? undefined
           : verdict,
         ...[false, true].map((warning) => {
@@ -7902,7 +7909,7 @@ class GodotServer {
             ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
             : undefined,
           unmatched.length > 0
-            ? `${unmatched.join(', ')} ${unmatched.length === 1 ? 'names' : 'name'} no suite or case under the paths run, so ${unmatched.length === 1 ? 'it' : 'they'} left nothing out.`
+            ? `${unmatched.join(', ')} ${unmatched.length === 1 ? 'names' : 'name'} no suite, case or row under the paths run, so ${unmatched.length === 1 ? 'it' : 'they'} left nothing out.`
             : undefined,
           uncaughtNote(uncaught),
           undeclaredErrors.length > 0
