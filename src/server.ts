@@ -6846,6 +6846,13 @@ class GodotServer {
     if (!project.ok) {
       return project.response;
     }
+    // Each line is searched on its own, so a query spanning two could never match, and the answer
+    // read as a project where the text was nowhere.
+    if (/[\r\n]/.test(readString(args, 'query') ?? '')) {
+      return this.createErrorResponse(
+        'query holds a line break, and project_search matches one line at a time: search for one of its lines.',
+      );
+    }
     const given = readNonEmptyString(args, 'path');
     const place =
       given === undefined ? null : resolveWithinProject(project.value.path, given, { root: true });

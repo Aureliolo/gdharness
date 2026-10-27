@@ -617,7 +617,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Search the project',
     effect: 'read',
     description:
-      'Searches text or a regular expression across project files and returns file paths with line numbers, one entry per line that holds the query, however often it holds it; total_matches counts those lines. What the engine steps over is not searched: directories spelled with a dot, node_modules, and any directory holding a .gdignore, which not_searched names when the search passed one. A vendored engine or an export directory is therefore absent from the results rather than matching the code you are looking for in a copy nobody runs. The addons gdharness installed are not searched either, since nobody on the project wrote them.',
+      'Searches text or a regular expression across project files and returns file paths with line numbers, one entry per line that holds the query, however often it holds it; total_matches counts those lines. What the engine steps over is not searched: directories spelled with a dot, node_modules, and any directory holding a .gdignore, which not_searched names when the search passed one. A vendored engine or an export directory is therefore absent from the results rather than matching the code you are looking for in a copy nobody runs. The addons gdharness installed are not searched either, since nobody on the project wrote them. A path naming one of those folders, or a place inside one, is searched as asked, and note says the whole-project search steps over it. Each line is searched on its own, so a query holding a line break is refused.',
     parameters: {
       projectPath: PROJECT_PATH,
       query: { type: 'string', description: 'The text or pattern to find.' },
@@ -634,7 +634,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       regex: { type: 'boolean', description: 'Read the query as a regular expression. Default false.' },
       caseSensitive: { type: 'boolean', description: 'Default false.' },
-      maxResults: { type: 'number', description: 'Default 100.' },
+      maxResults: {
+        type: 'integer',
+        minimum: 1,
+        description: 'How many matching lines to answer. Default 100.',
+      },
     },
     requires: ['projectPath', 'query'],
   },
@@ -652,7 +656,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           "forward: what this resource loads, with each reference closing a cycle marked circular and the cycle under circular_references, a script's dependencies including every script whose class_name it uses, marked by_class with the name, and the script of every autoload it names, marked by_autoload with the autoload's name. An ext_resource whose uid names another file than its path is followed to that file, as the engine loads it, with the path written under stale_path; one whose uid names no file the project has is followed by its path, as the engine does after warning, with the uid under unknown_uid; and a load or preload of a uid the project does not know is listed under that uid as missing. A shader's #include is followed as the preprocessor reads it, relative to the shader. A file the depth stops at carries beyond_depth, how many files it names that were not walked. summary.total_resources is the file asked about, so 1; total_dependencies counts each file reached, directly or through another, once however many places load it; total_references counts the entries in the tree, and missing names every file referenced that does not exist, with the files referring to it. reverse: every file that refers to it and how, for a file that is gone as well while anything still refers to it, answered with exists: false (a missing file nothing refers to is refused, naming the nearest files), a scene instancing it, a script extending, preloading or loading it, and for a script with a class_name every use of that name, and for an autoload's script every use of the autoload's name, with autoload naming it. Each reference carries a kind: ext_resource, extends, preload, load, include or path for a reference by path, with stale_path when an ext_resource reaches it by its uid under another path, and unknown_uid when one names it by path beside a uid naming no file; setting, plugin, export_preset and import for one in project.godot, a plugin.cfg, export_presets.cfg or an import sidecar; class_name for a use of the declared name, the declaration itself being the script asked about; autoload for code naming the autoload. Three kinds are not uses: doc is a name inside a ## documentation comment, which renaming would break in the generated docs; comment is one in ordinary prose, which it would only make stale; and stale_path is an ext_resource naming it by a path the engine does not load, since its uid leads to the file under loads. summary.in_code is the count with those left out, which is the number to read when the question is whether anything still uses this. Default forward.",
       },
-      depth: { type: 'number', description: 'forward: how many levels to follow. Default unlimited.' },
+      depth: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          'forward: how many levels to follow, 1 being what the file loads itself. Default unlimited.',
+      },
       includeBuiltin: {
         type: 'boolean',
         description: "forward: include the engine's own res://. resources. Default false.",

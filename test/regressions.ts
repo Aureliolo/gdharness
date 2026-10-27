@@ -8113,6 +8113,9 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       ['runtime_inspect', { op: 'text', limit: 5001 }, 'limit from 1 to 5000, not 5001'],
       ['runtime_wait', { op: 'frames', frames: 601 }, 'frames from 1 to 600, not 601'],
       ['runtime_input', { op: 'action', action: 'jump', strength: 1.5 }, 'strength from 0 to 1, not 1.5'],
+      // Read as absent, a depth of 0 walked every level and a limit of -1 answered every line.
+      ['project_dependencies', { resourcePath: 'res://a.gd', depth: 0 }, 'depth of 1 or more, not 0'],
+      ['project_search', { query: 'extends', maxResults: -1 }, 'maxResults of 1 or more, not -1'],
     ];
     for (const [tool, args, said] of outside) {
       const answer = await call(tool, args);
@@ -8994,6 +8997,35 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     });
     assert.equal(plain.summary.files_with_matches, 1, 'a project with nothing kept out is still searched');
     assert.equal(plain.not_searched, undefined, 'and says nothing was kept out');
+    // A folder the whole-project search steps over, named as the place to search, is searched as
+    // asked, and the note says why the whole search leaves it out; what it holds that the walk steps
+    // over, the reference project's installed addon, stays out.
+    const inside = (place: string[]): ReturnType<typeof searchProject> =>
+      searchProject(sandbox, {
+        query: 'findable',
+        within: join(sandbox, ...place),
+        regex: false,
+        caseSensitive: false,
+        maxResults: 100,
+      });
+    const ignoredNamed = inside(['export']);
+    assert.deepEqual(
+      [ignoredNamed.results.map((entry) => entry.file), ignoredNamed.note],
+      [
+        ['res://export/shipped.gd'],
+        'res://export/ is searched because path names it; a search of the whole project steps over it, since it holds a .gdignore.',
+      ],
+      JSON.stringify(ignoredNamed),
+    );
+    assert.deepEqual(
+      [inside(['.tools', 'godot']).note, inside(['addons', 'gdharness_editor', 'tooling.gd']).note],
+      [
+        'res://.tools/ is searched because path names it; a search of the whole project steps over it, since its name starts with a dot.',
+        'res://addons/gdharness_editor/ is searched because path names it; a search of the whole project steps over it, since gdharness installed it.',
+      ],
+      'a place inside one, a file among them, is told the same',
+    );
+    assert.equal(inside(['scripts']).note, undefined, 'and a place the whole search reads is told nothing');
     assert.equal(projectStructure(sandbox).scripts, 2, 'the count should agree with the search');
     assert.deepEqual(
       projectTexts(sandbox)
@@ -24235,6 +24267,24 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         4,
         `while total still counts everything found, so neither number has to be derived: ${JSON.stringify(used)}`,
       );
+      // The extensions as project_search reads them: ".GD" searched no file and answered no use.
+      const dotted = await call('project_dependencies', {
+        projectPath: project,
+        direction: 'reverse',
+        resourcePath: 'res://shape.gd',
+        fileTypes: ['.GD'],
+      });
+      const plainGd = await call('project_dependencies', {
+        projectPath: project,
+        direction: 'reverse',
+        resourcePath: 'res://shape.gd',
+        fileTypes: ['gd'],
+      });
+      assert.deepEqual(
+        [get(dotted, 'summary', 'by_kind'), get(dotted, 'summary')],
+        [{ extends: 2, doc: 1, comment: 1 }, get(plainGd, 'summary')],
+        `a dotted, capitalised extension reads the scripts gd does: ${JSON.stringify(dotted)}`,
+      );
 
       const written = await call('script_edit', {
         projectPath: project,
@@ -39436,6 +39486,30 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
         assert.equal(
           await call('project_search', { projectPath: ours, query: 'extends', path: 'res://nowhere' }),
           "There is nothing at res://nowhere to search. The project's folders are scripts.",
+        );
+        // A query spanning two lines matches nothing a line-by-line search reads, and a limit of no
+        // lines or part of one was taken as no limit and as the line after it.
+        assert.equal(
+          await call('project_search', { projectPath: ours, query: 'extends Node\n# ours' }),
+          'query holds a line break, and project_search matches one line at a time: search for one of its lines.',
+        );
+        assert.deepEqual(
+          [
+            await call('project_search', { projectPath: ours, query: 'extends', maxResults: 0 }),
+            await call('project_search', { projectPath: ours, query: 'extends', maxResults: 1.5 }),
+          ],
+          [
+            'project_search takes maxResults of 1 or more, not 0.',
+            'project_search takes maxResults as integer, not 1.5.',
+          ],
+        );
+        const one = JSON.parse(
+          await call('project_search', { projectPath: ours, query: 'extends', maxResults: 1 }),
+        ) as SearchResult;
+        assert.deepEqual(
+          [one.summary.total_matches, one.summary.truncated],
+          [1, true],
+          'a limit of one answers one line, and says there were more',
         );
 
         // The search with no fileTypes, through the server: every text file, project.godot included.
