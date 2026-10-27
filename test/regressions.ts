@@ -22113,9 +22113,37 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-diagnostics-'));
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-engine-diagnostics-rt-'));
+  // One warning raised to an error by the project, so the engine reports it while compiling.
   writeFileSync(
     join(project, 'project.godot'),
-    'config_version=5\n\n[application]\n\nconfig/name="Checked"\n',
+    'config_version=5\n\n[application]\n\nconfig/name="Checked"\n\n[debug]\n\ngdscript/warnings/integer_division=2\n',
+  );
+  mkdirSync(join(project, 'warned'));
+  writeFileSync(
+    join(project, 'warned', 'warned.gd'),
+    [
+      'extends Node',
+      '',
+      '',
+      'func total(unused_flag: bool) -> int:',
+      '\tvar spare: int = 3',
+      '\treturn 7 / 2',
+      '',
+      '',
+      '@warning_ignore("unused_parameter")',
+      'func quiet(ignored: int) -> void:',
+      '\tpass',
+      '',
+    ].join('\n'),
+  );
+  // Warnings at warn level only, so it compiles, and so does what loads it, until a warning is raised.
+  writeFileSync(
+    join(project, 'warned', 'mild.gd'),
+    'extends Node\n\n\nfunc spare(unused: int) -> void:\n\tpass\n',
+  );
+  writeFileSync(
+    join(project, 'warned', 'user.gd'),
+    'extends Node\n\nconst Mild = preload("res://warned/mild.gd")\n',
   );
   mkdirSync(join(project, 'checked'));
   writeFileSync(
@@ -22189,8 +22217,8 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(answered, 'errors'),
         get(answered, 'warnings'),
       ],
-      ['checked/broken.gd', false, 2, null],
-      `one script compiled by the engine, its warnings unread rather than none: ${shown}`,
+      ['checked/broken.gd', false, 2, 0],
+      `one script compiled by the engine, its warnings read as well: ${shown}`,
     );
     assert.deepEqual(
       get(answered, 'diagnostics'),
@@ -22208,8 +22236,51 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     assert.match(text(get(answered, 'languageServer')), /^Godot LSP is unavailable on port \d+/, shown);
     assert.match(
       text(get(answered, 'note')),
-      /^No editor of this project is open to ask, so a headless engine compiled the scripts .* warnings is null rather than 0\. editor_launch with hidden: true .* Until then clean says only that every script compiles\.$/,
+      /^No editor of this project is open to ask, so a headless engine compiled the scripts .* A second engine reports the warnings, at the levels the project sets, .* warnings is null when that engine could not answer\. editor_launch with hidden: true .* reports both with their columns\.$/,
       shown,
+    );
+    // A warning the project sets to warn comes back as a warning at its line, in the editor's words;
+    // one the project raises to an error comes back once, as the error the compile reported; and one
+    // the script ignores does not come back.
+    const warned = parseTextContent(await diagnose('warned/warned.gd'));
+    // What a script loads is read on the way, and its warnings are its own, not the loader's; nor is
+    // the compile failure raising them gives the loader a warning of its.
+    const user = parseTextContent(await diagnose('warned/user.gd'));
+    // Taken out again, since the project's own checks below count its scripts.
+    rmSync(join(project, 'warned'), { recursive: true });
+    assert.deepEqual(
+      [get(user, 'clean'), get(user, 'warnings'), get(user, 'diagnostics')],
+      [true, 0, []],
+      `a script is not given the warnings of what it loads: ${JSON.stringify(user)}`,
+    );
+    assert.deepEqual(
+      [get(warned, 'clean'), get(warned, 'errors'), get(warned, 'warnings'), get(warned, 'diagnostics')],
+      [
+        false,
+        1,
+        2,
+        [
+          {
+            severity: 'warning',
+            message:
+              'The parameter "unused_flag" is never used in the function "total()". If this is intended, prefix it with an underscore: "_unused_flag".',
+            line: 4,
+          },
+          {
+            severity: 'warning',
+            message:
+              'The local variable "spare" is declared but never used in the block. If this is intended, prefix it with an underscore: "_spare".',
+            line: 5,
+          },
+          {
+            severity: 'error',
+            message:
+              'Parse Error: Integer division. Decimal part will be discarded. (Warning treated as error.)',
+            line: 6,
+          },
+        ],
+      ],
+      `the engine's warnings at the project's levels: ${JSON.stringify(warned)}`,
     );
     // Three syntax errors, of which the engine reads only the first. Taken out again after, since
     // the project's own checks below count its scripts.
@@ -22242,7 +22313,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(all, 'nothingReported'),
         get(all, 'checkedBy'),
       ],
-      [false, 5, 4, null, ['checked/fine.gd', 'checked/stash.gd'], 'engine'],
+      [false, 5, 4, 0, ['checked/fine.gd', 'checked/stash.gd'], 'engine'],
       `a folder compiled whole, an engine past each failure, the clean scripts named apart: ${said}`,
     );
     const entryFor = (scriptPath: string): unknown =>

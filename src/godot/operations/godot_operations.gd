@@ -60,6 +60,7 @@ const AFTER_THE_AUTOLOADS: Array[String] = [
 	"read_resource",
 	"read_scene_tree",
 	"run_editor_tool",
+	"script_warnings",
 ]
 
 var _log: GdhLog
@@ -99,6 +100,8 @@ func _init() -> void:
 	var params: Dictionary = read
 
 	_log.info("Executing operation: " + operation)
+	if operation == "script_warnings":
+		GdhScriptCheck.raise_warnings()
 
 	var answer_path: String = args[answer_index]
 	if operation in AFTER_THE_AUTOLOADS:
@@ -279,6 +282,8 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = GdhRenameChecks.new(_log).names_taken(params)
 		"check_scripts":
 			payload = GdhScriptCheck.new(_log).check_scripts(params)
+		"script_warnings":
+			payload = GdhScriptCheck.new(_log).script_warnings(params)
 
 		# Plugins and input
 		"list_plugins":
