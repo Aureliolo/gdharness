@@ -109,6 +109,8 @@ export interface TestOptions {
   readonly order: 'reversed' | number | null;
   /** Print what each engine printed, after the run and before its verdict. */
   readonly printOutput: boolean;
+  /** Start every engine with `--verbose`, so a leak at exit is named by what was left. */
+  readonly verbose: boolean;
   /** Where the run writes its result as JSON ([type RunResult]), or null for nowhere. */
   readonly resultFile: string | null;
 }
@@ -192,7 +194,7 @@ const VALUED = new Set([
   '--order',
   '--result',
 ]);
-const SWITCHES = new Set(['--changed-only', '--import', '--print-output']);
+const SWITCHES = new Set(['--changed-only', '--import', '--print-output', '--verbose']);
 
 /** [param args], everything after `test`, read into options; relative paths are read from [param cwd]. */
 export function testOptionsOf(args: readonly string[], cwd: string): TestOptions {
@@ -242,6 +244,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     importFirst: switches.has('--import'),
     order: order === undefined ? null : order === 'reversed' ? 'reversed' : seedOf(order),
     printOutput: switches.has('--print-output'),
+    verbose: switches.has('--verbose'),
     resultFile: last('--result') === undefined ? null : resolve(cwd, last('--result') ?? ''),
   };
 }
@@ -425,6 +428,7 @@ interface Launch extends EngineLaunch {
   readonly silenceFloorSeconds: number;
   readonly selfTyped: readonly SelfTypedExport[];
   readonly godotVersion: string | null;
+  readonly verbose: boolean;
 }
 
 /** Runs the suites [param options] asks for with the engine at [param godotPath], answering the exit code. */
@@ -485,6 +489,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     selfTyped: selfTypedExports(scripts.sources),
     godotVersion: options.godotVersion,
     cores: options.cores,
+    verbose: options.verbose,
   };
   try {
     if (options.importFirst) {
@@ -913,6 +918,7 @@ async function runEngine(
     'Dummy',
     '--path',
     launch.projectPath,
+    ...(launch.verbose ? ['--verbose'] : []),
     '-s',
     shippedListedRunner(),
     ...(plan.windowed ? [] : ['--ignoreHeadlessMode']),

@@ -41488,6 +41488,44 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     [],
     'and a run that reported nothing held at exit says nothing of it',
   );
+  // A verbose engine names what it held: objects counted by class, most first, and the resources
+  // still in use with the project's own before its addons', eight named and the rest counted.
+  const addonScripts = Array.from({ length: 8 }, (_, at) => `res://addons/kit/part_${String(at)}.gd`);
+  const verboseLeak = [
+    rows([1]),
+    'WARNING: 4 ObjectDB instances were leaked at exit (run with `--verbose` for details).',
+    'Leaked instance: GDScript:9223372121294505547 - Reference count: 3',
+    'Leaked instance: RefCounted:9223372050695979775 - Reference count: 1',
+    'Leaked instance: RefCounted:9223372050695979776 - Reference count: 2',
+    'Leaked instance: RefCounted:9223372050695979777 - Reference count: 1',
+    'Hint: Leaked instances typically happen when nodes are removed from the scene tree.',
+    ...addonScripts.slice(0, 4).map((path) => `Resource still in use: ${path} (GDScript)`),
+    'Resource still in use: res://game/guide.gd (GDScript)',
+    ...addonScripts.slice(4).map((path) => `Resource still in use: ${path} (GDScript)`),
+    'Resource still in use: res://game/book.gd (GDScript)',
+    'ERROR: 10 resources still in use at exit.',
+  ].join('\n');
+  assert.deepEqual(
+    judgeEngine(readRun(verboseLeak), declaredRows, clean).faults,
+    [
+      'the engine exited holding what it should have freed: WARNING: 4 ObjectDB instances were leaked at exit (run with `--verbose` for details).',
+      `the engine exited holding what it should have freed: ERROR: 10 resources still in use at exit. The engine named them: objects left alive: 3 RefCounted, 1 GDScript; resources still in use: res://game/guide.gd, res://game/book.gd, ${addonScripts.slice(0, 6).join(', ')}, and 2 more.`,
+    ],
+    'a verbose run names what was held after the last count',
+  );
+  assert.deepEqual(
+    judgeEngine(
+      readRun(
+        `${rows([1])}\nWARNING: 1 ObjectDB instance was leaked at exit (run with \`--verbose\` for details).\nLeaked instance: RefCounted:1 - Reference count: 1`,
+      ),
+      declaredRows,
+      clean,
+    ).faults,
+    [
+      'the engine exited holding what it should have freed: WARNING: 1 ObjectDB instance was leaked at exit (run with `--verbose` for details). The engine named them: objects left alive: 1 RefCounted.',
+    ],
+    'and objects alone when no resource was still in use',
+  );
 
   // Below 4.8 the runner's markers say whether the engine's shutdown cleared every script. One that
   // stopped part way reports what it never reached, so its leaks are noted and not counted; a walk
@@ -42854,6 +42892,7 @@ function testTheTestCommandReadsItsOwnOptions(): void {
         '7',
         '--changed-only',
         '--print-output',
+        '--verbose',
         '--result',
         'out/result.json',
       ],
@@ -42861,6 +42900,8 @@ function testTheTestCommandReadsItsOwnOptions(): void {
     );
     assert.equal(read.printOutput, true);
     assert.equal(testOptionsOf([], project).printOutput, false, 'off unless asked for');
+    assert.equal(read.verbose, true);
+    assert.equal(testOptionsOf([], project).verbose, false, 'quiet unless asked for');
     assert.equal(
       read.resultFile,
       join(tmpdir(), 'out', 'result.json'),
@@ -44724,6 +44765,15 @@ function testTheShutdownWalkIsHeldAndARealLeakStillFails(): void {
     }
     // The cycle alone holds no resource, so the script's leak is the one that holds its script.
     assert.doesNotMatch(test('cycle').said, /resources? still in use at exit/);
+    // Verbose engines name what they held, and the verdict carries it; without, only the counts.
+    const named = test('--verbose', 'script');
+    assert.equal(named.status, 1, named.said);
+    assert.match(
+      named.said,
+      /The engine named them: objects left alive: [^;\n]*\b1 RefCounted\b[^;\n]*; resources still in use: [^\n]*res:\/\/core\/part\.gd/,
+      named.said,
+    );
+    assert.doesNotMatch(test('script').said, /The engine named them/, 'an engine not verbose names nothing');
 
     const gate = spawnSyncHidden(godotPath, ['--headless', '--path', project, '-s', 'res://gate.gd'], {
       encoding: 'utf8',

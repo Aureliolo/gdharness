@@ -45,6 +45,9 @@ command line itself is wrong.
   once.
 - `--print-output`: print everything each engine printed, before the verdict, as for a benchmark
   written as a suite and run by hand. A gate never passes it.
+- `--verbose`: start every engine with Godot's `--verbose`, so a leak at exit is named: the verdict
+  counts the objects left alive by class and names the resources still in use, the project's own
+  before its addons'. Without it the engine prints only the two counts.
 - `--result FILE`: write the run's result to `FILE` as JSON, for a gate that acts on more than the
   exit code. It holds `passed`, `seconds`, `problems` (every problem the output lists, one sentence
   each, an engine's prefixed with `engine N:`), `suites` (each suite an engine closed, slowest first,

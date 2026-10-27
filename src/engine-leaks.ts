@@ -45,6 +45,50 @@ export function walkStoppedPartWay(lines: Iterable<string>): boolean {
   return began;
 }
 
+const LEAKED_INSTANCE = /^Leaked instance: (\w+):/;
+const STILL_IN_USE = /^Resource still in use: (.+?) \(\w+\)$/;
+/** How many of the resources still in use a sentence names before counting the rest. */
+const IN_USE_NAMED = 8;
+
+/**
+ * What an engine started with `--verbose` names among [param lines] as it exits: the objects still
+ * alive, counted by class, and the resources still in use, the project's own before its addons'.
+ * Unnamed, a leak was two counts: a game's suite leaving 1251 objects in reference cycles read as
+ * the engine's shutdown fault until a verbose run by hand named the game's own scripts.
+ */
+export function heldAtExit(lines: Iterable<string>): string | undefined {
+  const objects = new Map<string, number>();
+  const inUse: string[] = [];
+  for (const line of lines) {
+    const object = LEAKED_INSTANCE.exec(line.trim())?.[1];
+    if (object !== undefined) {
+      objects.set(object, (objects.get(object) ?? 0) + 1);
+    }
+    const resource = STILL_IN_USE.exec(line.trim())?.[1];
+    if (resource !== undefined) {
+      inUse.push(resource);
+    }
+  }
+  if (objects.size === 0 && inUse.length === 0) {
+    return undefined;
+  }
+  const counted = [...objects].sort(([a, many], [b, more]) => more - many || a.localeCompare(b));
+  const objectsSaid = counted.map(([name, many]) => `${String(many)} ${name}`);
+  const ownFirst = [
+    ...inUse.filter((path) => !path.startsWith('res://addons/')),
+    ...inUse.filter((path) => path.startsWith('res://addons/')),
+  ];
+  const named = ownFirst.slice(0, IN_USE_NAMED);
+  const more = ownFirst.length - named.length;
+  const parts = [
+    objectsSaid.length === 0 ? undefined : `objects left alive: ${objectsSaid.join(', ')}`,
+    named.length === 0
+      ? undefined
+      : `resources still in use: ${named.join(', ')}${more > 0 ? `, and ${String(more)} more` : ''}`,
+  ].filter((part) => part !== undefined);
+  return `The engine named them: ${parts.join('; ')}.`;
+}
+
 /** Why a leak report beside a walk that stopped part way is not counted against the run. */
 export const WALK_STOPPED_SENTENCE =
   "The engine's shutdown stopped part way through its scripts (godot#117991, fixed in 4.8 by " +
