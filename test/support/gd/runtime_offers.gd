@@ -7,6 +7,7 @@ extends SceneTree
 const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
 const GdhPad = preload("res://addons/gdharness_runtime/runtime_pad.gd")
 const GdhPaths = preload("res://addons/gdharness_runtime/runtime_paths.gd")
+const GdhTyping = preload("res://addons/gdharness_runtime/runtime_typing.gd")
 const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 const Checked = preload("checked.gd")
 
@@ -30,6 +31,7 @@ func _run() -> void:
 	await _check_focus(input)
 	await _check_focus_moves(input)
 	await _check_pad_focus(host)
+	await _check_keys_a_field_keeps(input, GdhTyping.new(host))
 	_check_methods_offered(input)
 
 	host.queue_free()
@@ -39,6 +41,48 @@ func _run() -> void:
 		return
 	printerr("\n".join(failures))
 	quit(1)
+
+
+## A key the focused field keeps from the game, and typing at a focus that is no field. Space into a
+## name field pressed no jump and the answer named only the focus; Enter ended the edit without a
+## word; and text typed with a button focused answered that it went into the button.
+func _check_keys_a_field_keeps(input: GdhInputCommands, typing: GdhTyping) -> void:
+	var field: LineEdit = LineEdit.new()
+	root.add_child(field)
+	field.grab_focus()
+	await process_frame
+	var spaced: Dictionary = await input.inject_key({"keycode": "Space"})
+	if spaced.get("typed_into") != str(field.get_path()) or spaced.get("holds") != " ":
+		_fail("Space into a field names the field that took it: %s" % JSON.stringify(spaced))
+	var entered: Dictionary = await input.inject_key({"keycode": "Enter"})
+	if entered.get("editing_ended") != true or entered.has("typed_into"):
+		_fail("Enter says it ended the edit and typed nothing: %s" % JSON.stringify(entered))
+	var again: Dictionary = await input.inject_key({"keycode": "Space"})
+	if again.has("typed_into") or again.has("editing_ended") or field.text != " ":
+		_fail("a field no longer edited takes nothing and says nothing: %s" % JSON.stringify(again))
+	field.queue_free()
+
+	var button: Button = Button.new()
+	button.text = "Play"
+	root.add_child(button)
+	button.grab_focus()
+	await process_frame
+	var presses: Array[int] = [0]
+	Checked.done(
+		button.pressed.connect(func() -> void: presses[0] += 1) as Error, "counting the button's presses"
+	)
+	var typed: Dictionary = typing.inject_text({"text": "a b\n"})
+	await process_frame
+	if (
+		typed.get("into") != str(button.get_path())
+		or not str(typed.get("note", "")).contains("no LineEdit or TextEdit")
+	):
+		_fail("text at a focused button says it is no field: %s" % JSON.stringify(typed))
+	# What the note warns of: the space and the Enter in the text each pressed the button.
+	if presses[0] != 2 or not str(typed.get("note", "")).contains("a focused button takes a space"):
+		_fail("and the space and Enter each pressed it: %d, %s" % [presses[0], JSON.stringify(typed)])
+	button.queue_free()
+	await process_frame
 
 
 ## A key or an action goes to the Control holding the focus before the game's own handler, so Space

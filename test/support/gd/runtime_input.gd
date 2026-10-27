@@ -389,8 +389,10 @@ func _check_typing(input: GdhTyping) -> void:
 ## The key op types too, which is the half that was missing rather than the whole command.
 func _type_with_keys(input: GdhInputCommands) -> void:
 	_field.clear()
-	await input.inject_key({"keycode": "K"})
+	var lower: Dictionary = await input.inject_key({"keycode": "K"})
 	await input.inject_key({"keycode": "K", "shift": true})
+	if lower.get("typed_into") != str(_field.get_path()) or lower.get("holds") != "k":
+		_fail("a key a field takes as typing names the field and what it holds: %s" % JSON.stringify(lower))
 
 
 ## And what the two of them left, plus the submission, which comes last for a reason a player
@@ -412,6 +414,8 @@ func _check_what_the_keys_typed() -> void:
 		_fail("typing a newline was refused: %s" % JSON.stringify(newline))
 	if submitted != ["kK"]:
 		_fail("a newline should submit the field rather than land in it: %s" % str(submitted))
+	if newline.get("editing_ended") != true:
+		_fail("and the answer says the field stopped being edited: %s" % JSON.stringify(newline))
 	if _field.text != "kK":
 		_fail("and should leave the text alone: %s" % _field.text)
 

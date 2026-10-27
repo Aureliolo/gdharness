@@ -6138,13 +6138,27 @@ class GodotServer {
     if (!contained.ok) {
       return contained.response;
     }
+    // The import gives a uid to every script without one, as the editor's scan does, and those
+    // sidecars land in the project beside the scripts, where version control sees them.
+    const unminted = scriptsWithoutUid(project.value.path);
     const outcome = await this.reimport(
       project.value.path,
       readNonEmptyString(contained.value, 'resourcePath'),
       args['force'] === true,
       readPositiveNumber(args, 'timeoutMs') ?? REIMPORT_TIMEOUT_MS,
     );
-    return outcome.ok ? this.jsonTextResponse(outcome.payload) : outcome.response;
+    if (!outcome.ok) {
+      return outcome.response;
+    }
+    const stillUnminted = scriptsWithoutUid(project.value.path);
+    const uids = withAddonPathsCounted(
+      unminted.filter((script) => !stillUnminted.includes(script)).map((script) => `res://${script}`),
+    );
+    return this.jsonTextResponse({
+      ...outcome.payload,
+      ...(uids.own.length === 0 ? {} : { uidsWritten: uids.own }),
+      ...(Object.keys(uids.inAddons).length === 0 ? {} : { uidsWrittenInAddons: uids.inAddons }),
+    });
   }
 
   /** Whether the editor on the bridge has [param projectPath] open. */

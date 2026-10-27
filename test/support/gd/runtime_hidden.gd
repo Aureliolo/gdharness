@@ -271,6 +271,9 @@ func _check_buttons_offered_for_words_nobody_shows() -> void:
 	var offered: String = str(refused.get("message", "")).get_slice("the buttons on screen say ", 1)
 	if not _says(refused, "1 hidden control says it") or offered != '"Play", "Quit"':
 		_fail("words only a hidden control says offer what is on screen: %s" % JSON.stringify(refused))
+	# The control saying the words is not the node hidden, so both are named.
+	if not _says(refused, "1 hidden control says it, /root/Panel/Back (/root/Panel is hidden"):
+		_fail("and name the hidden one with what hides it: %s" % JSON.stringify(refused))
 	# A click that lands says whether the button heard it: Quit takes only the right button.
 	var play: Dictionary = await input.click({"says": "Play"})
 	if play.get("landed") != true or play.get("pressed_signal") != true or _presses("Play") != 1:

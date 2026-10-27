@@ -82,6 +82,8 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 	var full_path: String = resource_path
 	if not full_path.begins_with("res://"):
 		full_path = "res://" + full_path
+	if DirAccess.dir_exists_absolute(full_path):
+		return _log.failure(_folder_refusal(full_path))
 	if not FileAccess.file_exists(full_path):
 		return _log.failure(
 			_files.with_nearest_files("Resource file does not exist: " + full_path, full_path)
@@ -193,6 +195,11 @@ func _loaded_and_missing(script: String) -> Array[String]:
 				named[path] = true
 	var missing: Array[String] = []
 	for path: String in loaded:
+		# Left as written by the resolution, which is a uid the project does not know.
+		if path.begins_with("uid://"):
+			if not named.has(path) and not missing.has(path):
+				missing.append(path)
+			continue
 		if not path.begins_with("res://") or path.begins_with("res://.") or path.get_extension().is_empty():
 			continue
 		if not named.has(path) and not FileAccess.file_exists(path) and not missing.has(path):
@@ -217,6 +224,15 @@ static func _named_by_settings() -> Array[String]:
 	return named
 
 
+## The refusal for [param path], a folder: a walk follows one file, and a folder was refused as a
+## file that does not exist, about a folder the caller could see.
+static func _folder_refusal(path: String) -> String:
+	return (
+		"%s is a folder, and project_dependencies follows one file: name a file in it."
+		% path.trim_suffix("/")
+	)
+
+
 ## One line for [param entry], one of [method missing_references].
 static func missing_line(entry: Dictionary) -> String:
 	var referring: Array = entry.get("referenced_by", [])
@@ -235,6 +251,8 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 
 	if not resource_path.begins_with("res://"):
 		resource_path = "res://" + resource_path
+	if DirAccess.dir_exists_absolute(resource_path):
+		return _log.failure(_folder_refusal(resource_path))
 	# A file that is gone is searched for all the same, since what still refers to it is what a
 	# caller asks about one, and the forward walk of a scene had just named it missing. Refused only
 	# when nothing refers to it either, which is a path written wrong.
@@ -331,6 +349,11 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 				kind = _path_reference_kind(line, file_path)
 				if not loaded.is_empty() and written_path != loaded:
 					extra["stale_path"] = written_path
+				var unknown_uid: String = (
+					_unknown_uid_of(line) if trimmed.begins_with("[ext_resource") else ""
+				)
+				if not unknown_uid.is_empty():
+					extra["unknown_uid"] = unknown_uid
 			elif by_its_autoload:
 				kind = "autoload"
 			else:
@@ -570,6 +593,7 @@ func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk
 		elif path.get_extension() in SHADER_KINDS:
 			content = _shader_code(content)
 		var moved: Dictionary = _moved_by_uid(content)
+		var unknown: Dictionary = _unknown_uids(content, path)
 
 		for pattern: String in REFERENCE_PATTERNS:
 			var regex: RegEx = GdhPatterns.compiled(pattern)
@@ -577,6 +601,12 @@ func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk
 				var written: String = _resolved(_referenced_path(m.get_string()), path)
 				var dep_path: String = str(moved.get(written, written))
 
+				# A uid the project does not know names no file, and loading it fails: passed over as
+				# no res:// path, a script's load of one went unsaid while the game printed
+				# "Unrecognized UID" at that line.
+				if dep_path.begins_with("uid://"):
+					_depend(deps, path, dep_path, {}, current_depth, walk)
+					continue
 				if not dep_path.begins_with("res://"):
 					continue
 				# A literal naming a directory, or the start of a path a script builds as it runs
@@ -590,14 +620,10 @@ func _analyze_resource(path: String, current_depth: int, walk: GdhDependencyWalk
 				if not walk.include_built_in and dep_path.begins_with("res://."):
 					continue
 
-				_depend(
-					deps,
-					path,
-					dep_path,
-					{"stale_path": written} if dep_path != written else {},
-					current_depth,
-					walk
-				)
+				var named_by: Dictionary = {"stale_path": written} if dep_path != written else {}
+				if unknown.has(dep_path):
+					named_by["unknown_uid"] = unknown[dep_path]
+				_depend(deps, path, dep_path, named_by, current_depth, walk)
 
 		# A script uses another by its class_name as surely as by a preload, and only the reverse walk
 		# looked for that: asked what a script depends on, the answer left out the script it typed a
@@ -633,7 +659,11 @@ func _depend(
 	for existing: Dictionary in deps:
 		if existing.get("path", "") == dep_path:
 			return
-	var dep_info: Dictionary = {"path": dep_path, "exists": FileAccess.file_exists(dep_path)}
+	# A uid still written as one is one the project does not know, and asked about, the engine prints
+	# an error for it.
+	var dep_info: Dictionary = {
+		"path": dep_path, "exists": not dep_path.begins_with("uid://") and FileAccess.file_exists(dep_path)
+	}
 	dep_info.merge(named_by)
 	# Marked where the reference closing the cycle is. Marked inside the file reached again, the tree
 	# answered that file as a dependency of itself.
@@ -741,6 +771,25 @@ static func _moved_by_uid(content: String) -> Dictionary:
 		if at != null and not found.is_empty() and found != at.get_string(1):
 			moved[at.get_string(1)] = found
 	return moved
+
+
+# The ext_resource paths in [param content], read from [param from], whose uid names no file the
+# project has, each with that uid. The engine warns that the uid is invalid and loads the path, and
+# the walk followed the path saying nothing, so an export was the first to mention it.
+static func _unknown_uids(content: String, from: String) -> Dictionary:
+	var unknown: Dictionary = {}
+	for line: RegExMatch in GdhPatterns.compiled("\\[ext_resource[^\\]]*\\]").search_all(content):
+		var uid: String = _unknown_uid_of(line.get_string())
+		var at: RegExMatch = GdhPatterns.compiled('path="([^"]+)"').search(line.get_string())
+		if at != null and not uid.is_empty():
+			unknown[_resolved(at.get_string(1), from)] = uid
+	return unknown
+
+
+# The uid an ext_resource [param entry] carries when it names no file the project has, or empty.
+static func _unknown_uid_of(entry: String) -> String:
+	var uid: RegExMatch = GdhPatterns.compiled('uid="(uid://[^"]+)"').search(entry)
+	return "" if uid == null or not _loaded_by_uid(entry).is_empty() else uid.get_string(1)
 
 
 # The file an ext_resource [param entry] is loaded from by its uid, or empty when it carries none

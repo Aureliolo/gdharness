@@ -24459,8 +24459,8 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         'var held: int = 5  # a trailing note',
         '',
         '',
-        'func place(at: Vector2 = Vector2(1, 2), tint: Color = Color(1, 0, 0, 1), name: String = "a,b") -> void:',
-        '\tprint(at, tint, name)',
+        'func place(at: Vector2 = Vector2(1, 2), tint: Color = Color(1, 0, 0, 1), name: String = "a,b", by: Node = null) -> void:',
+        '\tprint(at, tint, name, by)',
         '',
         '',
         // A body on the declaration's own line, carrying a bracket and a colon of its own. The
@@ -24738,6 +24738,8 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
               ['tint', 'Color', 'Color(1, 0, 0, 1)'],
               // The comma here is inside the string, so it separates nothing.
               ['name', 'String', '"a,b"'],
+              // A default of null written out is the text "null", apart from none written at all.
+              ['by', 'Node', 'null'],
             ],
           ],
           // The last bracket on this line belongs to the body, not to the signature, and the last
@@ -25548,6 +25550,17 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
       );
       assert.equal(get(tested, 'uidsMissing'), undefined, JSON.stringify(tested));
       assert.deepEqual(await behindByStatus(), [], 'and status reads it current after the test run');
+
+      // Asked for directly, the reimport writes the same sidecars, and names them as the run does.
+      writeFileSync(join(project, 'picture.png'), solidPng(40, 160, 160));
+      writeFileSync(join(project, 'helper.gd'), 'extends Node\n');
+      const reimported = await answer('project_import', { op: 'reimport' });
+      assert.deepEqual(
+        [asArray(get(reimported, 'reimported')).map(String), get(reimported, 'uidsWritten')],
+        [['res://picture.png'], ['res://helper.gd']],
+        `a reimport names the picture it imported and the sidecar it wrote: ${JSON.stringify(reimported)}`,
+      );
+      assert.ok(existsSync(join(project, 'helper.gd.uid')), 'and the sidecar is on disk');
     });
   } finally {
     sweep(project);
@@ -58255,7 +58268,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
         'child_entered_tree',
         'hide',
         undefined,
-        `child_entered_tree passes 1 argument, and hide takes none${fails}`,
+        `child_entered_tree passes 1 argument, and hide takes none${fails} Connected with unbinds 1, the last argument the signal passes is left out.`,
       ],
       [
         'child_entered_tree',
@@ -58277,6 +58290,21 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
         `and the connection is written all the same:\n${fileOf('wires.tscn')}`,
       );
     }
+    // A bound argument the method has no room for is not one unbinding drops, so no unbinds is offered.
+    const overBound = await written('scene_signal', {
+      op: 'connect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'visibility_changed',
+      targetNodePath: 'Taker',
+      methodName: 'hide',
+      binds: [1],
+    });
+    assert.equal(
+      get(overBound, 'misfit'),
+      `visibility_changed passes 1 argument, and hide takes none${fails}`,
+      JSON.stringify(overBound),
+    );
     const unwritten = await wire('died', 'not_yet_written');
     assert.deepEqual(
       [get(unwritten, 'methodFound'), get(unwritten, 'argumentsFit'), get(unwritten, 'misfit')],
@@ -58384,7 +58412,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     const unbound = await rewire('child_entered_tree', 'queue_free', { unbinds: 0 });
     assert.deepEqual(
       [get(unbound, 'unbinds'), get(unbound, 'unbindsBefore'), get(unbound, 'misfit')],
-      [undefined, 1, `child_entered_tree passes 1 argument, and queue_free takes none${fails}`],
+      [
+        undefined,
+        1,
+        `child_entered_tree passes 1 argument, and queue_free takes none${fails} Connected with unbinds 1, the last argument the signal passes is left out.`,
+      ],
       JSON.stringify(unbound),
     );
     const rebound = await rewire('child_entered_tree', 'queue_free', { unbinds: 1, binds: [3] });

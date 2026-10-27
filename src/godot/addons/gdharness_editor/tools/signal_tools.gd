@@ -296,6 +296,7 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 	if flags & Object.CONNECT_APPEND_SOURCE_OBJECT:
 		passed.append({"name": "source", "type": TYPE_OBJECT, "class_name": source.get_class()})
 	passed = passed.slice(0, maxi(passed.size() - callable.get_unbound_arguments_count(), 0))
+	var from_signal: int = passed.size()
 	for bound: Variant in callable.get_bound_arguments():
 		var bound_class: String = ""
 		if bound is Object:
@@ -310,7 +311,25 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 		return "%s passes %s, and %s needs %d%s" % [signal_name, _count(passed.size()), method, needed, FAILS]
 	if passed.size() > parameters.size():
 		var most: String = "none" if parameters.is_empty() else "at most %d" % parameters.size()
-		return "%s passes %s, and %s takes %s%s" % [signal_name, _count(passed.size()), method, most, FAILS]
+		# Said with the misfit, since unbinds is what a connection to a method wanting less is for, and
+		# only when the extra arguments are the signal's: a bound one is not dropped by unbinding.
+		var extra: int = passed.size() - parameters.size()
+		var remedy: String = (
+			(
+				" Connected with unbinds %d, the last %s the signal passes %s left out."
+				% [
+					extra + callable.get_unbound_arguments_count(),
+					"argument" if extra == 1 else "%d arguments" % extra,
+					"is" if extra == 1 else "are",
+				]
+			)
+			if extra <= from_signal
+			else ""
+		)
+		return (
+			"%s passes %s, and %s takes %s%s%s"
+			% [signal_name, _count(passed.size()), method, most, FAILS, remedy]
+		)
 	for at: int in passed.size():
 		var given: Dictionary = passed[at]
 		var parameter: Dictionary = parameters[at]

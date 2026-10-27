@@ -2875,6 +2875,73 @@ function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _p
     );
     assert.deepEqual(get(walker, 'summary', 'missing'), [], 'and nothing is missing from it');
 
+    // A uid the project does not know: beside a path that has the file, the engine warns and loads
+    // the path, and loaded on its own it names nothing, which the game reports as an unrecognised
+    // uid at that line. The walk followed the first without a word and passed over the second.
+    writeFileSync(
+      join(dir, 'old.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" uid="uid://c0ld0ldst4le1" path="res://moved/leaf.gd" id="1_leaf"]\n\n[node name="Old" type="Node"]\nscript = ExtResource("1_leaf")\n',
+    );
+    writeFileSync(
+      join(dir, 'badge.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tvar badge: Texture2D = load("uid://b4dn0th1ngh3r")\n\tprint(badge)\n',
+    );
+    const oldScene = operation('get_dependencies', { resource_path: 'res://old.tscn' });
+    assert.deepEqual(
+      asArray(get(oldScene, 'dependencies', 'res://old.tscn')).map((dep) => [
+        get(dep, 'path'),
+        get(dep, 'exists'),
+        get(dep, 'unknown_uid'),
+      ]),
+      [['res://moved/leaf.gd', true, 'uid://c0ld0ldst4le1']],
+      `followed by its path, with the uid that names nothing: ${JSON.stringify(oldScene)}`,
+    );
+    const fromOld = asArray(
+      get(operation('find_resource_usages', { resource_path: 'res://moved/leaf.gd' }), 'usages'),
+    ).find((usage) => get(usage, 'file') === 'res://old.tscn');
+    assert.deepEqual(
+      asArray(get(fromOld, 'references')).map((reference) => [
+        get(reference, 'kind'),
+        get(reference, 'unknown_uid'),
+      ]),
+      [['ext_resource', 'uid://c0ld0ldst4le1']],
+      `and asked what uses the file, the same line says so: ${JSON.stringify(fromOld)}`,
+    );
+    const badge = operation('get_dependencies', { resource_path: 'res://badge.gd' });
+    assert.deepEqual(
+      [
+        asArray(get(badge, 'dependencies', 'res://badge.gd')).map((dep) => [
+          get(dep, 'path'),
+          get(dep, 'exists'),
+        ]),
+        get(badge, 'summary', 'missing'),
+      ],
+      [
+        [['uid://b4dn0th1ngh3r', false]],
+        [{ path: 'uid://b4dn0th1ngh3r', referenced_by: ['res://badge.gd'] }],
+      ],
+      `a load of a uid nothing has is missing: ${JSON.stringify(badge)}`,
+    );
+    assert.match(
+      JSON.stringify(operation('validate_project', {})),
+      /uid:\/\/b4dn0th1ngh3r does not exist, and res:\/\/badge\.gd refers to it/,
+      'and validation names it with the script loading it',
+    );
+    rmSync(join(dir, 'old.tscn'));
+    rmSync(join(dir, 'badge.gd'));
+
+    // A folder is refused as one, in both directions, where it was refused as a file not there.
+    for (const [name, asked] of [
+      ['get_dependencies', 'res://moved'],
+      ['find_resource_usages', 'res://moved/'],
+    ] as const) {
+      assert.match(
+        runRefusedOperation(godotPath, dir, name, { resource_path: asked }).stderr,
+        /res:\/\/moved is a folder, and project_dependencies follows one file: name a file in it\./,
+        `${name} on a folder`,
+      );
+    }
+
     // A path nothing is at is refused with the files of its kind nearest it, or every one of few.
     assert.match(
       runRefusedOperation(godotPath, dir, 'get_dependencies', { resource_path: 'res://stagee.tscn' }).stderr,

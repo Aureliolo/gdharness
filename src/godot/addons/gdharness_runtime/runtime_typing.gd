@@ -59,6 +59,7 @@ func inject_text(params: Dictionary) -> Dictionary:
 	if focused != null:
 		into = str(focused.get_path())
 
+	var before: Dictionary = field_before(focused)
 	var replaced: bool = over and _select_everything(focused)
 	# Emptying a field is a real thing to ask for and the one shape of filling one in that types no
 	# characters. The selection is standing, so the key a player presses over one is what clears it.
@@ -70,7 +71,7 @@ func inject_text(params: Dictionary) -> Dictionary:
 	var holds: Variant = null
 	if is_instance_valid(focused):
 		holds = _what_it_holds(focused)
-	return {
+	var answer: Dictionary = {
 		"type": "input_injected",
 		"input_type": "text",
 		"text": text,
@@ -79,6 +80,61 @@ func inject_text(params: Dictionary) -> Dictionary:
 		"replaced": replaced,
 		"holds": holds,
 	}
+	if ended_editing(focused, before):
+		answer["editing_ended"] = true
+	# A control drawing its own field takes characters in its gui_input, so typing at one is not
+	# refused; but a focused button answered that the text went into it, which read as typed.
+	if into != null and before.is_empty():
+		answer["note"] = (
+			(
+				"%s has the focus and is no LineEdit or TextEdit, so each character reached it as a key"
+				+ " press and went on to the game's input unless it kept it, and a focused button takes a"
+				+ " space or Enter as a press of it. Click a field first to type into one."
+			)
+			% into
+		)
+	return answer
+
+
+## What [param focused] says and whether it is being edited, read before keys go in, for
+## [method field_noted] and [method ended_editing] to compare with; empty where the focus is no
+## field. A [TextEdit] has no editing state of its own and counts as always edited.
+static func field_before(focused: Control) -> Dictionary:
+	var field: LineEdit = focused as LineEdit
+	if field != null:
+		return {"text": field.text, "editing": field.is_editing()}
+	var box: TextEdit = focused as TextEdit
+	if box != null:
+		return {"text": box.text, "editing": true}
+	return {}
+
+
+## Whether [param focused], read as [param before], stopped being edited, as a [LineEdit] does when
+## it is submitted: it keeps the focus and drops every key after, so a caller reading only the focus
+## typed next into nothing.
+static func ended_editing(focused: Control, before: Dictionary) -> bool:
+	var was: bool = before.get("editing", false)
+	if not was or not is_instance_valid(focused):
+		return false
+	var field: LineEdit = focused as LineEdit
+	return field != null and not field.is_editing()
+
+
+## [param said] with what a key did to [param focused], the field read before it as [param before]:
+## typed_into and holds where its text changed, and editing_ended where it stopped being edited. A
+## field being edited takes a printable key as typing and keeps it from the game's _unhandled_input,
+## so Space into a name field pressed no jump, and an answer naming only the focus did not say why.
+static func field_noted(said: Dictionary, focused: Control, before: Dictionary) -> Dictionary:
+	if before.is_empty() or not is_instance_valid(focused):
+		return said
+	var field: LineEdit = focused as LineEdit
+	var now: String = field.text if field != null else (focused as TextEdit).text
+	if now != before["text"]:
+		said["typed_into"] = str(focused.get_path())
+		said["holds"] = _what_it_holds(focused)
+	if ended_editing(focused, before):
+		said["editing_ended"] = true
+	return said
 
 
 ## The control keys pushed into [param viewport] go to: its focus, or the focus of the window
