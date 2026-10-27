@@ -1680,7 +1680,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['start'],
         description:
-          'start: on Windows, show the window on the desktop in use. By default a windowed run this server starts goes on a desktop of its own, where it renders and runtime_capture works but the window never shows and never takes the keyboard. A game a visible editor plays opens on the desktop in use, and one a hidden editor (editor_launch hidden: true) plays goes on its desktop. Elsewhere than Windows the window shows either way. Default false.',
+          'start: on Windows, show the window on the desktop in use. By default a windowed run this server starts goes on a desktop of its own, where it renders and runtime_capture works but the window never shows and never takes the keyboard or the pointer. A game a visible editor plays opens on the desktop in use, and one a hidden editor (editor_launch hidden: true) plays goes on its desktop. Elsewhere than Windows the window shows either way. Default false.',
       },
       silent: {
         type: 'boolean',

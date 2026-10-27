@@ -3368,10 +3368,8 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
     'animations',
   );
   const walked = listed.find((one) => get(one, 'animationName') === 'moves/walk');
-  // The step is a 32-bit float in the engine, so 0.1 reads back as 0.100000001.
-  assert.ok(Math.abs(Number(get(walked, 'step')) - 0.1) < 1e-6, JSON.stringify(walked));
   assert.deepEqual(
-    { ...(walked as object), step: 0.1 },
+    walked,
     { animationName: 'moves/walk', length: 1, loopMode: 'none', step: 0.1, tracks: 2 },
     `without an animationName the player's animations are listed: ${JSON.stringify(listed)}`,
   );

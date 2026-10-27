@@ -444,7 +444,7 @@ static func _keys_at(anim: Animation, calling: Array, times: Array) -> Array:
 			if pair[1] >= 0 and key != pair[1]:
 				continue
 			var time: float = anim.track_get_key_time(index, key)
-			var _listed: bool = held.append(str(GdhAnimationReads.key_time(time)))
+			var _listed: bool = held.append(str(GdhAnimationReads.held_seconds(time)))
 			for given: float in times:
 				if GdhAnimationReads.same_time(time, given):
 					at.append([index, key])
