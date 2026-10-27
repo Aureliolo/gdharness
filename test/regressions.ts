@@ -25548,6 +25548,17 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
       );
       assert.equal(get(tested, 'uidsMissing'), undefined, JSON.stringify(tested));
       assert.deepEqual(await behindByStatus(), [], 'and status reads it current after the test run');
+
+      // Asked for directly, the reimport writes the same sidecars, and names them as the run does.
+      writeFileSync(join(project, 'picture.png'), solidPng(40, 160, 160));
+      writeFileSync(join(project, 'helper.gd'), 'extends Node\n');
+      const reimported = await answer('project_import', { op: 'reimport' });
+      assert.deepEqual(
+        [asArray(get(reimported, 'reimported')).map(String), get(reimported, 'uidsWritten')],
+        [['res://picture.png'], ['res://helper.gd']],
+        `a reimport names the picture it imported and the sidecar it wrote: ${JSON.stringify(reimported)}`,
+      );
+      assert.ok(existsSync(join(project, 'helper.gd.uid')), 'and the sidecar is on disk');
     });
   } finally {
     sweep(project);
