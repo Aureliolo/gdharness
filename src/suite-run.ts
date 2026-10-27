@@ -28,7 +28,6 @@ import {
   EngineUsageError,
   godotNamed,
   homeOf,
-  inTurns,
   KEPT_RUN_DIRECTORIES,
   MOST_ENGINES,
   memoryAvailable,
@@ -72,6 +71,7 @@ import {
   lanesOf,
   ProjectScripts,
   readTimes,
+  Shares,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
   TEST_DIRECTORIES,
@@ -595,9 +595,25 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
       plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
     );
-    let ran = (await inTurns(lanes, room.engines, (lane) => runLane(launch, lane, times)))
-      .flat()
-      .sort((a, b) => a.index - b.index);
+    // A slot for each lane, taken only where one is free now: what the run was dealt holds only when
+    // every lane starts at once.
+    const taken: string[] = [];
+    while (taken.length < lanes.length) {
+      const lock = await slots.takeFree();
+      if (lock === null) {
+        break;
+      }
+      taken.push(lock);
+    }
+    const shared = options.order === null && lanes.length > 1 && taken.length < lanes.length;
+    if (shared) {
+      console.log(sharesSaid(taken.length, lanes.length));
+    }
+    let ran = shared
+      ? await runShares(launch, units, declared, lanes.length, taken, times)
+      : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null))))
+          .flat()
+          .sort((a, b) => a.index - b.index);
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
       console.log('An engine ran out of memory, so every engine that failed runs again, one at a time.');
       const again: EngineRan[] = [];
@@ -639,6 +655,14 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     process.off('SIGINT', interrupted);
     process.off('SIGTERM', interrupted);
   }
+}
+
+/**
+ * What a run says when only [param free] of the slots its [param lanes] lanes take were free as it
+ * began, so its engines are handed shares rather than the parts it announced.
+ */
+export function sharesSaid(free: number, lanes: number): string {
+  return `${free === 0 ? 'None' : String(free)} of the ${String(lanes)} slots this run uses ${free === 1 ? 'was' : 'were'} free as it began, so its engines are handed the suites a share at a time as each starts, and an engine starts as each slot comes free.`;
 }
 
 /**
@@ -781,8 +805,9 @@ async function runLane(
   launch: Launch,
   lane: ReadonlyArray<{ readonly plan: EnginePlan; readonly index: number }>,
   times: SuiteTimes,
+  taken: string | null,
 ): Promise<EngineRan[]> {
-  const lock = await launch.slots.take();
+  const lock = taken ?? (await launch.slots.take());
   try {
     const ran: EngineRan[] = [];
     for (const { plan, index } of lane) {
@@ -792,6 +817,55 @@ async function runLane(
   } finally {
     launch.slots.release(lock);
   }
+}
+
+/**
+ * Runs [param units] over [param lanes] lanes handed a share at a time (see [class Shares]), the
+ * lanes holding the slots in [param taken] at once and the rest as slots come free. A lane still
+ * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
+ * run open that has nothing left to give it.
+ */
+async function runShares(
+  launch: Launch,
+  units: readonly Unit[],
+  declared: CasesBySuite,
+  lanes: number,
+  taken: readonly string[],
+  times: SuiteTimes,
+): Promise<EngineRan[]> {
+  const shares = new Shares(units, declared, lanes);
+  const handedOut = new AbortController();
+  let engines = 0;
+  const lane = async (at: number): Promise<EngineRan[]> => {
+    let lock = taken[at] ?? null;
+    if (lock === null) {
+      try {
+        lock = await launch.slots.take(handedOut.signal);
+      } catch (error) {
+        if (handedOut.signal.aborted) {
+          return [];
+        }
+        throw error;
+      }
+    }
+    try {
+      const ran: EngineRan[] = [];
+      for (let plan = shares.next(at); plan !== null; plan = shares.next(at)) {
+        if (shares.empty) {
+          handedOut.abort();
+        }
+        const index = engines;
+        engines += 1;
+        ran.push(await runEngine(launch, plan, index, times, '', lock));
+      }
+      return ran;
+    } finally {
+      launch.slots.release(lock);
+    }
+  };
+  return (await Promise.all(Array.from({ length: lanes }, (_, at) => lane(at))))
+    .flat()
+    .sort((a, b) => a.index - b.index);
 }
 
 /**

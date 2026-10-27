@@ -402,6 +402,7 @@ import {
   lanesOf,
   NOT_SEARCHED_SETTING,
   ProjectScripts,
+  Shares,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
   timesAfter,
@@ -414,6 +415,7 @@ import {
   type RunResult,
   reportsFault,
   roomSaid,
+  sharesSaid,
   silenceWhile,
   testOptionsOf,
   uncollectedSaid,
@@ -42293,6 +42295,73 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     assert.equal(roomSaid(1, 1, 1, memory, 4), '', 'a run too small for a second lane was held by nothing');
     assert.equal(roomSaid(2, 1, 1, memory, 4), '', 'nor a windowed engine and the one following it');
     assert.equal(roomSaid(4, 4, 4, undefined, 4), '');
+
+    // A run whose third slot is held by an export for its first 121 s. Dealt at the start, that lane
+    // runs its third from 121 s on and the run ends as late as running the suites after the export;
+    // handed out a share at a time, the lanes started at once carry what the late one cannot.
+    const quickDeclared = new Map(quick.map((u) => [u.suite, u.cases]));
+    const starts = [0, 0, 121];
+    const start = 5;
+    const handed: Array<[number, boolean, string[]]> = [];
+    const shares = new Shares(quick, quickDeclared, starts.length);
+    const free = [...starts];
+    for (;;) {
+      const lane = free.indexOf(Math.min(...free));
+      const plan = shares.next(lane);
+      if (plan === null) {
+        break;
+      }
+      handed.push([lane, plan.windowed, plan.suites.map((s) => s.path)]);
+      free[lane] = (free[lane] ?? 0) + start + plan.cost;
+    }
+    assert.ok(shares.empty, 'nothing is left once next answers null');
+    assert.equal(shares.next(0), null, 'and every lane asking after that is told so');
+    const path = (name: string): string => `res://tests/${name}_test.gd`;
+    assert.deepEqual(
+      handed,
+      [
+        [0, true, [path('scene')]],
+        [1, false, [path('h0'), path('h4')]],
+        [0, false, [path('h1'), path('h7')]],
+        [2, false, [path('h2')]],
+        [0, false, [path('h3')]],
+        [2, false, [path('h5')]],
+        [1, false, [path('h6')]],
+        [2, false, [path('h8')]],
+      ],
+      'the windowed suite first and alone, then the slowest up to a third of what is left, shrinking as it runs out',
+    );
+    assert.deepEqual(
+      handed.flatMap(([, , paths]) => paths).sort(),
+      quick.map((u) => u.suite).sort(),
+      'every suite handed out once',
+    );
+    const staticEnd = Math.max(
+      ...starts.map((at, lane) =>
+        dealt(quick, quickDeclared, starts.length)
+          .filter((plan) => plan.lane === lane)
+          .reduce((end, plan) => end + start + plan.cost, at),
+      ),
+    );
+    const sharedEnd = Math.max(...free);
+    assert.ok(
+      sharedEnd < staticEnd - 40,
+      `shares end the run well before a deal made at the start: ${String(sharedEnd)} s against ${String(staticEnd)} s`,
+    );
+    // The floor: a share is an engine started, so a few quick suites left over go out together.
+    const crumbs = [8, 7, 6, 5, 4].map((cost, index) => unit(`c${String(index)}`, cost));
+    const crumbShares = new Shares(crumbs, new Map(crumbs.map((u) => [u.suite, u.cases])), 4);
+    assert.deepEqual(
+      [crumbShares.next(0), crumbShares.next(1), crumbShares.next(2)].map((plan) => plan?.suites.length ?? 0),
+      [5, 0, 0],
+      'thirty seconds of suites over four lanes is one engine, not four starting for seven seconds each',
+    );
+    assert.equal(
+      sharesSaid(2, 3),
+      '2 of the 3 slots this run uses were free as it began, so its engines are handed the suites a share at a time as each starts, and an engine starts as each slot comes free.',
+    );
+    assert.match(sharesSaid(1, 2), /^1 of the 2 slots this run uses was free as it began/);
+    assert.match(sharesSaid(0, 4), /^None of the 4 slots this run uses were free as it began/);
     let going = 0;
     let most = 0;
     const turned = await inTurns([30, 10, 20, 5], 2, async (wait, index) => {
@@ -43031,6 +43100,39 @@ const written = setInterval(() => {
   assert.ok(started !== undefined, `the platform says when the holder ${String(pid)} started`);
   writeFileSync(lock, JSON.stringify({ pid, started }));
   return holder;
+}
+
+/**
+ * Has a process of its own wait for the slot at [param lock] to be taken and given back, then take
+ * it for [param ms], as another run waiting on the machine's slots would. It looks every 2 ms, so it
+ * takes a slot given back before a take polling every 50 ms does; the platform's start for it is
+ * written to [param lock]`.start` before it looks, since its lock must name that start.
+ */
+async function slotTakenWhenFreed(lock: string, ms: number): Promise<ReturnType<typeof spawnHidden>> {
+  const start = `${lock}.start`;
+  const taker = spawnHidden(
+    process.execPath,
+    [
+      '-e',
+      `const fs = require('node:fs');
+let seen = false;
+const look = setInterval(() => {
+  if (!fs.existsSync(${JSON.stringify(start)})) return;
+  if (!seen) { seen = fs.existsSync(${JSON.stringify(lock)}); return; }
+  try {
+    fs.writeFileSync(${JSON.stringify(lock)}, JSON.stringify({ pid: process.pid, started: Number(fs.readFileSync(${JSON.stringify(start)}, 'utf8')) }), { flag: 'wx' });
+  } catch { return; }
+  clearInterval(look);
+  setTimeout(() => { fs.rmSync(${JSON.stringify(lock)}, { force: true }); }, ${String(ms)});
+}, 2);`,
+    ],
+    { stdio: 'ignore' },
+  );
+  const pid = taker.pid ?? 0;
+  const started = (await startTimesOf([pid])).get(pid);
+  assert.ok(started !== undefined, `the platform says when the taker ${String(pid)} started`);
+  writeFileSync(start, String(started));
+  return taker;
 }
 
 /**
@@ -44441,6 +44543,83 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       /^Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by a gate or another tool, and the engine starts when one is given back\.$/m,
       heldUp.said,
     );
+
+    // A run of two lanes meeting one of its two slots held elsewhere is handed out a share at a time.
+    // It needs room for two engines; a machine short of memory deals one lane, which has nothing to
+    // share, and the run line says why.
+    const timedAs = (seconds: number, suites: Record<string, readonly string[]>): void => {
+      writeFileSync(
+        join(state, 'suite-times.json'),
+        JSON.stringify(
+          Object.fromEntries(
+            Object.entries(suites).map(([path, cases]) => [
+              path,
+              { seconds, cases: Object.fromEntries(cases.map((name) => [name, seconds / cases.length])) },
+            ]),
+          ),
+        ),
+      );
+    };
+    writeTree(project, {
+      'tests/lane_a_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_holds() -> void:',
+        '\tvar marker := FileAccess.open("res://lane_marker.txt", FileAccess.WRITE)',
+        '\tmarker.store_string("a")',
+        '\tmarker.close()',
+        '\tawait get_tree().create_timer(20.0).timeout',
+        '\tDirAccess.remove_absolute(ProjectSettings.globalize_path("res://lane_marker.txt"))',
+        '\tassert_bool(true).is_true()',
+        '',
+      ].join('\n'),
+      // Passes only beside the first suite's engine, so only when the late slot ran it.
+      'tests/lane_b_test.gd':
+        'extends GdUnitTestSuite\n\n\nfunc test_meets_a() -> void:\n\tassert_bool(FileAccess.file_exists("res://lane_marker.txt")).is_true()\n',
+    });
+    const roomHeld = /asked for, since|at a time, since/;
+
+    // Everything in one share: the run ends without waiting on a slot it no longer needs, though the
+    // one its engine gives back goes to another run waiting, as one would on a busy machine.
+    timedAs(10, {
+      'res://tests/ok_test.gd': ['test_one', 'test_two'],
+      'res://tests/declared_test.gd': ['test_rows'],
+    });
+    const heldLock = join(slots, '0.lock');
+    const keeper = await slotHeldElsewhere(heldLock, 60_000);
+    const taker = await slotTakenWhenFreed(join(slots, '1.lock'), 60_000);
+    const oneShare = test('--slot-count', '2', 'tests/ok_test.gd', 'tests/declared_test.gd');
+    const stillKept = existsSync(heldLock);
+    keeper.kill();
+    taker.kill();
+    for (const left of [heldLock, join(slots, '1.lock'), join(slots, '1.lock.start')]) {
+      rmSync(left, { force: true });
+    }
+    assert.equal(oneShare.status, 0, oneShare.said);
+    assert.deepEqual(leftInSlots(slots), [], `the lane that stopped waiting left no mark: ${oneShare.said}`);
+    if (roomHeld.test(oneShare.said)) {
+      console.log(
+        `test command shares case not reached: the machine has room for one engine: ${oneShare.said}`,
+      );
+    } else {
+      assert.ok(oneShare.said.includes(sharesSaid(1, 2)), oneShare.said);
+      assert.match(oneShare.said, /^Passed: 4 cases in 2 suites across 1 engine, /m, oneShare.said);
+      assert.ok(stillKept, `the run ended while the other slot was still held: ${oneShare.said}`);
+
+      // Two shares: the second goes to the slot given back while the first runs.
+      timedAs(40, {
+        'res://tests/lane_a_test.gd': ['test_holds'],
+        'res://tests/lane_b_test.gd': ['test_meets_a'],
+      });
+      const late = await slotHeldElsewhere(heldLock, 8000);
+      const joined = test('--slot-count', '2', 'tests/lane_a_test.gd', 'tests/lane_b_test.gd');
+      late.kill();
+      assert.equal(joined.status, 0, joined.said);
+      assert.ok(joined.said.includes(sharesSaid(1, 2)), joined.said);
+      assert.match(joined.said, /^Passed: 2 cases in 2 suites across 2 engines, /m, joined.said);
+      assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
+    }
   } finally {
     sweep(project, slots, checkouts);
   }

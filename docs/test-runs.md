@@ -114,6 +114,16 @@ memory is the share the system itself counts as free, which includes the cache i
 Windows it is the smaller of the physical memory free and what the system can still commit, since
 an allocation fails at the commit limit however much physical memory is free.
 
+That deal holds only when every slot the run uses is free as it begins. When another run or tool
+holds some of them (a gate's export, say), the run says how many were free and hands the work out a
+share at a time instead. Each slot it holds starts an engine on a share, and an engine starts in
+each other slot as that slot comes free. An engine that ends is followed in its slot by one on the
+next share. The windowed suites go out first and whole. After them, a share is the slowest units
+that fit in what is left divided by the run's engines, and never less than 30 seconds while that
+much is left, since every share starts an engine. The shares shrink as the work runs out, so a slot
+freed partway through takes on part of what is left, rather than a part fixed when the run began.
+Once everything is handed out, the run stops waiting for slots.
+
 ## What fails a run
 
 - A case that failed, or that failed and then passed on a retry.

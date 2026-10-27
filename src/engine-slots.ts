@@ -218,12 +218,9 @@ export class EngineSlots {
     try {
       for (;;) {
         signal?.throwIfAborted();
-        for (let slot = 0; slot < this.count; slot += 1) {
-          const lock = join(this.directory, `${String(slot)}.lock`);
-          if (this.made(lock) || (await this.takenOver(lock))) {
-            this.held.add(lock);
-            return lock;
-          }
+        const lock = await this.takeFree();
+        if (lock !== null) {
+          return lock;
         }
         mark ??= this.waitMarked();
         const now = Date.now();
@@ -248,6 +245,19 @@ export class EngineSlots {
         removeWhole(mark);
       }
     }
+  }
+
+  /** Takes a slot that is free now and answers its lock's path, or null when every slot is held. */
+  async takeFree(): Promise<string | null> {
+    mkdirSync(this.directory, { recursive: true });
+    for (let slot = 0; slot < this.count; slot += 1) {
+      const lock = join(this.directory, `${String(slot)}.lock`);
+      if (this.made(lock) || (await this.takenOver(lock))) {
+        this.held.add(lock);
+        return lock;
+      }
+    }
+    return null;
   }
 
   /**
