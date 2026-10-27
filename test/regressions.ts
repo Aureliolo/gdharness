@@ -40587,6 +40587,16 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
         /Leaked instance: Object/,
         `verbose names the instance: ${printed(verbose)}`,
       );
+      assert.match(
+        text(get(verbose, 'note')),
+        /What the engine still held as it exited fails the run, as gdharness test judges it\. The engine named them: objects left alive: [^;.]*\b1 Object\b/,
+        `and the note counts it by class: ${JSON.stringify(verbose)}`,
+      );
+      assert.doesNotMatch(
+        text(get(plain, 'note')),
+        /The engine named them/,
+        'which a quiet engine never does',
+      );
 
       const refused = await run({ engineArgs: ['--script', 'res://leaky/leaky_test.gd'] });
       assert.equal(get(refused, 'tests'), undefined, 'a flag off the list starts nothing');
@@ -40640,7 +40650,7 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
       );
       assert.match(
         text(get(plain, 'note')),
-        /What the engine still held as it exited fails the run, as gdharness test judges it; engineArgs \["--verbose"\] names each instance and resource under engineEntries\./,
+        /What the engine still held as it exited fails the run, as gdharness test judges it; engineArgs \["--verbose"\] has the engine name what it held\./,
       );
       assert.doesNotMatch(
         text(get(plain, 'note')),

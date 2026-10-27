@@ -114,6 +114,7 @@ import {
 } from './editor-log.js';
 import {
   EXIT_LEAK,
+  heldAtExit,
   projectSelfTypedExports,
   selfTypedSentence,
   WALK_STOPPED_SENTENCE,
@@ -7705,6 +7706,10 @@ class GodotServer {
     // Listed all the same, and not counted: the engine's shutdown stopped before freeing them.
     const walkStopped = leakedAtExit.length > 0 && walkStoppedPartWay(run.log.all.map((entry) => entry.text));
     const countedLeaks = walkStopped ? [] : leakedAtExit;
+    // Named in a sentence, since engineEntries keeps the newest lines and a verbose engine prints
+    // one for every object it held: a game's leak was 1251 of them.
+    const heldNamed =
+      countedLeaks.length > 0 ? heldAtExit(run.log.all.map((entry) => entry.text)) : undefined;
     // A declared text matches the whole line, so one declaring the start of a message that ends in
     // a number reads as both never printed and undeclared, and nothing said the two were one line.
     const declaredNotPrinted = judgedErrors.neverPrinted.map((missing) => ({
@@ -7907,7 +7912,9 @@ class GodotServer {
           walkStopped ? WALK_STOPPED_SENTENCE : undefined,
           countedLeaks.length > 0
             ? [
-                'What the engine still held as it exited fails the run, as gdharness test judges it; engineArgs ["--verbose"] names each instance and resource under engineEntries.',
+                heldNamed === undefined
+                  ? 'What the engine still held as it exited fails the run, as gdharness test judges it; engineArgs ["--verbose"] has the engine name what it held.'
+                  : `What the engine still held as it exited fails the run, as gdharness test judges it. ${heldNamed}`,
                 selfTypedSentence(projectSelfTypedExports(project.value.path)),
               ]
                 .filter((part) => part !== undefined)
