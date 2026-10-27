@@ -51750,7 +51750,7 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
           get(unrun.answer, 'passed'),
           get(unrun.answer, 'verdict'),
         ],
-        [1, ['helper:test_fixture'], false, 'passed; not run: helper:test_fixture'],
+        [1, ['helper:test_fixture'], false, 'not run: helper:test_fixture'],
         unrun.text,
       );
       assert.match(
