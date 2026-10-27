@@ -530,15 +530,7 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
     return [];
   }
   const windowed = units.filter((unit) => unit.windowed);
-  const headless = units
-    .filter((unit) => !unit.windowed)
-    .sort(
-      (a, b) =>
-        b.cost - a.cost ||
-        a.suite.localeCompare(b.suite) ||
-        (a.cases[0] ?? '').localeCompare(b.cases[0] ?? '') ||
-        (a.row?.index ?? 0) - (b.row?.index ?? 0),
-    );
+  const headless = units.filter((unit) => !unit.windowed).sort(slowestFirst);
   // The windowed units stay together, so for the count they are one unit as slow as all of them.
   const together = windowed.reduce((sum, unit) => sum + unit.cost, 0);
   // A headless engine following them in their lane starts afresh.
@@ -565,6 +557,82 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
     ...(windowed.length > 0 ? [planOf(windowed, declared, true, 0, units)] : []),
     ...bins.flatMap((bin, lane) => (bin.length === 0 ? [] : [planOf(bin, declared, false, lane, units)])),
   ];
+}
+
+/** Slowest first, a tie in cost going to the suite first by path, then by case and row. */
+function slowestFirst(a: Unit, b: Unit): number {
+  return (
+    b.cost - a.cost ||
+    a.suite.localeCompare(b.suite) ||
+    (a.cases[0] ?? '').localeCompare(b.cases[0] ?? '') ||
+    (a.row?.index ?? 0) - (b.row?.index ?? 0)
+  );
+}
+
+/**
+ * The least work a share holds, while there is that much left: a share is an engine started, which
+ * costs about [constant ENGINE_START_SECONDS] before its first case.
+ */
+const SHARE_FLOOR_SECONDS = 6 * ENGINE_START_SECONDS;
+
+/**
+ * [param units] handed out a share at a time, to lanes that start at different moments.
+ *
+ * Dealt once, every lane is handed its part at the start, which is right when every lane starts then
+ * and leaves nothing for a lane whose slot comes free later. Measured on a gate whose export takes
+ * one of three slots for about 121 s: the engine starting once the export ends runs its third of the
+ * suites from there, and the run ends as late as running the suites after the export. Here each
+ * lane, as it starts or finishes an engine, is handed a share of what is left: the windowed units
+ * first and whole, then the slowest headless units up to [param lanes] parts of what is left, never
+ * less than [constant SHARE_FLOOR_SECONDS] while that much remains. The shares shrink as the work
+ * runs out, so the lanes end close together however late each began.
+ */
+export class Shares {
+  private windowed: readonly Unit[];
+  private headless: readonly Unit[];
+  private readonly declared: CasesBySuite;
+  private readonly all: readonly Unit[];
+  private readonly lanes: number;
+
+  constructor(units: readonly Unit[], declared: CasesBySuite, lanes: number) {
+    this.windowed = units.filter((unit) => unit.windowed);
+    this.headless = units.filter((unit) => !unit.windowed).sort(slowestFirst);
+    this.declared = declared;
+    this.all = units;
+    this.lanes = Math.max(1, lanes);
+  }
+
+  /** Whether every unit has been handed out. */
+  get empty(): boolean {
+    return this.windowed.length === 0 && this.headless.length === 0;
+  }
+
+  /** The next share, for an engine in [param lane], or null when nothing is left. */
+  next(lane: number): EnginePlan | null {
+    if (this.windowed.length > 0) {
+      const windowed = this.windowed;
+      this.windowed = [];
+      return planOf(windowed, this.declared, true, lane, this.all);
+    }
+    if (this.headless.length === 0) {
+      return null;
+    }
+    const left = this.headless.reduce((sum, unit) => sum + unit.cost, 0);
+    const target = Math.max(SHARE_FLOOR_SECONDS, left / this.lanes);
+    const share: Unit[] = [];
+    const rest: Unit[] = [];
+    let cost = 0;
+    for (const unit of this.headless) {
+      if (share.length === 0 || cost + unit.cost <= target) {
+        share.push(unit);
+        cost += unit.cost;
+      } else {
+        rest.push(unit);
+      }
+    }
+    this.headless = rest;
+    return planOf(share, this.declared, false, lane, this.all);
+  }
 }
 
 /** How many slots [param plans] take at once: one a lane. */

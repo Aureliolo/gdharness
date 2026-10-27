@@ -45,6 +45,9 @@ command line itself is wrong.
   once.
 - `--print-output`: print everything each engine printed, before the verdict, as for a benchmark
   written as a suite and run by hand. A gate never passes it.
+- `--verbose`: start every engine with Godot's `--verbose`, so a leak at exit is named: the verdict
+  counts the objects left alive by class and names the resources still in use, the project's own
+  before its addons'. Without it the engine prints only the two counts.
 - `--result FILE`: write the run's result to `FILE` as JSON, for a gate that acts on more than the
   exit code. It holds `passed`, `seconds`, `problems` (every problem the output lists, one sentence
   each, an engine's prefixed with `engine N:`), `suites` (each suite an engine closed, slowest first,
@@ -113,6 +116,16 @@ slow one, or every suite of a project's first run, is unlikely to cost it. A run
 memory is the share the system itself counts as free, which includes the cache it can give back. On
 Windows it is the smaller of the physical memory free and what the system can still commit, since
 an allocation fails at the commit limit however much physical memory is free.
+
+That deal holds only when every slot the run uses is free as it begins. When another run or tool
+holds some of them (a gate's export, say), the run says how many were free and hands the work out a
+share at a time instead. Each slot it holds starts an engine on a share, and an engine starts in
+each other slot as that slot comes free. An engine that ends is followed in its slot by one on the
+next share. The windowed suites go out first and whole. After them, a share is the slowest units
+that fit in what is left divided by the run's engines, and never less than 30 seconds while that
+much is left, since every share starts an engine. The shares shrink as the work runs out, so a slot
+freed partway through takes on part of what is left, rather than a part fixed when the run began.
+Once everything is handed out, the run stops waiting for slots.
 
 ## What fails a run
 
