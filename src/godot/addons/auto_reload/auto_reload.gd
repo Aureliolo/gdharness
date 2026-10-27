@@ -133,6 +133,21 @@ func _reload_script(path: String) -> void:
 
 func _reload_scene(path: String) -> void:
 	var edited_scene: Node = EditorInterface.get_edited_scene_root()
-	if edited_scene and edited_scene.scene_file_path == path:
-		print("[gdharness] Scene changed on disk, reloading: ", path)
-		EditorInterface.reload_scene_from_path(path)
+	if not edited_scene or edited_scene.scene_file_path != path:
+		return
+	# A reload from the file drops the edits the editor holds, without a prompt. gdharness refuses to
+	# write over them, so what is seen here is a write by somebody else or one the editor's tab has
+	# already taken in, made just before an edit inside the same poll, and neither is worth the edit.
+	if EditorInterface.get_unsaved_scenes().has(path):
+		push_warning(
+			(
+				(
+					"gdharness: %s changed on disk while the editor holds unsaved changes to it, so it "
+					+ "was not reloaded; saving it writes the editor's copy over the file"
+				)
+				% path
+			)
+		)
+		return
+	print("[gdharness] Scene changed on disk, reloading: ", path)
+	EditorInterface.reload_scene_from_path(path)

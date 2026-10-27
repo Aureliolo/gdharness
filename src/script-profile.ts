@@ -63,6 +63,13 @@ export interface ProfileTotals {
    * hold a frame or the totals themselves.
    */
   readonly dropped?: number;
+  /**
+   * The game's own numbers for the first and the last frame that arrived, its process frame count
+   * as each was sent, which say how far into the game the profiler came on and whether frames went
+   * missing between. Absent before a frame has arrived, and from a window of a profile.
+   */
+  readonly firstFrame?: number;
+  readonly lastFrame?: number;
 }
 
 /**
@@ -166,6 +173,8 @@ export class ProfileAggregate {
   private complete = false;
   private frames = 0;
   private lastFrameAt: number | null = null;
+  private firstFrame: number | null = null;
+  private lastFrame: number | null = null;
   private unreadable = 0;
   private cappedFrames = 0;
   private totalCapped = false;
@@ -201,6 +210,11 @@ export class ProfileAggregate {
         this.frames += 1;
         this.lastFrameAt = now;
         this.cappedFrames += carried >= this.frameFunctions ? 1 : 0;
+        const numbered = received.data[0];
+        if (typeof numbered === 'number') {
+          this.firstFrame ??= numbered;
+          this.lastFrame = numbered;
+        }
       }
     } else if (received.message === 'servers:profile_total') {
       // The engine's own count since the profiler started, so it replaces the frames' sum rather
@@ -276,6 +290,9 @@ export class ProfileAggregate {
       cappedFrames: this.cappedFrames,
       totalCapped: this.totalCapped,
       ...(this.dropped > 0 ? { dropped: this.dropped } : {}),
+      ...(this.firstFrame === null || this.lastFrame === null
+        ? {}
+        : { firstFrame: this.firstFrame, lastFrame: this.lastFrame }),
     };
   }
 }
@@ -478,7 +495,7 @@ export function totalsSince(
   shrunk += Object.keys(mark.functions).filter(
     (signature) => now.functions[signature] === undefined && (mark.functions[signature]?.calls ?? 0) > 0,
   ).length;
-  const { dropped: droppedInAll, ...kept } = now;
+  const { dropped: droppedInAll, firstFrame: _first, lastFrame: _last, ...kept } = now;
   const dropped = (droppedInAll ?? 0) - (mark.dropped ?? 0);
   return {
     totals: {

@@ -5226,6 +5226,59 @@ async function testAutoReloadMissesNoWrite({ project, printed }: Editor): Promis
 }
 
 /**
+ * auto_reload leaves a scene the editor holds unsaved changes to, and says so.
+ *
+ * A reload from the file drops the editor's edits without a prompt. A tool's write, taken in by the
+ * scene's tab, then an edit in the editor before auto_reload's next poll, left that poll seeing the
+ * write after the edit, and the reload threw the edit away, so the save that followed wrote the file
+ * without it, on a macOS runner. Written here from outside once the edit is made, which is the state
+ * that poll met.
+ */
+async function testAutoReloadKeepsUnsavedEdits({ call, project, printed }: Editor): Promise<void> {
+  const path = 'res://watched/watched.tscn';
+  const file = join(project, 'watched', 'watched.tscn');
+  const before = readFileSync(file, 'utf8');
+  const count = (text: string): number => printed().split(text).length - 1;
+  const held = `${path} changed on disk while the editor holds unsaved changes to it`;
+  const reloaded = `reloading: ${path}`;
+  const heldBefore = count(held);
+  const reloadedBefore = count(reloaded);
+  try {
+    const edited = await hook(project, { op: 'edit', path, node: 'Unsaved' });
+    assert.ok(
+      asArray(get(edited, 'unsaved')).includes(path),
+      `the edit is unsaved: ${JSON.stringify(edited)}`,
+    );
+    writeFileSync(file, `${before}\n[node name="Outside" type="Node" parent="."]\n`);
+    for (let waited = 0; count(held) === heldBefore && waited < 5000; waited += 100) {
+      await delay(100);
+    }
+    assert.equal(count(held), heldBefore + 1, `the change is said:\n${printed().slice(-2000)}`);
+    assert.equal(count(reloaded), reloadedBefore, 'and the scene is not reloaded');
+    const kept = await hook(project, { op: 'report', path });
+    assert.deepEqual(get(kept, 'children'), ['Unsaved'], `the edit is kept: ${JSON.stringify(kept)}`);
+    assert.ok(asArray(get(kept, 'unsaved')).includes(path), `and still unsaved: ${JSON.stringify(kept)}`);
+
+    // Once saved, a write is reloaded again. This scene alone, since other cases leave scenes of
+    // their own unsaved, and in front, the only tab auto_reload reloads.
+    await call('scene_create', { projectPath: project, scenePath: path, op: 'save' });
+    await hook(project, { op: 'open', path });
+    writeFileSync(file, before);
+    let back: unknown = null;
+    for (let waited = 0; waited < 5000; waited += 250) {
+      back = await hook(project, { op: 'report', path });
+      if (asArray(get(back, 'children')).length === 0) {
+        break;
+      }
+      await delay(250);
+    }
+    assert.deepEqual(get(back, 'children'), [], `a saved scene takes the file in: ${JSON.stringify(back)}`);
+  } finally {
+    writeFileSync(file, before);
+  }
+}
+
+/**
  * A rename against a real editor and its language server.
  *
  * The member half holds what Godot 4.7.2 was measured to answer: the references of a method's own
@@ -7537,6 +7590,7 @@ async function main(): Promise<void> {
     ['testAMemberRenameWaitsForTheClassesItTypesBy', testAMemberRenameWaitsForTheClassesItTypesBy],
     ['testARenameFollowsTheEngine', testARenameFollowsTheEngine],
     ['testAutoReloadMissesNoWrite', testAutoReloadMissesNoWrite],
+    ['testAutoReloadKeepsUnsavedEdits', testAutoReloadKeepsUnsavedEdits],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],
