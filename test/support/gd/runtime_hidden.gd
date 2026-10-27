@@ -40,6 +40,7 @@ func _everything() -> void:
 	await _check_a_tab_under_a_hidden_hall()
 	await _check_a_screen_drawn_over_a_hidden_one()
 	await _check_a_button_on_a_hidden_layer()
+	await _check_buttons_offered_for_words_nobody_shows()
 	await _check_a_dropdown_under_a_hidden_panel()
 	await _check_a_node_in_a_hidden_world()
 	await _check_a_card_that_turned_the_pointer_off()
@@ -243,6 +244,35 @@ func _check_a_button_on_a_hidden_layer() -> void:
 		_fail("and is pressed once the layer is shown: %s" % JSON.stringify(on_shown_layer))
 	_beside.queue_free()
 	layer.queue_free()
+	await process_frame
+
+
+## Words only a hidden control says, with buttons on screen: the refusal offers the ones a player
+## could press instead, and not one that is disabled or has something drawn over it. A click for
+## words nothing on screen said named nothing, though Play, Options and Quit were all there.
+func _check_buttons_offered_for_words_nobody_shows() -> void:
+	var panel: Control = _control("Panel", root)
+	panel.visible = false
+	_button("Back", Vector2(2, 2), panel).text = "Back"
+	# One a quarter of the viewport, its words clipped so they do not widen it over the next.
+	var corners: Array[Vector2] = [Vector2(0, 0), Vector2(32, 0), Vector2(0, 32), Vector2(32, 32)]
+	var named: Array[String] = ["Play", "Quit", "Later", "Buried"]
+	for at: int in named.size():
+		var made: Button = _button(named[at], corners[at], root)
+		made.text = named[at]
+		made.clip_text = true
+		made.size = Vector2(30, 30)
+	(root.get_node("Later") as Button).disabled = true
+	var lid: Control = _control("Lid", root)
+	lid.position = corners[3]
+	lid.size = Vector2(32, 32)
+	await process_frame
+	var refused: Dictionary = await input.click({"says": "Back"})
+	var offered: String = str(refused.get("message", "")).get_slice("the buttons on screen say ", 1)
+	if not _says(refused, "1 hidden control says it") or offered != '"Play", "Quit"':
+		_fail("words only a hidden control says offer what is on screen: %s" % JSON.stringify(refused))
+	for gone: String in ["Panel", "Play", "Quit", "Later", "Buried", "Lid"]:
+		root.get_node(gone).queue_free()
 	await process_frame
 
 

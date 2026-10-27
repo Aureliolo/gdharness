@@ -173,11 +173,12 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 
 	var under: String = "" if root_path == "/root" else " under %s" % root_path
 	if targets.is_empty():
+		var from: Node = reached["node"]
 		return {
 			"type": "error",
 			"message":
 			(
-				'no control on screen%s says "%s", so nothing was clicked%s%s%s%s'
+				'no control on screen%s says "%s", so nothing was clicked%s%s%s%s%s'
 				% [
 					under,
 					wanted,
@@ -185,6 +186,7 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 					_outside_note(outside, root),
 					_covered_note(covered, cover),
 					_open_menu_note(root, wanted),
+					_offered_note(from, drawn, areas),
 				]
 			)
 		}
@@ -437,6 +439,18 @@ static func _passed_over(best: int, others: Array[int], one: bool) -> String:
 
 
 ## What to add to a refusal that found nothing on screen, when words matched controls out of sight.
+static func _offered_note(from: Node, drawn: Array[Node], areas: Array[Rect2]) -> String:
+	var open: Callable = func(button: Control) -> bool:
+		var aim: Vector2 = button.size * 0.5
+		return (
+			GdhQueries.shown(button)
+			and not _off_screen(button, aim)
+			and _cover_of(button, drawn, areas, aim) == null
+		)
+	var words: String = GdhWords.pressable_words(from, open, LISTED_CANDIDATES)
+	return "" if words.is_empty() else "; the buttons on screen say %s" % words
+
+
 static func _hidden_note(hidden: int) -> String:
 	if hidden == 0:
 		return ""
