@@ -19,6 +19,15 @@ const GdhLog = preload("logger.gd")
 ## Where the engine raises a script's compile errors from.
 const RELOAD: String = "GDScript::reload"
 
+## What the engine puts on the end of a warning it raised as an error. Kept in step with
+## `RAISED_WARNING` in src/server.ts.
+const RAISED: String = " (Warning treated as error.)"
+
+## Where the project's warning levels are, each 0 to ignore, 1 to warn and 2 to raise as an error.
+const WARNING_LEVELS: String = "debug/gdscript/warnings/"
+const WARN: int = 1
+const ERROR_LEVEL: int = 2
+
 var _log: GdhLog
 
 
@@ -112,3 +121,52 @@ func check_scripts(params: Dictionary) -> Dictionary:
 		break
 	OS.remove_logger(caught)
 	return {"checked": checked, "failed": failed, "scripts": scripts}
+
+
+## Raises every warning the project sets to warn so that the engine reports it as an error, which is
+## the one way it reports a warning outside an editor or a debugger. Not saved. The analyser reads
+## the levels again only once the settings change has been flushed, at the next frame, so this is
+## called in `_init` and the scripts are loaded after it; the project's autoloads, compiled before
+## that frame, compile under the project's own levels. A warning set to ignore stays ignored, and
+## @warning_ignore and the directory rules hold as they do in the editor, since the analyser applies
+## them itself.
+static func raise_warnings() -> void:
+	for property: Dictionary in ProjectSettings.get_property_list():
+		var setting: String = str(property.get("name", ""))
+		if (
+			not setting.begins_with(WARNING_LEVELS)
+			or GdhRead.as_int(property.get("type", TYPE_NIL)) != TYPE_INT
+		):
+			continue
+		if GdhRead.as_int(ProjectSettings.get_setting(setting)) == WARN:
+			ProjectSettings.set_setting(setting, ERROR_LEVEL)
+
+
+## The warnings of each script in [code]paths[/code], under the levels [method raise_warnings] left:
+## [code]scripts[/code] holds each that has any, with its warnings' lines and the engine's messages
+## as raised. The analyser runs before anything is compiled, so a script whose dependency failed on a
+## warning still reports its own, and loading on past a failure loses nothing; only what is raised at
+## the script's own path is its, since a dependency is read on its own entry as well.
+func check_warnings(params: Dictionary) -> Dictionary:
+	var asked: Array = params.get("paths", [])
+	var caught: GdhCaught = GdhCaught.new()
+	OS.add_logger(caught)
+	var checked: Array[String] = []
+	var scripts: Array[Dictionary] = []
+	for entry: Variant in asked:
+		var path: String = str(entry)
+		checked.append(path)
+		caught.raised.clear()
+		var _loaded: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
+		var warnings: Array[Dictionary] = []
+		for error: Dictionary in caught.raised:
+			var message: String = str(error["message"])
+			if str(error["path"]) != path or not message.ends_with(RAISED):
+				continue
+			var found: Dictionary = {"line": GdhRead.as_int(error["line"]), "message": message}
+			if not found in warnings:
+				warnings.append(found)
+		if not warnings.is_empty():
+			scripts.append({"path": path, "warnings": warnings})
+	OS.remove_logger(caught)
+	return {"checked": checked, "scripts": scripts}

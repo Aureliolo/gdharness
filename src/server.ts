@@ -3772,8 +3772,21 @@ function engineChecked(why: string): OperationParams {
   return {
     checkedBy: 'engine',
     languageServer: why,
-    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, but stops reading a script at its first syntax error, so an error after one shows once it is fixed. It reports no warnings, which the engine tells only an editor: warnings is null rather than 0. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both. Until then clean says only that every script compiles.",
+    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, but stops reading a script at its first syntax error, so an error after one shows once it is fixed. A second engine reports the warnings, at the levels the project sets, by raising each warning set to warn as an error for that run only, since the engine tells a warning as one only to an editor; each comes at its line without a column, and warnings is null when that engine could not answer. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both with their columns.",
   };
+}
+
+/**
+ * What the engine puts around a warning it raised as an error. Kept in step with `RAISED` in
+ * src/godot/operations/script_check.gd.
+ */
+const RAISED_WARNING = ' (Warning treated as error.)';
+const PARSE_ERROR = 'Parse Error: ';
+
+/** [param raised], a warning the engine raised as an error, in the words the editor gives it. */
+function asWarning(raised: string): string {
+  const bare = raised.endsWith(RAISED_WARNING) ? raised.slice(0, -RAISED_WARNING.length) : raised;
+  return bare.startsWith(PARSE_ERROR) ? bare.slice(PARSE_ERROR.length) : bare;
 }
 
 /** A diagnostic naming only the member of another class it could not resolve. */
@@ -8171,6 +8184,8 @@ class GodotServer {
     const nothingReported: string[] = [];
     let errors = 0;
     let warnings = 0;
+    // The engine's count of the scripts it checked, null when its warnings could not be read.
+    let engineWarned: number | null = 0;
     let unread = 0;
     let byEngine: string | null = null;
     // How many the language server answered before it stopped answering, if it did, so a check
@@ -8198,6 +8213,10 @@ class GodotServer {
         }
         for (const answer of checked.answers) {
           errors += Number(answer['errors']);
+          engineWarned =
+            answer['warnings'] === null || engineWarned === null
+              ? null
+              : engineWarned + Number(answer['warnings']);
           if (readArray(answer, 'diagnostics')?.length === 0) {
             nothingReported.push(String(answer['scriptPath']));
           } else {
@@ -8229,8 +8248,7 @@ class GodotServer {
       clean: errors === 0 && unread === 0,
       scriptsChecked: scripts.value.length,
       errors,
-      // Unknown once any script was compiled by the engine, which reports no warnings.
-      warnings: byEngine === null ? warnings : null,
+      warnings: engineWarned === null ? null : warnings + engineWarned,
       ...(unread > 0 ? { scriptsNotRead: unread } : {}),
       scripts: reported,
       nothingReported,
@@ -8291,13 +8309,39 @@ class GodotServer {
   }
 
   /**
+   * The warnings of each of [param paths], res:// paths, by a headless engine that raises every
+   * warning the project sets to warn as an error, which is how the engine reports one outside an
+   * editor: each with its line and the engine's message as raised, by path. Null when the engine
+   * could not answer, which leaves the warnings unknown rather than none.
+   */
+  private async engineWarnings(
+    projectPath: string,
+    paths: readonly string[],
+  ): Promise<Map<string, { line: number; message: string }[]> | null> {
+    const ran = await this.operation('check_warnings', { paths: [...paths] }, projectPath);
+    if (!ran.ok) {
+      this.logDebug(`check_warnings did not answer: ${ran.message}`);
+      return null;
+    }
+    return new Map(
+      (readArray(ran.payload, 'scripts') ?? []).map((entry) => [
+        String(asParams(entry)['path']),
+        (readArray(asParams(entry), 'warnings') ?? []).map((warning) => ({
+          line: Number(asParams(warning)['line']),
+          message: String(asParams(warning)['message']),
+        })),
+      ]),
+    );
+  }
+
+  /**
    * [param scripts], paths inside the project, compiled by headless engines and answered each in
    * the shape the language server's diagnostics are, for a project whose editor's language server
    * cannot answer. Without an editor open the tool answered nothing at all, while the engine the
    * other headless tools start reports every error that stops a script compiling, at its line, up
    * to the first syntax error in each.
-   * Warnings are left as null rather than 0: the engine reports them only to an editor or a debugger,
-   * so none counted is not none found. [param why] is what the language server answered, which a
+   * Warnings come from a second engine raising them as errors, and are null when it could not
+   * answer, since none counted is then not none found. [param why] is what the language server answered, which a
    * refusal gives first, since it is the reason the engine was asked at all.
    */
   private async engineDiagnostics(
@@ -8325,6 +8369,7 @@ class GodotServer {
       ]),
     );
     const errorsOf = scripts.map((_, at) => readArray(failures.get(named[at] ?? '') ?? {}, 'errors') ?? []);
+    const warned = await this.engineWarnings(projectPath, named);
     const uncachedPer = uncachedFor(
       projectPath,
       errorsOf.map((errors) => errors.map((entry) => String(asParams(entry)['message']))),
@@ -8332,18 +8377,27 @@ class GodotServer {
     return {
       answers: scripts.map((scriptPath, at) => {
         const failure = failures.get(named[at] ?? '');
-        const diagnostics = (errorsOf[at] ?? []).map((entry) => {
+        const errors = (errorsOf[at] ?? []).map((entry) => {
           const { line, message } = asParams(entry);
           // Line 0 is the engine's for the whole script, a dependency that failed to compile.
           return { severity: 'error', message, ...(typeof line === 'number' && line > 0 ? { line } : {}) };
         });
+        // A warning the project already raises as an error was reported as one by the compile.
+        const raised = new Set(errors.map(({ message, line }) => `${line ?? 0}:${String(message)}`));
+        const warnings =
+          warned === null
+            ? []
+            : (warned.get(named[at] ?? '') ?? [])
+                .filter(({ line, message }) => !raised.has(`${line}:${message}`))
+                .map(({ line, message }) => ({ severity: 'warning', message: asWarning(message), line }));
+        const diagnostics = [...errors, ...warnings].sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
         const dependencies = readArray(failure ?? {}, 'dependencies_with_errors');
         const uncached = uncachedPer[at] ?? [];
         return {
           scriptPath,
-          clean: diagnostics.length === 0,
-          errors: diagnostics.length,
-          warnings: null,
+          clean: errors.length === 0,
+          errors: errors.length,
+          warnings: warned === null ? null : warnings.length,
           diagnostics,
           ...(dependencies === undefined ? {} : { dependenciesWithErrors: dependencies }),
           ...(uncached.length === 0

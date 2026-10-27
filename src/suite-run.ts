@@ -75,6 +75,7 @@ import {
   Shares,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
+  splitPastFor,
   TEST_DIRECTORIES,
   timesAfter,
   type Unit,
@@ -524,7 +525,6 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       }
     }
     const times = readTimes(timesFile);
-    const units = unitsOf(suites, times);
     const memory = await memoryAvailable();
     if (memory.unread !== undefined) {
       console.log(
@@ -546,14 +546,22 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         'macOS offers no way to hold a process to some processors, so --cores holds only the number of engines here.',
       );
     }
+    const splitPast = splitPastFor(suites, times, room.engines);
+    const units = unitsOf(suites, times, splitPast);
+    const past =
+      splitPast > SPLIT_PAST_SECONDS
+        ? `an engine's share of this run (${String(Math.round(splitPast))} s)`
+        : `${String(SPLIT_PAST_SECONDS)} s`;
     const plans =
       options.order === null
         ? dealt(units, declared, room.engines)
         : [inOneEngine(ordered(units, options.order), declared)];
     const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
+    // Cut for the engines asked: held to fewer, the share grows and keeps whole what they would split.
+    const asked = unitsOf(suites, times, splitPastFor(suites, times, options.engines));
     const how =
       options.order === null
-        ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(units, declared, options.engines)), room.held, options.engines)}`
+        ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(asked, declared, options.engines)), room.held, options.engines)}`
         : options.order === 'reversed'
           ? ', in reverse order of path'
           : `, shuffled by ${String(options.order)}`;
@@ -572,7 +580,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     );
     if (plans.length > 1 && split.length > 0) {
       console.log(
-        `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(split)}.`,
+        `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${past} last time: ${named(split)}.`,
       );
     }
     const byRows = [
@@ -582,7 +590,20 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     ];
     if (plans.length > 1 && byRows.length > 0) {
       console.log(
-        `Dealt out row by row, since ${byRows.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(byRows)}.`,
+        `Dealt out row by row, since ${byRows.length === 1 ? 'it' : 'each'} took more than ${past} last time: ${named(byRows)}.`,
+      );
+    }
+    // Said beside the deal, so a suite past the split in one engine reads as asked for, not missed.
+    const keptWhole = units.flatMap((unit) =>
+      unit.cost > splitPast && !unit.windowed && suites.some((s) => s.path === unit.suite && s.together)
+        ? [unit.suite]
+        : [],
+    );
+    // By the engines there was room for rather than those used: kept whole, it may need only one.
+    if (options.order === null && room.engines > 1 && keptWhole.length > 0) {
+      const one = keptWhole.length === 1;
+      console.log(
+        `Kept whole in one engine, since ${one ? 'it declares' : 'each declares'} GDHARNESS_TOGETHER: ${named(keptWhole)}.`,
       );
     }
     const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
