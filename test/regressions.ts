@@ -46082,9 +46082,9 @@ async function testAnEngineWritesItsLogThroughAPipeOnWindows(): Promise<void> {
     // whose detached child inherits the pipe, prints after its parent has exited, and then holds the
     // pipe open far longer than the drain waits.
     const linger = [
-      "const { spawn } = require('node:child_process');",
-      "const child = spawn(process.execPath, ['-e', 'setTimeout(() => { console.log(\"the late line\"); setTimeout(() => {}, 30000); }, 1500)'],",
-      "  { stdio: ['ignore', 'inherit', 'inherit'], detached: true, windowsHide: true });",
+      HIDDEN_SPAWN_PRELUDE,
+      "const child = spawnHidden(process.execPath, ['-e', 'setTimeout(() => { console.log(\"the late line\"); setTimeout(() => {}, 30000); }, 1500)'],",
+      "  { stdio: ['ignore', 'inherit', 'inherit'], detached: true });",
       "console.log('lingering ' + child.pid);",
       'child.unref();',
     ].join('\n');
