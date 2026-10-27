@@ -393,7 +393,6 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     );
   }
   plan = mentionIgnored(plan, ignoredTexts(projectPath), symbol, moveTo === null ? [] : [declaringPath]);
-  const left = leftAloneReport(plan.mentions);
   const rewrites = rewritesOf(
     plan,
     texts,
@@ -401,6 +400,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       ? null
       : { from: declaringPath, to: moveTo, absoluteTo: request.newScriptPath },
   );
+  const left = leftAloneReport(asWritten(plan.mentions, rewrites));
   const graph = new ClassGraph(scripts, declared);
   const rank = (path: string): number =>
     (declaringFiles.includes(path) ? 0 : 1000) + graph.ancestors(`${path}#`).length;
@@ -570,6 +570,19 @@ export function changedReport(
           text: (lines[line] ?? '').replace(/\r$/, '').trim(),
         })),
     };
+  });
+}
+
+/**
+ * Each mention quoted as its line reads once the rewrites are written. A line holding an edit and a
+ * mention, such as `var bag: Inventory = $Inventory`, was otherwise quoted under changed as it reads
+ * after and under leftAlone as it read before, as if the two were different lines.
+ */
+export function asWritten(mentions: readonly Mention[], rewrites: readonly Rewrite[]): Mention[] {
+  const after = new Map(rewrites.map((rewrite) => [rewrite.path, rewrite.after.split('\n')]));
+  return mentions.map((mention) => {
+    const line = mention.line < 1 ? undefined : after.get(mention.file)?.[mention.line - 1];
+    return line === undefined ? mention : { ...mention, text: line.replace(/\r$/, '').trim() };
   });
 }
 
