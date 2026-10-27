@@ -45489,6 +45489,29 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
     assert.doesNotMatch(everything.said, /are not run/, 'without the flag, every suite runs');
     assert.doesNotMatch(everything.said, /Dealt out case by case/, 'nothing took long enough to split');
+    // The same result is kept beside the suite times, with the deal it printed and when each engine
+    // started, so a passing run in a gate that keeps none of its output can be read afterwards.
+    const lastRunFile = join(state, 'last-run.json');
+    assert.deepEqual(
+      JSON.parse(readFileSync(lastRunFile, 'utf8')),
+      passedResult,
+      'the last run is kept as written',
+    );
+    const dealtLine = /^\d+ test functions in 2 suites over \d+ engines?.*\.$/m.exec(everything.said)?.[0];
+    assert.deepEqual(passedResult.dealing, [dealtLine], everything.said);
+    assert.ok(
+      passedResult.enginesAsked >= 1 &&
+        passedResult.slotsFree === new Set(passedResult.engines.map((one) => one.lane)).size &&
+        passedResult.engines.every(
+          (one) => one.startedAfter > 0 && one.startedAfter + one.seconds <= passedResult.seconds,
+        ),
+      `each engine says its lane and when it started, inside the run: ${JSON.stringify(passedResult)}`,
+    );
+    assert.deepEqual(
+      [...new Set(passedResult.engines.flatMap((one) => one.suites))].sort(),
+      ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
+      'and the suites each was handed',
+    );
 
     // A benchmark written as a suite reports by printing, which a passing run otherwise throws away.
     writeTree(project, {
@@ -45497,6 +45520,11 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     });
     const quiet = test('tests/says_test.gd');
     assert.equal(quiet.status, 0, quiet.said);
+    assert.deepEqual(
+      (JSON.parse(readFileSync(lastRunFile, 'utf8')) as RunResult).suites.map((suite) => suite.path),
+      ['res://tests/says_test.gd'],
+      'a run given no --result keeps its result there too',
+    );
     assert.match(quiet.said, /^Passed: 1 case in 1 suite across 1 engine, /m, quiet.said);
     assert.ok(!quiet.said.includes('frames per second: 4f2a'), quiet.said);
     // The failed runs above keep their logs, so what this one leaves is read against them.
