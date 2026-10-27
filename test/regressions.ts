@@ -59922,8 +59922,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       [0.25, 'linear'],
       JSON.stringify(shorter),
     );
-    // Held as a 32-bit float, so 0.1 comes back as 0.100000001490116.
-    assert.ok(Math.abs(asNumber(get(shorter, 'step')) - 0.1) < 1e-6, 'and the step it was made with stays');
+    assert.equal(get(shorter, 'step'), 0.1, 'and the step it was made with stays, as it was written');
     assert.equal(
       get(shorter, 'pastLength'),
       'spin is 0.25 s long, and these keys are past its end, where they never play: Body:rotation at 0.5 s, Body:rotation at 2 s. They are kept; scene_animation set with a longer length plays them.',
@@ -59943,6 +59942,33 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
         refusal,
       );
     }
+    // An animation keeps its length and step as 32-bit floats, as it keeps key times, so each is
+    // answered as the decimal it was written as rather than the nearest double to the float:
+    // neither 0.7 nor 0.3 is one.
+    const beat = await written({
+      op: 'create',
+      playerNodePath: 'Player',
+      animationName: 'beat',
+      length: 0.7,
+    });
+    assert.equal(get(beat, 'length'), 0.7, JSON.stringify(beat));
+    const stepped = await written({ op: 'set', playerNodePath: 'Player', animationName: 'beat', step: 0.3 });
+    assert.deepEqual([get(stepped, 'length'), get(stepped, 'step')], [0.7, 0.3], JSON.stringify(stepped));
+    const beatRead = parseTextContent(
+      await call({ op: 'read', playerNodePath: 'Player', animationName: 'beat' }),
+    );
+    assert.deepEqual([get(beatRead, 'length'), get(beatRead, 'step')], [0.7, 0.3], JSON.stringify(beatRead));
+    const listed = asArray(
+      get(parseTextContent(await call({ op: 'read', playerNodePath: 'Player' })), 'animations'),
+    );
+    assert.deepEqual(
+      listed
+        .filter((entry) => get(entry, 'animationName') === 'beat')
+        .map((entry) => [get(entry, 'length'), get(entry, 'step')]),
+      [[0.7, 0.3]],
+      JSON.stringify(listed),
+    );
+    await written({ op: 'remove', playerNodePath: 'Player', animationName: 'beat' });
 
     // A rename takes the player's autoplay and the state that plays it along: a state naming an
     // animation the player lacks plays nothing.
