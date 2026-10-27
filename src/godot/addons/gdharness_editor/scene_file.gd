@@ -630,11 +630,12 @@ func write(check: Callable = Callable()) -> Dictionary:
 	}
 
 
-## Each property [param state] stores differently from the file, on a node the file held and the call
-## did not ask to change, as {node, property, was, saved}: was left out where the file did not set it,
-## saved where the write does not. The engine writes a node as it holds it once the file has loaded,
-## and one property can set others as it loads, as anchors_preset gives a centred Control both grow
-## directions, so a file not written by the editor gains lines on nodes nobody named.
+## Each property [param state] stores differently from the file, on a node the file held, that the
+## call neither asked for nor changed, as {node, property, was, saved}: was left out where the file did
+## not set it, saved where the write does not. The engine writes a node as it holds it once the file
+## has loaded, and one property can set others as it loads, as anchors_preset gives a centred Control
+## both grow directions, so a file not written by the editor gains lines on any node, the one a set
+## names among them. What the call's own change moved on that node is its answer's alsoChanged.
 func _also_saved(state: SceneState) -> Array[Dictionary]:
 	var noted: Array[Dictionary] = []
 	var values: GdhSerialisation = GdhSerialisation.new()
@@ -643,14 +644,19 @@ func _also_saved(state: SceneState) -> Array[Dictionary]:
 		if node == null:
 			continue
 		var id: int = node.get_instance_id()
-		if _asked.has(id) or not _filed.has(id):
+		if not _filed.has(id):
 			continue
+		# What the call set on it, and what the engine moved as it did, which the answer gives as
+		# alsoChanged.
+		var on: Dictionary = _asked.get(id, {})
 		var filed: Dictionary = _filed[id]
 		var stored: Dictionary = _stored_at(state, index)
 		var names: Dictionary = filed.duplicate()
 		names.merge(stored)
 		for key: Variant in names:
 			var name: String = str(key)
+			if on.has(name):
+				continue
 			var held: bool = filed.has(name)
 			if held == stored.has(name) and (not held or GdhSame.same(stored[name], filed[name])):
 				continue

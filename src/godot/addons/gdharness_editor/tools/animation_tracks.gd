@@ -306,6 +306,10 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 	var property: String = str(track.get("property", ""))
 	var shape: Array = [track_type, node_path, property]
 	var method: String = str(track.get("method", "")) if track_type == "method" else ""
+	var read_times: Variant = _times_of(args.get("times"))
+	if read_times is String:
+		return {"ok": false, "error": read_times}
+	var times: Array = read_times
 
 	var found: Array = _animation_at(scene_path, player_node_path, animation_name)
 	if found[1] == null:
@@ -345,6 +349,12 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 				% [animation_name, node_path, method, ", ".join(_methods_called(anim, matching))]
 			)
 		)
+	if not times.is_empty():
+		var timed: Array = _keys_at(anim, calling, times)
+		if timed[1] != "":
+			var on: String = node_path if property.is_empty() else "%s:%s" % [node_path, property]
+			return scene.refuse("%s's %s track on %s %s" % [animation_name, track_type, on, timed[1]])
+		calling = timed[0]
 	var keys: int = 0
 	var tracks_removed: int = 0
 	calling.reverse()
@@ -402,6 +412,53 @@ static func _keys_calling(anim: Animation, matching: Array[int], method: String)
 			if str(anim.method_track_get_name(index, key)) == method:
 				calling.append([index, key])
 	return calling
+
+
+## The key times [param given] names, as floats, empty when it is null, or the String refusing it.
+static func _times_of(given: Variant) -> Variant:
+	var times: Array = []
+	if given == null:
+		return times
+	if not given is Array:
+		return "times is a list of the key times to remove, in seconds"
+	var listed: Array = given
+	if listed.is_empty():
+		return "times is a list of the key times to remove, in seconds"
+	for time: Variant in listed:
+		if not (time is float or time is int):
+			return "times holds %s, which is not a number of seconds" % str(time)
+		times.append(GdhRead.as_float(time))
+	return times
+
+
+## Of the keys [param calling] names, as [method _keys_calling] answers them, the ones at
+## [param times], as [[[track, key]...], ""], or with the second the words refusing a time none is at.
+## Removing a key took removing its whole track, so moving one key in time rewrote every other.
+static func _keys_at(anim: Animation, calling: Array, times: Array) -> Array:
+	var at: Array = []
+	var held: PackedStringArray = []
+	var missed: Array = times.duplicate()
+	for pair: Array in calling:
+		var index: int = pair[0]
+		for key: int in anim.track_get_key_count(index):
+			if pair[1] >= 0 and key != pair[1]:
+				continue
+			var time: float = anim.track_get_key_time(index, key)
+			var _listed: bool = held.append(str(GdhAnimationReads.key_time(time)))
+			for given: float in times:
+				if GdhAnimationReads.same_time(time, given):
+					at.append([index, key])
+					missed.erase(given)
+					break
+	if missed.is_empty():
+		return [at, ""]
+	var named: PackedStringArray = []
+	for given: float in missed:
+		var _named: bool = named.append(str(given))
+	return [
+		at,
+		"has no key at %s s; its keys are at %s s. Nothing was removed." % [", ".join(named), ", ".join(held)]
+	]
 
 
 ## The methods the keys of the tracks [param matching] call, each once.

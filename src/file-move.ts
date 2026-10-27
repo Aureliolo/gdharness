@@ -33,6 +33,7 @@ import {
   scriptsOf,
 } from './rename.js';
 import {
+  asWritten,
   changedReport,
   type LeftAloneDetail,
   leftAloneReport,
@@ -266,14 +267,14 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     }
   }
   const afterwards = (path: string): string => moves.get(path) ?? path;
+  const rewrites = rewritesOf(plan, texts, null);
   // Each file named where a caller finds it once the move is made, as under changed.
-  const mentions = [...plan.mentions, ...binaries].map((mention) => ({
+  const mentions = asWritten([...plan.mentions, ...binaries], rewrites).map((mention) => ({
     ...mention,
     file: afterwards(mention.file),
   }));
 
   const left = leftAloneReport(mentions);
-  const rewrites = rewritesOf(plan, texts, null);
   const absoluteOf = (path: string): string => join(projectPath, path.slice('res://'.length));
   const rewritten = new Map(rewrites.map((rewrite) => [rewrite.path, rewrite]));
   const moved: MovedFile[] = [...moves].map(([source, target]) => {

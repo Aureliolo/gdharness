@@ -351,6 +351,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var at: Array[Vector2] = [position]
 	var where: Dictionary = GdhMouse.where(aim, viewport, at)
 	var own: Viewport = _own_of(aim, viewport)
+	var pressing: Dictionary = _hover.press_of(aim, viewport, position) if held else {}
 	# A double click's first click goes whole before it, as [method _click_button] sends one.
 	if double and held and not notch:
 		_send(viewport, GdhMouse.button_event(position, button, true, false, _held_in(viewport)))
@@ -387,6 +388,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		"double": double
 	}
 	answer.merge(where)
+	answer.merge(pressing)
 	return _pointer_noted(_hover_noted(answer, supplied))
 
 
@@ -482,6 +484,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 	var supplied: bool = _follow_in(viewport, start)
 	var where: Dictionary = GdhMouse.where(aim, viewport, points)
 	var hovered_in: Viewport = _own_of(aim, viewport)
+	var pressing: Dictionary = _hover.press_of(aim, viewport, start)
 	_send(viewport, GdhMouse.button_event(start, button, true, false, _held_in(viewport)))
 	var travelled: Vector2 = Vector2.ZERO
 	var sent: int = 0
@@ -523,6 +526,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 		"hovered": _hovered_path(hovered_in),
 	}
 	answer.merge(where)
+	answer.merge(pressing)
 	return _pointer_noted(_hover_noted(answer, supplied))
 
 
@@ -572,7 +576,7 @@ func click(params: Dictionary) -> Dictionary:
 			"message": "%s is a %s, not a Control or a Node3D" % [node_path, node.get_class()]
 		}
 	var control: Control = node
-	var unmoved: String = _takes_no_click(control, node_path)
+	var unmoved: String = GdhMouse.takes_no_click(control, node_path, _host.get_tree().paused)
 	if not unmoved.is_empty():
 		return {"type": "error", "message": unmoved}
 
@@ -719,12 +723,21 @@ func click(params: Dictionary) -> Dictionary:
 	var was_pressed: Variant = null
 	if toggle != null and toggle.toggle_mode:
 		was_pressed = toggle.button_pressed
+	# Whether the button's own pressed signal came, which landing does not say either: a click that
+	# landed on Options answered nothing of whether the game heard it, and the panel it opened had
+	# closed again by the next read.
+	var fired: Array[bool] = [false]
+	var heard_press: Callable = func() -> void: fired[0] = true
+	if toggle != null:
+		var _hearing: int = toggle.pressed.connect(heard_press)
 	var press: InputEventMouseButton = await _click_button(viewport, position, button, double)
 	# The release is what a button acts on, and a queue_free it causes lands at the end of
 	# this frame; the frame passes so the answer describes the control as the click left it.
 	await _host.get_tree().process_frame
 	if rich != null and is_instance_valid(rich) and rich.meta_clicked.is_connected(heard):
 		rich.meta_clicked.disconnect(heard)
+	if toggle != null and is_instance_valid(toggle) and toggle.pressed.is_connected(heard_press):
+		toggle.pressed.disconnect(heard_press)
 
 	# What became of the control: still in the tree, taken out of it, or freed. A button that
 	# opened another screen is the second or the third, and the caller wants to hear that
@@ -754,6 +767,8 @@ func click(params: Dictionary) -> Dictionary:
 		if is_instance_valid(toggle):
 			now_pressed = toggle.button_pressed
 		answer["pressed"] = {"before": was_pressed, "after": now_pressed}
+	if toggle != null:
+		answer["pressed_signal"] = fired[0]
 	# Whether a link was pressed apart from what it carries: a bare [url] reports an empty meta,
 	# and given as the meta alone that press read exactly like one that reached no link.
 	if on_rich_text:
@@ -761,42 +776,6 @@ func click(params: Dictionary) -> Dictionary:
 		if not links.is_empty():
 			answer["link_meta"] = _values.serialize(links.back())
 	return _pointer_noted(_hover_noted(answer, supplied))
-
-
-## Why [param control] would take no click a player gave it, or "" when it would.
-##
-## The last two answered landed, since the pointer reaches the control, while the press did nothing,
-## measured on 4.7.2: a disabled button keeps its mouse filter and ignores the press, and a control
-## that does not process while the game is paused is hovered and never handed the event.
-## A control whose pointer a `mouse_behavior_recursive` above it has turned off is passed through to
-## what is underneath, which answered `landed: false` with nothing saying why.
-func _takes_no_click(control: Control, node_path: String) -> String:
-	if not control.is_visible_in_tree():
-		return "%s is not visible%s, so nothing can click it" % [node_path, GdhTargets.why_hidden(control)]
-	var button: BaseButton = control as BaseButton
-	if button != null and button.disabled:
-		return "%s is disabled, so clicking it presses nothing" % node_path
-	var turned_off: Control = GdhTargets.pointer_turned_off_by(control)
-	if turned_off != null:
-		var on: String = "itself" if turned_off == control else str(turned_off.get_path())
-		return (
-			(
-				"%s takes no pointer input, since mouse_behavior_recursive is disabled on %s,"
-				+ " so clicking it presses nothing"
-			)
-			% [node_path, on]
-		)
-	if not control.can_process():
-		var why: String = GdhTargets.why_it_does_not_process(control, node_path)
-		var over: Node = GdhTargets.drawn_over(control)
-		var cover: String = "" if over == null else "; %s is drawn over it" % over.get_path()
-		if _host.get_tree().paused:
-			return (
-				"the game is paused and %s does not process while it is (%s), so clicking it does nothing%s"
-				% [node_path, why, cover]
-			)
-		return "%s does not process (%s), so clicking it does nothing%s" % [node_path, why, cover]
-	return ""
 
 
 ## Why a click at [param control]'s centre, or at the point [param aimed] names, would reach nothing,

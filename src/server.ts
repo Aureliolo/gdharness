@@ -230,8 +230,11 @@ import {
   pathsInUidCache,
   projectFiles,
   projectStructure,
+  type SteppedOver,
   scriptsWithoutUid,
   searchProject,
+  steppedOverIn,
+  underGdignore,
 } from './project-scan.js';
 import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
@@ -3697,15 +3700,48 @@ export function scriptsToDiagnose(
       relative === '' ? script : `${relative}/${script}`,
     );
     if (inside.length === 0) {
-      empty.push(entry);
+      empty.push(noScriptUnder(entry, location.absolutePath, relative));
     }
     found.push(...inside);
   }
   const unique = [...new Set(found)];
   if (unique.length === 0) {
-    return { ok: false, reason: `No .gd script is under ${empty.join(' or ')}.` };
+    return { ok: false, reason: empty.join(' ') };
   }
   return { ok: true, value: unique };
+}
+
+/**
+ * The scripts of [param scripts], project-relative or res:// paths, that sit under a `.gdignore`.
+ * Named on purpose they are checked like any other, and an error in one read as the project's,
+ * although the engine never loads it: a class renamed elsewhere left one failing to compile.
+ */
+function scriptsUnderGdignore(projectPath: string, scripts: readonly string[]): Record<string, unknown> {
+  const ignored = scripts
+    .map((script) => script.replace(/^res:\/\//, ''))
+    .filter((script) => underGdignore(projectPath, script))
+    .map((script) => `res://${script}`);
+  return ignored.length === 0
+    ? {}
+    : {
+        underGdignore: ignored,
+        underGdignoreNote:
+          'The engine never loads a script under a folder holding a .gdignore, so what is reported for these does not stop the project from compiling or running.',
+      };
+}
+
+/** Why a folder named gave no script, naming each folder below it that the walk stepped over. */
+function noScriptUnder(entry: string, absolute: string, relative: string): string {
+  const said = (stepped: SteppedOver): string => {
+    const folder = [relative, stepped.folder].filter((step) => step !== '').join('/') || entry;
+    return stepped.why === 'gdharness'
+      ? `${folder} is an addon gdharness installed, whose scripts are checked when it is named`
+      : `${folder} holds a .gdignore, so the engine never loads what is under it, and a script there is checked when the script is named`;
+  };
+  const stepped = steppedOverIn(absolute);
+  return stepped.length === 0
+    ? `No .gd script is under ${entry}.`
+    : `No .gd script is under ${entry} that a folder walk takes in: ${stepped.map(said).join('; ')}.`;
 }
 
 /** Why no language server of the project answered, and what the refusal would have offered. */
@@ -8015,6 +8051,7 @@ class GodotServer {
       // absolute path and refused a path outside the project with no remedy, while every other
       // tool given either gave the res:// path and the remedies.
       const asked = readString(args, 'scriptPath');
+      let ignored: Record<string, unknown> = {};
       if (project.ok && asked !== undefined) {
         const location = resolveWithinProject(project.value.path, asked);
         if (!location.ok) {
@@ -8023,6 +8060,7 @@ class GodotServer {
         if (!existsSync(location.absolutePath)) {
           return this.missingScript(project.value.path, location.relativePath);
         }
+        ignored = scriptsUnderGdignore(project.value.path, [location.relativePath]);
       }
       const one = await this.diagnosticsOf(args);
       if ('noLanguageServer' in one) {
@@ -8035,9 +8073,19 @@ class GodotServer {
           : { refusal: project.response };
         return 'refusal' in checked
           ? checked.refusal
-          : this.jsonTextResponse({ ...checked.answers[0], ...engineChecked(one.noLanguageServer.reason) });
+          : this.jsonTextResponse({
+              ...checked.answers[0],
+              ...engineChecked(one.noLanguageServer.reason),
+              ...ignored,
+            });
       }
-      return 'refusal' in one ? one.refusal : this.jsonTextResponse(one.answer);
+      return 'refusal' in one
+        ? one.refusal
+        : this.jsonTextResponse({
+            ...one.answer,
+            checkedBy: 'language server',
+            ...ignored,
+          });
     }
     const progress = callProgress();
     const cancelled = callSignal();
@@ -8047,6 +8095,9 @@ class GodotServer {
     let warnings = 0;
     let unread = 0;
     let byEngine: string | null = null;
+    // How many the language server answered before it stopped answering, if it did, so a check
+    // that went on in the engine does not call every script the engine's.
+    let byServer = 0;
     for (const [at, scriptPath] of scripts.value.entries()) {
       // Nobody is left to read the answer, and a folder can take minutes.
       if (cancelled?.aborted === true) {
@@ -8086,6 +8137,7 @@ class GodotServer {
         reported.push({ scriptPath, error: one.refusal.content[0]?.text ?? 'not read' });
         continue;
       }
+      byServer += 1;
       errors += Number(one.answer['errors']);
       warnings += Number(one.answer['warnings']);
       // Every note an answer can carry is about a diagnostic, so none means nothing else either.
@@ -8104,7 +8156,11 @@ class GodotServer {
       ...(unread > 0 ? { scriptsNotRead: unread } : {}),
       scripts: reported,
       nothingReported,
-      ...(byEngine === null ? {} : engineChecked(byEngine)),
+      ...(byEngine === null ? { checkedBy: 'language server' } : engineChecked(byEngine)),
+      ...(byEngine !== null && byServer > 0
+        ? { checkedBy: 'language server, then engine', checkedByLanguageServer: byServer }
+        : {}),
+      ...(project.ok ? scriptsUnderGdignore(project.value.path, scripts.value) : {}),
     });
   }
 
@@ -9107,6 +9163,7 @@ class GodotServer {
     scanning: boolean;
     importing: boolean;
     finishedMsAgo: number | null;
+    scenes?: { openScenes: string[]; editedScene: string | null; unsavedScenes: string[] };
   } | null> {
     if (!this.godotBridge.getStatus().connected) {
       return null;
@@ -9120,10 +9177,21 @@ class GodotServer {
         return null;
       }
       const since = readNumber(asParams(answer), 'sinceScanFinishedMs');
+      const open = readStringArray(asParams(answer), 'openScenes');
+      const edited = readString(asParams(answer), 'editedScene');
       return {
         scanning: readBoolean(asParams(answer), 'scanning') ?? false,
         importing: readBoolean(asParams(answer), 'importing') ?? false,
         finishedMsAgo: since === undefined || since < 0 ? null : since,
+        ...(open === undefined
+          ? {}
+          : {
+              scenes: {
+                openScenes: open,
+                editedScene: edited === undefined || edited === '' ? null : edited,
+                unsavedScenes: readStringArray(asParams(answer), 'unsavedScenes') ?? [],
+              },
+            }),
       };
     } catch {
       return null;
@@ -9206,7 +9274,7 @@ class GodotServer {
     // Whether the run is held, said here as well as by editor_output: the list above names a held
     // game as unreachable with a problem that says it may be paused, and the session can often say
     // rather than guess. Alongside the pings, since the one wait a held game costs is paid once.
-    const asked = (async () => {
+    const askEditor = async () => {
       const playing = await this.editorPlayingState();
       await this.pickUpWhatTheEditorIsPlaying();
       const current = await this.currentRun();
@@ -9224,14 +9292,26 @@ class GodotServer {
         run: current === null ? null : this.runNamed(current),
         hold: current === null ? {} : await this.holdOf(current, active),
       };
-    })();
-    const [games, { playing, active, run, hold }, scan, editorStatus, servers] = await Promise.all([
+    };
+    const connectedBefore = this.godotBridge.getStatus().connected;
+    const [games, askedFirst, scanFirst, editorStatus, serversFirst] = await Promise.all([
       pinged,
-      asked,
+      askEditor(),
       this.editorScanState(),
       this.getEditorStatusPayload(),
       this.editorServersListening(),
     ]);
+    // An editor that finished arriving while the payload's slow questions ran is connected in it,
+    // and was not when the editor was asked about its play and its scan or its ports were tried,
+    // all skipped as unanswerable: asked again, so one answer does not say connected beside nothing
+    // asked.
+    const askAgain = !connectedBefore && editorStatus.connected;
+    if (askAgain) {
+      this.logDebug('editor_status: the editor connected during the call, so it is asked again');
+    }
+    const [{ playing, active, run, hold }, scan, servers] = askAgain
+      ? await Promise.all([askEditor(), this.editorScanState(), this.editorServersListening()])
+      : [askedFirst, scanFirst, serversFirst];
     const answeredAt = Date.now();
     const inFlight = this.godotBridge
       .requestsInFlight()
@@ -9248,7 +9328,11 @@ class GodotServer {
         // debugger takes a port again before every play, so the one in the greeting is a number
         // it has already moved off.
         debugPort: playing?.debugPort ?? this.godotBridge.getStatus().debugPort,
-        scan,
+        scan:
+          scan === null
+            ? null
+            : { scanning: scan.scanning, importing: scan.importing, finishedMsAgo: scan.finishedMsAgo },
+        ...scan?.scenes,
       },
       godot: {
         path: located.ok ? located.path : null,
@@ -14352,9 +14436,40 @@ class GodotServer {
             }),
       },
     });
-    return this.godotBridge.isConnected()
-      ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
-      : answered;
+    if (!this.godotBridge.isConnected()) {
+      return answered;
+    }
+    // The editor holding the project takes its class list in at a scan rather than from the file,
+    // so the class written here stayed a name it could not resolve until somebody called
+    // editor_rescan. Scanned here, as modify reloads the script there, unless this editor's scans
+    // write a list shorter than the file: a scan there loses classes, and the note says what loads them.
+    const scanned =
+      answered.isError === true || this.editorWritesAShortList(project.value.path)
+        ? null
+        : await this.handleRescanFilesystem({ projectPath: project.value.path });
+    return await this.alsoSayWhatTheEditorCannotSee(
+      scanned === null ? answered : this.withEditorScan(answered, scanned),
+      args,
+    );
+  }
+
+  /** [param answered] with what the editor's scan after it brought in, or why it did not. */
+  private withEditorScan(answered: ToolResponse, scanned: ToolResponse): ToolResponse {
+    const payload = asParams(JSON.parse(answered.content[0]?.text ?? '{}'));
+    const scan = scanned.isError === true ? null : asParams(JSON.parse(scanned.content[0]?.text ?? '{}'));
+    const broughtIn = scan === null ? undefined : readStringArray(scan, 'broughtIn');
+    return this.jsonTextResponse({
+      ...payload,
+      editorRescanned: scan !== null && readBoolean(scan, 'ok') === true,
+      ...(broughtIn === undefined ? {} : { broughtIn }),
+      ...(scan === null
+        ? {
+            editorRescanNote: `The editor was asked to scan for the new class and answered: ${scanned.content[0]?.text ?? 'nothing'}`,
+          }
+        : readBoolean(scan, 'ok') === true
+          ? {}
+          : { editorRescanNote: readString(scan, 'note') ?? JSON.stringify(scan) }),
+    });
   }
 
   /**

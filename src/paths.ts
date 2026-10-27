@@ -192,8 +192,14 @@ export function resolveWithinProject(
   if (withoutScheme.startsWith('/') || withoutScheme.startsWith('\\') || isAbsolute(withoutScheme)) {
     // The example is the end of the path given, so a build output is offered a build path and a
     // scene a scene path; a fixed scene path was offered for an export's .exe.
+    // A file beside the project or above it keeps only its name: its folder holds the project, so
+    // offered as one inside it, it names a folder the project does not have. Compared with the links
+    // in both resolved: a macOS temporary directory given under /var holds a project under /private/var.
     const tail = withoutScheme.split(/[\\/]+/).filter((step) => step !== '' && !step.endsWith(':'));
-    const example = tail.slice(-2).join('/') || 'scenes/main.tscn';
+    const besideIt =
+      isAbsolute(trimmed) &&
+      isWithinRoot(realAsFarAsItExists(dirname(resolve(trimmed))), realAsFarAsItExists(root));
+    const example = tail.slice(besideIt ? -1 : -2).join('/') || 'scenes/main.tscn';
     return {
       ok: false,
       reason: `Path '${trimmed}' is absolute and outside the project; give a path inside it, such as '${example}'.`,

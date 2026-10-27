@@ -424,6 +424,14 @@ const HOOKS_GD = [
   '\t\t\treturn profiler.call("profile_read", {}) if profiler != null else {}',
   '\t\t"open":',
   '\t\t\tEditorInterface.open_scene_from_path(path)',
+  // Every tab closed, which leaves the editor a tab of a new scene never saved, and what the
+  // editor itself then lists as open.
+  '\t\t"close_all":',
+  '\t\t\tfor _tab: int in range(32):',
+  '\t\t\t\tif EditorInterface.get_edited_scene_root() == null:',
+  '\t\t\t\t\tbreak',
+  '\t\t\t\tEditorInterface.close_scene()',
+  '\t\t\treturn {"open": Array(EditorInterface.get_open_scenes())}',
   '\t\t"edit":',
   '\t\t\tEditorInterface.open_scene_from_path(path)',
   '\t\t\tvar root: Node = EditorInterface.get_edited_scene_root()',
@@ -1464,6 +1472,34 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
     get(again, 'alsoSaved'),
     undefined,
     `and nothing once the file says them: ${JSON.stringify(again)}`,
+  );
+
+  // A set on the menu itself saves the grow directions on the node it names, which the set did not
+  // move, so they are under alsoSaved rather than alsoChanged.
+  writeFileSync(
+    join(project, 'menu_set.tscn'),
+    '[gd_scene format=3]\n\n[node name="Main" type="Control"]\nlayout_mode = 3\nanchors_preset = 0\n\n' +
+      '[node name="Menu" type="VBoxContainer" parent="."]\nlayout_mode = 1\nanchors_preset = 8\n' +
+      'anchor_left = 0.5\nanchor_top = 0.5\nanchor_right = 0.5\nanchor_bottom = 0.5\n' +
+      'offset_left = -150.0\noffset_top = -80.0\noffset_right = 150.0\noffset_bottom = 80.0\n',
+  );
+  const named = await call('scene_node', {
+    projectPath: project,
+    scenePath: 'res://menu_set.tscn',
+    op: 'set',
+    nodePath: 'Menu',
+    properties: { tooltip_text: 'Settings' },
+  });
+  assert.deepEqual(
+    [get(named, 'alsoSaved'), get(named, 'alsoChanged')],
+    [
+      [
+        { node: 'Menu', property: 'grow_horizontal', saved: 2 },
+        { node: 'Menu', property: 'grow_vertical', saved: 2 },
+      ],
+      undefined,
+    ],
+    `the lines the named node gained are said: ${JSON.stringify(named)}`,
   );
 }
 
@@ -2820,6 +2856,18 @@ async function testAnEditInTheEditorIsKept({ call, refusal, project }: Editor): 
   const edited = { projectPath: project, scenePath: path };
   const opened = await hook(project, { op: 'edit', path, node: 'ByHand' });
   assert.deepEqual(get(opened, 'unsaved'), [path], `the edit should be unsaved: ${JSON.stringify(opened)}`);
+  // What editor_status says of the tabs is what the editor holds, read past the server above. The
+  // editor of a new project opens with a tab of a scene never saved, which has no path to list.
+  const tabsOf = async (): Promise<unknown[]> => {
+    const shown = get(await call('editor_status', {}), 'editor');
+    const open = asArray(get(shown, 'openScenes'));
+    return [open.includes(path), open.includes(''), get(shown, 'editedScene'), get(shown, 'unsavedScenes')];
+  };
+  assert.deepEqual(
+    await tabsOf(),
+    [true, false, path, [path]],
+    'editor_status names the open, shown and unsaved',
+  );
 
   const before = fileText(project, 'layers/edited.tscn');
   assert.match(
@@ -2863,6 +2911,21 @@ async function testAnEditInTheEditorIsKept({ call, refusal, project }: Editor): 
     `the tab in front stays: ${JSON.stringify(after)}`,
   );
   assert.deepEqual(get(after, 'unsaved'), [], 'with nothing left unsaved');
+  assert.deepEqual(await tabsOf(), [true, false, 'res://layers/tab.tscn', []], 'and editor_status says so');
+
+  // A tab of a scene never saved, which every new project's editor opens with, has no path.
+  const closed = await hook(project, { op: 'close_all', path: '' });
+  assert.deepEqual(
+    get(closed, 'open'),
+    [''],
+    `the editor lists its new tab by no path: ${JSON.stringify(closed)}`,
+  );
+  const bare = get(await call('editor_status', {}), 'editor');
+  assert.deepEqual(
+    [get(bare, 'openScenes'), get(bare, 'editedScene'), get(bare, 'unsavedScenes')],
+    [[], null, []],
+    `and editor_status lists no scene: ${JSON.stringify(bare)}`,
+  );
 
   // The main scene back in front, as the cases after this one found the editor.
   await hook(project, { op: 'open', path: 'res://main.tscn' });
@@ -3974,6 +4037,33 @@ async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<
   const seeing = await call('editor_rescan', { projectPath: project });
   assert.equal(get(seeing, 'ok'), true, `a scanned project resolves its own classes: ${text(seeing)}`);
   assert.equal(get(seeing, 'unseenByEditor'), undefined, `with nothing to name: ${text(seeing)}`);
+}
+
+/**
+ * A class created through script_edit is one the editor resolves when the call comes back.
+ *
+ * The editor takes classes in at a scan, and nothing scanned after a create, so the answer said
+ * `registered: true` beside the same class under `unseenByEditor`, and every scene or script
+ * naming it next was refused by the editor until somebody called editor_rescan.
+ */
+async function testACreatedClassIsOneTheEditorSees({ call, project }: Editor): Promise<void> {
+  // Left in the project: an editor holds a class whose script is removed until it restarts, so a
+  // removal here would show up in every later rescan's cacheDropped.
+  const created = await call('script_edit', {
+    projectPath: project,
+    scriptPath: 'res://created_class.gd',
+    op: 'create',
+    className: 'CreatedClass',
+    extends: 'RefCounted',
+  });
+  assert.deepEqual(
+    [get(created, 'registered'), get(created, 'editorRescanned'), get(created, 'unseenByEditor')],
+    [true, true, undefined],
+    `the editor scanned for it and sees it: ${text(created)}`,
+  );
+  const rebuilt = await call('project_import', { projectPath: project, op: 'refresh_classes' });
+  assert.equal(get(rebuilt, 'classesUnchecked'), undefined, `the editor answered: ${text(rebuilt)}`);
+  assert.equal(get(rebuilt, 'unseenByEditor'), undefined, `asked again, it holds it: ${text(rebuilt)}`);
 }
 
 /**
@@ -5909,6 +5999,18 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
   assert.equal(get(clean, 'clean'), true, 'a script that parses should come back clean');
   assert.equal(get(clean, 'errors'), 0);
   assert.equal(get(clean, 'warnings'), 0, 'and with no warnings on it either');
+  // An answer from the editor's server and one from a headless engine read the same, so the answer
+  // names which it was, for one script and for several.
+  assert.equal(get(clean, 'checkedBy'), 'language server', JSON.stringify(clean));
+  const both = await call('script_diagnostics', {
+    projectPath: project,
+    scriptPath: ['res://sound.gd', 'res://broken.gd'],
+  });
+  assert.deepEqual(
+    [get(both, 'scriptsChecked'), get(both, 'checkedBy')],
+    [2, 'language server'],
+    JSON.stringify(both),
+  );
 
   const broken = await call('script_diagnostics', { projectPath: project, scriptPath: 'res://broken.gd' });
   assert.equal(get(broken, 'clean'), false, 'and a script that does not parse should not');
@@ -7573,6 +7675,7 @@ async function main(): Promise<void> {
     ['testAReimportTakesInFilesTheEditorHasNotSeen', testAReimportTakesInFilesTheEditorHasNotSeen],
     ['testARunImportsThroughTheEditorFirst', testARunImportsThroughTheEditorFirst],
     ['testAClassTheEditorCannotSee', testAClassTheEditorCannotSee],
+    ['testACreatedClassIsOneTheEditorSees', testACreatedClassIsOneTheEditorSees],
     ['testAScanWritesTheCacheFromTheEditor', testAScanWritesTheCacheFromTheEditor],
     ['testARescanKeepsWhatTheRebuildWrote', testARescanKeepsWhatTheRebuildWrote],
     ['testARescanDropsAClassWhoseScriptIsGone', testARescanDropsAClassWhoseScriptIsGone],

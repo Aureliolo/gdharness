@@ -168,8 +168,20 @@ func scan_status(_args: Dictionary) -> Dictionary:
 	if not _editor_plugin:
 		return {"ok": false, "error": "Editor plugin unavailable"}
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
+	# The scenes open in tabs, the one shown and the ones holding unsaved edits: a scene edit on disk
+	# meets what the editor holds of it, and nothing said which scenes those were. A tab of a scene
+	# never saved has no path, and a new project's editor opens with an empty one, so it is left out
+	# of the open; one with edits is kept among the unsaved, as the edits a close would lose.
+	var shown: Node = EditorInterface.get_edited_scene_root()
+	var open: Array[String] = []
+	open.assign(Array(EditorInterface.get_open_scenes()).filter(_has_path))
+	var unsaved: Array[String] = []
+	unsaved.assign(EditorInterface.get_unsaved_scenes())
 	return {
 		"ok": true,
+		"openScenes": open,
+		"editedScene": "" if shown == null else shown.scene_file_path,
+		"unsavedScenes": unsaved,
 		"scanning": filesystem.is_scanning(),
 		"importing": filesystem.is_importing(),
 		"pending": GdhSceneFile.scan_due,
@@ -177,6 +189,10 @@ func scan_status(_args: Dictionary) -> Dictionary:
 		-1 if _scan_finished_at_msec < 0 else Time.get_ticks_msec() - _scan_finished_at_msec,
 		"reimportsCompleted": _reimports_completed,
 	}
+
+
+func _has_path(path: String) -> bool:
+	return path != ""
 
 
 ## Reimport the files named under `paths`, whatever their state, the way the editor's Reimport

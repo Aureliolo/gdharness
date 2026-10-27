@@ -284,18 +284,17 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     }
     // A bare use of the new name inside a class that inherits the member is a local, a parameter,
     // or a global the member would hide; each either shadows the renamed member or is shadowed by
-    // it, and a project treating SHADOWED_VARIABLE as an error stops compiling.
+    // it, and a project treating SHADOWED_VARIABLE as an error stops compiling. In a class whose
+    // chain declares the new name as a member, a bare use is that member's, which the declaration
+    // above already names: `return weight * stack` was offered as a local beside `stack` declared.
     const heirs = graph.descendants(root);
+    const declaresNewName = (body: ClassId): boolean =>
+      [body, ...graph.ancestors(body)].some((id) => graph.declaration(id, newName) !== undefined);
     const inUse: { file: string; line: number }[] = [];
     for (const script of scripts.values()) {
       for (const occurrence of script.occurrences(newName)) {
         const body = graph.bodyAt(script.path, occurrence.offset);
-        if (
-          occurrence.kind === 'code' &&
-          !occurrence.afterDot &&
-          heirs.has(body) &&
-          graph.declaration(body, newName)?.offset !== occurrence.offset
-        ) {
+        if (occurrence.kind === 'code' && !occurrence.afterDot && heirs.has(body) && !declaresNewName(body)) {
           inUse.push({ file: script.path, line: script.lines.positionOf(occurrence.offset).line + 1 });
         }
       }
@@ -306,7 +305,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
         .slice(0, 10)
         .map((place) => `${place.file}:${place.line}`);
       conflicts.push(
-        `${newName} is already used in code where ${symbol} is inherited, as a local, a parameter or another name the renamed ${what} would shadow or be shadowed by, at ${places.join(', ')}${inUse.length > places.length ? ` and ${inUse.length - places.length} more` : ''}`,
+        `${newName} is already used in code in a class that declares or inherits ${symbol}, as a local, a parameter or another name the renamed ${what} would shadow or be shadowed by, at ${places.join(', ')}${inUse.length > places.length ? ` and ${inUse.length - places.length} more` : ''}`,
       );
     }
     if (conflicts.length > 0) {
@@ -393,7 +392,6 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     );
   }
   plan = mentionIgnored(plan, ignoredTexts(projectPath), symbol, moveTo === null ? [] : [declaringPath]);
-  const left = leftAloneReport(plan.mentions);
   const rewrites = rewritesOf(
     plan,
     texts,
@@ -401,6 +399,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       ? null
       : { from: declaringPath, to: moveTo, absoluteTo: request.newScriptPath },
   );
+  const left = leftAloneReport(asWritten(plan.mentions, rewrites));
   const graph = new ClassGraph(scripts, declared);
   const rank = (path: string): number =>
     (declaringFiles.includes(path) ? 0 : 1000) + graph.ancestors(`${path}#`).length;
@@ -570,6 +569,19 @@ export function changedReport(
           text: (lines[line] ?? '').replace(/\r$/, '').trim(),
         })),
     };
+  });
+}
+
+/**
+ * Each mention quoted as its line reads once the rewrites are written. A line holding an edit and a
+ * mention, such as `var bag: Inventory = $Inventory`, was otherwise quoted under changed as it reads
+ * after and under leftAlone as it read before, as if the two were different lines.
+ */
+export function asWritten(mentions: readonly Mention[], rewrites: readonly Rewrite[]): Mention[] {
+  const after = new Map(rewrites.map((rewrite) => [rewrite.path, rewrite.after.split('\n')]));
+  return mentions.map((mention) => {
+    const line = mention.line < 1 ? undefined : after.get(mention.file)?.[mention.line - 1];
+    return line === undefined ? mention : { ...mention, text: line.replace(/\r$/, '').trim() };
   });
 }
 
