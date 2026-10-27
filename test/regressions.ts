@@ -32738,6 +32738,90 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
  * nothing. The game here stops on a breakpoint set with no editor connected before it started, and
  * then spins forever the way that game did, and is broken into, read, stepped and let go.
  */
+async function testAStartHeldBeforeItsRuntimeSaysWhere(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('held-before-the-runtime regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-held-boot-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-held-boot-rt-'));
+  // Boot is loaded before the runtime, so a breakpoint in its _ready holds the game before the
+  // runtime can announce, and the start's wait has only the debugger to learn the hold from.
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="HeldBoot"\n' +
+      'run/main_scene="res://main.tscn"\n\n[autoload]\n\nBoot="*res://boot.gd"\n' +
+      'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'boot.gd'),
+    'extends Node\n\nvar started_at: int = 0\n\n\nfunc _ready() -> void:\n\tstarted_at = 1\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    const set = await server.request(
+      'tools/call',
+      {
+        name: 'debug_breakpoint',
+        arguments: { projectPath: project, op: 'set', scriptPath: 'boot.gd', line: 7 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    assert.deepEqual(get(parseTextContent(set), 'held'), [{ scriptPath: 'res://boot.gd', lines: [7] }]);
+    const began = Date.now();
+    const start = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 30_000 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    const took = Date.now() - began;
+    started = get(start, 'started') === true;
+    assert.equal(started, true, JSON.stringify(start));
+    assert.deepEqual(
+      [get(start, 'runtime', 'listening'), get(start, 'runtime', 'heldAt', 'reason')],
+      [false, 'breakpoint'],
+      `the start says the game is held, not still booting: ${JSON.stringify(start)}`,
+    );
+    assert.match(
+      text(get(start, 'runtime', 'heldAt', 'description')),
+      /^held by its debugger at res:\/\/boot\.gd:7 in _ready \(Breakpoint\)$/,
+      JSON.stringify(start),
+    );
+    assert.match(text(get(start, 'runtime', 'note')), /the game stopped before its runtime came up/);
+    assert.ok(
+      took < 20_000,
+      `the start answered once the game was held, not after its 30000ms wait: ${took}ms`,
+    );
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 async function testAGameThisServerStartedIsDebugged(): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
@@ -64310,6 +64394,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheRendererIsChosenAndItsMemoryRead,
   testWhatTheGameTellsAScreenReaderIsRead,
   testARefusalIsSaidOnce,
+  testAStartHeldBeforeItsRuntimeSaysWhere,
   testAGameThisServerStartedIsDebugged,
   testAGameHeldInACallHasTheCall,
   testInputThatReachesNothingSaysWhatWould,

@@ -10749,6 +10749,11 @@ class GodotServer {
     let editorAskedAt = 0;
     let editorSaysGoing = true;
     let editorAsks = 0;
+    // A run started here is held by the debugger its keeper holds, which the editor's session
+    // never sees, so the keeper is asked the same way, beside the looks.
+    let holding: Promise<void> | null = null;
+    let keeperAskedAt = 0;
+    let heldHere: StoppedAt | null = null;
     const waitBegan = Date.now();
     // Counted from the run's start rather than from here, since the boot the budget is sized to is
     // measured from there and the answer says "within" the budget: counted from here, whatever the
@@ -10782,7 +10787,21 @@ class GodotServer {
         }
         const run = this.activeProcess;
         if (run === null || !run.throughEditor) {
-          return !stillRunning(run);
+          if (!stillRunning(run)) {
+            return true;
+          }
+          const keeper = run?.keeper;
+          if (keeper !== undefined && holding === null && Date.now() - keeperAskedAt >= RUN_POLL_MS) {
+            keeperAskedAt = Date.now();
+            holding = this.keptHold(keeper)
+              .then((held) => {
+                heldHere = held;
+              })
+              .finally(() => {
+                holding = null;
+              });
+          }
+          return heldHere !== null;
         }
         if (asking === null && Date.now() - editorAskedAt >= RUN_POLL_MS) {
           editorAskedAt = Date.now();
@@ -10840,7 +10859,12 @@ class GodotServer {
       addon: true,
       budgetMs,
       ...(budget.sizedToMs === undefined ? {} : { sizedToMs: budget.sizedToMs }),
-      heldAt: this.dapClient?.whereItStopped() ?? null,
+      heldAt:
+        going === null || going.throughEditor
+          ? (this.dapClient?.whereItStopped() ?? null)
+          : endpoint === null && running && going.keeper !== undefined
+            ? await this.keptHold(going.keeper)
+            : null,
       running,
       withArgs,
       servesAProject: this.ownProject !== null,
