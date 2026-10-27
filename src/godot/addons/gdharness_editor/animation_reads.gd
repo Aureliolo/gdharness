@@ -131,6 +131,22 @@ static func _summary(anim: Animation) -> Dictionary:
 	}
 
 
+## [param seconds], a key's time, as the shortest decimal holding the same 32-bit float. A scene keeps
+## key times as 32-bit floats, so a key put at 0.7 read back as 0.699999988079071.
+static func key_time(seconds: float) -> float:
+	var held: float = PackedFloat32Array([seconds])[0]
+	for places: int in range(0, 10):
+		var shorter: float = String.num(held, places).to_float()
+		if PackedFloat32Array([shorter])[0] == held:
+			return shorter
+	return held
+
+
+## Whether two times are one key's: the same 32-bit float, as a scene stores them.
+static func same_time(first: float, second: float) -> bool:
+	return PackedFloat32Array([first])[0] == PackedFloat32Array([second])[0]
+
+
 static func _track(anim: Animation, track: int, values: GdhSerialisation) -> Dictionary:
 	var kind: int = anim.track_get_type(track)
 	var path: NodePath = anim.track_get_path(track)
@@ -143,7 +159,7 @@ static func _track(anim: Animation, track: int, values: GdhSerialisation) -> Dic
 	var keyframes: Array[Dictionary] = []
 	var methods: Dictionary = {}
 	for key: int in anim.track_get_key_count(track):
-		var keyframe: Dictionary = {"time": anim.track_get_key_time(track, key)}
+		var keyframe: Dictionary = {"time": key_time(anim.track_get_key_time(track, key))}
 		if kind == Animation.TYPE_METHOD:
 			var method: String = str(anim.method_track_get_name(track, key))
 			methods[method] = true

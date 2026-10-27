@@ -462,7 +462,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
   const slots = new EngineSlots(
     chosen.directory,
     chosen.count,
-    { pid: process.pid, started: await ownStart() },
+    { pid: process.pid, started: await ownStart(), by: `gdharness test of ${options.projectPath}` },
     (line) => {
       console.log(line);
     },

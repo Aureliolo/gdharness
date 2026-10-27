@@ -3,6 +3,17 @@ extends RefCounted
 const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhProjectFile = preload("project_file.gd")
+const GdhPatterns = preload("patterns.gd")
+const GdhFileWalk = preload("file_walk.gd")
+## The calls that read an input action by name, Input's and an event's, up to the opening bracket.
+const READS_AN_ACTION: String = (
+	"\\b(?:is_action(?:_just)?_(?:pressed|released)|is_action|get_action(?:_raw)?_strength"
+	+ "|action_press|action_release|get_axis|get_vector)\\("
+)
+## InputMap's call that makes an action at run time, which a script then reads as its own.
+const ADDS_AN_ACTION: String = "\\badd_action\\("
+## An argument that is a name written in the call and nothing else, a String or a StringName.
+const NAME_ARGUMENT: String = "^&?(?:\"([^\"\\\\]*)\"|'([^'\\\\]*)')$"
 ## The device an event matches every device with, InputMap's ALL_DEVICES, which GDScript is not given.
 const ALL_DEVICES: int = -1
 const MOUSE_NAMES: String = (
@@ -111,6 +122,100 @@ var _log: GdhLog
 
 func _init(p_log: GdhLog) -> void:
 	_log = p_log
+
+
+## The input actions the project's scripts read by a name written in the call that neither the
+## project nor the engine defines, each as {action, read_at} with the script and line of every read.
+## Godot answers such a read with false and an error on every frame, so the input never works and
+## nothing fails until the game runs. A name a script builds is not judged, and one a script adds
+## with InputMap.add_action is its own to define.
+func undefined_in_scripts() -> Array[Dictionary]:
+	var read: Dictionary = {}
+	var added: Dictionary = {}
+	for script: String in GdhFileWalk.new().find_files("res://", ".gd"):
+		var number: int = 0
+		for line: String in FileAccess.get_file_as_string(script).split("\n"):
+			number += 1
+			var code: String = GdhPatterns.without_comment(line)
+			for adding: RegExMatch in GdhPatterns.compiled(ADDS_AN_ACTION).search_all(code):
+				if not _in_a_string(code, adding.get_start()):
+					for name: String in _names_given(code, adding.get_end()):
+						added[name] = true
+			for reading: RegExMatch in GdhPatterns.compiled(READS_AN_ACTION).search_all(code):
+				if _in_a_string(code, reading.get_start()):
+					continue
+				for name: String in _names_given(code, reading.get_end()):
+					var at: Array = read.get_or_add(name, [])
+					var place: String = "%s:%d" % [script, number]
+					if not place in at:
+						at.append(place)
+	var names: Array = read.keys()
+	names.sort()
+	var undefined: Array[Dictionary] = []
+	for name: String in names:
+		if ProjectSettings.has_setting("input/" + name) or added.has(name):
+			continue
+		undefined.append({"action": name, "read_at": read[name]})
+	return undefined
+
+
+## One line for [param entry], one of [method undefined_in_scripts].
+static func undefined_line(entry: Dictionary) -> String:
+	var listed: Array = entry.get("read_at", [])
+	var at: PackedStringArray = PackedStringArray(listed)
+	return (
+		"%s is not an input action of this project, and %s %s it"
+		% [str(entry.get("action", "")), ", ".join(at), "reads" if at.size() == 1 else "read"]
+	)
+
+
+## The arguments of the call whose bracket opens before [param from] in [param code] that are each a
+## name written in the call, to its closing bracket or the end of the line.
+static func _names_given(code: String, from: int) -> Array[String]:
+	var names: Array[String] = []
+	var depth: int = 0
+	var quote: String = ""
+	var argument: String = ""
+	for at: int in range(from, code.length()):
+		var ch: String = code[at]
+		if not quote.is_empty():
+			if ch == quote and code[at - 1] != "\\":
+				quote = ""
+		elif ch == '"' or ch == "'":
+			quote = ch
+		elif ch == "(" or ch == "[" or ch == "{":
+			depth += 1
+		elif ch == ")" or ch == "]" or ch == "}":
+			if depth == 0:
+				_take_name(argument, names)
+				return names
+			depth -= 1
+		elif ch == "," and depth == 0:
+			_take_name(argument, names)
+			argument = ""
+			continue
+		argument += ch
+	return names
+
+
+## Whether [param at] in [param code] is inside a string literal, where a call is text rather than one.
+static func _in_a_string(code: String, at: int) -> bool:
+	var quote: String = ""
+	for index: int in range(at):
+		var ch: String = code[index]
+		if not quote.is_empty():
+			if ch == quote and code[index - 1] != "\\":
+				quote = ""
+		elif ch == '"' or ch == "'":
+			quote = ch
+	return not quote.is_empty()
+
+
+static func _take_name(argument: String, names: Array[String]) -> void:
+	var named: RegExMatch = GdhPatterns.compiled(NAME_ARGUMENT).search(argument.strip_edges())
+	if named != null:
+		var single: String = named.get_string(2)
+		names.append(named.get_string(1) if single.is_empty() else single)
 
 
 # Add an input action to the InputMap

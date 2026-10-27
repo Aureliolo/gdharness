@@ -7,6 +7,7 @@ const GdhDependencies = preload("dependencies.gd")
 const GdhExportPresets = preload("export_presets.gd")
 const GdhFileWalk = preload("file_walk.gd")
 const GdhImportPipeline = preload("import_pipeline.gd")
+const GdhInputActions = preload("input_actions.gd")
 const GdhLog = preload("logger.gd")
 const GdhRead = preload("reading.gd")
 const GdhSceneConnections = preload("scene_connections.gd")
@@ -215,6 +216,20 @@ func validate_project(params: Dictionary) -> Dictionary:
 				"references",
 				GdhDependencies.missing_line(entry),
 				"Restore the file, or point the reference at the file that replaced it",
+				include_suggestions
+			)
+		)
+
+	# An action read by a name the input map lacks answers false on every frame, so the input it was
+	# for never works, and the engine says so only while the game runs.
+	checks_performed.append("input_actions")
+	for entry: Dictionary in GdhInputActions.new(_log).undefined_in_scripts():
+		issues.append(
+			_finding(
+				"error",
+				"input_actions",
+				GdhInputActions.undefined_line(entry),
+				"Add it with project_settings add_input_action, or correct the name the script reads",
 				include_suggestions
 			)
 		)

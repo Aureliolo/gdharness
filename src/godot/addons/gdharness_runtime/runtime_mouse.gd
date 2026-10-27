@@ -5,6 +5,7 @@ extends RefCounted
 
 const GdhRead = preload("reading.gd")
 const GdhScreen = preload("runtime_screen.gd")
+const GdhTargets = preload("runtime_targets.gd")
 const GdhValues = preload("runtime_values.gd")
 
 
@@ -225,3 +226,40 @@ static func button_of(raw: Variant) -> int:
 	# number past the two extra buttons names nothing a mask bit can be made for.
 	var number: int = GdhRead.as_int(raw, -1)
 	return number if number >= MOUSE_BUTTON_LEFT and number <= MOUSE_BUTTON_XBUTTON2 else -1
+
+
+## Why [param control] would take no click a player gave it, or "" when it would.
+##
+## The last two answered landed, since the pointer reaches the control, while the press did nothing,
+## measured on 4.7.2: a disabled button keeps its mouse filter and ignores the press, and a control
+## that does not process while the game is paused is hovered and never handed the event.
+## A control whose pointer a `mouse_behavior_recursive` above it has turned off is passed through to
+## what is underneath, which answered `landed: false` with nothing saying why. [param paused] is
+## whether the game is.
+static func takes_no_click(control: Control, node_path: String, paused: bool) -> String:
+	if not control.is_visible_in_tree():
+		return "%s is not visible%s, so nothing can click it" % [node_path, GdhTargets.why_hidden(control)]
+	var button: BaseButton = control as BaseButton
+	if button != null and button.disabled:
+		return "%s is disabled, so clicking it presses nothing" % node_path
+	var turned_off: Control = GdhTargets.pointer_turned_off_by(control)
+	if turned_off != null:
+		var on: String = "itself" if turned_off == control else str(turned_off.get_path())
+		return (
+			(
+				"%s takes no pointer input, since mouse_behavior_recursive is disabled on %s,"
+				+ " so clicking it presses nothing"
+			)
+			% [node_path, on]
+		)
+	if not control.can_process():
+		var why: String = GdhTargets.why_it_does_not_process(control, node_path)
+		var over: Node = GdhTargets.drawn_over(control)
+		var cover: String = "" if over == null else "; %s is drawn over it" % over.get_path()
+		if paused:
+			return (
+				"the game is paused and %s does not process while it is (%s), so clicking it does nothing%s"
+				% [node_path, why, cover]
+			)
+		return "%s does not process (%s), so clicking it does nothing%s" % [node_path, why, cover]
+	return ""

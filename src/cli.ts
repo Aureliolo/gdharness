@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { serverServing } from './bridge-announce.js';
 import { EngineUsageError } from './engine-launch.js';
-import { sayWaitsTo } from './engine-slots.js';
+import { nameSlotTaker, sayWaitsTo } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
@@ -867,6 +867,12 @@ async function main(): Promise<void> {
       console.error(`gdharness: ${line}`);
     });
   }
+  const served = process.env['GDHARNESS_PROJECT'];
+  nameSlotTaker(
+    command !== undefined
+      ? `gdharness ${command}`
+      : `a gdharness server${served === undefined || served === '' ? '' : ` of ${served}`}`,
+  );
   if (command === 'test') {
     await test();
     return;

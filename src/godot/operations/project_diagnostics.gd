@@ -3,6 +3,7 @@ extends RefCounted
 const GdhDependencies = preload("dependencies.gd")
 const GdhFileWalk = preload("file_walk.gd")
 const GdhImportPipeline = preload("import_pipeline.gd")
+const GdhInputActions = preload("input_actions.gd")
 const GdhLog = preload("logger.gd")
 const GdhRead = preload("reading.gd")
 const GdhSceneConnections = preload("scene_connections.gd")
@@ -118,6 +119,9 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		var details: Array[String] = []
 		for entry: Dictionary in GdhDependencies.new(_log).missing_references():
 			details.append(GdhDependencies.missing_line(entry))
+			deductions += 5
+		for entry: Dictionary in GdhInputActions.new(_log).undefined_in_scripts():
+			details.append(GdhInputActions.undefined_line(entry))
 			deductions += 5
 		checks["references"] = {"name": "References", "passed": details.is_empty(), "details": details}
 

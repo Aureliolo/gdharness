@@ -225,6 +225,52 @@ func control_at(viewport: Viewport, point: Vector2) -> Control:
 	return null
 
 
+## What a pointer answer says of a press at [param position], in [param viewport]'s window pixels:
+## press_went_to, the path of what the GUI hands it to or null, and for a press aimed at a control,
+## landed, whether that is the control or inside it. Read before the press, which can free both. A
+## press aimed at a slider that went to a button drawn over it answered the slider's path alone,
+## and the caller read that as the slider having been pressed.
+func press_of(aim: Dictionary, viewport: Viewport, position: Vector2) -> Dictionary:
+	var took: Node = _pressed_at(viewport, viewport.get_final_transform().affine_inverse() * position)
+	var said: Dictionary = {"press_went_to": null}
+	if took != null:
+		said["press_went_to"] = str(took.get_path())
+	var named: Object = aim.get("node")
+	var aimed: Control = named as Control
+	if aimed != null:
+		said["landed"] = took != null and (took == aimed or aimed.is_ancestor_of(took))
+	return said
+
+
+## What a press at [param point], in [param viewport]'s own coordinates, goes to: the control the
+## GUI picks, carried into a window embedded over the point and into what a SubViewportContainer
+## shows, as the engine carries it; null when nothing there takes the pointer.
+func _pressed_at(viewport: Viewport, point: Vector2) -> Node:
+	var windows: Array[Window] = viewport.get_embedded_subwindows()
+	for index: int in range(windows.size() - 1, -1, -1):
+		var window: Window = windows[index]
+		if Rect2(window.position, window.size).has_point(point):
+			var inward: Transform2D = window.get_final_transform().affine_inverse()
+			var within: Node = _pressed_at(window, inward * (point - Vector2(window.position)))
+			if within == null:
+				return window
+			return within
+	var over: Control = control_at(viewport, point)
+	var container: SubViewportContainer = over as SubViewportContainer
+	if container == null:
+		return over
+	var inside: Vector2 = container.get_global_transform_with_canvas().affine_inverse() * point
+	if container.stretch:
+		inside /= container.stretch_shrink
+	for child: Node in container.get_children():
+		var shown: SubViewport = child as SubViewport
+		if shown != null and not shown.gui_disable_input:
+			var within: Node = _pressed_at(shown, shown.get_final_transform().affine_inverse() * inside)
+			if within != null:
+				return within
+	return container
+
+
 ## The controls [param node] holds that the engine keeps as roots of [param node]'s viewport: drawn
 ## on their own, or with no control above them. Not into another viewport, a window or a
 ## SubViewport, whose controls are that one's.

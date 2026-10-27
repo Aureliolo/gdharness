@@ -144,6 +144,28 @@ static func draws_a_list(node: Node) -> bool:
 	return node is TabBar or node is MenuBar or node is ItemList or node is PopupMenu or node is Tree
 
 
+## The words of the enabled buttons under [param from], quoted, each once and in the order they are
+## drawn, that [param open] says a player could press: at most [param most], then "and more". What a
+## refusal of words nothing on screen says offers instead: a click for "Settings" named nothing,
+## though Play, Options and Quit were all there.
+static func pressable_words(from: Node, open: Callable, most: int) -> String:
+	var offered: Array[String] = []
+	var pending: Array[Node] = [from]
+	while not pending.is_empty():
+		var node: Node = pending.pop_front()
+		var button: BaseButton = node as BaseButton
+		var words: String = "" if button == null or button.disabled else said_by(button).strip_edges()
+		var quoted: String = '"%s"' % words
+		if not words.is_empty() and not offered.has(quoted) and open.call(button):
+			if offered.size() == most:
+				return ", ".join(offered) + ", and more"
+			offered.append(quoted)
+		var children: Array[Node] = node.get_children()
+		for index: int in range(children.size() - 1, -1, -1):
+			pending.push_front(children[index])
+	return ", ".join(offered)
+
+
 static func _keep(line: String, into: Array[String]) -> void:
 	var trimmed: String = line.strip_edges()
 	if not trimmed.is_empty():

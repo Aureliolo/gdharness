@@ -242,7 +242,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   const slots = new EngineSlots(
     chosen.directory,
     slotCount,
-    { pid: process.pid, started: await ownStart() },
+    { pid: process.pid, started: await ownStart(), by: `gdharness spread of ${options.projectPath}` },
     (line) => {
       console.log(`[spread] ${line}`);
     },

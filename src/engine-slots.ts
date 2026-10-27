@@ -204,10 +204,14 @@ export class FolderChanges {
   }
 }
 
-/** Who holds a lock, as its file says. */
+/**
+ * Who holds a lock, as its file says. [member by] is what took it, such as a test run and its
+ * project, so a wait can say who it waits behind; a lock written without it is named by its pid.
+ */
 export interface SlotHolder {
   readonly pid: number;
   readonly started: number;
+  readonly by?: string;
 }
 
 /** The holder [param content] names, or null for content that names none. */
@@ -217,10 +221,11 @@ export function holderOf(content: string): SlotHolder | null {
     if (typeof parsed !== 'object' || parsed === null) {
       return null;
     }
-    const { pid, started } = parsed as { pid?: unknown; started?: unknown };
-    return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 && typeof started === 'number'
-      ? { pid, started }
-      : null;
+    const { pid, started, by } = parsed as { pid?: unknown; started?: unknown; by?: unknown };
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0 || typeof started !== 'number') {
+      return null;
+    }
+    return typeof by === 'string' && by !== '' ? { pid, started, by } : { pid, started };
   } catch {
     return null;
   }
@@ -312,7 +317,7 @@ export class EngineSlots {
           now - this.saidAt >= WAIT_SAID_MS
         ) {
           this.saidAt = now;
-          this.say(slotWaitSaid(now - began, this.count, this.directory));
+          this.say(slotWaitSaid(now - began, this.count, this.directory, this.holders()));
         }
         if (changes === undefined) {
           // Looked at again once watched, since a slot given back before the watch began says nothing.
@@ -360,6 +365,22 @@ export class EngineSlots {
     }
     this.marks.add(mark);
     return mark;
+  }
+
+  /** Who holds the slots now, in slot order, leaving out a lock that cannot be read. */
+  holders(): SlotHolder[] {
+    const found: SlotHolder[] = [];
+    for (let slot = 0; slot < this.count; slot += 1) {
+      try {
+        const holder = holderOf(readFileSync(join(this.directory, `${String(slot)}.lock`), 'utf8'));
+        if (holder !== null) {
+          found.push(holder);
+        }
+      } catch {
+        // Given back since the take looked, which the next look finds.
+      }
+    }
+    return found;
   }
 
   /** Gives back every slot this process holds, as it ends. */
@@ -464,6 +485,7 @@ export class EngineSlots {
 
 let ours: Promise<EngineSlots> | undefined;
 let saidTo: ((line: string) => void) | undefined;
+let takenBy: string | undefined;
 
 /**
  * Has a wait for a slot outside a call that reports progress said through [param say]: a command's
@@ -480,20 +502,60 @@ export function sayWaitsTo(say: (line: string) => void): void {
 function processSlots(): Promise<EngineSlots> {
   ours ??= ownStart().then((started) => {
     const chosen = machineSlots();
-    return new EngineSlots(chosen.directory, chosen.count, { pid: process.pid, started }, (line) => {
+    const holder = { pid: process.pid, started, ...(takenBy === undefined ? {} : { by: takenBy }) };
+    return new EngineSlots(chosen.directory, chosen.count, holder, (line) => {
       saidTo?.(line);
     });
   });
   return ours;
 }
 
-/** What waiting for a slot says, after [param waitedMs], to the client of the call that waits. */
-export function slotWaitSaid(waitedMs: number, count: number, directory: string): string {
+/**
+ * Names what this process's own engines are taken for, written into each lock it takes outside a
+ * run that names its slots, such as a command and its project or a server.
+ */
+export function nameSlotTaker(by: string): void {
+  takenBy = by;
+}
+
+/**
+ * What waiting for a slot says, after [param waitedMs], to the client of the call that waits:
+ * [param holders] are who hold the slots, one entry a slot, grouped by process in what is said.
+ */
+export function slotWaitSaid(
+  waitedMs: number,
+  count: number,
+  directory: string,
+  holders: readonly SlotHolder[] = [],
+): string {
   const slots =
     count === 1
       ? `the one engine slot on this machine (${directory}) is in use`
       : `all ${String(count)} engine slots on this machine (${directory}) are in use`;
-  return `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine: ${slots}, by a gate or another tool, and the engine starts when one is given back.`;
+  const held = new Map<number, { by: string | undefined; slots: number }>();
+  for (const holder of holders) {
+    const known = held.get(holder.pid);
+    held.set(holder.pid, { by: known?.by ?? holder.by, slots: (known?.slots ?? 0) + 1 });
+  }
+  const named = [...held].map(([pid, { by, slots: taken }]) => {
+    const who =
+      pid === process.pid
+        ? `this process (pid ${String(pid)})`
+        : by === undefined
+          ? `pid ${String(pid)}`
+          : `${by} (pid ${String(pid)})`;
+    return count === 1 ? who : `${String(taken)} by ${who}`;
+  });
+  const waiting = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine: ${slots}`;
+  if (named.length === 0) {
+    return `${waiting}, by a gate or another tool, and the engine starts when one is given back.`;
+  }
+  if (count === 1) {
+    return `${waiting}, by ${named.join(', ')}, and the engine starts when it is given back.`;
+  }
+  const list =
+    named.length === 1 ? named.join('') : `${named.slice(0, -1).join(', ')} and ${named.at(-1) ?? ''}`;
+  return `${waiting}: ${list}. The engine starts when one is given back.`;
 }
 
 /**
@@ -509,7 +571,7 @@ export async function slotForCall(): Promise<{ readonly release: () => void }> {
     progress === undefined
       ? undefined
       : (waitedMs) => {
-          progress(waitedMs / 1000, slotWaitSaid(waitedMs, slots.count, slots.directory));
+          progress(waitedMs / 1000, slotWaitSaid(waitedMs, slots.count, slots.directory, slots.holders()));
         },
   );
   return {
