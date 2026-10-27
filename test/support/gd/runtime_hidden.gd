@@ -271,6 +271,14 @@ func _check_buttons_offered_for_words_nobody_shows() -> void:
 	var offered: String = str(refused.get("message", "")).get_slice("the buttons on screen say ", 1)
 	if not _says(refused, "1 hidden control says it") or offered != '"Play", "Quit"':
 		_fail("words only a hidden control says offer what is on screen: %s" % JSON.stringify(refused))
+	# A click that lands says whether the button heard it: Quit takes only the right button.
+	var play: Dictionary = await input.click({"says": "Play"})
+	if play.get("landed") != true or play.get("pressed_signal") != true or _presses("Play") != 1:
+		_fail("a button that heard the click says so: %s" % JSON.stringify(play))
+	(root.get_node("Quit") as Button).button_mask = MOUSE_BUTTON_MASK_RIGHT
+	var quit_left: Dictionary = await input.click({"says": "Quit"})
+	if quit_left.get("landed") != true or quit_left.get("pressed_signal") != false or _presses("Quit") != 0:
+		_fail("and one the click landed on without pressing says that: %s" % JSON.stringify(quit_left))
 	for gone: String in ["Panel", "Play", "Quit", "Later", "Buried", "Lid"]:
 		root.get_node(gone).queue_free()
 	await process_frame

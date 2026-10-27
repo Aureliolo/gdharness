@@ -16865,7 +16865,7 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
       assert.deepEqual(get(mouse, 'position'), [241, 103], `in the window's pixels: ${mouseShown}`);
       assert.equal(get(mouse, 'window'), undefined, `the game's own window: ${mouseShown}`);
       assert.equal(get(mouse, 'hovered'), drawn, mouseShown);
-      assert.equal(get(mouse, 'pressed_on'), drawn, mouseShown);
+      assert.equal(get(mouse, 'press_went_to'), drawn, mouseShown);
       assert.equal(get(mouse, 'landed'), true, mouseShown);
       assert.deepEqual(
         (await record(drawn)).presses,
@@ -16896,7 +16896,7 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
       });
       assert.deepEqual(get(dragged, 'from'), [35, 100], `${how}: ${JSON.stringify(dragged)}`);
       assert.equal(get(dragged, 'hovered'), drawn, `${how}: and the drag: ${JSON.stringify(dragged)}`);
-      assert.equal(get(dragged, 'pressed_on'), drawn, `${how}: ${JSON.stringify(dragged)}`);
+      assert.equal(get(dragged, 'press_went_to'), drawn, `${how}: ${JSON.stringify(dragged)}`);
       assert.equal(get(dragged, 'landed'), true, `${how}: ${JSON.stringify(dragged)}`);
       // Off every control, so null is told apart from an answer that never reads the hover.
       const away = await call('runtime_input', { op: 'mouse_motion', x: 600, y: 20 });
@@ -16910,7 +16910,7 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
       const covered = await call('runtime_input', { op: 'mouse_click', nodePath: drawn, x: 500, y: 50 });
       const coveredShown = `${how}: ${JSON.stringify(covered)}`;
       assert.equal(get(covered, 'path'), drawn, coveredShown);
-      assert.equal(get(covered, 'pressed_on'), '/root/Main/Cover', coveredShown);
+      assert.equal(get(covered, 'press_went_to'), '/root/Main/Cover', coveredShown);
       assert.equal(get(covered, 'landed'), false, coveredShown);
       const coverDrag = await call('runtime_input', {
         op: 'mouse_drag',
@@ -16922,7 +16922,7 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
         frames: 2,
       });
       const coverDragShown = `${how}: ${JSON.stringify(coverDrag)}`;
-      assert.equal(get(coverDrag, 'pressed_on'), '/root/Main/Cover', coverDragShown);
+      assert.equal(get(coverDrag, 'press_went_to'), '/root/Main/Cover', coverDragShown);
       assert.equal(get(coverDrag, 'landed'), false, coverDragShown);
       assert.equal(
         (await record(drawn)).presses.length,
@@ -16943,7 +16943,7 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
         assert.deepEqual(get(inPopup, 'position'), [380, 210], inPopupShown);
         assert.equal(get(inPopup, 'hovered'), '/root/Main/Popup/Inside', inPopupShown);
         // Into the window over the point, not past it to the game's window under it.
-        assert.equal(get(inPopup, 'pressed_on'), '/root/Main/Popup/Inside', inPopupShown);
+        assert.equal(get(inPopup, 'press_went_to'), '/root/Main/Popup/Inside', inPopupShown);
         assert.equal(get(inPopup, 'landed'), undefined, `a Window is not a control: ${inPopupShown}`);
         assert.deepEqual((await record('/root/Main/Popup/Inside')).presses, [[25, 30]], 'inside the window');
       }

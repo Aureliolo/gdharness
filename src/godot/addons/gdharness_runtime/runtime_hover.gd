@@ -226,15 +226,15 @@ func control_at(viewport: Viewport, point: Vector2) -> Control:
 
 
 ## What a pointer answer says of a press at [param position], in [param viewport]'s window pixels:
-## pressed_on, the path of what the GUI hands it to or null, and for a press aimed at a control,
+## press_went_to, the path of what the GUI hands it to or null, and for a press aimed at a control,
 ## landed, whether that is the control or inside it. Read before the press, which can free both. A
 ## press aimed at a slider that went to a button drawn over it answered the slider's path alone,
 ## and the caller read that as the slider having been pressed.
 func press_of(aim: Dictionary, viewport: Viewport, position: Vector2) -> Dictionary:
 	var took: Node = _pressed_at(viewport, viewport.get_final_transform().affine_inverse() * position)
-	var said: Dictionary = {"pressed_on": null}
+	var said: Dictionary = {"press_went_to": null}
 	if took != null:
-		said["pressed_on"] = str(took.get_path())
+		said["press_went_to"] = str(took.get_path())
 	var named: Object = aim.get("node")
 	var aimed: Control = named as Control
 	if aimed != null:
