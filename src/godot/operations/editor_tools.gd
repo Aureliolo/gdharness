@@ -86,11 +86,11 @@ static func run(params: Dictionary) -> Dictionary:
 		if not GdhSceneUids.by_path.is_empty():
 			answered["namedByPath"] = (
 				(
-					"What this saved names %s by path rather than by uid. A uid in a file's own header is "
-					+ "resolved through the project's uid cache, which holds none for %s yet, as with a "
-					+ "file made since the project was last scanned, and a uid it does not hold would "
-					+ "warn on every load. project_import refresh_uids scans the project, and writes "
-					+ "after it name %s by uid."
+					"What this saved names %s by path rather than by uid, which loads the same. A uid in a "
+					+ "file's own header is resolved through the project's uid cache, which holds none for "
+					+ "%s yet, as with a file made since the project was last scanned, so a uid written "
+					+ "now would warn on every load. project_import refresh_uids scans the project, and "
+					+ "writes after it name %s by uid."
 				)
 				% [
 					", ".join(GdhSceneUids.by_path),

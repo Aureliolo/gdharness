@@ -51655,6 +51655,11 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       await axis({ 'position:z': 1 }),
       'Node2D.position is a Vector2, so it has no z; it has x, y.',
     );
+    // With no script and nothing near, the refusal alone left nothing to try.
+    assert.equal(
+      await axis({ zzz: 1 }),
+      'Node2D has no property zzz; editor_classes info with className Node2D and includeInherited true lists the ones it has.',
+    );
     assert.equal(
       await axis({ 'position:z': 1, visible: false }),
       'Node2D.position is a Vector2, so it has no z; it has x, y. None of the 2 properties given was written.',
@@ -59872,7 +59877,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "What this saved names res://parts/big_crate.tscn by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
+      "What this saved names res://parts/big_crate.tscn by path rather than by uid, which loads the same. A uid in a file's own header is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, so a uid written now would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -60694,7 +60699,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid. A uid in a file's own header is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, and a uid it does not hold would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
+      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid, which loads the same. A uid in a file's own header is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, so a uid written now would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
