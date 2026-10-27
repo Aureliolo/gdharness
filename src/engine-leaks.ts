@@ -49,6 +49,14 @@ const LEAKED_INSTANCE = /^Leaked instance: (\w+):/;
 const STILL_IN_USE = /^Resource still in use: (.+?) \(\w+\)$/;
 /** How many of the resources still in use a sentence names before counting the rest. */
 const IN_USE_NAMED = 8;
+/**
+ * What keeps a RefCounted alive to the exit. The engine's own hint beside the list speaks of nodes
+ * removed from the tree, which sent a reader after nodes for two RefCounted holding each other.
+ */
+const REFCOUNTED_HELD =
+  'A RefCounted alive at exit is held by a cycle of references (two holding each other, or one ' +
+  'holding a lambda that captures it) or by an Object never freed, rather than by a node left out ' +
+  'of the tree; a WeakRef on one side of the cycle, or clearing the reference once done, frees it.';
 
 /**
  * What an engine started with `--verbose` names among [param lines] as it exits: the objects still
@@ -86,7 +94,7 @@ export function heldAtExit(lines: Iterable<string>): string | undefined {
       ? undefined
       : `resources still in use: ${named.join(', ')}${more > 0 ? `, and ${String(more)} more` : ''}`,
   ].filter((part) => part !== undefined);
-  return `The engine named them: ${parts.join('; ')}.`;
+  return `The engine named them: ${parts.join('; ')}.${objects.has('RefCounted') ? ` ${REFCOUNTED_HELD}` : ''}`;
 }
 
 /** Why a leak report beside a walk that stopped part way is not counted against the run. */

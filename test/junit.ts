@@ -10,6 +10,7 @@ import {
   failedCases,
   failedWithin,
   hookFailuresPrinted,
+  ignoredForTheRunner,
   ignoredLeftOut,
   ignoredYetRan,
   LONGEST_DETAIL,
@@ -19,6 +20,7 @@ import {
   orphansPrinted,
   parseJUnit,
   RENDERED_AWAY_NOTE,
+  rowsIgnoredIn,
   scriptErrorsPrinted,
   suitesPrinted,
   testProgressMessage,
@@ -1102,6 +1104,35 @@ function testAnIgnoreThatLeftOutNothingIsNamed(): void {
       ],
       unmatched: ['ledger_test:test_fea', 'test_tax'],
     },
+  );
+
+  // A row is handed to the runner by the path of each suite declaring its case, as the failure named
+  // it or by its index alone, and as nothing when no suite does: gdUnit4 would read it as the case.
+  const declared = [
+    { path: 'res://test/econ/ledger_test.gd', cases: ['test_rate', 'test_sum'] },
+    { path: 'res://more/ledger_test.gd', cases: ['test_rate'] },
+  ];
+  assert.deepEqual(
+    ignoredForTheRunner(
+      ['ledger_test:test_rate:2 (3, 4)', 'ledger_test:test_sum', 'ledger_test:test_fee:1', 'tap_test'],
+      declared,
+    ),
+    [
+      'res://test/econ/ledger_test.gd:test_rate:2',
+      'res://more/ledger_test.gd:test_rate:2',
+      'ledger_test:test_sum',
+      'tap_test',
+    ],
+  );
+  // Left out is what the runner said it left out, so a row the case does not have matches nothing.
+  const said = rowsIgnoredIn([
+    'gdharness ignored res://test/econ/ledger_test.gd > test_rate:2',
+    'gdharness left out res://more/ledger_test.gd > test_rate:2',
+  ]);
+  assert.deepEqual([...said], ['res://test/econ/ledger_test.gd > test_rate:2']);
+  assert.deepEqual(
+    ignoredLeftOut(report, ['ledger_test:test_rate:2 (3, 4)', 'ledger_test:test_rate:7'], declared, said),
+    { leftOut: ['ledger_test:test_rate:2'], unmatched: ['ledger_test:test_rate:7'] },
   );
 }
 

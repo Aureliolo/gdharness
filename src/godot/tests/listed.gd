@@ -25,6 +25,9 @@ const ROWS: String = "--rows-in"
 ## that is not parameterised. gdUnit4 prints nothing for a case it skips, and the caller needs every
 ## row an engine found to tell one that no engine ran.
 const LEFT_OUT: String = "gdharness left out"
+## Printed before each row an entry of [constant SKIPPING] leaves out, as
+## `res://suite.gd > test_case:row`, so the caller can tell an entry naming a row that does not exist.
+const IGNORED_ROW: String = "gdharness ignored"
 ## Printed after a case or a suite's hooks that gdUnit4 says left orphan nodes, as
 ## `res://suite.gd > test_case left 2: Node "Sandbox" of res://sandbox.gd, Timer "Timer"`, with
 ## `after` for the suite's hooks. gdUnit4 names them only where a case calls
@@ -92,6 +95,8 @@ class GdhRunner:
 	## base, so an inherited case left out under its suite ran in every engine the suite was dealt to,
 	## and a case of `res://tests/a_test.gd` was also left out of `res://more/tests/a_test.gd`.
 	var left_out: Dictionary[String, bool] = {}
+	## The rows of parameterised cases to leave out, by `res://suite.gd:test_case:row`.
+	var left_out_rows: Dictionary[String, bool] = {}
 	## The cases gdUnit4 said it finished, which [GdhSessionCheck] holds the session's lookups against.
 	var cases_ended: int = 0
 	## The marker of the shutdown walk's oldest end, made as the run starts.
@@ -163,6 +168,15 @@ class GdhRunner:
 	## its index.
 	func is_skipped(test: GdUnitTestCase) -> bool:
 		if left_out.has("%s:%s" % [test.suite_resource_path, test.test_name]) or super(test):
+			return true
+		var row: String = "%s:%s:%d" % [test.suite_resource_path, test.test_name, test.attribute_index]
+		if test.attribute_index >= 0 and left_out_rows.has(row):
+			print(
+				(
+					"%s %s > %s:%d"
+					% [IGNORED_ROW, test.suite_resource_path, test.test_name, test.attribute_index]
+				)
+			)
 			return true
 		var share: GdhRowShare = row_shares.get("%s:%s" % [test.suite_resource_path, test.test_name], null)
 		if share == null or not share.leaves_out(test.attribute_index):
@@ -476,7 +490,9 @@ static func started(given: PackedStringArray) -> GdhRunner:
 		write_expected(expected_out, suites)
 	runner.add_test_suites(suites)
 	for entry: String in listed(asked, SKIPPING):
-		if is_one_case(entry):
+		if is_one_row(entry):
+			runner.left_out_rows[entry] = true
+		elif is_one_case(entry):
 			runner.left_out[entry] = true
 		else:
 			runner.skip_test_suite(entry)
@@ -560,6 +576,13 @@ static func listed(args: PackedStringArray, flag: String) -> PackedStringArray:
 ## Whether [param entry] of a [constant SKIPPING] file names one case of one suite file, as
 ## `res://suite.gd:test_case`, rather than a suite or a case by gdUnit4's looser names, which go to
 ## gdUnit4 as they are.
+## Whether [param entry] names one row of a parameterised case, as `res://suite.gd:test_case:row`.
+static func is_one_row(entry: String) -> bool:
+	var at: int = entry.rfind(":")
+	var row: String = entry.substr(at + 1)
+	return at > 0 and row.is_valid_int() and not row.begins_with("-") and is_one_case(entry.substr(0, at))
+
+
 static func is_one_case(entry: String) -> bool:
 	var at: int = entry.rfind(":")
 	return (
