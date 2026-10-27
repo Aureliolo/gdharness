@@ -58266,7 +58266,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
         'child_entered_tree',
         'hide',
         undefined,
-        `child_entered_tree passes 1 argument, and hide takes none${fails}`,
+        `child_entered_tree passes 1 argument, and hide takes none${fails} Connected with unbinds 1, the last argument the signal passes is left out.`,
       ],
       [
         'child_entered_tree',
@@ -58288,6 +58288,21 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
         `and the connection is written all the same:\n${fileOf('wires.tscn')}`,
       );
     }
+    // A bound argument the method has no room for is not one unbinding drops, so no unbinds is offered.
+    const overBound = await written('scene_signal', {
+      op: 'connect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'visibility_changed',
+      targetNodePath: 'Taker',
+      methodName: 'hide',
+      binds: [1],
+    });
+    assert.equal(
+      get(overBound, 'misfit'),
+      `visibility_changed passes 1 argument, and hide takes none${fails}`,
+      JSON.stringify(overBound),
+    );
     const unwritten = await wire('died', 'not_yet_written');
     assert.deepEqual(
       [get(unwritten, 'methodFound'), get(unwritten, 'argumentsFit'), get(unwritten, 'misfit')],
@@ -58395,7 +58410,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     const unbound = await rewire('child_entered_tree', 'queue_free', { unbinds: 0 });
     assert.deepEqual(
       [get(unbound, 'unbinds'), get(unbound, 'unbindsBefore'), get(unbound, 'misfit')],
-      [undefined, 1, `child_entered_tree passes 1 argument, and queue_free takes none${fails}`],
+      [
+        undefined,
+        1,
+        `child_entered_tree passes 1 argument, and queue_free takes none${fails} Connected with unbinds 1, the last argument the signal passes is left out.`,
+      ],
       JSON.stringify(unbound),
     );
     const rebound = await rewire('child_entered_tree', 'queue_free', { unbinds: 1, binds: [3] });
