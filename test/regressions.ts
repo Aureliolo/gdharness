@@ -39546,6 +39546,20 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
     'a long timeout waits thirty seconds of silence',
   );
   assert.equal(timedOutVerdict(600_000, 30_000).hung, true);
+  // Killed before the engine printed anything, under a limit an engine may not start in, it was
+  // perhaps still starting; given thirty seconds and still saying nothing, it had stopped.
+  const unstarted = timedOutVerdict(1, 3, null, false);
+  assert.deepEqual(
+    unstarted,
+    {
+      verdict:
+        'timed out after 1 ms before the engine printed anything, so it may still have been starting: timeoutMs counts milliseconds, and the default is 600000',
+      hung: false,
+    },
+    JSON.stringify(unstarted),
+  );
+  assert.equal(timedOutVerdict(30_000, 30_000, null, false).hung, true, 'silent at the boundary is hung');
+  assert.equal(timedOutVerdict(29_999, 29_999, null, false).hung, false, 'and just under it may be starting');
 
   // A run repeating one script error to the kill is named for it, whatever else it printed before.
   const log = new GameLog();
@@ -39667,12 +39681,12 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       ].join('\n'),
     );
     await withStdioServer(async (_call, request) => {
-      const run = async (path: string): Promise<unknown> => {
+      const run = async (path: string, timeoutMs = 12_000): Promise<unknown> => {
         const response = await request(
           'tools/call',
           {
             name: 'project_test',
-            arguments: { projectPath: projectDir, path, timeoutMs: 12_000, printed: 'passed' },
+            arguments: { projectPath: projectDir, path, timeoutMs, printed: 'passed' },
           },
           ENGINE_CALL_TIMEOUT_MS,
         );
@@ -39729,6 +39743,18 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       assert.ok(
         passedLines.length > 10 && passedLines.every((line) => /passed/i.test(line)),
         `a run cut off before its report answers with the lines asked for: ${JSON.stringify(passedLines.slice(0, 3))}`,
+      );
+      // A limit no engine starts in kills the run before it prints a line, which is not a hang.
+      const unstarted = await run('res://steady', 1);
+      assert.deepEqual(
+        [get(unstarted, 'timedOut'), get(unstarted, 'hung')],
+        [true, false],
+        JSON.stringify(unstarted),
+      );
+      assert.match(
+        String(get(unstarted, 'verdict')),
+        /^timed out after 1 ms before the engine printed anything, so it may still have been starting: timeoutMs counts milliseconds/,
+        JSON.stringify(unstarted),
       );
       const stuck = await run('res://stuck');
       assert.equal(get(stuck, 'hung'), true, `a run silent at the kill is hung: ${JSON.stringify(stuck)}`);
@@ -40521,6 +40547,11 @@ async function testSuitesPlayInASceneTheProfilerSees(): Promise<void> {
         [
           { op: 'start', projectPath: project, suites: ['tests/gone_test.gd'] },
           /^Nothing at res:\/\/tests\/gone_test\.gd/,
+        ],
+        // project_test's path takes one case after a script, and the suites scene plays whole suites.
+        [
+          { op: 'start', projectPath: project, suites: ['tests/heavy/heavy_test.gd:test_churns'] },
+          /^suites plays whole suites, and tests\/heavy\/heavy_test\.gd:test_churns names one case: name the file, tests\/heavy\/heavy_test\.gd, to play every case in it, or run the case alone with project_test, whose path takes tests\/heavy\/heavy_test\.gd:test_churns\.$/m,
         ],
         [
           { op: 'start', projectPath: bare, suites: 'tests' },
@@ -53038,6 +53069,37 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
         [get(one.answer, 'tests'), get(one.answer, 'failures'), get(one.answer, 'passed')],
         [2, 0, true],
         one.text,
+      );
+      // A case after a script in path, as gdharness test takes one, runs that case alone: given
+      // relative to the project, and from two suites, one of them beside tests naming another.
+      const inPath = await run({ path: 'test/math_test.gd:test_halves' });
+      assert.deepEqual(
+        [get(inPath.answer, 'tests'), get(inPath.answer, 'failures'), get(inPath.answer, 'passed')],
+        [1, 0, true],
+        inPath.text,
+      );
+      const inPaths = await run({
+        path: ['res://test/math_test.gd:test_doubles', 'res://test/more/math_extra_test.gd:test_adds'],
+        tests: ['math_test:test_halves'],
+      });
+      assert.deepEqual(
+        [get(inPaths.answer, 'tests'), get(inPaths.answer, 'failures'), failedIn(inPaths.answer)],
+        [3, 1, ['res://test/math_test.gd:test_doubles']],
+        inPaths.text,
+      );
+      // Beside a whole suite or a directory it is refused, since only the cases named would run.
+      const mixed = await run({ path: ['res://test/math_test.gd:test_halves', 'res://test/more'] });
+      assert.match(
+        mixed.text,
+        /^path names a case, res:\/\/test\/math_test\.gd:test_halves, beside res:\/\/test\/more, and a run with cases named runs only those: run the cases on their own, and the rest in a run of its own\.$/m,
+        mixed.text,
+      );
+      // A case the suite does not declare is refused as one named under tests is.
+      const missed = await run({ path: 'res://test/math_test.gd:test_dobles' });
+      assert.match(
+        missed.text,
+        /^No suite under res:\/\/test\/math_test\.gd has a case res:\/\/test\/math_test\.gd:test_dobles\. The nearest are math_test:test_doubles, /m,
+        missed.text,
       );
       // A name no suite declares is refused before an engine starts, with the nearest names.
       const misspelt = await run({ tests: ['test_dobles'] });

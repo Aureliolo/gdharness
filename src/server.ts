@@ -360,7 +360,7 @@ import {
   windowNeedsOf,
 } from './suite-plan.js';
 import { hasSuitesScene, SUITES_SCENE, suitesSceneArgs } from './suites-scene.js';
-import { scriptsWithoutCases, selectTests } from './test-selection.js';
+import { caseInSuites, casesOutOfPath, scriptsWithoutCases, selectTests } from './test-selection.js';
 import {
   asParams,
   readArray,
@@ -2546,6 +2546,9 @@ export function settingsNamedBy(op: string, args: OperationParams): string[] {
  */
 const STALLED_AFTER_MS = 30_000;
 
+/** How long a project_test run may take when timeoutMs is not given. */
+const TEST_TIMEOUT_MS = 600_000;
+
 /** The longest a test run goes without a progress notification while no suite finishes. */
 const TEST_HEARTBEAT_MS = 20_000;
 
@@ -2887,16 +2890,27 @@ export function failedVerdict(
  * else is a run the limit cut off while it was going. A run that ended repeating one script error,
  * [param repeating], is named for that instead: it printed up to the kill without getting anywhere,
  * and the advice to give it longer had a session retrying a run that could never finish.
+ *
+ * A run that printed nothing at all, [param printedAnything] false, under a limit shorter than
+ * thirty seconds may still have been starting the engine: a timeoutMs of 1 was called hung, which
+ * sent a caller who meant seconds after a deadlock in a run that had not begun.
  */
 export function timedOutVerdict(
   timeoutMs: number,
   silentForMs: number,
   repeating: RepeatedError | null = null,
+  printedAnything = true,
 ): { verdict: string; hung: boolean } {
   const quiet = Math.round(silentForMs);
   if (repeating !== null) {
     return {
       verdict: `timed out after ${timeoutMs} ms repeating one script error, printed ${repeating.times} times: ${repeating.text}${repeating.where === null ? '' : ` (${repeating.where})`}. A line that fails on every pass of a loop does this, and a longer timeoutMs would not end it`,
+      hung: false,
+    };
+  }
+  if (!printedAnything && timeoutMs < STALLED_AFTER_MS) {
+    return {
+      verdict: `timed out after ${timeoutMs} ms before the engine printed anything, so it may still have been starting: timeoutMs counts milliseconds, and the default is ${TEST_TIMEOUT_MS}`,
       hung: false,
     };
   }
@@ -7217,10 +7231,19 @@ class GodotServer {
    * it off, taken only by a call that is still being waited on: one that is not would take what
    * it had itself just kept, and hand it to nobody.
    */
-  private async handleRunTests(args: OperationParams): Promise<ToolResponse> {
+  private async handleRunTests(given: OperationParams): Promise<ToolResponse> {
+    const project = this.project(given);
+    if (!project.ok) {
+      return project.response;
+    }
+    const split = casesOutOfPath(project.value.path, given['path'], given['tests']);
+    if (!split.ok) {
+      return this.createErrorResponse(split.reason);
+    }
+    const args: OperationParams =
+      split.path === given['path'] ? given : { ...given, path: split.path, tests: split.tests };
     const ran = await this.runTests(args);
-    const project = this.project(args);
-    if (!project.ok || callSignal()?.aborted === true) {
+    if (callSignal()?.aborted === true) {
       return ran;
     }
     const paths = testPathsIn(project.value.path, args['path']);
@@ -7453,7 +7476,7 @@ class GodotServer {
       '--expected-out',
       expectedFile,
     ];
-    const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 600000;
+    const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? TEST_TIMEOUT_MS;
     this.logDebug(`Running tests: ${engine.value} ${cmdArgs.join(' ')}`);
     const helperFiles: HelperFiles = {
       spec: join(userData, 'spec'),
@@ -7477,12 +7500,15 @@ class GodotServer {
     // When it last said anything, on either stream, which is what tells a run the limit cut off
     // mid-stride from one that had stopped.
     let lastSaid = Date.now();
+    let saidAnything = false;
     run.process.stdout?.on('data', (data: Buffer) => {
       console.push(data);
       lastSaid = Date.now();
+      saidAnything = true;
     });
     run.process.stderr?.on('data', () => {
       lastSaid = Date.now();
+      saidAnything = true;
     });
     const reporting = this.reportTestProgress(run.log);
     const autoloaded = scriptsAutoloaded(project.value.path);
@@ -7632,6 +7658,7 @@ class GodotServer {
             timeoutMs,
             silentForMs,
             repeatingScriptError(run.log.all, (entry) => run.log.raisedByScript(entry)),
+            saidAnything,
           )
         : null;
     const hung = cutShort?.hung ?? false;
@@ -10295,6 +10322,10 @@ class GodotServer {
       return refused(
         "suites plays the suites in the tests addon's own scene, so it takes no scene and no executable: leave those out.",
       );
+    }
+    const cased = caseInSuites(args['suites']);
+    if (cased !== null) {
+      return refused(cased);
     }
     const paths = testPathsIn(projectPath, args['suites'], 'suites');
     if (!paths.ok) {
