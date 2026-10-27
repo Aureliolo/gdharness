@@ -8037,7 +8037,9 @@ class GodotServer {
           ? checked.refusal
           : this.jsonTextResponse({ ...checked.answers[0], ...engineChecked(one.noLanguageServer.reason) });
       }
-      return 'refusal' in one ? one.refusal : this.jsonTextResponse(one.answer);
+      return 'refusal' in one
+        ? one.refusal
+        : this.jsonTextResponse({ ...one.answer, checkedBy: 'language server' });
     }
     const progress = callProgress();
     const cancelled = callSignal();
@@ -8047,6 +8049,9 @@ class GodotServer {
     let warnings = 0;
     let unread = 0;
     let byEngine: string | null = null;
+    // How many the language server answered before it stopped answering, if it did, so a check
+    // that went on in the engine does not call every script the engine's.
+    let byServer = 0;
     for (const [at, scriptPath] of scripts.value.entries()) {
       // Nobody is left to read the answer, and a folder can take minutes.
       if (cancelled?.aborted === true) {
@@ -8086,6 +8091,7 @@ class GodotServer {
         reported.push({ scriptPath, error: one.refusal.content[0]?.text ?? 'not read' });
         continue;
       }
+      byServer += 1;
       errors += Number(one.answer['errors']);
       warnings += Number(one.answer['warnings']);
       // Every note an answer can carry is about a diagnostic, so none means nothing else either.
@@ -8104,7 +8110,10 @@ class GodotServer {
       ...(unread > 0 ? { scriptsNotRead: unread } : {}),
       scripts: reported,
       nothingReported,
-      ...(byEngine === null ? {} : engineChecked(byEngine)),
+      ...(byEngine === null ? { checkedBy: 'language server' } : engineChecked(byEngine)),
+      ...(byEngine !== null && byServer > 0
+        ? { checkedBy: 'language server, then engine', checkedByLanguageServer: byServer }
+        : {}),
     });
   }
 
@@ -9107,6 +9116,7 @@ class GodotServer {
     scanning: boolean;
     importing: boolean;
     finishedMsAgo: number | null;
+    scenes?: { openScenes: string[]; editedScene: string | null; unsavedScenes: string[] };
   } | null> {
     if (!this.godotBridge.getStatus().connected) {
       return null;
@@ -9120,10 +9130,21 @@ class GodotServer {
         return null;
       }
       const since = readNumber(asParams(answer), 'sinceScanFinishedMs');
+      const open = readStringArray(asParams(answer), 'openScenes');
+      const edited = readString(asParams(answer), 'editedScene');
       return {
         scanning: readBoolean(asParams(answer), 'scanning') ?? false,
         importing: readBoolean(asParams(answer), 'importing') ?? false,
         finishedMsAgo: since === undefined || since < 0 ? null : since,
+        ...(open === undefined
+          ? {}
+          : {
+              scenes: {
+                openScenes: open,
+                editedScene: edited === undefined || edited === '' ? null : edited,
+                unsavedScenes: readStringArray(asParams(answer), 'unsavedScenes') ?? [],
+              },
+            }),
       };
     } catch {
       return null;
@@ -9248,7 +9269,11 @@ class GodotServer {
         // debugger takes a port again before every play, so the one in the greeting is a number
         // it has already moved off.
         debugPort: playing?.debugPort ?? this.godotBridge.getStatus().debugPort,
-        scan,
+        scan:
+          scan === null
+            ? null
+            : { scanning: scan.scanning, importing: scan.importing, finishedMsAgo: scan.finishedMsAgo },
+        ...scan?.scenes,
       },
       godot: {
         path: located.ok ? located.path : null,
@@ -14352,9 +14377,40 @@ class GodotServer {
             }),
       },
     });
-    return this.godotBridge.isConnected()
-      ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
-      : answered;
+    if (!this.godotBridge.isConnected()) {
+      return answered;
+    }
+    // The editor holding the project takes its class list in at a scan rather than from the file,
+    // so the class written here stayed a name it could not resolve until somebody called
+    // editor_rescan. Scanned here, as modify reloads the script there, unless this editor's scans
+    // write a list shorter than the file: a scan there loses classes, and the note says what loads them.
+    const scanned =
+      answered.isError === true || this.editorWritesAShortList(project.value.path)
+        ? null
+        : await this.handleRescanFilesystem({ projectPath: project.value.path });
+    return await this.alsoSayWhatTheEditorCannotSee(
+      scanned === null ? answered : this.withEditorScan(answered, scanned),
+      args,
+    );
+  }
+
+  /** [param answered] with what the editor's scan after it brought in, or why it did not. */
+  private withEditorScan(answered: ToolResponse, scanned: ToolResponse): ToolResponse {
+    const payload = asParams(JSON.parse(answered.content[0]?.text ?? '{}'));
+    const scan = scanned.isError === true ? null : asParams(JSON.parse(scanned.content[0]?.text ?? '{}'));
+    const broughtIn = scan === null ? undefined : readStringArray(scan, 'broughtIn');
+    return this.jsonTextResponse({
+      ...payload,
+      editorRescanned: scan !== null && readBoolean(scan, 'ok') === true,
+      ...(broughtIn === undefined ? {} : { broughtIn }),
+      ...(scan === null
+        ? {
+            editorRescanNote: `The editor was asked to scan for the new class and answered: ${scanned.content[0]?.text ?? 'nothing'}`,
+          }
+        : readBoolean(scan, 'ok') === true
+          ? {}
+          : { editorRescanNote: readString(scan, 'note') ?? JSON.stringify(scan) }),
+    });
   }
 
   /**

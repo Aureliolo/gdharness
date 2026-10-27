@@ -2820,6 +2820,16 @@ async function testAnEditInTheEditorIsKept({ call, refusal, project }: Editor): 
   const edited = { projectPath: project, scenePath: path };
   const opened = await hook(project, { op: 'edit', path, node: 'ByHand' });
   assert.deepEqual(get(opened, 'unsaved'), [path], `the edit should be unsaved: ${JSON.stringify(opened)}`);
+  // What editor_status says of the tabs is what the editor holds, read past the server above.
+  const tabsOf = async (): Promise<unknown[]> => {
+    const shown = get(await call('editor_status', {}), 'editor');
+    return [
+      asArray(get(shown, 'openScenes')).includes(path),
+      get(shown, 'editedScene'),
+      get(shown, 'unsavedScenes'),
+    ];
+  };
+  assert.deepEqual(await tabsOf(), [true, path, [path]], 'editor_status names the open, shown and unsaved');
 
   const before = fileText(project, 'layers/edited.tscn');
   assert.match(
@@ -2863,6 +2873,7 @@ async function testAnEditInTheEditorIsKept({ call, refusal, project }: Editor): 
     `the tab in front stays: ${JSON.stringify(after)}`,
   );
   assert.deepEqual(get(after, 'unsaved'), [], 'with nothing left unsaved');
+  assert.deepEqual(await tabsOf(), [true, 'res://layers/tab.tscn', []], 'and editor_status says so');
 
   // The main scene back in front, as the cases after this one found the editor.
   await hook(project, { op: 'open', path: 'res://main.tscn' });
@@ -3974,6 +3985,37 @@ async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<
   const seeing = await call('editor_rescan', { projectPath: project });
   assert.equal(get(seeing, 'ok'), true, `a scanned project resolves its own classes: ${text(seeing)}`);
   assert.equal(get(seeing, 'unseenByEditor'), undefined, `with nothing to name: ${text(seeing)}`);
+}
+
+/**
+ * A class created through script_edit is one the editor resolves when the call comes back.
+ *
+ * The editor takes classes in at a scan, and nothing scanned after a create, so the answer said
+ * `registered: true` beside the same class under `unseenByEditor`, and every scene or script
+ * naming it next was refused by the editor until somebody called editor_rescan.
+ */
+async function testACreatedClassIsOneTheEditorSees({ call, project }: Editor): Promise<void> {
+  const created = await call('script_edit', {
+    projectPath: project,
+    scriptPath: 'res://created_class.gd',
+    op: 'create',
+    className: 'CreatedClass',
+    extends: 'RefCounted',
+  });
+  try {
+    assert.deepEqual(
+      [get(created, 'registered'), get(created, 'editorRescanned'), get(created, 'unseenByEditor')],
+      [true, true, undefined],
+      `the editor scanned for it and sees it: ${text(created)}`,
+    );
+    const rebuilt = await call('project_import', { projectPath: project, op: 'refresh_classes' });
+    assert.equal(get(rebuilt, 'classesUnchecked'), undefined, `the editor answered: ${text(rebuilt)}`);
+    assert.equal(get(rebuilt, 'unseenByEditor'), undefined, `asked again, it holds it: ${text(rebuilt)}`);
+  } finally {
+    rmSync(join(project, 'created_class.gd'), { force: true });
+    rmSync(join(project, 'created_class.gd.uid'), { force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
 }
 
 /**
@@ -5909,6 +5951,18 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
   assert.equal(get(clean, 'clean'), true, 'a script that parses should come back clean');
   assert.equal(get(clean, 'errors'), 0);
   assert.equal(get(clean, 'warnings'), 0, 'and with no warnings on it either');
+  // An answer from the editor's server and one from a headless engine read the same, so the answer
+  // names which it was, for one script and for several.
+  assert.equal(get(clean, 'checkedBy'), 'language server', JSON.stringify(clean));
+  const both = await call('script_diagnostics', {
+    projectPath: project,
+    scriptPath: ['res://sound.gd', 'res://broken.gd'],
+  });
+  assert.deepEqual(
+    [get(both, 'scriptsChecked'), get(both, 'checkedBy')],
+    [2, 'language server'],
+    JSON.stringify(both),
+  );
 
   const broken = await call('script_diagnostics', { projectPath: project, scriptPath: 'res://broken.gd' });
   assert.equal(get(broken, 'clean'), false, 'and a script that does not parse should not');
@@ -7573,6 +7627,7 @@ async function main(): Promise<void> {
     ['testAReimportTakesInFilesTheEditorHasNotSeen', testAReimportTakesInFilesTheEditorHasNotSeen],
     ['testARunImportsThroughTheEditorFirst', testARunImportsThroughTheEditorFirst],
     ['testAClassTheEditorCannotSee', testAClassTheEditorCannotSee],
+    ['testACreatedClassIsOneTheEditorSees', testACreatedClassIsOneTheEditorSees],
     ['testAScanWritesTheCacheFromTheEditor', testAScanWritesTheCacheFromTheEditor],
     ['testARescanKeepsWhatTheRebuildWrote', testARescanKeepsWhatTheRebuildWrote],
     ['testARescanDropsAClassWhoseScriptIsGone', testARescanDropsAClassWhoseScriptIsGone],

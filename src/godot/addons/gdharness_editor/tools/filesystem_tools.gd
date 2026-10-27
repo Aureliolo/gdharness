@@ -168,8 +168,18 @@ func scan_status(_args: Dictionary) -> Dictionary:
 	if not _editor_plugin:
 		return {"ok": false, "error": "Editor plugin unavailable"}
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
+	# The scenes open in tabs, the one shown and the ones holding unsaved edits: a scene edit on disk
+	# meets what the editor holds of it, and nothing said which scenes those were.
+	var shown: Node = EditorInterface.get_edited_scene_root()
+	var open: Array[String] = []
+	open.assign(EditorInterface.get_open_scenes())
+	var unsaved: Array[String] = []
+	unsaved.assign(EditorInterface.get_unsaved_scenes())
 	return {
 		"ok": true,
+		"openScenes": open,
+		"editedScene": "" if shown == null else shown.scene_file_path,
+		"unsavedScenes": unsaved,
 		"scanning": filesystem.is_scanning(),
 		"importing": filesystem.is_importing(),
 		"pending": GdhSceneFile.scan_due,
