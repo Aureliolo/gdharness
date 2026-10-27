@@ -336,7 +336,9 @@ the slots. A tool of a game's own that starts engines takes them the same way:
 1. A slot is `<directory>/<n>.lock`, for `n` from 0 below the slot count.
 2. To take one, create the file exclusively (`O_CREAT | O_EXCL`, Python's `open(path, "x")`), and
    write `{"pid": <your pid>, "started": <your process's start time>}` into it, the time in
-   milliseconds since the epoch as the operating system reports it.
+   milliseconds since the epoch as the operating system reports it. An optional `"by"` says what
+   took the slot, such as the tool and its project; a run waiting for a slot names each holder by
+   it, and by its pid when it is missing.
 3. When every slot exists, read each one. It is free when no process has its pid, when the process
    with that pid started more than 2000 ms away from `started`, or when the file is still empty or
    unreadable 10 seconds after it was last written. A lock whose holder's start time cannot be read

@@ -42445,14 +42445,19 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
 
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
   try {
-    const slots = new EngineSlots(directory, 2, { pid: process.pid, started });
+    const slots = new EngineSlots(directory, 2, { pid: process.pid, started, by: 'gdharness test of /p' });
     const first = await slots.take();
     const second = await slots.take();
     assert.deepEqual(readdirSync(directory).sort(), ['0.lock', '1.lock'], 'one file a slot');
     assert.deepEqual(
       holderOf(readFileSync(first, 'utf8')),
-      { pid: process.pid, started },
-      'naming its holder',
+      { pid: process.pid, started, by: 'gdharness test of /p' },
+      'naming its holder and what took it',
+    );
+    assert.deepEqual(
+      slots.holders().map((holder) => holder.by),
+      ['gdharness test of /p', 'gdharness test of /p'],
+      'and both are read back as held',
     );
     await assert.rejects(
       slots.take(AbortSignal.timeout(300)),
@@ -43863,7 +43868,10 @@ async function slotTakenWhenFreed(lock: string, ms: number): Promise<ReturnType<
 let seen = false;
 const look = setInterval(() => {
   if (!fs.existsSync(${JSON.stringify(start)})) return;
-  if (!seen) { seen = fs.existsSync(${JSON.stringify(lock)}); return; }
+  if (!seen) {
+    try { const held = fs.readFileSync(${JSON.stringify(lock)}, 'utf8'); if (held === '') return; fs.writeFileSync(${JSON.stringify(`${lock}.seen`)}, held); seen = true; } catch {}
+    return;
+  }
   try {
     fs.writeFileSync(${JSON.stringify(lock)}, JSON.stringify({ pid: process.pid, started: Number(fs.readFileSync(${JSON.stringify(start)}, 'utf8')) }), { flag: 'wx' });
   } catch { return; }
@@ -43960,6 +43968,18 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
     slotWaitSaid(41_400, 6, 'slots'),
     'Waiting 41 s so far for an engine: all 6 engine slots on this machine (slots) are in use, by a gate or another tool, and the engine starts when one is given back.',
   );
+  // Who holds them, one entry a slot: grouped by process, named by what took them where the lock
+  // says, and by pid where a lock written without it does not.
+  const gate = { pid: 1, started: 1, by: 'gdharness test of /games/one' };
+  const unnamed = { pid: 2, started: 1 };
+  assert.equal(
+    slotWaitSaid(41_400, 6, 'slots', [gate, gate, unnamed, gate, unnamed, unnamed]),
+    'Waiting 41 s so far for an engine: all 6 engine slots on this machine (slots) are in use: 3 by gdharness test of /games/one (pid 1) and 3 by pid 2. The engine starts when one is given back.',
+  );
+  assert.equal(
+    slotWaitSaid(500, 3, 'slots', [unnamed, { pid: 3, started: 1, by: 'gdharness setup' }, gate]),
+    'Waiting for an engine: all 3 engine slots on this machine (slots) are in use: 1 by pid 2, 1 by gdharness setup (pid 3) and 1 by gdharness test of /games/one (pid 1). The engine starts when one is given back.',
+  );
   // A wait reports from its own start and so does the run after it, and the client is sent numbers
   // that rise all the same.
   const sent: number[] = [];
@@ -43981,8 +44001,9 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
   // listener of its own says nothing to the command.
   const lined = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slot-lines-'));
   const lineHeld = join(lined, '0.lock');
-  const me = { pid: process.pid, started: await ownStart() };
-  const oneSlot = `the one engine slot on this machine (${lined}) is in use, by a gate or another tool, and the engine starts when one is given back.`;
+  const me = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /games/one' };
+  // Named as this process, since a holder that is the waiter itself is the thing to know about it.
+  const oneSlot = `the one engine slot on this machine (${lined}) is in use, by this process (pid ${String(process.pid)}), and the engine starts when it is given back.`;
   try {
     writeFileSync(lineHeld, JSON.stringify(me));
     const lines: string[] = [];
@@ -44064,14 +44085,20 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-machine-slots-'));
   const ours = join(slots, '0.lock');
   const hold = async (): Promise<void> => {
-    writeFileSync(ours, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    writeFileSync(ours, JSON.stringify({ pid: process.pid, started: await ownStart(), by: 'the suite' }));
   };
+  // What the last holder found by heldBy said took the slot, read through a call so that an
+  // assertion on one reading does not narrow the next.
+  let takenFor: string | undefined;
+  const lastTaker = (): string | undefined => takenFor;
   // Who holds the one slot, read every 20 ms until [param pid] does or the time runs out.
   const heldBy = async (pid: number | undefined, withinMs: number): Promise<boolean> => {
     const until = Date.now() + withinMs;
     while (Date.now() < until) {
       try {
-        if (holderOf(readFileSync(ours, 'utf8'))?.pid === pid) {
+        const holder = holderOf(readFileSync(ours, 'utf8'));
+        if (holder?.pid === pid) {
+          takenFor = holder?.by;
           return true;
         }
       } catch {
@@ -44127,12 +44154,13 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       waitLines[0]
         ?.trimEnd()
         .endsWith(
-          `(${slots}) is in use, by a gate or another tool, and the engine starts when one is given back.`,
+          `(${slots}) is in use, by the suite (pid ${String(process.pid)}), and the engine starts when it is given back.`,
         ),
       said,
     );
     rmSync(ours);
     assert.ok(await heldBy(classes.pid, 30_000), `then takes the slot given back: ${said}`);
+    assert.equal(lastTaker(), 'gdharness classes', 'naming itself in the lock');
     assert.equal(await ended, 0, said);
     assert.match(said, /"path": "res:\/\/\.godot\/global_script_class_cache\.cfg"/, said);
     assert.deepEqual(
@@ -44163,12 +44191,13 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       assert.deepEqual(
         told,
         [
-          `Waiting for an engine: the one engine slot on this machine (${slots}) is in use, by a gate or another tool, and the engine starts when one is given back.`,
+          `Waiting for an engine: the one engine slot on this machine (${slots}) is in use, by the suite (pid ${String(process.pid)}), and the engine starts when it is given back.`,
         ],
         JSON.stringify(server.notifications),
       );
       rmSync(ours);
       assert.ok(await heldBy(server.child.pid, 30_000), 'then its engine runs in the slot given back');
+      assert.match(lastTaker() ?? '', /^a gdharness server/, 'naming itself in the lock');
       const checked = JSON.parse(textOf(await checking) ?? '{}') as unknown;
       assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
       assert.deepEqual(leftInSlots(slots), [], 'and the server gives it back once the run is read');
@@ -44614,7 +44643,7 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
     );
     assert.match(
       queued.said,
-      /^\[spread\] Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by a gate or another tool, and the engine starts when one is given back\.$/m,
+      /^\[spread\] Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by pid \d+, and the engine starts when it is given back\.$/m,
       queued.said,
     );
     assert.deepEqual(table(queued.said), table(aloneSaid), queued.said);
@@ -45285,7 +45314,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
     assert.match(
       heldUp.said,
-      /^Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by a gate or another tool, and the engine starts when one is given back\.$/m,
+      /^Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by pid \d+, and the engine starts when it is given back\.$/m,
       heldUp.said,
     );
 
@@ -45338,10 +45367,13 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     const stillKept = existsSync(heldLock);
     keeper.kill();
     taker.kill();
-    for (const left of [heldLock, join(slots, '1.lock'), join(slots, '1.lock.start')]) {
+    const runsLock = join(slots, '1.lock.seen');
+    const seenHeld = existsSync(runsLock) ? holderOf(readFileSync(runsLock, 'utf8')) : null;
+    for (const left of [heldLock, join(slots, '1.lock'), join(slots, '1.lock.start'), runsLock]) {
       rmSync(left, { force: true });
     }
     assert.equal(oneShare.status, 0, oneShare.said);
+    assert.equal(seenHeld?.by, `gdharness test of ${project}`, 'the run names itself in the lock it takes');
     assert.deepEqual(leftInSlots(slots), [], `the lane that stopped waiting left no mark: ${oneShare.said}`);
     if (roomHeld.test(oneShare.said)) {
       console.log(
