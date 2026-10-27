@@ -391,6 +391,7 @@ import {
   readRun,
   rowsAcross,
   secondsOf,
+  uncollectedSaid,
   versionFault,
 } from '../src/suite-judge.js';
 import {
@@ -419,7 +420,6 @@ import {
   sharesSaid,
   silenceWhile,
   testOptionsOf,
-  uncollectedSaid,
 } from '../src/suite-run.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
@@ -11438,7 +11438,11 @@ async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void
     await server.initialize('regression-test');
 
     const before = await call('editor_output', { op: 'editor' });
-    assert.match(before, /No editor is connected/, `nothing launched and nothing connected: ${before}`);
+    assert.match(
+      before,
+      /^No editor is connected, and no editor gdharness opened on .+ left a console behind, so there is none to read\./,
+      `nothing launched and nothing connected, and no console left on disk: ${before}`,
+    );
 
     const opened = await call('editor_launch', { op: 'open', projectPath: project });
     const pid = asNumber(get(jsonOf(opened, 'editor_launch open'), 'pid'));
@@ -30476,9 +30480,18 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
         `the announcement should have been found: ${JSON.stringify(found.answer)}`,
       );
       assert.equal(get(found.answer, 'runtime', 'pid'), process.pid, JSON.stringify(found.answer));
+      // The wait by the server's own clock rather than from the play: the start writes its notes
+      // between the play and the wait, and on the Windows leg one of those writes waited out a
+      // process holding the file, so a wait that ended after 1 ms without asking the editor was
+      // measured as 706 ms after the play and failed as though the editor had held it.
+      const waited = account
+        .map((line) => /announce wait ended after (\d+)ms: pid (\d+) announced/.exec(line))
+        .find((said) => said !== null);
+      assert.ok(waited !== undefined, `the server should say how its wait ended: ${account.join(' | ')}`);
+      assert.equal(Number(waited[2]), process.pid, account.join(' | '));
       assert.ok(
-        sincePlayMs < answersAfterMs,
-        `and found before the editor's first answer arrived: ${sincePlayMs}ms after the play, against ${answersAfterMs}ms; the server said: ${account.join(' | ')}`,
+        Number(waited[1]) < answersAfterMs,
+        `and found before the editor's first answer arrived: the wait took ${waited[1]}ms, against ${answersAfterMs}ms, ${sincePlayMs}ms after the play; the server said: ${account.join(' | ')}`,
       );
     },
   );
@@ -39343,7 +39356,9 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
 /**
  * A run gdUnit4 exits 100 for is named for what its report counts. gdUnit4 gives the one code to a
  * failed assertion and to a case a script error ended, and a run of only the second was called one
- * of failures beside failures 0. Hooks count with the cases, and no report reads as before.
+ * of failures beside failures 0. A failed before() or after() is named apart from the cases, since
+ * the counts beside the verdict leave it out and a suite whose only fault was its before() was
+ * called one of failures beside failures 0 too. No report reads as before.
  */
 function testAFailedRunIsNamedForWhatFailed(): void {
   const counts = (failures: number, errors: number, hookFailures = 0, hookErrors = 0) => ({
@@ -39357,11 +39372,22 @@ function testAFailedRunIsNamedForWhatFailed(): void {
       failedVerdict(counts(2, 0)),
       failedVerdict(counts(0, 1)),
       failedVerdict(counts(1, 1)),
+      failedVerdict(counts(0, 0, 1, 0)),
       failedVerdict(counts(0, 0, 0, 1)),
       failedVerdict(counts(0, 1, 1, 0)),
+      failedVerdict(counts(1, 1, 0, 1)),
       failedVerdict(null),
     ],
-    ['failures', 'errors', 'failures and errors', 'errors', 'failures and errors', 'failures'],
+    [
+      'failures',
+      'errors',
+      'failures and errors',
+      'failed hooks',
+      'failed hooks',
+      'errors and failed hooks',
+      'failures, errors and failed hooks',
+      'failures',
+    ],
   );
 }
 
@@ -52581,10 +52607,16 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
   try {
     writeFileSync(
       join(project, 'project.godot'),
-      'config_version=5\n\n[application]\nconfig/name="NamedCases"\n',
+      'config_version=5\n\n[application]\nconfig/name="NamedCases"\n\n[gdharness]\n\ntests/not_searched=PackedStringArray("res://kept/slow/")\n',
     );
     cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
     mkdirSync(join(project, 'test', 'more'), { recursive: true });
+    mkdirSync(join(project, 'src'), { recursive: true });
+    mkdirSync(join(project, 'kept', 'slow'), { recursive: true });
+    writeFileSync(
+      join(project, 'src', 'purse.gd'),
+      'extends RefCounted\n\n\nfunc spend() -> void:\n\tpass\n',
+    );
     const suite = (cases: Record<string, boolean>): string =>
       `extends GdUnitTestSuite\n${Object.entries(cases)
         .map(([name, passes]) => `\n\nfunc ${name}() -> void:\n\tassert_bool(${String(passes)}).is_true()\n`)
@@ -52597,6 +52629,8 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
       join(project, 'test', 'more', 'math_extra_test.gd'),
       suite({ test_doubles: true, test_adds: true }),
     );
+    // The only suite of a folder, in a folder the project keeps out of every search.
+    writeFileSync(join(project, 'kept', 'slow', 'slow_test.gd'), suite({ test_slowly: true }));
     // A test_ function in a script gdUnit4 does not run, which the selection reads as a case all the same.
     writeFileSync(
       join(project, 'test', 'helper.gd'),
@@ -52663,6 +52697,42 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
       );
       const named = await run({ path: 'res://test/math_test.gd' });
       assert.deepEqual([get(named.answer, 'tests'), get(named.answer, 'failures')], [3, 1], named.text);
+      // So is a directory holding no suite, which gdUnit4 started an engine to find nothing in.
+      const sources = await run({ path: 'res://src' });
+      assert.match(
+        sources.text,
+        /^res:\/\/src holds no gdUnit4 suite: gdUnit4 runs the functions named test_ at the top level of a script that extends GdUnitTestSuite, directly or through what it extends, and no script there does\.$/m,
+        sources.text,
+      );
+      // And one whose only suite is in a folder kept out of the search, which says where it is.
+      const kept = await run({ path: 'res://kept' });
+      assert.match(
+        kept.text,
+        /^res:\/\/kept holds no gdUnit4 suite: .* and the only ones there are under res:\/\/kept\/slow, which gdharness\/tests\/not_searched keeps out of every search: name it as path to run its suites\.$/m,
+        kept.text,
+      );
+      const helperSaid =
+        'res://test/helper.gd declares test_fixture and does not extend GdUnitTestSuite, directly or through what it extends, so gdUnit4 never runs it: extend GdUnitTestSuite, or take the test_ prefix off a function that is no case';
+      // A script named that declares cases and is no suite is refused for what it is.
+      const helper = await run({ path: 'res://test/helper.gd' });
+      assert.ok(helper.text.startsWith(`${helperSaid}.`), helper.text);
+      // Under a directory run whole, it is named and the run is not a pass, whatever its suites did.
+      const whole = await run({ path: 'res://test/' });
+      assert.deepEqual(
+        [get(whole.answer, 'notSuites'), get(whole.answer, 'passed'), get(whole.answer, 'tests')],
+        [[helperSaid], false, 5],
+        whole.text,
+      );
+      assert.match(
+        text(get(whole.answer, 'verdict')),
+        /; one script declares cases gdUnit4 never runs$/,
+        whole.text,
+      );
+      assert.match(
+        text(get(whole.answer, 'note')),
+        /What notSuites names declares cases gdUnit4 never runs/,
+        whole.text,
+      );
       // A case read off a file gdUnit4 never ran is named, and the run is not called passed.
       const unrun = await run({ tests: ['test_fixture', 'math_test:test_adds'] });
       assert.deepEqual(

@@ -543,6 +543,19 @@ export function named(items: readonly string[]): string {
 }
 
 /**
+ * What fails a run of the scripts [param found] names, each declaring cases gdUnit4 never runs
+ * because it is no suite, one sentence a script.
+ */
+export function uncollectedSaid(
+  found: readonly { readonly path: string; readonly cases: readonly string[] }[],
+): string[] {
+  return found.map(({ path, cases }) => {
+    const one = cases.length === 1;
+    return `${path} declares ${named(cases)} and does not extend GdUnitTestSuite, directly or through what it extends, so gdUnit4 never runs ${one ? 'it' : 'them'}: extend GdUnitTestSuite, or take the test_ prefix off ${one ? 'a function that is' : 'functions that are'} no case`;
+  });
+}
+
+/**
  * [param printed] judged against what the engine was handed and how it ended.
  *
  * Every condition is checked whatever the exit code says, because each one has passed a run the

@@ -196,12 +196,14 @@ export class ProjectScripts {
   }
 
   /**
-   * The scripts under [param roots], searched as [method suitesUnder] searches them, that declare a
-   * case and are no suite, each with the cases it declares. gdUnit4 never runs them and says nothing
-   * of it, so a suite whose `extends` names the wrong class passes with none of its cases run.
+   * The scripts [param roots] name or hold, a directory searched as [method suitesUnder] searches
+   * it, that declare a case and are no suite, each with the cases it declares. gdUnit4 never runs
+   * them and says nothing of it, so a suite whose `extends` names the wrong class passes with none
+   * of its cases run.
    */
   uncollectedUnder(roots: readonly string[]): { readonly path: string; readonly cases: readonly string[] }[] {
-    return this.searched(roots).flatMap((path) => {
+    const named = roots.filter((root) => root.endsWith('.gd') && this.sources.has(root));
+    return [...new Set([...named, ...this.searched(roots)])].flatMap((path) => {
       const cases = this.script(path)?.funcs.filter((name) => name.startsWith(CASE_PREFIX)) ?? [];
       return cases.length === 0 || this.suite(path) !== null ? [] : [{ path, cases: [...cases].sort() }];
     });

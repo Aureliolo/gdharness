@@ -200,6 +200,27 @@ function testAFailedHookIsCountedAndNamed(): void {
     ],
     'and the printed line names it, where a case failing is not a hook',
   );
+  // As gdUnit4 4.7.2 prints a failed assert_int in before(), colours taken off: the message ends on
+  // the line naming the hook, and what it expected is on the lines above.
+  assert.deepEqual(
+    hookFailuresPrinted([
+      '  setup_test > finalize()  Report:',
+      '  Expecting:',
+      ' 4',
+      ' but was',
+      " 3\tat 'before' in res://test/setup_test.gd:9",
+      "  Expecting: 'true' but is 'false'\tat 'after' in res://test/setup_test.gd:14",
+      'Statistics: 2 test cases | 0 errors | 2 failures | 0 flaky | 0 skipped | 0 orphans | FAILED 66ms',
+      '  a line the run printed between suites',
+      "  Expecting: 'true' but is 'false'\tat 'before' in res://test/other_test.gd:5",
+    ]).map((hook) => `${hook.hook}:${hook.message}`),
+    [
+      'before:Expecting: 4 but was 3',
+      "after:Expecting: 'true' but is 'false'",
+      "before:Expecting: 'true' but is 'false'",
+    ],
+    'a message over several lines is read whole, up to the hook before it and no further than its report',
+  );
 }
 
 /**
