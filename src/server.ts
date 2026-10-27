@@ -8318,9 +8318,9 @@ class GodotServer {
     projectPath: string,
     paths: readonly string[],
   ): Promise<Map<string, { line: number; message: string }[]> | null> {
-    const ran = await this.operation('script_warnings', { paths: [...paths] }, projectPath);
+    const ran = await this.operation('check_warnings', { paths: [...paths] }, projectPath);
     if (!ran.ok) {
-      this.logDebug(`script_warnings did not answer: ${ran.message}`);
+      this.logDebug(`check_warnings did not answer: ${ran.message}`);
       return null;
     }
     return new Map(

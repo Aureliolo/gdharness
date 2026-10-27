@@ -51,6 +51,7 @@ const BEGUN: String = "[gdharness] begun"
 ## scene or a resource, loads the scripts of the file it opens.
 const AFTER_THE_AUTOLOADS: Array[String] = [
 	"check_scripts",
+	"check_warnings",
 	"create_script",
 	# An exporter made in _init, before an editor's main loop has started, crashed the engine.
 	"export_options",
@@ -60,7 +61,6 @@ const AFTER_THE_AUTOLOADS: Array[String] = [
 	"read_resource",
 	"read_scene_tree",
 	"run_editor_tool",
-	"script_warnings",
 ]
 
 var _log: GdhLog
@@ -100,7 +100,7 @@ func _init() -> void:
 	var params: Dictionary = read
 
 	_log.info("Executing operation: " + operation)
-	if operation == "script_warnings":
+	if operation == "check_warnings":
 		GdhScriptCheck.raise_warnings()
 
 	var answer_path: String = args[answer_index]
@@ -282,8 +282,8 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = GdhRenameChecks.new(_log).names_taken(params)
 		"check_scripts":
 			payload = GdhScriptCheck.new(_log).check_scripts(params)
-		"script_warnings":
-			payload = GdhScriptCheck.new(_log).script_warnings(params)
+		"check_warnings":
+			payload = GdhScriptCheck.new(_log).check_warnings(params)
 
 		# Plugins and input
 		"list_plugins":

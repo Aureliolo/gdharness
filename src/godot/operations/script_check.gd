@@ -147,7 +147,7 @@ static func raise_warnings() -> void:
 ## as raised. The analyser runs before anything is compiled, so a script whose dependency failed on a
 ## warning still reports its own, and loading on past a failure loses nothing; only what is raised at
 ## the script's own path is its, since a dependency is read on its own entry as well.
-func script_warnings(params: Dictionary) -> Dictionary:
+func check_warnings(params: Dictionary) -> Dictionary:
 	var asked: Array = params.get("paths", [])
 	var caught: GdhCaught = GdhCaught.new()
 	OS.add_logger(caught)
