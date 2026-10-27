@@ -348,10 +348,17 @@ import {
   named,
   readExpected,
   readRun,
+  uncollectedSaid,
   unexpectedErrors,
   withNestedErrors,
 } from './suite-judge.js';
-import { ProjectScripts, TEST_DIRECTORIES, viewportOf, windowNeedsOf } from './suite-plan.js';
+import {
+  NOT_SEARCHED_SETTING,
+  ProjectScripts,
+  TEST_DIRECTORIES,
+  viewportOf,
+  windowNeedsOf,
+} from './suite-plan.js';
 import { hasSuitesScene, SUITES_SCENE, suitesSceneArgs } from './suites-scene.js';
 import { scriptsWithoutCases, selectTests } from './test-selection.js';
 import {
@@ -2851,7 +2858,9 @@ export function repeatingScriptError(
  *
  * gdUnit4 exits 100 for a failed assertion and for a case a script error ended alike. A run whose
  * only fault was a script error was called one of failures beside failures 0, and the reader went
- * looking among the assertions.
+ * looking among the assertions. A failed before() or after() is named on its own, because the counts
+ * beside the verdict are of cases: a suite whose only fault was its before() was called one of
+ * failures beside failures 0.
  */
 export function failedVerdict(
   report: Pick<TestReport, 'failures' | 'errors' | 'hookFailures' | 'hookErrors'> | null,
@@ -2859,9 +2868,13 @@ export function failedVerdict(
   if (report === null) {
     return 'failures';
   }
-  const failed = report.failures + report.hookFailures > 0;
-  const erred = report.errors + report.hookErrors > 0;
-  return failed && erred ? 'failures and errors' : erred ? 'errors' : 'failures';
+  const parts = [
+    report.failures > 0 ? 'failures' : undefined,
+    report.errors > 0 ? 'errors' : undefined,
+    report.hookFailures + report.hookErrors > 0 ? 'failed hooks' : undefined,
+  ].filter((part) => part !== undefined);
+  const last = parts.pop();
+  return last === undefined ? 'failures' : parts.length === 0 ? last : `${parts.join(', ')} and ${last}`;
 }
 
 /**
@@ -7219,9 +7232,12 @@ class GodotServer {
     // gdUnit4 searches a directory it is handed itself, into the folders the project keeps out of
     // every search, so a directory holding one is handed as the suites gdharness test finds in it.
     const projectScripts = new ProjectScripts(project.value.path);
-    const asked = projectScripts.searchedAsTold(paths.value.filter((path) => !missing.includes(path)));
+    const present = paths.value.filter((path) => !missing.includes(path));
+    const asked = projectScripts.searchedAsTold(present);
     const unusable = gdUnit4Unusable(project.value.path);
-    if (asked.length === 0) {
+    // With nothing missing, an empty list is a directory whose suites all sit in folders the project
+    // keeps out of the search, which the refusal below names.
+    if (asked.length === 0 && missing.length > 0) {
       const verdict = `nothing at ${missing.join(' and ')}`;
       // Both, when both: a project with neither tests nor gdUnit4 was told only about the folder,
       // and the caller who wrote tests into it next would have been refused again for the runner.
@@ -7257,10 +7273,45 @@ class GodotServer {
         `${caseless.join(' and ')} ${one ? 'declares' : 'declare'} no case: gdUnit4 runs the functions named test_ at the top level of a script that extends GdUnitTestSuite, and ${one ? 'it has' : 'they have'} none.`,
       );
     }
+    // gdUnit4 says nothing of a script that declares cases and is no suite, so a suite whose extends
+    // named the wrong class passed with none of its cases run. Named in the answer, and never a pass.
+    const uncollected = projectScripts.uncollectedUnder(present);
+    // A directory with no suite in it started an engine for gdUnit4 to print that it found none, and
+    // the answer carried that engine's command line and console beside exit code 0.
+    const suiteless = present.filter(
+      (path) => !path.endsWith('.gd') && projectScripts.suitesUnder([path]).length === 0,
+    );
+    const namedNoSuite = uncollected.filter((one) => present.includes(one.path));
+    if (suiteless.length > 0 || namedNoSuite.length > 0) {
+      const one = suiteless.length === 1;
+      const under = (path: string): boolean =>
+        suiteless.some((folder) => path.startsWith(`${folder.replace(/\/+$/, '')}/`));
+      const holding = uncollected.filter((script) => namedNoSuite.includes(script) || under(script.path));
+      const keptOut = projectScripts.notSearched
+        .map((folder) => `res://${folder.replace(/^res:\/\//, '')}`)
+        .filter((folder) => under(folder) && projectScripts.suitesUnder([folder]).length > 0);
+      const keptOutSaid =
+        keptOut.length === 0
+          ? 'no script there does'
+          : `the only ones there are under ${named(keptOut)}, which ${NOT_SEARCHED_SETTING} keeps out of every search: name ${keptOut.length === 1 ? 'it' : 'them'} as path to run ${keptOut.length === 1 ? 'its' : 'their'} suites`;
+      return this.createErrorResponse(
+        [
+          suiteless.length === 0
+            ? undefined
+            : `${named(suiteless)} ${one ? 'holds' : 'hold'} no gdUnit4 suite: gdUnit4 runs the functions named test_ at the top level of a script that extends GdUnitTestSuite, directly or through what it extends, and ${keptOutSaid}.`,
+          ...uncollectedSaid(holding).map((sentence) => `${sentence}.`),
+        ]
+          .filter((part) => part !== undefined)
+          .join(' '),
+      );
+    }
     const selection = selectTests(project.value.path, asked, args['tests']);
     if (!selection.ok) {
       return this.createErrorResponse(selection.reason);
     }
+    // A run of cases asked for by name is not the run of the whole path, and a case asked for in a
+    // script that is no suite comes back under testsNotRun.
+    const notSuites = selection.value === null ? uncollectedSaid(uncollected) : [];
     // As gdharness test deals them, so a suite passing there is not failed here for running without
     // the window it was given there: a scene that sets itself up only off the headless display
     // server answered six errors pointing at the game. A suite left out whole by ignore is not run.
@@ -7877,11 +7928,17 @@ class GodotServer {
         declaredNotPrinted.length === 0 &&
         countedLeaks.length === 0 &&
         missing.length === 0 &&
-        testsNotRun.length === 0,
+        testsNotRun.length === 0 &&
+        notSuites.length === 0,
       verdict: [
         // gdUnit4's word for the exit, which is not the run's when something below fails it.
         verdict === 'passed' &&
-        undeclaredPrinted.length + declaredNotPrinted.length + countedLeaks.length + testsNotRun.length > 0
+        undeclaredPrinted.length +
+          declaredNotPrinted.length +
+          countedLeaks.length +
+          testsNotRun.length +
+          notSuites.length >
+          0
           ? undefined
           : verdict,
         ...[false, true].map((warning) => {
@@ -7900,10 +7957,14 @@ class GodotServer {
         }),
         countedLeaks.length > 0 ? 'the engine exited holding what it should have freed' : undefined,
         testsNotRun.length > 0 ? `not run: ${testsNotRun.join(', ')}` : undefined,
+        notSuites.length > 0
+          ? `${notSuites.length === 1 ? 'one script declares' : `${String(notSuites.length)} scripts declare`} cases gdUnit4 never runs`
+          : undefined,
       ]
         .filter((part) => part !== undefined)
         .join('; '),
       ...(missing.length > 0 ? { missing } : {}),
+      ...(notSuites.length > 0 ? { notSuites } : {}),
       ...(testsNotRun.length > 0 ? { testsNotRun } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
       exitCode,
@@ -7944,6 +8005,9 @@ class GodotServer {
           missingNote,
           testsNotRun.length > 0
             ? `${testsNotRun.join(', ')} ${testsNotRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`
+            : undefined,
+          notSuites.length > 0
+            ? 'What notSuites names declares cases gdUnit4 never runs, so the run is not called passed, as gdharness test judges it.'
             : undefined,
           briefed > 0
             ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver; pass one case's suite path to see its reports.`
@@ -12878,11 +12942,18 @@ class GodotServer {
     const noted =
       projectPath === undefined || greeted || launched !== null ? null : readEditorLogNote(projectPath);
     const editorPid = greeted ? (status.editorPid ?? null) : (launched ?? noted?.pid ?? null);
+    // Said apart from a project with none to look for, since the description promises the console a
+    // closed editor left, and a caller reading only "no editor is connected" went looking for it.
     const nothing = (): ToolResponse =>
-      this.createErrorResponse('No editor is connected, so there is no console to read.', [
-        'editor_status says whether one is connected and whether it may yet be',
-        'editor_launch opens one, and an editor opened here has its console captured',
-      ]);
+      this.createErrorResponse(
+        projectPath !== undefined && !greeted && launched === null
+          ? `No editor is connected, and no editor gdharness opened on ${projectPath} left a console behind, so there is none to read.`
+          : 'No editor is connected, so there is no console to read.',
+        [
+          'editor_status says whether one is connected and whether it may yet be',
+          'editor_launch opens one, and an editor opened here has its console captured',
+        ],
+      );
     if (projectPath === undefined || editorPid === null) {
       return nothing();
     }

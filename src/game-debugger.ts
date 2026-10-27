@@ -514,7 +514,7 @@ export class GameDebugger {
       case 'stack': {
         const frames = await this.stack();
         if (frames === null) {
-          return this.notHeld();
+          return this.notHeld('stack to read');
         }
         return {
           held: this.heldState(),
@@ -546,10 +546,10 @@ export class GameDebugger {
     };
   }
 
-  private notHeld(): DebugAnswer {
+  /** The refusal of a read that needs a held game, naming [param what] the call asked for. */
+  private notHeld(what: string): DebugAnswer {
     return {
-      refused:
-        'The game is running, not held, so it has no stack to read: debug_control pause stops it where it is, and a breakpoint stops it on its line.',
+      refused: `The game is running, not held, so it has no ${what}: debug_control pause stops it where it is, and a breakpoint stops it on its line.`,
     };
   }
 
@@ -773,7 +773,7 @@ export class GameDebugger {
   private async variables(frame: number): Promise<DebugAnswer> {
     const held = this.held;
     if (held === null) {
-      return this.notHeld();
+      return this.notHeld('frame whose variables could be read');
     }
     const frames = await this.stack();
     if (frames === null) {
@@ -829,7 +829,7 @@ export class GameDebugger {
   private async evaluate(frame: number, expression: string): Promise<DebugAnswer> {
     const held = this.held;
     if (held === null) {
-      return this.notHeld();
+      return this.notHeld('frame to work an expression out in');
     }
     // The engine evaluates on the frame's instance, and in a frame with none, a static function's,
     // it leaves its debug loop instead of answering, which lets the game go on. A frame with an

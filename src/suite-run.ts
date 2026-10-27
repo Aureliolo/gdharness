@@ -59,6 +59,7 @@ import {
   readRun,
   rowOf,
   rowsAcross,
+  uncollectedSaid,
   versionFault,
 } from './suite-judge.js';
 import {
@@ -274,19 +275,6 @@ function searchedRoots(options: TestOptions): readonly string[] {
         const directory = join(options.projectPath, entry.slice('res://'.length));
         return existsSync(directory) && statSync(directory).isDirectory();
       });
-}
-
-/**
- * What fails a run of the scripts [param found] names, each declaring cases gdUnit4 never runs
- * because it is no suite, one sentence a script.
- */
-export function uncollectedSaid(
-  found: readonly { readonly path: string; readonly cases: readonly string[] }[],
-): string[] {
-  return found.map(({ path, cases }) => {
-    const one = cases.length === 1;
-    return `${path} declares ${named(cases)} and does not extend GdUnitTestSuite, directly or through what it extends, so gdUnit4 never runs ${one ? 'it' : 'them'}: extend GdUnitTestSuite, or take the test_ prefix off ${one ? 'a function that is' : 'functions that are'} no case`;
-  });
 }
 
 /** The suites a run is asked for, each with the cases asked of it. */
