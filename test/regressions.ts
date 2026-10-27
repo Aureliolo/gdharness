@@ -29428,6 +29428,10 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
  * again, both still held. What only the crash handling makes true is the crash entry being an error
  * with its backtrace, which is what fails when it is broken; test/game-log.ts holds the count for a
  * report with no line before it.
+ *
+ * The prints before the crash are what explains it, and a check's run is kept nowhere editor_output
+ * reads, so the check answers them itself. A model-driven probe was told `printedLinesNotShown: 3`
+ * and then "No game is running" by editor_output, with no way to read the three.
  */
 async function testACrashedRunIsNeverClean(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -29447,7 +29451,9 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
     );
     writeFileSync(
       join(projectDir, 'main.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tprint("about to crash")\n\tboom()\n\n\nfunc boom() -> void:\n\tOS.crash("deliberate")\n',
+      'extends Node\n\n\nfunc _ready() -> void:\n\tfor i in 60:\n\t\tprint("line %d" % i)\n' +
+        '\tfor i in 3:\n\t\tprint("again")\n\tprint("about to crash")\n\tboom()\n\n\n' +
+        'func boom() -> void:\n\tOS.crash("deliberate")\n',
     );
     writeFileSync(
       join(projectDir, 'main.tscn'),
@@ -29459,7 +29465,7 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
         /Program crashed with signal \d+/.test(text(get(entry, 'text'))),
       );
     const backtraced = (entry: unknown): boolean =>
-      asArray(get(entry, 'detail') ?? []).some((line) => text(line).includes('boom (res://main.gd:10)'));
+      asArray(get(entry, 'detail') ?? []).some((line) => text(line).includes('boom (res://main.gd:14)'));
     await withStdioServer(
       async (call) => {
         const checked: unknown = JSON.parse(
@@ -29471,10 +29477,26 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
         const checkCrash = theCrash(checked);
         assert.equal(get(checkCrash, 'severity'), 'error', `the crash is an entry, as an error: ${said}`);
         assert.ok(backtraced(checkCrash), `with its GDScript backtrace: ${said}`);
-        assert.ok(
-          asNumber(get(checked, 'printedLinesNotShown')) >= 1,
-          `and the print it left out is counted: ${said}`,
+        // A check's run is kept nowhere else, so its prints are read here or not at all: the newest
+        // fifty distinct ones, the repeat folded, and the rest counted.
+        const printed = asArray(get(checked, 'printed')).map((entry) => [
+          text(get(entry, 'text')),
+          get(entry, 'times'),
+        ]);
+        assert.equal(printed.length, 50, said);
+        const again = printed.findIndex(([line]) => line === 'again');
+        assert.deepEqual(
+          printed.slice(again, again + 2),
+          [
+            ['again', 3],
+            ['about to crash', undefined],
+          ],
+          said,
         );
+        // The newest are kept: the crash handler's own lines come after the game's, so the cut falls
+        // a little past line 10 rather than at a number this case could fix.
+        const firstShown = text(printed[0]?.[0]);
+        assert.match(firstShown, /^line 1\d$/, said);
 
         const started: unknown = JSON.parse(
           await call(
@@ -29500,6 +29522,17 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
           theCrash(output) !== undefined,
           `editor_output names the crash as an error: ${JSON.stringify(output)}`,
         );
+        // The started run prints what the check's did, so what comes before the first line the
+        // check showed is what it counted as left out.
+        const lines = asArray(
+          get(JSON.parse(await call('editor_output', { severity: 'info', limit: 500 })), 'entries'),
+        ).filter((entry) => get(entry, 'severity') === 'info');
+        const cut = lines.findIndex((entry) => text(get(entry, 'text')) === firstShown);
+        assert.ok(cut > 10, JSON.stringify(lines));
+        const before = lines
+          .slice(0, cut)
+          .reduce((sum: number, entry) => sum + asNumber(get(entry, 'times') ?? 1), 0);
+        assert.equal(get(checked, 'printedLinesNotShown'), before, said);
       },
       { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
@@ -61045,6 +61078,209 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
 }
 
 /**
+ * A script that reads a node by its path breaks when the node is renamed, moved or deleted, and code
+ * is left as it was, as the editor's own rename leaves it, so each such line is named with the path
+ * that reaches the node now. A model-driven probe renamed a label `main.gd` read as `$Status`, got
+ * an answer saying nothing, and found out only when the game failed to boot.
+ *
+ * The lines that name nothing are as much the case as the ones that do: a path in a string or a
+ * comment, a `%` that is a division's remainder by a constant named like a unique node, and a
+ * get_node called on another node. A script on an instance's root is read in both scenes and named
+ * once, and a script the attached one extends is read too.
+ */
+async function testAMovedNodeNamesTheScriptLinesReadingIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('script lines regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-script-lines-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-script-lines-rt-'));
+  const hud = [
+    'extends CanvasLayer',
+    '',
+    'const Day: int = 7',
+    '',
+    '@onready var gold: Label = $Bar/Gold',
+    '@onready var day: Label = get_node("Bar/Day")',
+    'var note: String = "costs $Bar/Gold"',
+    '# $Bar/Gold in a comment',
+    'var week: int = 30 % Day',
+    '',
+    '',
+    'func _ready() -> void:',
+    '\tprint($"Bar/Gold".text)',
+    '\tprint(self.get_node_or_null(^"Bar/Gold"))',
+    '\tprint(other().get_node("Bar/Gold"))',
+    '',
+    '',
+    'func other() -> Node:',
+    '\treturn self',
+    '',
+    '',
+    'func today() -> Label:',
+    '\treturn %Day',
+    '',
+    '',
+    'func shown() -> String:',
+    '\treturn "%s" % $Bar/Gold.text',
+    '',
+  ];
+  const main = [
+    'extends "res://base.gd"',
+    '',
+    '@onready var status: Label = $Status',
+    '@onready var gold: Label = $Hud/Bar/Gold',
+    '@onready var sign_label: Label = $Sign',
+    '',
+  ];
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Script lines"\n',
+    'hud.gd': hud.join('\n'),
+    'main.gd': main.join('\n'),
+    'base.gd': 'extends Node\n\n\nfunc toast() -> Node:\n\treturn $Toast\n',
+    'hud.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://hud.gd" id="1_hud"]\n\n' +
+      // The root's own unique path, which the engine's get_path_to gives only from a node it owns.
+      '[node name="Hud" type="CanvasLayer"]\nscript = ExtResource("1_hud")\nmetadata/day = NodePath("%Day")\n\n' +
+      '[node name="Bar" type="HBoxContainer" parent="."]\n\n' +
+      '[node name="Gold" type="Label" parent="Bar"]\n\n' +
+      '[node name="Day" type="Label" parent="Bar"]\nunique_name_in_owner = true\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1_main"]\n' +
+      '[ext_resource type="PackedScene" path="res://hud.tscn" id="2_hud"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1_main")\n\n' +
+      '[node name="Status" type="Label" parent="."]\n\n[node name="Toast" type="Label" parent="."]\n\n' +
+      '[node name="Sign" type="Label" parent="."]\n\n[node name="Overlay" type="Control" parent="."]\n\n' +
+      '[node name="Hud" parent="." instance=ExtResource("2_hud")]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  // The line of a script holding a fragment, counted from 1, so the cases below say what they mean.
+  const at = (script: string[], fragment: string): number => {
+    const index = script.findIndex((line) => line.includes(fragment));
+    assert.ok(index >= 0, fragment);
+    return index + 1;
+  };
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<unknown> => {
+    const result = await server.request(
+      'tools/call',
+      { name: 'scene_node', arguments: { projectPath: project, ...args } },
+      240_000,
+    );
+    const parsed = parseTextContent(result);
+    assert.ok(parsed !== null, `scene_node ${String(args['op'])} answered: ${JSON.stringify(result)}`);
+    return parsed;
+  };
+  const named = (answer: unknown): string[] =>
+    asArray(get(answer, 'scriptsNaming') ?? [])
+      .map((entry) => {
+        const to = get(entry, 'to');
+        return (
+          `${text(get(entry, 'scenePath')).replace('res://', '')} ${text(get(entry, 'nodePath'))} ` +
+          `${text(get(entry, 'script')).replace('res://', '')}:${asNumber(get(entry, 'line'))} ` +
+          `${text(get(entry, 'from'))}${to === undefined ? '' : ` -> ${text(to)}`}`
+        );
+      })
+      .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('script-lines');
+
+    const coins = await call({
+      op: 'set',
+      scenePath: 'hud.tscn',
+      nodePath: 'Bar/Gold',
+      properties: { name: 'Coins' },
+    });
+    assert.deepEqual(
+      named(coins),
+      [
+        `hud.tscn . hud.gd:${at(hud, '= $Bar/Gold')} Bar/Gold -> Bar/Coins`,
+        `hud.tscn . hud.gd:${at(hud, '$"Bar/Gold"')} Bar/Gold -> Bar/Coins`,
+        `hud.tscn . hud.gd:${at(hud, 'self.get_node_or_null')} Bar/Gold -> Bar/Coins`,
+        `hud.tscn . hud.gd:${at(hud, '% $Bar/Gold')} Bar/Gold -> Bar/Coins`,
+        `main.tscn . main.gd:${at(main, '$Hud/Bar/Gold')} Hud/Bar/Gold -> Hud/Bar/Coins`,
+      ],
+      JSON.stringify(coins),
+    );
+    assert.equal(
+      readFileSync(join(project, 'hud.gd'), 'utf8'),
+      files['hud.gd'],
+      'the script is left as it was',
+    );
+
+    const date = await call({
+      op: 'set',
+      scenePath: 'hud.tscn',
+      nodePath: 'Bar/Day',
+      properties: { name: 'Date' },
+    });
+    assert.deepEqual(
+      named(date),
+      [
+        `hud.tscn . hud.gd:${at(hud, 'get_node("Bar/Day")')} Bar/Day -> Bar/Date`,
+        `hud.tscn . hud.gd:${at(hud, 'return %Day')} %Day -> %Date`,
+      ],
+      JSON.stringify(date),
+    );
+    assert.deepEqual(
+      asArray(get(date, 'retargeted')).map(
+        (entry) => `${text(get(entry, 'from'))} -> ${text(get(entry, 'to'))}`,
+      ),
+      ['%Day -> %Date'],
+      JSON.stringify(date),
+    );
+    assert.ok(
+      readFileSync(join(project, 'hud.tscn'), 'utf8').includes('metadata/day = NodePath("%Date")'),
+      readFileSync(join(project, 'hud.tscn'), 'utf8'),
+    );
+
+    const goldLabel = await call({
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Status',
+      properties: { name: 'GoldLabel' },
+    });
+    assert.deepEqual(
+      named(goldLabel),
+      [`main.tscn . main.gd:${at(main, '$Status')} Status -> GoldLabel`],
+      JSON.stringify(goldLabel),
+    );
+
+    const toast = await call({
+      op: 'reparent',
+      scenePath: 'main.tscn',
+      nodePath: 'Toast',
+      newParentPath: 'Overlay',
+    });
+    assert.deepEqual(named(toast), ['main.tscn . base.gd:5 Toast -> Overlay/Toast'], JSON.stringify(toast));
+
+    const sign = await call({ op: 'delete', scenePath: 'main.tscn', nodePath: 'Sign' });
+    assert.deepEqual(named(sign), [`main.tscn . main.gd:${at(main, '$Sign')} Sign`], JSON.stringify(sign));
+    assert.equal(readFileSync(join(project, 'main.gd'), 'utf8'), files['main.gd'], 'and so is this one');
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * A headless write to a file with a resource whose script is not a tool, written by hand: a default
  * set outright, which the saver leaves out, and a value spelt otherwise than the saver spells it, 3
  * for 3.0. Neither is a change the script made, so neither refuses the write, in a resource built
@@ -62634,6 +62870,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASceneKeepsItsOwnValuesForAnotherScenesNodes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,
+  testAMovedNodeNamesTheScriptLinesReadingIt,
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
