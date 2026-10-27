@@ -310,6 +310,10 @@ func _not_found(wanted: String, declared: Dictionary, answers_own: bool = false)
 	for name: String in close:
 		if name.to_lower().similarity(wanted.to_lower()) < best - CLOSE_TO_THE_BEST:
 			continue
+		# Similarity counts shared letter pairs, so a word the two names share passes it: NoSuchClass
+		# was offered ClassDB. A spelling is a few letters off, a swap of two among them.
+		if _edits(name.to_lower(), wanted.to_lower()) > maxi(2, floori(wanted.length() / 3.0)):
+			continue
 		if declared.has(name):
 			own.append(name)
 		else:
@@ -345,6 +349,18 @@ func _not_found(wanted: String, declared: Dictionary, answers_own: bool = false)
 			% [wanted, offered]
 		)
 	)
+
+
+## How many letters must be put in, taken out or changed to make [param from] into [param to].
+static func _edits(from: String, to: String) -> int:
+	var above: PackedInt32Array = PackedInt32Array(range(to.length() + 1))
+	for row: int in range(1, from.length() + 1):
+		var here: PackedInt32Array = PackedInt32Array([row])
+		for column: int in range(1, to.length() + 1):
+			var changed: int = above[column - 1] + (0 if from[row - 1] == to[column - 1] else 1)
+			var _added: bool = here.append(mini(changed, mini(above[column] + 1, here[column - 1] + 1)))
+		above = here
+	return above[to.length()]
 
 
 # One member of a class by name, wherever in its ancestry it is declared.

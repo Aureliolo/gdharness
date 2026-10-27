@@ -2690,6 +2690,22 @@ function testOperations(godotPath: string, projectDir: string): void {
     /Class not found: CharacterBody2\. The nearest engine classes are CharacterBody2D, CharacterBody3D[,.].* editor_classes reads the engine's ClassDB/,
     misspelt.stderr,
   );
+  // Two letters swapped are still a spelling, and a name sharing only a word is not: NoSuchClass was
+  // offered ClassDB, both holding "class", which scores as high as the swap does.
+  const swapped = runRefusedOperation(godotPath, projectDir, 'query_class_info', { class_name: 'Lable' });
+  assert.match(
+    swapped.stderr,
+    /Class not found: Lable\. The nearest engine class(es)? (is|are) Label[,.]/,
+    swapped.stderr,
+  );
+  const unlike = runRefusedOperation(godotPath, projectDir, 'query_class_info', {
+    class_name: 'NoSuchClass',
+  });
+  assert.match(
+    unlike.stderr,
+    /Class not found: NoSuchClass\. editor_classes reads the engine's ClassDB/,
+    unlike.stderr,
+  );
   // The classes the scripts declare on disk are the ones judged, not the class cache, which lags
   // them: a class written a moment ago was refused as declared nowhere, and a misspelt one was
   // offered only engine classes.
