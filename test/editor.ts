@@ -424,6 +424,14 @@ const HOOKS_GD = [
   '\t\t\treturn profiler.call("profile_read", {}) if profiler != null else {}',
   '\t\t"open":',
   '\t\t\tEditorInterface.open_scene_from_path(path)',
+  // Every tab closed, which leaves the editor a tab of a new scene never saved, and what the
+  // editor itself then lists as open.
+  '\t\t"close_all":',
+  '\t\t\tfor _tab: int in range(32):',
+  '\t\t\t\tif EditorInterface.get_edited_scene_root() == null:',
+  '\t\t\t\t\tbreak',
+  '\t\t\t\tEditorInterface.close_scene()',
+  '\t\t\treturn {"open": Array(EditorInterface.get_open_scenes())}',
   '\t\t"edit":',
   '\t\t\tEditorInterface.open_scene_from_path(path)',
   '\t\t\tvar root: Node = EditorInterface.get_edited_scene_root()',
@@ -2820,16 +2828,18 @@ async function testAnEditInTheEditorIsKept({ call, refusal, project }: Editor): 
   const edited = { projectPath: project, scenePath: path };
   const opened = await hook(project, { op: 'edit', path, node: 'ByHand' });
   assert.deepEqual(get(opened, 'unsaved'), [path], `the edit should be unsaved: ${JSON.stringify(opened)}`);
-  // What editor_status says of the tabs is what the editor holds, read past the server above.
+  // What editor_status says of the tabs is what the editor holds, read past the server above. The
+  // editor of a new project opens with a tab of a scene never saved, which has no path to list.
   const tabsOf = async (): Promise<unknown[]> => {
     const shown = get(await call('editor_status', {}), 'editor');
-    return [
-      asArray(get(shown, 'openScenes')).includes(path),
-      get(shown, 'editedScene'),
-      get(shown, 'unsavedScenes'),
-    ];
+    const open = asArray(get(shown, 'openScenes'));
+    return [open.includes(path), open.includes(''), get(shown, 'editedScene'), get(shown, 'unsavedScenes')];
   };
-  assert.deepEqual(await tabsOf(), [true, path, [path]], 'editor_status names the open, shown and unsaved');
+  assert.deepEqual(
+    await tabsOf(),
+    [true, false, path, [path]],
+    'editor_status names the open, shown and unsaved',
+  );
 
   const before = fileText(project, 'layers/edited.tscn');
   assert.match(
@@ -2873,7 +2883,21 @@ async function testAnEditInTheEditorIsKept({ call, refusal, project }: Editor): 
     `the tab in front stays: ${JSON.stringify(after)}`,
   );
   assert.deepEqual(get(after, 'unsaved'), [], 'with nothing left unsaved');
-  assert.deepEqual(await tabsOf(), [true, 'res://layers/tab.tscn', []], 'and editor_status says so');
+  assert.deepEqual(await tabsOf(), [true, false, 'res://layers/tab.tscn', []], 'and editor_status says so');
+
+  // A tab of a scene never saved, which every new project's editor opens with, has no path.
+  const closed = await hook(project, { op: 'close_all', path: '' });
+  assert.deepEqual(
+    get(closed, 'open'),
+    [''],
+    `the editor lists its new tab by no path: ${JSON.stringify(closed)}`,
+  );
+  const bare = get(await call('editor_status', {}), 'editor');
+  assert.deepEqual(
+    [get(bare, 'openScenes'), get(bare, 'editedScene'), get(bare, 'unsavedScenes')],
+    [[], null, []],
+    `and editor_status lists no scene: ${JSON.stringify(bare)}`,
+  );
 
   // The main scene back in front, as the cases after this one found the editor.
   await hook(project, { op: 'open', path: 'res://main.tscn' });

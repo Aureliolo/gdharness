@@ -9227,7 +9227,7 @@ class GodotServer {
     // Whether the run is held, said here as well as by editor_output: the list above names a held
     // game as unreachable with a problem that says it may be paused, and the session can often say
     // rather than guess. Alongside the pings, since the one wait a held game costs is paid once.
-    const asked = (async () => {
+    const askEditor = async () => {
       const playing = await this.editorPlayingState();
       await this.pickUpWhatTheEditorIsPlaying();
       const current = await this.currentRun();
@@ -9245,14 +9245,24 @@ class GodotServer {
         run: current === null ? null : this.runNamed(current),
         hold: current === null ? {} : await this.holdOf(current, active),
       };
-    })();
-    const [games, { playing, active, run, hold }, scan, editorStatus, servers] = await Promise.all([
+    };
+    const connectedBefore = this.godotBridge.getStatus().connected;
+    const [games, askedFirst, scanFirst, editorStatus, servers] = await Promise.all([
       pinged,
-      asked,
+      askEditor(),
       this.editorScanState(),
       this.getEditorStatusPayload(),
       this.editorServersListening(),
     ]);
+    // An editor that finished arriving while the payload's slow questions ran is connected in it,
+    // and was not when the editor was asked about its play and its scan, which were skipped as
+    // unanswerable: asked again, so one answer does not say connected beside nothing asked.
+    const askAgain = !connectedBefore && editorStatus.connected;
+    if (askAgain) {
+      this.logDebug('editor_status: the editor connected during the call, so it is asked again');
+    }
+    const { playing, active, run, hold } = askAgain ? await askEditor() : askedFirst;
+    const scan = askAgain ? await this.editorScanState() : scanFirst;
     const answeredAt = Date.now();
     const inFlight = this.godotBridge
       .requestsInFlight()

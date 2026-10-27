@@ -6480,6 +6480,95 @@ async function testEditorStatusCountsOnlyOtherCallsInFlight(): Promise<void> {
 }
 
 /**
+ * An editor_status asked while an editor arrives describes one moment.
+ *
+ * The editor's play and scan were asked beside the slow questions about the process table, and
+ * the connection was read after those. An editor that finished arriving in between was answered as
+ * connected with `scan: null` and nothing asked of it, which a probe read as the editor having no
+ * open scenes to report. The stand-in greets as the call is sent, and every attempt where the server
+ * says the editor connected during the call must carry the editor's answers.
+ */
+async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-status-arrival-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_DEBUG: '1',
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine'),
+    },
+  });
+  const marker = 'editor_status: the editor connected during the call';
+  const marked = (): number => server.stderr.split(marker).length - 1;
+  let met = 0;
+  let attempts = 0;
+  try {
+    await server.initialize('regression-test');
+    for (; attempts < 20 && met === 0; attempts += 1) {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      socket.on('message', (raw: Buffer) => {
+        const message: unknown = JSON.parse(String(raw));
+        if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+          return;
+        }
+        const result =
+          message['tool'] === 'scan_status'
+            ? {
+                ok: true,
+                openScenes: ['res://shown.tscn'],
+                editedScene: 'res://shown.tscn',
+                unsavedScenes: [],
+                scanning: false,
+                importing: false,
+                sinceScanFinishedMs: 5,
+              }
+            : message['tool'] === 'playing_status'
+              ? { ok: true, playing: false, scenePath: '', debugPort: 0 }
+              : { ok: true };
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+      });
+      const before = marked();
+      const asking = server.request('tools/call', { name: 'editor_status', arguments: {} });
+      socket.send(JSON.stringify(greeting(project)));
+      const editor = get(parseTextContent(await asking), 'editor');
+      if (marked() > before) {
+        met += 1;
+        assert.deepEqual(
+          [get(editor, 'connected'), get(editor, 'scan', 'finishedMsAgo'), get(editor, 'openScenes')],
+          [true, 5, ['res://shown.tscn']],
+          `connected during the call, and asked: ${JSON.stringify(editor)}`,
+        );
+      }
+      socket.close();
+      for (let waited = 0; waited < 5000; waited += 50) {
+        const now = get(
+          parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+          'editor',
+        );
+        if (get(now, 'connected') === false && get(now, 'identifying') !== true) {
+          break;
+        }
+        await delay(50);
+      }
+    }
+    // The state is a race between the greeting and the process table, so it is tried until met; a
+    // platform that never meets it in twenty tries says so rather than passing on the attempts.
+    assert.ok(met > 0, `the editor never connected during a status call in ${String(attempts)} tries`);
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * An editor that has connected and not yet greeted is described as that, and nothing is read off it.
  *
  * The socket opens a frame before the greeting, longer on an editor that is importing, and every
@@ -63534,6 +63623,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditorStatusPortConflict,
   testTheBridgeTakesThePortWhenItIsFreed,
   testAnEditorAServerOpenedIsStartedAgain,
+  testAStatusDuringArrivalIsOfOneMoment,
   testAnEditorIsReadOnceItHasSaidWhoItIs,
   testACallWaitsForAnArrivingEditor,
   testEditorStatusCountsOnlyOtherCallsInFlight,
