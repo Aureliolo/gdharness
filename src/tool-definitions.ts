@@ -322,8 +322,15 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
         description:
           'Variables: the initial value. Constants: the value, which a constant needs. As written in GDScript.',
       },
-      isExport: { type: 'boolean', description: 'Variables: add @export.' },
-      exportHint: { type: 'string', description: 'Variables: the export hint, such as "range(0, 100)".' },
+      isExport: {
+        type: 'boolean',
+        description: 'Variables: add @export. Default true when exportHint is given.',
+      },
+      exportHint: {
+        type: 'string',
+        description:
+          'Variables: the export hint, such as "range(0, 100)", written as @export_range(0, 100). Refused beside isExport false.',
+      },
       isOnready: { type: 'boolean', description: 'Variables: add @onready.' },
       position: {
         type: 'string',

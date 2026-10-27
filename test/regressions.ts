@@ -24395,6 +24395,82 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         'res://made/listed.gd',
         'because the class list on disk now holds it',
       );
+      // A class declared on disk since the list was written: a script extending it, and an addition
+      // naming it, read against the old list as scripts that do not parse. The list is rebuilt
+      // first, and the answer names what it lacked.
+      writeFileSync(join(project, 'made', 'based.gd'), 'class_name Based\nextends Node2D\n');
+      const child = await call('script_edit', {
+        projectPath: project,
+        op: 'create',
+        scriptPath: 'res://made/child.gd',
+        className: 'Child',
+        extends: 'Based',
+      });
+      assert.deepEqual(
+        [get(child, 'parses'), get(child, 'registered'), get(child, 'classesRebuiltFirst')],
+        [true, true, ['Based']],
+        JSON.stringify(child),
+      );
+      writeFileSync(join(project, 'made', 'kept.gd'), 'class_name Kept\nextends RefCounted\n');
+      const naming = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://marker.gd',
+        modifications: [{ type: 'add_variable', name: 'held', varType: 'Kept', defaultValue: 'null' }],
+      });
+      assert.deepEqual(
+        [get(naming, 'parses'), get(naming, 'classesRebuiltFirst')],
+        [true, ['Kept']],
+        JSON.stringify(naming),
+      );
+
+      // An export hint can only mean an export, so given alone it still writes one.
+      const hinted = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://marker.gd',
+        modifications: [
+          {
+            type: 'add_variable',
+            name: 'ranged',
+            varType: 'int',
+            defaultValue: '1',
+            exportHint: 'range(0, 10)',
+          },
+        ],
+      });
+      assert.equal(get(hinted, 'parses'), true, JSON.stringify(hinted));
+      assert.ok(
+        readFileSync(join(project, 'marker.gd'), 'utf8')
+          .split('\n')
+          .includes('@export_range(0, 10) var ranged: int = 1'),
+        readFileSync(join(project, 'marker.gd'), 'utf8'),
+      );
+      const contradicted = await server.request(
+        'tools/call',
+        {
+          name: 'script_edit',
+          arguments: {
+            projectPath: project,
+            op: 'modify',
+            scriptPath: 'res://marker.gd',
+            modifications: [
+              {
+                type: 'add_variable',
+                name: 'unranged',
+                varType: 'int',
+                exportHint: 'range(0, 10)',
+                isExport: false,
+              },
+            ],
+          },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      assert.match(
+        textOf(contradicted) ?? '',
+        /^Nothing was changed: modification 1 has an exportHint and isExport false, and a hint is written only on an export/,
+      );
 
       // A file that is not GDScript is refused with what does write it.
       const shaderText = 'shader_type canvas_item;\n\nuniform vec4 tint : source_color;\n';

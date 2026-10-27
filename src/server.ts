@@ -14602,7 +14602,18 @@ class GodotServer {
       return contained.response;
     }
     const { op: _op, projectPath: _projectPath, ...params } = contained.value;
-    const created = await this.operation('create_script', params, project.value.path);
+    // The script is loaded against the class list, and its extends checked against the files, so
+    // against a list missing a class declared since, a script extending that class reads as one
+    // that does not parse, for a fault that is the list's.
+    const stale = await this.refreshStaleClasses(project.value.path);
+    if (!stale.ok) {
+      return stale.response;
+    }
+    const loaded = await this.operation('create_script', params, project.value.path);
+    const created: HeadlessOutcome =
+      loaded.ok && stale.value.length > 0
+        ? { ...loaded, payload: { ...loaded.payload, classesRebuiltFirst: stale.value } }
+        : loaded;
     const declared = created.ok ? (readString(created.payload, 'class_name') ?? '') : '';
     if (!created.ok || declared === '') {
       return this.answer(created);
@@ -14669,8 +14680,35 @@ class GodotServer {
    * for a method just added, while the game it played ran that method.
    */
   private async handleModifyScript(args: OperationParams): Promise<ToolResponse> {
-    const written = await this.headless('modify_script', args);
     const project = this.project(args);
+    // The additions are loaded against the class list, so one naming a class the list does not
+    // hold yet is refused as a script that would not parse, with nothing written.
+    const stale = project.ok ? await this.refreshStaleClasses(project.value.path) : null;
+    if (stale !== null && !stale.ok) {
+      return stale.response;
+    }
+    const loaded = await this.headless('modify_script', args);
+    const first = loaded.content[0];
+    const written: ToolResponse =
+      stale === null ||
+      stale.value.length === 0 ||
+      loaded.isError === true ||
+      first?.type !== 'text' ||
+      !first.text.trimStart().startsWith('{')
+        ? loaded
+        : {
+            ...loaded,
+            content: [
+              {
+                ...first,
+                text: answerJson({
+                  ...asParams(JSON.parse(first.text)),
+                  classesRebuiltFirst: stale.value,
+                }),
+              },
+              ...loaded.content.slice(1),
+            ],
+          };
     const scriptPath = readNonEmptyString(args, 'scriptPath');
     if (
       written.isError === true ||
