@@ -102,6 +102,7 @@ import {
   memoryRoomOf,
   roomFor,
   sweepRunDirectories,
+  watchedEngine,
   windowsCommitLeft,
 } from '../src/engine-launch.js';
 import {
@@ -407,6 +408,7 @@ import {
   Shares,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
+  splitPastFor,
   timesAfter,
   type Unit,
   unitsOf,
@@ -22113,9 +22115,37 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-diagnostics-'));
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-engine-diagnostics-rt-'));
+  // One warning raised to an error by the project, so the engine reports it while compiling.
   writeFileSync(
     join(project, 'project.godot'),
-    'config_version=5\n\n[application]\n\nconfig/name="Checked"\n',
+    'config_version=5\n\n[application]\n\nconfig/name="Checked"\n\n[debug]\n\ngdscript/warnings/integer_division=2\n',
+  );
+  mkdirSync(join(project, 'warned'));
+  writeFileSync(
+    join(project, 'warned', 'warned.gd'),
+    [
+      'extends Node',
+      '',
+      '',
+      'func total(unused_flag: bool) -> int:',
+      '\tvar spare: int = 3',
+      '\treturn 7 / 2',
+      '',
+      '',
+      '@warning_ignore("unused_parameter")',
+      'func quiet(ignored: int) -> void:',
+      '\tpass',
+      '',
+    ].join('\n'),
+  );
+  // Warnings at warn level only, so it compiles, and so does what loads it, until a warning is raised.
+  writeFileSync(
+    join(project, 'warned', 'mild.gd'),
+    'extends Node\n\n\nfunc spare(unused: int) -> void:\n\tpass\n',
+  );
+  writeFileSync(
+    join(project, 'warned', 'user.gd'),
+    'extends Node\n\nconst Mild = preload("res://warned/mild.gd")\n',
   );
   mkdirSync(join(project, 'checked'));
   writeFileSync(
@@ -22189,8 +22219,8 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(answered, 'errors'),
         get(answered, 'warnings'),
       ],
-      ['checked/broken.gd', false, 2, null],
-      `one script compiled by the engine, its warnings unread rather than none: ${shown}`,
+      ['checked/broken.gd', false, 2, 0],
+      `one script compiled by the engine, its warnings read as well: ${shown}`,
     );
     assert.deepEqual(
       get(answered, 'diagnostics'),
@@ -22208,8 +22238,51 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     assert.match(text(get(answered, 'languageServer')), /^Godot LSP is unavailable on port \d+/, shown);
     assert.match(
       text(get(answered, 'note')),
-      /^No editor of this project is open to ask, so a headless engine compiled the scripts .* warnings is null rather than 0\. editor_launch with hidden: true .* Until then clean says only that every script compiles\.$/,
+      /^No editor of this project is open to ask, so a headless engine compiled the scripts .* A second engine reports the warnings, at the levels the project sets, .* warnings is null when that engine could not answer\. editor_launch with hidden: true .* reports both with their columns\.$/,
       shown,
+    );
+    // A warning the project sets to warn comes back as a warning at its line, in the editor's words;
+    // one the project raises to an error comes back once, as the error the compile reported; and one
+    // the script ignores does not come back.
+    const warned = parseTextContent(await diagnose('warned/warned.gd'));
+    // What a script loads is read on the way, and its warnings are its own, not the loader's; nor is
+    // the compile failure raising them gives the loader a warning of its.
+    const user = parseTextContent(await diagnose('warned/user.gd'));
+    // Taken out again, since the project's own checks below count its scripts.
+    rmSync(join(project, 'warned'), { recursive: true });
+    assert.deepEqual(
+      [get(user, 'clean'), get(user, 'warnings'), get(user, 'diagnostics')],
+      [true, 0, []],
+      `a script is not given the warnings of what it loads: ${JSON.stringify(user)}`,
+    );
+    assert.deepEqual(
+      [get(warned, 'clean'), get(warned, 'errors'), get(warned, 'warnings'), get(warned, 'diagnostics')],
+      [
+        false,
+        1,
+        2,
+        [
+          {
+            severity: 'warning',
+            message:
+              'The parameter "unused_flag" is never used in the function "total()". If this is intended, prefix it with an underscore: "_unused_flag".',
+            line: 4,
+          },
+          {
+            severity: 'warning',
+            message:
+              'The local variable "spare" is declared but never used in the block. If this is intended, prefix it with an underscore: "_spare".',
+            line: 5,
+          },
+          {
+            severity: 'error',
+            message:
+              'Parse Error: Integer division. Decimal part will be discarded. (Warning treated as error.)',
+            line: 6,
+          },
+        ],
+      ],
+      `the engine's warnings at the project's levels: ${JSON.stringify(warned)}`,
     );
     // Three syntax errors, of which the engine reads only the first. Taken out again after, since
     // the project's own checks below count its scripts.
@@ -22242,7 +22315,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(all, 'nothingReported'),
         get(all, 'checkedBy'),
       ],
-      [false, 5, 4, null, ['checked/fine.gd', 'checked/stash.gd'], 'engine'],
+      [false, 5, 4, 0, ['checked/fine.gd', 'checked/stash.gd'], 'engine'],
       `a folder compiled whole, an engine past each failure, the clean scripts named apart: ${said}`,
     );
     const entryFor = (scriptPath: string): unknown =>
@@ -42949,27 +43022,34 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'tests/stood_child_test.gd': `extends "res://tests/stood_test.gd"\n\nfunc test_child() -> void:\n\tvar r := scene_runner("res://x.tscn")\n`,
       'tests/scene_child_test.gd': `extends "res://tests/scene_test.gd"\nconst GDHARNESS_NEEDS_WINDOW := false\n${cases('test_c')}`,
       'tests/quiet_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n${cases('test_h')}`,
+      // Kept together by its own declaration, by a base's, and not when the nearest says false.
+      'tests/kept_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_TOGETHER: bool = true\n${cases('test_k')}`,
+      'tests/kept_child_test.gd': `extends "res://tests/kept_test.gd"\n${cases('test_kc')}`,
+      'tests/parted_test.gd': `extends "res://tests/kept_test.gd"\nconst GDHARNESS_TOGETHER := false\n${cases('test_p')}`,
       'other/outside_test.gd': `extends GdUnitTestSuite\n${cases('test_elsewhere')}`,
     });
     const scripts = new ProjectScripts(project);
     const found = scripts.suitesUnder(['res://tests']);
     assert.deepEqual(
-      found.map((suite) => [suite.path, suite.cases, suite.windowed, suite.headless]),
+      found.map((suite) => [suite.path, suite.cases, suite.windowed, suite.headless, suite.together]),
       [
-        ['res://tests/a_test.gd', ['test_a', 'test_b'], false, false],
-        ['res://tests/base_suite.gd', ['test_inherited'], false, false],
-        ['res://tests/child_test.gd', ['test_inherited', 'test_own'], false, false],
-        ['res://tests/deep/path_test.gd', ['test_by_path', 'test_inherited'], false, false],
-        ['res://tests/quiet_test.gd', ['test_h'], false, true],
-        ['res://tests/res_test.gd', ['test_inherited'], false, false],
-        ['res://tests/said_test.gd', ['test_q'], false, false],
-        ['res://tests/scene_child_test.gd', ['test_c', 'test_s'], false, true],
-        ['res://tests/scene_test.gd', ['test_s'], true, false],
-        ['res://tests/stood_child_test.gd', ['test_child', 'test_up'], false, true],
-        ['res://tests/stood_test.gd', ['test_up'], false, true],
-        ['res://tests/window_test.gd', ['test_w'], true, false],
+        ['res://tests/a_test.gd', ['test_a', 'test_b'], false, false, false],
+        ['res://tests/base_suite.gd', ['test_inherited'], false, false, false],
+        ['res://tests/child_test.gd', ['test_inherited', 'test_own'], false, false, false],
+        ['res://tests/deep/path_test.gd', ['test_by_path', 'test_inherited'], false, false, false],
+        ['res://tests/kept_child_test.gd', ['test_k', 'test_kc'], false, false, true],
+        ['res://tests/kept_test.gd', ['test_k'], false, false, true],
+        ['res://tests/parted_test.gd', ['test_k', 'test_p'], false, false, false],
+        ['res://tests/quiet_test.gd', ['test_h'], false, true, false],
+        ['res://tests/res_test.gd', ['test_inherited'], false, false, false],
+        ['res://tests/said_test.gd', ['test_q'], false, false, false],
+        ['res://tests/scene_child_test.gd', ['test_c', 'test_s'], false, true, false],
+        ['res://tests/scene_test.gd', ['test_s'], true, false, false],
+        ['res://tests/stood_child_test.gd', ['test_child', 'test_up'], false, true, false],
+        ['res://tests/stood_test.gd', ['test_up'], false, true, false],
+        ['res://tests/window_test.gd', ['test_w'], true, false, false],
       ],
-      'every suite under the root, its cases own and inherited, which need a window and which say they run headless',
+      'every suite under the root, its cases own and inherited, which need a window, which say they run headless and which keep their cases together',
     );
     // A script declaring cases that is no suite runs none of them, and gdUnit4 says nothing of it.
     const noSuite = [
@@ -43042,12 +43122,38 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'a directory holding a folder left out is handed as its suites, and one named inside it as it is',
     );
 
-    const suite = (path: string, names: string[], windowed = false, headless = false) => ({
+    const suite = (path: string, names: string[], windowed = false, headless = false, together = false) => ({
       path,
       cases: names,
       windowed,
       headless,
+      together,
     });
+    // Past the split and with a case timed row by row, kept whole when it says its cases belong
+    // together, and dealt out case by case and row by row when it does not.
+    const kept = suite('res://tests/kept_test.gd', ['test_k', 'test_l'], false, false, true);
+    const keptTimes = {
+      [kept.path]: { seconds: 20, cases: { test_k: 12, test_l: 8 }, rows: { test_k: [6, 6] } },
+    };
+    assert.deepEqual(
+      [
+        unitsOf([kept], keptTimes).map((unit) => [unit.cases, unit.row?.index, unit.cost]),
+        unitsOf([{ ...kept, together: false }], keptTimes).map((unit) => [
+          unit.cases,
+          unit.row?.index,
+          unit.cost,
+        ]),
+      ],
+      [
+        [[['test_k', 'test_l'], undefined, 20]],
+        [
+          [['test_k'], 0, 6],
+          [['test_k'], 1, 6],
+          [['test_l'], undefined, 8],
+        ],
+      ],
+      'a suite keeping its cases together is one unit; the same suite saying nothing is dealt out',
+    );
     const big = suite('res://tests/big_test.gd', ['test_x', 'test_y', 'test_z']);
     const edge = suite('res://tests/edge_test.gd', ['test_e', 'test_f']);
     const shown = suite('res://tests/shown_test.gd', ['test_m', 'test_n'], true);
@@ -43070,6 +43176,25 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         [small.path, ['test_s'], 4, false],
       ],
       'past the split, case by case with the time around them; at it, whole; a windowed one whole',
+    );
+    // 30 s of suites whole: 12, 10, 4 and the untimed one's 4.
+    const four = [big, edge, shown, small];
+    assert.equal(
+      splitPastFor(four, times, 4),
+      SPLIT_PAST_SECONDS,
+      'never under the floor, past 7.5 s a share',
+    );
+    assert.equal(splitPastFor(four, times, 2), 15, "an engine's share of the run");
+    assert.equal(splitPastFor(four, times, 0), 30, 'and the whole run for one engine, or none said');
+    assert.deepEqual(
+      unitsOf(four, times, splitPastFor(four, times, 2)).map((unit) => [unit.suite, unit.cases.length]),
+      [
+        [big.path, 3],
+        [edge.path, 2],
+        [shown.path, 2],
+        [small.path, 1],
+      ],
+      'a suite within its share is kept whole, so what its cases share is built once',
     );
     const declared = new Map([big, edge, shown, small].map((s) => [s.path, s.cases]));
     const plans = dealt(units, declared, 4);
@@ -44185,11 +44310,11 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       'the cache home on every platform',
       machine({ XDG_CACHE_HOME: join(sep, 'cache'), LOCALAPPDATA: join(sep, 'local') }, 'win32'),
       join(sep, 'cache', 'gdharness', 'slots'),
-      6,
+      16,
     ],
     [
       "Windows' local data without one",
-      machine({ XDG_CACHE_HOME: '', LOCALAPPDATA: join(sep, 'local') }, 'win32', 4),
+      machine({ XDG_CACHE_HOME: '', LOCALAPPDATA: join(sep, 'local') }, 'win32', 3),
       join(sep, 'local', 'gdharness', 'slots'),
       1,
     ],
@@ -44197,7 +44322,7 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       'the home cache elsewhere',
       machine({ LOCALAPPDATA: join(sep, 'local') }, 'linux', 10),
       join(sep, 'home', 'me', '.cache', 'gdharness', 'slots'),
-      2,
+      5,
     ],
     [
       'Windows with neither',
@@ -45358,7 +45483,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       split.said,
       split.said.includes('over 1 engine, of the 2 asked for, since')
         ? /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since the machine has \d+\.\d GB of memory free, 4\.0 GB of it kept for everything else and 1\.5 GB taken for each engine\.$/m
-        : /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than 10 s last time: res:\/\/tests\/ok_test\.gd\.$/m,
+        : /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
       split.said,
     );
     // The same run held to one processor starts one engine and says so; a machine short of memory
@@ -45881,6 +46006,118 @@ async function testAnEngineIsHeldToTheProcessorsAsked(): Promise<void> {
 }
 
 /**
+ * An engine started for a run writes to a pipe on Windows, copied into its log, and to the log file
+ * itself elsewhere. The stream is the property the cost depends on: an engine on Windows spent 1.5
+ * to 4 ms on each line written to a file and 0.04 ms on one written to a pipe. Either way the log
+ * holds both streams in the order printed, up to the line printed as the engine quits.
+ */
+async function testAnEngineWritesItsLogThroughAPipeOnWindows(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('engine stream regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-stream-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(
+      join(project, 'speak.gd'),
+      [
+        'extends SceneTree',
+        '',
+        '',
+        'func _init() -> void:',
+        '\tvar names := {OS.STD_HANDLE_PIPE: "a pipe", OS.STD_HANDLE_FILE: "a file"}',
+        '\tprint("stdout is %s" % names.get(OS.get_stdout_type(), "neither"))',
+        '\tfor i in 3:',
+        '\t\tprint("out %d" % i)',
+        '\t\tprinterr("err %d" % i)',
+        '\tprint("the last line")',
+        '\tquit()',
+        '',
+      ].join('\n'),
+    );
+    const directory = join(project, 'engine');
+    mkdirSync(directory);
+    const log = join(directory, 'engine.log');
+    const launch = {
+      godotPath,
+      projectPath: project,
+      deadlineSeconds: 120,
+      running: new Set<() => void>(),
+      cores: null,
+    };
+    const end = await watchedEngine(
+      launch,
+      ['--headless', '--path', project, '-s', 'res://speak.gd'],
+      directory,
+      log,
+      60,
+    );
+    const text = readFileSync(log, 'utf8');
+    assert.equal(end.ended, null, text);
+    assert.equal(end.code, 0, text);
+    const said = text.split(/\r?\n/).filter((line) => /^(stdout is|out \d|err \d|the last line)/.test(line));
+    assert.deepEqual(
+      said,
+      [
+        `stdout is ${process.platform === 'win32' ? 'a pipe' : 'a file'}`,
+        'out 0',
+        'err 0',
+        'out 1',
+        'err 1',
+        'out 2',
+        'err 2',
+        'the last line',
+      ],
+      text,
+    );
+    if (process.platform !== 'win32') {
+      return;
+    }
+    // Godot's own create_process hands a child none of its handles, so the stand-in is a runtime
+    // whose detached child inherits the pipe, prints after its parent has exited, and then holds the
+    // pipe open far longer than the drain waits.
+    const linger = [
+      HIDDEN_SPAWN_PRELUDE,
+      "const child = spawnHidden(process.execPath, ['-e', 'setTimeout(() => { console.log(\"the late line\"); setTimeout(() => {}, 30000); }, 1500)'],",
+      "  { stdio: ['ignore', 'inherit', 'inherit'], detached: true });",
+      "console.log('lingering ' + child.pid);",
+      'child.unref();',
+    ].join('\n');
+    const held = join(project, 'held');
+    mkdirSync(held);
+    const began = Date.now();
+    const heldEnd = await watchedEngine(
+      { ...launch, godotPath: process.execPath },
+      ['-e', linger],
+      held,
+      join(held, 'engine.log'),
+      60,
+    );
+    const seconds = (Date.now() - began) / 1000;
+    const heldText = readFileSync(join(held, 'engine.log'), 'utf8');
+    const lingering = Number(/^lingering (\d+)/m.exec(heldText)?.[1]);
+    try {
+      process.kill(lingering);
+    } catch {
+      // Gone already.
+    }
+    assert.equal(heldEnd.code, 0, heldText);
+    assert.match(heldText, /^the late line$/m, 'what arrives after the exit is still copied');
+    assert.ok(
+      seconds < 20,
+      `and the run is not held until the child lets go: ${String(seconds)} s\n${heldText}`,
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * A project with no extension list, as a fresh clone has, is given one naming every manifest the
  * editor's scan would find, so the import that follows loads the extensions; one with a list keeps it.
  */
@@ -45928,6 +46165,8 @@ function testAFreshCloneHasItsExtensionsListed(): void {
  * number of engines brought down while each ran whole. Each row prints the engine it ran in. The
  * times are set by hand after a first run, since six rows of nothing are too quick to be dealt; and
  * a row the case gains after they were taken runs once all the same, in the engine holding the last.
+ * A suite declaring GDHARNESS_TOGETHER is not dealt out at all: its cases share a setup kept in the
+ * suite, which every engine holding part of it computed again, 394 s whole against 612 s dealt out.
  */
 function testAParameterisedCaseIsDealtByItsRows(): void {
   const godotPath = resolveGodotPath();
@@ -45941,9 +46180,10 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rows-'));
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rows-slots-'));
-  const matrix = (rows: number): string =>
+  const matrix = (rows: number, together = false): string =>
     [
       'extends GdUnitTestSuite',
+      together ? 'const GDHARNESS_TOGETHER: bool = true' : '',
       '',
       `func test_face(value: int, test_parameters := [${Array.from({ length: rows }, (_, row) => `[${String(row)}]`).join(', ')}]) -> void:`,
       '\tprint("ROW %d IN %d" % [value, OS.get_process_id()])',
@@ -45997,6 +46237,9 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
           rows: { test_face: Array.from({ length: rows }, () => 5) },
         },
       });
+    // Read off the dealt runs: a run whose only suite is kept whole would use one engine anyway, so
+    // it never says it was held to one.
+    let heldToOne = false;
     for (const [rows, what] of [
       [6, 'the rows the times know'],
       [7, 'a row added since the times were taken'],
@@ -46015,11 +46258,12 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       // one, the case runs whole there, and the run says why it was held.
       if (run.said.includes('over 1 engine, of the 2 asked for, since')) {
         console.log(`row dealing: held to one engine, so the rows ran in one (${what})`);
+        heldToOne = true;
         continue;
       }
       assert.match(
         run.said,
-        /^Dealt out row by row, since it took more than 10 s last time: res:\/\/tests\/matrix_test\.gd > test_face\.$/m,
+        /^Dealt out row by row, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/matrix_test\.gd > test_face\.$/m,
         `${what}: ${run.said}`,
       );
       assert.equal(new Set([...ran.values()].flat()).size, 2, `${what}: over both engines: ${run.said}`);
@@ -46030,6 +46274,77 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       );
       assert.equal(rowsTimed(), rows, `${what}: and every row is timed afterwards`);
     }
+
+    // Held to one processor, the run's one engine takes the suite whole, which it would have dealt
+    // over the two asked for, and says it was held: the deal it compares with is cut for two.
+    writeTree(project, { 'tests/matrix_test.gd': matrix(6) });
+    writeFileSync(timesFile, slowed(6));
+    const cored = test('--engines', '2', '--cores', '1');
+    assert.equal(cored.status, 0, cored.said);
+    assert.match(
+      cored.said,
+      /^2 test functions in 1 suite over 1 engine, of the 2 asked for, since (--cores holds it to 1 processor|the machine has \d+\.\d GB of memory free, .*)\.$/m,
+      cored.said,
+    );
+
+    // The same suite and the same times, declaring its cases belong together: one engine runs every
+    // row, and nothing is dealt out, so work the rows share is done once.
+    writeTree(project, { 'tests/matrix_test.gd': matrix(6, true) });
+    writeFileSync(timesFile, slowed(6));
+    const kept = test('--engines', '2', '--print-output');
+    assert.equal(kept.status, 0, kept.said);
+    const keptRan = ranIn(kept.said);
+    assert.deepEqual(
+      [
+        [...keptRan].map(([row, pids]) => [row, pids.length]).sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
+        new Set([...keptRan.values()].flat()).size,
+      ],
+      [Array.from({ length: 6 }, (_, row) => [row, 1]), 1],
+      `a suite kept together runs every row once, in one engine: ${kept.said}`,
+    );
+    assert.doesNotMatch(kept.said, /^Dealt out (row by row|case by case)/m, kept.said);
+    // Held to one engine, as on the macOS runner, there is no deal to keep it out of.
+    if (!heldToOne) {
+      assert.match(
+        kept.said,
+        /^Kept whole in one engine, since it declares GDHARNESS_TOGETHER: res:\/\/tests\/matrix_test\.gd\.$/m,
+        kept.said,
+      );
+    }
+
+    // Saying nothing, beside two suites that make an engine's share of the run larger than its 31 s:
+    // dealt whole, since the others balance it, and split it would set up once an engine. Split, its
+    // rows would go to both engines, one at a time after the 20 s each of the others.
+    const other = 'extends GdUnitTestSuite\n\n\nfunc test_other() -> void:\n\tpass\n';
+    writeTree(project, {
+      'tests/matrix_test.gd': matrix(6),
+      'tests/other_a_test.gd': other,
+      'tests/other_b_test.gd': other,
+    });
+    writeFileSync(
+      timesFile,
+      JSON.stringify({
+        ...(JSON.parse(slowed(6)) as SuiteTimes),
+        'res://tests/other_a_test.gd': { seconds: 20, cases: { test_other: 20 } },
+        'res://tests/other_b_test.gd': { seconds: 20, cases: { test_other: 20 } },
+      }),
+    );
+    const shared = test('--engines', '2', '--print-output');
+    assert.equal(shared.status, 0, shared.said);
+    const sharedRan = ranIn(shared.said);
+    assert.deepEqual(
+      [
+        [...sharedRan].map(([row, pids]) => [row, pids.length]).sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
+        new Set([...sharedRan.values()].flat()).size,
+      ],
+      [Array.from({ length: 6 }, (_, row) => [row, 1]), 1],
+      `a suite within an engine's share runs every row once, in one engine: ${shared.said}`,
+    );
+    // Two engines, so the rows met in one by the deal, unless held to one as on the macOS runner.
+    if (!heldToOne) {
+      assert.match(shared.said, /^4 test functions in 3 suites over 2 engines\.$/m, shared.said);
+    }
+    assert.doesNotMatch(shared.said, /^(Dealt out|Kept whole)/m, shared.said);
     assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
     sweep(project, slots);
@@ -46162,7 +46477,7 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
     } else {
       assert.match(
         split.said,
-        /^Dealt out case by case, since it took more than 10 s last time: res:\/\/tests\/shell_test\.gd\.$/m,
+        /^Dealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/shell_test\.gd\.$/m,
         split.said,
       );
       const pids = new Set(
@@ -63874,6 +64189,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnOrphanIsNamedWithTheCaseThatLeftIt,
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
+  testAnEngineWritesItsLogThroughAPipeOnWindows,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,
   testATestRunSaysHowFarItHasGot,

@@ -23,8 +23,8 @@
  * One directory and one count serve the whole machine, whichever project an engine is for: every
  * game's gate, bench and tool, and this server's own engines, draw on the same budget. The directory
  * is `$XDG_CACHE_HOME/gdharness/slots` where that variable is set, else
- * `%LOCALAPPDATA%\gdharness\slots` on Windows, else `~/.cache/gdharness/slots`; the count is a fifth
- * of the processors, at least one. `GODOT_ENGINE_SLOTS` and `GODOT_ENGINE_SLOT_COUNT`
+ * `%LOCALAPPDATA%\gdharness\slots` on Windows, else `~/.cache/gdharness/slots`; the count is half
+ * the processors, at least one. `GODOT_ENGINE_SLOTS` and `GODOT_ENGINE_SLOT_COUNT`
  * replace either, and a command's `--slots` and `--slot-count` replace those ({@link machineSlots}).
  *
  * The games' own tools take slots in this directory the same way, which is the point of it: the
@@ -56,8 +56,11 @@ import { removeWhole } from './whole-file.js';
 export const SLOTS_VARIABLE = 'GODOT_ENGINE_SLOTS';
 /** The variable naming the slot count in place of the machine's. */
 export const SLOT_COUNT_VARIABLE = 'GODOT_ENGINE_SLOT_COUNT';
-/** Processors to each slot by default, which leaves most of the machine to whoever is at it. */
-const PROCESSORS_A_SLOT = 5;
+/**
+ * Processors to each slot by default. A test engine was measured at 0.5 to 0.86 of a processor, so
+ * one slot to five left the machine about half idle while gates waited in line for engines.
+ */
+const PROCESSORS_A_SLOT = 2;
 
 /** Where the slots are and how many there are. */
 export interface SlotsChosen {
