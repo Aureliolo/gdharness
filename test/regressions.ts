@@ -22255,6 +22255,40 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       textOf(info) ?? '',
     );
 
+    // Input actions read by a name the input map lacks: jump on two lines and move_left are named,
+    // and none of a project action, an engine ui_ action, one a script adds itself, a name built at
+    // run time, one in a comment and one inside a string.
+    mkdirSync(join(project, 'controls'));
+    writeFileSync(
+      join(project, 'controls', 'player.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tInputMap.add_action("made_here")',
+        '\tvar moving: Vector2 = Input.get_vector("move_left", "move_right", &"ui_up", \'ui_down\')',
+        '\tif Input.is_action_just_pressed("jump") or Input.is_action_pressed(&"made_here"):',
+        '\t\tprint(moving)',
+        '\tvar built: String = "dash" + str(1)',
+        '\tif Input.is_action_pressed(built) or Input.is_action_pressed("jump" + "_twice"):',
+        '\t\tprint(built)',
+        '\t# Input.is_action_pressed("in_a_comment")',
+        '\tvar said: String = \'Input.is_action_pressed("in_a_string")\'',
+        '\tprint(said)',
+        '',
+        '',
+        'func _unhandled_input(event: InputEvent) -> void:',
+        '\tif event.is_action_pressed("jump"):',
+        '\t\tprint(event)',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'project.godot'),
+      `${readFileSync(join(project, 'project.godot'), 'utf8')}\n[input]\n\nmove_right={"deadzone": 0.5, "events": []}\n`,
+    );
+
     // The health and validation sections compile what script_diagnostics does and follow every
     // reference, where the health check had read only comments and called the scripts passed.
     const projectInfo = await server.request(
@@ -22271,7 +22305,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(scriptsCheck, 'compiled'),
         asArray(get(scriptsCheck, 'details')).length,
       ],
-      [false, 5, 3],
+      [false, 6, 3],
       `every script compiled, each failure a detail: ${shownInfo}`,
     );
     assert.ok(
@@ -22294,12 +22328,24 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         'res://audio/theme.ogg does not exist, and res://checked/fine.gd refers to it',
         'res://checked/gone.ogg does not exist, and res://checked/fine.gd refers to it',
         'res://gone.png does not exist, and res://stage.tscn refers to it',
+        'jump is not an input action of this project, and res://controls/player.gd:7, res://controls/player.gd:18 read it',
+        'move_left is not an input action of this project, and res://controls/player.gd:6 reads it',
       ],
       shownInfo,
     );
     assert.deepEqual(
       asArray(get(judged, 'validation', 'issues')).map((issue) => get(issue, 'check')),
-      ['main_scene', 'compiles', 'compiles', 'compiles', 'references', 'references', 'references'],
+      [
+        'main_scene',
+        'compiles',
+        'compiles',
+        'compiles',
+        'references',
+        'references',
+        'references',
+        'input_actions',
+        'input_actions',
+      ],
       shownInfo,
     );
     assert.equal(get(judged, 'validation', 'valid'), false, shownInfo);
