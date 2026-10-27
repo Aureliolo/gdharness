@@ -1196,6 +1196,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description: 'create and set: keyframe snap in seconds, 0 or more. create: default 0.1.',
       },
       track: { ...ANIMATION_TRACK, ops: ['add_track', 'remove_track'] },
+      times: {
+        type: 'array',
+        items: { type: 'number' },
+        ops: ['remove_track'],
+        description:
+          'remove_track: the times in seconds of the keys to remove, keeping the rest of the track; a track left with no key goes too. A time no key is at refuses the call, naming the times the keys are at. To move a key, remove it and add_track it at the new time. Default every key.',
+      },
       replaceKeys: {
         type: 'boolean',
         ops: ['add_track'],

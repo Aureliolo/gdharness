@@ -8513,6 +8513,23 @@ function testProjectPathsAreContained(): void {
     );
   }
 
+  // Beside the project, with its folder given through a link: a macOS temporary directory is given
+  // under /var and holds a project whose real path is under /private/var.
+  const holding = realpathSync(mkdtempSync(join(tmpdir(), 'gdharness-beside-')));
+  try {
+    const real = join(holding, 'real');
+    mkdirSync(join(real, 'game'), { recursive: true });
+    symlinkSync(real, join(holding, 'link'), 'junction');
+    const given = join(holding, 'link', 'escape.png');
+    const beside = resolveWithinProject(join(real, 'game'), given);
+    assert.equal(
+      beside.ok ? 'contained' : beside.reason,
+      `Path '${given}' is absolute and outside the project; give a path inside it, such as 'escape.png'.`,
+    );
+  } finally {
+    sweep(holding);
+  }
+
   // The other half, or the fixture above passes against a function that refuses everything.
   const accepted: [string, string][] = [
     ['scenes/main.tscn', 'scenes/main.tscn'],
@@ -59632,6 +59649,83 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
         }),
       ),
       'moves/idle has no property track on Body:rotation; it has no tracks.',
+    );
+
+    // One key out of a track, the others kept: a key moved in time took removing the whole track.
+    // Times read back as given, though the scene keeps them as 32-bit floats.
+    const turnTrack = { type: 'property', nodePath: 'Body', property: 'rotation' };
+    await written({
+      op: 'add_track',
+      playerNodePath: 'Player',
+      animationName: 'sway',
+      track: {
+        ...turnTrack,
+        keyframes: [
+          { time: 0, value: 0 },
+          { time: 0.2, value: 0.1 },
+          { time: 0.6, value: -0.1 },
+        ],
+      },
+    });
+    const keyTimes = async (): Promise<unknown[]> => {
+      const read = parseTextContent(
+        await call({ op: 'read', playerNodePath: 'Player', animationName: 'sway' }),
+      );
+      const turned = asArray(get(read, 'tracks')).find((track) => get(track, 'property') === 'rotation');
+      return asArray(get(turned, 'keyframes')).map((key) => get(key, 'time'));
+    };
+    assert.deepEqual(await keyTimes(), [0, 0.2, 0.6], 'the times as they were given');
+    const unkeyed = await written({
+      op: 'remove_track',
+      playerNodePath: 'Player',
+      animationName: 'sway',
+      track: turnTrack,
+      times: [0.6],
+    });
+    assert.deepEqual(
+      [get(unkeyed, 'tracksRemoved'), get(unkeyed, 'keysRemoved'), get(unkeyed, 'tracks')],
+      [0, 1, 2],
+      JSON.stringify(unkeyed),
+    );
+    await written({
+      op: 'add_track',
+      playerNodePath: 'Player',
+      animationName: 'sway',
+      track: { ...turnTrack, keyframes: [{ time: 0.7, value: -0.1 }] },
+    });
+    assert.deepEqual(await keyTimes(), [0, 0.2, 0.7], 'the key moved and the others kept');
+    for (const [times, refusal] of [
+      [
+        [0.5, 0.7],
+        "sway's property track on Body:rotation has no key at 0.5 s; its keys are at 0.0, 0.2, 0.7 s. Nothing was removed.",
+      ],
+      [[], 'times is a list of the key times to remove, in seconds'],
+    ] as const) {
+      assert.equal(
+        textOf(
+          await call({
+            op: 'remove_track',
+            playerNodePath: 'Player',
+            animationName: 'sway',
+            track: turnTrack,
+            times: [...times],
+          }),
+        ),
+        refusal,
+        JSON.stringify(times),
+      );
+    }
+    const unturned = await written({
+      op: 'remove_track',
+      playerNodePath: 'Player',
+      animationName: 'sway',
+      track: turnTrack,
+      times: [0, 0.2, 0.7],
+    });
+    assert.deepEqual(
+      [get(unturned, 'tracksRemoved'), get(unturned, 'keysRemoved'), get(unturned, 'tracks')],
+      [1, 3, 1],
+      `the track goes with its last key: ${JSON.stringify(unturned)}`,
     );
 
     // A method key whose arguments the method cannot take is written, as one calling a missing
