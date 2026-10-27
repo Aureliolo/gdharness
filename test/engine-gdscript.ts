@@ -809,9 +809,10 @@ function testOperations(godotPath: string, projectDir: string): void {
       script_path: `made/${template}_template.gd`,
       template: template === 'none' ? '' : template,
     });
+    // No class_name was given, so none is read, which is null rather than an empty name.
     assert.deepEqual(
-      [get(made, 'parses'), get(made, 'extends')],
-      [true, base],
+      [get(made, 'parses'), get(made, 'extends'), get(made, 'class_name')],
+      [true, base, null],
       `the ${template} template should parse under every warning, on ${base}: ${JSON.stringify(made)}`,
     );
   }
@@ -861,6 +862,16 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.match(broken.stderr, /loose/, 'the reason is on stderr, where the server reads it from');
   // Gone again before the resave below walks the project, which would trip over it.
   rmSync(join(projectDir, 'made', 'broken.gd'));
+  const nameless = runRefusedOperation(godotPath, projectDir, 'create_script', {
+    script_path: 'made/nameless.gd',
+    content: 'extends Node2D\n\n\nfunc _ready() -> void:\n\tvar loose = 1\n',
+  });
+  assert.deepEqual(
+    [get(nameless.answer, 'parses'), get(nameless.answer, 'extends'), get(nameless.answer, 'class_name')],
+    [false, 'Node2D', null],
+    `a header read off the text with no class_name names none: ${JSON.stringify(nameless.answer)}`,
+  );
+  rmSync(join(projectDir, 'made', 'nameless.gd'));
 
   // Content is the whole file: written as sent, header and all, and read back from what was parsed.
   const whole = 'class_name FixtureWhole\nextends Sprite2D\n\n\nfunc _ready() -> void:\n\tpass\n';

@@ -116,7 +116,10 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	# answered for a file whose header says otherwise, so those are read off the text instead.
 	if parses:
 		answer["extends"] = _base_named(written)
-		answer["class_name"] = str(written.get_global_name())
+		var declared: String = str(written.get_global_name())
+		answer["class_name"] = null
+		if not declared.is_empty():
+			answer["class_name"] = declared
 	else:
 		answer.merge(_header_written(script_content))
 	return answer
@@ -134,9 +137,10 @@ static func _not_gdscript(path: String, doing: String) -> String:
 
 
 ## The class_name and extends [param text] declares at its margin, as written. A script with no
-## extends extends RefCounted.
+## extends extends RefCounted, and one with no class_name answers null for it, as an absent name
+## does everywhere else rather than as a name that is empty.
 static func _header_written(text: String) -> Dictionary:
-	var header: Dictionary = {"extends": "RefCounted", "class_name": ""}
+	var header: Dictionary = {"extends": "RefCounted", "class_name": null}
 	for line: String in text.split("\n"):
 		# An inner class's extends is indented, and is not the script's.
 		if line.begins_with(" ") or line.begins_with("\t"):

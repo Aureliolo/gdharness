@@ -470,7 +470,7 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 	return _noting_variation(
 		{
 			"ok": true,
-			"themePath": theme_path,
+			"resourcePath": theme_path,
 			"controlType": control_type,
 			"colorName": color_name,
 			"color": {"r": stored.r, "g": stored.g, "b": stored.b, "a": stored.a}
@@ -524,7 +524,7 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 	return _noting_variation(
 		{
 			"ok": true,
-			"themePath": theme_path,
+			"resourcePath": theme_path,
 			"controlType": control_type,
 			"fontSizeName": font_size_name,
 			"size": saved.get_font_size(font_size_name, control_type)
@@ -572,7 +572,7 @@ func remove_theme_item(args: Dictionary) -> Dictionary:
 	var unsaved: String = _save_theme(theme, theme_path, removed)
 	if not unsaved.is_empty():
 		return {"ok": false, "error": unsaved}
-	return {"ok": true, "themePath": theme_path, "controlType": control_type, "removed": removed}
+	return {"ok": true, "resourcePath": theme_path, "controlType": control_type, "removed": removed}
 
 
 ## [param answer] with a note when its controlType names no class a theme styles. Any name is a

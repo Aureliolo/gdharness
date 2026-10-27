@@ -62714,7 +62714,9 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     await server.initialize('theme-engine');
 
     await call('resource_edit', { ...theme, op: 'create', resourceType: 'Theme' });
-    assert.equal(get(parseTextContent(await fontSize(12)), 'size'), 12);
+    const sized = parseTextContent(await fontSize(12));
+    // Named as every other resource_edit answer names the file it wrote.
+    assert.deepEqual([get(sized, 'size'), get(sized, 'resourcePath')], [12, 'res://theme.tres']);
     for (const [size, said] of [
       [
         -3,
@@ -62732,7 +62734,7 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
 
     for (const kind of ['Button', 'PopupMenu']) {
       const set = await colour(kind);
-      assert.equal(get(set, 'controlType'), kind, JSON.stringify(set));
+      assert.deepEqual([get(set, 'controlType'), get(set, 'resourcePath')], [kind, 'res://theme.tres']);
       assert.equal(get(set, 'note'), undefined, `${kind} is a class a theme styles: ${JSON.stringify(set)}`);
     }
     const variation = await colour('Buton');
