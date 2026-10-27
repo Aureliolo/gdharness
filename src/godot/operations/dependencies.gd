@@ -166,20 +166,36 @@ func missing_references() -> Array[Dictionary]:
 
 ## The files [param script] loads with load() or ResourceLoader.load() by a path written in the call
 ## that are not on disk. A load called on another object, such as a ConfigFile's, reads a file that
-## object's owner may write, so only the bare call and the ResourceLoader's count.
+## object's owner may write, so only the bare call and the ResourceLoader's count. A path the script
+## names anywhere else, asking whether it exists, writing it or removing it, is one it looks after
+## itself, and a `load(` inside a string is not a call: read across lines, one in a string literal
+## took the rest of the file up to the next quote as a path.
 func _loaded_and_missing(script: String) -> Array[String]:
-	var code: String = _code_lines(FileAccess.get_file_as_string(script))
-	var asked: Dictionary = {}
-	for question: RegExMatch in GdhPatterns.compiled('exists\\(\\s*"([^"]+)"').search_all(code):
-		asked[_resolved(question.get_string(1), script)] = true
+	var loaded: Array[String] = []
+	var named: Dictionary = {}
+	for line: String in FileAccess.get_file_as_string(script).split("\n"):
+		var code: String = GdhPatterns.without_comment(line)
+		if not code.contains("load("):
+			for literal: String in _string_literals(code):
+				named[_resolved(literal, script)] = true
+			continue
+		var calls: Dictionary = {}
+		for loading: RegExMatch in (
+			GdhPatterns.compiled("(?:(?<![\\w.])|ResourceLoader\\.)load\\(\\s*(?=[\"'])").search_all(code)
+		):
+			calls[loading.get_end()] = true
+		for literal: RegExMatch in GdhPatterns.compiled(STRING_LITERAL).search_all(code):
+			var single: String = literal.get_string(2)
+			var path: String = _resolved(literal.get_string(1) if single.is_empty() else single, script)
+			if calls.has(literal.get_start()):
+				loaded.append(path)
+			else:
+				named[path] = true
 	var missing: Array[String] = []
-	for loading: RegExMatch in (
-		GdhPatterns.compiled('(?:(?<![\\w.])|ResourceLoader\\.)load\\(\\s*"([^"]+)"').search_all(code)
-	):
-		var path: String = _resolved(loading.get_string(1), script)
+	for path: String in loaded:
 		if not path.begins_with("res://") or path.begins_with("res://.") or path.get_extension().is_empty():
 			continue
-		if not asked.has(path) and not FileAccess.file_exists(path) and not missing.has(path):
+		if not named.has(path) and not FileAccess.file_exists(path) and not missing.has(path):
 			missing.append(path)
 	return missing
 

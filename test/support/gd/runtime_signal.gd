@@ -123,6 +123,9 @@ func _check_watch(timer: Timer) -> void:
 	if armed.get("type") != "watching" or typeof(armed.get("watch")) != TYPE_INT:
 		_fail("a watch is armed and named: %s" % str(armed))
 		return
+	# Time between the arming and the first emission, as a call made between them takes, which the
+	# wait collecting it does not see.
+	await create_timer(0.15).timeout
 	Checked.done(timer.emit_signal("settled", 1, 2, 3, 4, 5, 6) as Error, "emitting settled")
 	Checked.done(timer.emit_signal("settled", 7, 8, 9, 10, 11, 12) as Error, "emitting settled again")
 	await process_frame
@@ -137,6 +140,10 @@ func _check_watch(timer: Timer) -> void:
 		or GdhRead.as_int(caught.get("elapsed_ms", 9999)) > 100
 	):
 		_fail("a signal fired before the wait is collected at once, with the first's args: %s" % str(caught))
+	var after: int = GdhRead.as_int(caught.get("fired_after_ms", -1), -1)
+	# A timer of 0.15 s came due 145 ms after it was made: it counts frame deltas, not the clock.
+	if after < 100 or after > 1000:
+		_fail("and says how long after the arming the first came: %s" % str(caught))
 	var again: Dictionary = await node._execute_command("wait_signal", {"watch": armed["watch"]})
 	if again.get("type") != "error" or not str(again.get("message", "")).contains("collected already"):
 		_fail("a watch is collected once: %s" % str(again))
@@ -147,7 +154,12 @@ func _check_watch(timer: Timer) -> void:
 	var nothing: Dictionary = await node._execute_command(
 		"wait_signal", {"watch": quiet.get("watch"), "timeout_ms": 60}
 	)
-	if nothing.get("fired") != false or nothing.get("times") != 0 or nothing.has("fired_before_wait"):
+	if (
+		nothing.get("fired") != false
+		or nothing.get("times") != 0
+		or nothing.has("fired_before_wait")
+		or nothing.has("fired_after_ms")
+	):
 		_fail("a watch nothing fired on runs out: %s" % str(nothing))
 	if (
 		not timer.timeout.get_connections().is_empty()

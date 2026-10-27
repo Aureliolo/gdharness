@@ -227,6 +227,8 @@ func _collect(id: int, timeout_ms: int) -> Dictionary:
 		"args": _values.serialize(watch.catcher.args),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 	}
+	if watch.catcher.fired:
+		answer["fired_after_ms"] = watch.catcher.fired_after_ms
 	if before:
 		answer["fired_before_wait"] = true
 	return answer
@@ -848,10 +850,16 @@ class GdhSignalCatcher:
 	## How many times it fired; [member args] holds what the first carried.
 	var times: int = 0
 	var args: Array = []
+	## Milliseconds from when this began listening to the first emission, -1 before one. A wait
+	## collecting a watch measured only itself, so a call made between the arming and the wait left
+	## nothing saying how long after it the signal came.
+	var fired_after_ms: int = -1
+	var _armed_at: int = Time.get_ticks_msec()
 
 	func _on_fired(...carried: Array) -> void:
 		if not fired:
 			args = carried
+			fired_after_ms = Time.get_ticks_msec() - _armed_at
 		fired = true
 		times += 1
 

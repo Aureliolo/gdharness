@@ -16819,6 +16819,8 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
         '[node name="Plain" type="Node" parent="."]\n\n' +
         '[node name="Holder" type="Control" parent="."]\noffset_left = 20.0\noffset_top = 10.0\noffset_right = 20.0\noffset_bottom = 10.0\nscale = Vector2(0.5, 0.5)\nmouse_filter = 2\n\n' +
         '[node name="Drawn" type="Control" parent="Holder"]\noffset_right = 600.0\noffset_bottom = 230.0\nscript = ExtResource("2")\n\n' +
+        // Over the top right of Drawn: its x 460 to 600 and y 0 to 100.
+        '[node name="Cover" type="Control" parent="."]\noffset_left = 250.0\noffset_top = 10.0\noffset_right = 320.0\noffset_bottom = 60.0\n\n' +
         '[node name="Popup" type="Window" parent="."]\nposition = Vector2i(330, 150)\nsize = Vector2i(300, 200)\nunfocusable = true\ncontent_scale_factor = 2.0\n\n' +
         '[node name="Inside" type="Control" parent="Popup"]\noffset_right = 300.0\noffset_bottom = 200.0\nscript = ExtResource("2")\n',
     );
@@ -16863,6 +16865,8 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
       assert.deepEqual(get(mouse, 'position'), [241, 103], `in the window's pixels: ${mouseShown}`);
       assert.equal(get(mouse, 'window'), undefined, `the game's own window: ${mouseShown}`);
       assert.equal(get(mouse, 'hovered'), drawn, mouseShown);
+      assert.equal(get(mouse, 'pressed_on'), drawn, mouseShown);
+      assert.equal(get(mouse, 'landed'), true, mouseShown);
       assert.deepEqual(
         (await record(drawn)).presses,
         [
@@ -16892,12 +16896,39 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
       });
       assert.deepEqual(get(dragged, 'from'), [35, 100], `${how}: ${JSON.stringify(dragged)}`);
       assert.equal(get(dragged, 'hovered'), drawn, `${how}: and the drag: ${JSON.stringify(dragged)}`);
+      assert.equal(get(dragged, 'pressed_on'), drawn, `${how}: ${JSON.stringify(dragged)}`);
+      assert.equal(get(dragged, 'landed'), true, `${how}: ${JSON.stringify(dragged)}`);
       // Off every control, so null is told apart from an answer that never reads the hover.
       const away = await call('runtime_input', { op: 'mouse_motion', x: 600, y: 20 });
       assert.equal(get(away, 'hovered'), null, `${how}: over nothing: ${JSON.stringify(away)}`);
       const afterDrag = await record(drawn);
       assert.deepEqual(afterDrag.presses.at(-1), [30, 180], `${how}: the drag pressed where it was named`);
       assert.deepEqual(afterDrag.motions.at(-1), [280, 190], `${how}: and moved to where it ends`);
+
+      // Aimed at Drawn where Cover is drawn over it, so the press goes to Cover: path alone named
+      // Drawn, and was read as Drawn pressed.
+      const covered = await call('runtime_input', { op: 'mouse_click', nodePath: drawn, x: 500, y: 50 });
+      const coveredShown = `${how}: ${JSON.stringify(covered)}`;
+      assert.equal(get(covered, 'path'), drawn, coveredShown);
+      assert.equal(get(covered, 'pressed_on'), '/root/Main/Cover', coveredShown);
+      assert.equal(get(covered, 'landed'), false, coveredShown);
+      const coverDrag = await call('runtime_input', {
+        op: 'mouse_drag',
+        nodePath: drawn,
+        x: 500,
+        y: 50,
+        toX: 560,
+        toY: 80,
+        frames: 2,
+      });
+      const coverDragShown = `${how}: ${JSON.stringify(coverDrag)}`;
+      assert.equal(get(coverDrag, 'pressed_on'), '/root/Main/Cover', coverDragShown);
+      assert.equal(get(coverDrag, 'landed'), false, coverDragShown);
+      assert.equal(
+        (await record(drawn)).presses.length,
+        afterDrag.presses.length,
+        `${how}: neither press reached Drawn`,
+      );
 
       if (headless) {
         // A Window's own space is its pixels, which a content scale of 2 makes twice its canvas; this
@@ -16911,6 +16942,9 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
         const inPopupShown = JSON.stringify(inPopup);
         assert.deepEqual(get(inPopup, 'position'), [380, 210], inPopupShown);
         assert.equal(get(inPopup, 'hovered'), '/root/Main/Popup/Inside', inPopupShown);
+        // Into the window over the point, not past it to the game's window under it.
+        assert.equal(get(inPopup, 'pressed_on'), '/root/Main/Popup/Inside', inPopupShown);
+        assert.equal(get(inPopup, 'landed'), undefined, `a Window is not a control: ${inPopupShown}`);
         assert.deepEqual((await record('/root/Main/Popup/Inside')).presses, [[25, 30]], 'inside the window');
       }
 
@@ -21904,6 +21938,14 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       '\tvar _read: Error = settings.load("res://settings.cfg")',
       '\tvar _folder: String = "res://levels/"',
       '\t# load("res://in/a/comment.ogg")',
+      // A load( inside a string is no call, alone on its line or with a quote further on.
+      '\tvar _said: String = \'load("res://said/only.ogg")\'',
+      '\tif "load(" in _said:',
+      '\t\t_said = _said.to_lower()',
+      '\tprint("done")',
+      // Written before it is loaded, so the script looks after it.
+      '\tvar _made: FileAccess = FileAccess.open("res://made/here.tres", FileAccess.WRITE)',
+      '\tvar _back: Resource = load("res://made/here.tres")',
       '',
     ].join('\n'),
   );

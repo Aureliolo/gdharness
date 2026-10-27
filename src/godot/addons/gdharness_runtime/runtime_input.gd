@@ -351,6 +351,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var at: Array[Vector2] = [position]
 	var where: Dictionary = GdhMouse.where(aim, viewport, at)
 	var own: Viewport = _own_of(aim, viewport)
+	var pressing: Dictionary = _hover.press_of(aim, viewport, position) if held else {}
 	# A double click's first click goes whole before it, as [method _click_button] sends one.
 	if double and held and not notch:
 		_send(viewport, GdhMouse.button_event(position, button, true, false, _held_in(viewport)))
@@ -387,6 +388,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		"double": double
 	}
 	answer.merge(where)
+	answer.merge(pressing)
 	return _pointer_noted(_hover_noted(answer, supplied))
 
 
@@ -482,6 +484,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 	var supplied: bool = _follow_in(viewport, start)
 	var where: Dictionary = GdhMouse.where(aim, viewport, points)
 	var hovered_in: Viewport = _own_of(aim, viewport)
+	var pressing: Dictionary = _hover.press_of(aim, viewport, start)
 	_send(viewport, GdhMouse.button_event(start, button, true, false, _held_in(viewport)))
 	var travelled: Vector2 = Vector2.ZERO
 	var sent: int = 0
@@ -523,6 +526,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 		"hovered": _hovered_path(hovered_in),
 	}
 	answer.merge(where)
+	answer.merge(pressing)
 	return _pointer_noted(_hover_noted(answer, supplied))
 
 
