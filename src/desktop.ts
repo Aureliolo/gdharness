@@ -9,6 +9,15 @@
  * asserted on drawn pixels and passed. Whatever the process starts lands on the same desktop, so an
  * editor started here plays its games here too.
  *
+ * The desktop is made in the logon session's non-interactive window station rather than in the one
+ * the user works in. A desktop keeps the focus to itself but shares its window station's cursor: a
+ * game run on a desktop of the user's station held the user's real pointer to one monitor while it
+ * ran, because ClipCursor confines the station's one cursor whatever desktop asks. Windows refuses
+ * ClipCursor, SetCursorPos and GetCursorPos to a process in a non-interactive station, so nothing a
+ * game, its add-ons or a driver loaded into it calls can reach the user's pointer, and engines still
+ * render there. A non-admin user cannot make a named station, but asking for one with no name opens
+ * the session's own, which every such request in the session shares.
+ *
  * Node cannot name a desktop when it starts a process, and the package ships no native code, so the
  * one call that can, CreateProcessW with a desktop in its startup information, is made from C#
  * compiled by the Windows PowerShell every Windows machine has. The compiled assembly is kept in the
@@ -77,7 +86,18 @@ public static class GdharnessDesktop {
   }
 
   [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-  static extern IntPtr CreateDesktopW(string name, IntPtr device, IntPtr mode, uint flags, uint access, IntPtr attributes);
+  static extern IntPtr CreateDesktopExW(string name, IntPtr device, IntPtr mode, uint flags, uint access, IntPtr attributes, uint heapKilobytes, IntPtr reserved);
+  [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern IntPtr CreateWindowStationW(string name, uint flags, uint access, IntPtr attributes);
+  [DllImport("user32.dll", SetLastError = true)] static extern IntPtr GetProcessWindowStation();
+  [DllImport("user32.dll", SetLastError = true)] static extern bool SetProcessWindowStation(IntPtr station);
+  [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool GetUserObjectInformationW(IntPtr handle, int index, StringBuilder into, int size, out int needed);
+  const uint WindowStationAllAccess = 0x37F;
+  const int ObjectName = 2;
+  // What Windows gives an interactive desktop. A non-interactive station's desktops get a small
+  // fraction of that by default, and one desktop here holds every engine a run starts.
+  const uint DesktopHeapKilobytes = 20480;
 
   [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
   static extern bool CreateProcessW(string application, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out Started started);
@@ -168,12 +188,34 @@ public static class GdharnessDesktop {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     if (desktop.Length > 0) {
-      Step(stepFile, "creating the " + desktop + " desktop");
-      IntPtr held = CreateDesktopW(desktop, IntPtr.Zero, IntPtr.Zero, 0, GenericAll, IntPtr.Zero);
-      if (held == IntPtr.Zero) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateDesktopW " + desktop);
+      Step(stepFile, "opening the session's own window station");
+      IntPtr station = CreateWindowStationW(null, 0, WindowStationAllAccess, IntPtr.Zero);
+      if (station == IntPtr.Zero) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateWindowStationW");
       }
-      startup.desktop = desktop;
+      StringBuilder stationName = new StringBuilder(256);
+      int needed;
+      if (!GetUserObjectInformationW(station, ObjectName, stationName, stationName.Capacity * 2, out needed)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "GetUserObjectInformationW");
+      }
+      // A desktop is made in the calling process's station, so this one is the caller's while it is.
+      IntPtr own = GetProcessWindowStation();
+      if (!SetProcessWindowStation(station)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "SetProcessWindowStation");
+      }
+      IntPtr held;
+      int made;
+      try {
+        Step(stepFile, "creating the " + desktop + " desktop");
+        held = CreateDesktopExW(desktop, IntPtr.Zero, IntPtr.Zero, 0, GenericAll, IntPtr.Zero, DesktopHeapKilobytes, IntPtr.Zero);
+        made = Marshal.GetLastWin32Error();
+      } finally {
+        SetProcessWindowStation(own);
+      }
+      if (held == IntPtr.Zero) {
+        throw new Win32Exception(made, "CreateDesktopExW " + stationName + "\\\\" + desktop);
+      }
+      startup.desktop = stationName + "\\\\" + desktop;
     }
     startup.flags = UseStdHandles;
     if (noActivate) {

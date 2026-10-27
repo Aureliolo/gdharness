@@ -12285,11 +12285,19 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
     '[DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint thread);',
     '[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
     '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetUserObjectInformationW(IntPtr handle, int index, System.Text.StringBuilder into, int size, out int needed);',
+    '[DllImport("user32.dll")] public static extern IntPtr GetProcessWindowStation();',
+    '[StructLayout(LayoutKind.Sequential)] public struct Point { public int x, y; }',
+    '[DllImport("user32.dll", SetLastError = true)] public static extern bool GetCursorPos(out Point at);',
     "'",
-    '$name = New-Object System.Text.StringBuilder 256',
     '$needed = 0',
+    '$station = New-Object System.Text.StringBuilder 256',
+    '[void][Probe.Desk]::GetUserObjectInformationW([Probe.Desk]::GetProcessWindowStation(), 2, $station, 512, [ref]$needed)',
+    '$at = New-Object Probe.Desk+Point',
+    '$read = [Probe.Desk]::GetCursorPos([ref]$at)',
+    '$refused = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()',
+    '$name = New-Object System.Text.StringBuilder 256',
     '[void][Probe.Desk]::GetUserObjectInformationW([Probe.Desk]::GetThreadDesktop([Probe.Desk]::GetCurrentThreadId()), 2, $name, 512, [ref]$needed)',
-    '"desktop=$($name.ToString())"',
+    '"station=$($station.ToString()) cursor=$(if ($read) { "read" } else { "refused $refused" }) desktop=$($name.ToString())"',
   ].join('\n');
   // Node as the process launched, asking a PowerShell of its own: Windows PowerShell started detached
   // runs nothing, and the launch without a desktop starts its process detached. A child is on its
@@ -12373,6 +12381,14 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
         hidden.said,
         new RegExp(`^pid=${hidden.pid} `),
         `under the pid the launch answered: ${hidden.said}`,
+      );
+      // In a window station of the session's own, where Windows refuses the cursor outright, so a
+      // game there cannot confine or move the user's: a desktop of the user's station shares its one
+      // cursor, and refuses GetCursorPos only with access denied (5) rather than 1459.
+      assert.match(
+        hidden.said,
+        / station=Service-0x[0-9a-f]+-[0-9a-f]+\$ cursor=refused 1459 /,
+        `the launch should be in a non-interactive window station: ${hidden.said}`,
       );
     }
     // The helper's script calls no cmdlet, so Windows PowerShell prepares no modules as it starts
