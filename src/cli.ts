@@ -786,7 +786,7 @@ Usage:
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--deadline S] [--tests DIR] [--changed-only] [--reach-also PATH]
                  [--import] [--godot PATH] [--godot-version V] [--cores N]
-                 [--order reversed|SEED] [--print-output] [--result FILE] [--runner]
+                 [--order reversed|SEED] [--print-output] [--verbose] [--result FILE] [--runner]
                                      Run the project's gdUnit4 suites over several engines and
                                      judge every line they print: exit 1 on a failing case, an
                                      engine error no case declared, a case that never finished
@@ -795,7 +795,8 @@ Usage:
                                      suites that passed with everything they reach unchanged; it
                                      is for iterating, and no gate passes it. --print-output
                                      prints what every engine printed, for a
-                                     benchmark run by hand. --result writes the outcome, each
+                                     benchmark run by hand. --verbose starts every engine verbose,
+                                     so a leak at exit is named. --result writes the outcome, each
                                      suite's time and every problem as JSON for a gate. --runner
                                      prints the shipped runner's path. docs/test-runs.md has the
                                      rest.
