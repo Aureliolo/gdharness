@@ -230,8 +230,10 @@ import {
   pathsInUidCache,
   projectFiles,
   projectStructure,
+  type SteppedOver,
   scriptsWithoutUid,
   searchProject,
+  steppedOverIn,
 } from './project-scan.js';
 import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
@@ -3697,15 +3699,29 @@ export function scriptsToDiagnose(
       relative === '' ? script : `${relative}/${script}`,
     );
     if (inside.length === 0) {
-      empty.push(entry);
+      empty.push(noScriptUnder(entry, location.absolutePath, relative));
     }
     found.push(...inside);
   }
   const unique = [...new Set(found)];
   if (unique.length === 0) {
-    return { ok: false, reason: `No .gd script is under ${empty.join(' or ')}.` };
+    return { ok: false, reason: empty.join(' ') };
   }
   return { ok: true, value: unique };
+}
+
+/** Why a folder named gave no script, naming each folder below it that the walk stepped over. */
+function noScriptUnder(entry: string, absolute: string, relative: string): string {
+  const said = (stepped: SteppedOver): string => {
+    const folder = [relative, stepped.folder].filter((step) => step !== '').join('/') || entry;
+    return stepped.why === 'gdharness'
+      ? `${folder} is an addon gdharness installed, whose scripts are checked when it is named`
+      : `${folder} holds a .gdignore, so the engine never loads what is under it, and a script there is checked when the script is named`;
+  };
+  const stepped = steppedOverIn(absolute);
+  return stepped.length === 0
+    ? `No .gd script is under ${entry}.`
+    : `No .gd script is under ${entry} that a folder walk takes in: ${stepped.map(said).join('; ')}.`;
 }
 
 /** Why no language server of the project answered, and what the refusal would have offered. */

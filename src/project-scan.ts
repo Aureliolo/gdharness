@@ -144,6 +144,43 @@ export function folderFiles(directory: string, extensions: readonly string[]): s
   return gdignored(directory) ? [] : filesBelow(directory, extensions);
 }
 
+/** A folder [method folderFiles] steps over, and why. */
+export interface SteppedOver {
+  /** Relative to the folder walked, with forward slashes; empty for that folder itself. */
+  readonly folder: string;
+  readonly why: 'gdignore' | 'gdharness';
+}
+
+/**
+ * The topmost folders [method folderFiles] steps over in [param directory], so that a folder with
+ * no script it walks can say where its scripts are. `addons` holding only gdharness's addons was
+ * answered as holding no .gd script, beside the seventy-three that naming each addon found.
+ */
+export function steppedOverIn(directory: string): SteppedOver[] {
+  if (gdignored(directory)) {
+    return [{ folder: '', why: 'gdignore' }];
+  }
+  const found: SteppedOver[] = [];
+  const visit = (at: string, prefix: string): void => {
+    for (const entry of readdirSync(at, { withFileTypes: true })) {
+      if (!entry.isDirectory() || skipped(entry.name)) {
+        continue;
+      }
+      const spelled = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const path = join(at, entry.name);
+      if (gdignored(path)) {
+        found.push({ folder: spelled, why: 'gdignore' });
+      } else if (installedByUs(path)) {
+        found.push({ folder: spelled, why: 'gdharness' });
+      } else {
+        visit(path, spelled);
+      }
+    }
+  };
+  visit(directory, '');
+  return found.sort((a, b) => a.folder.localeCompare(b.folder));
+}
+
 function filesBelow(root: string, extensions: readonly string[]): string[] {
   const found: string[] = [];
   const visit = (directory: string, prefix: string): void => {

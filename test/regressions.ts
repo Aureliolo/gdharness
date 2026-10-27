@@ -21758,6 +21758,12 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     script('addons/gdharness_editor/tools/scene_tools.gd');
     writeFileSync(join(project, 'addons', 'gdharness_editor', VERSION_MARKER), '1.0.0\n');
     script('addons/theirs/thing.gd');
+    // A folder holding only what the walk steps over, as a project's addons folder holding only
+    // gdharness's addons does.
+    script('kit/gdharness_runtime/runtime.gd');
+    writeFileSync(join(project, 'kit', 'gdharness_runtime', VERSION_MARKER), '1.0.0\n');
+    script('kit/old/legacy.gd');
+    writeFileSync(join(project, 'kit', 'old', '.gdignore'), '');
 
     // Which scripts a call names, without a language server.
     assert.deepEqual(
@@ -21806,7 +21812,14 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       [['ui', 5], /^scriptPath\[1\] is 5, not a script or a folder/],
       [['../elsewhere'], /outside the project/],
       [['empty'], /^No \.gd script is under empty\.$/],
-      [['scripts/ignored'], /^No \.gd script is under scripts\/ignored\.$/],
+      [
+        ['scripts/ignored'],
+        /^No \.gd script is under scripts\/ignored that a folder walk takes in: scripts\/ignored holds a \.gdignore, so the engine never loads what is under it, and a script there is checked when the script is named\.$/,
+      ],
+      [
+        ['kit', 'empty'],
+        /^No \.gd script is under kit that a folder walk takes in: kit\/gdharness_runtime is an addon gdharness installed, whose scripts are checked when it is named; kit\/old holds a \.gdignore, so the engine never loads what is under it, and a script there is checked when the script is named\. No \.gd script is under empty\.$/,
+      ],
     ] as const) {
       const refused = scriptsToDiagnose(project, given);
       assert.ok(
@@ -55808,6 +55821,7 @@ const RENAME_FIXTURE: Readonly<Record<string, string>> = {
     '\tfound = find_children("*", "Told")',
     '\tprint($Told, %Told, typed.Told)',
     '\tget_node("X").say(8)',
+    '\tvar kept: Told = $Told',
     '',
   ].join('\n'),
   'shadow.gd': [
@@ -55967,8 +55981,9 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
         'res://loud.gd:3',
         `res://told.gd:1`,
         `res://user.gd:${fixtureLine('user.gd', 'var typed')}`,
+        `res://user.gd:${fixtureLine('user.gd', 'var kept')}`,
       ].sort(),
-      'the declaration, extends, doc links, a typed use and the class a resource records',
+      'the declaration, extends, doc links, typed uses and the class a resource records',
     );
     assert.deepEqual(
       left,
@@ -55984,8 +55999,17 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
         `res://user.gd:${fixtureLine('user.gd', 'print(')}:nodePath`,
         `res://user.gd:${fixtureLine('user.gd', 'print(')}:code`,
         `res://user.gd:${fixtureLine('user.gd', 'Holder.Told')}:doc`,
+        `res://user.gd:${fixtureLine('user.gd', 'var kept')}:nodePath`,
       ].sort(),
       'every other occurrence is answered, each as what the tokenizer makes of its place',
+    );
+    // The line also holds an edit, and is quoted as it reads under changed rather than as it read.
+    assert.deepEqual(
+      asArray(get(outcome.report, 'leftAlone'))
+        .filter((one) => get(one, 'line') === fixtureLine('user.gd', 'var kept'))
+        .map((one) => get(one, 'text')),
+      ['var kept: Wording = $Told'],
+      JSON.stringify(get(outcome.report, 'leftAlone')),
     );
     assert.deepEqual(
       get(outcome.report, 'leftAloneInProse'),
@@ -56009,12 +56033,12 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
     // list a fraction its size as entries gone missing.
     const counted = asObject(get(outcome.report, 'summary', 'leftAlone'));
     assert.deepEqual(counted, {
-      total: 11,
+      total: 12,
       quoted: asArray(get(outcome.report, 'leftAlone')).length,
       inProse: 4,
       otherSymbols: 0,
     });
-    assert.equal(asNumber(get(counted, 'quoted')) + 4, 11, 'the lists add up to the total');
+    assert.equal(asNumber(get(counted, 'quoted')) + 4, 12, 'the lists add up to the total');
     const why = asArray(get(outcome.report, 'leftAlone'))
       .filter((one) => text(get(one, 'file')) === 'res://shadow.gd')
       .map((one) => text(get(one, 'why')));
