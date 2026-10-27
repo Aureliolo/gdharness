@@ -32971,7 +32971,13 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       );
       return;
     }
+    // The first read starts PowerShell cold; a Windows runner once took it past the client's whole
+    // deadline, so the time it took is printed beside the stages a slow one says it reached.
+    const coldAt = Date.now();
     const unbuilt = textOf(await readWith([])) ?? '';
+    console.log(
+      `accessibility: the cold read, game start and stop included, took ${String(Date.now() - coldAt)} ms`,
+    );
     assert.match(
       unbuilt,
       /UI Automation found nothing in the game's windows: .*this project's is auto\. Start the run with engineArgs \["--accessibility", "always"\]/,
@@ -32989,6 +32995,12 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
     stopped = true;
     const tree = parseTextContent(asked);
     const shown = textOf(asked) ?? JSON.stringify(asked);
+    const split = ['start', 'load', 'walk'].map((stage) => get(tree, 'tookMsBy', stage));
+    console.log(`accessibility: the built read took ${JSON.stringify(get(tree, 'tookMsBy'))} ms by stage`);
+    assert.ok(
+      split.every((ms) => typeof ms === 'number' && ms >= 0),
+      `the read says where its time went: ${shown}`,
+    );
     const window = get(tree, 'windows', 0);
     assert.deepEqual(
       [get(window, 'role'), get(window, 'window_id'), get(window, 'bounds', 'x'), get(window, 'bounds', 'y')],

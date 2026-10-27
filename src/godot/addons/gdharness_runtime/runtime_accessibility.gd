@@ -28,16 +28,23 @@ const MOST_LEVELS: int = 40
 ## answer goes.
 const NODE_ID: String = "_node_instance"
 
-## The client, as PowerShell, with $Handles, $Out, $SettleMs, $EmptyMs and $MostLevels set before it. Each
-## element answers what UI Automation names its role, its name, its value where it has one, its
-## bounds in the window's pixels, and the actions a screen reader is offered on it.
+## The client, as PowerShell, with $Handles, $Out, $Progress, $SettleMs, $EmptyMs and $MostLevels
+## set before it. Each element answers what UI Automation names its role, its name, its value where it
+## has one, its bounds in the window's pixels, and the actions a screen reader is offered on it. Each
+## stage it reaches is marked in $Progress as it is reached, with the time, so a client stopped at the
+## deadline still says how far it got.
 const WALK: String = r"""
 $ErrorActionPreference = 'Stop'
 function Answer($value) {
   [System.IO.File]::WriteAllText($Out, (ConvertTo-Json -InputObject $value -Depth 100 -Compress))
 }
+function Mark($stage) {
+  [System.IO.File]::AppendAllText($Progress, "$stage $([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())`n")
+}
 try {
+  Mark 'began'
   Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+  Mark 'loaded'
   $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
   function Patterned($element, $name) {
     $pattern = ("System.Windows.Automation.$($name)Pattern" -as [type])::Pattern
@@ -148,6 +155,7 @@ try {
     $r = $root.Current.BoundingRectangle
     $tree = Describe $root $r.X $r.Y 0
     $last = Count $tree
+    Mark "walked $last"
     # Walked again until two walks in a row agree, since the first question is what makes the
     # engine build the tree, which arrives over the frames after it.
     while ([DateTime]::UtcNow -lt $deadline) {
@@ -155,6 +163,7 @@ try {
       $r = $root.Current.BoundingRectangle
       $tree = Describe $root $r.X $r.Y 0
       $count = Count $tree
+      Mark "walked $count"
       if ($count -gt 1 -and $count -eq $last) { break }
       if ($count -eq 1 -and [DateTime]::UtcNow -gt $empty) { break }
       $last = $count
@@ -221,13 +230,22 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var out: String = OS.get_temp_dir().path_join(
 		"gdharness-accessibility-%d-%d.json" % [OS.get_process_id(), Time.get_ticks_usec()]
 	)
+	var progress: String = out + ".progress"
 	var script: String = (
 		(
-			"$Handles = @(%s)\n$Out = '%s'\n$SettleMs = %d\n$EmptyMs = %d\n$MostLevels = %d\n"
-			% [", ".join(handles), out.replace("'", "''"), SETTLE_MS, EMPTY_MS, MOST_LEVELS]
+			"$Handles = @(%s)\n$Out = '%s'\n$Progress = '%s'\n$SettleMs = %d\n$EmptyMs = %d\n$MostLevels = %d\n"
+			% [
+				", ".join(handles),
+				out.replace("'", "''"),
+				progress.replace("'", "''"),
+				SETTLE_MS,
+				EMPTY_MS,
+				MOST_LEVELS,
+			]
 		)
 		+ WALK
 	)
+	var started_ms: int = int(Time.get_unix_time_from_system() * 1000.0)
 	# The system's own PowerShell by its path, so a powershell.exe earlier on PATH is not what runs.
 	var shell: String = OS.get_environment("SystemRoot").path_join(
 		"System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -252,14 +270,23 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	while OS.is_process_running(pid):
 		if Time.get_ticks_msec() > deadline:
 			var _killed: Error = OS.kill(pid)
+			var reached: String = _reached(FileAccess.get_file_as_string(progress), started_ms)
+			var _gone: Error = DirAccess.remove_absolute(progress)
 			return _refused(
-				"UI Automation had not read the tree after %d ms, so it was stopped" % (SETTLE_MS + START_MS)
+				(
+					"UI Automation had not read the tree after %d ms, so it was stopped: %s"
+					% [SETTLE_MS + START_MS, reached]
+				)
 			)
 		await _host.get_tree().process_frame
 
 	var text: String = FileAccess.get_file_as_string(out)
+	var took: Dictionary = _took(
+		FileAccess.get_file_as_string(progress), started_ms, int(Time.get_unix_time_from_system() * 1000.0)
+	)
 	# Not checked: a file that is not there was never written, which the answer below says.
 	var _removed: Error = DirAccess.remove_absolute(out)
+	var _progress_removed: Error = DirAccess.remove_absolute(progress)
 	var read: Variant = GdhRead.json_or_null(text)
 	if not read is Dictionary:
 		return _refused("UI Automation answered nothing readable: %s" % text.left(500))
@@ -290,6 +317,8 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 		elements += _count(window)
 		unnamed += _unnamed_text(window)
 	var result: Dictionary = {"windows": windows, "elements": elements}
+	if not took.is_empty():
+		result["tookMsBy"] = took
 	if placing.tooltips > 0:
 		result["tooltip_note"] = (
 			"tooltip is the node's tooltip_text, which the engine puts in the tree, and UI Automation, as"
@@ -662,6 +691,74 @@ static func _unnamed_text(element: Dictionary) -> int:
 			var inner: Dictionary = child
 			total += _unnamed_text(inner)
 	return total
+
+
+## The stages [param progress] marks, each with the Unix time in ms it was reached, as an array of
+## [stage, ms] in order.
+static func _marks(progress: String) -> Array:
+	var marks: Array = []
+	for line: String in progress.split("\n", false):
+		var words: PackedStringArray = line.strip_edges().split(" ", false)
+		if words.size() >= 2 and words[words.size() - 1].is_valid_int():
+			var stage: String = " ".join(words.slice(0, words.size() - 1))
+			marks.append([stage, words[words.size() - 1].to_int()])
+	return marks
+
+
+## How far a client started at [param started_ms] got by the marks in [param progress], said for a
+## caller whose read it stopped: the time went to starting PowerShell, loading UI Automation, or the
+## walks, and which tells a loaded machine from a window that never answers.
+static func _reached(progress: String, started_ms: int) -> String:
+	var marks: Array = _marks(progress)
+	var at: Dictionary = {}
+	var walks: int = 0
+	var last: String = ""
+	for mark: Array in marks:
+		var stage: String = mark[0]
+		if stage.begins_with("walked "):
+			walks += 1
+			last = stage.trim_prefix("walked ")
+		elif not at.has(stage):
+			at[stage] = mark[1]
+	if not at.has("began"):
+		return "PowerShell had not begun the client"
+	var began: int = at["began"] - started_ms
+	if not at.has("loaded"):
+		return "PowerShell began the client after %d ms and was still loading UI Automation" % began
+	var loaded: int = at["loaded"] - at["began"]
+	if walks == 0:
+		return (
+			(
+				"PowerShell began the client after %d ms and loaded UI Automation in %d ms, and the"
+				+ " first walk of the windows had not ended"
+			)
+			% [began, loaded]
+		)
+	return (
+		(
+			"PowerShell began the client after %d ms and loaded UI Automation in %d ms, and the windows"
+			+ " were walked %d time%s, the last finding %s element%s"
+		)
+		% [began, loaded, walks, "" if walks == 1 else "s", last, "" if last == "1" else "s"]
+	)
+
+
+## Where the time of a client started at [param started_ms] and done at [param done_ms] went, by
+## the marks in [param progress]: starting PowerShell, loading UI Automation, and walking the
+## windows. Empty when the client marked nothing.
+static func _took(progress: String, started_ms: int, done_ms: int) -> Dictionary:
+	var at: Dictionary = {}
+	for mark: Array in _marks(progress):
+		var stage: String = mark[0]
+		if not at.has(stage):
+			at[stage] = mark[1]
+	if not at.has("began") or not at.has("loaded"):
+		return {}
+	return {
+		"start": at["began"] - started_ms,
+		"load": at["loaded"] - at["began"],
+		"walk": done_ms - at["loaded"],
+	}
 
 
 static func _refused(message: String) -> Dictionary:

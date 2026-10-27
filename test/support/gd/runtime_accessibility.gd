@@ -6,6 +6,7 @@ extends SceneTree
 
 const Checked = preload("checked.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
+const Accessibility = preload("res://addons/gdharness_runtime/runtime_accessibility.gd")
 
 var node: Runtime
 
@@ -33,6 +34,36 @@ func _run() -> void:
 		or not str(asked.get("message", "")).contains("start the run with headless: false")
 	):
 		failures.append("a headless run is told it has no window to read: %s" % JSON.stringify(asked))
+
+	# A client stopped at the deadline says how far its marks got, started at 1000 ms.
+	var reached: Dictionary = {
+		"": "PowerShell had not begun the client",
+		"began 1100\n": "PowerShell began the client after 100 ms and was still loading UI Automation",
+		"began 1100\nloaded 1600\n":
+		(
+			"PowerShell began the client after 100 ms and loaded UI Automation in 500 ms, and the first"
+			+ " walk of the windows had not ended"
+		),
+		"began 1100\nloaded 1600\nwalked 1 1700\n":
+		(
+			"PowerShell began the client after 100 ms and loaded UI Automation in 500 ms, and the"
+			+ " windows were walked 1 time, the last finding 1 element"
+		),
+		"began 1100\nloaded 1600\nwalked 1 1700\nwalked 12 1900\n":
+		(
+			"PowerShell began the client after 100 ms and loaded UI Automation in 500 ms, and the"
+			+ " windows were walked 2 times, the last finding 12 elements"
+		),
+	}
+	for progress: String in reached:
+		var said: String = Accessibility._reached(progress, 1000)
+		if said != reached[progress]:
+			failures.append("marks %s are said as: %s" % [JSON.stringify(progress), said])
+	var took: Dictionary = Accessibility._took("began 1100\nloaded 1600\nwalked 3 1700\n", 1000, 2000)
+	if took != {"start": 100, "load": 500, "walk": 400}:
+		failures.append("a read's time is split as: %s" % JSON.stringify(took))
+	if not Accessibility._took("began 1100\n", 1000, 2000).is_empty():
+		failures.append("a client that never loaded UI Automation splits nothing")
 
 	node._cleanup()
 	# Not checked: the directory is gone either way by the time the fixture tears itself down.
