@@ -123,12 +123,18 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 
 
 ## Every file a scene or resource of the project loads through an ext_resource that is not there,
-## by its path or its uid, each with the files loading it. Only those: a script naming a path in
-## its code may be asking whether the file exists, and the shipped addons check for files they
-## write, so every project was told its addons referred to files that are missing. A script's
-## preloads are the compile's to judge.
+## by its path or its uid, and every one a script hands load() as written, each with the files
+## loading it. Not any path a script names: one may be asking whether the file exists, and the
+## shipped addons check for files they write, so every project was told its addons referred to
+## files that are missing. A load() of a file the script also asks exists() about is left out for
+## the same reason, and a script's preloads are the compile's to judge.
 func missing_references() -> Array[Dictionary]:
 	var missing: Dictionary = {}
+	for file: String in _files.find_files("res://", ".gd"):
+		for path: String in _loaded_and_missing(file):
+			var naming: Array = missing.get_or_add(path, [])
+			if not file in naming:
+				naming.append(file)
 	for file: String in _files.find_files_with_extensions("res://", GdhResourceFiles.TEXT_RESOURCE_KINDS):
 		var content: String = FileAccess.get_file_as_string(file)
 		var moved: Dictionary = _moved_by_uid(content)
@@ -156,6 +162,26 @@ func missing_references() -> Array[Dictionary]:
 		naming.sort()
 		found.append({"path": path, "referenced_by": naming})
 	return found
+
+
+## The files [param script] loads with load() or ResourceLoader.load() by a path written in the call
+## that are not on disk. A load called on another object, such as a ConfigFile's, reads a file that
+## object's owner may write, so only the bare call and the ResourceLoader's count.
+func _loaded_and_missing(script: String) -> Array[String]:
+	var code: String = _code_lines(FileAccess.get_file_as_string(script))
+	var asked: Dictionary = {}
+	for question: RegExMatch in GdhPatterns.compiled('exists\\(\\s*"([^"]+)"').search_all(code):
+		asked[_resolved(question.get_string(1), script)] = true
+	var missing: Array[String] = []
+	for loading: RegExMatch in (
+		GdhPatterns.compiled('(?:(?<![\\w.])|ResourceLoader\\.)load\\(\\s*"([^"]+)"').search_all(code)
+	):
+		var path: String = _resolved(loading.get_string(1), script)
+		if not path.begins_with("res://") or path.begins_with("res://.") or path.get_extension().is_empty():
+			continue
+		if not asked.has(path) and not FileAccess.file_exists(path) and not missing.has(path):
+			missing.append(path)
+	return missing
 
 
 ## The files project.godot's settings name that are not on disk: an autoload, a registered

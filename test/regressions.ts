@@ -8500,6 +8500,9 @@ function testProjectPathsAreContained(): void {
     ['\\Windows\\win.ini', 'Windows/win.ini'],
     ['/game.pck', 'game.pck'],
     ['/', 'scenes/main.tscn'],
+    // Beside the project, its folder holds the project and is no folder inside it.
+    ...(onWindows ? [] : [['/srv/escape.png', 'escape.png']]),
+    ['/srv/other/x.png', 'other/x.png'],
     ...(onWindows ? [['C:\\Users\\me\\out\\game.exe', 'out/game.exe']] : []),
   ]) {
     const answer = resolveWithinProject(root, String(candidate));
@@ -21883,7 +21886,27 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     join(project, 'checked', 'dependent.gd'),
     'extends Node\n\nconst Broken = preload("res://checked/broken.gd")\n',
   );
-  writeFileSync(join(project, 'checked', 'fine.gd'), 'extends Node\n');
+  // It compiles, and loads by path what is not there: a load() of each, and none of the others.
+  writeFileSync(
+    join(project, 'checked', 'fine.gd'),
+    [
+      'extends Node',
+      '',
+      'var settings: ConfigFile = ConfigFile.new()',
+      '',
+      '',
+      'func _ready() -> void:',
+      '\tvar _theme: Resource = load("res://audio/theme.ogg")',
+      '\tvar _gone: Resource = ResourceLoader.load("gone.ogg")',
+      '\tvar _here: Resource = load("res://checked/fine.gd")',
+      '\tif ResourceLoader.exists("res://maybe.ogg"):',
+      '\t\tvar _maybe: Resource = load("res://maybe.ogg")',
+      '\tvar _read: Error = settings.load("res://settings.cfg")',
+      '\tvar _folder: String = "res://levels/"',
+      '\t# load("res://in/a/comment.ogg")',
+      '',
+    ].join('\n'),
+  );
   // The project has never been opened, so no class cache lists the class it declares, which is
   // the state a fresh clone is in.
   writeFileSync(join(project, 'checked', 'stash.gd'), 'class_name FixtureStash\nextends Node\n');
@@ -22013,7 +22036,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     const outside = textOf(await diagnose(join(tmpdir(), 'elsewhere.gd'))) ?? '';
     assert.match(
       outside,
-      /is absolute and outside the project; give a path inside it, such as '[^'/]+\/elsewhere\.gd'\./,
+      /is absolute and outside the project; give a path inside it, such as 'elsewhere\.gd'\./,
       outside,
     );
     assert.match(outside, /Possible solutions:\n- Give the path relative to the project/, outside);
@@ -22063,12 +22086,16 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     );
     assert.deepEqual(
       get(judged, 'health', 'checks', 'references', 'details'),
-      ['res://gone.png does not exist, and res://stage.tscn refers to it'],
+      [
+        'res://audio/theme.ogg does not exist, and res://checked/fine.gd refers to it',
+        'res://checked/gone.ogg does not exist, and res://checked/fine.gd refers to it',
+        'res://gone.png does not exist, and res://stage.tscn refers to it',
+      ],
       shownInfo,
     );
     assert.deepEqual(
       asArray(get(judged, 'validation', 'issues')).map((issue) => get(issue, 'check')),
-      ['main_scene', 'compiles', 'compiles', 'compiles', 'references'],
+      ['main_scene', 'compiles', 'compiles', 'compiles', 'references', 'references', 'references'],
       shownInfo,
     );
     assert.equal(get(judged, 'validation', 'valid'), false, shownInfo);
