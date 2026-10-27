@@ -105,7 +105,12 @@ parameterised case that costs more than 10 seconds by itself, with at least two 
 out row by row, in a suite of any number of cases. Each engine holding some of its rows runs only
 those, and the one holding the last row also runs any row the times do not know, so a row added
 since they were taken still runs once. The run names each case it dealt out that way, and fails
-when a row that any engine found ran in none of them or in more than one. Units are
+when a row that any engine found ran in none of them or in more than one. A suite declaring
+`const GDHARNESS_TOGETHER: bool = true` is never dealt out by case or by row, and goes to one engine
+whole: its cases share work kept in the suite, such as a memoised setup, which every engine holding
+part of it would do again. The declaration counts from the suite or any script it extends, the
+nearest one deciding, so a suite can say `false` over a base saying `true`. A run over several
+engines names each such suite it kept whole past the 10 seconds. Units are
 dealt slowest first, each to the engine with the least so far. A run starts no more engines than
 `--engines`, the machine's processors (or `--cores`), or its
 free memory allows once 4 GB is left for everything else at 1.5 GB an engine, and no more than it

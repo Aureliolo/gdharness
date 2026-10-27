@@ -21,6 +21,8 @@ const SUITE_BASE = 'GdUnitTestSuite';
 const CASE_PREFIX = 'test_';
 /** A suite saying whether it needs a real window, as a constant so the runner can read it too. */
 const NEEDS_WINDOW = /^const\s+GDHARNESS_NEEDS_WINDOW\b[^=\n]*=\s*(true|false)\b/m;
+/** A suite saying its cases share work, such as a memoised setup, and belong in one engine. */
+const TOGETHER = /^const\s+GDHARNESS_TOGETHER\b[^=\n]*=\s*(true|false)\b/m;
 /** Where suites are looked for when none are named, by gdharness test and project_test alike. */
 export const TEST_DIRECTORIES = ['tests', 'test'];
 
@@ -61,6 +63,13 @@ export interface DeclaredSuite {
    * root viewport itself gets that size headless, and the window's own size with a window.
    */
   readonly headless: boolean;
+  /**
+   * Whether it says its cases belong in one engine, which keeps it whole and its rows together: a
+   * suite whose cases share a setup kept in a variable of the suite computes the setup again in
+   * every engine holding part of it, so dealing it out added to its processor time rather than
+   * spreading it, 394 s whole against 612 s dealt out in one measured project.
+   */
+  readonly together: boolean;
 }
 
 /** One script as read for discovery. */
@@ -154,6 +163,7 @@ export class ProjectScripts {
     // The nearest script in the chain to declare it decides, as the nearest declaration of a constant
     // is the one GDScript reads.
     let said: boolean | undefined;
+    let together: boolean | undefined;
     let guessed = false;
     const seen = new Set<string>();
     let at = path;
@@ -168,6 +178,8 @@ export class ProjectScripts {
       }
       const declared = NEEDS_WINDOW.exec(read.code)?.[1];
       said ??= declared === undefined ? undefined : declared === 'true';
+      const kept = TOGETHER.exec(read.code)?.[1];
+      together ??= kept === undefined ? undefined : kept === 'true';
       guessed ||= this.guessWindow && SCENE_RUNNER.test(read.code);
       const base = this.base(at);
       if (base === null) {
@@ -176,7 +188,13 @@ export class ProjectScripts {
       // By name, or by the script declaring it: gdUnit4's own class is a global class of the project.
       if ('name' in base ? base.name === SUITE_BASE : base.path === this.classes.get(SUITE_BASE)) {
         return cases.size > 0
-          ? { path, cases: [...cases].sort(), windowed: said ?? guessed, headless: said === false }
+          ? {
+              path,
+              cases: [...cases].sort(),
+              windowed: said ?? guessed,
+              headless: said === false,
+              together: together === true,
+            }
           : null;
       }
       if ('name' in base) {
@@ -438,7 +456,8 @@ function median(values: readonly number[]): number | undefined {
  * [param splitPast] seconds and has more than one case, and a parameterised case costing more than
  * that row by row, once a run has printed its rows. A single case of 110 to 400 s otherwise set
  * the length of a whole run, however many engines it had. A suite needing a window stays whole,
- * since all of those go to the one windowed engine anyway.
+ * since all of those go to the one windowed engine anyway, and so does one declaring
+ * GDHARNESS_TOGETHER, whose cases share work each engine would do again.
  */
 export function unitsOf(
   suites: readonly DeclaredSuite[],
@@ -466,7 +485,7 @@ export function unitsOf(
       windowed: suite.windowed,
       headless: suite.headless,
     };
-    if (suite.windowed || whole <= splitPast) {
+    if (suite.windowed || suite.together || whole <= splitPast) {
       return [wholly];
     }
     const units = suite.cases.flatMap((func): Unit[] => {

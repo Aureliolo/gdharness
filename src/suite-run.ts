@@ -585,6 +585,21 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         `Dealt out row by row, since ${byRows.length === 1 ? 'it' : 'each'} took more than ${String(SPLIT_PAST_SECONDS)} s last time: ${named(byRows)}.`,
       );
     }
+    // Said beside the deal, so a suite past the split in one engine reads as asked for, not missed.
+    const keptWhole = units.flatMap((unit) =>
+      unit.cost > SPLIT_PAST_SECONDS &&
+      !unit.windowed &&
+      suites.some((s) => s.path === unit.suite && s.together)
+        ? [unit.suite]
+        : [],
+    );
+    // By the engines there was room for rather than those used: kept whole, it may need only one.
+    if (options.order === null && room.engines > 1 && keptWhole.length > 0) {
+      const one = keptWhole.length === 1;
+      console.log(
+        `Kept whole in one engine, since ${one ? 'it declares' : 'each declares'} GDHARNESS_TOGETHER: ${named(keptWhole)}.`,
+      );
+    }
     const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
       plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
     );

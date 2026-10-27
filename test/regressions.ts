@@ -43020,27 +43020,34 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'tests/stood_child_test.gd': `extends "res://tests/stood_test.gd"\n\nfunc test_child() -> void:\n\tvar r := scene_runner("res://x.tscn")\n`,
       'tests/scene_child_test.gd': `extends "res://tests/scene_test.gd"\nconst GDHARNESS_NEEDS_WINDOW := false\n${cases('test_c')}`,
       'tests/quiet_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n${cases('test_h')}`,
+      // Kept together by its own declaration, by a base's, and not when the nearest says false.
+      'tests/kept_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_TOGETHER: bool = true\n${cases('test_k')}`,
+      'tests/kept_child_test.gd': `extends "res://tests/kept_test.gd"\n${cases('test_kc')}`,
+      'tests/parted_test.gd': `extends "res://tests/kept_test.gd"\nconst GDHARNESS_TOGETHER := false\n${cases('test_p')}`,
       'other/outside_test.gd': `extends GdUnitTestSuite\n${cases('test_elsewhere')}`,
     });
     const scripts = new ProjectScripts(project);
     const found = scripts.suitesUnder(['res://tests']);
     assert.deepEqual(
-      found.map((suite) => [suite.path, suite.cases, suite.windowed, suite.headless]),
+      found.map((suite) => [suite.path, suite.cases, suite.windowed, suite.headless, suite.together]),
       [
-        ['res://tests/a_test.gd', ['test_a', 'test_b'], false, false],
-        ['res://tests/base_suite.gd', ['test_inherited'], false, false],
-        ['res://tests/child_test.gd', ['test_inherited', 'test_own'], false, false],
-        ['res://tests/deep/path_test.gd', ['test_by_path', 'test_inherited'], false, false],
-        ['res://tests/quiet_test.gd', ['test_h'], false, true],
-        ['res://tests/res_test.gd', ['test_inherited'], false, false],
-        ['res://tests/said_test.gd', ['test_q'], false, false],
-        ['res://tests/scene_child_test.gd', ['test_c', 'test_s'], false, true],
-        ['res://tests/scene_test.gd', ['test_s'], true, false],
-        ['res://tests/stood_child_test.gd', ['test_child', 'test_up'], false, true],
-        ['res://tests/stood_test.gd', ['test_up'], false, true],
-        ['res://tests/window_test.gd', ['test_w'], true, false],
+        ['res://tests/a_test.gd', ['test_a', 'test_b'], false, false, false],
+        ['res://tests/base_suite.gd', ['test_inherited'], false, false, false],
+        ['res://tests/child_test.gd', ['test_inherited', 'test_own'], false, false, false],
+        ['res://tests/deep/path_test.gd', ['test_by_path', 'test_inherited'], false, false, false],
+        ['res://tests/kept_child_test.gd', ['test_k', 'test_kc'], false, false, true],
+        ['res://tests/kept_test.gd', ['test_k'], false, false, true],
+        ['res://tests/parted_test.gd', ['test_k', 'test_p'], false, false, false],
+        ['res://tests/quiet_test.gd', ['test_h'], false, true, false],
+        ['res://tests/res_test.gd', ['test_inherited'], false, false, false],
+        ['res://tests/said_test.gd', ['test_q'], false, false, false],
+        ['res://tests/scene_child_test.gd', ['test_c', 'test_s'], false, true, false],
+        ['res://tests/scene_test.gd', ['test_s'], true, false, false],
+        ['res://tests/stood_child_test.gd', ['test_child', 'test_up'], false, true, false],
+        ['res://tests/stood_test.gd', ['test_up'], false, true, false],
+        ['res://tests/window_test.gd', ['test_w'], true, false, false],
       ],
-      'every suite under the root, its cases own and inherited, which need a window and which say they run headless',
+      'every suite under the root, its cases own and inherited, which need a window, which say they run headless and which keep their cases together',
     );
     // A script declaring cases that is no suite runs none of them, and gdUnit4 says nothing of it.
     const noSuite = [
@@ -43113,12 +43120,38 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'a directory holding a folder left out is handed as its suites, and one named inside it as it is',
     );
 
-    const suite = (path: string, names: string[], windowed = false, headless = false) => ({
+    const suite = (path: string, names: string[], windowed = false, headless = false, together = false) => ({
       path,
       cases: names,
       windowed,
       headless,
+      together,
     });
+    // Past the split and with a case timed row by row, kept whole when it says its cases belong
+    // together, and dealt out case by case and row by row when it does not.
+    const kept = suite('res://tests/kept_test.gd', ['test_k', 'test_l'], false, false, true);
+    const keptTimes = {
+      [kept.path]: { seconds: 20, cases: { test_k: 12, test_l: 8 }, rows: { test_k: [6, 6] } },
+    };
+    assert.deepEqual(
+      [
+        unitsOf([kept], keptTimes).map((unit) => [unit.cases, unit.row?.index, unit.cost]),
+        unitsOf([{ ...kept, together: false }], keptTimes).map((unit) => [
+          unit.cases,
+          unit.row?.index,
+          unit.cost,
+        ]),
+      ],
+      [
+        [[['test_k', 'test_l'], undefined, 20]],
+        [
+          [['test_k'], 0, 6],
+          [['test_k'], 1, 6],
+          [['test_l'], undefined, 8],
+        ],
+      ],
+      'a suite keeping its cases together is one unit; the same suite saying nothing is dealt out',
+    );
     const big = suite('res://tests/big_test.gd', ['test_x', 'test_y', 'test_z']);
     const edge = suite('res://tests/edge_test.gd', ['test_e', 'test_f']);
     const shown = suite('res://tests/shown_test.gd', ['test_m', 'test_n'], true);
@@ -45999,6 +46032,8 @@ function testAFreshCloneHasItsExtensionsListed(): void {
  * number of engines brought down while each ran whole. Each row prints the engine it ran in. The
  * times are set by hand after a first run, since six rows of nothing are too quick to be dealt; and
  * a row the case gains after they were taken runs once all the same, in the engine holding the last.
+ * A suite declaring GDHARNESS_TOGETHER is not dealt out at all: its cases share a setup kept in the
+ * suite, which every engine holding part of it computed again, 394 s whole against 612 s dealt out.
  */
 function testAParameterisedCaseIsDealtByItsRows(): void {
   const godotPath = resolveGodotPath();
@@ -46012,9 +46047,10 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rows-'));
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rows-slots-'));
-  const matrix = (rows: number): string =>
+  const matrix = (rows: number, together = false): string =>
     [
       'extends GdUnitTestSuite',
+      together ? 'const GDHARNESS_TOGETHER: bool = true' : '',
       '',
       `func test_face(value: int, test_parameters := [${Array.from({ length: rows }, (_, row) => `[${String(row)}]`).join(', ')}]) -> void:`,
       '\tprint("ROW %d IN %d" % [value, OS.get_process_id()])',
@@ -46100,6 +46136,31 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
         `${what}: what each took beside what it was dealt: ${run.said}`,
       );
       assert.equal(rowsTimed(), rows, `${what}: and every row is timed afterwards`);
+    }
+
+    // The same suite and the same times, declaring its cases belong together: one engine runs every
+    // row, and nothing is dealt out, so work the rows share is done once.
+    writeTree(project, { 'tests/matrix_test.gd': matrix(6, true) });
+    writeFileSync(timesFile, slowed(6));
+    const kept = test('--engines', '2', '--print-output');
+    assert.equal(kept.status, 0, kept.said);
+    const keptRan = ranIn(kept.said);
+    assert.deepEqual(
+      [
+        [...keptRan].map(([row, pids]) => [row, pids.length]).sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
+        new Set([...keptRan.values()].flat()).size,
+      ],
+      [Array.from({ length: 6 }, (_, row) => [row, 1]), 1],
+      `a suite kept together runs every row once, in one engine: ${kept.said}`,
+    );
+    assert.doesNotMatch(kept.said, /^Dealt out (row by row|case by case)/m, kept.said);
+    // Held to one engine, as on the macOS runner, there is no deal to keep it out of.
+    if (!kept.said.includes('over 1 engine, of the 2 asked for, since')) {
+      assert.match(
+        kept.said,
+        /^Kept whole in one engine, since it declares GDHARNESS_TOGETHER: res:\/\/tests\/matrix_test\.gd\.$/m,
+        kept.said,
+      );
     }
     assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
