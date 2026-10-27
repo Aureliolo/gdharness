@@ -61886,6 +61886,8 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
       '[node name="Pair" type="CharacterBody2D" parent="."]\n',
       '[node name="Agent" type="NavigationAgent2D" parent="Pair"]\n',
       '[node name="Link" type="NavigationLink2D" parent="Pair"]\n',
+      // Beside the regions rather than under one, so no bake here reads it.
+      '[node name="Crate" type="StaticBody2D" parent="."]\n',
     ].join('\n'),
     // Its obstacles come from a group, and one is outside the region.
     'outline.tres': `[gd_resource type="NavigationPolygon" format=3]\n\n[resource]\noutlines = Array[PackedVector2Array]([${square(300)}])\nsource_geometry_mode = 1\nsource_geometry_group_name = &"walls"\n`,
@@ -62042,6 +62044,14 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
       [1, 4],
       textOf(plain) ?? '',
     );
+    // Nothing read leaves the whole square walkable, which the counts alone do not tell from a bake
+    // that read the crate; the walls under the other regions are theirs and go unnamed.
+    assert.equal(
+      get(parseTextContent(plain), 'note'),
+      "No obstacle was read from the region's children (source mode root_node_children), so all the outlines enclose is walkable, less the agent_radius 10.0 kept from their edges. Crate (a StaticBody2D) is outside what was read; the bake reads a node elsewhere once it is in the group navigation_polygon_source_geometry_group and source_geometry_mode is groups_with_children, or once it is moved under the region.",
+      textOf(plain) ?? '',
+    );
+    assert.equal(get(parseTextContent(walled), 'note'), undefined, textOf(walled) ?? '');
 
     const covered = await bake('walled.tscn', 'Covered');
     assert.equal(
@@ -62099,7 +62109,7 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
     );
     assert.equal(
       textOf(await bake('walled.tscn', 'Walker')),
-      'Walker is a CharacterBody2D, not a NavigationRegion2D or a NavigationRegion3D.',
+      "Walker is a CharacterBody2D, not a NavigationRegion2D or a NavigationRegion3D; the scene's are at Region, Covered, Bare, Blank.",
     );
     const inheriting = readFileSync(join(project, 'inherits.tscn'), 'utf8');
     const base = readFileSync(join(project, 'walled.tscn'), 'utf8');

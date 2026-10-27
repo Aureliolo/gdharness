@@ -32,6 +32,8 @@ var still_naming: Array[Dictionary] = []
 var scripts_naming: Array[Dictionary] = []
 ## The script lines already named, so one shared by an instance and its scene is named once.
 var _lines: Dictionary = {}
+## The paths each script names, by the script, read once however many nodes it is on.
+var _named_in: Dictionary = {}
 ## The files beside a scene holding a rewritten track, each to the resource saved there.
 var _homes: Dictionary = {}
 ## Each track rewritten in an animation one of [member _homes] keeps, as [animation, track, the path
@@ -165,10 +167,13 @@ func _scripts(node: Node, was: String, now: String) -> void:
 	var script: Script = node.get_script()
 	while script is GDScript:
 		var file: String = script.resource_path
-		var source: String = script.source_code
-		if source.is_empty() and FileAccess.file_exists(file):
-			source = FileAccess.get_file_as_string(file)
-		for named: Dictionary in GdhScriptPaths.named(source):
+		if not _named_in.has(script):
+			var source: String = script.source_code
+			if source.is_empty() and FileAccess.file_exists(file):
+				source = FileAccess.get_file_as_string(file)
+			_named_in[script] = GdhScriptPaths.named(source)
+		var listed: Array[Dictionary] = _named_in[script]
+		for named: Dictionary in listed:
 			var path: String = named["path"]
 			var key: String = "%s:%d:%s" % [file, named["line"], path]
 			if _lines.has(key):

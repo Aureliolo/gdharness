@@ -1088,7 +1088,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       bake_navigation: {
         effect: 'destructive',
         summary:
-          "bake a NavigationRegion2D or NavigationRegion3D from the geometry under it, as the editor's Bake button does, into the scene or its polygon's own file (savedTo); one holding none is given one (made). Answers polygons and vertices, with a note saying why when none came out, and meshesNote on the engine's mesh warning. It reads a script-free copy of the scene",
+          "bake a NavigationRegion2D or NavigationRegion3D from the geometry under it, as the editor's Bake button does, into the scene or its polygon's own file (savedTo); one holding none is given one (made). Answers polygons and vertices, with a note saying why when none came out, or, for a 2D region that read no obstacle, that its outlines are walkable whole and which nodes giving obstacles are outside what it read, and meshesNote on the engine's mesh warning. It reads a script-free copy of the scene",
         requires: ['nodePath'],
       },
     },
