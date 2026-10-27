@@ -32705,6 +32705,17 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       /The game is running, not held/,
       `a game let go has no stack: ${running.said}`,
     );
+    // Each refusal names what was asked for: a read of variables was refused as a read of the stack.
+    const unheldReads = [
+      await call('debug_state', { op: 'stack' }),
+      await call('debug_state', { op: 'variables' }),
+      await call('debug_state', { op: 'evaluate', expression: 'waited' }),
+    ].map((one) => /^The game is running, not held, so it has no ([^:]+):/m.exec(one.said)?.[1] ?? one.said);
+    assert.deepEqual(
+      unheldReads,
+      ['stack to read', 'frame whose variables could be read', 'frame to work an expression out in'],
+      'each read of a running game is refused for what it asked',
+    );
     const goingOutput = await call('editor_output', { projectPath: project, op: 'run' });
     assert.deepEqual(
       [get(goingOutput.answer, 'running'), get(goingOutput.answer, 'heldAt')],
