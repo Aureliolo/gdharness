@@ -234,6 +234,7 @@ import {
   scriptsWithoutUid,
   searchProject,
   steppedOverIn,
+  underGdignore,
 } from './project-scan.js';
 import { setupPromptHandlers } from './prompts.js';
 import { applyRewrites } from './rename.js';
@@ -3708,6 +3709,25 @@ export function scriptsToDiagnose(
     return { ok: false, reason: empty.join(' ') };
   }
   return { ok: true, value: unique };
+}
+
+/**
+ * The scripts of [param scripts], project-relative or res:// paths, that sit under a `.gdignore`.
+ * Named on purpose they are checked like any other, and an error in one read as the project's,
+ * although the engine never loads it: a class renamed elsewhere left one failing to compile.
+ */
+function scriptsUnderGdignore(projectPath: string, scripts: readonly string[]): Record<string, unknown> {
+  const ignored = scripts
+    .map((script) => script.replace(/^res:\/\//, ''))
+    .filter((script) => underGdignore(projectPath, script))
+    .map((script) => `res://${script}`);
+  return ignored.length === 0
+    ? {}
+    : {
+        underGdignore: ignored,
+        underGdignoreNote:
+          'The engine never loads a script under a folder holding a .gdignore, so what is reported for these does not stop the project from compiling or running.',
+      };
 }
 
 /** Why a folder named gave no script, naming each folder below it that the walk stepped over. */
@@ -8031,6 +8051,7 @@ class GodotServer {
       // absolute path and refused a path outside the project with no remedy, while every other
       // tool given either gave the res:// path and the remedies.
       const asked = readString(args, 'scriptPath');
+      let ignored: Record<string, unknown> = {};
       if (project.ok && asked !== undefined) {
         const location = resolveWithinProject(project.value.path, asked);
         if (!location.ok) {
@@ -8039,6 +8060,7 @@ class GodotServer {
         if (!existsSync(location.absolutePath)) {
           return this.missingScript(project.value.path, location.relativePath);
         }
+        ignored = scriptsUnderGdignore(project.value.path, [location.relativePath]);
       }
       const one = await this.diagnosticsOf(args);
       if ('noLanguageServer' in one) {
@@ -8051,11 +8073,19 @@ class GodotServer {
           : { refusal: project.response };
         return 'refusal' in checked
           ? checked.refusal
-          : this.jsonTextResponse({ ...checked.answers[0], ...engineChecked(one.noLanguageServer.reason) });
+          : this.jsonTextResponse({
+              ...checked.answers[0],
+              ...engineChecked(one.noLanguageServer.reason),
+              ...ignored,
+            });
       }
       return 'refusal' in one
         ? one.refusal
-        : this.jsonTextResponse({ ...one.answer, checkedBy: 'language server' });
+        : this.jsonTextResponse({
+            ...one.answer,
+            checkedBy: 'language server',
+            ...ignored,
+          });
     }
     const progress = callProgress();
     const cancelled = callSignal();
@@ -8130,6 +8160,7 @@ class GodotServer {
       ...(byEngine !== null && byServer > 0
         ? { checkedBy: 'language server, then engine', checkedByLanguageServer: byServer }
         : {}),
+      ...(project.ok ? scriptsUnderGdignore(project.value.path, scripts.value) : {}),
     });
   }
 
@@ -9263,7 +9294,7 @@ class GodotServer {
       };
     };
     const connectedBefore = this.godotBridge.getStatus().connected;
-    const [games, askedFirst, scanFirst, editorStatus, servers] = await Promise.all([
+    const [games, askedFirst, scanFirst, editorStatus, serversFirst] = await Promise.all([
       pinged,
       askEditor(),
       this.editorScanState(),
@@ -9271,14 +9302,16 @@ class GodotServer {
       this.editorServersListening(),
     ]);
     // An editor that finished arriving while the payload's slow questions ran is connected in it,
-    // and was not when the editor was asked about its play and its scan, which were skipped as
-    // unanswerable: asked again, so one answer does not say connected beside nothing asked.
+    // and was not when the editor was asked about its play and its scan or its ports were tried,
+    // all skipped as unanswerable: asked again, so one answer does not say connected beside nothing
+    // asked.
     const askAgain = !connectedBefore && editorStatus.connected;
     if (askAgain) {
       this.logDebug('editor_status: the editor connected during the call, so it is asked again');
     }
-    const { playing, active, run, hold } = askAgain ? await askEditor() : askedFirst;
-    const scan = askAgain ? await this.editorScanState() : scanFirst;
+    const [{ playing, active, run, hold }, scan, servers] = askAgain
+      ? await Promise.all([askEditor(), this.editorScanState(), this.editorServersListening()])
+      : [askedFirst, scanFirst, serversFirst];
     const answeredAt = Date.now();
     const inFlight = this.godotBridge
       .requestsInFlight()

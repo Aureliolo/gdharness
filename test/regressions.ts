@@ -6502,6 +6502,16 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
   });
   const marker = 'editor_status: the editor connected during the call';
   const marked = (): number => server.stderr.split(marker).length - 1;
+  // The language server's port accepts and the debug adapter's does not, so each reading is one
+  // that was taken rather than one left at a default.
+  const languageServer = createServer();
+  const lspPort = await new Promise<number>((resolve) => {
+    languageServer.listen(0, '127.0.0.1', () => {
+      const address = languageServer.address();
+      resolve(typeof address === 'object' && address !== null ? address.port : 0);
+    });
+  });
+  const dapPort = await reservePort();
   let met = 0;
   let attempts = 0;
   try {
@@ -6537,13 +6547,19 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
       });
       const before = marked();
       const asking = server.request('tools/call', { name: 'editor_status', arguments: {} });
-      socket.send(JSON.stringify(greeting(project)));
+      socket.send(JSON.stringify(greeting(project, { lsp_port: lspPort, dap_port: dapPort })));
       const editor = get(parseTextContent(await asking), 'editor');
       if (marked() > before) {
         met += 1;
         assert.deepEqual(
-          [get(editor, 'connected'), get(editor, 'scan', 'finishedMsAgo'), get(editor, 'openScenes')],
-          [true, 5, ['res://shown.tscn']],
+          [
+            get(editor, 'connected'),
+            get(editor, 'scan', 'finishedMsAgo'),
+            get(editor, 'openScenes'),
+            get(editor, 'lspListening'),
+            get(editor, 'dapListening'),
+          ],
+          [true, 5, ['res://shown.tscn'], true, false],
           `connected during the call, and asked: ${JSON.stringify(editor)}`,
         );
       }
@@ -6564,6 +6580,7 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
     assert.ok(met > 0, `the editor never connected during a status call in ${String(attempts)} tries`);
   } finally {
     await server.stop();
+    languageServer.close();
     rmSync(project, { recursive: true, force: true });
   }
 }
@@ -21880,6 +21897,23 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
             },
             JSON.stringify(folder).slice(0, 600),
           );
+          assert.equal(get(folder, 'underGdignore'), undefined, 'none of these is under a .gdignore');
+          // A script under a .gdignore named on purpose is checked, and said to be one the engine
+          // never loads, alone and among others.
+          for (const scriptPath of ['scripts/ignored/c.gd', ['ui/shop.gd', 'res://scripts/ignored/c.gd']]) {
+            const named = parseTextContent(
+              await server.request('tools/call', {
+                name: 'script_diagnostics',
+                arguments: { projectPath: project, scriptPath },
+              }),
+            );
+            assert.deepEqual(
+              [get(named, 'clean'), get(named, 'underGdignore')],
+              [true, ['res://scripts/ignored/c.gd']],
+              JSON.stringify(named),
+            );
+            assert.match(text(get(named, 'underGdignoreNote')), /^The engine never loads a script under/);
+          }
         } finally {
           await server.stop();
         }
@@ -55803,6 +55837,7 @@ const RENAME_FIXTURE: Readonly<Record<string, string>> = {
     '',
     'func shout() -> void:',
     '\tsay(1)',
+    '\tagain()',
     '',
   ].join('\n'),
   'user.gd': [
@@ -56101,6 +56136,14 @@ async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
       await ask('level', 'name', { level: { declaredBy: 'Node' } }),
       /level is declared by the engine's Node/,
     );
+    // say is declared in both scripts and called bare in both, and those calls are the member's own.
+    const declaredAndCalled = await ask('level', 'say');
+    assert.match(declaredAndCalled, /say is already declared in res:\/\/told\.gd/);
+    assert.doesNotMatch(declaredAndCalled, /used in code/, 'a declared member is not also a local');
+    // again is declared in told.gd only and called bare in loud.gd, which inherits it.
+    const inherited = await ask('level', 'again');
+    assert.match(inherited, /again is already declared in res:\/\/told\.gd/);
+    assert.doesNotMatch(inherited, /used in code/, 'an inherited member is not a local either');
     const declared = await ask('level', 'shout');
     assert.match(declared, /shout is already declared in res:\/\/loud\.gd/);
     assert.doesNotMatch(declared, /used in code/, 'a declaration is named once, as a declaration');
@@ -56110,7 +56153,7 @@ async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
     assert.match(
       shadowing,
       new RegExp(
-        `times is already used in code where level is inherited, as a local, a parameter or another name the renamed variable would shadow or be shadowed by, at res://loud\\.gd:${fixtureLine('loud.gd', 'func say')}, res://loud\\.gd:${fixtureLine('loud.gd', 'super.say')}, res://told\\.gd:${fixtureLine('told.gd', 'func say')}, res://told\\.gd:${fixtureLine('told.gd', 'repeat(times)')}$`,
+        `times is already used in code in a class that declares or inherits level, as a local, a parameter or another name the renamed variable would shadow or be shadowed by, at res://loud\\.gd:${fixtureLine('loud.gd', 'func say')}, res://loud\\.gd:${fixtureLine('loud.gd', 'super.say')}, res://told\\.gd:${fixtureLine('told.gd', 'func say')}, res://told\\.gd:${fixtureLine('told.gd', 'repeat(times)')}$`,
       ),
     );
     assert.doesNotMatch(shadowing, /other\.gd/, 'a class not inheriting the member is not named');

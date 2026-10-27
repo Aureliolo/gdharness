@@ -1450,7 +1450,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: ['string', 'array'],
         items: { type: 'string' },
         description:
-          'A script inside the project, a folder, or a list of either, such as "scripts/player.gd" or ["scripts/economy", "ui/shop.gd"]. A folder is its .gd files at any depth, skipping what the engine skips. One script is answered on its own. Several are answered together, with clean, errors and warnings for all of them: a script with nothing to report is named in nothingReported, and every other is answered under scripts in that same shape, including a script that could not be read, named with why while the rest are still asked about. Any number of scripts is one call, which reports progress as it goes.',
+          'A script inside the project, a folder, or a list of either, such as "scripts/player.gd" or ["scripts/economy", "ui/shop.gd"]. A folder is its .gd files at any depth, skipping what the engine skips and the addons gdharness installed; a folder whose scripts all sit in those is refused, naming each. A script named that sits under a folder holding a .gdignore is checked as asked and listed under underGdignore, since the engine never loads it and its errors do not stop the project. One script is answered on its own. Several are answered together, with clean, errors and warnings for all of them: a script with nothing to report is named in nothingReported, and every other is answered under scripts in that same shape, including a script that could not be read, named with why while the rest are still asked about. Any number of scripts is one call, which reports progress as it goes.',
       },
     },
     requires: ['projectPath', 'scriptPath'],

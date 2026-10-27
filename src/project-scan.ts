@@ -144,6 +144,20 @@ export function folderFiles(directory: string, extensions: readonly string[]): s
   return gdignored(directory) ? [] : filesBelow(directory, extensions);
 }
 
+/**
+ * Whether [param relative], a project-relative path, is under a folder of the project holding a
+ * `.gdignore`, which the engine never loads anything from.
+ */
+export function underGdignore(projectPath: string, relative: string): boolean {
+  const folders = relative.split('/').slice(0, -1);
+  for (let depth = 1; depth <= folders.length; depth += 1) {
+    if (gdignored(join(projectPath, ...folders.slice(0, depth)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** A folder [method folderFiles] steps over, and why. */
 export interface SteppedOver {
   /** Relative to the folder walked, with forward slashes; empty for that folder itself. */
