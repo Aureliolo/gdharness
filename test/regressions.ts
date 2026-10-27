@@ -25524,6 +25524,10 @@ async function testAnEditorThatClearsBreakpointsIsSaidSo(): Promise<void> {
 
     const keeping = await greet({ syncs_breakpoints: true });
     assert.equal(get(keeping, 'editor', 'syncsBreakpoints'), true, JSON.stringify(keeping));
+    // Its window is the editor's word too, passed on either way.
+    assert.equal(get(keeping, 'editor', 'hidden'), true, JSON.stringify(keeping));
+    const windowed = await greet({ hidden: false });
+    assert.equal(get(windowed, 'editor', 'hidden'), false, JSON.stringify(windowed));
     assert.equal(
       get(keeping, 'editor', 'breakpointsAtRisk'),
       undefined,
