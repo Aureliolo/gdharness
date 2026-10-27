@@ -3466,6 +3466,9 @@ function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading[
 
 /** How many distinct engine entries a test run's answer carries, the newest kept. */
 const MOST_ENGINE_ENTRIES = 200;
+
+/** How many distinct ordinary lines a check's answer carries, the newest kept. */
+const MOST_PRINTED_LINES = 50;
 /** How many distinct undeclared engine errors a test run's answer names, the first kept. */
 const MOST_UNDECLARED_ERRORS = 20;
 
@@ -12293,7 +12296,11 @@ class GodotServer {
     // check's run is read nowhere but here, so an answer keeping only the problems would drop
     // everything the flag was passed for.
     const floor: Severity = engineArgs.includes('--verbose') ? 'info' : 'warning';
-    const printed = boot.log.count('info');
+    // Apart from the problems, so a chatty boot never pushes an error out of entries; a check's run
+    // is kept nowhere for editor_output, so lines left out here cannot be read at all.
+    const ordinary = boot.log.all.filter((entry) => entry.severity === 'info');
+    const printed = floor === 'warning' ? foldedRepeats(ordinary).slice(-MOST_PRINTED_LINES) : [];
+    const shown = printed.reduce((sum, entry) => sum + (entry.times ?? 1), 0);
     return this.jsonTextResponse({
       booted: !hung && boot.exitCode === 0 && errors === 0,
       hung,
@@ -12307,9 +12314,11 @@ class GodotServer {
       argsNote: engineFlagsNote(userArgs),
       ...scanWaitAnswer(scanned),
       savesNote: asked.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
-      // Counted rather than left to be inferred: entries holding no ordinary line read as a run that
-      // printed nothing, beside a run that printed and was not shown.
-      printedLinesNotShown: floor === 'warning' && printed > 0 ? printed : undefined,
+      printed: printed.length > 0 ? printed : undefined,
+      // Counted rather than left to be inferred: a printed list holding the newest lines reads as
+      // a run that printed only those.
+      printedLinesNotShown:
+        floor === 'warning' && ordinary.length > shown ? ordinary.length - shown : undefined,
       ...foldedEntriesAnswer(boot.log, floor),
     });
   }
