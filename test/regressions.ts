@@ -46237,6 +46237,9 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
           rows: { test_face: Array.from({ length: rows }, () => 5) },
         },
       });
+    // Read off the dealt runs: a run whose only suite is kept whole would use one engine anyway, so
+    // it never says it was held to one.
+    let heldToOne = false;
     for (const [rows, what] of [
       [6, 'the rows the times know'],
       [7, 'a row added since the times were taken'],
@@ -46255,6 +46258,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       // one, the case runs whole there, and the run says why it was held.
       if (run.said.includes('over 1 engine, of the 2 asked for, since')) {
         console.log(`row dealing: held to one engine, so the rows ran in one (${what})`);
+        heldToOne = true;
         continue;
       }
       assert.match(
@@ -46270,6 +46274,18 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       );
       assert.equal(rowsTimed(), rows, `${what}: and every row is timed afterwards`);
     }
+
+    // Held to one processor, the run's one engine takes the suite whole, which it would have dealt
+    // over the two asked for, and says it was held: the deal it compares with is cut for two.
+    writeTree(project, { 'tests/matrix_test.gd': matrix(6) });
+    writeFileSync(timesFile, slowed(6));
+    const cored = test('--engines', '2', '--cores', '1');
+    assert.equal(cored.status, 0, cored.said);
+    assert.match(
+      cored.said,
+      /^2 test functions in 1 suite over 1 engine, of the 2 asked for, since (--cores holds it to 1 processor|the machine has \d+\.\d GB of memory free, .*)\.$/m,
+      cored.said,
+    );
 
     // The same suite and the same times, declaring its cases belong together: one engine runs every
     // row, and nothing is dealt out, so work the rows share is done once.
@@ -46288,7 +46304,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
     );
     assert.doesNotMatch(kept.said, /^Dealt out (row by row|case by case)/m, kept.said);
     // Held to one engine, as on the macOS runner, there is no deal to keep it out of.
-    if (!kept.said.includes('over 1 engine, of the 2 asked for, since')) {
+    if (!heldToOne) {
       assert.match(
         kept.said,
         /^Kept whole in one engine, since it declares GDHARNESS_TOGETHER: res:\/\/tests\/matrix_test\.gd\.$/m,
@@ -46325,7 +46341,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       `a suite within an engine's share runs every row once, in one engine: ${shared.said}`,
     );
     // Two engines, so the rows met in one by the deal, unless held to one as on the macOS runner.
-    if (!shared.said.includes('over 1 engine, of the 2 asked for, since')) {
+    if (!heldToOne) {
       assert.match(shared.said, /^4 test functions in 3 suites over 2 engines\.$/m, shared.said);
     }
     assert.doesNotMatch(shared.said, /^(Dealt out|Kept whole)/m, shared.said);

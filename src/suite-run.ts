@@ -557,9 +557,11 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         ? dealt(units, declared, room.engines)
         : [inOneEngine(ordered(units, options.order), declared)];
     const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
+    // Cut for the engines asked: held to fewer, the share grows and keeps whole what they would split.
+    const asked = unitsOf(suites, times, splitPastFor(suites, times, options.engines));
     const how =
       options.order === null
-        ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(units, declared, options.engines)), room.held, options.engines)}`
+        ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(asked, declared, options.engines)), room.held, options.engines)}`
         : options.order === 'reversed'
           ? ', in reverse order of path'
           : `, shuffled by ${String(options.order)}`;
