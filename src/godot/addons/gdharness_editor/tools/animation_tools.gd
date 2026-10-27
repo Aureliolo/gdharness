@@ -320,7 +320,10 @@ func create_animation(args: Dictionary) -> Dictionary:
 			return "%s would not be in the scene when it loads." % animation_name
 		return ""
 	var answer: Dictionary = {
-		"ok": true, "animationName": animation_name, "length": anim.length, "loopMode": loop_mode_name
+		"ok": true,
+		"animationName": animation_name,
+		"length": GdhAnimationReads.held_seconds(anim.length),
+		"loopMode": loop_mode_name
 	}
 	if library[2]:
 		answer["libraryMade"] = animation_name.get_slice("/", 0) if animation_name.contains("/") else ""
@@ -477,9 +480,9 @@ func set_animation(args: Dictionary) -> Dictionary:
 	var answer: Dictionary = {
 		"ok": true,
 		"animationName": animation_name,
-		"length": anim.length,
+		"length": GdhAnimationReads.held_seconds(anim.length),
 		"loopMode": GdhAnimationReads.LOOP_MODE_NAMES.get(anim.loop_mode, str(anim.loop_mode)),
-		"step": anim.step,
+		"step": GdhAnimationReads.held_seconds(anim.step),
 	}
 	var past: String = _past_length(anim, animation_name)
 	if not past.is_empty():

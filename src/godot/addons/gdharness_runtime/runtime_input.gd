@@ -61,9 +61,11 @@ func _init(host: Node, values: GdhValues) -> void:
 ## pointer when the game is on one.
 ##
 ## For the root window the engine asks Windows where the pointer is, and GetCursorPos refuses a
-## process on a desktop that is not in use: measured on one of gdharness's own, it answered false
-## with access denied and left the point unwritten. The engine does not check, so a game driven
-## there read get_mouse_position() as x 836852416 after a motion to 1310, 314. Nothing here can
+## process on a desktop that is not in use: on one of gdharness's own it answers false and leaves the
+## point unwritten, with access denied in the user's window station and with
+## ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION in the one gdharness's desktop is in. The engine does
+## not check, so a game driven there read get_mouse_position() as x 836852416 after a motion to
+## 1310, 314. Nothing here can
 ## put a pointer on that desktop: Windows moves one only on the desktop in use, and making this one
 ## that would take the screen. What reads the injected event is right, tooltips included, since the
 ## engine places a tooltip from the motion that reached the control.

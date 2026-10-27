@@ -125,7 +125,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 These need the runtime autoload, which \`gdharness setup\` registers. \`runtime_capture\` needs a
 window and refuses headless rather than handing back the last frame anything drew. On Windows a
 windowed run this server starts is on a desktop of its own, where it draws and can be captured but
-never shows or takes the keyboard.
+never shows or takes the keyboard or the pointer.
 
 The autoload reads these settings and no others. \`${BIND_ADDRESS_SETTING}\`
 is \`127.0.0.1\` and should stay there: the command set includes \`call_method\`, \`set_property\`

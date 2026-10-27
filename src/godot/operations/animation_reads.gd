@@ -125,15 +125,16 @@ static func no_animation(player: AnimationPlayer, called: String, animation_name
 
 static func _summary(anim: Animation) -> Dictionary:
 	return {
-		"length": anim.length,
+		"length": held_seconds(anim.length),
 		"loopMode": LOOP_MODE_NAMES.get(anim.loop_mode, str(anim.loop_mode)),
-		"step": anim.step,
+		"step": held_seconds(anim.step),
 	}
 
 
-## [param seconds], a key's time, as the shortest decimal holding the same 32-bit float. A scene keeps
-## key times as 32-bit floats, so a key put at 0.7 read back as 0.699999988079071.
-static func key_time(seconds: float) -> float:
+## [param seconds], a key's time or an animation's length or step, as the shortest decimal holding
+## the same 32-bit float. An animation keeps all three as 32-bit floats, so a key put at 0.7 read
+## back as 0.699999988079071 and a step of 0.1 as 0.100000001490116.
+static func held_seconds(seconds: float) -> float:
 	var held: float = PackedFloat32Array([seconds])[0]
 	for places: int in range(0, 10):
 		var shorter: float = String.num(held, places).to_float()
@@ -159,7 +160,7 @@ static func _track(anim: Animation, track: int, values: GdhSerialisation) -> Dic
 	var keyframes: Array[Dictionary] = []
 	var methods: Dictionary = {}
 	for key: int in anim.track_get_key_count(track):
-		var keyframe: Dictionary = {"time": key_time(anim.track_get_key_time(track, key))}
+		var keyframe: Dictionary = {"time": held_seconds(anim.track_get_key_time(track, key))}
 		if kind == Animation.TYPE_METHOD:
 			var method: String = str(anim.method_track_get_name(track, key))
 			methods[method] = true

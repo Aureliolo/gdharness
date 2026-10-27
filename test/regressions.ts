@@ -12285,11 +12285,25 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
     '[DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint thread);',
     '[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
     '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetUserObjectInformationW(IntPtr handle, int index, System.Text.StringBuilder into, int size, out int needed);',
+    '[DllImport("user32.dll")] public static extern IntPtr GetProcessWindowStation();',
+    '[StructLayout(LayoutKind.Sequential)] public struct Point { public int x, y; }',
+    '[DllImport("user32.dll", SetLastError = true)] public static extern bool GetCursorPos(out Point at);',
+    '[DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);',
+    '[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);',
     "'",
-    '$name = New-Object System.Text.StringBuilder 256',
+    // Aware of the display's scale, as Godot is: a process that is not is told a scaled screen on
+    // the user's desktop and the screen as it is in a non-interactive station.
+    '[void][Probe.Desk]::SetProcessDpiAwarenessContext([IntPtr]-4)',
+    '$screens ="monitors=$([Probe.Desk]::GetSystemMetrics(80)) screen=$([Probe.Desk]::GetSystemMetrics(76)),$([Probe.Desk]::GetSystemMetrics(77)),$([Probe.Desk]::GetSystemMetrics(78))x$([Probe.Desk]::GetSystemMetrics(79))"',
     '$needed = 0',
+    '$station = New-Object System.Text.StringBuilder 256',
+    '[void][Probe.Desk]::GetUserObjectInformationW([Probe.Desk]::GetProcessWindowStation(), 2, $station, 512, [ref]$needed)',
+    '$at = New-Object Probe.Desk+Point',
+    '$read = [Probe.Desk]::GetCursorPos([ref]$at)',
+    '$refused = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()',
+    '$name = New-Object System.Text.StringBuilder 256',
     '[void][Probe.Desk]::GetUserObjectInformationW([Probe.Desk]::GetThreadDesktop([Probe.Desk]::GetCurrentThreadId()), 2, $name, 512, [ref]$needed)',
-    '"desktop=$($name.ToString())"',
+    '"$screens station=$($station.ToString()) cursor=$(if ($read) { "read" } else { "refused $refused" }) desktop=$($name.ToString())"',
   ].join('\n');
   // Node as the process launched, asking a PowerShell of its own: Windows PowerShell started detached
   // runs nothing, and the launch without a desktop starts its process detached. A child is on its
@@ -12374,6 +12388,19 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
         new RegExp(`^pid=${hidden.pid} `),
         `under the pid the launch answered: ${hidden.said}`,
       );
+      // In a window station of the session's own, where Windows refuses the cursor outright, so a
+      // game there cannot confine or move the user's: a desktop of the user's station shares its one
+      // cursor, and refuses GetCursorPos only with access denied (5) rather than 1459.
+      assert.match(
+        hidden.said,
+        / station=Service-0x[0-9a-f]+-[0-9a-f]+\$ cursor=refused 1459 /,
+        `the launch should be in a non-interactive window station: ${hidden.said}`,
+      );
+      // And sees the display the user's desktop does, which a game sizes its window from: the
+      // screens a desktop sees come from its station.
+      const screens = (said: string): string | undefined => / (monitors=\d+ screen=\S+) /.exec(said)?.[1];
+      assert.ok(screens(control.said)?.match(/^monitors=[1-9]/), control.said);
+      assert.equal(screens(hidden.said), screens(control.said), `${hidden.said}\n${control.said}`);
     }
     // The helper's script calls no cmdlet, so Windows PowerShell prepares no modules as it starts
     // one, and writes no account of that among what the run printed.
@@ -59922,8 +59949,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       [0.25, 'linear'],
       JSON.stringify(shorter),
     );
-    // Held as a 32-bit float, so 0.1 comes back as 0.100000001490116.
-    assert.ok(Math.abs(asNumber(get(shorter, 'step')) - 0.1) < 1e-6, 'and the step it was made with stays');
+    assert.equal(get(shorter, 'step'), 0.1, 'and the step it was made with stays, as it was written');
     assert.equal(
       get(shorter, 'pastLength'),
       'spin is 0.25 s long, and these keys are past its end, where they never play: Body:rotation at 0.5 s, Body:rotation at 2 s. They are kept; scene_animation set with a longer length plays them.',
@@ -59943,6 +59969,33 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
         refusal,
       );
     }
+    // An animation keeps its length and step as 32-bit floats, as it keeps key times, so each is
+    // answered as the decimal it was written as rather than the nearest double to the float:
+    // neither 0.7 nor 0.3 is one.
+    const beat = await written({
+      op: 'create',
+      playerNodePath: 'Player',
+      animationName: 'beat',
+      length: 0.7,
+    });
+    assert.equal(get(beat, 'length'), 0.7, JSON.stringify(beat));
+    const stepped = await written({ op: 'set', playerNodePath: 'Player', animationName: 'beat', step: 0.3 });
+    assert.deepEqual([get(stepped, 'length'), get(stepped, 'step')], [0.7, 0.3], JSON.stringify(stepped));
+    const beatRead = parseTextContent(
+      await call({ op: 'read', playerNodePath: 'Player', animationName: 'beat' }),
+    );
+    assert.deepEqual([get(beatRead, 'length'), get(beatRead, 'step')], [0.7, 0.3], JSON.stringify(beatRead));
+    const listed = asArray(
+      get(parseTextContent(await call({ op: 'read', playerNodePath: 'Player' })), 'animations'),
+    );
+    assert.deepEqual(
+      listed
+        .filter((entry) => get(entry, 'animationName') === 'beat')
+        .map((entry) => [get(entry, 'length'), get(entry, 'step')]),
+      [[0.7, 0.3]],
+      JSON.stringify(listed),
+    );
+    await written({ op: 'remove', playerNodePath: 'Player', animationName: 'beat' });
 
     // A rename takes the player's autoplay and the state that plays it along: a state naming an
     // animation the player lacks plays nothing.
