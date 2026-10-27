@@ -22,6 +22,7 @@ export function greeting(
     dap_port: 0,
     debug_port: 0,
     syncs_breakpoints: true,
+    hidden: true,
     opened_by_a_server: false,
     started_by_an_editor: false,
     ...overrides,

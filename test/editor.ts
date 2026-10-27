@@ -7356,6 +7356,12 @@ async function testABreakpointHoldsForEveryPlay({
     true,
     `the editor keeps its breakpoints: ${text(status)}`,
   );
+  // The editor's own word on its window, which this leg starts with --headless unless asked for one.
+  assert.equal(
+    get(status, 'editor', 'hidden'),
+    process.env['GDHARNESS_WINDOWED_EDITOR'] !== '1',
+    `the editor says whether it has a window: ${text(status)}`,
+  );
   assert.equal(
     get(status, 'editor', 'breakpointsAtRisk'),
     undefined,

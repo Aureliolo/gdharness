@@ -365,6 +365,8 @@ func _handle_connect() -> void:
 			# Whether a session opening on the adapter is told this editor's breakpoints or takes
 			# them away, so a server can say which before it sets one.
 			"syncs_breakpoints": _syncs_breakpoints(),
+			# Whether this editor runs with no window, which for one opened by hand only it can say.
+			"hidden": DisplayServer.get_name() == "headless",
 			# Whether a server started this editor, which is the only kind that can be started again
 			# as itself: the engine hands back none of the arguments it was given, so the arguments
 			# have to come from whoever wrote them. See `restart_editor` in play_tools.gd.

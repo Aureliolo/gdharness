@@ -6711,7 +6711,7 @@ function testEveryGreetingFieldIsRequired(): void {
   const full = greeting('/p');
   assert.deepEqual(greetingFaults(full), [], `the full greeting is this release's: ${JSON.stringify(full)}`);
   const fields = Object.keys(full).filter((field) => field !== 'type');
-  assert.equal(fields.length, 10, `every field the addon sends: ${fields.join(', ')}`);
+  assert.equal(fields.length, 11, `every field the addon sends: ${fields.join(', ')}`);
   for (const field of fields) {
     assert.deepEqual(greetingFaults(greeting('/p', { [field]: undefined })), [field], `${field} left out`);
     const wrong = typeof full[field] === 'string' ? 7 : 'seven';
@@ -25524,6 +25524,10 @@ async function testAnEditorThatClearsBreakpointsIsSaidSo(): Promise<void> {
 
     const keeping = await greet({ syncs_breakpoints: true });
     assert.equal(get(keeping, 'editor', 'syncsBreakpoints'), true, JSON.stringify(keeping));
+    // Its window is the editor's word too, passed on either way.
+    assert.equal(get(keeping, 'editor', 'hidden'), true, JSON.stringify(keeping));
+    const windowed = await greet({ hidden: false });
+    assert.equal(get(windowed, 'editor', 'hidden'), false, JSON.stringify(windowed));
     assert.equal(
       get(keeping, 'editor', 'breakpointsAtRisk'),
       undefined,
