@@ -693,7 +693,10 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
     printed.leaks.forEach((leak, at) => {
       const last = at === printed.leaks.length - 1;
       const after = last ? [held, selfTyped].filter((part) => part !== undefined) : [];
-      faults.push(`the engine exited holding what it should have freed: ${[leak, ...after].join(' ')}`);
+      // A verbose engine still ends its count of objects by advising --verbose, beside the names.
+      const quoted =
+        held === undefined ? leak : leak.replace(/\s*\(run with `?--verbose`? for details\)/, '');
+      faults.push(`the engine exited holding what it should have freed: ${[quoted, ...after].join(' ')}`);
     });
   }
   const memoryExit = end.code !== null && MEMORY_EXITS.has(end.code >>> 0);

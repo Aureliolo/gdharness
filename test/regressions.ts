@@ -41564,7 +41564,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   assert.deepEqual(
     judgeEngine(readRun(verboseLeak), declaredRows, clean).faults,
     [
-      'the engine exited holding what it should have freed: WARNING: 4 ObjectDB instances were leaked at exit (run with `--verbose` for details).',
+      'the engine exited holding what it should have freed: WARNING: 4 ObjectDB instances were leaked at exit.',
       `the engine exited holding what it should have freed: ERROR: 10 resources still in use at exit. The engine named them: objects left alive: 3 RefCounted, 1 GDScript; resources still in use: res://game/guide.gd, res://game/book.gd, ${addonScripts.slice(0, 6).join(', ')}, and 2 more. ${REFCOUNTED_SAID}`,
     ],
     'a verbose run names what was held after the last count',
@@ -41578,7 +41578,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
       clean,
     ).faults,
     [
-      `the engine exited holding what it should have freed: WARNING: 1 ObjectDB instance was leaked at exit (run with \`--verbose\` for details). The engine named them: objects left alive: 1 RefCounted. ${REFCOUNTED_SAID}`,
+      `the engine exited holding what it should have freed: WARNING: 1 ObjectDB instance was leaked at exit. The engine named them: objects left alive: 1 RefCounted. ${REFCOUNTED_SAID}`,
     ],
     'and objects alone when no resource was still in use',
   );
@@ -41591,7 +41591,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
       clean,
     ).faults,
     [
-      'the engine exited holding what it should have freed: WARNING: 1 ObjectDB instance was leaked at exit (run with `--verbose` for details). The engine named them: objects left alive: 1 Node.',
+      'the engine exited holding what it should have freed: WARNING: 1 ObjectDB instance was leaked at exit. The engine named them: objects left alive: 1 Node.',
     ],
     'and says what holds a RefCounted only when one was left',
   );
