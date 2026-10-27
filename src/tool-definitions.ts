@@ -955,9 +955,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
       depth: {
-        type: 'number',
+        type: 'integer',
+        minimum: 0,
         description:
-          'How many levels to descend. Default: all. A node at the last level that has children of its own lists none and says how many under childrenNotListed.',
+          'How many levels to descend, 0 being the root alone. Default: all. A node at the last level that has children of its own lists none and says how many under childrenNotListed.',
       },
       includeProperties: {
         type: 'boolean',
@@ -967,7 +968,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       includeDefaults: {
         type: 'boolean',
         description:
-          'With includeProperties, list every stored property, defaults included: a Control has about a hundred, and ten of them ran to fifty-seven thousand characters. Default false.',
+          'List every stored property, defaults included, which turns includeProperties on when it is left out: a Control has about a hundred, and ten of them ran to fifty-seven thousand characters. Default false.',
       },
     },
     requires: ['projectPath', 'scenePath'],

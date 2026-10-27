@@ -7743,7 +7743,7 @@ async function testArgumentsOfTheWrongTypeAreRefused(): Promise<void> {
     );
     assert.match(
       await call('scene_tree', { projectPath: '/p', scenePath: 'a.tscn', depth: '3' }),
-      /depth as number, not a string/,
+      /depth as integer, not a string/,
       'a number given a string should be refused',
     );
 
@@ -8116,6 +8116,8 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       // Read as absent, a depth of 0 walked every level and a limit of -1 answered every line.
       ['project_dependencies', { resourcePath: 'res://a.gd', depth: 0 }, 'depth of 1 or more, not 0'],
       ['project_search', { query: 'extends', maxResults: -1 }, 'maxResults of 1 or more, not -1'],
+      ['scene_tree', { scenePath: 'a.tscn', depth: -1 }, 'depth of 0 or more, not -1'],
+      ['scene_tree', { scenePath: 'a.tscn', depth: 1.5 }, 'depth as integer, not 1.5'],
     ];
     for (const [tool, args, said] of outside) {
       const answer = await call(tool, args);
@@ -58222,6 +58224,26 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       Object.keys(asObject(get(tailEverything, 'properties'))).length,
       Object.keys(asObject(get(tail, 'properties'))).length + Number(get(tail, 'defaultsLeftOut')),
       'the count is what was left out',
+    );
+    // Given alone, includeDefaults can mean only the properties with their defaults: read without
+    // them, it answered the bare tree. Beside includeProperties false, it is a contradiction.
+    assert.deepEqual(
+      get(
+        parseTextContent(await call('scene_tree', { scenePath: 'world.tscn', includeDefaults: true })),
+        'tree',
+      ),
+      everything,
+      'includeDefaults alone answers what it does with includeProperties',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_tree', {
+          scenePath: 'world.tscn',
+          includeProperties: false,
+          includeDefaults: true,
+        }),
+      ),
+      'includeDefaults lists the defaults among the properties, and includeProperties false lists none: leave includeProperties out, or set it true.',
     );
     assert.equal(get(at(everything, 'Loud'), 'properties', 'speed'), 9);
     // Which of those values this file sets, said on the nodes another file makes and on no other:

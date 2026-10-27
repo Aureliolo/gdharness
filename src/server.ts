@@ -5085,7 +5085,17 @@ class GodotServer {
         return op === 'create'
           ? await editorOrEngine('create_scene', 'writes')
           : await editorOrEngine('save_scene', 'writes');
-      case 'scene_tree':
+      case 'scene_tree': {
+        // includeDefaults names which properties to list, so given alone it can mean only that the
+        // properties are wanted: read without them, it answered the bare tree and said nothing.
+        const defaults = readBoolean(args, 'includeDefaults') ?? false;
+        const asked = readBoolean(args, 'includeProperties');
+        if (defaults && asked === false) {
+          return this.createErrorResponse(
+            'includeDefaults lists the defaults among the properties, and includeProperties false lists none: leave includeProperties out, or set it true.',
+          );
+        }
+        const properties = asked ?? defaults;
         return await this.readFromFile(
           args,
           'scenePath',
@@ -5093,11 +5103,12 @@ class GodotServer {
           (file) => ({
             scenePath: file,
             depth: readNumber(args, 'depth') ?? -1,
-            includeProperties: readBoolean(args, 'includeProperties') ?? false,
-            includeDefaults: readBoolean(args, 'includeDefaults') ?? false,
+            includeProperties: properties,
+            includeDefaults: defaults,
           }),
-          async () => await bridge('list_scene_nodes'),
+          async () => await bridge('list_scene_nodes', { includeProperties: properties }),
         );
+      }
       case 'scene_node':
         switch (op) {
           case 'add':
