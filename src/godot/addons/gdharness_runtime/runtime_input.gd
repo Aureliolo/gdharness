@@ -16,6 +16,8 @@ const GdhItems = preload("runtime_items.gd")
 const GdhScreen = preload("runtime_screen.gd")
 const GdhTargets = preload("runtime_targets.gd")
 const GdhMouse = preload("runtime_mouse.gd")
+const GdhTyping = preload("runtime_typing.gd")
+const GdhSays = preload("runtime_says.gd")
 
 ## Set, to the desktop's name, for a process gdharness started on a desktop of its own and for
 ## everything that process starts. Kept in step with `DESKTOP_VARIABLE` in src/desktop.ts.
@@ -276,6 +278,8 @@ func inject_key(params: Dictionary) -> Dictionary:
 	event.unicode = GdhValues.glyph_of(event.keycode, event.shift_pressed)
 
 	var focused: String = GdhValues.focus_path(_host)
+	var field: Control = GdhTyping.focus_owner(_host.get_tree().root)
+	var before: Dictionary = GdhTyping.field_before(field)
 	Input.parse_input_event(event)
 	var lasted: Variant = null
 	if whole:
@@ -300,7 +304,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 		"pressed": held and not whole,
 		"whole": whole,
 	}
-	return GdhValues.focus_noted(answer, focused, _host)
+	return GdhTyping.field_noted(GdhValues.focus_noted(answer, focused, _host), field, before)
 
 
 ## Clicks a mouse button at a position, and lets go of it again unless asked to hold it.
@@ -601,7 +605,7 @@ func click(params: Dictionary) -> Dictionary:
 		item_scrolled = placed_item["scrolled"]
 	var rich: RichTextLabel = control as RichTextLabel
 	if found != null and rich != null and named_point == null:
-		var placed: Dictionary = GdhTargets.point_on_words(rich, wanted)
+		var placed: Dictionary = GdhSays.point_on_words(rich, wanted)
 		var found_here: Dictionary = found
 		if placed.has("point"):
 			aim = placed["point"]
