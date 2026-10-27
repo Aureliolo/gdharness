@@ -29497,6 +29497,12 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
         // a little past line 10 rather than at a number this case could fix.
         const firstShown = text(printed[0]?.[0]);
         assert.match(firstShown, /^line 1\d$/, said);
+        const afterTheCheck = await call('editor_output', {});
+        assert.match(
+          afterTheCheck,
+          /^No game is running\. The editor_run check \d+s ago kept no run: its answer held what the game printed, under entries and printed\./,
+          afterTheCheck,
+        );
 
         const started: unknown = JSON.parse(
           await call(

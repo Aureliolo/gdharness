@@ -3799,6 +3799,8 @@ class GodotServer {
   private readonly godotBridge: GodotBridge;
   private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
   private activeProcess: GodotProcess | null = null;
+  // When this server last answered an editor_run check, whose run is kept nowhere afterwards.
+  private lastCheckAt: number | null = null;
   private readonly updates = new UpdateCheck(SERVER_VERSION);
   private noticedUpdate = false;
   private callsSinceNotice = 0;
@@ -12107,7 +12109,13 @@ class GodotServer {
     const record =
       everyRunRecord().find((one) => mine === null || !isSameDirectory(one.projectPath, mine)) ?? null;
     if (record === null) {
-      return `No game is running.${noEditor} Start one with editor_run.`;
+      // A caller looks here for a check's lines, and "No game is running" alone sent it looking for a
+      // run that never existed.
+      const checked =
+        this.lastCheckAt === null
+          ? ''
+          : ` The editor_run check ${Math.round((Date.now() - this.lastCheckAt) / 1000)}s ago kept no run: its answer held what the game printed, under entries and printed.`;
+      return `No game is running.${checked}${noEditor} Start one with editor_run.`;
     }
     const ours =
       mine === null
@@ -12301,6 +12309,7 @@ class GodotServer {
     const ordinary = boot.log.all.filter((entry) => entry.severity === 'info');
     const printed = floor === 'warning' ? foldedRepeats(ordinary).slice(-MOST_PRINTED_LINES) : [];
     const shown = printed.reduce((sum, entry) => sum + (entry.times ?? 1), 0);
+    this.lastCheckAt = Date.now();
     return this.jsonTextResponse({
       booted: !hung && boot.exitCode === 0 && errors === 0,
       hung,
