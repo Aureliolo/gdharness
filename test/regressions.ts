@@ -12288,7 +12288,13 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
     '[DllImport("user32.dll")] public static extern IntPtr GetProcessWindowStation();',
     '[StructLayout(LayoutKind.Sequential)] public struct Point { public int x, y; }',
     '[DllImport("user32.dll", SetLastError = true)] public static extern bool GetCursorPos(out Point at);',
+    '[DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);',
+    '[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);',
     "'",
+    // Aware of the display's scale, as Godot is: a process that is not is told a scaled screen on
+    // the user's desktop and the screen as it is in a non-interactive station.
+    '[void][Probe.Desk]::SetProcessDpiAwarenessContext([IntPtr]-4)',
+    '$screens ="monitors=$([Probe.Desk]::GetSystemMetrics(80)) screen=$([Probe.Desk]::GetSystemMetrics(76)),$([Probe.Desk]::GetSystemMetrics(77)),$([Probe.Desk]::GetSystemMetrics(78))x$([Probe.Desk]::GetSystemMetrics(79))"',
     '$needed = 0',
     '$station = New-Object System.Text.StringBuilder 256',
     '[void][Probe.Desk]::GetUserObjectInformationW([Probe.Desk]::GetProcessWindowStation(), 2, $station, 512, [ref]$needed)',
@@ -12297,7 +12303,7 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
     '$refused = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()',
     '$name = New-Object System.Text.StringBuilder 256',
     '[void][Probe.Desk]::GetUserObjectInformationW([Probe.Desk]::GetThreadDesktop([Probe.Desk]::GetCurrentThreadId()), 2, $name, 512, [ref]$needed)',
-    '"station=$($station.ToString()) cursor=$(if ($read) { "read" } else { "refused $refused" }) desktop=$($name.ToString())"',
+    '"$screens station=$($station.ToString()) cursor=$(if ($read) { "read" } else { "refused $refused" }) desktop=$($name.ToString())"',
   ].join('\n');
   // Node as the process launched, asking a PowerShell of its own: Windows PowerShell started detached
   // runs nothing, and the launch without a desktop starts its process detached. A child is on its
@@ -12390,6 +12396,11 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
         / station=Service-0x[0-9a-f]+-[0-9a-f]+\$ cursor=refused 1459 /,
         `the launch should be in a non-interactive window station: ${hidden.said}`,
       );
+      // And sees the display the user's desktop does, which a game sizes its window from: the
+      // screens a desktop sees come from its station.
+      const screens = (said: string): string | undefined => / (monitors=\d+ screen=\S+) /.exec(said)?.[1];
+      assert.ok(screens(control.said)?.match(/^monitors=[1-9]/), control.said);
+      assert.equal(screens(hidden.said), screens(control.said), `${hidden.said}\n${control.said}`);
     }
     // The helper's script calls no cmdlet, so Windows PowerShell prepares no modules as it starts
     // one, and writes no account of that among what the run printed.
