@@ -16594,6 +16594,383 @@ async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
 }
 
 /**
+ * A click that misses its control answers in full when what it pressed instead frees that control.
+ *
+ * Reported from a game whose room rebuilds its pointer spots, Buttons whose mouse_filter is ignore,
+ * when a click changes the room: a click on a spot by nodePath answered `{}`, and the game's log held
+ * "Invalid access to property or key 'mouse_filter' on a base object of type 'previously freed'",
+ * because why_not_landed read the spot's filter after the press had freed it. A control under a
+ * cover that frees both on the press is the same fault on the other branch, the cover's path.
+ */
+async function testAClickThatFreesWhatItMissedAnswers(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('click that frees what it missed regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-freed-miss-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-freed-miss-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Freed miss"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[display]\n\nwindow/size/viewport_width=320\nwindow/size/viewport_height=180\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Control',
+        '',
+        'var rebuilt: int = 0',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar _room: int = $Room.gui_input.connect(_on_room)',
+        '\tvar _cover: int = $Cover.gui_input.connect(_on_cover)',
+        '',
+        '',
+        'func _on_room(event: InputEvent) -> void:',
+        '\tvar press: InputEventMouseButton = event as InputEventMouseButton',
+        '\tif press != null and press.pressed:',
+        '\t\tfor spot: Node in get_tree().get_nodes_in_group("spots"):',
+        '\t\t\tspot.queue_free()',
+        '\t\trebuilt += 1',
+        '\t\tprint("room rebuilt %d" % rebuilt)',
+        '',
+        '',
+        'func _on_cover(event: InputEvent) -> void:',
+        '\tvar press: InputEventMouseButton = event as InputEventMouseButton',
+        '\tif press != null and press.pressed:',
+        '\t\t$Covered.queue_free()',
+        '\t\t$Cover.queue_free()',
+        '\t\trebuilt += 1',
+        '\t\tprint("cover taken down %d" % rebuilt)',
+        '',
+        '',
+        'func record() -> int:',
+        '\treturn rebuilt',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\noffset_right = 320.0\noffset_bottom = 180.0\nmouse_filter = 2\nscript = ExtResource("1")\n\n' +
+        '[node name="Room" type="Control" parent="."]\noffset_right = 320.0\noffset_bottom = 180.0\n\n' +
+        '[node name="Spot" type="Button" parent="." groups=["spots"]]\noffset_left = 10.0\noffset_top = 10.0\noffset_right = 60.0\noffset_bottom = 40.0\nmouse_filter = 2\ntext = "S"\n\n' +
+        '[node name="Covered" type="Button" parent="."]\noffset_left = 10.0\noffset_top = 80.0\noffset_right = 60.0\noffset_bottom = 110.0\ntext = "C"\n\n' +
+        '[node name="Cover" type="Panel" parent="."]\noffset_top = 70.0\noffset_right = 80.0\noffset_bottom = 120.0\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return parseTextContent(response) ?? textOf(response);
+    };
+    const started = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+
+    const spot = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Spot' });
+    const spotShown = JSON.stringify(spot);
+    assert.equal(get(spot, 'type'), 'clicked', `a whole answer: ${spotShown}`);
+    assert.equal(get(spot, 'landed'), false, spotShown);
+    assert.equal(get(spot, 'hovered'), '/root/Main/Room', spotShown);
+    assert.equal(get(spot, 'control_afterwards'), 'freed', spotShown);
+    assert.match(String(get(spot, 'why_not_landed')), /Spot's mouse_filter is ignore/, spotShown);
+
+    const covered = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Covered' });
+    const coveredShown = JSON.stringify(covered);
+    assert.equal(get(covered, 'type'), 'clicked', `a whole answer: ${coveredShown}`);
+    assert.equal(get(covered, 'landed'), false, coveredShown);
+    assert.equal(get(covered, 'control_afterwards'), 'freed', coveredShown);
+    assert.match(
+      String(get(covered, 'why_not_landed')),
+      /\/root\/Main\/Cover is drawn over it/,
+      coveredShown,
+    );
+
+    const rebuilt = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'record' });
+    assert.equal(get(rebuilt, 'result'), 2, `each press reached what it went to: ${JSON.stringify(rebuilt)}`);
+    const printed = JSON.stringify(await call('editor_output', { op: 'run' }));
+    assert.match(printed, /room rebuilt 1/, `the game printed the room's rebuild: ${printed}`);
+    assert.match(printed, /cover taken down 2/, `and the cover's: ${printed}`);
+    assert.doesNotMatch(printed, /previously freed/, `and nothing read a freed control: ${printed}`);
+    await stopItsRun(server);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
+ * A pointer call aims at a point in a named node's own space, and reaches it in a native window.
+ *
+ * Reported from a game with subwindow embedding off whose second window holds one Control that
+ * draws its buttons and hit-tests them in _gui_input: mouse_click took only the game's window
+ * pixels, which do not reach a native window, and click pressed the control's centre alone, so no
+ * drawn button could be pressed or hovered. Each control here records the press and motion positions
+ * it reads. The holder is moved and scaled, so the node's space and the window's pixels differ, and
+ * one window is embedded, reached through the game's window, and named by its own pixels.
+ */
+async function testAPointerAimsInsideANamedNode(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('pointer inside a named node regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-aimed-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-aimed-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Aimed"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[display]\n\nwindow/size/viewport_width=640\nwindow/size/viewport_height=360\n' +
+        'window/size/borderless=true\nwindow/size/no_focus=true\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'drawn.gd'),
+      [
+        'extends Control',
+        '',
+        'var presses: Array = []',
+        'var motions: Array = []',
+        '',
+        '',
+        'func _gui_input(event: InputEvent) -> void:',
+        '\tvar press: InputEventMouseButton = event as InputEventMouseButton',
+        '\tif press != null and press.pressed:',
+        '\t\tpresses.append([press.position.x, press.position.y])',
+        '\tvar motion: InputEventMouseMotion = event as InputEventMouseMotion',
+        '\tif motion != null:',
+        '\t\tmotions.append([motion.position.x, motion.position.y])',
+        '',
+        '',
+        'func record() -> Dictionary:',
+        '\treturn {"presses": presses, "motions": motions}',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Control',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tif DisplayServer.get_name() == "headless":',
+        '\t\treturn',
+        "\t# A native window beside the game's, which the game's window pixels cannot reach.",
+        '\tvar screen: Rect2i = DisplayServer.screen_get_usable_rect()',
+        '\tget_window().position = Vector2i(screen.end.x - 660, screen.position.y + 16)',
+        '\tvar native: Window = Window.new()',
+        '\tnative.name = "Native"',
+        '\tnative.borderless = true',
+        '\tnative.unfocusable = true',
+        '\tnative.size = Vector2i(200, 100)',
+        '\tnative.position = Vector2i(screen.end.x - 880, screen.position.y + 16)',
+        '\tvar drawn: Control = Control.new()',
+        '\tdrawn.name = "Drawn"',
+        '\tdrawn.set_script(load("res://drawn.gd"))',
+        '\tdrawn.size = Vector2(200, 100)',
+        '\tnative.add_child(drawn)',
+        "\t# Embedding cannot change while a window is shown, and the embedded one is the headless half's.",
+        '\t$Popup.free()',
+        '\tget_tree().root.gui_embed_subwindows = false',
+        '\tadd_child(native)',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=3 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n' +
+        '[ext_resource type="Script" path="res://drawn.gd" id="2"]\n\n' +
+        '[node name="Main" type="Control"]\noffset_right = 640.0\noffset_bottom = 360.0\nmouse_filter = 2\nscript = ExtResource("1")\n\n' +
+        '[node name="Plain" type="Node" parent="."]\n\n' +
+        '[node name="Holder" type="Control" parent="."]\noffset_left = 20.0\noffset_top = 10.0\noffset_right = 20.0\noffset_bottom = 10.0\nscale = Vector2(0.5, 0.5)\nmouse_filter = 2\n\n' +
+        '[node name="Drawn" type="Control" parent="Holder"]\noffset_right = 600.0\noffset_bottom = 230.0\nscript = ExtResource("2")\n\n' +
+        '[node name="Popup" type="Window" parent="."]\nposition = Vector2i(330, 150)\nsize = Vector2i(300, 200)\nunfocusable = true\ncontent_scale_factor = 2.0\n\n' +
+        '[node name="Inside" type="Control" parent="Popup"]\noffset_right = 300.0\noffset_bottom = 200.0\nscript = ExtResource("2")\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return parseTextContent(response) ?? textOf(response);
+    };
+    const record = async (nodePath: string): Promise<{ presses: unknown[]; motions: unknown[] }> => {
+      const read = await call('runtime_invoke', { op: 'call', nodePath, method: 'record' });
+      return get(read, 'result') as { presses: unknown[]; motions: unknown[] };
+    };
+    const run = async (headless: boolean): Promise<void> => {
+      const how = headless ? 'headless' : 'windowed';
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless,
+        runtimeWaitMs: headless ? 30_000 : WINDOWED_BOOT_MS,
+      });
+      assert.equal(get(started, 'runtime', 'listening'), true, `${how}: ${JSON.stringify(started)}`);
+      const drawn = '/root/Main/Holder/Drawn';
+
+      const clicked = await call('runtime_input', { op: 'click', nodePath: drawn, x: 157, y: 186 });
+      const clickedShown = `${how}: ${JSON.stringify(clicked)}`;
+      assert.equal(get(clicked, 'landed'), true, clickedShown);
+      assert.deepEqual(
+        get(clicked, 'position'),
+        { x: 98.5, y: 103, _type: 'Vector2' },
+        `in the window's pixels: ${clickedShown}`,
+      );
+      assert.deepEqual((await record(drawn)).presses, [[157, 186]], `${how}: click pressed the point named`);
+
+      const mouse = await call('runtime_input', { op: 'mouse_click', nodePath: drawn, x: 442, y: 186 });
+      const mouseShown = `${how}: ${JSON.stringify(mouse)}`;
+      assert.equal(get(mouse, 'path'), drawn, mouseShown);
+      assert.deepEqual(get(mouse, 'position'), [241, 103], `in the window's pixels: ${mouseShown}`);
+      assert.equal(get(mouse, 'window'), undefined, `the game's own window: ${mouseShown}`);
+      assert.equal(get(mouse, 'hovered'), drawn, mouseShown);
+      assert.deepEqual(
+        (await record(drawn)).presses,
+        [
+          [157, 186],
+          [442, 186],
+        ],
+        `${how}: mouse_click pressed the point named`,
+      );
+
+      const moved = await call('runtime_input', { op: 'mouse_motion', nodePath: drawn, x: 157, y: 186 });
+      assert.deepEqual(get(moved, 'position'), [98.5, 103], `${how}: ${JSON.stringify(moved)}`);
+      assert.deepEqual(
+        (await record(drawn)).motions.at(-1),
+        [157, 186],
+        `${how}: the motion reached the point`,
+      );
+
+      const dragged = await call('runtime_input', {
+        op: 'mouse_drag',
+        nodePath: drawn,
+        x: 30,
+        y: 180,
+        toX: 280,
+        toY: 190,
+        frames: 4,
+      });
+      assert.deepEqual(get(dragged, 'from'), [35, 100], `${how}: ${JSON.stringify(dragged)}`);
+      const afterDrag = await record(drawn);
+      assert.deepEqual(afterDrag.presses.at(-1), [30, 180], `${how}: the drag pressed where it was named`);
+      assert.deepEqual(afterDrag.motions.at(-1), [280, 190], `${how}: and moved to where it ends`);
+
+      if (headless) {
+        // A Window's own space is its pixels, which a content scale of 2 makes twice its canvas; this
+        // one is embedded, so the events go through the game's.
+        const inPopup = await call('runtime_input', {
+          op: 'mouse_click',
+          nodePath: '/root/Main/Popup',
+          x: 50,
+          y: 60,
+        });
+        const inPopupShown = JSON.stringify(inPopup);
+        assert.deepEqual(get(inPopup, 'position'), [380, 210], inPopupShown);
+        assert.equal(get(inPopup, 'hovered'), '/root/Main/Popup/Inside', inPopupShown);
+        assert.deepEqual((await record('/root/Main/Popup/Inside')).presses, [[25, 30]], 'inside the window');
+      }
+
+      const plain = textOf(
+        await server.request(
+          'tools/call',
+          {
+            name: 'runtime_input',
+            arguments: { op: 'mouse_motion', nodePath: '/root/Main/Plain', x: 1, y: 1 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.match(
+        plain ?? '',
+        /\/root\/Main\/Plain is a Node, and the points are in a Control's, a Node2D's or a Window's own space/,
+        `${how}: ${plain}`,
+      );
+      const half = textOf(
+        await server.request(
+          'tools/call',
+          { name: 'runtime_input', arguments: { op: 'click', nodePath: drawn, x: 10 } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.match(half ?? '', /x and y are both needed/, `${how}: ${half}`);
+
+      if (!headless) {
+        const native = '/root/Main/Native/Drawn';
+        const there = await call('runtime_input', { op: 'mouse_click', nodePath: native, x: 150, y: 80 });
+        const thereShown = JSON.stringify(there);
+        assert.equal(get(there, 'window'), '/root/Main/Native', thereShown);
+        assert.deepEqual(get(there, 'position'), [150, 80], thereShown);
+        const hovered = await call('runtime_input', { op: 'mouse_motion', nodePath: native, x: 40, y: 20 });
+        assert.equal(get(hovered, 'window'), '/root/Main/Native', JSON.stringify(hovered));
+        const pressed = await call('runtime_input', { op: 'click', nodePath: native, x: 170, y: 30 });
+        assert.equal(get(pressed, 'landed'), true, JSON.stringify(pressed));
+        const nativeRecord = await record(native);
+        assert.deepEqual(
+          nativeRecord.presses,
+          [
+            [150, 80],
+            [170, 30],
+          ],
+          `the native window's control pressed at each point named: ${JSON.stringify(nativeRecord)}`,
+        );
+        assert.ok(
+          nativeRecord.motions.some((at) => JSON.stringify(at) === '[40,20]'),
+          `and given the motion: ${JSON.stringify(nativeRecord)}`,
+        );
+      }
+      await stopItsRun(server);
+    };
+    await run(true);
+    const refused = windowedRunRefused();
+    if (refused === null) {
+      await run(false);
+    } else {
+      console.log(`pointer inside a named node: the windowed half skipped (${refused})`);
+    }
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A headless game lays out at the size the project opens its window at, and says it has no window
  * when a click or a capture needs one.
  *
@@ -62527,6 +62904,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWatchRecordsAPropertyEveryFrame,
   testAClickReachesAControlInAScaledWindow,
   testAClickInAWindowNothingEnteredPresses,
+  testAClickThatFreesWhatItMissedAnswers,
+  testAPointerAimsInsideANamedNode,
   testAHeadlessGameSaysItHasNoWindow,
   testTheKeeperAnswersAStop,
   testTheKeeperAnswersItsDebuggersQuestions,

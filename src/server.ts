@@ -5306,6 +5306,8 @@ class GodotServer {
                 ? {}
                 : { says: readNonEmptyString(args, 'says') }),
               ...(args['index'] === undefined ? {} : { index: args['index'] }),
+              ...(args['x'] === undefined ? {} : { x: args['x'] }),
+              ...(args['y'] === undefined ? {} : { y: args['y'] }),
             },
             { tool: 'runtime_input', op },
           );

@@ -4,6 +4,8 @@ extends RefCounted
 ## here and sent from runtime_input.gd, which keeps where the pointer is.
 
 const GdhRead = preload("reading.gd")
+const GdhScreen = preload("runtime_screen.gd")
+const GdhValues = preload("runtime_values.gd")
 
 
 ## A point the tool schema sends as two flat numbers. Answers a Vector2, or the String that says
@@ -12,6 +14,84 @@ static func read_point(params: Dictionary, x_key: String, y_key: String) -> Vari
 	if not params.has(x_key) or not params.has(y_key):
 		return "%s and %s are both needed." % [x_key, y_key]
 	return Vector2(GdhRead.as_float(params[x_key]), GdhRead.as_float(params[y_key]))
+
+
+## The point a click names in [param node]'s own space, null when it names none, or the String
+## refusing it: a 3D node is clicked where it is drawn, and an item found by its words, a tab or a
+## row, where the control draws it.
+##
+## For a control that draws its parts itself and hit-tests them in _gui_input, whose centre was all
+## a click could press; in a native window, where the game's window pixels do not reach, nothing
+## else could press the rest.
+static func point_in(params: Dictionary, node: Node, node_path: String, has_item: bool) -> Variant:
+	if not params.has("x") and not params.has("y"):
+		return null
+	if node is Node3D:
+		return (
+			"%s is a 3D node, clicked where it is drawn; x and y name a point in a Control's own space"
+			% node_path
+		)
+	if has_item:
+		return (
+			(
+				"the words name an item %s draws, which is pressed where it is drawn, and x and y a point in it:"
+				+ " give one of them"
+			)
+			% node_path
+		)
+	return read_point(params, "x", "y")
+
+
+## The node a mouse_click, mouse_motion or mouse_drag names its points in, as {"node", "path"}, an
+## empty Dictionary for the game's window, or the String refusing it.
+##
+## A point in a node's own space is the only way to press part of a control in a native window,
+## where the game's window pixels do not reach: a game that draws its buttons itself and hit-tests
+## them in _gui_input had nothing a click could aim at but the control's centre.
+static func aim_of(params: Dictionary, root: Window) -> Variant:
+	var path: String = str(params.get("nodePath", ""))
+	if path.is_empty():
+		return {}
+	var standing: Dictionary = GdhValues.node_at(root, path)
+	if standing.has("message"):
+		return standing["message"]
+	var node: Node = standing["node"]
+	if node is CanvasItem or node is Viewport:
+		return {"node": node, "path": path}
+	return (
+		"%s is a %s, and the points are in a Control's, a Node2D's or a Window's own space"
+		% [path, node.get_class()]
+	)
+
+
+## Where [param local], in the space of the node [param aim] names, arrives: {"viewport", "position"},
+## the viewport the pointer reaches it through and the point in that viewport's pixels, which is what
+## an event sent there names. A Window's space is its own pixels, as the game's window pixels are the
+## root's; a canvas item's is its own, the one it draws and reads _gui_input in.
+static func carried(aim: Dictionary, local: Vector2, root: Window) -> Dictionary:
+	var node: Node = aim.get("node", root)
+	var reached: Dictionary = {}
+	if node is Viewport:
+		var viewport: Viewport = node
+		reached = GdhScreen.reach(viewport, viewport.get_final_transform().affine_inverse() * local)
+	else:
+		var item: CanvasItem = node
+		reached = GdhScreen.reach(item.get_viewport(), item.get_global_transform_with_canvas() * local)
+	var arriving: Viewport = reached["viewport"]
+	var point: Vector2 = reached["point"]
+	return {"viewport": arriving, "position": arriving.get_final_transform() * point}
+
+
+## What a pointer answer says of where [param points] went in [param viewport]: the node they were
+## named in, the window when it is not the game's own, and any of them outside its viewport. Read
+## before the first event, since a release can close the window it went to.
+static func where(aim: Dictionary, viewport: Viewport, points: Array[Vector2]) -> Dictionary:
+	var said: Dictionary = outside_noted({}, viewport, points)
+	if aim.has("path"):
+		said["path"] = aim["path"]
+	if viewport != viewport.get_tree().root:
+		said["window"] = str(viewport.get_path())
+	return said
 
 
 ## The points of a drag: x, y, then each of via, then toX, toY. Answers the String saying what is
@@ -66,9 +146,10 @@ static func mask_of(button: int) -> int:
 
 
 ## A button event carries the buttons held once it has happened: the pressed one among them, the
-## released one out. A wheel step is a button with no mask, as it is from a real mouse.
+## released one out. A wheel step is a button with no mask, as it is from a real mouse. [param held]
+## is what was held before it, which Input knows for the game's window.
 static func button_event(
-	position: Vector2, button: int, pressed: bool, double: bool
+	position: Vector2, button: int, pressed: bool, double: bool, held: int = -1
 ) -> InputEventMouseButton:
 	var event: InputEventMouseButton = InputEventMouseButton.new()
 	event.position = position
@@ -76,7 +157,8 @@ static func button_event(
 	event.button_index = button as MouseButton
 	event.pressed = pressed
 	event.double_click = double
-	var held: int = Input.get_mouse_button_mask()
+	if held < 0:
+		held = Input.get_mouse_button_mask()
 	var own: int = mask_of(button)
 	event.button_mask = (held | own) if pressed else (held & ~own)
 	return event
@@ -90,12 +172,15 @@ static func button_event(
 ## content scale and any letterbox offset, so the rect is taken into window pixels first.
 static func outside_noted(answer: Dictionary, viewport: Viewport, points: Array[Vector2]) -> Dictionary:
 	var shown: Rect2 = viewport.get_final_transform() * viewport.get_visible_rect()
+	var which: String = (
+		"the window's" if viewport == viewport.get_tree().root else "%s's" % viewport.get_path()
+	)
 	for point: Vector2 in points:
 		if not shown.has_point(point):
 			answer["outside_viewport"] = (
 				(
-					"%s is outside the window's viewport, %s in window pixels, so no control there receives"
-					% [point, shown]
+					"%s is outside %s viewport, %s in window pixels, so no control there receives"
+					% [point, which, shown]
 				)
 				+ " it; the game's _input and _unhandled_input still do."
 			)
