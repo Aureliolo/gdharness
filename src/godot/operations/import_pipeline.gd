@@ -408,7 +408,21 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 # Why [param resource_path] has no import file, with what to do about it where anything can be done.
 func _no_sidecar(resource_path: String) -> String:
 	if not FileAccess.file_exists(resource_path):
-		return resource_path + " is not on disk"
+		var said: String = resource_path + " is not on disk"
+		# A misspelt extension has no file of its own extension to be near, so the folder's files of
+		# the same name come first.
+		var folder: String = resource_path.get_base_dir()
+		var stem: String = resource_path.get_file().get_basename()
+		var namesakes: Array[String] = []
+		var listed: PackedStringArray = (
+			DirAccess.get_files_at(folder) if DirAccess.dir_exists_absolute(folder) else PackedStringArray()
+		)
+		for file: String in listed:
+			if file.get_basename() == stem and not file.ends_with(".import"):
+				namesakes.append(folder.path_join(file))
+		if not namesakes.is_empty():
+			return "%s, and %s %s." % [said, ", ".join(namesakes), "is" if namesakes.size() == 1 else "are"]
+		return GdhFileWalk.new().with_nearest_files(said, resource_path)
 	var never: String = _never_imported(resource_path)
 	if not never.is_empty():
 		return resource_path + " has no import options: " + never

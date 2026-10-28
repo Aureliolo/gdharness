@@ -1716,6 +1716,19 @@ function testOperations(godotPath: string, projectDir: string): void {
     orphan.stderr,
     /res:\/\/gone\.png is not on disk, so there is nothing its import options apply to/,
   );
+  // A misspelt path is offered what was likely meant: the file of the same name beside it for a
+  // misspelt extension, which has no file of its own extension to be near, else the nearest name.
+  const misspeltExtension = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
+    resource_path: 'art.pgn',
+  });
+  assert.match(misspeltExtension.stderr, /res:\/\/art\.pgn is not on disk, and res:\/\/art\.png is\./);
+  const misspeltName = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
+    resource_path: 'arts.png',
+  });
+  assert.match(
+    misspeltName.stderr,
+    /res:\/\/arts\.png is not on disk\. The nearest \.png files? (is|are) [^\n]*res:\/\/art\.png/,
+  );
 
   assert.equal(
     get(operation('get_import_status', { resource_path: 'art.png' }), 'resources', 0, 'status'),
