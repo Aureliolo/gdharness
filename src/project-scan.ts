@@ -508,9 +508,11 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   };
   const regex = options.regex ? compiledQuery(options.query, options.caseSensitive) : null;
   const needle = options.caseSensitive ? options.query : options.query.toLowerCase();
-  // Truncated only once a match past the limit has been seen: a search whose matches came to the
-  // limit exactly was called cut, and raising the limit gave the same list.
-  const full = (): boolean => result.summary.truncated;
+  // The search goes on past the limit and only stops answering lines, so the summary and
+  // not_searched describe the whole project: a search cut at one line answered total_matches 1 of
+  // five, and left out the ignored folder it had not yet reached. Truncated only once a match past
+  // the limit has been seen, since a search whose matches came to the limit exactly is whole.
+  let shown = 0;
   const notSearched: string[] = [];
   // The extensions the walk met, for a search whose fileTypes matched none of them: answered as an
   // empty search, it read as a project where nothing held the query.
@@ -534,6 +536,7 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
 
     result.summary.files_searched += 1;
     const matches: SearchMatch[] = [];
+    let matched = false;
     // Split on either ending, so `$` in a pattern meets the end of a line in a CRLF checkout.
     for (const [index, line] of bytes.toString('utf8').split(/\r?\n/).entries()) {
       // Found or not, rather than by what it matched: a lookahead matches the empty string.
@@ -541,17 +544,21 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       if (found === null) {
         continue;
       }
-      if (result.summary.total_matches >= options.maxResults) {
-        result.summary.truncated = true;
-        break;
-      }
-      matches.push({ line: index + 1, content: line.trim(), match: found[0] });
+      matched = true;
       result.summary.total_matches += 1;
+      if (shown >= options.maxResults) {
+        result.summary.truncated = true;
+        continue;
+      }
+      shown += 1;
+      matches.push({ line: index + 1, content: line.trim(), match: found[0] });
+    }
+    if (matched) {
+      result.summary.files_with_matches += 1;
     }
     if (matches.length > 0) {
       const relativePath = entryPath.slice(projectPath.length + 1).replace(/\\/g, '/');
       result.results.push({ file: `res://${relativePath}`, matches });
-      result.summary.files_with_matches += 1;
     }
   };
   const visit = (directory: string, named = false): void => {
@@ -562,9 +569,6 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       return;
     }
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (full()) {
-        return;
-      }
       if (skipped(entry.name)) {
         continue;
       }
