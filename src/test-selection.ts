@@ -10,8 +10,70 @@
 import { existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { nearest } from './nearest.js';
+import { resolveWithinProject } from './paths.js';
 import { projectFiles } from './project-scan.js';
 import { ProjectScripts } from './suite-plan.js';
+
+/** A `script.gd:test_case` entry, as gdharness test takes one case: the script, then the case. */
+const CASE_AFTER_SCRIPT = /^(.*\.gd):(\w+)$/;
+
+/**
+ * [param given], project_test's path, with each `script.gd:test_case` entry taken apart into its
+ * suite, kept under path, and its case, added to [param tests], as gdharness test reads such an
+ * entry. As a file name it was refused for its colon, which told a caller from the command line
+ * nothing of tests. Refused beside a whole suite or a directory, since a run with cases named runs
+ * only those, and the rest of the list would not have run.
+ */
+export function casesOutOfPath(
+  projectPath: string,
+  given: unknown,
+  tests: unknown,
+): { ok: true; path: unknown; tests: unknown } | { ok: false; reason: string } {
+  const entries: unknown[] = Array.isArray(given) ? given : [given];
+  const cases: string[] = [];
+  const whole: string[] = [];
+  const path = entries.map((entry) => {
+    const caseAt = typeof entry === 'string' ? CASE_AFTER_SCRIPT.exec(entry.trim()) : null;
+    const suite = caseAt === null ? null : resolveWithinProject(projectPath, caseAt[1] ?? '');
+    if (caseAt === null || suite === null || !suite.ok) {
+      if (typeof entry === 'string') {
+        whole.push(entry);
+      }
+      return entry;
+    }
+    cases.push(`res://${suite.relativePath}:${caseAt[2] ?? ''}`);
+    return `res://${suite.relativePath}`;
+  });
+  if (cases.length === 0) {
+    return { ok: true, path: given, tests };
+  }
+  if (whole.length > 0) {
+    return {
+      ok: false,
+      reason: `path names ${cases.length === 1 ? 'a case' : 'cases'}, ${cases.join(', ')}, beside ${whole.join(', ')}, and a run with cases named runs only those: run the cases on their own, and the rest in a run of its own.`,
+    };
+  }
+  const named: unknown[] =
+    tests === undefined || tests === null ? [] : Array.isArray(tests) ? tests : [tests];
+  return { ok: true, path: [...new Set(path)], tests: [...named, ...cases] };
+}
+
+/**
+ * Why [param given], editor_run's suites, cannot be played, when an entry names one case as
+ * `script.gd:test_case`: the suites scene plays whole suites. Null when no entry names a case.
+ */
+export function caseInSuites(given: unknown): string | null {
+  const entries: unknown[] = Array.isArray(given) ? given : [given];
+  const cased = entries.filter(
+    (entry): entry is string => typeof entry === 'string' && CASE_AFTER_SCRIPT.test(entry.trim()),
+  );
+  const first = cased[0];
+  if (first === undefined) {
+    return null;
+  }
+  const file = CASE_AFTER_SCRIPT.exec(first.trim())?.[1] ?? first;
+  return `suites plays whole suites, and ${cased.join(', ')} ${cased.length === 1 ? 'names' : 'name'} one case: name the file, ${file}, to play every case in it, or run the case alone with project_test, whose path takes ${first}.`;
+}
 
 /** One case asked for, by the entry that asked for it and the suite file it is in. */
 interface SelectedTest {

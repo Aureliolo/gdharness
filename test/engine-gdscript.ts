@@ -1716,6 +1716,22 @@ function testOperations(godotPath: string, projectDir: string): void {
     orphan.stderr,
     /res:\/\/gone\.png is not on disk, so there is nothing its import options apply to/,
   );
+  // A misspelt path is offered what was likely meant: the file of the same name beside it for a
+  // misspelt extension, which has no file of its own extension to be near, else the nearest name.
+  const misspeltExtension = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
+    resource_path: 'art.pgn',
+  });
+  assert.match(
+    misspeltExtension.stderr,
+    /res:\/\/art\.pgn is not on disk\. The file of that name beside it is res:\/\/art\.png\./,
+  );
+  const misspeltName = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
+    resource_path: 'arts.png',
+  });
+  assert.match(
+    misspeltName.stderr,
+    /res:\/\/arts\.png is not on disk\. The nearest \.png files? (is|are) [^\n]*res:\/\/art\.png/,
+  );
 
   assert.equal(
     get(operation('get_import_status', { resource_path: 'art.png' }), 'resources', 0, 'status'),
@@ -2146,7 +2162,12 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(plugins, 'enabled_count'), 0);
 
   const beforePlugin = readFileSync(projectFile, 'utf8');
-  assert.equal(get(operation('enable_plugin', { plugin_name: 'gdharness_editor' }), 'action'), 'enabled');
+  const enabledOne = operation('enable_plugin', { plugin_name: 'gdharness_editor' });
+  assert.deepEqual(
+    [get(enabledOne, 'action'), get(enabledOne, 'note')],
+    ['enabled', undefined],
+    `a plugin the editor loads is enabled with nothing to say: ${JSON.stringify(enabledOne)}`,
+  );
   const withPlugin = readFileSync(projectFile, 'utf8');
   assert.match(
     withPlugin,
@@ -2204,6 +2225,55 @@ function testOperations(godotPath: string, projectDir: string): void {
     assert.equal(readFileSync(projectFile, 'utf8'), beforePlugin, 'and both come out again');
   } finally {
     rmSync(join(projectDir, 'addons', 'pack'), { recursive: true, force: true });
+  }
+
+  // A plugin the editor will not load is still enabled, since its script can be put right before
+  // the editor starts, and the answer says what the editor will find.
+  const unloadable: Array<[string, string, string]> = [
+    [
+      'broken',
+      '@tool\nextends EditorPlugin\n\n\nfunc _enter_tree() -> void\n\tpass\n',
+      'res://addons/broken/plugin.gd does not compile, so the editor disables the plugin again at its next start. script_diagnostics names the error.',
+    ],
+    [
+      'untooled',
+      'extends EditorPlugin\n',
+      'res://addons/untooled/plugin.gd is not a @tool script, so the editor loads nothing for it.',
+    ],
+    [
+      'unplugged',
+      '@tool\nextends Node\n',
+      'res://addons/unplugged/plugin.gd does not extend EditorPlugin, so the editor loads nothing for it.',
+    ],
+    [
+      'scriptless',
+      '',
+      'res://addons/scriptless/plugin.gd does not exist, so the editor will not enable the plugin.',
+    ],
+  ];
+  try {
+    for (const [name, source, note] of unloadable) {
+      mkdirSync(join(projectDir, 'addons', name), { recursive: true });
+      writeFileSync(
+        join(projectDir, 'addons', name, 'plugin.cfg'),
+        `[plugin]\n\nname="${name}"\nscript="plugin.gd"\n`,
+      );
+      if (source !== '') {
+        writeFileSync(join(projectDir, 'addons', name, 'plugin.gd'), source);
+      }
+      const answer = operation('enable_plugin', { plugin_name: name });
+      assert.deepEqual(
+        [get(answer, 'action'), get(answer, 'note')],
+        ['enabled', note],
+        `${name} is enabled and the answer says why the editor will not load it: ${JSON.stringify(answer)}`,
+      );
+      operation('disable_plugin', { plugin_name: name });
+    }
+    assert.equal(readFileSync(projectFile, 'utf8'), beforePlugin, 'and each comes out again');
+  } finally {
+    for (const [name] of unloadable) {
+      rmSync(join(projectDir, 'addons', name), { recursive: true, force: true });
+    }
   }
 
   // Input actions, which are stored as an engine expression rather than as JSON.
@@ -2984,6 +3054,23 @@ function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _p
         'get_uid',
         { resource_path: 'res://stagee.tscn' },
         `File does not exist: res://stagee.tscn. ${nearStage}`,
+      ],
+      // A misspelt extension has no file of its own extension to be near.
+      [
+        'get_uid',
+        { resource_path: 'res://stage.tcsn' },
+        'File does not exist: res://stage.tcsn. The file of that name beside it is res://stage.tscn.',
+      ],
+      // Offered although the refusal's own path, res://stage.tscnn, holds its name.
+      [
+        'get_uid',
+        { resource_path: 'res://stage.tscnn' },
+        'File does not exist: res://stage.tscnn. The file of that name beside it is res://stage.tscn.',
+      ],
+      [
+        'read_resource',
+        { resource_path: 'res://stage.tcsn' },
+        'No resource at res://stage.tcsn. The file of that name beside it is res://stage.tscn.',
       ],
       [
         'add_autoload',
@@ -4098,6 +4185,12 @@ function testASettingSaysWhatReplacesIt(godotPath: string): void {
       ],
       JSON.stringify(again),
     );
+    // A new override is not a misspelt setting, so it is written with no nearest names offered.
+    const back = runOperation(godotPath, dir, 'set_project_setting', {
+      setting: 'application/config/description.windows',
+      value: 'on windows again',
+    });
+    assert.deepEqual([get(back, 'saved'), get(back, 'note')], [true, undefined], JSON.stringify(back));
   } finally {
     sweep(dir);
   }

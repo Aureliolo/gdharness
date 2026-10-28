@@ -194,6 +194,12 @@ func unset_project_setting(params: Dictionary) -> Dictionary:
 		answer["removed"] = false
 		answer["saved"] = false
 		answer["note"] = "project.godot does not set %s, so there was nothing to take out." % setting_path
+		var near: PackedStringArray = PackedStringArray() if held else _settings_near(setting_path)
+		if not near.is_empty():
+			answer["note"] += (
+				" Nor does the engine declare it; the nearest %s %s."
+				% ["setting is" if near.size() == 1 else "settings are", ", ".join(near)]
+			)
 		return _with_what_holds(answer, setting_path)
 	answer["old_value"] = _values.serialize_value(value)
 	# The default rather than null for a setting the engine declares: null takes the declaration away
@@ -221,8 +227,12 @@ func _with_what_holds(answer: Dictionary, setting_path: String) -> Dictionary:
 
 
 # The settings in the same section as [param setting_path] named nearest it, for a new one that is
-# likely a misspelt one: a setting nothing declares is written all the same, and is never read.
+# likely a misspelt one: a setting nothing declares is written all the same, and is never read. None
+# for an override of a setting the engine has, which its feature's builds read in the base's place.
 static func _settings_near(setting_path: String) -> PackedStringArray:
+	var base: String = GdhSettingReads.override_base(setting_path)
+	if not base.is_empty() and ProjectSettings.has_setting(base):
+		return PackedStringArray()
 	var section: String = setting_path.get_slice("/", 0) + "/"
 	var names: PackedStringArray = []
 	for info: Dictionary in ProjectSettings.get_property_list():

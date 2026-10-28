@@ -52,10 +52,16 @@ command line itself is wrong.
   exit code. It holds `passed`, `seconds`, `problems` (every problem the output lists, one sentence
   each, an engine's prefixed with `engine N:`), `suites` (each suite an engine closed, slowest first,
   with its `path`, `seconds`, gdUnit4's `verdict` and the `engine` that ran it), `engines` (each
-  with its `index`, `seconds`, the `dealt` seconds the times kept had it at, `passed`, `windowed`
-  and the `log` its output is kept in) and `logs`, the directory every engine's output is kept
-  under. `log` and `logs` are null once a passing run has removed them. A run that failed its
-  import, or had nothing left to run under `--changed-only`, writes empty `suites` and `engines`.
+  with its `index`, its `lane`, `startedAfter` (the seconds after the command started that it got
+  a slot and began), `seconds`, the `dealt` seconds the times kept had it at, `passed`,
+  `windowed`, the `suites` it was handed and the `log` its output is kept in), `logs`, the
+  directory every engine's output is kept under, `enginesAsked`, `slotsFree` (how many of the
+  slots its lanes take were free as it began; fewer than the lanes means the engines were handed
+  the suites a share at a time) and `dealing`, the lines the run printed about its deal. `log` and
+  `logs` are null once a passing run has removed them. A run that failed its import, or had
+  nothing left to run under `--changed-only`, writes empty `suites` and `engines`. Every run writes
+  the same result to `.godot/gdharness/last-run.json` beside the suite times, with or without
+  `--result`, so a run inside a gate that keeps none of a passing step's output can still be read.
 - `--runner`: print the path of the shipped runner and exit.
 
 ## Which suites run
@@ -266,9 +272,11 @@ whole run one, and the run names each suite declaring `false` that runs with the
 starts. The windowed engine runs without
 `--headless`, at the size `project.godot` gives its viewport, and with the Dummy audio driver like
 every other test engine. On Windows it runs on a desktop of its own, so its window never appears
-on the desktop in use or takes its focus. The headless engines run there too, since an engine that
-fails to start shows a modal alert even with `--headless`. Elsewhere it uses the display there is;
-on a CI runner with none, run it under `xvfb-run`.
+on the desktop in use or takes its focus. That desktop has no compositor, so a layered window
+fails there once it has been shown again; [the install guide](install.md) says how a game tells.
+The headless engines run there too, since an engine that fails to start shows a modal alert even
+with `--headless`. Elsewhere it uses the display there is; on a CI runner with none, run it under
+`xvfb-run`.
 
 The `project_test` tool reads the suites the same way. Its run is one engine, so when a suite in it
 needs a window the whole run has one, started as above, and the answer's `windowNote` names the

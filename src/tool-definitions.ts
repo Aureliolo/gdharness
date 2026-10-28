@@ -322,8 +322,15 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
         description:
           'Variables: the initial value. Constants: the value, which a constant needs. As written in GDScript.',
       },
-      isExport: { type: 'boolean', description: 'Variables: add @export.' },
-      exportHint: { type: 'string', description: 'Variables: the export hint, such as "range(0, 100)".' },
+      isExport: {
+        type: 'boolean',
+        description: 'Variables: add @export. Default true when exportHint is given.',
+      },
+      exportHint: {
+        type: 'string',
+        description:
+          'Variables: the export hint, such as "range(0, 100)", written as @export_range(0, 100). Refused beside isExport false.',
+      },
       isOnready: { type: 'boolean', description: 'Variables: add @onready.' },
       position: {
         type: 'string',
@@ -444,7 +451,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_settings',
     title: 'Project settings',
     description:
-      "Reads or writes project.godot (settings, autoloads, the main scene, input actions and plugins) and the audio bus layout, default_bus_layout.tres unless audio/buses/default_bus_layout names another. project_info include lists the autoloads, input actions and audio buses as the project holds them. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, or one on another release's addon that was not asked, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events, and its deadzone when one is given, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. unset takes a setting's line out of project.godot, the way back from a set of a misspelt name, and answers removed, old_value and default_value, the value that holds now (null for a setting the engine does not declare; for an override, name.feature, holds is the base setting's value its builds read now); on one the file does not set it answers removed false and writes nothing. Every write changes only the lines of the settings it names and keeps every other line as the file had it, in its place: the engine's own save would sort a dictionary's keys and write what a project_settings_override file laid over the project. get answers exists, true for any setting the engine knows, at_default, true when the value is the engine's own default and so has no line in project.godot, and overrides, the value each feature's override holds. An override answers override_of, its base setting, and one project.godot does not set answers exists false with holds, the base setting's value. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
+      "Reads or writes project.godot (settings, autoloads, the main scene, input actions and plugins) and the audio bus layout, default_bus_layout.tres unless audio/buses/default_bus_layout names another. project_info include lists the autoloads, input actions and audio buses as the project holds them. A write with an editor open on the project is handed to the editor, which takes the settings the write changed or names from the file (named under editorAdopted), including a setting the file already held, since the editor can hold another value after the file was put back, or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, or one on another release's addon that was not asked, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start, and enable_plugin notes a script it would not load. set answers old_value and new_value, with was_new true when project.godot did not set the setting before, and was_default true when what it held was the engine's own default, which old_value then is. add_input_action on an action that exists, one of the engine's ui_ actions included, replaces its events, and its deadzone when one is given, and answers was_new false with what it held under old_events and old_deadzone. A set of the value the setting already holds, in the same type, writes nothing and answers unchanged true and saved false. unset takes a setting's line out of project.godot, the way back from a set of a misspelt name, and answers removed, old_value and default_value, the value that holds now (null for a setting the engine does not declare; for an override, name.feature, holds is the base setting's value its builds read now); on one the file does not set it answers removed false and writes nothing, its note naming the nearest settings when the engine does not declare it either. Every write changes only the lines of the settings it names and keeps every other line as the file had it, in its place: the engine's own save would sort a dictionary's keys and write what a project_settings_override file laid over the project. get answers exists, true for any setting the engine knows, at_default, true when the value is the engine's own default and so has no line in project.godot, and overrides, the value each feature's override holds. An override answers override_of, its base setting, and one project.godot does not set answers exists false with holds, the base setting's value. Each setting under prefix carries at_default too, so a family read separates what the project sets from the engine's defaults; it is absent for a setting the engine registers no default for, such as an input action the project added, which only the project can have set.",
     parameters: {
       projectPath: PROJECT_PATH,
       setting: {
@@ -617,7 +624,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Search the project',
     effect: 'read',
     description:
-      'Searches text or a regular expression across project files and returns file paths with line numbers, one entry per line that holds the query, however often it holds it; total_matches counts those lines. What the engine steps over is not searched: directories spelled with a dot, node_modules, and any directory holding a .gdignore, which not_searched names when the search passed one. A vendored engine or an export directory is therefore absent from the results rather than matching the code you are looking for in a copy nobody runs. The addons gdharness installed are not searched either, since nobody on the project wrote them.',
+      'Searches text or a regular expression across project files and returns file paths with line numbers, one entry per line that holds the query, however often it holds it; total_matches counts those lines. What the engine steps over is not searched: directories spelled with a dot, node_modules, and any directory holding a .gdignore, which not_searched names when the search passed one. A vendored engine or an export directory is therefore absent from the results rather than matching the code you are looking for in a copy nobody runs. The addons gdharness installed are not searched either, since nobody on the project wrote them. A path naming one of those folders, or a place inside one, is searched as asked, and note says the whole-project search steps over it. Each line is searched on its own, so a query holding a line break is refused.',
     parameters: {
       projectPath: PROJECT_PATH,
       query: { type: 'string', description: 'The text or pattern to find.' },
@@ -634,7 +641,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       regex: { type: 'boolean', description: 'Read the query as a regular expression. Default false.' },
       caseSensitive: { type: 'boolean', description: 'Default false.' },
-      maxResults: { type: 'number', description: 'Default 100.' },
+      maxResults: {
+        type: 'integer',
+        minimum: 1,
+        description: 'How many matching lines to answer. Default 100.',
+      },
     },
     requires: ['projectPath', 'query'],
   },
@@ -652,7 +663,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           "forward: what this resource loads, with each reference closing a cycle marked circular and the cycle under circular_references, a script's dependencies including every script whose class_name it uses, marked by_class with the name, and the script of every autoload it names, marked by_autoload with the autoload's name. An ext_resource whose uid names another file than its path is followed to that file, as the engine loads it, with the path written under stale_path; one whose uid names no file the project has is followed by its path, as the engine does after warning, with the uid under unknown_uid; and a load or preload of a uid the project does not know is listed under that uid as missing. A shader's #include is followed as the preprocessor reads it, relative to the shader. A file the depth stops at carries beyond_depth, how many files it names that were not walked. summary.total_resources is the file asked about, so 1; total_dependencies counts each file reached, directly or through another, once however many places load it; total_references counts the entries in the tree, and missing names every file referenced that does not exist, with the files referring to it. reverse: every file that refers to it and how, for a file that is gone as well while anything still refers to it, answered with exists: false (a missing file nothing refers to is refused, naming the nearest files), a scene instancing it, a script extending, preloading or loading it, and for a script with a class_name every use of that name, and for an autoload's script every use of the autoload's name, with autoload naming it. Each reference carries a kind: ext_resource, extends, preload, load, include or path for a reference by path, with stale_path when an ext_resource reaches it by its uid under another path, and unknown_uid when one names it by path beside a uid naming no file; setting, plugin, export_preset and import for one in project.godot, a plugin.cfg, export_presets.cfg or an import sidecar; class_name for a use of the declared name, the declaration itself being the script asked about; autoload for code naming the autoload. Three kinds are not uses: doc is a name inside a ## documentation comment, which renaming would break in the generated docs; comment is one in ordinary prose, which it would only make stale; and stale_path is an ext_resource naming it by a path the engine does not load, since its uid leads to the file under loads. summary.in_code is the count with those left out, which is the number to read when the question is whether anything still uses this. Default forward.",
       },
-      depth: { type: 'number', description: 'forward: how many levels to follow. Default unlimited.' },
+      depth: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          'forward: how many levels to follow, 1 being what the file loads itself. Default unlimited.',
+      },
       includeBuiltin: {
         type: 'boolean',
         description: "forward: include the engine's own res://. resources. Default false.",
@@ -853,7 +869,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: ['string', 'array'],
         items: { type: 'string' },
         description:
-          'A test directory or suite file inside the project, or a list of them, all run on one engine: a named set of suites boots once rather than once per suite. An entry given twice, or a suite inside a directory also listed, runs once. An entry that is not there is left out and named under missing, the rest run, and such a run is never called passed; when no entry is there the run is refused before the engine starts, naming each one. A script named that declares no test_ function at the top level is refused the same way, and so is a directory holding no suite. A script that declares test_ functions and does not extend GdUnitTestSuite, which gdUnit4 never runs and never mentions, is refused when named, and under a directory run whole it is named under notSuites and the run is not called passed. Default tests and test, those the project has, which is where gdharness test looks.',
+          'A test directory or suite file inside the project, or a list of them, all run on one engine: a named set of suites boots once rather than once per suite. An entry given twice, or a suite inside a directory also listed, runs once. An entry "suite.gd:test_name" runs that case alone, as gdharness test reads it and as tests runs it, so it cannot share the list with a whole suite or a directory. An entry that is not there is left out and named under missing, the rest run, and such a run is never called passed; when no entry is there the run is refused before the engine starts, naming each one. A script named that declares no test_ function at the top level is refused the same way, and so is a directory holding no suite. A script that declares test_ functions and does not extend GdUnitTestSuite, which gdUnit4 never runs and never mentions, is refused when named, and under a directory run whole it is named under notSuites and the run is not called passed. Default tests and test, those the project has, which is where gdharness test looks.',
       },
       ignore: {
         type: 'array',
@@ -906,7 +922,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['create'],
         description:
-          'create: the root node class, an engine class or a class_name a project script declares, which the root is made as with that script attached. Default Node.',
+          'create: the root node class, an engine class or a class_name a project script declares, which the root is made as with that script attached. Default Node. The answer names the root as scene_node get does: rootNodeType its engine class, with scriptClass for a class_name.',
       },
       rootNodeName: {
         type: 'string',
@@ -946,9 +962,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
       depth: {
-        type: 'number',
+        type: 'integer',
+        minimum: 0,
         description:
-          'How many levels to descend. Default: all. A node at the last level that has children of its own lists none and says how many under childrenNotListed.',
+          'How many levels to descend, 0 being the root alone. Default: all. A node at the last level that has children of its own lists none and says how many under childrenNotListed.',
       },
       includeProperties: {
         type: 'boolean',
@@ -958,7 +975,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       includeDefaults: {
         type: 'boolean',
         description:
-          'With includeProperties, list every stored property, defaults included: a Control has about a hundred, and ten of them ran to fifty-seven thousand characters. Default false.',
+          'List every stored property, defaults included, which turns includeProperties on when it is left out: a Control has about a hundred, and ten of them ran to fifty-seven thousand characters. Default false.',
       },
     },
     requires: ['projectPath', 'scenePath'],
@@ -986,7 +1003,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['add'],
         description:
-          'add: the node class, such as "CharacterBody2D", or a class_name a project script declares, which the node is made as with that script attached. Give this or instancePath. The answer\'s nodeType is the class of the node made, for an instance the class of its scene\'s root.',
+          'add: the node class, such as "CharacterBody2D", or a class_name a project script declares, which the node is made as with that script attached. Give this or instancePath. The answer names the node made as get does: nodeType its engine class, for an instance the class of its scene\'s root, with scriptClass when its script declares a class_name.',
       },
       instancePath: {
         type: 'string',
@@ -1096,7 +1113,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_signal',
     title: 'Scene signals',
-    description: `Signal connections in a scene file. Each connection answers with its flags as the number and as flagNames; persist is on every connection, since a scene saves no other kind. A connection carries binds, the values passed after the signal's own, and unbinds, how many of the signal's own are dropped first, as the editor's connect dialog offers them; each is answered only when there is one. A connect of a pair already connected says alreadyConnected, with flagsBefore, bindsBefore and unbindsBefore when it changed them, and keeps the binds and unbinds it had unless the call gives new ones. A connect to a method the target does not have is still written, as the editor's own dialog allows, since the method may be written next; methodFound false says so, and until the method exists the signal fails each time it is emitted. One whose method cannot take what the signal passes, with its binds and unbinds (too few or too many arguments, an object where the method takes a value or the reverse, or an engine class unrelated to the one it takes), is written too, and answers argumentsFit false with misfit saying why; list gives each connection its methodFound, and misfit when it has one. list marks editable false on a connection an instanced scene makes inside itself, which only that scene can change. ${WITHOUT_AN_EDITOR} ${ALSO_SAVED}`,
+    description: `Signal connections in a scene file. Each connection answers with its flags as the number and as flagNames; persist is on every connection, since a scene saves no other kind. A connection carries binds, the values passed after the signal's own, and unbinds, how many of the signal's own are dropped first, as the editor's connect dialog offers them; each is answered only when there is one. A connect of a pair already connected says alreadyConnected, with flagsBefore, bindsBefore and unbindsBefore when it changed them, and keeps the binds and unbinds it had unless the call gives new ones. A connect to a method the target does not have is still written, as the editor's own dialog allows, since the method may be written next; methodFound false says so, and until the method exists the signal fails each time it is emitted. One whose method cannot take what the signal passes, with its binds and unbinds (too few or too many arguments, an object where the method takes a value or the reverse, or an engine class unrelated to the one it takes), is written too, and answers argumentsFit false with misfit saying why; list gives each connection its methodFound, and misfit when it has one. list marks editable false on a connection a scene this one instances or inherits makes, on its own root as well as inside it, and names that scene under madeIn; only that scene can change it, so a disconnect of one is refused. ${WITHOUT_AN_EDITOR} ${ALSO_SAVED}`,
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -1170,7 +1187,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['read', 'create', 'add_track', 'remove_track', 'set', 'rename', 'remove', 'add_state'],
         description:
-          'The animation in the player. A name before a slash is the library it is in, as moves/walk. read: the one to answer with whole, its tracks a list; without it, read lists them, each with the number of its tracks under tracks. create: a library the player does not have is made in the scene and named under libraryMade. add_state: the one that state plays. One the player does not have yet is written all the same, answering animationFound false and why under animationMissing.',
+          'The animation in the player. A name before a slash is the library it is in, as moves/walk. read: the one to answer with whole, its tracks a list; without it, read lists them, each with the number of its tracks under tracks. create: a library the player does not have is made in the scene and named under libraryMade, where an empty name is the default library of the player, the one a name without a slash is in. add_state: the one that state plays. One the player does not have yet is written all the same, answering animationFound false and why under animationMissing.',
       },
       newName: {
         type: 'string',
@@ -1655,7 +1672,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         items: { type: 'string' },
         ops: ['start'],
         description:
-          "start: gdUnit4 suites to play instead of a scene, a suite file or a test directory inside the project or a list of them, as project_test's path takes them. They run in the tests addon's suites scene through the runner gdharness test uses, so with profile: true the profile names what the suites cost by function, which project_test and gdharness test cannot show, since the profiler never sees a script run. The run quits with gdUnit4's exit code; read it with editor_output until running is false, then profile. Takes no scene or executable, and needs gdUnit4 and the tests addon of this release in the project.",
+          "start: gdUnit4 suites to play instead of a scene, a suite file or a test directory inside the project or a list of them, as project_test's path takes them, though always whole: an entry naming one case is refused. They run in the tests addon's suites scene through the runner gdharness test uses, so with profile: true the profile names what the suites cost by function, which project_test and gdharness test cannot show, since the profiler never sees a script run. The run quits with gdUnit4's exit code; read it with editor_output until running is false, then profile. Takes no scene or executable, and needs gdUnit4 and the tests addon of this release in the project.",
       },
       args: {
         type: 'array',
@@ -2590,7 +2607,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'debug_breakpoint',
     title: 'Breakpoints',
     description:
-      "Sets, removes or lists breakpoints. A set on a script that is not there, past its last line, or on a line holding no code, blank or only a comment, is refused, as nothing would ever stop there; a remove takes any line, and with no editor connected answers removed false, saying why, when none was held there. Set them first, then editor_run, and the game stops where you asked. With the editor connected it goes through the editor's debug adapter; with none, it is held here. A game this server starts itself, which editor_run start does for a run given args, savesIn, env or silent, for a headless run of a project whose editor plays its games with a window, or with no editor, is handed every breakpoint held here as it starts, and one set while that game runs reaches it, and the set answers once the game has taken it, which it does between frames, so a call made after the answer stops there (runningGame says so). The editor keeps a breakpoint set this way for one play, so every breakpoint this server holds is sent again before each play editor_run starts, and the start answer lists them under breakpoints. The set is also kept in the project, for the server that comes after a reconnect: a breakpoint stays until it is removed here, whichever server set it. Every answer lists the whole set under held, and the breakpoints the user set in the editor's own gutter under setInEditor; setting one here never takes those away, and removing a line here clears it whoever set it. Godot clears every breakpoint in the editor when a debug session opens unless network/debug_adapter/sync_breakpoints is on, which the addon turns on as it loads; an editor where it was turned off again is said so under breakpointsAtRisk, here and in editor_status.",
+      "Sets, removes or lists breakpoints. A set on a script that is not there, past its last line, or on a line holding no code, blank or only a comment, is refused, as nothing would ever stop there; a remove takes any line, and with no editor connected answers removed false, saying why, when none was held there. Set them first, then editor_run, and the game stops where you asked. With the editor connected it goes through the editor's debug adapter; with none, it is held here. A game this server starts itself, which editor_run start does for a run given args, savesIn, env or silent, for a headless run of a project whose editor plays its games with a window, or with no editor, is handed every breakpoint held here as it starts, and one set while that game runs reaches it, and the set answers once the game has taken it, which it does between frames, so a call made after the answer stops there (runningGame says so). Such a game does not stop on a script error, so a run that meets one carries on past it: editor_output has the error with where it happened, and a breakpoint on that line stops the game before the line runs. The editor keeps a breakpoint set this way for one play, so every breakpoint this server holds is sent again before each play editor_run starts, and the start answer lists them under breakpoints. The set is also kept in the project, for the server that comes after a reconnect: a breakpoint stays until it is removed here, whichever server set it. Every answer lists the whole set under held, and the breakpoints the user set in the editor's own gutter under setInEditor; setting one here never takes those away, and removing a line here clears it whoever set it. Godot clears every breakpoint in the editor when a debug session opens unless network/debug_adapter/sync_breakpoints is on, which the addon turns on as it loads; an editor where it was turned off again is said so under breakpointsAtRisk, here and in editor_status.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: { ...SCRIPT_PATH, ops: ['set', 'remove'] },

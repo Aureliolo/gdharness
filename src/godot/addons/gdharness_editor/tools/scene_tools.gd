@@ -142,7 +142,6 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 
 	if scene_path.is_empty():
 		return {"ok": false, "error": "Missing scenePath"}
-	var asked_type: String = root_node_type
 	var made: Dictionary = GdhSceneFile.made_as(
 		root_node_type,
 		"" if script_path.is_empty() else GdhSceneFile.res_path(project_path, script_path),
@@ -200,13 +199,20 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 	if not folder.is_empty():
 		root.free()
 		return {"ok": false, "error": folder}
+	# Read before the write, which frees the root.
+	var root_class: Dictionary = GdhSceneFile.class_of(root)
 	var written: Dictionary = scene.write()
 	if not written.is_empty():
 		return written
 
 	var answer: Dictionary = {
-		"ok": true, "scenePath": scene_path, "rootNodeType": asked_type, "rootNodeName": root_node_name
+		"ok": true,
+		"scenePath": scene_path,
+		"rootNodeType": root_class["nodeType"],
+		"rootNodeName": root_node_name
 	}
+	if root_class.has("scriptClass"):
+		answer["scriptClass"] = root_class["scriptClass"]
 	if not script_path.is_empty():
 		answer["script"] = script_path
 	if not had_folder:
@@ -241,7 +247,6 @@ func add_node(args: Dictionary) -> Dictionary:
 
 	if node_name.is_empty():
 		return {"ok": false, "error": "Missing nodeName"}
-	var asked_type: String = node_type
 	var class_script: Script = null
 	if not node_type.is_empty() and not ClassDB.class_exists(node_type):
 		var declared: Dictionary = GdhSceneFile.script_class(node_type, "Node")
@@ -301,13 +306,9 @@ func add_node(args: Dictionary) -> Dictionary:
 
 	var new_path: String = scene.path_of(new_node)
 	# Read before the write, which frees the scene it was added to.
-	var answer: Dictionary = {
-		"ok": true,
-		"nodeName": node_name,
-		"nodeType": asked_type if class_script != null else new_node.get_class(),
-		"nodePath": new_path,
-		"index": new_node.get_index(),
-	}
+	var answer: Dictionary = {"ok": true, "nodeName": node_name}
+	answer.merge(GdhSceneFile.class_of(new_node))
+	answer.merge({"nodePath": new_path, "index": new_node.get_index()})
 	if not properties.is_empty():
 		var held: Dictionary = {}
 		for key: Variant in properties:

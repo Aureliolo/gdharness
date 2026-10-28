@@ -408,7 +408,7 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 # Why [param resource_path] has no import file, with what to do about it where anything can be done.
 func _no_sidecar(resource_path: String) -> String:
 	if not FileAccess.file_exists(resource_path):
-		return resource_path + " is not on disk"
+		return GdhFileWalk.new().with_nearest_files(resource_path + " is not on disk", resource_path)
 	var never: String = _never_imported(resource_path)
 	if not never.is_empty():
 		return resource_path + " has no import options: " + never

@@ -360,7 +360,7 @@ import {
   windowNeedsOf,
 } from './suite-plan.js';
 import { hasSuitesScene, SUITES_SCENE, suitesSceneArgs } from './suites-scene.js';
-import { scriptsWithoutCases, selectTests } from './test-selection.js';
+import { caseInSuites, casesOutOfPath, scriptsWithoutCases, selectTests } from './test-selection.js';
 import {
   asParams,
   readArray,
@@ -2546,6 +2546,9 @@ export function settingsNamedBy(op: string, args: OperationParams): string[] {
  */
 const STALLED_AFTER_MS = 30_000;
 
+/** How long a project_test run may take when timeoutMs is not given. */
+const TEST_TIMEOUT_MS = 600_000;
+
 /** The longest a test run goes without a progress notification while no suite finishes. */
 const TEST_HEARTBEAT_MS = 20_000;
 
@@ -2887,16 +2890,27 @@ export function failedVerdict(
  * else is a run the limit cut off while it was going. A run that ended repeating one script error,
  * [param repeating], is named for that instead: it printed up to the kill without getting anywhere,
  * and the advice to give it longer had a session retrying a run that could never finish.
+ *
+ * A run that printed nothing at all, [param printedAnything] false, under a limit shorter than
+ * thirty seconds may still have been starting the engine: a timeoutMs of 1 was called hung, which
+ * sent a caller who meant seconds after a deadlock in a run that had not begun.
  */
 export function timedOutVerdict(
   timeoutMs: number,
   silentForMs: number,
   repeating: RepeatedError | null = null,
+  printedAnything = true,
 ): { verdict: string; hung: boolean } {
   const quiet = Math.round(silentForMs);
   if (repeating !== null) {
     return {
       verdict: `timed out after ${timeoutMs} ms repeating one script error, printed ${repeating.times} times: ${repeating.text}${repeating.where === null ? '' : ` (${repeating.where})`}. A line that fails on every pass of a loop does this, and a longer timeoutMs would not end it`,
+      hung: false,
+    };
+  }
+  if (!printedAnything && timeoutMs < STALLED_AFTER_MS) {
+    return {
+      verdict: `timed out after ${timeoutMs} ms before the engine printed anything, so it may still have been starting: timeoutMs counts milliseconds, and the default is ${TEST_TIMEOUT_MS}`,
       hung: false,
     };
   }
@@ -5071,7 +5085,17 @@ class GodotServer {
         return op === 'create'
           ? await editorOrEngine('create_scene', 'writes')
           : await editorOrEngine('save_scene', 'writes');
-      case 'scene_tree':
+      case 'scene_tree': {
+        // includeDefaults names which properties to list, so given alone it can mean only that the
+        // properties are wanted: read without them, it answered the bare tree and said nothing.
+        const defaults = readBoolean(args, 'includeDefaults') ?? false;
+        const asked = readBoolean(args, 'includeProperties');
+        if (defaults && asked === false) {
+          return this.createErrorResponse(
+            'includeDefaults lists the defaults among the properties, and includeProperties false lists none: leave includeProperties out, or set it true.',
+          );
+        }
+        const properties = asked ?? defaults;
         return await this.readFromFile(
           args,
           'scenePath',
@@ -5079,11 +5103,12 @@ class GodotServer {
           (file) => ({
             scenePath: file,
             depth: readNumber(args, 'depth') ?? -1,
-            includeProperties: readBoolean(args, 'includeProperties') ?? false,
-            includeDefaults: readBoolean(args, 'includeDefaults') ?? false,
+            includeProperties: properties,
+            includeDefaults: defaults,
           }),
-          async () => await bridge('list_scene_nodes'),
+          async () => await bridge('list_scene_nodes', { includeProperties: properties }),
         );
+      }
       case 'scene_node':
         switch (op) {
           case 'add':
@@ -6832,6 +6857,13 @@ class GodotServer {
     if (!project.ok) {
       return project.response;
     }
+    // Each line is searched on its own, so a query spanning two could never match, and the answer
+    // read as a project where the text was nowhere.
+    if (/[\r\n]/.test(readString(args, 'query') ?? '')) {
+      return this.createErrorResponse(
+        'query holds a line break, and project_search matches one line at a time: search for one of its lines.',
+      );
+    }
     const given = readNonEmptyString(args, 'path');
     const place =
       given === undefined ? null : resolveWithinProject(project.value.path, given, { root: true });
@@ -7217,10 +7249,19 @@ class GodotServer {
    * it off, taken only by a call that is still being waited on: one that is not would take what
    * it had itself just kept, and hand it to nobody.
    */
-  private async handleRunTests(args: OperationParams): Promise<ToolResponse> {
+  private async handleRunTests(given: OperationParams): Promise<ToolResponse> {
+    const project = this.project(given);
+    if (!project.ok) {
+      return project.response;
+    }
+    const split = casesOutOfPath(project.value.path, given['path'], given['tests']);
+    if (!split.ok) {
+      return this.createErrorResponse(split.reason);
+    }
+    const args: OperationParams =
+      split.path === given['path'] ? given : { ...given, path: split.path, tests: split.tests };
     const ran = await this.runTests(args);
-    const project = this.project(args);
-    if (!project.ok || callSignal()?.aborted === true) {
+    if (callSignal()?.aborted === true) {
       return ran;
     }
     const paths = testPathsIn(project.value.path, args['path']);
@@ -7453,7 +7494,7 @@ class GodotServer {
       '--expected-out',
       expectedFile,
     ];
-    const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 600000;
+    const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? TEST_TIMEOUT_MS;
     this.logDebug(`Running tests: ${engine.value} ${cmdArgs.join(' ')}`);
     const helperFiles: HelperFiles = {
       spec: join(userData, 'spec'),
@@ -7477,12 +7518,15 @@ class GodotServer {
     // When it last said anything, on either stream, which is what tells a run the limit cut off
     // mid-stride from one that had stopped.
     let lastSaid = Date.now();
+    let saidAnything = false;
     run.process.stdout?.on('data', (data: Buffer) => {
       console.push(data);
       lastSaid = Date.now();
+      saidAnything = true;
     });
     run.process.stderr?.on('data', () => {
       lastSaid = Date.now();
+      saidAnything = true;
     });
     const reporting = this.reportTestProgress(run.log);
     const autoloaded = scriptsAutoloaded(project.value.path);
@@ -7632,6 +7676,7 @@ class GodotServer {
             timeoutMs,
             silentForMs,
             repeatingScriptError(run.log.all, (entry) => run.log.raisedByScript(entry)),
+            saidAnything,
           )
         : null;
     const hung = cutShort?.hung ?? false;
@@ -8264,8 +8309,15 @@ class GodotServer {
   private missingScript(projectPath: string, relativePath: string): ToolResponse {
     const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
     const wanted = `res://${relativePath}`;
+    const folder = dirname(relativePath.replaceAll('\\', '/'));
+    const inFolder = join(projectPath, folder);
+    const beside = existsSync(inFolder)
+      ? readdirSync(inFolder, { withFileTypes: true })
+          .filter((entry) => entry.isFile())
+          .map((entry) => `res://${folder === '.' ? '' : `${folder}/`}${entry.name}`)
+      : [];
     return this.createErrorResponse(
-      withNearestFiles(`Script file does not exist: ${wanted}`, wanted, scripts),
+      withNearestFiles(`Script file does not exist: ${wanted}`, wanted, scripts, beside),
     );
   }
 
@@ -10296,6 +10348,10 @@ class GodotServer {
         "suites plays the suites in the tests addon's own scene, so it takes no scene and no executable: leave those out.",
       );
     }
+    const cased = caseInSuites(args['suites']);
+    if (cased !== null) {
+      return refused(cased);
+    }
     const paths = testPathsIn(projectPath, args['suites'], 'suites');
     if (!paths.ok) {
       return refused(paths.reason, PATH_SOLUTIONS);
@@ -10700,6 +10756,11 @@ class GodotServer {
     let editorAskedAt = 0;
     let editorSaysGoing = true;
     let editorAsks = 0;
+    // A run started here is held by the debugger its keeper holds, which the editor's session
+    // never sees, so the keeper is asked the same way, beside the looks.
+    let holding: Promise<void> | null = null;
+    let keeperAskedAt = 0;
+    let heldHere: StoppedAt | null = null;
     const waitBegan = Date.now();
     // Counted from the run's start rather than from here, since the boot the budget is sized to is
     // measured from there and the answer says "within" the budget: counted from here, whatever the
@@ -10733,7 +10794,21 @@ class GodotServer {
         }
         const run = this.activeProcess;
         if (run === null || !run.throughEditor) {
-          return !stillRunning(run);
+          if (!stillRunning(run)) {
+            return true;
+          }
+          const keeper = run?.keeper;
+          if (keeper !== undefined && holding === null && Date.now() - keeperAskedAt >= RUN_POLL_MS) {
+            keeperAskedAt = Date.now();
+            holding = this.keptHold(keeper)
+              .then((held) => {
+                heldHere = held;
+              })
+              .finally(() => {
+                holding = null;
+              });
+          }
+          return heldHere !== null;
         }
         if (asking === null && Date.now() - editorAskedAt >= RUN_POLL_MS) {
           editorAskedAt = Date.now();
@@ -10791,7 +10866,12 @@ class GodotServer {
       addon: true,
       budgetMs,
       ...(budget.sizedToMs === undefined ? {} : { sizedToMs: budget.sizedToMs }),
-      heldAt: this.dapClient?.whereItStopped() ?? null,
+      heldAt:
+        going === null || going.throughEditor
+          ? (this.dapClient?.whereItStopped() ?? null)
+          : endpoint === null && running && going.keeper !== undefined
+            ? await this.keptHold(going.keeper)
+            : null,
       running,
       withArgs,
       servesAProject: this.ownProject !== null,
@@ -14553,7 +14633,18 @@ class GodotServer {
       return contained.response;
     }
     const { op: _op, projectPath: _projectPath, ...params } = contained.value;
-    const created = await this.operation('create_script', params, project.value.path);
+    // The script is loaded against the class list, and its extends checked against the files, so
+    // against a list missing a class declared since, a script extending that class reads as one
+    // that does not parse, for a fault that is the list's.
+    const stale = await this.refreshStaleClasses(project.value.path);
+    if (!stale.ok) {
+      return stale.response;
+    }
+    const loaded = await this.operation('create_script', params, project.value.path);
+    const created: HeadlessOutcome =
+      loaded.ok && stale.value.length > 0
+        ? { ...loaded, payload: { ...loaded.payload, classesRebuiltFirst: stale.value } }
+        : loaded;
     const declared = created.ok ? (readString(created.payload, 'class_name') ?? '') : '';
     if (!created.ok || declared === '') {
       return this.answer(created);
@@ -14620,8 +14711,35 @@ class GodotServer {
    * for a method just added, while the game it played ran that method.
    */
   private async handleModifyScript(args: OperationParams): Promise<ToolResponse> {
-    const written = await this.headless('modify_script', args);
     const project = this.project(args);
+    // The additions are loaded against the class list, so one naming a class the list does not
+    // hold yet is refused as a script that would not parse, with nothing written.
+    const stale = project.ok ? await this.refreshStaleClasses(project.value.path) : null;
+    if (stale !== null && !stale.ok) {
+      return stale.response;
+    }
+    const loaded = await this.headless('modify_script', args);
+    const first = loaded.content[0];
+    const written: ToolResponse =
+      stale === null ||
+      stale.value.length === 0 ||
+      loaded.isError === true ||
+      first?.type !== 'text' ||
+      !first.text.trimStart().startsWith('{')
+        ? loaded
+        : {
+            ...loaded,
+            content: [
+              {
+                ...first,
+                text: answerJson({
+                  ...asParams(JSON.parse(first.text)),
+                  classesRebuiltFirst: stale.value,
+                }),
+              },
+              ...loaded.content.slice(1),
+            ],
+          };
     const scriptPath = readNonEmptyString(args, 'scriptPath');
     if (
       written.isError === true ||

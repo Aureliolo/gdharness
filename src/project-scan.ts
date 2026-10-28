@@ -4,7 +4,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { basename, extname, join } from 'node:path';
+import { basename, extname, join, relative, sep } from 'node:path';
 import { errorMessage } from './errors.js';
 
 /** Directories that are never part of a project's own files, and are not spelled with a dot. */
@@ -321,8 +321,42 @@ export interface SearchResult {
   };
   /** The folders a `.gdignore` kept out, which a search for words the project holds may want. */
   not_searched?: string[];
-  /** Why nothing was searched, when the extensions asked for matched no file. */
+  /**
+   * Why nothing was searched, when the extensions asked for matched no file, and that the place
+   * asked for is one the engine steps over, when it is.
+   */
   note?: string;
+}
+
+/**
+ * The folder at or above [param place], up to [param projectPath], that a whole-project search
+ * steps over, with why, or null when none is. Named as the path, such a folder is searched all the
+ * same: a folder holding a .gdignore answered no file searched, while a folder inside it was
+ * searched whole.
+ */
+function steppedOverAround(projectPath: string, place: string): { folder: string; why: string } | null {
+  let at = projectPath;
+  for (const step of relative(projectPath, place)
+    .split(sep)
+    .filter((part) => part !== '')) {
+    at = join(at, step);
+    if (!statSync(at).isDirectory()) {
+      break;
+    }
+    const why = skipped(step)
+      ? step.startsWith('.')
+        ? 'its name starts with a dot'
+        : `it is ${step}`
+      : gdignored(at)
+        ? 'it holds a .gdignore'
+        : installedByUs(at)
+          ? 'gdharness installed it'
+          : null;
+    if (why !== null) {
+      return { folder: `res://${relative(projectPath, at).split(sep).join('/')}/`, why };
+    }
+  }
+  return null;
 }
 
 /** Whether [param bytes] are a binary file's: a NUL in the first eight thousand, as git judges. */
@@ -520,8 +554,8 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       result.summary.files_with_matches += 1;
     }
   };
-  const visit = (directory: string): void => {
-    if (steppedOver(directory)) {
+  const visit = (directory: string, named = false): void => {
+    if (!named && steppedOver(directory)) {
       if (gdignored(directory)) {
         notSearched.push(`res://${directory.slice(projectPath.length + 1).replace(/\\/g, '/')}/`);
       }
@@ -544,21 +578,21 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   };
   const within = options.within ?? projectPath;
   if (statSync(within).isDirectory()) {
-    visit(within);
+    visit(within, true);
   } else {
     searchFile(within, basename(within));
   }
   const answered = notSearched.length === 0 ? result : { ...result, not_searched: notSearched };
-  if (extensions === null || result.summary.files_searched > 0) {
-    return answered;
-  }
-  const asked = [...extensions].join(', ');
-  const there = [...met].sort().join(', ');
-  return {
-    ...answered,
-    note:
-      met.size === 0
-        ? `No file was searched: there is no file there to search.`
-        : `No file was searched: none there has the extension ${asked}. The extensions there are ${there}.`,
-  };
+  const around = options.within === undefined ? null : steppedOverAround(projectPath, within);
+  const notes = [
+    around === null
+      ? undefined
+      : `${around.folder} is searched because path names it; a search of the whole project steps over it, since ${around.why}.`,
+    extensions === null || result.summary.files_searched > 0
+      ? undefined
+      : met.size === 0
+        ? 'No file was searched: there is no file there to search.'
+        : `No file was searched: none there has the extension ${[...extensions].join(', ')}. The extensions there are ${[...met].sort().join(', ')}.`,
+  ].filter((note) => note !== undefined);
+  return notes.length === 0 ? answered : { ...answered, note: notes.join(' ') };
 }
