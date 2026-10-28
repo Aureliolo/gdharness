@@ -89,6 +89,17 @@ export interface RunPrinted {
   readonly engineVersion: string | null;
   /** The orphans each case or suite's hooks left, as the runner named them. */
   readonly orphansLeft: readonly OrphansLeft[];
+  /** The rows gdUnit4 skipped for data that does not fit their case's parameters. */
+  readonly mismatched: readonly MismatchedRow[];
+}
+
+/** A row of a parameterised case that gdUnit4 skipped because its data does not fit the case. */
+interface MismatchedRow {
+  readonly suite: string;
+  /** The row as gdUnit4 printed it, `test_fit:0 (…)`. */
+  readonly name: string;
+  /** gdUnit4's reason, its lines joined. */
+  readonly reason: string;
 }
 
 const SUITE_OPENED = /^Run Test Suite:\s*(res:\/\/.+?\.gd)\s*$/;
@@ -100,6 +111,9 @@ const STATISTICS = new RegExp(String.raw`^Statistics:.*\|\s*([A-Z]+)(?:\s+\(.*?\
 const ERROR_LINE = /^\s*(?:SCRIPT |USER )?ERROR: (.*?)\s*$/;
 const WARNING_LINE = /^\s*(?:SCRIPT |USER )?WARNING: (.*?)\s*$/;
 const EXECUTED = /^Executed test cases\s*:\s*\((\d+)\//;
+// gdUnit4's reason for skipping a row whose data does not fit its case, printed under the row, which
+// it prints as PASSED first. The run's summary counts it skipped, and nothing else says it never ran.
+const MISMATCHED_ROW = /^\s*The test data set at index \(\d+\) does not match the expected test parameters/;
 // The engine's first line, `Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org`.
 const BANNER = /^\s*Godot Engine v(\S+?)(?:\s+-\s+\S+)?\s*$/;
 // Printed by the runner in src/godot/tests/listed.gd as it leaves a row out, -1 for a case whole.
@@ -157,6 +171,45 @@ function rowRuns(share: RowShare, row: number | null): boolean {
   return 'only' in share
     ? row !== null && share.only.includes(row)
     : row === null || !share.besides.includes(row);
+}
+
+/**
+ * Every row [param printed] says gdUnit4 skipped for data that does not fit its case, under the suite
+ * and the row printed last before the reason.
+ *
+ * A row skipped this way is a case that never ran, and gdUnit4 calls the run passed: a case taking
+ * its rows from a function returning a constant had all three skipped, and a mix of fitting and
+ * misfitting rows passes with only the misfits left out.
+ */
+function mismatchedRowsIn(printed: readonly string[]): MismatchedRow[] {
+  const lines = printed.flatMap((text) => stripVTControlCharacters(text).split(/\r?\n/));
+  const found: MismatchedRow[] = [];
+  let suite: string | null = null;
+  let lastCase: string | null = null;
+  for (let at = 0; at < lines.length; at += 1) {
+    const line = lines[at] ?? '';
+    const opened = SUITE_OPENED.exec(line)?.[1];
+    if (opened !== undefined) {
+      suite = opened;
+      lastCase = null;
+      continue;
+    }
+    const caseLine = CASE_LINE.exec(line);
+    if (caseLine !== null) {
+      lastCase = caseLine[3] === 'STARTED' ? lastCase : (caseLine[2] ?? null);
+      continue;
+    }
+    if (suite === null || lastCase === null || !MISMATCHED_ROW.test(line)) {
+      continue;
+    }
+    const parts = [line.trim()];
+    while (at + 1 < lines.length && !['', "'"].includes((lines[at + 1] ?? '').trim())) {
+      at += 1;
+      parts.push((lines[at] ?? '').trim());
+    }
+    found.push({ suite, name: lastCase, reason: parts.join(' ').replaceAll(/\[\/?color[^\]]*\]/g, '') });
+  }
+  return found;
 }
 
 /** [param printed], both streams in the order they came, read into suites, cases and errors. */
@@ -305,6 +358,7 @@ export function readRun(printed: string): RunPrinted {
     leftOut,
     engineVersion,
     orphansLeft,
+    mismatched: mismatchedRowsIn(lines),
   };
 }
 
@@ -604,6 +658,10 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
         ? 'the run never printed its summary'
         : 'the run executed no test case at all, whatever it exited with',
     );
+  }
+  for (const row of printed.mismatched) {
+    faults.push(`${row.suite} > ${row.name} never ran: gdUnit4 skipped it, saying "${row.reason}"`);
+    failing.add(row.suite);
   }
   for (const { path, cases, rows = {} } of handed.suites) {
     const suite = printed.suites.get(path);

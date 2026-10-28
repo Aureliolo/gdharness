@@ -43280,6 +43280,64 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
 }
 
 /**
+ * A row gdUnit4 skips because its data does not fit the case fails the run. gdUnit4 prints the row
+ * passed and then a report saying it was skipped, and a run with other cases passing beside it was
+ * called passed. The lines are gdUnit4's own, captured from a real run of rows a function returned.
+ */
+function testARowSkippedForItsDataIsNoPass(): void {
+  const clean = { code: 0, signal: null, ended: null };
+  const handed = {
+    suites: [{ path: S_TEST, cases: ['test_a', 'test_p'] }],
+    expected: { errors: {}, warnings: {} },
+  };
+  const row = (index: number, value: number, skipped: boolean): string[] => [
+    caseLine(S_TEST, `test_p:${String(index)} (${String(value)})`, 'STARTED'),
+    caseLine(S_TEST, `test_p:${String(index)} (${String(value)})`, 'PASSED', '0ms'),
+    ...(skipped
+      ? [
+          '  \u001b[38;2;0;206;209m\u001b[1m\u001b[4mReport:\u001b[0m',
+          '  \u001b[38;2;128;128;128m\u001b[38;2;255;69;0mThis test is skipped!\u001b[0m',
+          "  Reason: '\u001b[38;2;30;144;255m",
+          `The test data set at index (${String(index)}) does not match the expected test parameters:`,
+          '\ttest function: \u001b[38;2;255;250;250mfunc test...(a: int,b: int)\u001b[0m\u001b[38;2;30;144;255m',
+          `\ttest input values: \u001b[38;2;255;250;250m[${String(value)}]\u001b[0m\u001b[38;2;30;144;255m`,
+          "\u001b[0m'",
+          '\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+        ]
+      : []),
+  ];
+  const run = (skipped: boolean): string =>
+    cannedRun([
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+      ...row(0, 1, skipped),
+      ...row(1, 3, skipped),
+    ]);
+  const fitting = judgeEngine(readRun(run(false)), handed, clean);
+  assert.deepEqual([fitting.faults, fitting.passedSuites], [[], [S_TEST]], 'rows that ran pass');
+  const reason = (index: number, value: number): string =>
+    `The test data set at index (${String(index)}) does not match the expected test parameters: test function: func test...(a: int,b: int) test input values: [${String(value)}]`;
+  assert.deepEqual(
+    readRun(run(true)).mismatched,
+    [
+      { suite: S_TEST, name: 'test_p:0 (1)', reason: reason(0, 1) },
+      { suite: S_TEST, name: 'test_p:1 (3)', reason: reason(1, 3) },
+    ],
+    'each skipped row with the reason gdUnit4 gave',
+  );
+  const skipped = judgeEngine(readRun(run(true)), handed, clean);
+  assert.deepEqual(
+    skipped.faults,
+    [
+      `${S_TEST} > test_p:0 (1) never ran: gdUnit4 skipped it, saying "${reason(0, 1)}"`,
+      `${S_TEST} > test_p:1 (3) never ran: gdUnit4 skipped it, saying "${reason(1, 3)}"`,
+    ],
+    'rows skipped beside a case that passed',
+  );
+  assert.deepEqual(skipped.passedSuites, [], 'and the suite did not pass');
+}
+
+/**
  * A wait for a slot looks when the slots' folder changes, and otherwise once a second.
  *
  * The lane measured a wait looking every 50 ms at some 2.7% of a core for each waiting taker, for
@@ -49115,6 +49173,9 @@ async function testGdUnitRunner(): Promise<void> {
           `and runs fewer than the whole set: ${JSON.stringify(stopped, null, 2)}`,
         );
         assert.match(text(get(stopped, 'note')), /never ran/, text(get(stopped, 'note')));
+        // The cases a failure stopped are counted under notRun, and not named as cases gdUnit4
+        // left out of a suite that passed.
+        assert.equal(get(stopped, 'testsNotRun'), undefined, JSON.stringify(stopped, null, 2));
         // Every suite's own numbers count what ran, so the totals and the suites agree.
         for (const suite of asArray(get(stopped, 'suites'))) {
           const ran = asNumber(get(suite, 'tests'));
@@ -53818,6 +53879,108 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
         text(get(unrun.answer, 'note')),
         /helper:test_fixture was asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite/,
         unrun.text,
+      );
+    });
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A suite gdUnit4 runs and passes can leave out a case it declares, or skip every row of one, and say
+ * nothing that fails the run. Both were answered passed. The two shapes are those gdUnit4 was seen to
+ * do it with: a parameterised case whose signature spans lines, and rows a function returns.
+ */
+async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('unrun cases regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-unrun-cases-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="UnrunCases"\n',
+    );
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(project, 'test'), { recursive: true });
+    const screens = 'const SCREENS: Array = [[Vector2(1280, 800)], [Vector2(640, 400)]]\n';
+    const plain = '\n\nfunc test_plain() -> void:\n\tassert_bool(true).is_true()\n';
+    const fits = '\tassert_float(screen.x).is_greater(0.0)\n';
+    writeFileSync(
+      join(project, 'test', 'one_line_test.gd'),
+      `extends GdUnitTestSuite\n\n${screens}\n\nfunc test_fit(screen: Vector2, _test_parameters: Array = SCREENS) -> void:\n${fits}${plain}`,
+    );
+    writeFileSync(
+      join(project, 'test', 'spanning_test.gd'),
+      `extends GdUnitTestSuite\n\n${screens}\n\nfunc test_fit(\n\tscreen: Vector2, _test_parameters: Array = SCREENS\n) -> void:\n${fits}${plain}`,
+    );
+    writeFileSync(
+      join(project, 'test', 'returned_test.gd'),
+      'extends GdUnitTestSuite\n\nconst PAIRS: Array = [[1, 2], [3, 4]]\n\n\nfunc pairs() -> Array:\n\treturn PAIRS\n\n\n' +
+        `func test_pair(a: int, b: int, _test_parameters: Array = pairs()) -> void:\n\tassert_int(a + 1).is_equal(b)\n${plain}`,
+    );
+    await withStdioServer(async (_call, request) => {
+      const run = async (args: Record<string, unknown>): Promise<{ text: string; answer: unknown }> => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project, ...args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        return {
+          text: blocks.join('\n'),
+          answer: JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown,
+        };
+      };
+      const read = (answer: unknown): unknown[] =>
+        ['passed', 'tests', 'testsNotRun', 'rowsMismatched'].map((key) => get(answer, key));
+
+      // The same case on one line runs every row, and is a pass.
+      const oneLine = await run({ path: 'res://test/one_line_test.gd' });
+      assert.deepEqual(read(oneLine.answer), [true, 3, undefined, undefined], oneLine.text);
+
+      const spanning = await run({ path: 'res://test/spanning_test.gd' });
+      assert.deepEqual(
+        read(spanning.answer),
+        [false, 1, ['spanning_test:test_fit'], undefined],
+        spanning.text,
+      );
+      assert.equal(get(spanning.answer, 'verdict'), 'not run: spanning_test:test_fit', spanning.text);
+      assert.match(
+        text(get(spanning.answer, 'note')),
+        /spanning_test:test_fit is a case of a suite that ran and passed, and gdUnit4 never ran it and said nothing of it, so the run is not called passed/,
+        spanning.text,
+      );
+      // A case the run was told to leave out is answered under ignored, and not as unrun.
+      const leftOut = await run({ path: 'res://test/spanning_test.gd', ignore: ['spanning_test:test_fit'] });
+      assert.deepEqual(
+        [...read(leftOut.answer), get(leftOut.answer, 'ignored')],
+        [true, 1, undefined, undefined, ['spanning_test:test_fit']],
+        leftOut.text,
+      );
+
+      const returned = await run({ path: 'res://test/returned_test.gd' });
+      const reason = (index: number, value: number): string =>
+        `The test data set at index (${String(index)}) does not match the expected test parameters: test function: func test...(a: int,b: int) test input values: [${String(value)}]`;
+      assert.deepEqual(read(returned.answer).slice(0, 3), [false, 3, undefined], returned.text);
+      assert.deepEqual(
+        get(returned.answer, 'rowsMismatched'),
+        [
+          { test: 'res://test/returned_test.gd > test_pair:0 (1)', reason: reason(0, 1) },
+          { test: 'res://test/returned_test.gd > test_pair:1 (3)', reason: reason(1, 3) },
+        ],
+        returned.text,
+      );
+      assert.equal(
+        get(returned.answer, 'verdict'),
+        '2 rows skipped for data that does not fit the case',
+        returned.text,
       );
     });
   } finally {
@@ -64982,6 +65145,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWriteReadsWhatThePropertyDeclares,
   testAResourceWriteWithNoEditorSaysWhatStoppedIt,
   testATestRunTakesTheCasesNamed,
+  testACaseGdUnitLeavesUnrunIsNoPass,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,
@@ -65284,6 +65448,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunIsReadCaseByCase,
   testAnEngineMayBeSilentAsLongAsWhatItRuns,
   testAnEngineRunIsJudgedOnEverythingItPrinted,
+  testARowSkippedForItsDataIsNoPass,
   testTheScriptsGodotNeverFreesAreFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testASlotWaitLooksWhenTheSlotsChange,

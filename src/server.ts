@@ -7988,6 +7988,31 @@ class GodotServer {
           .map((one) => `${basename(one.suite, '.gd')}:${one.test}`),
       ),
     ];
+    // A suite that ran and passed can still leave a case it declares unrun, and gdUnit4 says nothing
+    // of it: a parameterised case whose signature spans lines was never run, and the run was
+    // answered passed. Read off the console, as gdharness test judges it.
+    const casesNotRun =
+      selection.value === null
+        ? asked
+            .flatMap((path) =>
+              path.endsWith('.gd') ? (projectScripts.suite(path) ?? []) : projectScripts.suitesUnder([path]),
+            )
+            .flatMap((suite) => {
+              const ran = casePrinted.suites.get(suite.path);
+              if (ran?.closed?.verdict !== 'PASSED') {
+                return [];
+              }
+              return suite.cases
+                .filter((func) => !ran.cases.some((one) => one.func === func))
+                .map((func) => `${basename(suite.path, '.gd')}:${func}`)
+                .filter((one) => !ignoreRead.leftOut.includes(one));
+            })
+        : [];
+    // gdUnit4 prints such a row passed, then skips it, and the run was answered passed.
+    const rowsMismatched = casePrinted.mismatched.map((row) => ({
+      test: `${row.suite} > ${row.name}`,
+      reason: row.reason,
+    }));
     return this.jsonTextResponse({
       // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
       // passed beside a verdict saying no test cases were found.
@@ -8005,6 +8030,8 @@ class GodotServer {
         countedLeaks.length === 0 &&
         missing.length === 0 &&
         testsNotRun.length === 0 &&
+        casesNotRun.length === 0 &&
+        rowsMismatched.length === 0 &&
         notSuites.length === 0,
       verdict: [
         // gdUnit4's word for the exit, which is not the run's when something below fails it.
@@ -8013,6 +8040,8 @@ class GodotServer {
           declaredNotPrinted.length +
           countedLeaks.length +
           testsNotRun.length +
+          casesNotRun.length +
+          rowsMismatched.length +
           notSuites.length >
           0
           ? undefined
@@ -8032,7 +8061,12 @@ class GodotServer {
             : undefined;
         }),
         countedLeaks.length > 0 ? 'the engine exited holding what it should have freed' : undefined,
-        testsNotRun.length > 0 ? `not run: ${testsNotRun.join(', ')}` : undefined,
+        testsNotRun.length + casesNotRun.length > 0
+          ? `not run: ${[...testsNotRun, ...casesNotRun].join(', ')}`
+          : undefined,
+        rowsMismatched.length > 0
+          ? `${rowsMismatched.length === 1 ? 'one row' : `${String(rowsMismatched.length)} rows`} skipped for data that does not fit the case`
+          : undefined,
         notSuites.length > 0
           ? `${notSuites.length === 1 ? 'one script declares' : `${String(notSuites.length)} scripts declare`} cases gdUnit4 never runs`
           : undefined,
@@ -8041,7 +8075,10 @@ class GodotServer {
         .join('; '),
       ...(missing.length > 0 ? { missing } : {}),
       ...(notSuites.length > 0 ? { notSuites } : {}),
-      ...(testsNotRun.length > 0 ? { testsNotRun } : {}),
+      ...(testsNotRun.length + casesNotRun.length > 0
+        ? { testsNotRun: [...testsNotRun, ...casesNotRun] }
+        : {}),
+      ...(rowsMismatched.length > 0 ? { rowsMismatched } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
       exitCode,
       exitSignal: run.exitSignal ?? undefined,
@@ -8081,6 +8118,12 @@ class GodotServer {
           missingNote,
           testsNotRun.length > 0
             ? `${testsNotRun.join(', ')} ${testsNotRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`
+            : undefined,
+          casesNotRun.length > 0
+            ? `${casesNotRun.join(', ')} ${casesNotRun.length === 1 ? 'is a case' : 'are cases'} of a suite that ran and passed, and gdUnit4 never ran ${casesNotRun.length === 1 ? 'it' : 'them'} and said nothing of it, so the run is not called passed, as gdharness test judges it.`
+            : undefined,
+          rowsMismatched.length > 0
+            ? `gdUnit4 skipped what rowsMismatched names because the row's data does not fit the case's parameters, though it printed ${rowsMismatched.length === 1 ? 'the row' : 'each row'} passed first; each entry carries gdUnit4's reason. The run is not called passed, as gdharness test judges it.`
             : undefined,
           notSuites.length > 0
             ? 'What notSuites names declares cases gdUnit4 never runs, so the run is not called passed, as gdharness test judges it.'
