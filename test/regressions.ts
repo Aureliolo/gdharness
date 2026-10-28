@@ -9138,8 +9138,23 @@ function testASearchReadsWhatItSaysItReads(): void {
     const exactly = search('GameState', { maxResults: 2 });
     assert.equal(exactly.summary.total_matches, 2);
     assert.equal(exactly.summary.truncated, false, 'matches that come to the limit exactly are all of them');
+    mkdirSync(join(sandbox, 'zz_vendor'));
+    writeFileSync(join(sandbox, 'zz_vendor', '.gdignore'), '');
     const cut = search('GameState', { maxResults: 1 });
     assert.equal(cut.summary.truncated, true, 'and one more than the limit is cut');
+    // Cut in what it answers, not in what it counts or where it looked.
+    assert.deepEqual(
+      [
+        cut.results.flatMap((entry) => entry.matches).length,
+        cut.summary.total_matches,
+        cut.summary.files_with_matches,
+        cut.summary.files_searched,
+        cut.not_searched,
+      ],
+      [1, 2, 2, everywhere.summary.files_searched, ['res://zz_vendor/']],
+      JSON.stringify(cut),
+    );
+    rmSync(join(sandbox, 'zz_vendor'), { recursive: true });
 
     // The text found, as the line spells it, rather than the query: a search ignoring case
     // answered "GameState" on a line holding "gamestate". Spelled unlike both the query and its
@@ -40058,11 +40073,19 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
         const one = JSON.parse(
           await call('project_search', { projectPath: ours, query: 'extends', maxResults: 1 }),
         ) as SearchResult;
+        const every = JSON.parse(
+          await call('project_search', { projectPath: ours, query: 'extends' }),
+        ) as SearchResult;
         assert.deepEqual(
-          [one.summary.total_matches, one.summary.truncated],
-          [1, true],
-          'a limit of one answers one line, and says there were more',
+          [
+            one.results.flatMap((entry) => entry.matches).length,
+            one.summary.truncated,
+            one.summary.total_matches,
+          ],
+          [1, true, every.summary.total_matches],
+          'a limit of one answers one line, says there were more, and counts them all',
         );
+        assert.ok(every.summary.total_matches > 1, JSON.stringify(every.summary));
 
         // The search with no fileTypes, through the server: every text file, project.godot included.
         const searched = await call('project_search', { projectPath: theirs, query: 'config_version' });
