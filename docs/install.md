@@ -171,6 +171,14 @@ game's input handlers, but `get_mouse_position()` on the root window, and the po
 from it, read a meaningless position: the engine asks Windows and does not check the refusal. The
 pointer answers from `runtime_input` say so under `pointer_note` for a game on that desktop.
 
+That desktop is in the logon session's non-interactive window station, which keeps a game's
+`ClipCursor` and `SetCursorPos` off the pointer in use and has no compositor:
+`DwmIsCompositionEnabled` answers false there. A layered window (`WS_EX_LAYERED`, as a click-through
+overlay makes) takes `SetLayeredWindowAttributes` once, and after it has been hidden and shown again
+the call fails with `ERROR_GEN_FAILURE` (31). A game that makes its window layered can tell it is
+there by that answer, or by `GDHARNESS_DESKTOP`, which names the desktop to every process started
+on it, and leave the window plain.
+
 `editor_launch restart` waits ninety seconds for the old editor to close and ninety more for the new
 one to connect. A project whose import takes longer than that sets
 `GDHARNESS_EDITOR_RESTART_TIMEOUT_MS` in the server's environment.

@@ -272,9 +272,11 @@ whole run one, and the run names each suite declaring `false` that runs with the
 starts. The windowed engine runs without
 `--headless`, at the size `project.godot` gives its viewport, and with the Dummy audio driver like
 every other test engine. On Windows it runs on a desktop of its own, so its window never appears
-on the desktop in use or takes its focus. The headless engines run there too, since an engine that
-fails to start shows a modal alert even with `--headless`. Elsewhere it uses the display there is;
-on a CI runner with none, run it under `xvfb-run`.
+on the desktop in use or takes its focus. That desktop has no compositor, so a layered window
+fails there once it has been shown again; [the install guide](install.md) says how a game tells.
+The headless engines run there too, since an engine that fails to start shows a modal alert even
+with `--headless`. Elsewhere it uses the display there is; on a CI runner with none, run it under
+`xvfb-run`.
 
 The `project_test` tool reads the suites the same way. Its run is one engine, so when a suite in it
 needs a window the whole run has one, started as above, and the answer's `windowNote` names the

@@ -58956,7 +58956,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
         'child_entered_tree',
         'hide',
         undefined,
-        `child_entered_tree passes 1 argument, and hide takes none${fails} Connected with unbinds 1, the last argument the signal passes is left out.`,
+        `child_entered_tree passes 1 argument, and hide takes none${fails} Connect it with unbinds 1 to leave out the last argument the signal passes.`,
       ],
       [
         'child_entered_tree',
@@ -58990,8 +58990,22 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     });
     assert.equal(
       get(overBound, 'misfit'),
-      `visibility_changed passes 1 argument, and hide takes none${fails}`,
+      `visibility_changed passes no arguments and the connection binds 1, so hide is called with 1 argument, and takes none${fails}`,
       JSON.stringify(overBound),
+    );
+    const boundWrong = await written('scene_signal', {
+      op: 'connect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'tree_entered',
+      targetNodePath: 'Taker',
+      methodName: 'take_node',
+      binds: [1],
+    });
+    assert.equal(
+      get(boundWrong, 'misfit'),
+      `the connection binds argument 1 as int, and take_node takes it as node: Node2D${fails}`,
+      JSON.stringify(boundWrong),
     );
     const unwritten = await wire('died', 'not_yet_written');
     assert.deepEqual(
@@ -59103,14 +59117,19 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       [
         undefined,
         1,
-        `child_entered_tree passes 1 argument, and queue_free takes none${fails} Connected with unbinds 1, the last argument the signal passes is left out.`,
+        `child_entered_tree passes 1 argument, and queue_free takes none${fails} Connect it with unbinds 1 to leave out the last argument the signal passes.`,
       ],
       JSON.stringify(unbound),
     );
     const rebound = await rewire('child_entered_tree', 'queue_free', { unbinds: 1, binds: [3] });
     assert.deepEqual(
-      [get(rebound, 'unbinds'), get(rebound, 'binds'), get(rebound, 'unbindsBefore')],
-      [1, [3], 0],
+      [get(rebound, 'unbinds'), get(rebound, 'binds'), get(rebound, 'unbindsBefore'), get(rebound, 'misfit')],
+      [
+        1,
+        [3],
+        0,
+        `child_entered_tree passes 1 argument and the connection unbinds 1 and binds 1, so queue_free is called with 1 argument, and takes none${fails}`,
+      ],
       JSON.stringify(rebound),
     );
     assert.equal(
@@ -59230,6 +59249,54 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       [['persist', 'inherited'], false, [7]],
       JSON.stringify(nested),
     );
+    // One an instanced scene makes on its own root sits on a node the scene holding it owns, so the
+    // ends alone read it as editable there. Seen from an instance and from a scene inheriting it,
+    // beside a connection the holding scene makes itself.
+    writeFileSync(
+      join(project, 'ring.tscn'),
+      '[gd_scene format=3]\n\n[node name="Ring" type="Node2D"]\n\n' +
+        '[connection signal="visibility_changed" from="." to="." method="queue_free"]\n',
+    );
+    writeFileSync(
+      join(project, 'rings.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://ring.tscn" id="1_ring"]\n\n' +
+        '[node name="Rings" type="Node2D"]\n\n[node name="Ring" parent="." instance=ExtResource("1_ring")]\n\n' +
+        '[connection signal="visibility_changed" from="Ring" to="." method="hide"]\n',
+    );
+    writeFileSync(
+      join(project, 'big_ring.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://ring.tscn" id="1_ring"]\n\n' +
+        '[node name="BigRing" instance=ExtResource("1_ring")]\n',
+    );
+    const ringed = (listed: Parameters<typeof parseTextContent>[0]): unknown[] =>
+      asArray(get(parseTextContent(listed), 'connections')).map((one) => [
+        get(one, 'sourceNodePath'),
+        get(one, 'methodName'),
+        get(one, 'editable'),
+        get(one, 'madeIn'),
+      ]);
+    assert.deepEqual(ringed(await call('scene_signal', { op: 'list', scenePath: 'rings.tscn' })), [
+      ['Ring', 'queue_free', false, 'res://ring.tscn'],
+      ['Ring', 'hide', true, undefined],
+    ]);
+    assert.deepEqual(ringed(await call('scene_signal', { op: 'list', scenePath: 'big_ring.tscn' })), [
+      ['.', 'queue_free', false, 'res://ring.tscn'],
+    ]);
+    const ringBefore = fileOf('ring.tscn');
+    assert.equal(
+      textOf(
+        await call('scene_signal', {
+          op: 'disconnect',
+          scenePath: 'rings.tscn',
+          sourceNodePath: 'Ring',
+          signalName: 'visibility_changed',
+          targetNodePath: 'Ring',
+          methodName: 'queue_free',
+        }),
+      ),
+      'The connection from Ring.visibility_changed to Ring.queue_free is made by res://ring.tscn, and this scene saves nothing about it: disconnect it there, which changes every scene using it.',
+    );
+    assert.equal(fileOf('ring.tscn'), ringBefore, 'and the scene that makes it is left alone');
 
     const scripted = await written('scene_create', {
       op: 'create',
