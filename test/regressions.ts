@@ -60157,8 +60157,22 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       textOf(
         await call('scene_node', { op: 'add', scenePath: 'made.tscn', nodeName: 'Boss', nodeType: 'Node' }),
       ),
-      'The root, Node2D, already has a child named Boss.',
+      'The root, Node2D, already has a child named Boss; Boss2 is free there.',
     );
+    // The name offered is free, past a numbered one already taken, and a numbered name counts on.
+    await written('scene_node', { op: 'add', scenePath: 'made.tscn', nodeName: 'Boss2', nodeType: 'Node' });
+    for (const [taken, free] of [
+      ['Boss', 'Boss3'],
+      ['Boss2', 'Boss3'],
+    ] as const) {
+      assert.equal(
+        textOf(
+          await call('scene_node', { op: 'add', scenePath: 'made.tscn', nodeName: taken, nodeType: 'Node' }),
+        ),
+        `The root, Node2D, already has a child named ${taken}; ${free} is free there.`,
+      );
+    }
+    await written('scene_node', { op: 'delete', scenePath: 'made.tscn', nodePath: 'Boss2' });
     // A scene that is not there is refused before anything loads it, so no engine error and
     // backtrace lie beneath the refusal, and the nearest scenes are offered.
     const orc = await call('scene_node', {
@@ -62520,7 +62534,7 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "What this saved names res://parts/big_crate.tscn by path rather than by uid, which loads the same. A uid in a file's own header is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, so a uid written now would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
+      "What this saved names res://parts/big_crate.tscn by path rather than by uid, which loads the same. A reference by uid is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, so naming it by uid now would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -63414,7 +63428,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid, which loads the same. A uid in a file's own header is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, so a uid written now would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
+      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid, which loads the same. A reference by uid is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, so naming them by uid now would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));

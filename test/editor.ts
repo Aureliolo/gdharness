@@ -3042,7 +3042,7 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
 
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'Clock' }),
-    /: The root, \w+, already has a child named Clock\.$/m,
+    /: The root, \w+, already has a child named Clock; Clock2 is free there\.$/m,
   );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'a.b' }),

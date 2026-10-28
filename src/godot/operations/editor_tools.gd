@@ -85,13 +85,14 @@ static func run(params: Dictionary) -> Dictionary:
 			answered["namedByPath"] = (
 				(
 					"What this saved names %s by path rather than by uid, which loads the same. A "
-					+ "uid in a file's own header is resolved through the project's uid cache, "
-					+ "which holds none for %s yet, as with a file made since the project was last "
-					+ "scanned, so a uid written now would warn on every load. project_import "
-					+ "refresh_uids scans the project, and writes after it name %s by uid."
+					+ "reference by uid is resolved through the project's uid cache, which holds "
+					+ "none for %s yet, as with a file made since the project was last scanned, so "
+					+ "naming %s by uid now would warn on every load. project_import refresh_uids "
+					+ "scans the project, and writes after it name %s by uid."
 				)
 				% [
 					", ".join(GdhSceneUids.by_path),
+					"it" if GdhSceneUids.by_path.size() == 1 else "them",
 					"it" if GdhSceneUids.by_path.size() == 1 else "them",
 					"it" if GdhSceneUids.by_path.size() == 1 else "them",
 				]
