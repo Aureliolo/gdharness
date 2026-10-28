@@ -1,6 +1,5 @@
 @tool
 extends RefCounted
-
 ## What a caller writes for a property, read against the type that property declares, and the
 ## question of whether it can be written at all.
 ##
@@ -21,7 +20,6 @@ const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhShapes = preload("value_shapes.gd")
-
 # The data types a Theme names its items by, as in "Button/colors/font_color", and what each holds.
 const THEME_ITEMS: Dictionary[String, Array] = {
 	"colors": [TYPE_COLOR, ""],
@@ -31,13 +29,11 @@ const THEME_ITEMS: Dictionary[String, Array] = {
 	"icons": [TYPE_OBJECT, "Texture2D"],
 	"styles": [TYPE_OBJECT, "StyleBox"],
 }
-
 # What each packed array holds, for the four whose elements are not types JSON has. A polygon is
 # written as a list of pairs, and only the property knows that each pair is a Vector2 rather than a
 # list of two numbers: without being told, every element was read as itself and the engine turned
 # the lot into zeroes on the way into the property.
 const PACKED_ELEMENTS: Dictionary = GdhShapes.PACKED_ELEMENTS
-
 # Entries in a property list that only head a section of the inspector. Object.set ignores their
 # names, so a write to "Visibility" or "Transform" changed nothing and was answered as made.
 const HEADINGS: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP
@@ -49,7 +45,6 @@ const PLACED_BY_A_CONTAINER: Array[String] = ["position", "size", "global_positi
 
 ## The property the last write_all refused because it did not hold what it was given, or "".
 var unheld: String = ""
-
 ## The stored properties the last write_all's own writes moved beside the ones they were given, as a
 ## set: the Anchors mode an anchor needs, and what an engine setter keeps in step, such as the
 ## anchors an anchor preset sets. Only writes no script code runs for count. A headless write that
@@ -57,24 +52,19 @@ var unheld: String = ""
 ## doing, which put a panel given a script and a bottom-wide preset back in Position mode, where its
 ## anchors are not stored.
 var moved_by_engine: Dictionary = {}
-
 var _values: GdhSerialisation = GdhSerialisation.new()
-
 # Why the value being parsed cannot be written, when the parse is what found out. A resource is
 # built inside the parse and there is nowhere in a parsed value to put the reason it is wrong.
 var _refused: String = ""
-
 # The stored properties the last write_all changed without being given them, by name, as [what it
 # held before, what it holds now]. A setter keeps other properties in step with the one it is given:
 # a Gradient given a third colour gives that point an offset of 0, a Control given a size moves its
 # offsets. An answer naming only what was given leaves the caller to guess the rest.
 var _also_changed: Dictionary = {}
-
 # The values the last write_all wrote outside what their property declares, by name, as a sentence
 # saying so: a number past an export range, or one no enum value has. The engine stores either, and
 # the inspector would not have let it be entered, so a write answered as made said nothing of it.
 var _outside_declared: Dictionary = {}
-
 # The node paths the last write_all wrote that name no node from the node written, by property, as
 # a sentence saying so.
 var _names_no_node: Dictionary = {}
@@ -94,7 +84,10 @@ func parse(value: Variant, expected_type: int = TYPE_NIL, elements: Array = []) 
 		var fields: Dictionary = value
 		# A dictionary with keys that are not text arrives as its entries, and is read against the
 		# declared element types like any other.
-		if str(fields.get("_type", "")) == "Dictionary" and GdhSerialisation.pairs(fields.get("entries")):
+		if (
+			str(fields.get("_type", "")) == "Dictionary"
+			and GdhSerialisation.pairs(fields.get("entries"))
+		):
 			var built: Dictionary = _values.deserialize_value(fields)
 			return _parse_entries(built, elements)
 		var tagged: Array = _parse_tagged_dictionary(fields)
@@ -128,8 +121,8 @@ func cannot_hold(
 		return shape % [holder, property, held, _kind(value)] + remedy + cost
 
 	# And the same question of each element, because a list is accepted for a packed or typed array
-	# whatever is in it: a polygon written as [{"x": 1}] passes the check above and lands as one zero
-	# vector, and [1.5, "x"] for a PackedInt32Array as [1, 0].
+	# whatever is in it: a polygon written as [{"x": 1}] passes the check above and lands as one
+	# zero vector, and [1.5, "x"] for a PackedInt32Array as [1, 0].
 	var element: int = GdhRead.as_int(PACKED_ELEMENTS.get(expected_type, TYPE_NIL), TYPE_NIL)
 	if expected_type == TYPE_ARRAY and not elements.is_empty():
 		element = GdhRead.as_int(elements[0], TYPE_NIL)
@@ -138,7 +131,9 @@ func cannot_hold(
 		for index: int in items.size():
 			if not GdhSerialisation.acceptable(items[index], element):
 				var shape: String = "%s.%s is %s and item %d of the list given is %s, not %s."
-				var named: Array = [holder, property, held, index, _kind(items[index]), type_string(element)]
+				var named: Array = [
+					holder, property, held, index, _kind(items[index]), type_string(element),
+				]
 				return shape % named + GdhShapes.remedy(items[index], element) + cost
 			# A list of polygons is a list of lists of points, and each point is read as one too.
 			var inner: int = GdhRead.as_int(PACKED_ELEMENTS.get(element, TYPE_NIL), TYPE_NIL)
@@ -147,9 +142,17 @@ func cannot_hold(
 			var points: Array = items[index]
 			for at: int in points.size():
 				if not GdhSerialisation.acceptable(points[at], inner):
-					var nested: String = "%s.%s holds lists of %s, and item %d of list %d given is %s, not %s."
+					var nested: String = (
+						"%s.%s holds lists of %s, and item %d of list %d given is %s, not %s."
+					)
 					var said: Array = [
-						holder, property, type_string(inner), at, index, _kind(points[at]), type_string(inner)
+						holder,
+						property,
+						type_string(inner),
+						at,
+						index,
+						_kind(points[at]),
+						type_string(inner),
 					]
 					return nested % said + GdhShapes.remedy(points[at], inner) + cost
 	if expected_type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
@@ -163,13 +166,15 @@ func cannot_hold(
 			var entry: Variant = entries[key]
 			if not GdhSerialisation.acceptable(entry, value_type):
 				var shape: String = "%s.%s holds %s values, and the one given for %s is %s."
-				var named: Array = [holder, property, type_string(value_type), shown(key), shown(entry)]
+				var named: Array = [
+					holder, property, type_string(value_type), shown(key), shown(entry),
+				]
 				return shape % named + GdhShapes.remedy(entry, value_type) + cost
 	return ""
 
 
-## What [param value] is, as a refusal names it. A number arrives from JSON as a float whether or not
-## it has a fraction, so [1, 2] given for a list of words was called a list of floats.
+## What [param value] is, as a refusal names it. A number arrives from JSON as a float whether or
+## not it has a fraction, so [1, 2] given for a list of words was called a list of floats.
 static func _kind(value: Variant) -> String:
 	if value is int or value is float:
 		return "a number"
@@ -219,7 +224,9 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	# A refusal of one of several leaves the others unwritten too, which a refusal naming only the
 	# one it refused left a caller to guess.
 	var unwritten: String = (
-		"" if properties.size() < 2 else " None of the %d properties given was written." % properties.size()
+		""
+		if properties.size() < 2
+		else " None of the %d properties given was written." % properties.size()
 	)
 	# The script first, wherever the caller put it, since the properties it declares exist only once
 	# it is attached.
@@ -241,7 +248,9 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			var unlisted: String = GdhPropertyPaths.unlisted(holder, name)
 			if not unlisted.is_empty():
 				return unlisted + unwritten
-			var ungrown: String = GdhPropertyPaths.grow(holder, name, GdhPropertyPaths.class_called(holder))
+			var ungrown: String = GdhPropertyPaths.grow(
+				holder, name, GdhPropertyPaths.class_called(holder)
+			)
 			if not ungrown.is_empty():
 				return ungrown + unwritten
 			declared = declaration(holder, name)
@@ -249,7 +258,11 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			declared = _component_slot(holder, name)
 			if declared.has("refused"):
 				return str(declared["refused"]) + unwritten
-		if declared.is_empty() and holder is ShaderMaterial and name.begins_with("shader_parameter/"):
+		if (
+			declared.is_empty()
+			and holder is ShaderMaterial
+			and name.begins_with("shader_parameter/")
+		):
 			return GdhDeclared.no_uniform(holder as ShaderMaterial, name) + unwritten
 		if declared.is_empty():
 			return no_property(holder, name) + unwritten
@@ -280,7 +293,10 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		declarations[property] = declared
 
 	for property: String in given:
-		if written_at[property] < writes and not GdhSame.same(read_at(target, property), given[property]):
+		if (
+			written_at[property] < writes
+			and not GdhSame.same(read_at(target, property), given[property])
+		):
 			_write(target, property, given[property])
 			writes += 1
 			written_at[property] = writes
@@ -292,15 +308,16 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			if undone_by.has(property):
 				return (
 					(
-						"%s.%s was given %s and holds %s once %s was set as well: the engine keeps the two "
-						+ "in step, so they cannot hold these values together. Nothing was written."
+						"%s.%s was given %s and holds %s once %s was set as well: the engine keeps "
+						+ "the two in step, so they cannot hold these values together. Nothing was "
+						+ "written."
 					)
 					% [
 						GdhPropertyPaths.class_called(target),
 						property,
 						shown(given[property]),
 						shown(held),
-						undone_by[property]
+						undone_by[property],
 					]
 				)
 			var declared: Dictionary = declarations[property]
@@ -334,17 +351,20 @@ func _note_undone(
 ## Why [param name] cannot be written on [param control], or "" once it can. A container places and
 ## sizes its children and the scene keeps none of that for them, so their anchors, offsets, position
 ## and size are refused with what a child does set. A control in Position mode ignores an anchor
-## preset, and the inspector offers anchors only in Anchors mode, so writing one puts it there first,
-## as picking a preset in the editor does; alsoChanged then names layout_mode.
+## preset, and the inspector offers anchors only in Anchors mode, so writing one puts it there
+## first, as picking a preset in the editor does; alsoChanged then names layout_mode.
 func _laid_out(control: Control, name: String) -> String:
 	var base: String = name.get_slice(":", 0)
 	var anchoring: bool = base == "anchors_preset" or base.begins_with("anchor_")
 	var parent: Node = control.get_parent()
-	if parent is Container and (anchoring or base.begins_with("offset_") or base in PLACED_BY_A_CONTAINER):
+	if (
+		parent is Container
+		and (anchoring or base.begins_with("offset_") or base in PLACED_BY_A_CONTAINER)
+	):
 		return (
 			(
-				"%s's parent, %s, is a %s, which places and sizes it, so its %s is the container's to set "
-				+ "and the scene keeps none of it. A child of a container is laid out with "
+				"%s's parent, %s, is a %s, which places and sizes it, so its %s is the container's "
+				+ "to set and the scene keeps none of it. A child of a container is laid out with "
 				+ "size_flags_horizontal, size_flags_vertical and custom_minimum_size."
 			)
 			% [control.name, parent.name, parent.get_class(), base]
@@ -369,7 +389,9 @@ func note_write(answer: Dictionary, relative_to: Node = null) -> void:
 	var noted: Dictionary = {}
 	for property: Variant in _also_changed:
 		var pair: Array = _also_changed[property]
-		noted[property] = {"was": _readable(pair[0], relative_to), "now": _readable(pair[1], relative_to)}
+		noted[property] = {
+			"was": _readable(pair[0], relative_to), "now": _readable(pair[1], relative_to),
+		}
 	answer["alsoChanged"] = noted
 
 
@@ -384,9 +406,9 @@ func _readable(value: Variant, relative_to: Node) -> Variant:
 
 
 ## What [param target] stores, by name, but its script and the properties in [param leave], in the
-## names a read answers with: a Curve's points as point_0/position and the rest rather than the _data
-## list every point write changes. A list or a map is copied, since a setter can change the one it
-## holds in place.
+## names a read answers with: a Curve's points as point_0/position and the rest rather than the
+## _data list every point write changes. A list or a map is copied, since a setter can change the
+## one it holds in place.
 func _stored(target: Object, leave: Dictionary) -> Dictionary:
 	var held: Dictionary = {}
 	for entry: Dictionary in GdhShapes.read_properties(target):
@@ -434,7 +456,7 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 	var steps: PackedStringArray = path.split(":")
 	var owner: String = GdhPropertyPaths.class_called(target)
 	if declaration(target, steps[0]).is_empty():
-		return {"refused": no_property(target, steps[0])}
+		return { "refused": no_property(target, steps[0]) }
 	var value: Variant = target.get(steps[0])
 	var walked: String = steps[0]
 	for index: int in range(1, steps.size()):
@@ -444,8 +466,8 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 		if has.is_empty():
 			var refused: String = (
 				(
-					"%s.%s is %s, which a path does not step into: a path reaches the components of a "
-					+ "vector, a colour, a rectangle or a transform."
+					"%s.%s is %s, which a path does not step into: a path reaches the components "
+					+ "of a vector, a colour, a rectangle or a transform."
 				)
 				% [owner, walked, sort]
 			)
@@ -457,18 +479,24 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 				)
 			elif value is Array and index + 1 < steps.size():
 				refused += (
-					" A property of a resource in it is reached with slashes and the element's index: %s/%s/%s."
+					(
+						" A property of a resource in it is reached with slashes and the element's "
+						+ "index: %s/%s/%s."
+					)
 					% [walked, step, ":".join(steps.slice(index + 1))]
 				)
-			return {"refused": refused}
+			return { "refused": refused }
 		if not step in has:
 			return {
 				"refused":
-				"%s.%s is %s, so it has no %s; it has %s." % [owner, walked, sort, step, ", ".join(has)]
+				(
+					"%s.%s is %s, so it has no %s; it has %s."
+					% [owner, walked, sort, step, ", ".join(has)]
+				),
 			}
 		value = value[step]
 		walked += ":" + step
-	return {"name": path, "type": typeof(value), "usage": PROPERTY_USAGE_DEFAULT}
+	return { "name": path, "type": typeof(value), "usage": PROPERTY_USAGE_DEFAULT }
 
 
 ## [param raw] as the value [param declared] takes, as [ok, value] or [false, why not].
@@ -509,7 +537,8 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 		var rounded: String = GdhSerialisation.inexact(raw, expected_type)
 		if not rounded.is_empty():
 			return [
-				false, "%s.%s holds int: %s." % [GdhPropertyPaths.class_called(target), property, rounded]
+				false,
+				"%s.%s holds int: %s." % [GdhPropertyPaths.class_called(target), property, rounded],
 			]
 		_refused = ""
 		value = parse(raw, expected_type, elements)
@@ -559,12 +588,13 @@ func _node_reference(target: Object, property: String, raw: Variant) -> Array:
 					+ '"../Player", not %s.'
 				)
 				% [property, shown(raw)]
-			)
+			),
 		]
 	var found: Node = node.get_node_or_null(path)
 	if found == null:
 		return [
-			false, "%s names %s, and there is no node at that path from %s." % [property, path, node.name]
+			false,
+			"%s names %s, and there is no node at that path from %s." % [property, path, node.name],
 		]
 	return [true, found]
 
@@ -587,16 +617,20 @@ func _wrong_class(value: Object, declared: Dictionary) -> String:
 	)
 
 
-## [param value] as the typed list of objects that [param declared] holds on [param target], as
-## [ok, list or why not]. Measured on 4.7.2, a scene's node whose script exports Array[Item] holds []
+## [param value] as the typed list of objects that [param declared] holds on [param target], as [ok,
+## list or why not]. Measured on 4.7.2, a scene's node whose script exports Array[Item] holds []
 ## after being given an untyped list of Items, and keeps a list typed as its own is.
 func _object_list(target: Object, declared: Dictionary, value: Array) -> Array:
 	var property: String = str(declared.get("name", ""))
 	var kind: Array = GdhDeclared.object_kind(declared, 0)
-	var holding: String = "%s.%s holds %s" % [GdhPropertyPaths.class_called(target), property, kind[0]]
+	var holding: String = (
+		"%s.%s holds %s" % [GdhPropertyPaths.class_called(target), property, kind[0]]
+	)
 	var items: Array = []
 	for index: int in value.size():
-		var place: Array = ["item %d of the list given" % index, "item %d of %s" % [index, property]]
+		var place: Array = [
+			"item %d of the list given" % index, "item %d of %s" % [index, property],
+		]
 		var item: Array = _object_item(target, value[index], kind, holding, place)
 		if not item[0]:
 			return item
@@ -607,8 +641,11 @@ func _object_list(target: Object, declared: Dictionary, value: Array) -> Array:
 		return [
 			true,
 			Array(
-				items, current.get_typed_builtin(), current.get_typed_class_name(), current.get_typed_script()
-			)
+				items,
+				current.get_typed_builtin(),
+				current.get_typed_class_name(),
+				current.get_typed_script()
+			),
 		]
 	var typing: Array = GdhDeclared.object_typing(str(kind[0]))
 	if typing.is_empty():
@@ -623,7 +660,9 @@ func _object_list(target: Object, declared: Dictionary, value: Array) -> Array:
 func _object_entries(target: Object, declared: Dictionary, value: Dictionary) -> Array:
 	var property: String = str(declared.get("name", ""))
 	var kind: Array = GdhDeclared.object_kind(declared, 1)
-	var holding: String = "%s.%s holds %s values" % [GdhPropertyPaths.class_called(target), property, kind[0]]
+	var holding: String = (
+		"%s.%s holds %s values" % [GdhPropertyPaths.class_called(target), property, kind[0]]
+	)
 	var entries: Dictionary = {}
 	for key: Variant in value:
 		var place: Array = ["the one given for %s" % shown(key), "%s[%s]" % [property, shown(key)]]
@@ -644,7 +683,7 @@ func _object_entries(target: Object, declared: Dictionary, value: Dictionary) ->
 				current.get_typed_value_builtin(),
 				current.get_typed_value_class_name(),
 				current.get_typed_value_script()
-			)
+			),
 		]
 	var typing: Array = GdhDeclared.object_typing(str(kind[0]))
 	var key_type: int = GdhRead.as_int(GdhDeclared.elements_of(declared)[0], TYPE_NIL)
@@ -659,7 +698,9 @@ func _object_entries(target: Object, declared: Dictionary, value: Dictionary) ->
 ## res:// path is the resource, and for nodes a path from [param target] is the node there.
 ## [param holding] says what the list or map holds, and [param place] is [where the value sits in
 ## what was given, what it is called in the property].
-func _object_item(target: Object, given: Variant, kind: Array, holding: String, place: Array) -> Array:
+func _object_item(
+	target: Object, given: Variant, kind: Array, holding: String, place: Array
+) -> Array:
 	var item: Variant = given
 	if typeof(item) == TYPE_STRING:
 		var found: Array = (
@@ -680,8 +721,8 @@ func _object_item(target: Object, given: Variant, kind: Array, holding: String, 
 func _fraction_refusal(target: Object, property: String, raw: Variant) -> String:
 	return (
 		(
-			"%s.%s holds whole numbers, and %s would be cut to fit. Setting it would save a different "
-			+ "value than the one asked for."
+			"%s.%s holds whole numbers, and %s would be cut to fit. Setting it would save a "
+			+ "different value than the one asked for."
 		)
 		% [GdhPropertyPaths.class_called(target), property, shown(raw)]
 	)
@@ -700,11 +741,11 @@ func colour_from(raw: Variant, named: String) -> Array:
 		false,
 		(
 			(
-				'%s is {"r": .., "g": .., "b": .., "a": ..} from 0 to 1, a optional, or an html code such as '
-				+ '"#ff8000" or "#ff800080"; %s is neither.'
+				'%s is {"r": .., "g": .., "b": .., "a": ..} from 0 to 1, a optional, or an html '
+				+ 'code such as "#ff8000" or "#ff800080"; %s is neither.'
 			)
 			% [named, JSON.stringify(raw)]
-		)
+		),
 	]
 
 
@@ -713,7 +754,9 @@ func colour_from(raw: Variant, named: String) -> Array:
 static func no_property(target: Object, property: String) -> String:
 	var said: String = (
 		GdhRead.near_property(
-			"%s has no property %s" % [GdhPropertyPaths.class_called(target), property], target, property
+			"%s has no property %s" % [GdhPropertyPaths.class_called(target), property],
+			target,
+			property
 		)
 		+ "."
 	)
@@ -738,11 +781,11 @@ func _resource_at(path: String, property: String) -> Array:
 			false,
 			(
 				(
-					"%s is a resource built into %s, and only that file can refer to it. Build a new one "
-					+ 'for %s with "_type" set to its class and its properties beside it.'
+					"%s is a resource built into %s, and only that file can refer to it. Build a "
+					+ 'new one for %s with "_type" set to its class and its properties beside it.'
 				)
 				% [path, path.get_slice("::", 0), property]
-			)
+			),
 		]
 	if not ResourceLoader.exists(path):
 		# An image or a sound nobody has imported is a file the engine has no loader for, and "No
@@ -752,16 +795,20 @@ func _resource_at(path: String, property: String) -> Array:
 				false,
 				(
 					(
-						"%s is there, but it has never been imported, so the engine has no resource to load"
-						+ " from it for %s. project_import reimport with resourcePath %s imports it."
+						"%s is there, but it has never been imported, so the engine has no "
+						+ "resource to load from it for %s. project_import reimport with "
+						+ "resourcePath %s imports it."
 					)
 					% [path, property, path]
-				)
+				),
 			]
 		if path.begins_with("uid://"):
 			return [false, "No resource at %s for %s" % [path, property]]
 		return [
-			false, GdhFileWalk.new().with_nearest_files("No resource at %s for %s" % [path, property], path)
+			false,
+			GdhFileWalk.new().with_nearest_files(
+				"No resource at %s for %s" % [path, property], path
+			),
 		]
 	return [true, load(path)]
 
@@ -782,11 +829,16 @@ func declaration(target: Object, property: String) -> Dictionary:
 ## item a read of one theme answered with was refused when written into another that lacked it.
 static func _theme_item(property: String) -> Dictionary:
 	var parts: PackedStringArray = property.split("/")
-	if parts.size() != 3 or parts[0].is_empty() or parts[2].is_empty() or not THEME_ITEMS.has(parts[1]):
+	if (
+		parts.size() != 3
+		or parts[0].is_empty()
+		or parts[2].is_empty()
+		or not THEME_ITEMS.has(parts[1])
+	):
 		return {}
 	var item: Array = THEME_ITEMS[parts[1]]
 	var kind: int = item[0]
-	var made: Dictionary = {"name": property, "type": kind, "usage": PROPERTY_USAGE_DEFAULT}
+	var made: Dictionary = { "name": property, "type": kind, "usage": PROPERTY_USAGE_DEFAULT }
 	if kind == TYPE_OBJECT:
 		made["hint"] = PROPERTY_HINT_RESOURCE_TYPE
 		made["hint_string"] = item[1]
@@ -835,8 +887,8 @@ func _parse_resource_tag(value: Dictionary) -> Array:
 		_refused = (
 			(
 				"The %s given has no path: a read names a resource built into a scene by its class "
-				+ "alone where it recurs inside itself, and nothing elsewhere can refer to it. Build "
-				+ 'a new one with "_type" set to its class and its properties beside it.'
+				+ "alone where it recurs inside itself, and nothing elsewhere can refer to it. "
+				+ 'Build a new one with "_type" set to its class and its properties beside it.'
 			)
 			% str(value["class"])
 		)
@@ -929,7 +981,9 @@ func _typed_dictionary(entries: Dictionary, key_type: int, value_type: int) -> D
 			return entries
 	var fitted: Dictionary = {}
 	for key: Variant in entries:
-		fitted[key] = type_convert(entries[key], value_type) if value_type != TYPE_NIL else entries[key]
+		fitted[key] = (
+			type_convert(entries[key], value_type) if value_type != TYPE_NIL else entries[key]
+		)
 	return Dictionary(fitted, key_type, &"", null, value_type, &"", null)
 
 
@@ -952,11 +1006,15 @@ func _parse_array(value: Array, expected_type: int, elements: Array) -> Variant:
 		TYPE_VECTOR3:
 			if value.size() == 3:
 				return Vector3(
-					GdhRead.as_float(value[0]), GdhRead.as_float(value[1]), GdhRead.as_float(value[2])
+					GdhRead.as_float(value[0]),
+					GdhRead.as_float(value[1]),
+					GdhRead.as_float(value[2])
 				)
 		TYPE_VECTOR3I:
 			if value.size() == 3:
-				return Vector3i(GdhRead.as_int(value[0]), GdhRead.as_int(value[1]), GdhRead.as_int(value[2]))
+				return Vector3i(
+					GdhRead.as_int(value[0]), GdhRead.as_int(value[1]), GdhRead.as_int(value[2])
+				)
 		TYPE_VECTOR4:
 			if value.size() == 4:
 				return Vector4(
@@ -980,14 +1038,21 @@ func _parse_array(value: Array, expected_type: int, elements: Array) -> Variant:
 	var items: Array = value.map(func(item: Variant) -> Variant: return parse(item, element_type))
 	if element_type == TYPE_NIL or element_type == TYPE_OBJECT:
 		return items
-	if not items.all(func(item: Variant) -> bool: return GdhSerialisation.acceptable(item, element_type)):
+	if not items.all(
+		func(item: Variant) -> bool: return GdhSerialisation.acceptable(item, element_type)
+	):
 		return items
-	# Converted, a list of points holding a word became a packed list of zeroes before anything read it.
+	# Converted, a list of points holding a word became a packed list of zeroes before anything read
+	# it.
 	var inner: int = GdhRead.as_int(PACKED_ELEMENTS.get(element_type, TYPE_NIL), TYPE_NIL)
 	if inner != TYPE_NIL:
 		for item: Variant in items:
 			var points: Array = item if item is Array else []
-			if not points.all(func(point: Variant) -> bool: return GdhSerialisation.acceptable(point, inner)):
+			if not points.all(
+				func(point: Variant) -> bool: return GdhSerialisation.acceptable(point, inner)
+			):
 				return items
-	var fitted: Array = items.map(func(item: Variant) -> Variant: return type_convert(item, element_type))
+	var fitted: Array = items.map(
+		func(item: Variant) -> Variant: return type_convert(item, element_type)
+	)
 	return Array(fitted, element_type, &"", null)

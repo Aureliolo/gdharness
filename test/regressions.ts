@@ -9422,8 +9422,8 @@ function testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome(): void {
   // Everything after the tool that is not a flag. Reading only the words with a slash in them
   // looked equivalent and is not: it cannot see a directory at the top level, which is the one a
   // mistyped or moved path is most likely to be, and the disarm that adds one passed because of it.
-  // A script of the repository's own run through bun is the tool, as format:gd runs gdformat
-  // through scripts/format-gd.ts, and its path is not one of the directories.
+  // A script of the repository's own run through bun is the tool, as the gates run gdstyle through
+  // scripts/gdstyle.ts, and its path is not one of the directories.
   const pathsIn = (script: string): string[] => {
     const line = get(manifest, 'scripts', script);
     assert.equal(typeof line, 'string', `package.json should define the ${script} script`);
@@ -20951,10 +20951,11 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
 function testTheLoaderPassesAGamesOwnLint(): void {
   const lines = readFileSync(shippedLoader(), 'utf8').split(/\r?\n/);
   assert.ok(lines.length > 20, `the shipped loader is read: ${lines.length} lines`);
-  // gdlint's default line length is 100, and this repository's own 110 let a 101-character line
-  // through.
-  const long = lines.flatMap((line, at) => (line.length > 100 ? [`${at + 1}: ${line.length}`] : []));
-  assert.deepEqual(long, [], "every line of the loader is within gdlint's default 100 characters");
+  // A game's gdstyle wraps at 100 columns and counts a tab as four, and a 110-column limit here once
+  // let a 101-character line through.
+  const columns = (line: string): number => line.replaceAll('\t', '    ').length;
+  const long = lines.flatMap((line, at) => (columns(line) > 100 ? [`${at + 1}: ${columns(line)}`] : []));
+  assert.deepEqual(long, [], 'every line of the loader is within 100 columns, a tab counting four');
   // A game's check on cited files reads a backticked span as a path when its first folder holds a
   // file the repository tracks. Once the loader is committed, gdharness/ is such a folder, so the
   // setting `gdharness/runtime/serve_script_runs` in its comment was refused as a missing file.
@@ -51597,7 +51598,7 @@ function testTheCopiedHelperReadsTheSameEverywhere(): void {
   const copies = sharedCopies();
   assert.ok(copies.length >= 4, `only ${copies.length} copies were listed, so this proved little`);
 
-  // Line endings as the repository keeps them, LF: gdformat on Windows writes CRLF, and a copy the
+  // Line endings as the repository keeps them, LF: gdformat on Windows wrote CRLF, and a copy the
   // formatter touched while the original was checked out again read as drifted with nothing changed.
   const committed = (path: string): string => readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
   for (const { original, copy } of copies) {

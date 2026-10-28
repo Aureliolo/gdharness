@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## A step written as a call in a path is a read. A find with property "queue_free()" freed every
 ## node it matched, and a wait on a method that advances the game called it once a frame and then
 ## said the game had reached the state the wait drove it to. The engine marks its reading methods
@@ -7,7 +6,6 @@ extends SceneTree
 
 const Checked = preload("checked.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
-
 const GAME_SOURCE: String = """extends Node
 
 class Charter:
@@ -87,7 +85,8 @@ func _init() -> void:
 	# Announced somewhere private, so the fixture does not look like a game to a server running
 	# on this machine.
 	OS.set_environment(
-		"GDHARNESS_RUNTIME_DIR", OS.get_temp_dir().path_join("gdharness-calls-%d" % OS.get_process_id())
+		"GDHARNESS_RUNTIME_DIR",
+		OS.get_temp_dir().path_join("gdharness-calls-%d" % OS.get_process_id())
 	)
 	node = Runtime.new()
 	root.add_child(node)
@@ -100,7 +99,9 @@ func _init() -> void:
 	game.set_script(script)
 	root.add_child(game)
 
-	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
+	Checked.done(
+		process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame"
+	)
 
 
 func _fail(message: String) -> void:
@@ -117,7 +118,7 @@ func _run() -> void:
 	# Not checked: the directory is gone either way by the time the fixture tears itself down.
 	var _removed: Error = DirAccess.remove_absolute(OS.get_environment("GDHARNESS_RUNTIME_DIR"))
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -127,25 +128,33 @@ func _run() -> void:
 
 func _check_only_reads_are_called() -> void:
 	var freeing: Dictionary = await node._execute_command(
-		"find_nodes", {"name": "Game", "property": "queue_free()"}
+		"find_nodes", { "name": "Game", "property": "queue_free()" }
 	)
 	await process_frame
 	if not is_instance_valid(game):
 		_fail("a find reading queue_free() freed the node it matched: %s" % str(freeing))
 		return
 	var entries: Array = freeing.get("nodes", []) if freeing.get("nodes") is Array else []
-	var entry: Dictionary = entries[0] if not entries.is_empty() and entries[0] is Dictionary else {}
+	var entry: Dictionary = (
+		entries[0] if not entries.is_empty() and entries[0] is Dictionary else {}
+	)
 	if entry.get("has_property") != false:
 		_fail("and the engine method that changes a node is not a reading of it: %s" % str(freeing))
 
 	var advancing: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Game", "property": "advance()"}
+		"get_property", { "path": "/root/Game", "property": "advance()" }
 	)
 	var said: String = str(advancing.get("message", ""))
 	if advancing.get("type") != "error" or not said.contains("is declared -> void"):
-		_fail("a game method declared void is refused as doing rather than reading: %s" % str(advancing))
+		_fail(
+			(
+				"a game method declared void is refused as doing rather than reading: %s"
+				% str(advancing)
+			)
+		)
 	var waited: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Game", "property": "advance()", "value": null, "timeout_ms": 200}
+		"wait_until",
+		{ "path": "/root/Game", "property": "advance()", "value": null, "timeout_ms": 200 }
 	)
 	if waited.get("type") != "error":
 		_fail("and a wait on it is refused rather than driving it every frame: %s" % str(waited))
@@ -153,24 +162,24 @@ func _check_only_reads_are_called() -> void:
 		_fail("so the game was not advanced by reading it: day %s" % str(game.get("day")))
 
 	var answered: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Game", "property": "settled()"}
+		"get_property", { "path": "/root/Game", "property": "settled()" }
 	)
 	if answered.get("type") != "property" or answered.get("value") != false:
 		_fail("a game method that returns a value is read: %s" % str(answered))
 	var untyped: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Game", "property": "loose()"}
+		"get_property", { "path": "/root/Game", "property": "loose()" }
 	)
 	if untyped.get("type") != "property" or untyped.get("value") != 0:
 		_fail("an untyped game method cannot be told apart, and is read: %s" % str(untyped))
 	var engine_read: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Game", "property": "get_viewport():get_visible_rect()"}
+		"get_property", { "path": "/root/Game", "property": "get_viewport():get_visible_rect()" }
 	)
 	if engine_read.get("type") != "property":
 		_fail("an engine method the engine marks as reading is called: %s" % str(engine_read))
 
 
 func _read(path: String, property: String) -> Dictionary:
-	return await node._execute_command("get_property", {"path": path, "property": property})
+	return await node._execute_command("get_property", { "path": path, "property": property })
 
 
 ## #896: an engine method that reads takes literal arguments in a path, so a control's theme is read
@@ -191,7 +200,9 @@ func _check_reading_calls_take_literal_arguments() -> void:
 	root.add_child(column)
 	await process_frame
 
-	var margin: Dictionary = await _read("/root/Card", 'get_theme_stylebox("panel"):content_margin_top')
+	var margin: Dictionary = await _read(
+		"/root/Card", 'get_theme_stylebox("panel"):content_margin_top'
+	)
 	if margin.get("type") != "property" or margin.get("value") != 7.0:
 		_fail("a theme box is read through a call given its name: %s" % str(margin))
 	var spacing: Dictionary = await _read("/root/Column", 'get_theme_constant("separation")')
@@ -226,7 +237,10 @@ func _check_reading_calls_take_literal_arguments() -> void:
 	for asked: String in refusals:
 		var at: String = asked.get_slice(":", 0) if asked.begins_with("/") else "/root/Game"
 		var answer: Dictionary = await _read(at, asked.trim_prefix(at + ":"))
-		if answer.get("type") != "error" or not str(answer.get("message", "")).contains(refusals[asked]):
+		if (
+			answer.get("type") != "error"
+			or not str(answer.get("message", "")).contains(refusals[asked])
+		):
 			_fail("%s is refused, saying %s: %s" % [asked, refusals[asked], str(answer)])
 	if game.get("day") != 0 or game.name != "Game":
 		_fail("and none of them ran: day %s, named %s" % [str(game.get("day")), game.name])
@@ -234,7 +248,9 @@ func _check_reading_calls_take_literal_arguments() -> void:
 	if not str(unmarked.get("message", "")).ends_with(
 		"only calls methods that read; runtime_invoke call calls it"
 	):
-		_fail("an unmarked engine method's refusal names the tool that calls it: %s" % str(unmarked))
+		_fail(
+			"an unmarked engine method's refusal names the tool that calls it: %s" % str(unmarked)
+		)
 	card.queue_free()
 	column.queue_free()
 	await process_frame
@@ -244,9 +260,10 @@ func _check_reading_calls_take_literal_arguments() -> void:
 ## script declares or the paths named, and says what it could not read rather than refusing.
 func _check_a_returned_object_is_read() -> void:
 	var whole: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Game", "method": "fetch", "args": ["royal"], "properties": true}
+		"call_method",
+		{ "path": "/root/Game", "method": "fetch", "args": ["royal"], "properties": true }
 	)
-	var expected: Dictionary = {"dead_allowed": true, "title": "royal", "terms": ["first"]}
+	var expected: Dictionary = { "dead_allowed": true, "title": "royal", "terms": ["first"] }
 	if whole.get("type") != "method_result" or whole.get("result_properties") != expected:
 		_fail("a returned object's script variables come back with it: %s" % str(whole))
 	var named_paths: Dictionary = {
@@ -258,7 +275,7 @@ func _check_a_returned_object_is_read() -> void:
 	var some: Dictionary = await node._execute_command("call_method", named_paths)
 	var missing: Array = some.get("result_properties_missing", [])
 	if (
-		some.get("result_properties") != {"dead_allowed": true, "terms:0": "first"}
+		some.get("result_properties") != { "dead_allowed": true, "terms:0": "first" }
 		or missing.size() != 1
 		or not str(missing[0]).ends_with(
 			"has no property nope; its script declares dead_allowed, terms, title"
@@ -266,17 +283,17 @@ func _check_a_returned_object_is_read() -> void:
 	):
 		_fail("named paths are read off it, and one not there is listed: %s" % str(some))
 	var plain: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Game", "method": "settled", "properties": true}
+		"call_method", { "path": "/root/Game", "method": "settled", "properties": true }
 	)
 	if not str(plain.get("properties_note", "")).contains("which has no properties to read"):
 		_fail("a result that is not an object says so: %s" % str(plain))
 	var bare: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Game", "method": "fetch", "args": ["royal"]}
+		"call_method", { "path": "/root/Game", "method": "fetch", "args": ["royal"] }
 	)
 	if bare.has("result_properties") or bare.get("type") != "method_result":
 		_fail("and without asking, the answer is as it was: %s" % str(bare))
 	var bracketed: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Game", "method": 'fetch("royal")'}
+		"call_method", { "path": "/root/Game", "method": 'fetch("royal")' }
 	)
 	if not str(bracketed.get("message", "")).contains("takes its arguments under args"):
 		_fail("arguments in the brackets of the method called are refused: %s" % str(bracketed))
@@ -286,28 +303,33 @@ func _check_a_returned_object_is_read() -> void:
 ## and the id beside a returned object is its instance id, whatever the record calls id.
 func _check_each_returned_object_is_read() -> void:
 	var listed: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Game", "method": "records", "properties": ["id"]}
+		"call_method", { "path": "/root/Game", "method": "records", "properties": ["id"] }
 	)
-	if listed.get("result_properties") != [{"id": &"lamp"}, {"id": &"rope"}]:
+	if listed.get("result_properties") != [{ "id": &"lamp" }, { "id": &"rope" }]:
 		_fail("the id each record of a list declares is read off it: %s" % str(listed))
 	var described: Array = listed.get("result", []) if listed.get("result") is Array else []
-	var first: Dictionary = described[0] if not described.is_empty() and described[0] is Dictionary else {}
+	var first: Dictionary = (
+		described[0] if not described.is_empty() and described[0] is Dictionary else {}
+	)
 	var records: Array = game.get("_records")
 	var instance: Object = records[0]
 	if _whole(first.get("id")) != str(instance.get_instance_id()):
 		_fail("and the id beside the object is its instance id: %s" % str(first))
 	var everything: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Game", "method": "records", "properties": true}
+		"call_method", { "path": "/root/Game", "method": "records", "properties": true }
 	)
-	var expected: Array = [{"id": &"lamp", "worth": 3}, {"id": &"rope", "worth": 1}]
+	var expected: Array = [{ "id": &"lamp", "worth": 3 }, { "id": &"rope", "worth": 1 }]
 	if everything.get("result_properties") != expected:
 		_fail("every variable of each record comes back with it: %s" % str(everything))
 	var keyed: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Game", "method": "named", "properties": ["worth", "nope"]}
+		"call_method", { "path": "/root/Game", "method": "named", "properties": ["worth", "nope"] }
 	)
 	var missing: Array = keyed.get("result_properties_missing", [])
 	if (
-		keyed.get("result_properties") != {"lamp": {"worth": 3}, "rope": {"worth": 1}, "count": null}
+		(
+			keyed.get("result_properties")
+			!= { "lamp": { "worth": 3 }, "rope": { "worth": 1 }, "count": null }
+		)
 		or missing.size() != 2
 		or not str(missing[0]).begins_with("[lamp] ")
 		or not str(missing[0]).ends_with("has no property nope; its script declares id, worth")
@@ -315,29 +337,41 @@ func _check_each_returned_object_is_read() -> void:
 	):
 		_fail(
 			(
-				"a dictionary's records are read under its keys, and what is not there named by key: %s"
+				(
+					"a dictionary's records are read under its keys, and what is not there named "
+					+ "by key: %s"
+				)
 				% str(keyed)
 			)
 		)
 	# A key 7 and a key "7" are one key once both are text, so a dictionary whose keys are not all
 	# text is read in the shape result gives it, as entries.
 	var mixed: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Game", "method": "priced", "properties": ["worth", "nope"]}
+		"call_method", { "path": "/root/Game", "method": "priced", "properties": ["worth", "nope"] }
 	)
-	var entries: Array = [["lamp", {"worth": 3}], [7, {"worth": 1}], ["7", {"worth": 3}], ["count", null]]
+	var entries: Array = [
+		["lamp", { "worth": 3 }], [7, { "worth": 1 }], ["7", { "worth": 3 }], ["count", null],
+	]
 	var mixed_missing: Array = mixed.get("result_properties_missing", [])
-	var said: Array = mixed_missing.map(func(why: Variant) -> String: return str(why).get_slice(" ", 0))
+	var said: Array = mixed_missing.map(
+		func(why: Variant) -> String: return str(why).get_slice(" ", 0)
+	)
 	if (
-		mixed.get("result_properties") != {"_type": "Dictionary", "entries": entries}
+		mixed.get("result_properties") != { "_type": "Dictionary", "entries": entries }
 		or said != ['["lamp"]', "[7]", '["7"]']
 	):
-		_fail("a dictionary keyed by more than text is read as entries, each key kept: %s" % str(mixed))
+		_fail(
+			(
+				"a dictionary keyed by more than text is read as entries, each key kept: %s"
+				% str(mixed)
+			)
+		)
 	var shown: Dictionary = mixed.get("result", {}) if mixed.get("result") is Dictionary else {}
 	var shown_entries: Array = shown.get("entries", []) if shown.get("entries") is Array else []
 	if shown.get("_type") != "Dictionary" or shown_entries.size() != 4:
 		_fail("in the shape result itself has: %s" % str(mixed))
 	var numbers: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Game", "method": "counts", "properties": true}
+		"call_method", { "path": "/root/Game", "method": "counts", "properties": true }
 	)
 	if (
 		numbers.has("result_properties")

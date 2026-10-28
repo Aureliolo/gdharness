@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## Calls a fixture makes for their effect, whose answer it still may not drop.
 ##
 ## The fixture project holds every GDScript warning this engine has at error level,

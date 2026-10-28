@@ -1,11 +1,10 @@
 @tool
 extends RefCounted
-
-## What a write made by a headless engine has to put back so the file holds what an editor would have
-## written.
+## What a write made by a headless engine has to put back so the file holds what an editor would
+## have written.
 ##
-## The editor runs only tool scripts and gives every other script a placeholder that holds values and
-## runs nothing. A headless engine runs them all, so loading a file runs each script's
+## The editor runs only tool scripts and gives every other script a placeholder that holds values
+## and runs nothing. A headless engine runs them all, so loading a file runs each script's
 ## [code]_init[/code] and every setter of a stored property, and a tool setting one runs its setter.
 ## Whatever those change is saved with the write unless it is put back. Godot's own setters run in
 ## both, so a property a built-in setter derives (a Control's offsets from its size) is left alone
@@ -14,10 +13,9 @@ extends RefCounted
 const GdhPropertyPaths = preload("property_paths.gd")
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
-
 const REMEDY: String = (
-	"Open the project's editor (editor_launch with hidden: true) and ask again: the write then goes "
-	+ "through it, and the editor runs no script that is not a tool."
+	"Open the project's editor (editor_launch with hidden: true) and ask again: the write then "
+	+ "goes through it, and the editor runs no script that is not a tool."
 )
 
 
@@ -76,7 +74,7 @@ static func kept_by_engine(object: Object, name: String, wanted: Variant, held: 
 		not GdhSame.same(object.get(name), wanted)
 		and GdhSame.same(object.get(name), held)
 		and name != "script"
-		and not through_script(object, {name: true})
+		and not through_script(object, { name: true })
 	)
 
 
@@ -155,7 +153,7 @@ static func reached(object: Object, property: String) -> Dictionary:
 		name = name.get_slice(":", 0)
 	var id: String = holder.get_scene_unique_id()
 	if not id.is_empty():
-		ids[id] = {name: true}
+		ids[id] = { name: true }
 	return ids
 
 
@@ -175,7 +173,8 @@ static func spare(into: Dictionary, more: Dictionary) -> void:
 			into[id] = given
 
 
-## Whether [param object] holds, at any depth, an embedded resource with a script that is not a tool.
+## Whether [param object] holds, at any depth, an embedded resource with a script that is not a
+## tool.
 static func holds_scripted_embedded(object: Object, seen: Dictionary) -> bool:
 	for value: Variant in stored(object).values():
 		for resource: Resource in resources_in(value):
@@ -219,7 +218,9 @@ static func put_back(file_path: String, previous: Variant) -> String:
 			return " Putting the file back as it was failed too."
 		file.close()
 		if ResourceLoader.has_cached(file_path):
-			var _replaced: Resource = ResourceLoader.load(file_path, "", ResourceLoader.CACHE_MODE_REPLACE)
+			var _replaced: Resource = ResourceLoader.load(
+				file_path, "", ResourceLoader.CACHE_MODE_REPLACE
+			)
 	elif DirAccess.remove_absolute(ProjectSettings.globalize_path(file_path)) != OK:
 		return " Removing the file it wrote failed too."
 	return ""
@@ -235,14 +236,14 @@ static func sections(text: String) -> Dictionary:
 	for line: String in text.split("\n"):
 		if line.begins_with("["):
 			if not key.is_empty():
-				found[key] = {"head": head, "lines": lines}
+				found[key] = { "head": head, "lines": lines }
 			lines = []
 			head = line
 			key = _section_key(line)
 			continue
 		var _kept: bool = lines.append(line)
 	if not key.is_empty():
-		found[key] = {"head": head, "lines": lines}
+		found[key] = { "head": head, "lines": lines }
 	return found
 
 
@@ -257,8 +258,8 @@ static func _section_key(head: String) -> String:
 	return ""
 
 
-## Each property a section sets, by name, to the text of its value. A value running over several lines
-## is kept whole.
+## Each property a section sets, by name, to the text of its value. A value running over several
+## lines is kept whole.
 static func entries_of(section: Dictionary) -> Dictionary:
 	var lines: PackedStringArray = section.get("lines", PackedStringArray())
 	return entries(lines)
@@ -315,7 +316,8 @@ static func _main_entries(text: String) -> Dictionary:
 	return entries_of(main)
 
 
-## The ids of the embedded resources in [param text] that carry a script that is not a tool, as a set.
+## The ids of the embedded resources in [param text] that carry a script that is not a tool, as a
+## set.
 static func scripted_sections(text: String) -> Dictionary:
 	var all: Dictionary = sections(text)
 	var scripts: Dictionary = {}
@@ -349,7 +351,9 @@ static func scripted_sections(text: String) -> Dictionary:
 ## null]. Only those with a script that is not a tool are compared, since only a script runs
 ## differently here, and what [param reached_ids] says the tool wrote is left out, as
 ## [method reached] answers it.
-static func embedded_changes(before: String, after: String, reached_ids: Dictionary) -> Array[Array]:
+static func embedded_changes(
+	before: String, after: String, reached_ids: Dictionary
+) -> Array[Array]:
 	var changed: Array[Array] = []
 	if before.is_empty():
 		return changed
@@ -375,34 +379,37 @@ static func embedded_changes(before: String, after: String, reached_ids: Diction
 	return changed
 
 
-## Compares the file just saved at [param path] with [param before], what it held, and puts back
-## what a script that is not a tool changed in it: in its embedded resources, which [param values]
-## reach, and in [param main], its main resource, unless that is null. [param asked] and
-## [param reached_ids] are what the call changed, and [param carried] is [method embedded_in] of
-## [param values] taken before the save. Saved again through [param resave], which answers an Error,
-## and answers "" or why the file still does not hold what it should.
+## Compares the file [param saved] names with what it held before, and puts back what a script that
+## is not a tool changed in it: in its embedded resources, which [param values] reach, and in
+## [param main], its main resource, unless that is null. [param asked] and [param reached_ids] are
+## what the call changed, and [param carried] is [method embedded_in] of [param values] taken before
+## the save. Saved again through [param saved], and answers "" or why the file still does not hold
+## what it should.
 ##
 ## An id is compared only where the resource holding it after the save held it before. Each headless
 ## engine hands out the ids of one sequence, so a resource the call added can be saved under the id
 ## the file had kept for one it dropped. Read as one resource, the new third line of a dialogue was
 ## taken for the old first one changed by its script, and given the old one's text back.
 static func settle_saved(
-	path: String,
-	before: String,
+	saved: GdhSaved,
 	values: Array,
 	main: Object,
 	asked: Dictionary,
 	reached_ids: Dictionary,
-	carried: Dictionary,
-	resave: Callable
+	carried: Dictionary
 ) -> String:
+	var path: String = saved.path
+	var before: String = saved.before
 	for attempt: int in 2:
 		var after: String = FileAccess.get_file_as_string(path)
 		var by_id: Dictionary = embedded_in(values, {})
 		var embedded: Array[Array] = []
 		for found: Array in embedded_changes(before, after, reached_ids):
 			var holder: Resource = by_id.get(found[0])
-			if not carried.has(found[0]) or (holder != null and not is_same(holder, carried[found[0]])):
+			if (
+				not carried.has(found[0])
+				or (holder != null and not is_same(holder, carried[found[0]]))
+			):
 				continue
 			if holder != null and _unchanged(holder, found.slice(1)):
 				continue
@@ -439,7 +446,7 @@ static func settle_saved(
 			var refused: String = put_back_value(main, name, was_set, held)
 			if not refused.is_empty():
 				return unasked(path, name, refused)
-		var saving: Error = resave.call()
+		var saving: Error = saved.resave.call()
 		if saving != OK:
 			return "Failed to save %s again: %s." % [path, error_string(saving)]
 	return ""
@@ -474,19 +481,22 @@ static func put_back_value(object: Object, name: String, was_set: bool, held: St
 		object.set(name, default_of(object, name))
 		return ""
 	if "Resource(" in held:
-		return "its value there names another resource, which cannot be restored from the text here."
+		return (
+			"its value there names another resource, which cannot be restored from the text "
+			+ "here."
+		)
 	object.set(name, str_to_var(held))
 	return ""
 
 
-## [param refused], a refusal of [param property] on [param object] for not holding what it was given,
-## with why when a headless engine set it through a script that is not a tool. That setter runs here
-## and in the game, and an editor runs none and saves the value given, so a setter clamping stock to
-## 0 refused -5 here and the same call through an editor wrote it.
+## [param refused], a refusal of [param property] on [param object] for not holding what it was
+## given, with why when a headless engine set it through a script that is not a tool. That setter
+## runs here and in the game, and an editor runs none and saves the value given, so a setter
+## clamping stock to 0 refused -5 here and the same call through an editor wrote it.
 static func setter_ran(object: Object, property: String, refused: String) -> String:
 	if Engine.is_editor_hint() or property.is_empty():
 		return refused
-	if not through_script(object, {property.get_slice(":", 0): true}):
+	if not through_script(object, { property.get_slice(":", 0): true }):
 		return refused
 	var attached: Variant = object.get_script()
 	var named: String = "Its script"
@@ -496,8 +506,9 @@ static func setter_ran(object: Object, property: String, refused: String) -> Str
 	return (
 		(
 			(
-				"%s %s is not a tool script, so its setter ran in the headless engine writing this as it runs "
-				+ "in the game; an editor runs none and would have saved the value given. "
+				"%s %s is not a tool script, so its setter ran in the headless engine writing this "
+				+ "as it runs in the game; an editor runs none and would have saved the value "
+				+ "given. "
 			)
 			% [refused, named]
 		)
@@ -526,9 +537,9 @@ static func move_script_set(answer: Dictionary, names: Array, owner: String) -> 
 	var pronoun: String = "it" if listed.size() == 1 else "them"
 	answer["setByScriptNote"] = (
 		(
-			"%s's script is not a tool, so it ran in the headless engine that wrote the file, and set %s "
-			+ "as it did. The file does not hold %s, as a save from the editor, where the script does not "
-			+ "run, would not; the script sets %s again when it runs in the game."
+			"%s's script is not a tool, so it ran in the headless engine that wrote the file, and "
+			+ "set %s as it did. The file does not hold %s, as a save from the editor, where the "
+			+ "script does not run, would not; the script sets %s again when it runs in the game."
 		)
 		% [owner, ", ".join(listed), pronoun, pronoun]
 	)
@@ -539,11 +550,24 @@ static func unasked(what: String, name: String, why: String = "") -> String:
 	return (
 		(
 			(
-				"%s.%s would be saved differently from what the file holds, and the call did not ask for "
-				+ "it: its script ran when a headless engine loaded or set it, as it does in the game and not "
-				+ "in an editor%s. "
+				"%s.%s would be saved differently from what the file holds, and the call did not "
+				+ "ask for it: its script ran when a headless engine loaded or set it, as it does "
+				+ "in the game and not in an editor%s. "
 			)
 			% [what, name, "" if why.is_empty() else "; " + why.trim_suffix(".")]
 		)
 		+ REMEDY
 	)
+
+
+## A file just saved: where it is, the text it held before, and [member resave], a Callable that
+## saves it again and answers an Error.
+class GdhSaved:
+	var path: String
+	var before: String
+	var resave: Callable
+
+	func _init(at: String, held: String, again: Callable) -> void:
+		path = at
+		before = held
+		resave = again

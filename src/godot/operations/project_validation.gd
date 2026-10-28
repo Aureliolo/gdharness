@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## Whether a project is ready to run and export: its settings, main scene, imports, presets,
 ## scripts, references and signal connections, each named under checks_performed.
 
@@ -13,7 +12,8 @@ const GdhRead = preload("reading.gd")
 const GdhSceneConnections = preload("scene_connections.gd")
 const GdhScriptCheck = preload("script_check.gd")
 const CONNECTION_FIX: String = (
-	"Write the method or signal, or point the connection at the one that replaced it with" + " scene_signal"
+	"Write the method or signal, or point the connection at the one that replaced it with"
+	+ " scene_signal"
 )
 
 var _log: GdhLog
@@ -28,7 +28,9 @@ func validate_project(params: Dictionary) -> Dictionary:
 	var preset_name: String = str(params.get("preset", ""))
 	var include_suggestions: bool = GdhRead.as_bool(params.get("include_suggestions", true), true)
 
-	_log.info("Validating project" + (" for preset: " + preset_name if not preset_name.is_empty() else ""))
+	_log.info(
+		"Validating project" + (" for preset: " + preset_name if not preset_name.is_empty() else "")
+	)
 
 	var issues: Array[Dictionary] = []
 	var warnings: Array[Dictionary] = []
@@ -73,18 +75,24 @@ func validate_project(params: Dictionary) -> Dictionary:
 	# a scene using one fails to load in a run or an export.
 	checks_performed.append("imports")
 	var never: Array[String] = []
-	for path: String in _files.find_files_with_extensions("res://", GdhImportPipeline.IMPORTABLE_EXTENSIONS):
+	for path: String in _files.find_files_with_extensions(
+		"res://", GdhImportPipeline.IMPORTABLE_EXTENSIONS
+	):
 		if not FileAccess.file_exists(path + ".import"):
 			never.append(path)
 	if not never.is_empty():
 		never.sort()
-		warnings.append(
-			_finding(
-				"warning",
-				"imports",
-				GdhImportPipeline.never_imported_line(never),
-				"Run project_import reimport, or open the project in the editor, whose scan imports them",
-				include_suggestions
+		(
+			warnings
+			. append(
+				_finding(
+					"warning",
+					"imports",
+					GdhImportPipeline.never_imported_line(never),
+					"Run project_import reimport, or open the project in the editor, whose scan "
+					+ "imports them",
+					include_suggestions
+				)
 			)
 		)
 
@@ -106,33 +114,44 @@ func validate_project(params: Dictionary) -> Dictionary:
 		checks_performed.append("export_preset")
 		var named: Array[String] = GdhExportPresets.names()
 		if preset_name not in named:
-			issues.append(
-				_finding(
-					"error",
-					"export_preset",
-					(
-						"No export preset is named "
-						+ preset_name
-						+ (
-							": the project has none"
-							if named.is_empty()
-							else ": the presets are " + ", ".join(named)
-						)
-					),
-					"Pass one of the preset names, or add the preset with project_export add_preset",
-					include_suggestions
+			(
+				issues
+				. append(
+					_finding(
+						"error",
+						"export_preset",
+						(
+							"No export preset is named "
+							+ preset_name
+							+ (
+								": the project has none"
+								if named.is_empty()
+								else ": the presets are " + ", ".join(named)
+							)
+						),
+						"Pass one of the preset names, or add the preset with project_export "
+						+ "add_preset",
+						include_suggestions
+					)
 				)
 			)
 		else:
 			var gone: Array[String] = GdhExportPresets.missing_named(preset_name)
 			if not gone.is_empty():
-				warnings.append(
-					_finding(
-						"warning",
-						"export_preset_files",
-						"The preset %s names files that are not there: %s" % [preset_name, "; ".join(gone)],
-						"Add the files, or point the options at others with project_export set_preset",
-						include_suggestions
+				(
+					warnings
+					. append(
+						_finding(
+							"warning",
+							"export_preset_files",
+							(
+								"The preset %s names files that are not there: %s"
+								% [preset_name, "; ".join(gone)]
+							),
+							"Add the files, or point the options at others with project_export "
+							+ "set_preset",
+							include_suggestions
+						)
 					)
 				)
 
@@ -187,9 +206,13 @@ func validate_project(params: Dictionary) -> Dictionary:
 			file.close()
 
 			if "# TODO" in content or "# FIXME" in content:
-				script_issues.append({"path": script_path, "issue": "Contains TODO/FIXME comments"})
+				script_issues.append(
+					{ "path": script_path, "issue": "Contains TODO/FIXME comments" }
+				)
 			if "pass # TODO" in content:
-				script_issues.append({"path": script_path, "issue": "Contains unimplemented functions"})
+				script_issues.append(
+					{ "path": script_path, "issue": "Contains unimplemented functions" }
+				)
 
 	# Compiled by the server and handed in, as for the health check: a script the engine refuses
 	# stops the export's game at the first scene using it, which the comment check above never saw.
@@ -224,13 +247,17 @@ func validate_project(params: Dictionary) -> Dictionary:
 	# for never works, and the engine says so only while the game runs.
 	checks_performed.append("input_actions")
 	for entry: Dictionary in GdhInputActions.new(_log).undefined_in_scripts():
-		issues.append(
-			_finding(
-				"error",
-				"input_actions",
-				GdhInputActions.undefined_line(entry),
-				"Add it with project_settings add_input_action, or correct the name the script reads",
-				include_suggestions
+		(
+			issues
+			. append(
+				_finding(
+					"error",
+					"input_actions",
+					GdhInputActions.undefined_line(entry),
+					"Add it with project_settings add_input_action, or correct the name the script "
+					+ "reads",
+					include_suggestions
+				)
 			)
 		)
 
@@ -268,14 +295,14 @@ func validate_project(params: Dictionary) -> Dictionary:
 		# Said beside the count, so a project of four hundred scripts is not read as checked whole.
 		"scripts_total": script_files.size(),
 		"issue_count": issues.size(),
-		"warning_count": warnings.size()
+		"warning_count": warnings.size(),
 	}
 
 
 func _finding(
 	type: String, check: String, message: String, suggestion: String, include_suggestion: bool
 ) -> Dictionary:
-	var finding: Dictionary = {"type": type, "check": check, "message": message}
+	var finding: Dictionary = { "type": type, "check": check, "message": message }
 	if include_suggestion:
 		finding["suggestion"] = suggestion
 	return finding

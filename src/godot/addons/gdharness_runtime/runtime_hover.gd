@@ -1,37 +1,35 @@
 extends RefCounted
-
 ## The hover Godot gives the controls under the pointer, supplied in a native window the operating
 ## system has not said the pointer entered.
 ##
 ## With display/window/subwindows/embed_subwindows off, every window is a native one, and the engine
-## hovers a control in one only once the window has had its mouse-enter: Viewport::_update_mouse_over
-## asks the root which window the pointer is over, and only Window::_event_callback, called by the
-## platform when the pointer crosses into the window, sets it. An injected event never crosses
-## anything, and on gdharness's own desktop no pointer ever enters a window, so nothing was hovered.
-## A BaseButton takes a mouse press only while hovered, so every click on a button in such a window
-## was dropped while the press itself was routed to it. Reported from Game C, whose strip
-## window holds its first-run question, and traced through Godot 4.7.2's source.
+## hovers a control in one only once the window has had its mouse-enter:
+## Viewport::_update_mouse_over asks the root which window the pointer is over, and only
+## Window::_event_callback, called by the platform when the pointer crosses into the window, sets
+## it. An injected event never crosses anything, and on gdharness's own desktop no pointer ever
+## enters a window, so nothing was hovered. A BaseButton takes a mouse press only while hovered, so
+## every click on a button in such a window was dropped while the press itself was routed to it.
+## Reported from Game C, whose strip window holds its first-run question, and traced through Godot
+## 4.7.2's source.
 ##
 ## What is supplied is what the engine does once the window has been entered: the control its own
 ## search finds under the point, MOUSE_ENTER and mouse_entered on it and on each holder the pointer
 ## passes to, MOUSE_ENTER_SELF on it, and the exits in the engine's order when the pointer moves on.
 ## The engine's own record of the hover is not reachable from a script, so
-## Viewport.gui_get_hovered_control() still answers null there; [method hovered_in] answers for both.
+## Viewport.gui_get_hovered_control() still answers null there; [method hovered_in] answers for
+## both.
 
-## Per viewport, by instance id, the instance ids of the controls the supplied hover is on, outermost
-## first, ending with the one under the pointer, as the engine keeps its own.
+## Per viewport, by instance id, the instance ids of the controls the supplied hover is on,
+## outermost first, ending with the one under the pointer, as the engine keeps its own.
 var _supplied: Dictionary[int, Array] = {}
-
 ## The windows whose mouse-enter and mouse-exit are listened for, and whether the platform has said
 ## the pointer is inside each: once it has, the engine hovers there by itself.
 var _listened: Dictionary[int, bool] = {}
 var _inside: Dictionary[int, bool] = {}
-
-## The windows told here that the pointer is in them, and whether the telling is under way, since the
-## window answers it with the same mouse_entered the platform's enter sends.
+## The windows told here that the pointer is in them, and whether the telling is under way, since
+## the window answers it with the same mouse_entered the platform's enter sends.
 var _told: Dictionary[int, bool] = {}
 var _telling: bool = false
-
 ## Whether a script on a control declares `_has_point`, per script, since the search asks it of
 ## every control it passes.
 var _shapes: Dictionary[Script, bool] = {}
@@ -217,7 +215,9 @@ func control_at(viewport: Viewport, point: Vector2) -> Control:
 			continue
 		var holder: CanvasItem = _parent_item(root)
 		var transform: Transform2D = (
-			holder.get_global_transform_with_canvas() if holder != null else root.get_canvas_transform()
+			holder.get_global_transform_with_canvas()
+			if holder != null
+			else root.get_canvas_transform()
 		)
 		var found: Control = _at(root, point, transform)
 		if found != null:
@@ -231,8 +231,10 @@ func control_at(viewport: Viewport, point: Vector2) -> Control:
 ## press aimed at a slider that went to a button drawn over it answered the slider's path alone,
 ## and the caller read that as the slider having been pressed.
 func press_of(aim: Dictionary, viewport: Viewport, position: Vector2) -> Dictionary:
-	var took: Node = _pressed_at(viewport, viewport.get_final_transform().affine_inverse() * position)
-	var said: Dictionary = {"press_went_to": null}
+	var took: Node = _pressed_at(
+		viewport, viewport.get_final_transform().affine_inverse() * position
+	)
+	var said: Dictionary = { "press_went_to": null }
 	if took != null:
 		said["press_went_to"] = str(took.get_path())
 	var named: Object = aim.get("node")
@@ -265,7 +267,9 @@ func _pressed_at(viewport: Viewport, point: Vector2) -> Node:
 	for child: Node in container.get_children():
 		var shown: SubViewport = child as SubViewport
 		if shown != null and not shown.gui_disable_input:
-			var within: Node = _pressed_at(shown, shown.get_final_transform().affine_inverse() * inside)
+			var within: Node = _pressed_at(
+				shown, shown.get_final_transform().affine_inverse() * inside
+			)
 			if within != null:
 				return within
 	return container

@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## The commands that take time: they let the game run and answer when what was waited for has
 ## happened, or when the time ran out, so the caller never sleeps for a guessed length.
 
@@ -10,31 +9,24 @@ const GdhQueries = preload("runtime_queries.gd")
 const GdhRead = preload("reading.gd")
 const GdhSays = preload("runtime_says.gd")
 const GdhValues = preload("runtime_values.gd")
-
 ## The longest one wait may last, whatever the request says: past this the server has long
 ## since given up on the reply.
 const CEILING_MSEC: int = 120000
-
 ## The most frames one wait may cover, which is about half a minute of a game drawing slowly.
 const MOST_FRAMES: int = 600
-
 ## How long a wait for words leaves between looks, as a multiple of what the last look took: nine
 ## gives looking about a tenth of the time.
 const LOOKS_APART: int = 9
-
 ## How a property wait compares what it reads with the value: equality by default, and order for a
 ## number that steps rather than lands, as a day counter on a fast clock goes from 31 to 34 between
 ## two looks and a wait for 32 never sees it.
 const COMPARES: Array[String] = ["==", "!=", ">=", "<=", ">", "<"]
-
 ## The most signal watches kept at once; arming one past this lets the oldest go. Property watches
 ## are counted apart, to the same number.
 const MOST_WATCHES: int = 16
-
 ## The most changes a property watch keeps. Past it, each new one takes the last place, so what is
 ## kept still ends on the latest value.
 const MOST_CHANGES: int = 1000
-
 ## The commands that can change the game, by the tool call that sends each, which a property watch
 ## notes as they arrive.
 const CALLS_NAMED: Dictionary[String, String] = {
@@ -51,10 +43,9 @@ const CALLS_NAMED: Dictionary[String, String] = {
 	"inject_joypad_button": "runtime_input joypad_button",
 	"inject_joypad_motion": "runtime_input joypad_motion",
 }
-
 ## What a call noted by a property watch carries of its parameters, when it was given them.
 const CALL_FIELDS: Array[String] = [
-	"path", "method", "property", "action", "keycode", "button", "pressed", "says"
+	"path", "method", "property", "action", "keycode", "button", "pressed", "says",
 ]
 
 var _host: Node
@@ -76,7 +67,8 @@ func _init(host: Node, values: GdhValues) -> void:
 ## frames of the game having passed, and everything measured off it is out by that much.
 static func _out_of_range(named: String, asked: int, least: int, most: int) -> Dictionary:
 	return {
-		"type": "error", "message": "%s is %d, and %s takes %d to %d." % [named, asked, named, least, most]
+		"type": "error",
+		"message": "%s is %d, and %s takes %d to %d." % [named, asked, named, least, most],
 	}
 
 
@@ -84,7 +76,10 @@ static func _out_of_range(named: String, asked: int, least: int, most: int) -> D
 ## or every one when none is near: a name to send instead.
 static func _no_signal(node: Node, node_path: String, signal_name: String) -> Dictionary:
 	var said: String = "%s has no signal %s" % [node_path, signal_name]
-	return {"type": "error", "message": GdhRead.offered(said, signal_name, GdhRead.signals_of(node)) + "."}
+	return {
+		"type": "error",
+		"message": GdhRead.offered(said, signal_name, GdhRead.signals_of(node)) + ".",
+	}
 
 
 func wait_frames(params: Dictionary) -> Dictionary:
@@ -94,7 +89,7 @@ func wait_frames(params: Dictionary) -> Dictionary:
 	var started: int = Time.get_ticks_msec()
 	for _frame: int in frames:
 		await _host.get_tree().process_frame
-	return {"type": "waited", "frames": frames, "elapsed_ms": Time.get_ticks_msec() - started}
+	return { "type": "waited", "frames": frames, "elapsed_ms": Time.get_ticks_msec() - started }
 
 
 ## Waits for a signal to fire, and answers with what it carried, or that the time ran out. Given a
@@ -108,7 +103,7 @@ func wait_signal(params: Dictionary) -> Dictionary:
 	if params.has("watch"):
 		return await _collect(GdhRead.as_int(params["watch"], 0), timeout_ms)
 	if node_path.is_empty() or signal_name.is_empty():
-		return {"type": "error", "message": "Node path and signal name required"}
+		return { "type": "error", "message": "Node path and signal name required" }
 
 	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
@@ -121,7 +116,7 @@ func wait_signal(params: Dictionary) -> Dictionary:
 	var callable: Callable = catcher._on_fired
 	var listening: Error = node.connect(signal_name, callable, CONNECT_ONE_SHOT)
 	if listening != OK:
-		return {"type": "error", "message": "Could not listen to signal: " + signal_name}
+		return { "type": "error", "message": "Could not listen to signal: " + signal_name }
 	var started: int = Time.get_ticks_msec()
 	while not catcher.fired and Time.get_ticks_msec() - started < timeout_ms:
 		await _host.get_tree().process_frame
@@ -138,10 +133,10 @@ func wait_signal(params: Dictionary) -> Dictionary:
 	}
 	if not catcher.fired:
 		answer["note"] = (
-			"A wait hears the signal only from when it begins, so one that fired before it is not"
-			+ " counted. If a call meant to set the signal off was sent beside this wait, it may have run"
-			+ " only after the wait answered, as a client can run its calls in turn: arm runtime_wait"
-			+ " watch first, make the call, then wait with signal and that watch"
+			"A wait hears the signal only from when it begins, so one that fired before it is not "
+			+ "counted. If a call meant to set the signal off was sent beside this wait, it may "
+			+ "have run only after the wait answered, as a client can run its calls in turn: arm "
+			+ "runtime_wait watch first, make the call, then wait with signal and that watch"
 		)
 	return answer
 
@@ -149,8 +144,9 @@ func wait_signal(params: Dictionary) -> Dictionary:
 ## Starts recording a signal and answers at once with the watch to collect it by.
 ##
 ## A wait sent beside the call meant to set its signal off does not see it when the client runs the
-## two in turn: Claude Code ran a key press only after the signal wait beside it had answered, so the
-## wait ran out and the press landed after it. A watch is armed before the call and collected after.
+## two in turn: Claude Code ran a key press only after the signal wait beside it had answered, so
+## the wait ran out and the press landed after it. A watch is armed before the call and collected
+## after.
 func watch_signal(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var signal_name: String = str(params.get("signal", ""))
@@ -160,14 +156,17 @@ func watch_signal(params: Dictionary) -> Dictionary:
 			"type": "error",
 			"message":
 			(
-				"A watch records a signal or a property, not both: this one has signal %s and property %s"
+				(
+					"A watch records a signal or a property, not both: this one has signal %s and "
+					+ "property %s"
+				)
 				% [signal_name, property]
-			)
+			),
 		}
 	if not property.is_empty():
 		return _watch_property(node_path, property)
 	if node_path.is_empty() or signal_name.is_empty():
-		return {"type": "error", "message": "Node path and signal name required"}
+		return { "type": "error", "message": "Node path and signal name required" }
 	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
@@ -177,14 +176,14 @@ func watch_signal(params: Dictionary) -> Dictionary:
 	var watch: GdhWatch = GdhWatch.new(node, node_path, signal_name)
 	var listening: Error = node.connect(signal_name, watch.catcher._on_fired)
 	if listening != OK:
-		return {"type": "error", "message": "Could not listen to signal: " + signal_name}
+		return { "type": "error", "message": "Could not listen to signal: " + signal_name }
 	while _watches.size() >= MOST_WATCHES:
 		var oldest: int = _watches.keys().min()
 		_let_go(oldest)
 	var id: int = _next_watch
 	_next_watch += 1
 	_watches[id] = watch
-	return {"type": "watching", "watch": id, "path": node_path, "signal": signal_name}
+	return { "type": "watching", "watch": id, "path": node_path, "signal": signal_name }
 
 
 ## Answers at once with the first emission recorded since watch [param id] was armed, otherwise
@@ -197,7 +196,7 @@ func _collect(id: int, timeout_ms: int) -> Dictionary:
 			(
 				"Watch %d records %s:%s, a property, and is collected with runtime_wait recorded"
 				% [id, _traces[id].node_path, _traces[id].property]
-			)
+			),
 		}
 	if not _watches.has(id):
 		return {
@@ -205,8 +204,8 @@ func _collect(id: int, timeout_ms: int) -> Dictionary:
 			"message":
 			(
 				(
-					"No watch %d is armed in this game: it was collected already, %d armed after it let it"
-					+ " go, or the game started again since"
+					"No watch %d is armed in this game: it was collected already, %d armed after "
+					+ "it let it go, or the game started again since"
 				)
 				% [id, MOST_WATCHES]
 			),
@@ -254,7 +253,7 @@ func _let_go(id: int) -> void:
 ## only by slowing the game's clock. Armed before the click, the watch has every frame of it.
 func _watch_property(node_path: String, property: String) -> Dictionary:
 	if node_path.is_empty():
-		return {"type": "error", "message": "Node path required"}
+		return { "type": "error", "message": "Node path required" }
 	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
@@ -270,7 +269,8 @@ func _watch_property(node_path: String, property: String) -> Dictionary:
 	_next_watch += 1
 	_traces[id] = trace
 	# Left to run across frames while the answer goes now. Deferred calls run once the frame's
-	# _process is done and before its tweens step, so the recording starts in the frame it was armed in.
+	# _process is done and before its tweens step, so the recording starts in the frame it was armed
+	# in.
 	_record.call_deferred(trace)
 	return {
 		"type": "watching",
@@ -303,7 +303,9 @@ func _record(trace: GdhTrace) -> void:
 		var held: Object = trace.node.get_ref()
 		var node: Node = held as Node
 		if node == null:
-			trace.ended = "%s was freed %d frames after the watch was armed" % [trace.node_path, frame]
+			trace.ended = (
+				"%s was freed %d frames after the watch was armed" % [trace.node_path, frame]
+			)
 			return
 		var watched: Dictionary = _watched(node, trace.node_path, trace.property)
 		if watched.has("message"):
@@ -314,7 +316,8 @@ func _record(trace: GdhTrace) -> void:
 		trace.elapsed_ms = elapsed
 		if elapsed >= CEILING_MSEC:
 			trace.ended = (
-				"recording stopped %d ms after the watch was armed, the longest a wait lasts" % elapsed
+				"recording stopped %d ms after the watch was armed, the longest a wait lasts"
+				% elapsed
 			)
 			return
 
@@ -333,7 +336,7 @@ func saw_call(command: String, params: Dictionary) -> void:
 		if trace.calls.size() >= MOST_CHANGES:
 			trace.calls_dropped += 1
 			continue
-		var noted: Dictionary = {"frame": trace.frames, "call": named}
+		var noted: Dictionary = { "frame": trace.frames, "call": named }
 		for field: String in CALL_FIELDS:
 			if params.has(field):
 				noted[field] = params[field]
@@ -351,7 +354,7 @@ func recorded(params: Dictionary) -> Dictionary:
 			(
 				"Watch %d records the signal %s of %s, and is collected with runtime_wait signal"
 				% [id, _watches[id].signal_name, _watches[id].node_path]
-			)
+			),
 		}
 	if not _traces.has(id):
 		return {
@@ -359,8 +362,8 @@ func recorded(params: Dictionary) -> Dictionary:
 			"message":
 			(
 				(
-					"No property watch %d is armed in this game: it was collected already, %d armed after"
-					+ " it let it go, or the game started again since"
+					"No property watch %d is armed in this game: it was collected already, %d "
+					+ "armed after it let it go, or the game started again since"
 				)
 				% [id, MOST_WATCHES]
 			),
@@ -383,8 +386,8 @@ func recorded(params: Dictionary) -> Dictionary:
 	if trace.dropped > 0:
 		answer["dropped"] = (
 			(
-				"%d changes are left out: past %d, each new one took the last place, so the list ends on"
-				+ " the latest"
+				"%d changes are left out: past %d, each new one took the last place, so the list "
+				+ "ends on the latest"
 			)
 			% [trace.dropped, MOST_CHANGES]
 		)
@@ -403,7 +406,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 	if timeout_ms < 1 or timeout_ms > CEILING_MSEC:
 		return _out_of_range("timeout_ms", timeout_ms, 1, CEILING_MSEC)
 	if node_path.is_empty():
-		return {"type": "error", "message": "Node path required"}
+		return { "type": "error", "message": "Node path required" }
 	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
@@ -411,7 +414,10 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# path, a property compares one value on one node. Taking says and dropping the other left a
 	# caller watching a screen while believing they were watching a property, and the answer says
 	# which of them it is about only if you already know that says wins.
-	if not says.is_empty() and (not property.is_empty() or params.has("value") or params.has("compare")):
+	if (
+		not says.is_empty()
+		and (not property.is_empty() or params.has("value") or params.has("compare"))
+	):
 		var other: String = (
 			property if not property.is_empty() else ("value" if params.has("value") else "compare")
 		)
@@ -420,18 +426,18 @@ func wait_until(params: Dictionary) -> Dictionary:
 			"message":
 			(
 				(
-					'A wait takes says or a property, not both: this one has says "%s" and %s as well.'
-					+ " Ask for one of them."
+					'A wait takes says or a property, not both: this one has says "%s" and %s as '
+					+ "well. Ask for one of them."
 				)
 				% [says, other]
-			)
+			),
 		}
 	if not says.is_empty():
 		var include_hidden: bool = GdhRead.as_bool(params.get("include_hidden", false))
 		return await _wait_until_said(node_path, says, timeout_ms, include_hidden)
 	var unasked: String = _property_wait_unasked(property, params)
 	if not unasked.is_empty():
-		return {"type": "error", "message": unasked}
+		return { "type": "error", "message": unasked }
 	var compare: String = str(params.get("compare", "=="))
 
 	var node: Node = standing["node"]
@@ -451,13 +457,15 @@ func wait_until(params: Dictionary) -> Dictionary:
 	var sent: Variant = by_name[1] if not by_name.is_empty() and by_name[0] else params["value"]
 	var wanted: Variant = _values.fitted(sent, typeof(current))
 	# Read against what the property is declared as, not only against what it holds this frame: an
-	# object property holding null holds nothing typed, so any value was taken as it came and compared
-	# with null until the time ran out. #772 waited a minute for "null" that way and answered met
-	# false with value null beside it.
+	# object property holding null holds nothing typed, so any value was taken as it came and
+	# compared with null until the time ran out. #772 waited a minute for "null" that way and
+	# answered met false with value null beside it.
 	var declared: int = watched["declared"]
 	# An untyped slot holding null or an object is read the same way, as set reads it: otherwise the
 	# two ops would disagree about one property, and the wait would run out on the text null.
-	var untyped_object: bool = declared == TYPE_NIL and (current == null or typeof(current) == TYPE_OBJECT)
+	var untyped_object: bool = (
+		declared == TYPE_NIL and (current == null or typeof(current) == TYPE_OBJECT)
+	)
 	var holds_objects: bool = declared == TYPE_OBJECT or untyped_object
 	if holds_objects and GdhChanges.names_no_object(wanted):
 		wanted = null
@@ -480,15 +488,15 @@ func wait_until(params: Dictionary) -> Dictionary:
 			% [node_path, property, type_string(typeof(wanted))]
 		)
 	if not refused.is_empty():
-		return {"type": "error", "message": refused}
+		return { "type": "error", "message": refused }
 
 	var started: int = Time.get_ticks_msec()
 	var frames: int = 0
 	# The type is checked every time round, not only at the top: a property that holds an object a
-	# frame later is the same error arriving late.
-	# At the precision the property keeps, as set compares: a float arrives as 64 bits and most
-	# engine properties keep 32, so h_offset waited on as -1.1 read -1.10000002384186 every frame and
-	# the wait ran out on a value the game had reached.
+	# frame later is the same error arriving late. At the precision the property keeps, as set
+	# compares: a float arrives as 64 bits and most engine properties keep 32, so h_offset waited on
+	# as -1.1 read -1.10000002384186 every frame and the wait ran out on a value the game had
+	# reached.
 	var differs: bool = compare == "!="
 	while (
 		GdhValues.comparable(current, wanted)
@@ -498,7 +506,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 		await _host.get_tree().process_frame
 		frames += 1
 		if not is_instance_valid(node):
-			return {"type": "error", "message": "%s was freed while waiting" % node_path}
+			return { "type": "error", "message": "%s was freed while waiting" % node_path }
 		watched = _watched(node, node_path, property)
 		if watched.has("message"):
 			return watched
@@ -509,13 +517,18 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"path": node_path,
 		"property": property,
 		"compare": compare,
-		"met": GdhValues.comparable(current, wanted) and GdhChanges.held_already(wanted, current) != differs,
+		"met":
+		(
+			GdhValues.comparable(current, wanted)
+			and GdhChanges.held_already(wanted, current) != differs
+		),
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 		"frames": frames,
 	}
 	# Said rather than refused, since a game may store a number no value has, as set says it stores
-	# one: a wait for 7 on an enum of three ran its whole timeout and answered only that it was not met.
+	# one: a wait for 7 on an enum of three ran its whole timeout and answered only that it was not
+	# met.
 	if watched["holder"] is Object:
 		var owner: Object = watched["holder"]
 		var shown: String = JSON.stringify(_values.serialize(wanted), "", false)
@@ -542,8 +555,11 @@ static func _property_wait_unasked(property: String, params: Dictionary) -> Stri
 ## is past the value, or level with it at the precision the property keeps, as `==` compares.
 ##
 ## The value is read as the number it is rather than fitted to the property's type, since fitting
-## truncates: 31.5 on a whole-number property became 31, and a wait for "at least 31.5" was met at 31.
-func _wait_in_order(node: Node, params: Dictionary, current: Variant, timeout_ms: int) -> Dictionary:
+## truncates: 31.5 on a whole-number property became 31, and a wait for "at least 31.5" was met at
+## 31.
+func _wait_in_order(
+	node: Node, params: Dictionary, current: Variant, timeout_ms: int
+) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
 	var compare: String = str(params.get("compare", ""))
@@ -552,7 +568,7 @@ func _wait_in_order(node: Node, params: Dictionary, current: Variant, timeout_ms
 	# came with it, since no number would make the wait answerable.
 	var unordered: String = _no_order(current, node_path, property, compare)
 	if not unordered.is_empty():
-		return {"type": "error", "message": unordered}
+		return { "type": "error", "message": unordered }
 	var number: Variant = given
 	if given is String:
 		var text: String = given
@@ -564,7 +580,7 @@ func _wait_in_order(node: Node, params: Dictionary, current: Variant, timeout_ms
 			(
 				"compare %s puts a number in order, and the value to wait for is %s: give a number."
 				% [compare, str(given)]
-			)
+			),
 		}
 	var limit: float = GdhRead.as_float(number)
 
@@ -574,14 +590,14 @@ func _wait_in_order(node: Node, params: Dictionary, current: Variant, timeout_ms
 		await _host.get_tree().process_frame
 		frames += 1
 		if not is_instance_valid(node):
-			return {"type": "error", "message": "%s was freed while waiting" % node_path}
+			return { "type": "error", "message": "%s was freed while waiting" % node_path }
 		var watched: Dictionary = _watched(node, node_path, property)
 		if watched.has("message"):
 			return watched
 		current = watched["value"]
 		unordered = _no_order(current, node_path, property, compare)
 		if not unordered.is_empty():
-			return {"type": "error", "message": unordered}
+			return { "type": "error", "message": unordered }
 
 	return {
 		"type": "condition",
@@ -596,7 +612,9 @@ func _wait_in_order(node: Node, params: Dictionary, current: Variant, timeout_ms
 
 
 ## Why [param current] cannot be put in order, or "" when it is a number.
-static func _no_order(current: Variant, node_path: String, property: String, compare: String) -> String:
+static func _no_order(
+	current: Variant, node_path: String, property: String, compare: String
+) -> String:
 	if typeof(current) == TYPE_INT or typeof(current) == TYPE_FLOAT:
 		return ""
 	return (
@@ -610,7 +628,8 @@ static func _no_order(current: Variant, node_path: String, property: String, com
 static func _in_order(compare: String, limit: float, current: Variant) -> bool:
 	var reading: float = GdhRead.as_float(current)
 	var level: bool = (
-		reading == limit or (typeof(current) == TYPE_FLOAT and GdhChanges.held_already(limit, current))
+		reading == limit
+		or (typeof(current) == TYPE_FLOAT and GdhChanges.held_already(limit, current))
 	)
 	match compare:
 		">=":
@@ -633,8 +652,8 @@ static func _cut_to_fit(given: Variant, type: int, node_path: String, property: 
 		return ""
 	return (
 		(
-			"%s.%s holds %s and the value to wait for is %s, which %s cannot hold without changing it:"
-			+ " waiting on it would answer about a state nobody asked for."
+			"%s.%s holds %s and the value to wait for is %s, which %s cannot hold without changing "
+			+ "it: waiting on it would answer about a state nobody asked for."
 		)
 		% [node_path, property, type_string(type), str(given), GdhValues.cut_by(type)]
 	)
@@ -651,9 +670,11 @@ static func _cut_to_fit(given: Variant, type: int, node_path: String, property: 
 ## where a number goes became 0.0, 0.0 already equalled the property, and the wait answered met the
 ## instant it started, about a state nobody asked about, with the real value beside it. A refusal
 ## is read and a met is acted on.
-static func _not_comparable(current: Variant, wanted: Variant, node_path: String, property: String) -> String:
+static func _not_comparable(
+	current: Variant, wanted: Variant, node_path: String, property: String
+) -> String:
 	var types: Array[String] = [
-		node_path, property, type_string(typeof(current)), type_string(typeof(wanted))
+		node_path, property, type_string(typeof(current)), type_string(typeof(wanted)),
 	]
 	# A value that cannot become what the property holds is said as that, which names the remedy,
 	# before the comparison it would also fail; an object on either side is said as the comparison.
@@ -696,7 +717,9 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 ## when the property is no enum or the value no word.
 static func _enum_by_name(watched: Dictionary, sent: Variant, node_path: String) -> Array:
 	var declaration: Dictionary = watched["declaration"]
-	var enum_hint: bool = GdhRead.as_int(declaration.get("hint", PROPERTY_HINT_NONE)) == PROPERTY_HINT_ENUM
+	var enum_hint: bool = (
+		GdhRead.as_int(declaration.get("hint", PROPERTY_HINT_NONE)) == PROPERTY_HINT_ENUM
+	)
 	if watched["declared"] != TYPE_INT or not enum_hint or not sent is String:
 		return []
 	if not watched["holder"] is Object:
@@ -721,7 +744,7 @@ static func _watched(node: Node, node_path: String, property: String) -> Diction
 	var named: String = reached["name"]
 	var missing: String = GdhPaths.nothing_under(holder, named, str(reached["called"]))
 	if not missing.is_empty():
-		return {"type": "error", "message": missing}
+		return { "type": "error", "message": missing }
 	var slot: Dictionary = _declared_slot(holder, named)
 	return {
 		"value": GdhPaths.read_under(holder, named),
@@ -731,14 +754,15 @@ static func _watched(node: Node, node_path: String, property: String) -> Diction
 	}
 
 
-## What [param named] is declared with on [param holder], as [method GdhValues.slot_declared] answers,
-## read the way a set reads it, so the two refuse the same values: a property's declaration, or a
-## typed list's or map's element type. Read off properties alone, an element of an Array[Node] holding
-## null declares nothing, and a wait for 5 on it runs out the timeout while a set of 5 on it is refused
-## at once. TYPE_NIL for anything declaring none, and for a call, whose answer nothing declares.
+## What [param named] is declared with on [param holder], as [method GdhValues.slot_declared]
+## answers, read the way a set reads it, so the two refuse the same values: a property's
+## declaration, or a typed list's or map's element type. Read off properties alone, an element of an
+## Array[Node] holding null declares nothing, and a wait for 5 on it runs out the timeout while a
+## set of 5 on it is refused at once. TYPE_NIL for anything declaring none, and for a call, whose
+## answer nothing declares.
 static func _declared_slot(holder: Variant, named: String) -> Dictionary:
 	if not GdhPaths.method_of(named).is_empty():
-		return {"type": TYPE_NIL, "class": "", "script": null, "declared": {}}
+		return { "type": TYPE_NIL, "class": "", "script": null, "declared": {} }
 	return GdhValues.slot_declared(holder, named)
 
 
@@ -756,15 +780,17 @@ static func _declared_slot(holder: Variant, named: String) -> Dictionary:
 ## screen fell back to counting frames. [param include_hidden] asks the other question, for a
 ## caller waiting on words a hidden node holds.
 ##
-## Paced by what a look costs, so the watching leaves the game its speed: every frame while a look is
-## cheap, and on a screen large enough for one to cost a real share of a frame, often enough that
+## Paced by what a look costs, so the watching leaves the game its speed: every frame while a look
+## is cheap, and on a screen large enough for one to cost a real share of a frame, often enough that
 ## looking takes about a tenth of the time. Every frame on a hall of 3,500 nodes held the game at a
 ## sixth of its frame rate, and its clock, which advances by the frame's delta, lost three quarters
 ## of its time, so a wait for a date timed out on a clock that turned a day every thirty seconds.
 ## The answer says how many frames the wait spanned, how many looks it took and how long they took
 ## between them, which is how a caller sees what it cost and whether the game lost its speed to the
 ## looks or to something else.
-func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_hidden: bool) -> Dictionary:
+func _wait_until_said(
+	node_path: String, said: String, timeout_ms: int, include_hidden: bool
+) -> Dictionary:
 	var started: int = Time.get_ticks_msec()
 	var frames: int = 0
 	var looks: int = 0
@@ -814,8 +840,9 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 	if not found and not include_hidden and _anything_says(node_path, said, true):
 		answer["unseen_note"] = (
 			(
-				"Something under %s says it, but is hidden or drawn outside the viewport or a"
-				+ " ScrollContainer, where the player cannot read it; includeHidden true counts it there too"
+				"Something under %s says it, but is hidden or drawn outside the viewport or a "
+				+ "ScrollContainer, where the player cannot read it; includeHidden true counts it "
+				+ "there too"
 			)
 			% node_path
 		)
@@ -900,8 +927,8 @@ class GdhTrace:
 		elif value is Dictionary:
 			var map: Dictionary = value
 			_last = map.duplicate(true)
-		# Game time unrounded: a frame can be a tenth of a millisecond long, and a rate worked out over
-		# one from times cut to a ten-thousandth was off by its own size.
+		# Game time unrounded: a frame can be a tenth of a millisecond long, and a rate worked out
+		# over one from times cut to a ten-thousandth was off by its own size.
 		var change: Dictionary = {
 			"frame": frame,
 			"elapsed_ms": elapsed,

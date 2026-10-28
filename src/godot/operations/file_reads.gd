@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## Scenes and resources read from their files, by the editor's tools and by a headless engine with
 ## none connected, so a read answers the same either way.
 ##
@@ -30,7 +29,10 @@ static func scene_tree(
 	if not laid.get("ok", false):
 		return laid
 	var nodes: Dictionary = laid["nodes"]
-	return {"ok": true, "tree": _entry(nodes, ".", include_properties, include_defaults, depth, 0)}
+	return {
+		"ok": true,
+		"tree": _entry(nodes, ".", include_properties, include_defaults, depth, 0),
+	}
 
 
 ## The node at [param node_path] in [param scene_path] as {ok, name, type, properties}, laid as
@@ -45,7 +47,9 @@ static func scene_node(scene_path: String, node_path: String) -> Dictionary:
 	if not nodes.has(path):
 		return {}
 	var found: Dictionary = nodes[path]
-	return {"ok": true, "name": found["name"], "type": found["type"], "properties": found["properties"]}
+	return {
+		"ok": true, "name": found["name"], "type": found["type"], "properties": found["properties"],
+	}
 
 
 ## The node at [param node_path] in [param scene_path] as [method scene_node] answers it, when it is
@@ -67,7 +71,7 @@ static func scene_node_of_kind(scene_path: String, node_path: String, kind: Stri
 				"ok": true,
 				"name": nodes[path]["name"],
 				"type": found,
-				"properties": nodes[path]["properties"]
+				"properties": nodes[path]["properties"],
 			}
 	else:
 		var hinted: String = said
@@ -79,7 +83,7 @@ static func scene_node_of_kind(scene_path: String, node_path: String, kind: Stri
 		var type: String = str(nodes[at]["type"])
 		if ClassDB.class_exists(type) and ClassDB.is_parent_class(type, kind):
 			var _held: bool = held.append(str(at))
-	return {"ok": false, "error": GdhRead.not_of_kind(said, node_path, found, kind, held)}
+	return { "ok": false, "error": GdhRead.not_of_kind(said, node_path, found, kind, held) }
 
 
 ## [param said], the refusal for [param node_path], which the scene laid as [param nodes] does not
@@ -100,35 +104,38 @@ static func _missing_in(nodes: Dictionary, said: String, node_path: String) -> S
 	var children: Array[String] = nodes[at]["children"]
 	for child: String in children:
 		var _named: bool = names.append(str(nodes[child]["name"]))
-	return GdhRead.missing_below(said, str(nodes["."]["name"]), reached, parts[reached.size()], names)
+	return GdhRead.missing_below(
+		said, str(nodes["."]["name"]), reached, parts[reached.size()], names
+	)
 
 
 ## Every node of [param scene_path] as {ok, nodes}, keyed by path, or a refusal.
 static func _laid(scene_path: String) -> Dictionary:
 	if not FileAccess.file_exists(scene_path):
-		return {"ok": false, "error": "Scene not found: " + scene_path}
+		return { "ok": false, "error": "Scene not found: " + scene_path }
 	# Loaded without naming the type, so a resource handed in by mistake loads as what it is and the
 	# refusal can say so, where asking for a PackedScene printed the loader's error and a backtrace.
 	var loaded: Resource = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_IGNORE)
 	if loaded == null:
-		return {"ok": false, "error": "Failed to load %s as a scene" % scene_path}
+		return { "ok": false, "error": "Failed to load %s as a scene" % scene_path }
 	if not loaded is PackedScene:
 		var sort: String = GdhRead.with_article(loaded.get_class())
 		return {
 			"ok": false,
-			"error": "%s is %s, not a scene: resource_edit read reads its properties." % [scene_path, sort]
+			"error":
+			"%s is %s, not a scene: resource_edit read reads its properties." % [scene_path, sort],
 		}
 	var packed: PackedScene = loaded
 	var nodes: Dictionary = {}
 	var refused: String = _lay(packed.get_state(), ".", nodes, [scene_path], packed)
 	if not refused.is_empty():
-		return {"ok": false, "error": refused}
+		return { "ok": false, "error": refused }
 	if not nodes.has("."):
-		return {"ok": false, "error": "%s holds no nodes" % scene_path}
+		return { "ok": false, "error": "%s holds no nodes" % scene_path }
 	var base: SceneState = packed.get_state().get_base_scene_state()
 	if base != null:
 		nodes["."]["inherits"] = base.get_path()
-	return {"ok": true, "nodes": nodes}
+	return { "ok": true, "nodes": nodes }
 
 
 ## Lays the nodes of [param state] into [param nodes] under [param prefix], keyed by their path
@@ -152,8 +159,8 @@ static func _lay(
 		var path: String = _joined(prefix, str(state.get_node_path(index)))
 		var recovered: bool = false
 		if not nodes.has(path) and index > 0 and _overrides(state, index) and ids[index] >= 0:
-			# The engine finds an entry whose node was renamed or moved in the scene it comes from by
-			# the node's unique_id, and keeps the node's new name.
+			# The engine finds an entry whose node was renamed or moved in the scene it comes from
+			# by the node's unique_id, and keeps the node's new name.
 			var parent: String = _joined(prefix, str(state.get_node_path(index, true)))
 			var found: String = _by_id(nodes, _owner_of(nodes, parent, prefix), ids[index])
 			recovered = not found.is_empty()
@@ -164,7 +171,9 @@ static func _lay(
 			var instance: PackedScene = state.get_node_instance(index)
 			if instance != null:
 				if within.has(instance.resource_path):
-					return "%s instances %s, which holds it" % [within.back(), instance.resource_path]
+					return (
+						"%s instances %s, which holds it" % [within.back(), instance.resource_path]
+					)
 				var refused: String = _lay(
 					instance.get_state(), path, nodes, within + [instance.resource_path]
 				)
@@ -178,15 +187,16 @@ static func _lay(
 				nodes[path] = _made("InstancePlaceholder")
 				nodes[path]["instanceOf"] = state.get_node_instance_placeholder(index)
 			elif str(state.get_node_type(index)).is_empty():
-				# An entry for a node of an instance that no longer has it, which the engine skips too.
+				# An entry for a node of an instance that no longer has it, which the engine skips
+				# too.
 				continue
 			else:
 				nodes[path] = _made(str(state.get_node_type(index)))
 				nodes[path]["madeHere"] = loaded != null
 			if ids[index] >= 0:
 				nodes[path]["uniqueId"] = ids[index]
-			# Laid at the root with no scene handed in is a scene the one being read inherits, and the
-			# deepest is laid first, so this is the file that makes the node.
+			# Laid at the root with no scene handed in is a scene the one being read inherits, and
+			# the deepest is laid first, so this is the file that makes the node.
 			if prefix == "." and loaded == null:
 				nodes[path]["inheritedFrom"] = state.get_path()
 		# The name is the state's even for an entry laid already, since an inherited scene names its
@@ -251,8 +261,8 @@ static func _editable_in(scene_path: String, given_scene: PackedScene = null) ->
 
 
 ## The unique_id of each node entry in the text scene at [param scene_path], in the order its state
-## holds them, -1 where an entry has none. All -1 for a binary scene, and for a file whose entries do
-## not number [param count], since SceneState does not give the ids to a script.
+## holds them, -1 where an entry has none. All -1 for a binary scene, and for a file whose entries
+## do not number [param count], since SceneState does not give the ids to a script.
 static func _unique_ids(scene_path: String, count: int) -> Array[int]:
 	var ids: Array[int] = []
 	var _sized: int = ids.resize(count)
@@ -289,8 +299,9 @@ static func _owner_of(nodes: Dictionary, parent: String, prefix: String) -> Stri
 	return at if nodes.has(at) else prefix
 
 
-## The path of the node [param owner] owns whose unique_id is [param id], or "": one under an instance
-## nested below [param owner] belongs to that instance's file, whose ids are numbered apart.
+## The path of the node [param owner] owns whose unique_id is [param id], or "": one under an
+## instance nested below [param owner] belongs to that instance's file, whose ids are numbered
+## apart.
 static func _by_id(nodes: Dictionary, owner: String, id: int) -> String:
 	for path: String in nodes:
 		if path == owner or not (owner == "." or path.begins_with(owner + "/")):
@@ -307,7 +318,7 @@ static func _by_id(nodes: Dictionary, owner: String, id: int) -> String:
 static func _made(type: String) -> Dictionary:
 	var children: Array[String] = []
 	var groups: Array[String] = []
-	return {"name": "", "type": type, "properties": {}, "children": children, "groups": groups}
+	return { "name": "", "type": type, "properties": {}, "children": children, "groups": groups }
 
 
 ## Puts [param path] among [param parent]'s children, at [param at] when the file says where (a node
@@ -342,7 +353,9 @@ static func _entry(
 ) -> Dictionary:
 	var node: Dictionary = nodes[path]
 	var children: Array[Dictionary] = []
-	var data: Dictionary = {"name": node["name"], "type": node["type"], "path": path, "children": children}
+	var data: Dictionary = {
+		"name": node["name"], "type": node["type"], "path": path, "children": children,
+	}
 	# The root's file is the scene being read, so only another node's names a second scene.
 	if path != "." and node.has("instanceOf"):
 		data["instanceOf"] = node["instanceOf"]
@@ -369,7 +382,8 @@ static func _entry(
 		if cells >= 0:
 			data["cellCount"] = cells
 			data["cellsListedBy"] = (
-				"scene_node get with nodePath %s, which lists them as set_tilemap_cells takes them" % path
+				"scene_node get with nodePath %s, which lists them as set_tilemap_cells takes them"
+				% path
 			)
 		if not node.get("madeHere", false):
 			var kept: Array = node.get("setHere", [])
@@ -383,14 +397,16 @@ static func _entry(
 			data["childrenNotListed"] = below.size()
 		return data
 	for child: String in below:
-		children.append(_entry(nodes, child, include_properties, include_defaults, depth, current_depth + 1))
+		children.append(
+			_entry(nodes, child, include_properties, include_defaults, depth, current_depth + 1)
+		)
 	return data
 
 
 ## How many cells a TileMapLayer or TileMap of [param type] holds under the values [param given], or
-## -1 when it is another node or the file sets none of its cells. The file keeps them as packed bytes,
-## which a read of the tree answered with alone, so a caller decoded the base64 to learn what was
-## painted. Only cells the file sets are counted: an instance's come from its own scene.
+## -1 when it is another node or the file sets none of its cells. The file keeps them as packed
+## bytes, which a read of the tree answered with alone, so a caller decoded the base64 to learn what
+## was painted. Only cells the file sets are counted: an instance's come from its own scene.
 static func _cell_count(type: String, given: Dictionary) -> int:
 	if not ClassDB.class_exists(type) or not ClassDB.can_instantiate(type):
 		return -1
@@ -400,7 +416,10 @@ static func _cell_count(type: String, given: Dictionary) -> int:
 	var painted: bool = false
 	for property: Variant in given:
 		var named: String = str(property)
-		if named == "tile_map_data" or (named.begins_with("layer_") and named.ends_with("/tile_data")):
+		if (
+			named == "tile_map_data"
+			or (named.begins_with("layer_") and named.ends_with("/tile_data"))
+		):
 			painted = true
 	if not painted:
 		return -1
@@ -439,7 +458,10 @@ static func _stored(type: String, given: Dictionary, include_defaults: bool) -> 
 	if script != null:
 		for declared: Dictionary in script.get_script_property_list():
 			var property: String = str(declared.get("name", ""))
-			if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+			if (
+				not property.is_empty()
+				and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE
+			):
 				scripted[property] = script.get_property_default_value(property)
 	var values: Dictionary = {}
 	var defaults: Dictionary = {}
@@ -451,7 +473,10 @@ static func _stored(type: String, given: Dictionary, include_defaults: bool) -> 
 				bare.set(str(property), given[property])
 		for declared: Dictionary in bare.get_property_list():
 			var property: String = str(declared.get("name", ""))
-			if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+			if (
+				not property.is_empty()
+				and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE
+			):
 				values[property] = bare.get(property)
 				defaults[property] = plain.get(property)
 		for made: Object in [bare, plain]:
@@ -476,7 +501,7 @@ static func _stored(type: String, given: Dictionary, include_defaults: bool) -> 
 			left_out += 1
 			continue
 		answered[property] = serialiser.serialize_value(values[property])
-	return {"properties": answered, "left_out": left_out}
+	return { "properties": answered, "left_out": left_out }
 
 
 ## What a resource file holds, in the form modify takes, so a value read here can be written back.
@@ -488,10 +513,13 @@ static func _stored(type: String, given: Dictionary, include_defaults: bool) -> 
 static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	var file: String = res_path.get_slice("::", 0)
 	if not FileAccess.file_exists(file):
-		return {"ok": false, "error": GdhFileWalk.new().with_nearest_files("No resource at " + file, file)}
+		return {
+			"ok": false,
+			"error": GdhFileWalk.new().with_nearest_files("No resource at " + file, file),
+		}
 	var whole: Resource = ResourceLoader.load(file, "", ResourceLoader.CACHE_MODE_IGNORE)
 	if whole == null:
-		return {"ok": false, "error": "%s did not load as a resource." % file}
+		return { "ok": false, "error": "%s did not load as a resource." % file }
 	# The file's resource is held until the read is done, since what it keeps can depend on it: a
 	# TileSet that goes unlinks its sources, and an atlas source with no TileSet lists none of its
 	# tiles' physics, navigation or custom data.
@@ -500,14 +528,20 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 		var id: String = res_path.trim_prefix(file + "::")
 		var inner: Resource = _kept_in(whole, file, id, {})
 		if inner == null:
-			return {"ok": false, "error": "%s keeps no resource with the id %s." % [file, id]}
+			return { "ok": false, "error": "%s keeps no resource with the id %s." % [file, id] }
 		loaded = inner
 	# A scene's own properties are its packed bundle, which says nothing a caller can use.
 	if loaded is PackedScene:
 		return {
 			"ok": false,
 			"error":
-			"%s is a scene: scene_tree reads its nodes, and scene_node get one node's properties." % res_path
+			(
+				(
+					"%s is a scene: scene_tree reads its nodes, and scene_node get one node's "
+					+ "properties."
+				)
+				% res_path
+			),
 		}
 
 	var script: Script = loaded.get_script()
@@ -525,13 +559,17 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 		untooled and file.ends_with(".tres") and not GdhShapes.STORED_APART.has(loaded.get_class())
 	)
 	var set_in_file: Dictionary = (
-		_names_set_in(FileAccess.get_file_as_string(file), res_path.trim_prefix(file).trim_prefix("::"))
+		_names_set_in(
+			FileAccess.get_file_as_string(file), res_path.trim_prefix(file).trim_prefix("::")
+		)
 		if from_file
 		else {}
 	)
 	# A Curve's points are read off one with none, since the engine has no default for point_0.
 	var fresh: Object = (
-		ClassDB.instantiate(loaded.get_class()) if GdhShapes.STORED_APART.has(loaded.get_class()) else null
+		ClassDB.instantiate(loaded.get_class())
+		if GdhShapes.STORED_APART.has(loaded.get_class())
+		else null
 	)
 	for p: Dictionary in GdhShapes.read_properties(loaded):
 		var property: String = str(p.get("name", ""))
@@ -554,7 +592,10 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 				continue
 		properties[property] = serialiser.serialize_value(value)
 	var answer: Dictionary = {
-		"ok": true, "resourcePath": res_path, "resourceType": loaded.get_class(), "properties": properties
+		"ok": true,
+		"resourcePath": res_path,
+		"resourceType": loaded.get_class(),
+		"properties": properties,
 	}
 	if script != null:
 		answer["script"] = script.resource_path
@@ -566,8 +607,8 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	return answer
 
 
-## The names the [code][resource][/code] section of [param text], a .tres file, sets, or those of the
-## embedded resource with the id [param id] when one is given, as a set.
+## The names the [code][resource][/code] section of [param text], a .tres file, sets, or those of
+## the embedded resource with the id [param id] when one is given, as a set.
 static func _names_set_in(text: String, id: String) -> Dictionary:
 	var names: Dictionary = {}
 	var inside: bool = false

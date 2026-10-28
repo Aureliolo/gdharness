@@ -1,6 +1,5 @@
 @tool
 extends RefCounted
-
 ## The node paths scenes hold, carried after a node moves as the editor's own rename carries them:
 ## the NodePath values on their nodes, inside arrays, dictionaries and the resources built into the
 ## scene too, and the tracks of the animations their players play. After a delete they are named
@@ -9,7 +8,11 @@ extends RefCounted
 ## A path is worked out from where its holder was and where it pointed before the move, so it is
 ## followed in a scene loaded after the move as well, where the old path no longer resolves.
 
-enum { UNCHANGED, REWRITTEN, DELETED }
+enum {
+	UNCHANGED,
+	REWRITTEN,
+	DELETED,
+}
 
 const GdhHeadlessCheck = preload("../headless_check.gd")
 const GdhRead = preload("../reading.gd")
@@ -87,7 +90,7 @@ func carry(scene: GdhSceneFile, moves: Dictionary) -> int:
 			var name: String = str(property["name"])
 			if not _may_hold_paths(property):
 				continue
-			var entry: Dictionary = {"scenePath": scene.path, "nodePath": now, "property": name}
+			var entry: Dictionary = { "scenePath": scene.path, "nodePath": now, "property": name }
 			var elsewhere: String = "" if set_here.has(name) else from
 			var carried: Array = _carried(node.get(name), was, now, entry, elsewhere)
 			if carried[0]:
@@ -241,10 +244,12 @@ static func _may_hold_paths(property: Dictionary) -> bool:
 ## it carried, as [whether any was, the value]. A resource built into the scene is changed in place.
 ## [param entry] says where the value is held, for the record of each path. A path in a resource may
 ## be relative to something other than its holder, as the editor allows; it is followed only when it
-## names a node from where its holder was, as one relative to the holder does. A value [param
-## elsewhere], a file other than the scene's, gives is named only when it names nothing since the
-## move, which its own file's pass could not see.
-func _carried(value: Variant, was: String, now: String, entry: Dictionary, elsewhere: String) -> Array:
+## names a node from where its holder was, as one relative to the holder does. A value
+## [param elsewhere], a file other than the scene's, gives is named only when it names nothing since
+## the move, which its own file's pass could not see.
+func _carried(
+	value: Variant, was: String, now: String, entry: Dictionary, elsewhere: String
+) -> Array:
 	match typeof(value):
 		TYPE_NODE_PATH:
 			var path: NodePath = value
@@ -256,7 +261,10 @@ func _carried(value: Variant, was: String, now: String, entry: Dictionary, elsew
 					not_retargeted.append(
 						_left(
 							record,
-							"The value is set in %s, and an edit here would not be saved there." % elsewhere
+							(
+								"The value is set in %s, and an edit here would not be saved there."
+								% elsewhere
+							)
 						)
 					)
 			elif after[0] == DELETED:
@@ -350,7 +358,9 @@ func _after(path: NodePath, was: String, now: String) -> Array:
 ## Whether [param path], held by the node at [param now], names no node.
 func _names_nothing(path: NodePath, now: String) -> bool:
 	var holder: Node = _scene.root.get_node_or_null(now)
-	return holder != null and holder.get_node_or_null(NodePath(path.get_concatenated_names())) == null
+	return (
+		holder != null and holder.get_node_or_null(NodePath(path.get_concatenated_names())) == null
+	)
 
 
 ## The path to [param target] through the unique node that was at [param start], written through its
@@ -424,8 +434,9 @@ func _tracks(mixer: AnimationMixer, now: String) -> void:
 			var animation: Animation = library.get_animation(animation_name)
 			var home: Dictionary = _home_of(animation, library)
 			var why: String = home["why"]
-			# Carried once, from the first scene playing it. One kept in a file of its own that this call
-			# rewrote is held in _homes, so a later scene loading that file is given this same copy.
+			# Carried once, from the first scene playing it. One kept in a file of its own that this
+			# call rewrote is held in _homes, so a later scene loading that file is given this same
+			# copy.
 			if _seen.has(animation):
 				continue
 			_seen[animation] = true
@@ -466,13 +477,14 @@ func _tracks(mixer: AnimationMixer, now: String) -> void:
 
 
 ## Where an edit to [param animation], played from [param library], is saved, as {file, home, why,
-## theirs}: file "" with the scene, or the file of its own it or its library is kept in, with home the
-## resource saved there; why, when nothing written here would keep the edit; theirs, when that is
-## because it is kept in another scene or an imported file, whose tracks are written in its terms.
+## theirs}: file "" with the scene, or the file of its own it or its library is kept in, with home
+## the resource saved there; why, when nothing written here would keep the edit; theirs, when that
+## is because it is kept in another scene or an imported file, whose tracks are written in its
+## terms.
 func _home_of(animation: Animation, library: AnimationLibrary) -> Dictionary:
 	var file: String = animation.resource_path.get_slice("::", 0)
 	if file.is_empty() or file == _scene.path:
-		return {"file": "", "why": ""}
+		return { "file": "", "why": "" }
 	var home: Resource = animation
 	if animation.resource_path.contains("::"):
 		home = library if library.resource_path == file else null
@@ -483,18 +495,21 @@ func _home_of(animation: Animation, library: AnimationLibrary) -> Dictionary:
 		}
 	if not Engine.is_editor_hint():
 		var script: Script = home.get_script()
-		if (script != null and not script.is_tool()) or GdhHeadlessCheck.holds_scripted_embedded(home, {}):
+		if (
+			(script != null and not script.is_tool())
+			or GdhHeadlessCheck.holds_scripted_embedded(home, {})
+		):
 			return {
 				"why":
 				(
 					(
 						(
-							"%s holds a resource with a script that is not a tool, which a headless engine runs as "
-							+ "it loads the file. "
+							"%s holds a resource with a script that is not a tool, which a "
+							+ "headless engine runs as it loads the file. "
 						)
 						% file
 					)
 					+ GdhHeadlessCheck.REMEDY
-				)
+				),
 			}
-	return {"file": file, "home": home, "why": ""}
+	return { "file": file, "home": home, "why": "" }

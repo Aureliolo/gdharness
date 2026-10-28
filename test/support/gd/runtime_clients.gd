@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## The runtime's server against a real socket: it takes the port it is given, announces
 ## itself where the server will look, greets a client, answers requests by id however the
 ## bytes arrive, refuses what it cannot read, drops a client that hangs up without the engine
@@ -12,7 +11,6 @@ extends SceneTree
 const Checked = preload("checked.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const DEADLINE_MSEC: int = 5000
-
 ## Comfortably past any socket buffer, so one reply cannot go out in a single write however the
 ## platform happens to be tuned.
 const BLOB_BYTES: int = 4 * 1024 * 1024
@@ -26,7 +24,9 @@ var second_received: PackedByteArray = PackedByteArray()
 
 
 func _init() -> void:
-	var directory: String = OS.get_temp_dir().path_join("gdharness-fixture-%d" % OS.get_process_id())
+	var directory: String = OS.get_temp_dir().path_join(
+		"gdharness-fixture-%d" % OS.get_process_id()
+	)
 	OS.set_environment("GDHARNESS_RUNTIME_DIR", directory)
 
 	_check_a_script_run_serves_nobody(directory)
@@ -56,7 +56,7 @@ func _finish(directory: String) -> void:
 	var _removed: Error = DirAccess.remove_absolute(directory)
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true, "temp_dir": OS.get_temp_dir()}))
+		print(JSON.stringify({ "ok": true, "temp_dir": OS.get_temp_dir() }))
 		quit(0)
 		return
 
@@ -139,7 +139,7 @@ func _check_a_client_that_stopped_reading(node: Runtime) -> void:
 	# Queued rather than written, which is the whole of the fix: nothing reaches the socket until
 	# the frame loop hands over as much as it will take.
 	var peer: StreamPeerTCP = node._clients[0]
-	node._send_response(peer, {"type": "blob", "data": "x".repeat(BLOB_BYTES)})
+	node._send_response(peer, { "type": "blob", "data": "x".repeat(BLOB_BYTES) })
 	var owed: PackedByteArray = node._outgoing.get(peer, PackedByteArray())
 	if owed.size() < BLOB_BYTES:
 		_fail("a reply should be queued for the frame loop rather than written where it can block")
@@ -153,7 +153,7 @@ func _check_a_client_that_stopped_reading(node: Runtime) -> void:
 		_fail("the runtime never accepted the second client, with the first one not reading")
 		return
 	var asked: PackedByteArray = (
-		(JSON.stringify({"id": 1, "command": "ping", "params": {}}) + "\n").to_utf8_buffer()
+		(JSON.stringify({ "id": 1, "command": "ping", "params": {} }) + "\n").to_utf8_buffer()
 	)
 	Checked.done(talker.put_data(asked), "asking over the socket")
 
@@ -212,8 +212,8 @@ func _check_a_script_run_serves_nobody(directory: String) -> void:
 
 
 ## Which command lines name a quiet scene: a scene argument under a listed folder, read from the
-## PackedStringArray project.godot writes or an Array a hand might, and nothing else. An empty folder
-## would match every scene, and a flag's value or a script is not the scene the engine runs.
+## PackedStringArray project.godot writes or an Array a hand might, and nothing else. An empty
+## folder would match every scene, and a flag's value or a script is not the scene the engine runs.
 func _check_which_scenes_are_quiet() -> void:
 	var bench: String = "res://tests/bench_run.tscn"
 	var cases: Array[Array] = [
@@ -307,16 +307,16 @@ func _check(node: Runtime, directory: String) -> void:
 	# Two requests in one write, one of them for a command that does not exist, then one with
 	# no id at all, then one request split across two writes.
 	var batch: String = (
-		JSON.stringify({"id": 7, "command": "ping", "params": {}})
+		JSON.stringify({ "id": 7, "command": "ping", "params": {} })
 		+ "\n"
-		+ JSON.stringify({"id": 8, "command": "nonesuch", "params": {}})
+		+ JSON.stringify({ "id": 8, "command": "nonesuch", "params": {} })
 		+ "\n"
-		+ JSON.stringify({"command": "ping", "params": {}})
+		+ JSON.stringify({ "command": "ping", "params": {} })
 		+ "\n"
 	)
 	Checked.done(client.put_data(batch.to_utf8_buffer()), "sending the batch")
 	var split: PackedByteArray = (
-		(JSON.stringify({"id": 9, "command": "ping", "params": {}}) + "\n").to_utf8_buffer()
+		(JSON.stringify({ "id": 9, "command": "ping", "params": {} }) + "\n").to_utf8_buffer()
 	)
 	Checked.done(client.put_data(split.slice(0, 10)), "sending the first half")
 	var three_answered: Callable = func() -> bool:

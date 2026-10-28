@@ -1,8 +1,7 @@
 extends SceneTree
-
 ## What the runtime offers beside an input or a refusal, so a caller can act on it without a second
-## look: the Control a key, an action or a pad's event reached first, and the methods a node has when
-## the one asked for is not among them. Each absence is checked beside the case that fills it.
+## look: the Control a key, an action or a pad's event reached first, and the methods a node has
+## when the one asked for is not among them. Each absence is checked beside the case that fills it.
 
 const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
 const GdhPad = preload("res://addons/gdharness_runtime/runtime_pad.gd")
@@ -15,7 +14,9 @@ var failures: Array[String] = []
 
 
 func _init() -> void:
-	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
+	Checked.done(
+		process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame"
+	)
 
 
 func _fail(message: String) -> void:
@@ -36,7 +37,7 @@ func _run() -> void:
 
 	host.queue_free()
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 	printerr("\n".join(failures))
@@ -51,19 +52,19 @@ func _check_keys_a_field_keeps(input: GdhInputCommands, typing: GdhTyping) -> vo
 	root.add_child(field)
 	field.grab_focus()
 	await process_frame
-	var spaced: Dictionary = await input.inject_key({"keycode": "Space"})
+	var spaced: Dictionary = await input.inject_key({ "keycode": "Space" })
 	if spaced.get("typed_into") != str(field.get_path()) or spaced.get("holds") != " ":
 		_fail("Space into a field names the field that took it: %s" % JSON.stringify(spaced))
-	var entered: Dictionary = await input.inject_key({"keycode": "Enter"})
+	var entered: Dictionary = await input.inject_key({ "keycode": "Enter" })
 	if entered.get("editing_ended") != true or entered.has("typed_into"):
 		_fail("Enter says it ended the edit and typed nothing: %s" % JSON.stringify(entered))
-	var again: Dictionary = await input.inject_key({"keycode": "Space"})
+	var again: Dictionary = await input.inject_key({ "keycode": "Space" })
 	if again.has("typed_into") or again.has("editing_ended") or field.text != " ":
 		_fail("a field no longer edited takes nothing and says nothing: %s" % JSON.stringify(again))
 	field.queue_free()
 
-	# A key that frees the focused field with its panel, as Escape closing a dialog does, answered {}:
-	# the field read before the key was handed on freed.
+	# A key that frees the focused field with its panel, as Escape closing a dialog does, answered
+	# {}: the field read before the key was handed on freed.
 	var panel: PanelContainer = PanelContainer.new()
 	var named: LineEdit = LineEdit.new()
 	panel.add_child(named)
@@ -77,7 +78,7 @@ func _check_keys_a_field_keeps(input: GdhInputCommands, typing: GdhTyping) -> vo
 			panel.queue_free()
 	Checked.done(named.gui_input.connect(close) as Error, "closing the panel on Escape")
 	await process_frame
-	var closed: Dictionary = await input.inject_key({"keycode": "Escape"})
+	var closed: Dictionary = await input.inject_key({ "keycode": "Escape" })
 	if (
 		closed.get("type") != "input_injected"
 		or closed.get("focused") != path
@@ -86,7 +87,12 @@ func _check_keys_a_field_keeps(input: GdhInputCommands, typing: GdhTyping) -> vo
 		or closed.has("typed_into")
 		or is_instance_valid(panel)
 	):
-		_fail("a key that frees the focused field answers as any key does: %s" % JSON.stringify(closed))
+		_fail(
+			(
+				"a key that frees the focused field answers as any key does: %s"
+				% JSON.stringify(closed)
+			)
+		)
 
 	var button: Button = Button.new()
 	button.text = "Play"
@@ -95,9 +101,10 @@ func _check_keys_a_field_keeps(input: GdhInputCommands, typing: GdhTyping) -> vo
 	await process_frame
 	var presses: Array[int] = [0]
 	Checked.done(
-		button.pressed.connect(func() -> void: presses[0] += 1) as Error, "counting the button's presses"
+		button.pressed.connect(func() -> void: presses[0] += 1) as Error,
+		"counting the button's presses"
 	)
-	var typed: Dictionary = typing.inject_text({"text": "a b\n"})
+	var typed: Dictionary = typing.inject_text({ "text": "a b\n" })
 	await process_frame
 	if (
 		typed.get("into") != str(button.get_path())
@@ -106,7 +113,9 @@ func _check_keys_a_field_keeps(input: GdhInputCommands, typing: GdhTyping) -> vo
 		_fail("text at a focused button says it is no field: %s" % JSON.stringify(typed))
 	# What the note warns of: the space and the Enter in the text each pressed the button.
 	if presses[0] != 2 or not str(typed.get("note", "")).contains("a focused button takes a space"):
-		_fail("and the space and Enter each pressed it: %d, %s" % [presses[0], JSON.stringify(typed)])
+		_fail(
+			"and the space and Enter each pressed it: %d, %s" % [presses[0], JSON.stringify(typed)]
+		)
 	button.queue_free()
 	await process_frame
 
@@ -121,24 +130,34 @@ func _check_focus(input: GdhInputCommands) -> void:
 	button.grab_focus()
 	Input.flush_buffered_events()
 
-	var spaced: Dictionary = await input.inject_key({"keycode": "Space"})
+	var spaced: Dictionary = await input.inject_key({ "keycode": "Space" })
 	if presses[0] != 1:
-		_fail("Space on a focused button should press it, which is what the answer explains: %d" % presses[0])
+		_fail(
+			(
+				"Space on a focused button should press it, which is what the answer explains: %d"
+				% presses[0]
+			)
+		)
 	if str(spaced.get("focused", "")) != str(button.get_path()):
 		_fail("a key should name the Control that had the focus: %s" % JSON.stringify(spaced))
-	var accepted: Dictionary = await input.inject_action({"action": "ui_accept"})
+	var accepted: Dictionary = await input.inject_action({ "action": "ui_accept" })
 	if str(accepted.get("focused", "")) != str(button.get_path()):
 		_fail("and so should an action: %s" % JSON.stringify(accepted))
 
 	button.release_focus()
-	var unfocused: Dictionary = await input.inject_key({"keycode": "Space"})
+	var unfocused: Dictionary = await input.inject_key({ "keycode": "Space" })
 	if unfocused.get("type", "") != "input_injected" or unfocused.has("focused"):
 		_fail("with nothing focused a key names nothing: %s" % JSON.stringify(unfocused))
-	var free_action: Dictionary = await input.inject_action({"action": "ui_accept"})
+	var free_action: Dictionary = await input.inject_action({ "action": "ui_accept" })
 	if free_action.get("type", "") != "input_injected" or free_action.has("focused"):
 		_fail("and nor does an action: %s" % JSON.stringify(free_action))
 	if spaced.has("focused_after") or unfocused.has("focused_after"):
-		_fail("a press that leaves the focus where it was names nowhere it went: %s" % JSON.stringify(spaced))
+		_fail(
+			(
+				"a press that leaves the focus where it was names nowhere it went: %s"
+				% JSON.stringify(spaced)
+			)
+		)
 	button.queue_free()
 
 
@@ -155,21 +174,21 @@ func _check_focus_moves(input: GdhInputCommands) -> void:
 	upper.grab_focus()
 	Input.flush_buffered_events()
 
-	var down: Dictionary = await input.inject_action({"action": "ui_down"})
+	var down: Dictionary = await input.inject_action({ "action": "ui_down" })
 	if (
 		str(down.get("focused", "")) != str(upper.get_path())
 		or str(down.get("focused_after", "")) != str(lower.get_path())
 	):
 		_fail("ui_down names the button it left and the one it reached: %s" % JSON.stringify(down))
-	var up: Dictionary = await input.inject_key({"keycode": "Up", "pressed": true})
+	var up: Dictionary = await input.inject_key({ "keycode": "Up", "pressed": true })
 	if str(up.get("focused_after", "")) != str(upper.get_path()):
 		_fail("a key held down names where the focus went as well: %s" % JSON.stringify(up))
-	var let_go: Dictionary = await input.inject_key({"keycode": "Up", "pressed": false})
+	var let_go: Dictionary = await input.inject_key({ "keycode": "Up", "pressed": false })
 	if let_go.has("focused_after"):
 		_fail("and letting go of it moves nothing: %s" % JSON.stringify(let_go))
 
 	Checked.done(upper.pressed.connect(upper.hide), "hiding the button on its press")
-	var hidden: Dictionary = await input.inject_action({"action": "ui_accept"})
+	var hidden: Dictionary = await input.inject_action({ "action": "ui_accept" })
 	if not hidden.has("focused_after") or hidden["focused_after"] != null:
 		_fail("a press that leaves nothing focused answers null: %s" % JSON.stringify(hidden))
 	upper.queue_free()
@@ -189,32 +208,52 @@ func _check_pad_focus(host: Node) -> void:
 	list.grab_focus()
 	Input.flush_buffered_events()
 
-	var pushed: Dictionary = await pad.inject_joypad_motion({"axis": "left_y", "value": 0.75})
+	var pushed: Dictionary = await pad.inject_joypad_motion({ "axis": "left_y", "value": 0.75 })
 	if list.get_selected_items() != PackedInt32Array([1]):
-		_fail("a stick pushed down moves a focused list's selection: %s" % str(list.get_selected_items()))
+		_fail(
+			(
+				"a stick pushed down moves a focused list's selection: %s"
+				% str(list.get_selected_items())
+			)
+		)
 	if str(pushed.get("focused", "")) != str(list.get_path()) or pushed.has("focused_after"):
-		_fail("a motion should name the Control that had the focus and kept it: %s" % JSON.stringify(pushed))
+		_fail(
+			(
+				"a motion should name the Control that had the focus and kept it: %s"
+				% JSON.stringify(pushed)
+			)
+		)
 	if JSON.stringify(pushed.get("actions")) != '["ui_down"]':
 		_fail("and the one action its direction pressed, not ui_up: %s" % JSON.stringify(pushed))
 
-	var eased: Dictionary = await pad.inject_joypad_motion({"axis": "left_y", "value": 0.2})
-	if JSON.stringify(eased.get("actions")) != "[]" or str(eased.get("focused", "")) != str(list.get_path()):
+	var eased: Dictionary = await pad.inject_joypad_motion({ "axis": "left_y", "value": 0.2 })
+	if (
+		JSON.stringify(eased.get("actions")) != "[]"
+		or str(eased.get("focused", "")) != str(list.get_path())
+	):
 		_fail("a motion inside the deadzone presses nothing: %s" % JSON.stringify(eased))
 
-	var dpad: Dictionary = await pad.inject_joypad_button({"button": "dpad_down"})
+	var dpad: Dictionary = await pad.inject_joypad_button({ "button": "dpad_down" })
 	if list.get_selected_items() != PackedInt32Array([2]):
 		_fail("the dpad moves it on as well: %s" % str(list.get_selected_items()))
 	if (
 		JSON.stringify(dpad.get("actions")) != '["ui_down"]'
 		or str(dpad.get("focused", "")) != str(list.get_path())
 	):
-		_fail("a button names the focused Control and the action it pressed: %s" % JSON.stringify(dpad))
+		_fail(
+			(
+				"a button names the focused Control and the action it pressed: %s"
+				% JSON.stringify(dpad)
+			)
+		)
 
 	list.release_focus()
-	var free_motion: Dictionary = await pad.inject_joypad_motion({"axis": "left_y", "value": 0.75})
+	var free_motion: Dictionary = await pad.inject_joypad_motion(
+		{ "axis": "left_y", "value": 0.75 }
+	)
 	if JSON.stringify(free_motion.get("actions")) != '["ui_down"]' or free_motion.has("focused"):
 		_fail("with nothing focused a motion names nothing: %s" % JSON.stringify(free_motion))
-	var _settled: Dictionary = await pad.inject_joypad_motion({"axis": "left_y", "value": 0.0})
+	var _settled: Dictionary = await pad.inject_joypad_motion({ "axis": "left_y", "value": 0.0 })
 	list.queue_free()
 
 
@@ -222,7 +261,9 @@ func _check_pad_focus(host: Node) -> void:
 ## none is near, and never the engine's hundreds. The input commands are the scripted object.
 func _check_methods_offered(scripted: GdhInputCommands) -> void:
 	var plain: Node = Node.new()
-	var near: String = GdhPaths.with_methods_offered("I has no method inject_kye", scripted, "inject_kye")
+	var near: String = GdhPaths.with_methods_offered(
+		"I has no method inject_kye", scripted, "inject_kye"
+	)
 	if (
 		not near.begins_with("I has no method inject_kye; the nearest it has")
 		or not near.contains("inject_key")
@@ -235,7 +276,9 @@ func _check_methods_offered(scripted: GdhInputCommands) -> void:
 		or far.contains("get_class")
 	):
 		_fail("with nothing near, the script's own methods and no engine one: %s" % far)
-	var engine_near: String = GdhPaths.with_methods_offered("N has no method get_parnt", plain, "get_parnt")
+	var engine_near: String = GdhPaths.with_methods_offered(
+		"N has no method get_parnt", plain, "get_parnt"
+	)
 	if not engine_near.contains("; the nearest it has") or not engine_near.contains("get_parent"):
 		_fail("an engine method near the name is offered too: %s" % engine_near)
 	var bare: String = GdhPaths.with_methods_offered("N has no method nobody", plain, "nobody")

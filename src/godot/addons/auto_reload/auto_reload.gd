@@ -1,23 +1,9 @@
 @tool
 extends EditorPlugin
-
 ## Reloads the open scene and the scripts it carries when they change on disk, without the
 ## editor's confirmation popup. Every edit made through gdharness lands on disk, and an editor
 ## that keeps showing the old file is how a change reads as one that never happened. The
 ## files are polled once a second; the editor's own watcher only fires on window focus.
-
-
-## What was last seen of a watched file.
-class GdhSeen:
-	## Its modification time, in whole seconds.
-	var time: int
-	## The MD5 of its contents.
-	var md5: String
-
-	func _init(seen_time: int, seen_md5: String) -> void:
-		time = seen_time
-		md5 = seen_md5
-
 
 const CHECK_INTERVAL_SECONDS: float = 1.0
 ## How long after a file's modification time its contents are compared as well. The time is in
@@ -135,15 +121,16 @@ func _reload_scene(path: String) -> void:
 	var edited_scene: Node = EditorInterface.get_edited_scene_root()
 	if not edited_scene or edited_scene.scene_file_path != path:
 		return
-	# A reload from the file drops the edits the editor holds, without a prompt. gdharness refuses to
-	# write over them, so what is seen here is a write by somebody else or one the editor's tab has
-	# already taken in, made just before an edit inside the same poll, and neither is worth the edit.
+	# A reload from the file drops the edits the editor holds, without a prompt. gdharness refuses
+	# to write over them, so what is seen here is a write by somebody else or one the editor's tab
+	# has already taken in, made just before an edit inside the same poll, and neither is worth the
+	# edit.
 	if EditorInterface.get_unsaved_scenes().has(path):
 		push_warning(
 			(
 				(
-					"gdharness: %s changed on disk while the editor holds unsaved changes to it, so it "
-					+ "was not reloaded; saving it writes the editor's copy over the file"
+					"gdharness: %s changed on disk while the editor holds unsaved changes to it, "
+					+ "so it was not reloaded; saving it writes the editor's copy over the file"
 				)
 				% path
 			)
@@ -151,3 +138,15 @@ func _reload_scene(path: String) -> void:
 		return
 	print("[gdharness] Scene changed on disk, reloading: ", path)
 	EditorInterface.reload_scene_from_path(path)
+
+
+## What was last seen of a watched file.
+class GdhSeen:
+	## Its modification time, in whole seconds.
+	var time: int
+	## The MD5 of its contents.
+	var md5: String
+
+	func _init(seen_time: int, seen_md5: String) -> void:
+		time = seen_time
+		md5 = seen_md5

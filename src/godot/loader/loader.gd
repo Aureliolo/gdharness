@@ -14,15 +14,6 @@ const RUNTIME: String = "res://addons/gdharness_runtime/runtime_autoload.gd"
 var _runtime: Node
 
 
-## Whether gdharness's runtime is listening in this engine: false in a release build, a script run
-## and an engine without the addon, though this node is in every one of them.
-func serving() -> bool:
-	if not is_instance_valid(_runtime) or not _runtime.has_method("serving"):
-		return false
-	var answered: Variant = _runtime.call("serving")
-	return answered is bool and answered
-
-
 func _ready() -> void:
 	if not OS.is_debug_build() or not ResourceLoader.exists(RUNTIME):
 		return
@@ -38,3 +29,12 @@ func _ready() -> void:
 	# Added now, it announces before the main scene runs, as it does when an entry names it.
 	add_child(runtime)
 	_runtime = runtime
+
+
+## Whether gdharness's runtime is listening in this engine: false in a release build, a script run
+## and an engine without the addon, though this node is in every one of them.
+func serving() -> bool:
+	if not is_instance_valid(_runtime) or not _runtime.has_method("serving"):
+		return false
+	var answered: Variant = _runtime.call("serving")
+	return answered is bool and answered

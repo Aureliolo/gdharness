@@ -1,11 +1,10 @@
 extends SceneTree
-
 ## Refusals for a control or a 3D node that is not visible, or whose pointer a card above it has
-## turned off, which name what hides it or turned it off. The node's own
-## visible reads true when only an ancestor is hidden, so a refusal saying only "is not visible" left
-## a caller nothing to unhide. Reported from game-a: a ledger tab under a hall hidden
-## while the game's menu was open. Each refusal is checked beside the call that works once nothing
-## hides the node, so a check refusing everything fails too.
+## turned off, which name what hides it or turned it off. The node's own visible reads true when
+## only an ancestor is hidden, so a refusal saying only "is not visible" left a caller nothing to
+## unhide. Reported from game-a: a ledger tab under a hall hidden while the game's menu was open.
+## Each refusal is checked beside the call that works once nothing hides the node, so a check
+## refusing everything fails too.
 ##
 ## Everything sits in the 64 by 64 viewport a script run with no window has.
 
@@ -13,7 +12,6 @@ const Checked = preload("checked.gd")
 const GdhInputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
 const GdhTyping = preload("res://addons/gdharness_runtime/runtime_typing.gd")
 const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
-
 const TAB: String = "/root/Main/Hall/Rail/Tab"
 
 var failures: Array[String] = []
@@ -47,7 +45,7 @@ func _everything() -> void:
 
 	host.queue_free()
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 	printerr("\n".join(failures))
@@ -83,7 +81,9 @@ func _button(named: String, at: Vector2, parent: Node) -> Button:
 	made.position = at
 	made.size = Vector2(10, 10)
 	parent.add_child(made)
-	Checked.done(made.pressed.connect(_count.bind(named)) as Error, "counting presses of %s" % named)
+	Checked.done(
+		made.pressed.connect(_count.bind(named)) as Error, "counting presses of %s" % named
+	)
 	return made
 
 
@@ -92,8 +92,8 @@ func _says(answer: Dictionary, words: String) -> bool:
 
 
 ## The hall and the menu shown beside it, then two and four shown beside it, both hidden nodes when
-## the hall's parent is hidden too, the tab alone when it is its own flag, and a hidden control above
-## a plain Node left out, since by the engine's rule it hides nothing below that Node.
+## the hall's parent is hidden too, the tab alone when it is its own flag, and a hidden control
+## above a plain Node left out, since by the engine's rule it hides nothing below that Node.
 func _check_a_tab_under_a_hidden_hall() -> void:
 	var main: Control = _control("Main", root)
 	var hall: Control = _control("Hall", main)
@@ -102,21 +102,28 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 	await process_frame
 
 	hall.visible = false
-	var hidden: Dictionary = await input.click({"path": TAB})
+	var hidden: Dictionary = await input.click({ "path": TAB })
 	var expected: String = (
 		"%s is not visible (/root/Main/Hall is hidden;" % TAB
 		+ " /root/Main/Menu is shown beside /root/Main/Hall), so nothing can click it"
 	)
 	if not _says(hidden, expected) or _presses("Tab") != 0:
-		_fail("a tab under a hidden hall names the hall and what is shown: %s" % JSON.stringify(hidden))
+		_fail(
+			(
+				"a tab under a hidden hall names the hall and what is shown: %s"
+				% JSON.stringify(hidden)
+			)
+		)
 	var beside: Array[Control] = []
 	for named: String in ["Ledger", "Purse", "Roster"]:
 		beside.append(_control(named, main))
 		if beside.size() == 1:
-			var two: Dictionary = await input.click({"path": TAB})
-			if not _says(two, "; /root/Main/Menu and /root/Main/Ledger are shown beside /root/Main/Hall)"):
+			var two: Dictionary = await input.click({ "path": TAB })
+			if not _says(
+				two, "; /root/Main/Menu and /root/Main/Ledger are shown beside /root/Main/Hall)"
+			):
 				_fail("two shown beside the hall are both named: %s" % JSON.stringify(two))
-	var four: Dictionary = await input.click({"path": TAB})
+	var four: Dictionary = await input.click({ "path": TAB })
 	var counted: String = (
 		"; /root/Main/Menu, /root/Main/Ledger, /root/Main/Purse"
 		+ " and 1 more are shown beside /root/Main/Hall)"
@@ -127,7 +134,7 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 		shown_too.free()
 
 	main.visible = false
-	var both: Dictionary = await input.click({"path": TAB})
+	var both: Dictionary = await input.click({ "path": TAB })
 	main.visible = true
 	if not _says(both, "(/root/Main/Hall is hidden, and /root/Main is hidden too)"):
 		_fail("both hidden nodes are named, nearest first: %s" % JSON.stringify(both))
@@ -136,7 +143,7 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 	# the menu is what stands beside the hall.
 	var rail: Control = root.get_node("Main/Hall/Rail")
 	rail.visible = false
-	var nested: Dictionary = await input.click({"path": TAB})
+	var nested: Dictionary = await input.click({ "path": TAB })
 	rail.visible = true
 	var outer: String = (
 		"(/root/Main/Hall/Rail is hidden, and /root/Main/Hall is hidden too;"
@@ -147,12 +154,12 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 
 	hall.visible = true
 	tab.visible = false
-	var own: Dictionary = await input.click({"path": TAB})
+	var own: Dictionary = await input.click({ "path": TAB })
 	tab.visible = true
 	if not _says(own, "%s is not visible (its own visible is false)" % TAB):
 		_fail("a tab hidden by its own flag says so: %s" % JSON.stringify(own))
 
-	var shown: Dictionary = await input.click({"path": TAB})
+	var shown: Dictionary = await input.click({ "path": TAB })
 	if shown.get("landed") != true or _presses("Tab") != 1:
 		_fail("and the tab is pressed once nothing hides it: %s" % JSON.stringify(shown))
 
@@ -164,8 +171,10 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 	var lone: Button = _button("Lone", Vector2(34, 34), plain)
 	lone.visible = false
 	await process_frame
-	var alone: Dictionary = await input.click({"path": "/root/Main/Cover/Plain/Lone"})
-	if not _says(alone, "/root/Main/Cover/Plain/Lone is not visible (its own visible is false), so"):
+	var alone: Dictionary = await input.click({ "path": "/root/Main/Cover/Plain/Lone" })
+	if not _says(
+		alone, "/root/Main/Cover/Plain/Lone is not visible (its own visible is false), so"
+	):
 		_fail("a hidden control above a plain Node is not named: %s" % JSON.stringify(alone))
 
 	main.queue_free()
@@ -191,13 +200,18 @@ func _check_a_screen_drawn_over_a_hidden_one() -> void:
 	var _books: Button = _button("Books", Vector2(2, 2), screen)
 	await process_frame
 	screen.visible = false
-	var covered: Dictionary = await input.click({"path": "/root/Shown/Hall/Screen/Books"})
+	var covered: Dictionary = await input.click({ "path": "/root/Shown/Hall/Screen/Books" })
 	var expected: String = (
 		"/root/Shown/Hall/Screen/Books is not visible (/root/Shown/Hall/Screen is hidden;"
 		+ " a click where it would be reaches /root/Shown/Menu/Resume), so nothing can click it"
 	)
 	if not _says(covered, expected) or _presses("Books") != 0 or _presses("Resume") != 0:
-		_fail("a tab on a hidden screen names what is drawn in its place: %s" % JSON.stringify(covered))
+		_fail(
+			(
+				"a tab on a hidden screen names what is drawn in its place: %s"
+				% JSON.stringify(covered)
+			)
+		)
 	# A dialog open over the place is above everything in the viewport holding it.
 	var dialog: Window = Window.new()
 	dialog.name = "Dialog"
@@ -205,7 +219,7 @@ func _check_a_screen_drawn_over_a_hidden_one() -> void:
 	dialog.size = Vector2i(30, 30)
 	root.add_child(dialog)
 	await process_frame
-	var under: Dictionary = await input.click({"path": "/root/Shown/Hall/Screen/Books"})
+	var under: Dictionary = await input.click({ "path": "/root/Shown/Hall/Screen/Books" })
 	dialog.queue_free()
 	await process_frame
 	if not _says(
@@ -213,7 +227,7 @@ func _check_a_screen_drawn_over_a_hidden_one() -> void:
 	):
 		_fail("a dialog over a hidden tab is what is drawn there: %s" % JSON.stringify(under))
 	screen.visible = true
-	var reached: Dictionary = await input.click({"path": "/root/Shown/Hall/Screen/Books"})
+	var reached: Dictionary = await input.click({ "path": "/root/Shown/Hall/Screen/Books" })
 	if reached.get("landed") != true or _presses("Books") != 1:
 		_fail("and is pressed once the screen is shown: %s" % JSON.stringify(reached))
 	shown.queue_free()
@@ -231,7 +245,7 @@ func _check_a_button_on_a_hidden_layer() -> void:
 	await process_frame
 	layer.visible = false
 	await process_frame
-	var on_layer: Dictionary = await input.click({"path": "/root/Layer/Drawn"})
+	var on_layer: Dictionary = await input.click({ "path": "/root/Layer/Drawn" })
 	var by_layer: String = (
 		"/root/Layer/Drawn is not visible (/root/Layer is hidden;"
 		+ " /root/Beside is shown beside /root/Layer), so nothing can click it"
@@ -239,7 +253,7 @@ func _check_a_button_on_a_hidden_layer() -> void:
 	if not _says(on_layer, by_layer) or _presses("Drawn") != 0:
 		_fail("a button on a hidden canvas layer names the layer: %s" % JSON.stringify(on_layer))
 	layer.visible = true
-	var on_shown_layer: Dictionary = await input.click({"path": "/root/Layer/Drawn"})
+	var on_shown_layer: Dictionary = await input.click({ "path": "/root/Layer/Drawn" })
 	if on_shown_layer.get("landed") != true or _presses("Drawn") != 1:
 		_fail("and is pressed once the layer is shown: %s" % JSON.stringify(on_shown_layer))
 	_beside.queue_free()
@@ -267,21 +281,29 @@ func _check_buttons_offered_for_words_nobody_shows() -> void:
 	lid.position = corners[3]
 	lid.size = Vector2(32, 32)
 	await process_frame
-	var refused: Dictionary = await input.click({"says": "Back"})
+	var refused: Dictionary = await input.click({ "says": "Back" })
 	var offered: String = str(refused.get("message", "")).get_slice("the buttons on screen say ", 1)
 	if not _says(refused, "1 hidden control says it") or offered != '"Play", "Quit"':
-		_fail("words only a hidden control says offer what is on screen: %s" % JSON.stringify(refused))
+		_fail(
+			"words only a hidden control says offer what is on screen: %s" % JSON.stringify(refused)
+		)
 	# The control saying the words is not the node hidden, so both are named.
 	if not _says(refused, "1 hidden control says it, /root/Panel/Back (/root/Panel is hidden"):
 		_fail("and name the hidden one with what hides it: %s" % JSON.stringify(refused))
 	# A click that lands says whether the button heard it: Quit takes only the right button.
-	var play: Dictionary = await input.click({"says": "Play"})
+	var play: Dictionary = await input.click({ "says": "Play" })
 	if play.get("landed") != true or play.get("pressed_signal") != true or _presses("Play") != 1:
 		_fail("a button that heard the click says so: %s" % JSON.stringify(play))
 	(root.get_node("Quit") as Button).button_mask = MOUSE_BUTTON_MASK_RIGHT
-	var quit_left: Dictionary = await input.click({"says": "Quit"})
-	if quit_left.get("landed") != true or quit_left.get("pressed_signal") != false or _presses("Quit") != 0:
-		_fail("and one the click landed on without pressing says that: %s" % JSON.stringify(quit_left))
+	var quit_left: Dictionary = await input.click({ "says": "Quit" })
+	if (
+		quit_left.get("landed") != true
+		or quit_left.get("pressed_signal") != false
+		or _presses("Quit") != 0
+	):
+		_fail(
+			"and one the click landed on without pressing says that: %s" % JSON.stringify(quit_left)
+		)
 	for gone: String in ["Panel", "Play", "Quit", "Later", "Buried", "Lid"]:
 		root.get_node(gone).queue_free()
 	await process_frame
@@ -297,14 +319,15 @@ func _check_a_dropdown_under_a_hidden_panel() -> void:
 	panel.add_child(option)
 	await process_frame
 	panel.visible = false
-	var unseen: Dictionary = await typing.choose({"path": "/root/Panel/Option", "index": 1})
+	var unseen: Dictionary = await typing.choose({ "path": "/root/Panel/Option", "index": 1 })
 	var expected: String = (
-		"/root/Panel/Option is not visible (/root/Panel is hidden)" + ", so its menu cannot be opened"
+		"/root/Panel/Option is not visible (/root/Panel is hidden)"
+		+ ", so its menu cannot be opened"
 	)
 	if not _says(unseen, expected) or option.selected != 0:
 		_fail("a dropdown under a hidden panel names the panel: %s" % JSON.stringify(unseen))
 	panel.visible = true
-	var chosen: Dictionary = await typing.choose({"path": "/root/Panel/Option", "index": 1})
+	var chosen: Dictionary = await typing.choose({ "path": "/root/Panel/Option", "index": 1 })
 	if chosen.get("type") == "error" or option.selected != 1:
 		_fail("and it is chosen from once the panel is shown: %s" % JSON.stringify(chosen))
 	panel.queue_free()
@@ -326,11 +349,13 @@ func _check_a_node_in_a_hidden_world() -> void:
 	world.add_child(target)
 	await process_frame
 	world.visible = false
-	var unseen: Dictionary = await input.click({"path": "/root/World/Target"})
-	if not _says(unseen, "/root/World/Target is not visible (/root/World is hidden), so nothing can"):
+	var unseen: Dictionary = await input.click({ "path": "/root/World/Target" })
+	if not _says(
+		unseen, "/root/World/Target is not visible (/root/World is hidden), so nothing can"
+	):
 		_fail("a 3D node in a hidden world names the world: %s" % JSON.stringify(unseen))
 	world.visible = true
-	var reached: Dictionary = await input.click({"path": "/root/World/Target"})
+	var reached: Dictionary = await input.click({ "path": "/root/World/Target" })
 	if reached.get("landed") != true:
 		_fail("and is clicked once the world is shown: %s" % JSON.stringify(reached))
 	world.queue_free()
@@ -338,10 +363,11 @@ func _check_a_node_in_a_hidden_world() -> void:
 
 
 ## A card on its way out turns the pointer off for itself and everything in it, through
-## mouse_behavior_recursive, leaving its button enabled and its mouse_filter as it was. By words, the
-## next card's button saying the same is the one meant rather than a tie; by path, the leaving one is
-## refused with the node that turned it off, where it answered landed false; alone, it is refused by
-## words too. Turned back on, the same button is pressed, so the refusal is the setting's.
+## mouse_behavior_recursive, leaving its button enabled and its mouse_filter as it was. By words,
+## the next card's button saying the same is the one meant rather than a tie; by path, the leaving
+## one is refused with the node that turned it off, where it answered landed false; alone, it is
+## refused by words too. Turned back on, the same button is pressed, so the refusal is the
+## setting's.
 func _check_a_card_that_turned_the_pointer_off() -> void:
 	var leaving: Panel = Panel.new()
 	leaving.name = "Leaving"
@@ -362,7 +388,7 @@ func _check_a_card_that_turned_the_pointer_off() -> void:
 	leaving.mouse_behavior_recursive = Control.MOUSE_BEHAVIOR_DISABLED
 	await process_frame
 
-	var by_words: Dictionary = await input.click({"says": "Post"})
+	var by_words: Dictionary = await input.click({ "says": "Post" })
 	var found: Dictionary = by_words.get("found", {})
 	var picked: String = str(found.get("picked", ""))
 	if (
@@ -379,7 +405,7 @@ func _check_a_card_that_turned_the_pointer_off() -> void:
 	elif not picked.ends_with("the other one on screen takes no pointer input"):
 		_fail("and say why the leaving one was passed over: %s" % picked)
 
-	var by_path: Dictionary = await input.click({"path": "/root/Leaving/GonePost"})
+	var by_path: Dictionary = await input.click({ "path": "/root/Leaving/GonePost" })
 	var why: String = (
 		"/root/Leaving/GonePost takes no pointer input, since mouse_behavior_recursive"
 		+ " is disabled on /root/Leaving"
@@ -394,13 +420,13 @@ func _check_a_card_that_turned_the_pointer_off() -> void:
 
 	next.queue_free()
 	await process_frame
-	var alone: Dictionary = await input.click({"says": "Post"})
+	var alone: Dictionary = await input.click({ "says": "Post" })
 	if not _says(alone, why) or _presses("GonePost") != 0:
 		_fail("and refused by its words when it is the only one: %s" % JSON.stringify(alone))
 
 	leaving.mouse_behavior_recursive = Control.MOUSE_BEHAVIOR_INHERITED
 	await process_frame
-	var back: Dictionary = await input.click({"path": "/root/Leaving/GonePost"})
+	var back: Dictionary = await input.click({ "path": "/root/Leaving/GonePost" })
 	if back.get("landed") != true or _presses("GonePost") != 1:
 		_fail("and pressed once the card turns the pointer back on: %s" % JSON.stringify(back))
 	gone.queue_free()

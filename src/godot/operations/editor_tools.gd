@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## The editor addon's scene and resource tools, run by a headless engine for a project no editor
 ## serves.
 ##
@@ -16,7 +15,6 @@ const GdhSignalTools = preload("../addons/gdharness_editor/tools/signal_tools.gd
 const GdhTilesetTools = preload("../addons/gdharness_editor/tools/tileset_tools.gd")
 const GdhSceneFile = preload("../addons/gdharness_editor/scene_file.gd")
 const GdhSceneUids = preload("../addons/gdharness_editor/scene_uids.gd")
-
 const SCENE_COMMANDS: Array[String] = [
 	"create_scene",
 	"save_scene",
@@ -58,7 +56,7 @@ static func run(params: Dictionary) -> Dictionary:
 	var command: String = str(params.get("command", ""))
 	var given: Variant = params.get("arguments", {})
 	if not given is Dictionary:
-		return {"ok": false, "error": "arguments must be an object."}
+		return { "ok": false, "error": "arguments must be an object." }
 	var arguments: Dictionary = given
 	var tools: Node = null
 	if command in SCENE_COMMANDS:
@@ -76,7 +74,7 @@ static func run(params: Dictionary) -> Dictionary:
 	elif command in ANIMATION_STATE_COMMANDS:
 		tools = GdhAnimationStates.new()
 	else:
-		return {"ok": false, "error": "No editor tool runs headless as " + command}
+		return { "ok": false, "error": "No editor tool runs headless as " + command }
 	var answer: Variant = tools.call(command, arguments)
 	tools.free()
 	if answer is Dictionary:
@@ -86,11 +84,11 @@ static func run(params: Dictionary) -> Dictionary:
 		if not GdhSceneUids.by_path.is_empty():
 			answered["namedByPath"] = (
 				(
-					"What this saved names %s by path rather than by uid, which loads the same. A uid in a "
-					+ "file's own header is resolved through the project's uid cache, which holds none for "
-					+ "%s yet, as with a file made since the project was last scanned, so a uid written "
-					+ "now would warn on every load. project_import refresh_uids scans the project, and "
-					+ "writes after it name %s by uid."
+					"What this saved names %s by path rather than by uid, which loads the same. A "
+					+ "uid in a file's own header is resolved through the project's uid cache, "
+					+ "which holds none for %s yet, as with a file made since the project was last "
+					+ "scanned, so a uid written now would warn on every load. project_import "
+					+ "refresh_uids scans the project, and writes after it name %s by uid."
 				)
 				% [
 					", ".join(GdhSceneUids.by_path),
@@ -100,5 +98,6 @@ static func run(params: Dictionary) -> Dictionary:
 			)
 		return answered
 	return {
-		"ok": false, "error": "%s answered %s rather than an object." % [command, type_string(typeof(answer))]
+		"ok": false,
+		"error": "%s answered %s rather than an object." % [command, type_string(typeof(answer))],
 	}

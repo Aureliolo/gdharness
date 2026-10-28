@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## The runtime's input injection, driven the way the socket drives it and asserted on what the
 ## engine does with the event rather than on what the command echoes back.
 ##
@@ -16,44 +15,7 @@ const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 const GdhMouse = preload("res://addons/gdharness_runtime/runtime_mouse.gd")
 
-
-## Counts both halves of a press, which is the only way to see one that is over by the time the
-## call answering it returns.
-class Watcher:
-	extends Node
-
-	var action: String = ""
-	var downs: int = 0
-	var ups: int = 0
-
-	func _unhandled_input(event: InputEvent) -> void:
-		if action.is_empty() or not event.is_action(action):
-			return
-		if event.is_action_pressed(action):
-			downs += 1
-		elif event.is_action_released(action):
-			ups += 1
-
-
-## Counts the button events a control is handed, by button and by half, which is what says where
-## the viewport delivered a click rather than where the command said it sent one.
-class Counter:
-	extends Control
-
-	var presses: Dictionary = {}
-	var releases: Dictionary = {}
-
-	func _gui_input(event: InputEvent) -> void:
-		if event is not InputEventMouseButton:
-			return
-		var button: InputEventMouseButton = event
-		var tally: Dictionary = presses if button.pressed else releases
-		var so_far: int = GdhRead.as_int(tally.get(button.button_index, 0), 0)
-		tally[button.button_index] = so_far + 1
-
-
 var failures: Array[String] = []
-
 var _field: LineEdit = null
 var _typing: GdhTyping = null
 var _begun: bool = false
@@ -92,7 +54,7 @@ func _everything() -> void:
 
 	host.queue_free()
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -121,19 +83,28 @@ func _pressed(action: String) -> bool:
 
 func _check_keys(input: GdhInputCommands) -> void:
 	# A string keycode is a key label, and the label is what names the key.
-	var by_string: Dictionary = await input.inject_key({"keycode": "A"})
+	var by_string: Dictionary = await input.inject_key({ "keycode": "A" })
 	if by_string.get("type", "") != "input_injected":
 		_fail("string keycode: %s" % JSON.stringify(by_string))
 	elif by_string.get("keycode", 0) != KEY_A or by_string.get("physical_keycode", 0) != KEY_A:
-		_fail("string keycode should carry keycode and physical_keycode: %s" % JSON.stringify(by_string))
+		_fail(
+			(
+				"string keycode should carry keycode and physical_keycode: %s"
+				% JSON.stringify(by_string)
+			)
+		)
 
-	var by_number: Dictionary = await input.inject_key({"keycode": KEY_B})
+	var by_number: Dictionary = await input.inject_key({ "keycode": KEY_B })
 	if by_number.get("keycode", 0) != KEY_B:
 		_fail("numeric keycode: %s" % JSON.stringify(by_number))
 
-	var bad_name: Dictionary = await input.inject_key({"keycode": "Escpe"})
-	if not str(bad_name.get("message", "")).begins_with("No key is called Escpe. The nearest key name"):
-		_fail("an unknown key name should be refused with the nearest: %s" % JSON.stringify(bad_name))
+	var bad_name: Dictionary = await input.inject_key({ "keycode": "Escpe" })
+	if not str(bad_name.get("message", "")).begins_with(
+		"No key is called Escpe. The nearest key name"
+	):
+		_fail(
+			"an unknown key name should be refused with the nearest: %s" % JSON.stringify(bad_name)
+		)
 	elif not str(bad_name.get("message", "")).contains("Escape"):
 		_fail("and the nearest should hold the key meant: %s" % JSON.stringify(bad_name))
 
@@ -142,53 +113,60 @@ func _check_keys(input: GdhInputCommands) -> void:
 		_fail("a key event needs a key: %s" % JSON.stringify(nothing))
 
 	var modified: Dictionary = await input.inject_key(
-		{"keycode": "Escape", "shift": true, "ctrl": true, "alt": true}
+		{ "keycode": "Escape", "shift": true, "ctrl": true, "alt": true }
 	)
-	if not (modified.get("shift", false) and modified.get("ctrl", false) and modified.get("alt", false)):
+	if not (
+		modified.get("shift", false) and modified.get("ctrl", false) and modified.get("alt", false)
+	):
 		_fail("modifiers should reach the event: %s" % JSON.stringify(modified))
 
 	_bind("fixture_physical", KEY_C, KEY_NONE)
-	await input.inject_key({"keycode": "C", "pressed": true})
+	await input.inject_key({ "keycode": "C", "pressed": true })
 	if not _pressed("fixture_physical"):
 		_fail("a key injected by label should press an action bound by physical key")
-	await input.inject_key({"keycode": "C", "pressed": false})
+	await input.inject_key({ "keycode": "C", "pressed": false })
 	if _pressed("fixture_physical"):
 		_fail("releasing the key should release the action")
 
 	# And the shape a caller gets by saying nothing: the key goes down and comes back up, so the
 	# action it is bound to is not left held for the rest of the session.
-	var whole: Dictionary = await input.inject_key({"keycode": "C"})
+	var whole: Dictionary = await input.inject_key({ "keycode": "C" })
 	if not GdhRead.as_bool(whole.get("whole", false)):
 		_fail("a key with no `pressed` should be the whole press: %s" % JSON.stringify(whole))
 	if _pressed("fixture_physical"):
 		_fail("the whole press should leave the action released")
 
 	_bind("fixture_label", KEY_NONE, KEY_D)
-	await input.inject_key({"keycode": KEY_D, "pressed": true})
+	await input.inject_key({ "keycode": KEY_D, "pressed": true })
 	if not _pressed("fixture_label"):
 		_fail("a key injected by keycode should press an action bound by label")
-	await input.inject_key({"keycode": KEY_D, "pressed": false})
+	await input.inject_key({ "keycode": KEY_D, "pressed": false })
 
 
 func _check_mouse(input: GdhInputCommands) -> void:
-	var flat: Dictionary = await input.inject_mouse_click({"x": 10, "y": 20, "button": "right"})
+	var flat: Dictionary = await input.inject_mouse_click({ "x": 10, "y": 20, "button": "right" })
 	if flat.get("position", []) != [10.0, 20.0] or flat.get("button", 0) != MOUSE_BUTTON_RIGHT:
 		_fail("flat click: %s" % JSON.stringify(flat))
 
-	var numbered: Dictionary = await input.inject_mouse_click({"x": 1, "y": 2, "button": 3})
-	if numbered.get("position", []) != [1.0, 2.0] or numbered.get("button", 0) != MOUSE_BUTTON_MIDDLE:
+	var numbered: Dictionary = await input.inject_mouse_click({ "x": 1, "y": 2, "button": 3 })
+	if (
+		numbered.get("position", []) != [1.0, 2.0]
+		or numbered.get("button", 0) != MOUSE_BUTTON_MIDDLE
+	):
 		_fail("click by button number: %s" % JSON.stringify(numbered))
 
-	var short: Dictionary = await input.inject_mouse_click({"x": 1})
+	var short: Dictionary = await input.inject_mouse_click({ "x": 1 })
 	var refusal: String = str(short.get("message", ""))
 	if short.get("type", "") != "error" or not refusal.contains("x and y"):
 		_fail("a point missing y should be refused: %s" % JSON.stringify(short))
 
-	var motion: Dictionary = await input.inject_mouse_motion({"x": 1, "y": 2, "relativeX": 3, "relativeY": 4})
+	var motion: Dictionary = await input.inject_mouse_motion(
+		{ "x": 1, "y": 2, "relativeX": 3, "relativeY": 4 }
+	)
 	if motion.get("position", []) != [1.0, 2.0] or motion.get("relative", []) != [3.0, 4.0]:
 		_fail("flat motion: %s" % JSON.stringify(motion))
 
-	var position_only: Dictionary = await input.inject_mouse_motion({"position": [5, 6]})
+	var position_only: Dictionary = await input.inject_mouse_motion({ "position": [5, 6] })
 	if position_only.get("type", "") != "error":
 		_fail("a position list is not a point: %s" % JSON.stringify(position_only))
 
@@ -199,15 +177,22 @@ func _check_mouse(input: GdhInputCommands) -> void:
 
 	# A spelling nobody recognises used to come back as the left button, so a right click asked for
 	# by the wrong word went left and said it went left.
-	var unknown: Dictionary = await input.inject_mouse_click({"x": 1, "y": 1, "button": "scroll_up"})
+	var unknown: Dictionary = await input.inject_mouse_click(
+		{ "x": 1, "y": 1, "button": "scroll_up" }
+	)
 	if unknown.get("type", "") != "error":
 		_fail("a button name that is not one should be refused: %s" % JSON.stringify(unknown))
 	# And a number that is not a button: 0 is MOUSE_BUTTON_NONE, which no event carries, and past
 	# the two extra buttons there is nothing to press.
 	for number: int in [0, 10, -3]:
-		var none: Dictionary = await input.inject_mouse_click({"x": 1, "y": 1, "button": number})
+		var none: Dictionary = await input.inject_mouse_click({ "x": 1, "y": 1, "button": number })
 		if none.get("type", "") != "error":
-			_fail("button %d is not a button and should be refused: %s" % [number, JSON.stringify(none)])
+			_fail(
+				(
+					"button %d is not a button and should be refused: %s"
+					% [number, JSON.stringify(none)]
+				)
+			)
 
 
 ## A wheel step is a press and a release together, the way a mouse sends one.
@@ -231,7 +216,7 @@ func _check_a_wheel_step(input: GdhInputCommands) -> void:
 	await process_frame
 
 	var notch: Dictionary = await input.inject_mouse_click(
-		{"x": 50, "y": 50, "button": "wheel_down", "pressed": true}
+		{ "x": 50, "y": 50, "button": "wheel_down", "pressed": true }
 	)
 	await process_frame
 	if notch.get("whole") != true or notch.get("pressed") != false:
@@ -242,12 +227,15 @@ func _check_a_wheel_step(input: GdhInputCommands) -> void:
 	):
 		_fail(
 			(
-				"the control under a wheel click is handed both halves of the step: presses %s, releases %s"
+				(
+					"the control under a wheel click is handed both halves of the step: presses "
+					+ "%s, releases %s"
+				)
 				% [JSON.stringify(taker.presses), JSON.stringify(taker.releases)]
 			)
 		)
 
-	var _clicked: Dictionary = await input.inject_mouse_click({"x": 250, "y": 50})
+	var _clicked: Dictionary = await input.inject_mouse_click({ "x": 250, "y": 50 })
 	if other.presses.get(MOUSE_BUTTON_LEFT, 0) != 1 or taker.presses.get(MOUSE_BUTTON_LEFT, 0) != 0:
 		_fail(
 			(
@@ -282,7 +270,7 @@ func _check_a_whole_click(input: GdhInputCommands) -> void:
 	root.add_child(link)
 	await process_frame
 
-	var whole: Dictionary = await input.inject_mouse_click({"x": 17, "y": 10})
+	var whole: Dictionary = await input.inject_mouse_click({ "x": 17, "y": 10 })
 	if whole.get("whole") != true or whole.get("pressed") != false or _presses(button) != 1:
 		_fail(
 			(
@@ -293,17 +281,22 @@ func _check_a_whole_click(input: GdhInputCommands) -> void:
 	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 		_fail("a whole click leaves the button up")
 
-	var _on_link: Dictionary = await input.inject_mouse_click({"x": 8, "y": 34})
+	var _on_link: Dictionary = await input.inject_mouse_click({ "x": 8, "y": 34 })
 	if opened != ["onward"]:
 		_fail("a click on a rich label's link opens it: %s" % JSON.stringify(opened))
 
-	var down: Dictionary = await input.inject_mouse_click({"x": 17, "y": 10, "pressed": true})
+	var down: Dictionary = await input.inject_mouse_click({ "x": 17, "y": 10, "pressed": true })
 	await process_frame
 	if down.get("whole") != false or down.get("pressed") != true or _presses(button) != 1:
-		_fail("a held press is only the press: presses %d, %s" % [_presses(button), JSON.stringify(down)])
+		_fail(
+			(
+				"a held press is only the press: presses %d, %s"
+				% [_presses(button), JSON.stringify(down)]
+			)
+		)
 	if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 		_fail("a held press leaves the button down")
-	var _up: Dictionary = await input.inject_mouse_click({"x": 17, "y": 10, "pressed": false})
+	var _up: Dictionary = await input.inject_mouse_click({ "x": 17, "y": 10, "pressed": false })
 	await process_frame
 	if _presses(button) != 2:
 		_fail("the release after a held press finishes the click: presses %d" % _presses(button))
@@ -326,7 +319,7 @@ func _check_typing(input: GdhTyping) -> void:
 	field.clear()
 	_field = field
 
-	var typed: Dictionary = input.inject_text({"text": "Ash & Marek, 12!"})
+	var typed: Dictionary = input.inject_text({ "text": "Ash & Marek, 12!" })
 	if typed.get("characters", 0) != 16:
 		_fail("typing should report what it typed: %s" % JSON.stringify(typed))
 	if field.text != "Ash & Marek, 12!":
@@ -346,13 +339,13 @@ func _check_typing(input: GdhTyping) -> void:
 
 	# Filling a field in, which is what a caller means nearly every time and could not be asked
 	# for: typing lands at the caret, so whatever the field already said stayed where it was.
-	var over: Dictionary = input.inject_text({"text": "8", "replace": true})
+	var over: Dictionary = input.inject_text({ "text": "8", "replace": true })
 	if field.text != "8":
 		_fail("replace should write over what the field said: %s" % field.text)
 	if not GdhRead.as_bool(over.get("replaced", false)) or str(over.get("holds", "")) != "8":
 		_fail("and should say so: %s" % JSON.stringify(over))
 
-	var appended: Dictionary = input.inject_text({"text": "9"})
+	var appended: Dictionary = input.inject_text({ "text": "9" })
 	if field.text != "89":
 		_fail("and without it typing still lands at the caret: %s" % field.text)
 	if str(appended.get("holds", "")) != "89":
@@ -361,7 +354,7 @@ func _check_typing(input: GdhTyping) -> void:
 	# Emptying a field, which is filling one in with nothing and the one shape of it that types no
 	# characters. Refused as a missing argument, the only way left was a select-all nobody can send
 	# honestly and a key event of the caller's own.
-	var cleared: Dictionary = input.inject_text({"text": "", "replace": true})
+	var cleared: Dictionary = input.inject_text({ "text": "", "replace": true })
 	if field.text != "":
 		_fail("replace with nothing should empty the field: %s" % field.text)
 	if not GdhRead.as_bool(cleared.get("replaced", false)) or str(cleared.get("holds", "x")) != "":
@@ -376,7 +369,7 @@ func _check_typing(input: GdhTyping) -> void:
 	field.secret = true
 	field.text = "hunter"
 	field.caret_column = field.text.length()
-	var hidden: Dictionary = input.inject_text({"text": "2"})
+	var hidden: Dictionary = input.inject_text({ "text": "2" })
 	if field.text != "hunter2":
 		_fail("a secret field should take what is typed like any other: %s" % field.text)
 	if str(hidden.get("holds", "")) != field.secret_character.repeat(7):
@@ -389,10 +382,15 @@ func _check_typing(input: GdhTyping) -> void:
 ## The key op types too, which is the half that was missing rather than the whole command.
 func _type_with_keys(input: GdhInputCommands) -> void:
 	_field.clear()
-	var lower: Dictionary = await input.inject_key({"keycode": "K"})
-	await input.inject_key({"keycode": "K", "shift": true})
+	var lower: Dictionary = await input.inject_key({ "keycode": "K" })
+	await input.inject_key({ "keycode": "K", "shift": true })
 	if lower.get("typed_into") != str(_field.get_path()) or lower.get("holds") != "k":
-		_fail("a key a field takes as typing names the field and what it holds: %s" % JSON.stringify(lower))
+		_fail(
+			(
+				"a key a field takes as typing names the field and what it holds: %s"
+				% JSON.stringify(lower)
+			)
+		)
 
 
 ## And what the two of them left, plus the submission, which comes last for a reason a player
@@ -409,7 +407,7 @@ func _check_what_the_keys_typed() -> void:
 		_field.text_submitted.connect(func(said: String) -> void: submitted.append(said)) as Error,
 		"listening for the field being submitted"
 	)
-	var newline: Dictionary = _typing.inject_text({"text": "\n"})
+	var newline: Dictionary = _typing.inject_text({ "text": "\n" })
 	if newline.get("type") == "error":
 		_fail("typing a newline was refused: %s" % JSON.stringify(newline))
 	if submitted != ["kK"]:
@@ -422,7 +420,7 @@ func _check_what_the_keys_typed() -> void:
 	# And the state that leaves behind, which this fixture has had to work around since it was
 	# written: the field keeps the focus and stops being edited, so the next thing typed reaches
 	# nothing at all. It is refused with what to do about it rather than counted as typed.
-	var shut: Dictionary = _typing.inject_text({"text": "more"})
+	var shut: Dictionary = _typing.inject_text({ "text": "more" })
 	if shut.get("type", "") != "error":
 		_fail("typing into a field that is not being edited is refused: %s" % JSON.stringify(shut))
 	if not str(shut.get("message", "")).contains("not being edited"):
@@ -434,14 +432,14 @@ func _check_what_the_keys_typed() -> void:
 
 
 func _check_actions(input: GdhInputCommands) -> void:
-	var missing: Dictionary = await input.inject_action({"action": "fixture_missing"})
+	var missing: Dictionary = await input.inject_action({ "action": "fixture_missing" })
 	if missing.get("type", "") != "error":
 		_fail("an unknown action should be refused: %s" % JSON.stringify(missing))
 
-	await input.inject_action({"action": "fixture_physical", "pressed": true})
+	await input.inject_action({ "action": "fixture_physical", "pressed": true })
 	if not _pressed("fixture_physical"):
 		_fail("an injected action should read as pressed")
-	await input.inject_action({"action": "fixture_physical", "pressed": false})
+	await input.inject_action({ "action": "fixture_physical", "pressed": false })
 	if _pressed("fixture_physical"):
 		_fail("an injected release should read as released")
 
@@ -453,7 +451,7 @@ func _check_actions(input: GdhInputCommands) -> void:
 	watcher.action = "fixture_physical"
 	root.add_child(watcher)
 
-	var whole: Dictionary = await input.inject_action({"action": "fixture_physical"})
+	var whole: Dictionary = await input.inject_action({ "action": "fixture_physical" })
 
 	if not GdhRead.as_bool(whole.get("whole", false)):
 		_fail("an action with no `pressed` should be the whole press: %s" % JSON.stringify(whole))
@@ -482,20 +480,20 @@ func _check_a_dialog(input: GdhInputCommands) -> void:
 	asking.popup_centered()
 	await root.get_tree().process_frame
 
-	await input.inject_action({"action": "ui_cancel"})
+	await input.inject_action({ "action": "ui_cancel" })
 	await root.get_tree().process_frame
 	if not asking.visible:
 		_fail("ui_cancel closing a dialog would be news: Godot's own reads the key instead")
 
-	await input.inject_key({"keycode": "Escape"})
+	await input.inject_key({ "keycode": "Escape" })
 	await root.get_tree().process_frame
 	if asking.visible:
 		_fail("the Escape key should close a dialog, which is how a player answers one")
 	asking.queue_free()
 
 
-## A button placed inside the 64 by 64 viewport a headless script run has, its words clipped so the text
-## does not widen it past the edge, counting its presses under the meta `presses`.
+## A button placed inside the 64 by 64 viewport a headless script run has, its words clipped so the
+## text does not widen it past the edge, counting its presses under the meta `presses`.
 func _small_button(parent: Node, words: String, at: Vector2) -> Button:
 	var button: Button = Button.new()
 	button.text = words
@@ -503,12 +501,9 @@ func _small_button(parent: Node, words: String, at: Vector2) -> Button:
 	button.position = at
 	button.size = Vector2(26, 12)
 	button.set_meta("presses", 0)
-	Checked.done(
-		button.pressed.connect(
-			func() -> void: button.set_meta("presses", GdhRead.as_int(button.get_meta("presses"), 0) + 1)
-		),
-		"counting presses on %s" % words
-	)
+	var count: Callable = func() -> void:
+		button.set_meta("presses", GdhRead.as_int(button.get_meta("presses"), 0) + 1)
+	Checked.done(button.pressed.connect(count), "counting presses on %s" % words)
 	parent.add_child(button)
 	return button
 
@@ -543,14 +538,18 @@ func _check_a_click_by_words(input: GdhInputCommands) -> void:
 	secret.visible = false
 	await root.get_tree().process_frame
 
-	var once: Dictionary = await input.click({"says": "New guild"})
+	var once: Dictionary = await input.click({ "says": "New guild" })
 	var found: Dictionary = once.get("found", {})
 	if once.get("type") != "clicked" or _presses(new_guild) != 1 or once.get("landed") != true:
 		_fail("a click by words presses the one control saying them: %s" % JSON.stringify(once))
-	elif found.get("of") != 1 or found.get("index") != 0 or once.get("path") != str(new_guild.get_path()):
+	elif (
+		found.get("of") != 1
+		or found.get("index") != 0
+		or once.get("path") != str(new_guild.get_path())
+	):
 		_fail("and says which match it pressed: %s" % JSON.stringify(once))
 
-	var unclear: Dictionary = await input.click({"says": "Send back"})
+	var unclear: Dictionary = await input.click({ "says": "Send back" })
 	var listed: String = str(unclear.get("message", ""))
 	if (
 		unclear.get("type") != "error"
@@ -559,18 +558,23 @@ func _check_a_click_by_words(input: GdhInputCommands) -> void:
 		or not listed.contains('1 %s ("Send back")' % send_right.get_path())
 	):
 		_fail(
-			"two controls saying the words are refused with an index for each: %s" % JSON.stringify(unclear)
+			(
+				"two controls saying the words are refused with an index for each: %s"
+				% JSON.stringify(unclear)
+			)
 		)
 	if _presses(send_left) + _presses(send_right) != 0:
 		_fail("and neither is pressed")
 
-	var second: Dictionary = await input.click({"says": "Send back", "index": 1})
+	var second: Dictionary = await input.click({ "says": "Send back", "index": 1 })
 	if _presses(send_right) != 1 or _presses(send_left) != 0:
 		_fail("index 1 presses the second one listed: %s" % JSON.stringify(second))
-	var narrowed: Dictionary = await input.click({"says": "Send back", "path": str(left.get_path())})
+	var narrowed: Dictionary = await input.click(
+		{ "says": "Send back", "path": str(left.get_path()) }
+	)
 	if _presses(send_left) != 1 or narrowed.get("type") != "clicked":
 		_fail("a path narrows where the words are looked for: %s" % JSON.stringify(narrowed))
-	var beyond: Dictionary = await input.click({"says": "Send back", "index": 2})
+	var beyond: Dictionary = await input.click({ "says": "Send back", "index": 2 })
 	if (
 		beyond.get("type") != "error"
 		or not str(beyond.get("message", "")).contains(
@@ -579,7 +583,7 @@ func _check_a_click_by_words(input: GdhInputCommands) -> void:
 	):
 		_fail("an index past the matches is refused: %s" % JSON.stringify(beyond))
 
-	var through: Dictionary = await input.click({"says": "Recruit"})
+	var through: Dictionary = await input.click({ "says": "Recruit" })
 	if (
 		_presses(recruit) != 1
 		or through.get("path") != str(recruit.get_path())
@@ -587,11 +591,11 @@ func _check_a_click_by_words(input: GdhInputCommands) -> void:
 	):
 		_fail("words on a label press the button holding it: %s" % JSON.stringify(through))
 
-	var globbed: Dictionary = await input.click({"says": "New g*"})
+	var globbed: Dictionary = await input.click({ "says": "New g*" })
 	if _presses(new_guild) != 2:
 		_fail("a glob in says is matched as a find matches one: %s" % JSON.stringify(globbed))
 
-	var hidden: Dictionary = await input.click({"says": "Secret"})
+	var hidden: Dictionary = await input.click({ "says": "Secret" })
 	var hidden_said: String = str(hidden.get("message", ""))
 	if hidden.get("type") != "error" or not hidden_said.contains("1 hidden control says it"):
 		_fail(
@@ -625,14 +629,17 @@ func _check_a_click_opening_a_menu_over_itself(input: GdhInputCommands) -> void:
 	root.add_child(dropdown)
 	await root.get_tree().process_frame
 
-	var opened: Dictionary = await input.click({"path": str(dropdown.get_path())})
+	var opened: Dictionary = await input.click({ "path": str(dropdown.get_path()) })
 	var menu: PopupMenu = dropdown.get_popup()
 	var centre: Vector2 = dropdown.get_global_rect().get_center()
 	var over: bool = Rect2(Vector2(menu.position), Vector2(menu.size)).has_point(centre)
 	if not over:
 		_fail(
 			(
-				"the menu should open over the button for this case to mean anything: menu %s, button centre %s"
+				(
+					"the menu should open over the button for this case to mean anything: menu %s, "
+					+ "button centre %s"
+				)
 				% [Rect2(Vector2(menu.position), Vector2(menu.size)), centre]
 			)
 		)
@@ -650,13 +657,18 @@ func _check_a_click_opening_a_menu_over_itself(input: GdhInputCommands) -> void:
 	# the menu is an embedded window, so the root viewport has to hand the motion on, and the item
 	# under it is the one the menu draws hovered and holds as focused.
 	var over_second: Vector2 = Vector2(menu.position) + Vector2(menu.size) * Vector2(0.5, 0.75)
-	var moved: Dictionary = await input.inject_mouse_motion({"x": over_second.x, "y": over_second.y})
+	var moved: Dictionary = await input.inject_mouse_motion(
+		{ "x": over_second.x, "y": over_second.y }
+	)
 	await root.get_tree().process_frame
 	await root.get_tree().process_frame
 	if menu.get_focused_item() != 1:
 		_fail(
 			(
-				"a motion over an open menu's second item is over it, as a real pointer is: focused %d after %s"
+				(
+					"a motion over an open menu's second item is over it, as a real pointer is: "
+					+ "focused %d after %s"
+				)
 				% [menu.get_focused_item(), JSON.stringify(moved)]
 			)
 		)
@@ -683,12 +695,15 @@ func _check_a_click_opening_a_menu_over_itself(input: GdhInputCommands) -> void:
 	inner.add_child(nested)
 	await root.get_tree().process_frame
 	await root.get_tree().process_frame
-	var inside: Dictionary = await input.click({"path": str(nested.get_path())})
+	var inside: Dictionary = await input.click({ "path": str(nested.get_path()) })
 	var nested_menu: PopupMenu = nested.get_popup()
 	if not nested_picked.is_empty() or not nested_menu.visible:
 		_fail(
 			(
-				"a dropdown in a SubViewport opens its menu and chooses nothing: %s, picked %s, open %s"
+				(
+					"a dropdown in a SubViewport opens its menu and chooses nothing: %s, picked "
+					+ "%s, open %s"
+				)
 				% [JSON.stringify(inside), nested_picked, nested_menu.visible]
 			)
 		)
@@ -710,17 +725,22 @@ func _check_a_click_opening_a_menu_over_itself(input: GdhInputCommands) -> void:
 	corner.size = Vector2(8, 8)
 	await root.get_tree().process_frame
 	await root.get_tree().process_frame
-	var pressed: Dictionary = await input.click({"path": str(corner.get_path())})
+	var pressed: Dictionary = await input.click({ "path": str(corner.get_path()) })
 	if _presses(corner) != 1 or pressed.get("landed") != true:
-		_fail("a button in a shrunk SubViewport is pressed where it is drawn: %s" % JSON.stringify(pressed))
+		_fail(
+			(
+				"a button in a shrunk SubViewport is pressed where it is drawn: %s"
+				% JSON.stringify(pressed)
+			)
+		)
 	halved.queue_free()
 	await root.get_tree().process_frame
 
 
 func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
-	# Placed by centre, and a button in the default theme grows to about 31 pixels tall whatever size
-	# it is given: the page covers the top 48 rows, so the hall's two buttons have their centres
-	# under it and the button saying more has its centre below it.
+	# Placed by centre, and a button in the default theme grows to about 31 pixels tall whatever
+	# size it is given: the page covers the top 48 rows, so the hall's two buttons have their
+	# centres under it and the button saying more has its centre below it.
 	var hall: Control = Control.new()
 	hall.size = Vector2(64, 64)
 	root.add_child(hall)
@@ -748,14 +768,14 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	strip.add_child(beyond_strip)
 	await root.get_tree().process_frame
 
-	var back: Dictionary = await input.click({"says": "Back"})
+	var back: Dictionary = await input.click({ "says": "Back" })
 	var found: Dictionary = back.get("found", {})
 	if back.get("type") != "clicked" or _presses(page_back) != 1 or _presses(hall_back) != 0:
 		_fail(
 			(
 				(
-					"the button saying exactly the word is pressed over a button saying more, labels saying it"
-					+ " in a sentence and a button covered by the page: %s"
+					"the button saying exactly the word is pressed over a button saying more, "
+					+ "labels saying it in a sentence and a button covered by the page: %s"
 				)
 				% JSON.stringify(back)
 			)
@@ -769,30 +789,42 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	if _presses(partly) != 0:
 		_fail("a button saying the word as part of more is passed over for one saying only it")
 
-	var under: Dictionary = await input.click({"says": "Drawer"})
+	var under: Dictionary = await input.click({ "says": "Drawer" })
 	var refused: String = str(under.get("message", ""))
 	if (
 		under.get("type") != "error"
-		or not refused.contains("1 control says it under %s, which is drawn over it" % page.get_path())
+		or not refused.contains(
+			"1 control says it under %s, which is drawn over it" % page.get_path()
+		)
 		or _presses(hall_only) != 0
 	):
-		_fail("a control the page covers is not on screen and is not pressed: %s" % JSON.stringify(under))
+		_fail(
+			(
+				"a control the page covers is not on screen and is not pressed: %s"
+				% JSON.stringify(under)
+			)
+		)
 
 	page.visible = false
 	await root.get_tree().process_frame
-	var uncovered: Dictionary = await input.click({"says": "Back"})
+	var uncovered: Dictionary = await input.click({ "says": "Back" })
 	if _presses(hall_back) != 1 or uncovered.get("path") != str(hall_back.get_path()):
-		_fail("with the page gone the hall's button is on screen again: %s" % JSON.stringify(uncovered))
+		_fail(
+			(
+				"with the page gone the hall's button is on screen again: %s"
+				% JSON.stringify(uncovered)
+			)
+		)
 	for each: Node in [hall, page, partly, caption, strip]:
 		each.queue_free()
 	await root.get_tree().process_frame
 
-	# Cards: a title over a description. The card whose title is exactly the words is the exact match,
-	# over the one whose title only starts with them.
+	# Cards: a title over a description. The card whose title is exactly the words is the exact
+	# match, over the one whose title only starts with them.
 	var ward: Button = _small_button(root, "WARD\nwards 3", Vector2(2, 2))
 	var spite: Button = _small_button(root, "WARDSPITE\ntwo words", Vector2(34, 2))
 	await root.get_tree().process_frame
-	var titled: Dictionary = await input.click({"says": "WARD"})
+	var titled: Dictionary = await input.click({ "says": "WARD" })
 	if _presses(ward) != 1 or _presses(spite) != 0:
 		_fail(
 			(
@@ -804,9 +836,9 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	spite.queue_free()
 	await root.get_tree().process_frame
 
-	# A cover away from the origin and scaled, so it covers the button only where it is drawn: its own
-	# rectangle at the origin misses the button's centre, and so does the same rectangle placed but
-	# not scaled.
+	# A cover away from the origin and scaled, so it covers the button only where it is drawn: its
+	# own rectangle at the origin misses the button's centre, and so does the same rectangle placed
+	# but not scaled.
 	var aside: Button = _small_button(root, "Aside", Vector2(34, 2))
 	var side: Panel = Panel.new()
 	side.position = Vector2(32, 0)
@@ -814,10 +846,12 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	side.scale = Vector2(4, 2)
 	root.add_child(side)
 	await root.get_tree().process_frame
-	var beside: Dictionary = await input.click({"says": "Aside"})
+	var beside: Dictionary = await input.click({ "says": "Aside" })
 	if (
 		_presses(aside) != 0
-		or not str(beside.get("message", "")).contains("under %s, which is drawn over it" % side.get_path())
+		or not str(beside.get("message", "")).contains(
+			"under %s, which is drawn over it" % side.get_path()
+		)
 	):
 		_fail(
 			(
@@ -845,14 +879,19 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	footer.size = Vector2(64, 200)
 	root.add_child(footer)
 	await root.get_tree().process_frame
-	var scrolled: Dictionary = await input.click({"says": "Far"})
+	var scrolled: Dictionary = await input.click({ "says": "Far" })
 	if _presses(far) != 1 or scrolled.get("scrolled_into_view") != true:
-		_fail("a button scrolled out of view is scrolled back and pressed: %s" % JSON.stringify(scrolled))
+		_fail(
+			(
+				"a button scrolled out of view is scrolled back and pressed: %s"
+				% JSON.stringify(scrolled)
+			)
+		)
 
 	# The same container under a page drawn over all of it: the button in view is covered, and so is
 	# the one below the fold, since wherever the click scrolls it to is under the page too. Judged
-	# where it sat, below the container and so clipped away, it was not covered at all, and the click
-	# scrolled it up under the page and pressed there.
+	# where it sat, below the container and so clipped away, it was not covered at all, and the
+	# click scrolled it up under the page and pressed there.
 	var near: Button = _small_button(column, "Far", Vector2.ZERO)
 	column.move_child(near, 0)
 	var over_all: Panel = Panel.new()
@@ -860,16 +899,21 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	root.add_child(over_all)
 	scroll.scroll_vertical = 0
 	await root.get_tree().process_frame
-	var paged: Dictionary = await input.click({"says": "Far"})
+	var paged: Dictionary = await input.click({ "says": "Far" })
 	if (
 		paged.get("type") != "error"
-		or not str(paged.get("message", "")).contains("2 controls say it under what is drawn over them")
+		or not str(paged.get("message", "")).contains(
+			"2 controls say it under what is drawn over them"
+		)
 		or _presses(far) != 1
 		or _presses(near) != 0
 	):
 		_fail(
 			(
-				"a button below the fold of a container a page covers is covered, as the one in view is: %s"
+				(
+					"a button below the fold of a container a page covers is covered, as the one "
+					+ "in view is: %s"
+				)
 				% JSON.stringify(paged)
 			)
 		)
@@ -902,20 +946,32 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 		await root.get_tree().process_frame
 		if wanted.get_global_rect().end.y > 0:
 			_fail("%s should start above the tray's view for this to mean anything" % case[1])
-		var raised: Dictionary = await input.click({"says": case[1]})
+		var raised: Dictionary = await input.click({ "says": case[1] })
 		if _presses(wanted) != 1 or raised.get("scrolled_into_view") != true:
-			_fail("a button above the view is scrolled down to and pressed: %s" % JSON.stringify(raised))
+			_fail(
+				(
+					"a button above the view is scrolled down to and pressed: %s"
+					% JSON.stringify(raised)
+				)
+			)
 	tray.scroll_vertical = 1000
 	var lid: Panel = Panel.new()
 	lid.size = Vector2(64, 32)
 	root.add_child(lid)
 	await root.get_tree().process_frame
-	var lidded: Dictionary = await input.click({"says": "Up"})
+	var lidded: Dictionary = await input.click({ "says": "Up" })
 	if (
 		_presses(up) != 1
-		or not str(lidded.get("message", "")).contains("under %s, which is drawn over it" % lid.get_path())
+		or not str(lidded.get("message", "")).contains(
+			"under %s, which is drawn over it" % lid.get_path()
+		)
 	):
-		_fail("and one above the view of a container a lid covers is covered: %s" % JSON.stringify(lidded))
+		_fail(
+			(
+				"and one above the view of a container a lid covers is covered: %s"
+				% JSON.stringify(lidded)
+			)
+		)
 	tray.queue_free()
 	lid.queue_free()
 	await root.get_tree().process_frame
@@ -930,10 +986,12 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	overlay.add_child(veil)
 	var below: Button = _small_button(root, "Below", Vector2(2, 2))
 	await root.get_tree().process_frame
-	var veiled: Dictionary = await input.click({"says": "Below"})
+	var veiled: Dictionary = await input.click({ "says": "Below" })
 	if (
 		_presses(below) != 0
-		or not str(veiled.get("message", "")).contains("under %s, which is drawn over it" % veil.get_path())
+		or not str(veiled.get("message", "")).contains(
+			"under %s, which is drawn over it" % veil.get_path()
+		)
 	):
 		_fail("a control under a higher canvas layer is covered by it: %s" % JSON.stringify(veiled))
 	overlay.queue_free()
@@ -947,7 +1005,7 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	dialog.size = Vector2i(64, 64)
 	root.add_child(dialog)
 	await root.get_tree().process_frame
-	var windowed: Dictionary = await input.click({"says": "Behind"})
+	var windowed: Dictionary = await input.click({ "says": "Behind" })
 	if (
 		not dialog.is_embedded()
 		or _presses(behind) != 0
@@ -963,13 +1021,16 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	var exactly: Label = _small_label(root, "Onward", Vector2(2, 2))
 	var onward: Button = _small_button(root, "Onward now", Vector2(34, 2))
 	await root.get_tree().process_frame
-	var over_text: Dictionary = await input.click({"says": "Onward"})
+	var over_text: Dictionary = await input.click({ "says": "Onward" })
 	var over_found: Dictionary = over_text.get("found", {})
 	var why: String = str(over_found.get("picked", ""))
 	if _presses(onward) != 1 or over_text.get("path") != str(onward.get_path()):
 		_fail(
 			(
-				"a button saying the word as part of more is pressed over a label saying exactly it: %s"
+				(
+					"a button saying the word as part of more is pressed over a label saying "
+					+ "exactly it: %s"
+				)
 				% JSON.stringify(over_text)
 			)
 		)
@@ -986,7 +1047,8 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	await root.get_tree().process_frame
 
 
-## A label inside the 64 by 64 viewport a headless script run has, clipped to the size of a small button.
+## A label inside the 64 by 64 viewport a headless script run has, clipped to the size of a small
+## button.
 func _small_label(parent: Node, words: String, at: Vector2) -> Label:
 	var label: Label = Label.new()
 	label.text = words
@@ -995,3 +1057,41 @@ func _small_label(parent: Node, words: String, at: Vector2) -> Label:
 	label.size = Vector2(26, 12)
 	parent.add_child(label)
 	return label
+
+
+## Counts both halves of a press, which is the only way to see one that is over by the time the
+## call answering it returns.
+class Watcher:
+	extends Node
+
+	var action: String = ""
+
+	var downs: int = 0
+
+	var ups: int = 0
+
+	func _unhandled_input(event: InputEvent) -> void:
+		if action.is_empty() or not event.is_action(action):
+			return
+		if event.is_action_pressed(action):
+			downs += 1
+		elif event.is_action_released(action):
+			ups += 1
+
+
+## Counts the button events a control is handed, by button and by half, which is what says where
+## the viewport delivered a click rather than where the command said it sent one.
+class Counter:
+	extends Control
+
+	var presses: Dictionary = {}
+
+	var releases: Dictionary = {}
+
+	func _gui_input(event: InputEvent) -> void:
+		if event is not InputEventMouseButton:
+			return
+		var button: InputEventMouseButton = event
+		var tally: Dictionary = presses if button.pressed else releases
+		var so_far: int = GdhRead.as_int(tally.get(button.button_index, 0), 0)
+		tally[button.button_index] = so_far + 1

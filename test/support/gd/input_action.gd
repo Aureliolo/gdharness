@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## project.godot stores an input action as an engine expression, not as JSON, and what goes in
 ## has to be a Dictionary of real InputEvent objects: ConfigFile writes a String quoted and
 ## escaped, which loads back as a String and leaves InputMap with no action while the tool still
@@ -21,7 +20,7 @@ func _init() -> void:
 	_check_written_form()
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -54,7 +53,10 @@ func _events_of(label: String, action: Dictionary, expected_count: int) -> Array
 	var stored: Variant = _round_trip(action)
 	if not stored is Dictionary:
 		_fail(
-			"%s did not survive project.godot as a dictionary, got %s" % [label, type_string(typeof(stored))]
+			(
+				"%s did not survive project.godot as a dictionary, got %s"
+				% [label, type_string(typeof(stored))]
+			)
 		)
 		return []
 
@@ -78,7 +80,7 @@ func _check_key() -> void:
 					"ctrl_pressed": true,
 					"alt_pressed": false,
 					"shift_pressed": true,
-				}
+				},
 			]
 		)
 	)
@@ -107,7 +109,7 @@ func _check_key() -> void:
 
 func _check_mouse_button() -> void:
 	var action: Dictionary = actions.build_input_action(
-		0.2, [{"class_name": "InputEventMouseButton", "button_index": MOUSE_BUTTON_RIGHT}]
+		0.2, [{ "class_name": "InputEventMouseButton", "button_index": MOUSE_BUTTON_RIGHT }]
 	)
 
 	var events: Array = _events_of("mouse action", action, 1)
@@ -128,8 +130,12 @@ func _check_joypad() -> void:
 		. build_input_action(
 			0.3,
 			[
-				{"class_name": "InputEventJoypadButton", "button_index": JOY_BUTTON_A},
-				{"class_name": "InputEventJoypadMotion", "axis": JOY_AXIS_LEFT_X, "axis_value": -1.0},
+				{ "class_name": "InputEventJoypadButton", "button_index": JOY_BUTTON_A },
+				{
+					"class_name": "InputEventJoypadMotion",
+					"axis": JOY_AXIS_LEFT_X,
+					"axis_value": -1.0,
+				},
 			]
 		)
 	)
@@ -161,7 +167,9 @@ func _check_joypad() -> void:
 func _check_written_form() -> void:
 	var path: String = "user://input_action_written.cfg"
 	var config: ConfigFile = ConfigFile.new()
-	config.set_value("input", "fixture", actions.build_input_action(0.5, [{"class_name": "InputEventKey"}]))
+	config.set_value(
+		"input", "fixture", actions.build_input_action(0.5, [{ "class_name": "InputEventKey" }])
+	)
 	if config.save(path) != OK:
 		_fail("could not save the written-form config")
 		return

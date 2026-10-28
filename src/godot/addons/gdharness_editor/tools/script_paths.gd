@@ -1,18 +1,21 @@
 @tool
 extends RefCounted
-
 ## The node paths a GDScript names in its own source, from the node it is on: `$Path`, `%Unique`,
 ## and a string handed to get_node, get_node_or_null or has_node called on itself. Read from the
 ## tokens rather than the lines, so a `$` or a `%` inside a string or a comment names nothing, and
 ## a `%` after an operand is the remainder of a division rather than a unique name.
 
-enum { NAME, STRING, MARK }
+enum {
+	NAME,
+	STRING,
+	MARK,
+}
 
 ## The calls that take a path from the node they are called on.
 const CALLS: Array[String] = ["get_node", "get_node_or_null", "has_node"]
 ## The words after which a `%` starts an operand.
 const OPERAND_AFTER: Array[String] = [
-	"return", "and", "or", "not", "in", "if", "elif", "while", "await", "match", "when", "else"
+	"return", "and", "or", "not", "in", "if", "elif", "while", "await", "match", "when", "else",
 ]
 ## The marks after which a `%` starts an operand: an opening bracket, a separator or an operator.
 const OPERAND_AFTER_MARKS: String = "([{,=:;+-*/<>!&|^~%"
@@ -33,10 +36,14 @@ static func named(source: String) -> Array[Dictionary]:
 		elif _is_mark(token, "%") and _starts_operand(tokens, at):
 			path = _path_from(tokens, at)
 		elif token[0] == NAME and CALLS.has(str(token[1])) and _on_itself(tokens, at):
-			if at + 2 < tokens.size() and _is_mark(tokens[at + 1], "(") and tokens[at + 2][0] == STRING:
+			if (
+				at + 2 < tokens.size()
+				and _is_mark(tokens[at + 1], "(")
+				and tokens[at + 2][0] == STRING
+			):
 				path = str(tokens[at + 2][1])
 		if not path.is_empty():
-			found.append({"line": token[2], "path": path})
+			found.append({ "line": token[2], "path": path })
 	return found
 
 
@@ -58,7 +65,8 @@ static func _path_from(tokens: Array[Array], at: int) -> String:
 	return "/".join(parts)
 
 
-## The name of a path at [param at], as [its text, where the next token is], or [] when there is none.
+## The name of a path at [param at], as [its text, where the next token is], or [] when there is
+## none.
 static func _part_at(tokens: Array[Array], at: int) -> Array:
 	var unique: String = ""
 	if at < tokens.size() and _is_mark(tokens[at], "%"):
@@ -112,7 +120,10 @@ static func _tokens(source: String) -> Array[Array]:
 				at += 1
 		elif c in " \t\r":
 			at += 1
-		elif QUOTES.contains(c) or ("r^&".contains(c) and QUOTES.contains(next) and not next.is_empty()):
+		elif (
+			QUOTES.contains(c)
+			or ("r^&".contains(c) and QUOTES.contains(next) and not next.is_empty())
+		):
 			var quoted: Array = _string(source, at if QUOTES.contains(c) else at + 1)
 			tokens.append([STRING, quoted[0], line])
 			line += str(quoted[0]).count("\n")
@@ -133,7 +144,8 @@ static func _tokens(source: String) -> Array[Array]:
 
 
 ## The string whose opening quote is at [param at], as [what is between its quotes, where it ends].
-## A backslash keeps the character after it inside the string, raw or not, as the tokenizer reads it.
+## A backslash keeps the character after it inside the string, raw or not, as the tokenizer reads
+## it.
 static func _string(source: String, at: int) -> Array:
 	var quote: String = source[at]
 	var closing: String = quote.repeat(3) if source.substr(at, 3) == quote.repeat(3) else quote

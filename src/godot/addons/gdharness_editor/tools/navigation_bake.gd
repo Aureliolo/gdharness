@@ -1,6 +1,5 @@
 @tool
 extends RefCounted
-
 ## Bakes what a NavigationRegion2D or NavigationRegion3D in a scene file navigates by, as the
 ## editor's Bake button does, and saves it where the region keeps it.
 ##
@@ -13,10 +12,11 @@ extends RefCounted
 
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSceneUids = preload("../scene_uids.gd")
-
 ## The names NavigationPolygon.SourceGeometryMode and NavigationMesh.SourceGeometryMode give each
 ## mode, which share their values.
-const SOURCE_MODES: Array[String] = ["root_node_children", "groups_with_children", "groups_explicit"]
+const SOURCE_MODES: Array[String] = [
+	"root_node_children", "groups_with_children", "groups_explicit",
+]
 
 
 ## Bakes the region [param region] of [param scene], answering what it now holds or why not.
@@ -55,13 +55,16 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 	var file: String = held.resource_path.get_slice("::", 0)
 	var embedded: bool = file.is_empty() or held.resource_path.contains("::")
 	if embedded and not file.is_empty() and file != scene.path:
-		return scene.refuse(
-			(
+		return (
+			scene
+			. refuse(
 				(
-					"The %s %s holds is built into %s, and a bake here cannot save that file. Bake the "
-					+ "region there, or save the %s to a file of its own."
+					(
+						"The %s %s holds is built into %s, and a bake here cannot save that file. "
+						+ "Bake the region there, or save the %s to a file of its own."
+					)
+					% [held.get_class(), at, file, held.get_class()]
 				)
-				% [held.get_class(), at, file, held.get_class()]
 			)
 		)
 
@@ -78,7 +81,8 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 	}
 	if made:
 		answer["made"] = (
-			"%s held no %s, so one was made and built into the scene, with the defaults." % [at, property]
+			"%s held no %s, so one was made and built into the scene, with the defaults."
+			% [at, property]
 		)
 	if polygons == 0:
 		answer["note"] = _why_empty(held, flat, parsed)
@@ -86,17 +90,17 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 		answer["note"] = _nothing_read(scene, held)
 	if not flat and not Engine.is_editor_hint() and _reads_meshes(region, held):
 		answer["meshesNote"] = (
-			"The engine's warning that it had to parse RenderingServer meshes at runtime is about a "
-			+ "game rebaking as it runs, where reading a mesh back from the GPU stalls a frame. A "
-			+ "headless engine gives it for any bake read from MeshInstance3D nodes; this one ran once "
-			+ "and is saved."
+			"The engine's warning that it had to parse RenderingServer meshes at runtime is about "
+			+ "a game rebaking as it runs, where reading a mesh back from the GPU stalls a frame. "
+			+ "A headless engine gives it for any bake read from MeshInstance3D nodes; this one "
+			+ "ran once and is saved."
 		)
 
 	if not embedded:
 		scene.close()
 		var saving: Error = GdhSceneUids.save_keeping_uid(held, file)
 		if saving != OK:
-			return {"ok": false, "error": "Failed to save %s: %s" % [file, error_string(saving)]}
+			return { "ok": false, "error": "Failed to save %s: %s" % [file, error_string(saving)] }
 		if Engine.is_editor_hint():
 			EditorInterface.get_resource_filesystem().update_file(file)
 		answer["savedTo"] = file
@@ -121,7 +125,9 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 static func _parse_and_bake(scene: GdhSceneFile, at: String, held: Resource, flat: bool) -> bool:
 	var copy: Node = scene.root.duplicate(Node.DUPLICATE_GROUPS)
 	var reading: Resource = held.duplicate()
-	var group_property: String = "source_geometry_group_name" if flat else "geometry_source_group_name"
+	var group_property: String = (
+		"source_geometry_group_name" if flat else "geometry_source_group_name"
+	)
 	var group: String = str(held.get(group_property))
 	var own_group: String = "_gdh_bake_%d" % copy.get_instance_id()
 	reading.set(group_property, own_group)
@@ -136,8 +142,8 @@ static func _parse_and_bake(scene: GdhSceneFile, at: String, held: Resource, fla
 		var outline: NavigationPolygon = reading
 		var geometry: NavigationMeshSourceGeometryData2D = NavigationMeshSourceGeometryData2D.new()
 		NavigationServer2D.parse_source_geometry_data(outline, geometry, region)
-		# has_data() counts only traversable outlines, so a bake carving every obstacle it read would
-		# still say it read nothing.
+		# has_data() counts only traversable outlines, so a bake carving every obstacle it read
+		# would still say it read nothing.
 		found = (
 			not geometry.get_obstruction_outlines().is_empty()
 			or not geometry.get_projected_obstructions().is_empty()
@@ -211,12 +217,15 @@ static func _why_empty(held: Resource, flat: bool, parsed: bool) -> String:
 			return (
 				"The NavigationPolygon has no outlines, and a 2D bake fills only the area its "
 				+ "outlines enclose, less what the obstacles inside take. Give it outlines with "
-				+ "scene_node set, such as navigation_polygon/outlines [[[0, 0], [512, 0], [512, 512], "
-				+ "[0, 512]]], then bake again."
+				+ "scene_node set, such as navigation_polygon/outlines [[[0, 0], [512, 0], [512, "
+				+ "512], [0, 512]]], then bake again."
 			)
 		return (
 			(
-				"Nothing was left to walk inside the outlines once the obstacles read from %s, and the "
+				(
+					"Nothing was left to walk inside the outlines once the obstacles read from %s, "
+					+ "and the "
+				)
 				% _source_said(polygon.source_geometry_mode, polygon.source_geometry_group_name)
 			)
 			+ "agent_radius %s kept from their edges, were taken out." % polygon.agent_radius
@@ -225,17 +234,27 @@ static func _why_empty(held: Resource, flat: bool, parsed: bool) -> String:
 	if not parsed:
 		return (
 			(
-				"No geometry was read from %s with geometry_parsed_geometry_type %s, so there was nothing to "
+				(
+					"No geometry was read from %s with geometry_parsed_geometry_type %s, so there "
+					+ "was nothing to "
+				)
 				% [
-					_source_said(mesh.geometry_source_geometry_mode, mesh.geometry_source_group_name),
-					["mesh_instances", "static_colliders", "both"][mesh.geometry_parsed_geometry_type],
+					_source_said(
+						mesh.geometry_source_geometry_mode, mesh.geometry_source_group_name
+					),
+					["mesh_instances", "static_colliders", "both"][
+						mesh.geometry_parsed_geometry_type
+					],
 				]
 			)
-			+ "bake: mesh_instances reads MeshInstance3D nodes, static_colliders the shapes of physics "
-			+ "bodies on geometry_collision_mask, and both reads both."
+			+ "bake: mesh_instances reads MeshInstance3D nodes, static_colliders the shapes of "
+			+ "physics bodies on geometry_collision_mask, and both reads both."
 		)
 	return (
-		"The geometry read gave no floor an agent of agent_height %s and agent_radius %s can stand on."
+		(
+			"The geometry read gave no floor an agent of agent_height %s and agent_radius %s can "
+			+ "stand on."
+		)
 		% [mesh.agent_height, mesh.agent_radius]
 	)
 
@@ -252,7 +271,7 @@ static func _nothing_read(scene: GdhSceneFile, held: Resource) -> String:
 		)
 		% [
 			_source_said(polygon.source_geometry_mode, polygon.source_geometry_group_name),
-			polygon.agent_radius
+			polygon.agent_radius,
 		]
 	)
 	var outside: PackedStringArray = []
@@ -270,8 +289,9 @@ static func _nothing_read(scene: GdhSceneFile, held: Resource) -> String:
 		return said
 	return (
 		(
-			"%s %s %s outside what was read; the bake reads a node elsewhere once it is in the group %s and "
-			+ "source_geometry_mode is groups_with_children, or once it is moved under the region."
+			"%s %s %s outside what was read; the bake reads a node elsewhere once it is in the "
+			+ "group %s and source_geometry_mode is groups_with_children, or once it is moved "
+			+ "under the region."
 		)
 		% [
 			said,

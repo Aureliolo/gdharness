@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## Project settings read the same way headless and from the open editor, because the two are one
 ## question asked of two places: a field one of them left out read as the editor and the file
 ## disagreeing about something they agree about.
@@ -12,7 +11,7 @@ const GdhSerialisation = preload("serialisation.gd")
 ## the feature overrides that replace it in some builds.
 static func one(setting_path: String, values: GdhSerialisation) -> Dictionary:
 	var result: Dictionary = {
-		"setting_path": setting_path, "exists": ProjectSettings.has_setting(setting_path)
+		"setting_path": setting_path, "exists": ProjectSettings.has_setting(setting_path),
 	}
 
 	if result["exists"]:
@@ -66,8 +65,8 @@ static func under(prefix: String, values: GdhSerialisation) -> Dictionary:
 			"type": type_string(kind),
 			"value": values.serialize_value(value),
 		}
-		# As a single get says it, so a family read can be told apart into what the project sets
-		# and the engine's defaults: "input/" is ninety actions the engine ships and the project's few.
+		# As a single get says it, so a family read can be told apart into what the project sets and
+		# the engine's defaults: "input/" is ninety actions the engine ships and the project's few.
 		var default_value: Variant = ProjectSettings.property_get_revert(name)
 		if default_value != null:
 			described["at_default"] = value == default_value
@@ -76,8 +75,10 @@ static func under(prefix: String, values: GdhSerialisation) -> Dictionary:
 			described["override_of"] = base
 		found.append(described)
 
-	found.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["setting"] < b["setting"])
-	return {"prefix": prefix, "count": found.size(), "settings": found}
+	found.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool: return a["setting"] < b["setting"]
+	)
+	return { "prefix": prefix, "count": found.size(), "settings": found }
 
 
 ## The setting [param setting_path] overrides for builds with one feature, as

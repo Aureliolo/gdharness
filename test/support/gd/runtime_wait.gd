@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## The commands that take time: a click that presses and releases a frame apart, and the waits for
 ## frames and a property; the wait for a signal is runtime_signal.gd. They need the main loop
 ## running, so the checks start on the first frame rather than in _init, and the fixture quits
@@ -8,7 +7,6 @@ extends SceneTree
 const Checked = preload("checked.gd")
 const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
-
 ## How tall the room's camera sees, in metres. Against a 480 pixel viewport that is 48 pixels a
 ## metre, which is what makes every figure in [method _check_the_room] exact rather than read back
 ## off whatever the engine answered.
@@ -25,7 +23,8 @@ func _init() -> void:
 	# In the tree, because the commands ask it for the tree; announced somewhere private, so the
 	# fixture does not look like a game to a server running on this machine.
 	OS.set_environment(
-		"GDHARNESS_RUNTIME_DIR", OS.get_temp_dir().path_join("gdharness-wait-%d" % OS.get_process_id())
+		"GDHARNESS_RUNTIME_DIR",
+		OS.get_temp_dir().path_join("gdharness-wait-%d" % OS.get_process_id())
 	)
 	node = Runtime.new()
 	root.add_child(node)
@@ -43,8 +42,12 @@ func _init() -> void:
 	Checked.done(button.pressed.connect(func() -> void: presses += 1) as Error, "counting presses")
 	panel.add_child(button)
 
-	Checked.done(process_frame.connect(func() -> void: frames_seen += 1) as Error, "counting frames")
-	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
+	Checked.done(
+		process_frame.connect(func() -> void: frames_seen += 1) as Error, "counting frames"
+	)
+	Checked.done(
+		process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame"
+	)
 
 
 func _fail(message: String) -> void:
@@ -68,7 +71,7 @@ func _run() -> void:
 	# Not checked: the directory is gone either way by the time the fixture tears itself down.
 	var _removed: Error = DirAccess.remove_absolute(OS.get_environment("GDHARNESS_RUNTIME_DIR"))
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -77,7 +80,7 @@ func _run() -> void:
 
 
 func _check_click() -> void:
-	var clicked: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Go"})
+	var clicked: Dictionary = await node._execute_command("click", { "path": "/root/Panel/Go" })
 	if clicked.get("type") != "clicked":
 		_fail("click: %s" % str(clicked))
 		return
@@ -89,17 +92,19 @@ func _check_click() -> void:
 	if presses != 1:
 		_fail("one click should press the button once, pressed %d times" % presses)
 
-	var doubled: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Go", "double": true})
+	var doubled: Dictionary = await node._execute_command(
+		"click", { "path": "/root/Panel/Go", "double": true }
+	)
 	if doubled.get("double") != true:
 		_fail("a double click should say so: %s" % str(doubled))
 
 	button.hide()
-	var hidden: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Go"})
+	var hidden: Dictionary = await node._execute_command("click", { "path": "/root/Panel/Go" })
 	if hidden.get("type") != "error":
 		_fail("a hidden control cannot be clicked: %s" % str(hidden))
 	button.show()
 
-	var not_control: Dictionary = await node._execute_command("click", {"path": "/root"})
+	var not_control: Dictionary = await node._execute_command("click", { "path": "/root" })
 	if not_control.get("type") != "error":
 		_fail("a node that is not a Control cannot be clicked: %s" % str(not_control))
 
@@ -108,12 +113,17 @@ func _check_click() -> void:
 	far.position = Vector2(900, 900)
 	far.size = Vector2(80, 30)
 	button.get_parent().add_child(far)
-	var off_screen: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Far"})
+	var off_screen: Dictionary = await node._execute_command("click", { "path": "/root/Panel/Far" })
 	if (
 		off_screen.get("type") != "error"
 		or not str(off_screen.get("message", "")).contains("outside the viewport")
 	):
-		_fail("a control outside the window cannot be clicked, and the answer says so: %s" % str(off_screen))
+		_fail(
+			(
+				"a control outside the window cannot be clicked, and the answer says so: %s"
+				% str(off_screen)
+			)
+		)
 	# This engine is headless and the fixture gave its root a size, so the refusal names that size,
 	# which the rect printed beside it agrees with. A window of the same size would not reach the
 	# control either, so it is not offered one, and 64 by 64 is not claimed.
@@ -145,7 +155,12 @@ func _check_click() -> void:
 		func(going: Button) -> void: going.get_parent().remove_child(going)
 	)
 	if removed.get("control_afterwards") != "removed":
-		_fail("a button taken out of the tree by its own click should be reported removed: %s" % str(removed))
+		_fail(
+			(
+				"a button taken out of the tree by its own click should be reported removed: %s"
+				% str(removed)
+			)
+		)
 
 
 ## Somebody standing in a 3D room, which is the other half of what a game puts on screen and had
@@ -226,22 +241,29 @@ func _check_a_room_in_a_subviewport() -> void:
 	room.add_child(label)
 	await process_frame
 	var screen: Transform2D = root.get_final_transform()
-	var placed: Dictionary = await node._execute_command("get_rect", {"path": str(body.get_path())})
+	var placed: Dictionary = await node._execute_command(
+		"get_rect",
+		{ "path": str(body.get_path()) },
+	)
 	var in_window: Dictionary = placed.get("window", {})
 	var body_at: Vector2 = screen * Vector2(200, 130)
 	if in_window.get("x") != body_at.x or in_window.get("y") != body_at.y:
 		_fail("get_rect gives a body in a SubViewport its place in the window: %s" % str(placed))
-	var framed: Dictionary = await node._execute_command("get_rect", {"path": str(label.get_path())})
+	var framed: Dictionary = await node._execute_command(
+		"get_rect", { "path": str(label.get_path()) }
+	)
 	var framed_window: Dictionary = framed.get("window", {})
 	var framed_at: Dictionary = framed_window.get("position", {})
 	var label_at: Vector2 = screen * Vector2(120, 70)
 	if framed_at.get("x") != label_at.x or framed_at.get("y") != label_at.y:
 		_fail("and a control in one its place in the window, scaled: %s" % str(framed))
 
-	var clicked: Dictionary = await node._execute_command("click", {"path": str(body.get_path())})
+	var clicked: Dictionary = await node._execute_command("click", { "path": str(body.get_path()) })
 	var at: Dictionary = clicked.get("position", {})
 	if at.get("x") != 200.0 or at.get("y") != 130.0:
-		_fail("a body in a SubViewport is clicked where it is drawn on the screen: %s" % str(clicked))
+		_fail(
+			"a body in a SubViewport is clicked where it is drawn on the screen: %s" % str(clicked)
+		)
 	if room.get_mouse_position() != Vector2(50, 40):
 		_fail(
 			(
@@ -261,17 +283,28 @@ func _check_a_room_in_a_subviewport() -> void:
 	inside.position = Vector2(5, 5)
 	dialog.add_child(inside)
 	await process_frame
-	var boxed: Dictionary = await node._execute_command("get_rect", {"path": str(inside.get_path())})
+	var boxed: Dictionary = await node._execute_command(
+		"get_rect", { "path": str(inside.get_path()) }
+	)
 	var boxed_window: Dictionary = boxed.get("window", {})
 	var boxed_at: Dictionary = boxed_window.get("position", {})
 	var inside_at: Vector2 = screen * Vector2(35, 45)
-	if not dialog.is_embedded() or boxed_at.get("x") != inside_at.x or boxed_at.get("y") != inside_at.y:
-		_fail("get_rect gives a control in an embedded dialog its place in the window: %s" % str(boxed))
+	if (
+		not dialog.is_embedded()
+		or boxed_at.get("x") != inside_at.x
+		or boxed_at.get("y") != inside_at.y
+	):
+		_fail(
+			(
+				"get_rect gives a control in an embedded dialog its place in the window: %s"
+				% str(boxed)
+			)
+		)
 	dialog.free()
 
 
 func _check_the_body_is_placed() -> void:
-	var placed: Dictionary = await node._execute_command("get_rect", {"path": "/root/Body"})
+	var placed: Dictionary = await node._execute_command("get_rect", { "path": "/root/Body" })
 	if placed.get("type") != "point":
 		_fail("a 3D node should have a place on screen: %s" % str(placed))
 		return
@@ -294,7 +327,7 @@ func _check_the_body_is_placed() -> void:
 
 
 func _check_the_body_can_be_clicked() -> void:
-	var clicked: Dictionary = await node._execute_command("click", {"path": "/root/Body"})
+	var clicked: Dictionary = await node._execute_command("click", { "path": "/root/Body" })
 	if clicked.get("type") != "clicked":
 		_fail("a 3D node should be clickable: %s" % str(clicked))
 		return
@@ -317,7 +350,7 @@ func _check_a_panel_over_the_room() -> void:
 	root.add_child(over)
 	await process_frame
 
-	var swallowed: Dictionary = await node._execute_command("click", {"path": "/root/Body"})
+	var swallowed: Dictionary = await node._execute_command("click", { "path": "/root/Body" })
 	if swallowed.get("landed") != false or swallowed.get("hovered") != "/root/Over":
 		_fail("a panel over the room should be named as what took the click: %s" % str(swallowed))
 	over.free()
@@ -327,12 +360,15 @@ func _check_a_body_behind_the_camera(body: Node3D) -> void:
 	body.position = Vector3(2.5, -3.0, 20.0)
 	await process_frame
 
-	var placed: Dictionary = await node._execute_command("get_rect", {"path": "/root/Body"})
+	var placed: Dictionary = await node._execute_command("get_rect", { "path": "/root/Body" })
 	if placed.get("behind_camera") != true or placed.has("canvas"):
 		_fail("a node behind the camera has no place on screen and says so: %s" % str(placed))
 
-	var refused: Dictionary = await node._execute_command("click", {"path": "/root/Body"})
-	if refused.get("type") != "error" or not str(refused.get("message", "")).contains("behind the camera"):
+	var refused: Dictionary = await node._execute_command("click", { "path": "/root/Body" })
+	if (
+		refused.get("type") != "error"
+		or not str(refused.get("message", "")).contains("behind the camera")
+	):
 		_fail("and cannot be clicked: %s" % str(refused))
 	body.position = Vector3(2.5, -3.0, 0.0)
 
@@ -388,14 +424,21 @@ func _check_a_pick_that_frees_the_menu() -> void:
 	root.add_child(setting)
 	await process_frame
 
-	var took: Dictionary = await node._execute_command("choose", {"path": "/root/Setting", "index": 1})
+	var took: Dictionary = await node._execute_command(
+		"choose", { "path": "/root/Setting", "index": 1 }
+	)
 	if (
 		took.get("type") != "chosen"
 		or took.get("text") != "Fullscreen"
 		or took.get("id") != 2
 		or took.get("control_afterwards") != "freed"
 	):
-		_fail("a pick that frees its menu answers with the item and says the button went: %s" % str(took))
+		_fail(
+			(
+				"a pick that frees its menu answers with the item and says the button went: %s"
+				% str(took)
+			)
+		)
 	if took.has("selected") or took.has("shows"):
 		_fail("and reads nothing off a button that is gone: %s" % str(took))
 	if rebuilt != [1]:
@@ -419,31 +462,35 @@ func _check_a_heading_is_not_a_choice() -> void:
 	root.add_child(filter)
 	await process_frame
 
-	var took: Dictionary = await node._execute_command("choose", {"path": "/root/Filter", "text": "Quests"})
+	var took: Dictionary = await node._execute_command(
+		"choose", { "path": "/root/Filter", "text": "Quests" }
+	)
 	if took.get("type") != "chosen" or took.get("index") != 2:
 		_fail("an item sharing its heading's words should be the one chosen: %s" % str(took))
 
 	var heading: Dictionary = await node._execute_command(
-		"choose", {"path": "/root/Filter", "text": "The work"}
+		"choose", { "path": "/root/Filter", "text": "The work" }
 	)
 	if not str(heading.get("message", "")).contains("item 4, The work, is a separator heading"):
 		_fail("a heading asked for alone should be refused as one: %s" % str(heading))
 
 	var missing: Dictionary = await node._execute_command(
-		"choose", {"path": "/root/Filter", "text": "Nothing like it"}
+		"choose", { "path": "/root/Filter", "text": "Nothing like it" }
 	)
 	var listed: String = str(missing.get("message", ""))
 	if not listed.contains(
 		"0: Everything, 1: Quests (a heading), 2: Quests, 4: The work (a heading), 5: Hiring"
 	):
-		_fail("a refusal should list headings as headings and leave out a bare separator: %s" % listed)
+		_fail(
+			"a refusal should list headings as headings and leave out a bare separator: %s" % listed
+		)
 
 	filter.free()
 
 
 func _check_choosing_by_what_it_says(chosen: Array[int]) -> void:
 	var took: Dictionary = await node._execute_command(
-		"choose", {"path": "/root/Picker", "text": "Word back"}
+		"choose", { "path": "/root/Picker", "text": "Word back" }
 	)
 	if took.get("type") != "chosen":
 		_fail("an option should be choosable by what it says: %s" % str(took))
@@ -459,7 +506,9 @@ func _check_choosing_by_what_it_says(chosen: Array[int]) -> void:
 
 
 func _check_choosing_by_where_it_is() -> void:
-	var took: Dictionary = await node._execute_command("choose", {"path": "/root/Picker", "index": 0})
+	var took: Dictionary = await node._execute_command(
+		"choose", { "path": "/root/Picker", "index": 0 }
+	)
 	if took.get("type") != "chosen" or took.get("text") != "Everything":
 		_fail("an option should be choosable by where it is in the list: %s" % str(took))
 
@@ -468,19 +517,24 @@ func _check_choosing_by_where_it_is() -> void:
 ## be one nobody could tell a typo from a greyed-out row in.
 func _check_a_menu_says_no() -> void:
 	var greyed: Dictionary = await node._execute_command(
-		"choose", {"path": "/root/Picker", "text": "Trouble"}
+		"choose", { "path": "/root/Picker", "text": "Trouble" }
 	)
 	if greyed.get("type") != "error" or not str(greyed.get("message", "")).contains("disabled"):
 		_fail("a disabled item should be refused and said to be: %s" % str(greyed))
 
 	var missing: Dictionary = await node._execute_command(
-		"choose", {"path": "/root/Picker", "text": "Nothing like it"}
+		"choose", { "path": "/root/Picker", "text": "Nothing like it" }
 	)
 	if missing.get("type") != "error" or not str(missing.get("message", "")).contains("Everything"):
-		_fail("an item that is not there should be refused with the ones that are: %s" % str(missing))
+		_fail(
+			"an item that is not there should be refused with the ones that are: %s" % str(missing)
+		)
 
-	var unasked: Dictionary = await node._execute_command("choose", {"path": "/root/Picker"})
-	if unasked.get("type") != "error" or not str(unasked.get("message", "")).contains("by text or index"):
+	var unasked: Dictionary = await node._execute_command("choose", { "path": "/root/Picker" })
+	if (
+		unasked.get("type") != "error"
+		or not str(unasked.get("message", "")).contains("by text or index")
+	):
 		_fail("naming no item at all should say how to name one: %s" % str(unasked))
 
 
@@ -506,25 +560,29 @@ func _check_a_translated_menu() -> void:
 	root.add_child(orders)
 	await process_frame
 
-	var took: Dictionary = await node._execute_command("choose", {"path": "/root/Orders", "text": "Dismiss"})
+	var took: Dictionary = await node._execute_command(
+		"choose", { "path": "/root/Orders", "text": "Dismiss" }
+	)
 	if took.get("type") != "chosen" or took.get("index") != 1:
 		_fail("a translated item should be chosen by the words it shows: %s" % str(took))
 	elif took.get("text") != "Dismiss" or took.get("shows") != "Dismiss":
 		_fail("and the answer should name it as shown: %s" % str(took))
 
 	var by_key: Dictionary = await node._execute_command(
-		"choose", {"path": "/root/Orders", "text": "ACT_ENGAGE"}
+		"choose", { "path": "/root/Orders", "text": "ACT_ENGAGE" }
 	)
 	if by_key.get("type") != "chosen" or by_key.get("index") != 0:
 		_fail("and still by the key it holds: %s" % str(by_key))
 
 	var missing: Dictionary = await node._execute_command(
-		"choose", {"path": "/root/Orders", "text": "Nothing like it"}
+		"choose", { "path": "/root/Orders", "text": "Nothing like it" }
 	)
 	if not str(missing.get("message", "")).contains("0: Hire, 1: Dismiss, 2: Levy"):
 		_fail("a refusal should list the items as shown: %s" % str(missing))
 
-	var greyed: Dictionary = await node._execute_command("choose", {"path": "/root/Orders", "text": "Levy"})
+	var greyed: Dictionary = await node._execute_command(
+		"choose", { "path": "/root/Orders", "text": "Levy" }
+	)
 	if not str(greyed.get("message", "")).contains("item 2, Levy, is disabled"):
 		_fail("a disabled item should be named as shown: %s" % str(greyed))
 
@@ -546,19 +604,21 @@ func _check_a_dialog() -> void:
 	dialog.name = "AreYouSure"
 	dialog.dialog_text = "Do the irreversible thing?"
 	var confirmed: Array[int] = []
-	Checked.done(dialog.confirmed.connect(func() -> void: confirmed.append(1)) as Error, "noting the confirm")
+	Checked.done(
+		dialog.confirmed.connect(func() -> void: confirmed.append(1)) as Error, "noting the confirm"
+	)
 	root.add_child(dialog)
 	dialog.popup_centered(Vector2i(240, 120))
 	await process_frame
 
 	var buttons: Dictionary = await node._execute_command(
-		"find_nodes", {"class": "Button", "root": "/root/AreYouSure"}
+		"find_nodes", { "class": "Button", "root": "/root/AreYouSure" }
 	)
 	if GdhRead.as_int(buttons.get("count", 0)) < 2:
 		_fail("a dialog's own buttons should be findable: %s" % str(buttons))
 
 	var answered: Dictionary = await node._execute_command(
-		"click", {"path": str(dialog.get_ok_button().get_path())}
+		"click", { "path": str(dialog.get_ok_button().get_path()) }
 	)
 	if answered.get("type") != "clicked" or answered.get("landed") != true:
 		_fail("a click on a dialog's Yes should land on it: %s" % str(answered))
@@ -594,11 +654,15 @@ func _check_below_the_fold() -> void:
 	buried.name = "Buried"
 	buried.custom_minimum_size = Vector2(180, 40)
 	var pressed: Array[int] = []
-	Checked.done(buried.pressed.connect(func() -> void: pressed.append(1)) as Error, "noting the press")
+	Checked.done(
+		buried.pressed.connect(func() -> void: pressed.append(1)) as Error, "noting the press"
+	)
 	column.add_child(buried)
 	await process_frame
 
-	var reached: Dictionary = await node._execute_command("click", {"path": "/root/Ledger/Column/Buried"})
+	var reached: Dictionary = await node._execute_command(
+		"click", { "path": "/root/Ledger/Column/Buried" }
+	)
 
 	if reached.get("type") != "clicked" or reached.get("landed") != true:
 		_fail("a button below the fold should be scrolled to and clicked: %s" % str(reached))
@@ -614,14 +678,18 @@ func _check_below_the_fold() -> void:
 	first.name = "Topmost"
 	first.custom_minimum_size = Vector2(180, 40)
 	var early: Array[int] = []
-	Checked.done(first.pressed.connect(func() -> void: early.append(1)) as Error, "noting the early press")
+	Checked.done(
+		first.pressed.connect(func() -> void: early.append(1)) as Error, "noting the early press"
+	)
 	column.add_child(first)
 	column.move_child(first, 0)
 	scroller.set_deferred("scroll_vertical", 400)
 	await process_frame
 	await process_frame
 
-	var above: Dictionary = await node._execute_command("click", {"path": "/root/Ledger/Column/Topmost"})
+	var above: Dictionary = await node._execute_command(
+		"click", { "path": "/root/Ledger/Column/Topmost" }
+	)
 
 	if above.get("type") != "clicked" or above.get("landed") != true:
 		_fail("a button above the fold should be scrolled to and clicked: %s" % str(above))
@@ -630,7 +698,7 @@ func _check_below_the_fold() -> void:
 
 	# The control that was already on screen is the other half: nothing should scroll for it, or
 	# every click would be reported as having moved the view.
-	var on_screen: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Go"})
+	var on_screen: Dictionary = await node._execute_command("click", { "path": "/root/Panel/Go" })
 	if on_screen.get("scrolled_into_view") != false:
 		_fail("a control already on screen should not report a scroll: %s" % str(on_screen))
 
@@ -649,11 +717,13 @@ func _click_a_button_that(to_it: Callable) -> Dictionary:
 	going.name = "Go"
 	going.position = Vector2(30, 20)
 	going.size = Vector2(80, 30)
-	Checked.done(going.pressed.connect(func() -> void: to_it.call(going)) as Error, "noting the press")
+	Checked.done(
+		going.pressed.connect(func() -> void: to_it.call(going)) as Error, "noting the press"
+	)
 	panel.add_child(going)
 	await process_frame
 
-	var answer: Dictionary = await node._execute_command("click", {"path": "/root/Doomed/Go"})
+	var answer: Dictionary = await node._execute_command("click", { "path": "/root/Doomed/Go" })
 	if is_instance_valid(going) and not going.is_inside_tree():
 		going.free()
 	if is_instance_valid(panel):
@@ -663,7 +733,7 @@ func _click_a_button_that(to_it: Callable) -> Dictionary:
 
 func _check_frames() -> void:
 	var before: int = frames_seen
-	var waited: Dictionary = await node._execute_command("wait_frames", {"frames": 3})
+	var waited: Dictionary = await node._execute_command("wait_frames", { "frames": 3 })
 	if waited.get("frames") != 3 or frames_seen - before != 3:
 		_fail(
 			(
@@ -675,10 +745,12 @@ func _check_frames() -> void:
 	# More than it can wait for is refused rather than brought inside the range: 900 frames asked
 	# for and 600 waited reads as 900 frames of the game having passed, and anything measured off
 	# that is out by the difference.
-	var too_many: Dictionary = await node._execute_command("wait_frames", {"frames": 900})
+	var too_many: Dictionary = await node._execute_command("wait_frames", { "frames": 900 })
 	if too_many.get("type") != "error" or not str(too_many.get("message", "")).contains("1 to 600"):
-		_fail("more frames than it can wait for should be refused with the range: %s" % str(too_many))
-	var none: Dictionary = await node._execute_command("wait_frames", {"frames": 0})
+		_fail(
+			"more frames than it can wait for should be refused with the range: %s" % str(too_many)
+		)
+	var none: Dictionary = await node._execute_command("wait_frames", { "frames": 0 })
 	if none.get("type") != "error":
 		_fail("a wait of no frames should be refused: %s" % str(none))
 
@@ -690,19 +762,20 @@ func _check_until() -> void:
 		button.visible = false
 	late.call()
 	var met: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel/Go", "property": "visible", "value": false}
+		"wait_until", { "path": "/root/Panel/Go", "property": "visible", "value": false }
 	)
 	if met.get("met") != true or met.get("value") != false:
 		_fail("wait_until should see the property change: %s" % str(met))
 
 	var unmet: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel/Go", "property": "visible", "value": true, "timeout_ms": 60}
+		"wait_until",
+		{ "path": "/root/Panel/Go", "property": "visible", "value": true, "timeout_ms": 60 }
 	)
 	if unmet.get("met") != false or unmet.get("value") != false:
 		_fail("wait_until should report the last value when the time runs out: %s" % str(unmet))
 
 	var no_value: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel/Go", "property": "visible"}
+		"wait_until", { "path": "/root/Panel/Go", "property": "visible" }
 	)
 	if no_value.get("type") != "error":
 		_fail("wait_until without a value is refused: %s" % str(no_value))
@@ -723,7 +796,8 @@ func _check_until_at_the_precision_kept() -> void:
 		lens.h_offset = -1.1
 	shifted.call()
 	var met: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Lens", "property": "h_offset", "value": -1.1, "timeout_ms": 1000}
+		"wait_until",
+		{ "path": "/root/Lens", "property": "h_offset", "value": -1.1, "timeout_ms": 1000 }
 	)
 	if met.get("met") != true:
 		_fail("a 32-bit float meets the value it was given: %s" % JSON.stringify(met))
@@ -734,23 +808,40 @@ func _check_until_at_the_precision_kept() -> void:
 	root.add_child(lines)
 	var whole: Dictionary = await node._execute_command(
 		"wait_until",
-		{"path": "/root/Lines", "property": "max_lines_visible", "value": 3.0, "timeout_ms": 200}
+		{ "path": "/root/Lines", "property": "max_lines_visible", "value": 3.0, "timeout_ms": 200 }
 	)
 	if whole.get("met") != true:
 		_fail("a whole number arriving as a float meets an int: %s" % JSON.stringify(whole))
 	for cut: Variant in [3.5, "3.5"]:
 		var refused: Dictionary = await node._execute_command(
 			"wait_until",
-			{"path": "/root/Lines", "property": "max_lines_visible", "value": cut, "timeout_ms": 200}
+			{
+				"path": "/root/Lines",
+				"property": "max_lines_visible",
+				"value": cut,
+				"timeout_ms": 200,
+			}
 		)
 		var said: String = str(refused.get("message", ""))
-		if refused.get("type") != "error" or not said.contains("an int cannot hold without changing it"):
-			_fail("%s waited on an int is refused, not cut to 3: %s" % [str(cut), JSON.stringify(refused)])
+		if (
+			refused.get("type") != "error"
+			or not said.contains("an int cannot hold without changing it")
+		):
+			_fail(
+				(
+					"%s waited on an int is refused, not cut to 3: %s"
+					% [str(cut), JSON.stringify(refused)]
+				)
+			)
 	var truth: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Lines", "property": "visible", "value": 0.2, "timeout_ms": 200}
+		"wait_until",
+		{ "path": "/root/Lines", "property": "visible", "value": 0.2, "timeout_ms": 200 }
 	)
 	var truth_said: String = str(truth.get("message", ""))
-	if truth.get("type") != "error" or not truth_said.contains("a bool cannot hold without changing it"):
+	if (
+		truth.get("type") != "error"
+		or not truth_said.contains("a bool cannot hold without changing it")
+	):
 		_fail("0.2 waited on a bool is refused, not read as true: %s" % JSON.stringify(truth))
 	lens.queue_free()
 	lines.queue_free()
@@ -802,27 +893,45 @@ func _check_until_a_reference_is_let_go() -> void:
 				target.queue_free()
 		let_go.call()
 		var met: Dictionary = await node._execute_command(
-			"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": null, "timeout_ms": 1000}
+			"wait_until",
+			{ "path": "/root/Holder", "property": "quarrel", "value": null, "timeout_ms": 1000 }
 		)
-		if met.get("met") != true or met.get("value") != null or GdhRead.as_int(met.get("frames"), -1) > 5:
-			_fail("a reference %s meets a wait for null within frames: %s" % [way, JSON.stringify(met)])
+		if (
+			met.get("met") != true
+			or met.get("value") != null
+			or GdhRead.as_int(met.get("frames"), -1) > 5
+		):
+			_fail(
+				(
+					"a reference %s meets a wait for null within frames: %s"
+					% [way, JSON.stringify(met)]
+				)
+			)
 
 	holder.set("quarrel", null)
 	var as_text: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": "null", "timeout_ms": 1000}
+		"wait_until",
+		{ "path": "/root/Holder", "property": "quarrel", "value": "null", "timeout_ms": 1000 }
 	)
 	if as_text.get("met") != true or GdhRead.as_int(as_text.get("frames"), -1) != 0:
 		_fail("the text null on a null object property meets at once: %s" % JSON.stringify(as_text))
 	# And on an untyped slot holding null, which declares no type to read against: set already read
 	# the text as null there, and the wait ran out on it.
 	var untyped: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Holder", "property": "loose", "value": "null", "timeout_ms": 1000}
+		"wait_until",
+		{ "path": "/root/Holder", "property": "loose", "value": "null", "timeout_ms": 1000 }
 	)
 	if untyped.get("met") != true or GdhRead.as_int(untyped.get("frames"), -1) != 0:
-		_fail("the text null on an untyped slot holding null meets at once: %s" % JSON.stringify(untyped))
+		_fail(
+			(
+				"the text null on an untyped slot holding null meets at once: %s"
+				% JSON.stringify(untyped)
+			)
+		)
 
 	var number: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": 5, "timeout_ms": 1000}
+		"wait_until",
+		{ "path": "/root/Holder", "property": "quarrel", "value": 5, "timeout_ms": 1000 }
 	)
 	var said: String = str(number.get("message", ""))
 	if number.get("type") != "error" or not said.contains("declared to hold an object"):
@@ -839,13 +948,18 @@ func _check_until_a_reference_is_let_go() -> void:
 		holder.set("quarrel", null)
 	let_go_later.call()
 	var text_on_object: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": "null", "timeout_ms": 1000}
+		"wait_until",
+		{ "path": "/root/Holder", "property": "quarrel", "value": "null", "timeout_ms": 1000 }
 	)
 	if text_on_object.get("met") != true:
-		_fail("the text null is waited for on an object property: %s" % JSON.stringify(text_on_object))
+		_fail(
+			"the text null is waited for on an object property: %s" % JSON.stringify(text_on_object)
+		)
 	standing.free()
 	holder.free()
-	var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path("res://probe_walker.gd"))
+	var _removed: Error = DirAccess.remove_absolute(
+		ProjectSettings.globalize_path("res://probe_walker.gd")
+	)
 
 
 ## Waiting on a screen rather than on a node, which is the only way a panel that rebuilds its own
@@ -867,7 +981,7 @@ func _check_until_something_says_it() -> void:
 	turning.call()
 
 	var came: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel", "says": "spring 2"}
+		"wait_until", { "path": "/root/Panel", "says": "spring 2" }
 	)
 	if came.get("met") != true or came.get("says") != "spring 2":
 		_fail("a wait should see words arrive on a panel, whatever the case: %s" % str(came))
@@ -875,14 +989,14 @@ func _check_until_something_says_it() -> void:
 	# A glob, matched over the whole text as a find and a click match it, rather than as words with
 	# a star in them, which nothing on the screen says.
 	var globbed: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel", "says": "spring 2*", "timeout_ms": 500}
+		"wait_until", { "path": "/root/Panel", "says": "spring 2*", "timeout_ms": 500 }
 	)
 	if globbed.get("met") != true:
 		_fail("a glob in says is matched as a find matches one: %s" % str(globbed))
 
 	# Alternatives: any one of them on screen meets the wait, a glob among them included.
 	var either: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel", "says": "*won*|spring 2*|lost", "timeout_ms": 500}
+		"wait_until", { "path": "/root/Panel", "says": "*won*|spring 2*|lost", "timeout_ms": 500 }
 	)
 	if either.get("met") != true:
 		_fail("any one of several alternatives in says meets a wait: %s" % str(either))
@@ -890,36 +1004,43 @@ func _check_until_something_says_it() -> void:
 	barred.text = "left|right"
 	button.get_parent().add_child(barred)
 	var literal_bar: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel", "says": "t\\|r", "timeout_ms": 500}
+		"wait_until", { "path": "/root/Panel", "says": "t\\|r", "timeout_ms": 500 }
 	)
 	if literal_bar.get("met") != true:
 		_fail("a bar written as \\| is a bar in the words: %s" % str(literal_bar))
 	# And not a split: read as two alternatives this would be met by "left" on its own.
 	var not_split: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel", "says": "zz\\|left", "timeout_ms": 60}
+		"wait_until", { "path": "/root/Panel", "says": "zz\\|left", "timeout_ms": 60 }
 	)
 	if not_split.get("met") != false:
-		_fail("a bar written as \\| does not split the words into alternatives: %s" % str(not_split))
+		_fail(
+			"a bar written as \\| does not split the words into alternatives: %s" % str(not_split)
+		)
 	var only_bars: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel", "says": "|", "timeout_ms": 60}
+		"wait_until", { "path": "/root/Panel", "says": "|", "timeout_ms": 60 }
 	)
 	if only_bars.get("met") != false:
-		_fail("says with no alternative in it matches nothing rather than everything: %s" % str(only_bars))
+		_fail(
+			(
+				"says with no alternative in it matches nothing rather than everything: %s"
+				% str(only_bars)
+			)
+		)
 	barred.free()
 
 	var never: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel", "says": "Autumn 4", "timeout_ms": 60}
+		"wait_until", { "path": "/root/Panel", "says": "Autumn 4", "timeout_ms": 60 }
 	)
 	if never.get("met") != false or GdhRead.as_int(never.get("elapsed_ms", 0)) < 60:
 		_fail("and give up saying so when they never come: %s" % str(never))
 
 	var nowhere: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Nowhere", "says": "anything"}
+		"wait_until", { "path": "/root/Nowhere", "says": "anything" }
 	)
 	if nowhere.get("type") != "error":
 		_fail("a wait on a screen that is not there is refused: %s" % str(nowhere))
 
-	var unasked: Dictionary = await node._execute_command("wait_until", {"path": "/root/Panel"})
+	var unasked: Dictionary = await node._execute_command("wait_until", { "path": "/root/Panel" })
 	if unasked.get("type") != "error" or not str(unasked.get("message", "")).contains("says"):
 		_fail("waiting for nothing in particular says what to ask for: %s" % str(unasked))
 
@@ -938,13 +1059,14 @@ func _check_words_on_a_hidden_node_are_not_yet_shown() -> void:
 	button.get_parent().add_child(carry_on)
 
 	var not_yet: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel", "says": "carry on", "timeout_ms": 60}
+		"wait_until", { "path": "/root/Panel", "says": "carry on", "timeout_ms": 60 }
 	)
 	if not_yet.get("met") != false or not_yet.get("include_hidden") != false:
 		_fail("words on a hidden button are not shown yet: %s" % str(not_yet))
 
 	var asked_for: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel", "says": "carry on", "include_hidden": true, "timeout_ms": 60}
+		"wait_until",
+		{ "path": "/root/Panel", "says": "carry on", "include_hidden": true, "timeout_ms": 60 }
 	)
 	if asked_for.get("met") != true or asked_for.get("include_hidden") != true:
 		_fail("and count when hidden ones are asked for: %s" % str(asked_for))
@@ -956,7 +1078,7 @@ func _check_words_on_a_hidden_node_are_not_yet_shown() -> void:
 		carry_on.visible = true
 	showing.call()
 	var shown: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Panel", "says": "carry on"}
+		"wait_until", { "path": "/root/Panel", "says": "carry on" }
 	)
 	if shown.get("met") != true or GdhRead.as_int(shown.get("elapsed_ms", 0)) < 1:
 		_fail("the wait ends when the button is shown, and not before: %s" % str(shown))

@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## The signal connections the project's scenes hold that cannot work: a method the node it calls
 ## does not have, which fails on every emission, or a signal the node it leaves does not have, which
 ## the engine drops as the scene loads. Read from the text of each scene and script, so nothing is
@@ -13,7 +12,6 @@ extends RefCounted
 const GdhDependencies = preload("dependencies.gd")
 const GdhFileWalk = preload("file_walk.gd")
 const GdhLog = preload("logger.gd")
-
 const EXT_RESOURCE: String = '^\\[ext_resource [^\\]]*?path="([^"]+)"[^\\]]*? id="([^"]+)"'
 const NODE: String = "^\\[node ([^\\]]*)\\]"
 const CONNECTION: String = "^\\[connection ([^\\]]*)\\]"
@@ -38,8 +36,8 @@ func _init(p_log: GdhLog) -> void:
 	_globals = GdhDependencies.new(p_log).classes_declared()
 
 
-## Every connection that cannot work, as {scene, from, signal, to, method, missing}, where missing is
-## "method" or "signal".
+## Every connection that cannot work, as {scene, from, signal, to, method, missing}, where missing
+## is "method" or "signal".
 func broken() -> Array[Dictionary]:
 	var found: Array[Dictionary] = []
 	for scene: String in _files.find_files_with_extensions("res://", ["tscn"]):
@@ -76,7 +74,10 @@ static func broken_line(entry: Dictionary) -> String:
 		% [entry["scene"], entry["from"], entry["signal"], entry["to"], entry["method"]]
 	)
 	if entry["missing"] == "signal":
-		return connected + ", a signal that node does not have, so the engine drops it as the scene loads."
+		return (
+			connected
+			+ ", a signal that node does not have, so the engine drops it as the scene loads."
+		)
 	return connected + ", a method that node does not have, so every emission fails to call it."
 
 
@@ -100,11 +101,17 @@ func _nodes_of(content: String, scene: String) -> Dictionary:
 			var attributes: Dictionary = _attributes(heading.get_string(1))
 			var name: String = str(attributes.get("name", ""))
 			var parent: Variant = attributes.get("parent")
-			current = "." if parent == null else (name if parent == "." else "%s/%s" % [parent, name])
-			var node: Dictionary = {"class": str(attributes.get("type", "")), "script": "", "name": name}
+			current = (
+				"." if parent == null else (name if parent == "." else "%s/%s" % [parent, name])
+			)
+			var node: Dictionary = {
+				"class": str(attributes.get("type", "")), "script": "", "name": name,
+			}
 			var instanced: RegExMatch = instance.search(heading.get_string(1))
 			if instanced != null:
-				var root: Dictionary = _root_of(str(resources.get(instanced.get_string(1), "")), scene)
+				var root: Dictionary = _root_of(
+					str(resources.get(instanced.get_string(1), "")), scene
+				)
 				node = root.duplicate()
 				node["name"] = name
 			nodes[current] = node
@@ -118,7 +125,9 @@ func _nodes_of(content: String, scene: String) -> Dictionary:
 			# A built-in script lives in the scene, where this does not read it, so its node is one
 			# nothing here can judge, which a path that is no script file says.
 			var external: bool = scripted.get_string(1) == "Ext"
-			node["script"] = str(resources.get(scripted.get_string(2), "?")) if external else "built-in"
+			node["script"] = (
+				str(resources.get(scripted.get_string(2), "?")) if external else "built-in"
+			)
 	return nodes
 
 
@@ -127,11 +136,16 @@ func _nodes_of(content: String, scene: String) -> Dictionary:
 func _root_of(path: String, from: String) -> Dictionary:
 	if _roots.has(path):
 		return _roots[path]
-	_roots[path] = {"class": "", "script": ""}
-	if path.is_empty() or path == from or not path.ends_with(".tscn") or not FileAccess.file_exists(path):
+	_roots[path] = { "class": "", "script": "" }
+	if (
+		path.is_empty()
+		or path == from
+		or not path.ends_with(".tscn")
+		or not FileAccess.file_exists(path)
+	):
 		return _roots[path]
 	var nodes: Dictionary = _nodes_of(FileAccess.get_file_as_string(path), path)
-	_roots[path] = nodes.get(".", {"class": "", "script": ""})
+	_roots[path] = nodes.get(".", { "class": "", "script": "" })
 	return _roots[path]
 
 
@@ -200,7 +214,7 @@ func _script(path: String, seen: Dictionary) -> Dictionary:
 		methods.merge(inherited_methods)
 		signals.merge(inherited_signals)
 		engine_class = str(inherited["class"])
-	_scripts[path] = {"class": engine_class, "methods": methods, "signals": signals}
+	_scripts[path] = { "class": engine_class, "methods": methods, "signals": signals }
 	return _scripts[path]
 
 

@@ -6,10 +6,11 @@ extends RefCounted
 ## A bench whose run `i` depends on `i` alone (its seed worked out from the index, nothing carried
 ## from one run to the next) calls [method outcomes] for each arm with the number of runs and a
 ## callable playing run `i`. Run on its own, the scene plays every run here, as it always did. Under
-## `gdharness spread`, each worker engine plays every Nth run from its own index and leaves what each
-## run answered; then one more engine runs the scene to gather, and there [method outcomes] plays
-## nothing and answers every run's outcome, read back as the type it went in as. The bench folds them
-## in run order either way, so a spread table is the same table to the last digit, floats included.
+## `gdharness spread`, each worker engine plays every Nth run from its own index and leaves what
+## each run answered; then one more engine runs the scene to gather, and there [method outcomes]
+## plays nothing and answers every run's outcome, read back as the type it went in as. The bench
+## folds them in run order either way, so a spread table is the same table to the last digit, floats
+## included.
 ##
 ## An outcome is a plain value: a number, a string, a vector, or an array or dictionary of them. An
 ## object cannot be handed from one engine to another, so one is refused with an error.
@@ -18,7 +19,8 @@ extends RefCounted
 const SHARE: String = "--gdh-share="
 ## What it tells the engine gathering: how many workers left outcomes.
 const GATHER: String = "--gdh-share-gather="
-## Where the workers leave their outcomes, an absolute path, since each engine has its own `user://`.
+## Where the workers leave their outcomes, an absolute path, since each engine has its own
+## `user://`.
 const INTO: String = "--gdh-share-dir="
 ## What a worker prints as it goes, which `gdharness spread` reads to say how far each has got.
 const PROGRESS: String = "gdharness share: %s %d of %d runs"
@@ -67,7 +69,9 @@ static func dealt(runs: int) -> PackedInt32Array:
 static func outcomes(arm: String, runs: int, play: Callable) -> Array:
 	_learn()
 	if _arms.has(arm):
-		push_error("GdhShare: the arm %s was played twice in one run; give each arm its own name" % arm)
+		push_error(
+			"GdhShare: the arm %s was played twice in one run; give each arm its own name" % arm
+		)
 		return []
 	_arms[arm] = true
 	if gathering():
@@ -83,7 +87,10 @@ static func outcomes(arm: String, runs: int, play: Callable) -> Array:
 		if not wrong.is_empty():
 			push_error(
 				(
-					"GdhShare: run %d of %s answered %s, which cannot be handed from one engine to another"
+					(
+						"GdhShare: run %d of %s answered %s, which cannot be handed from one "
+						+ "engine to another"
+					)
 					% [run, arm, wrong]
 				)
 			)
@@ -109,7 +116,9 @@ static func added(
 	var total: Dictionary[String, int] = {}
 	for outcome: Variant in counted:
 		if not outcome is Dictionary:
-			push_error("GdhShare.added: an outcome is %s, not a dictionary" % type_string(typeof(outcome)))
+			push_error(
+				"GdhShare.added: an outcome is %s, not a dictionary" % type_string(typeof(outcome))
+			)
 			continue
 		var counts: Dictionary = outcome
 		for key: Variant in counts:
@@ -117,7 +126,10 @@ static func added(
 			var count: Variant = counts[key]
 			if not count is int:
 				push_error(
-					"GdhShare.added: %s is %s, not a whole number" % [named, type_string(typeof(count))]
+					(
+						"GdhShare.added: %s is %s, not a whole number"
+						% [named, type_string(typeof(count))]
+					)
 				)
 				continue
 			var now: int = count
@@ -133,10 +145,12 @@ static func added(
 ## Leaves one arm's outcomes, then the line saying so, which `gdharness spread` checks the share
 ## against; the outcomes first, so a line is never there without them.
 static func _leave(arm: String, runs: int, by_index: Dictionary[int, Variant]) -> void:
-	var left: Dictionary = {"arm": arm, "runs": runs, "outcomes": by_index}
-	if not _appended("worker-%d.bin" % _index, func(file: FileAccess) -> bool: return file.store_var(left)):
+	var left: Dictionary = { "arm": arm, "runs": runs, "outcomes": by_index }
+	if not _appended(
+		"worker-%d.bin" % _index, func(file: FileAccess) -> bool: return file.store_var(left)
+	):
 		return
-	var said: String = JSON.stringify({"arm": arm, "runs": runs, "played": by_index.size()})
+	var said: String = JSON.stringify({ "arm": arm, "runs": runs, "played": by_index.size() })
 	var _noted: bool = _appended(
 		"worker-%d.arms" % _index, func(file: FileAccess) -> bool: return file.store_line(said)
 	)
@@ -149,7 +163,9 @@ static func _appended(name: String, write: Callable) -> bool:
 		path, FileAccess.READ_WRITE if FileAccess.file_exists(path) else FileAccess.WRITE
 	)
 	if file == null:
-		push_error("GdhShare: cannot write %s: %s" % [path, error_string(FileAccess.get_open_error())])
+		push_error(
+			"GdhShare: cannot write %s: %s" % [path, error_string(FileAccess.get_open_error())]
+		)
 		return false
 	file.seek_end()
 	var wrote: bool = write.call(file)
@@ -168,8 +184,8 @@ static func _gathered(arm: String, runs: int) -> Array:
 		push_error(
 			(
 				(
-					"GdhShare: no worker played the arm %s, so this run went another way than theirs; "
-					+ "which arms a bench plays must depend on its command line alone"
+					"GdhShare: no worker played the arm %s, so this run went another way than "
+					+ "theirs; which arms a bench plays must depend on its command line alone"
 				)
 				% arm
 			)
@@ -190,7 +206,7 @@ static func _gathered(arm: String, runs: int) -> Array:
 			push_error("GdhShare: no worker played run %d of %s" % [run, arm])
 			return []
 		ordered.append(held[run])
-	var said: String = JSON.stringify({"arm": arm, "runs": runs, "played": runs})
+	var said: String = JSON.stringify({ "arm": arm, "runs": runs, "played": runs })
 	var _noted: bool = _appended(
 		"gathered.arms", func(file: FileAccess) -> bool: return file.store_line(said)
 	)
@@ -205,7 +221,9 @@ static func _read_workers() -> void:
 		var path: String = _directory.path_join("worker-%d.bin" % worker)
 		var file: FileAccess = FileAccess.open(path, FileAccess.READ)
 		if file == null:
-			_unread = "GdhShare: cannot read %s: %s" % [path, error_string(FileAccess.get_open_error())]
+			_unread = (
+				"GdhShare: cannot read %s: %s" % [path, error_string(FileAccess.get_open_error())]
+			)
 			return
 		while file.get_position() < file.get_length():
 			_unread = _took(file.get_var(), path)
@@ -260,7 +278,9 @@ static func _learn() -> void:
 		elif given.begins_with(INTO):
 			_directory = given.trim_prefix(INTO)
 	if (_index >= 0 or _gathering > 0) and _directory.is_empty():
-		push_error("GdhShare: a spread engine was given no %s<directory> to share outcomes in" % INTO)
+		push_error(
+			"GdhShare: a spread engine was given no %s<directory> to share outcomes in" % INTO
+		)
 
 
 ## What in [param value] cannot be written by one engine and read by another, or empty.

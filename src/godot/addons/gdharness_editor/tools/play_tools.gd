@@ -1,6 +1,5 @@
 @tool
 extends Node
-
 ## Running the game from the editor, so the editor is the one debugging it.
 ##
 ## A game started as its own process is a game nothing is attached to: the editor's debug adapter
@@ -10,7 +9,6 @@ extends Node
 
 ## What the display server calls itself when the engine was started with no display at all.
 const GdhRead = preload("../reading.gd")
-
 const HEADLESS_DISPLAY: String = "headless"
 ## Where Godot keeps the port its own debugger listens on for a game it is playing. One setting
 ## for every editor on the machine, and bound only while a game runs.
@@ -18,7 +16,6 @@ const DEBUGGER_SETTING: String = "network/debug/remote_port"
 const LOOPBACK: String = "127.0.0.1"
 
 var _editor_plugin: EditorPlugin = null
-
 ## Which play this is, counted up for every one the editor starts, whoever starts it. What a server
 ## writes about a play is kept on disk after it, and the editor saying it is playing does not say
 ## which play: a server picking a play back up read the console of an earlier one as this one's.
@@ -29,12 +26,12 @@ var _was_playing: bool = false
 var _awaited: bool = false
 
 
-func set_editor_plugin(plugin: EditorPlugin) -> void:
-	_editor_plugin = plugin
-
-
 func _process(_delta: float) -> void:
 	_count_a_play_begun()
+
+
+func set_editor_plugin(plugin: EditorPlugin) -> void:
+	_editor_plugin = plugin
 
 
 ## Counts a play the editor has begun since the last look, whoever began it. Looked at every frame
@@ -60,20 +57,23 @@ func play_scene(args: Dictionary) -> Dictionary:
 		# play was answered as started.
 		var main: String = str(ProjectSettings.get_setting("application/run/main_scene", ""))
 		if main.is_empty():
-			return {"ok": false, "error": "The project has no main scene to play."}
+			return { "ok": false, "error": "The project has no main scene to play." }
 		if not ResourceLoader.exists(main, "PackedScene"):
 			return {
 				"ok": false,
 				"error":
 				(
-					"The main scene, %s, is not there, so the editor would ask for another rather than play."
+					(
+						"The main scene, %s, is not there, so the editor would ask for another "
+						+ "rather than play."
+					)
 					% main
-				)
+				),
 			}
 	else:
 		full_path = scene_path if scene_path.begins_with("res://") else "res://" + scene_path
 		if not ResourceLoader.exists(full_path, "PackedScene"):
-			return {"ok": false, "error": "No scene at " + full_path}
+			return { "ok": false, "error": "No scene at " + full_path }
 
 	if EditorInterface.is_playing_scene():
 		EditorInterface.stop_playing_scene()
@@ -138,7 +138,7 @@ func stop_playing(_args: Dictionary) -> Dictionary:
 	# Known over now rather than at the next frame's look: a play somebody else starts before that
 	# look would otherwise be read as this one still going, and given its number and its console.
 	_was_playing = EditorInterface.is_playing_scene()
-	return {"ok": true, "wasPlaying": was_playing, "playing": _was_playing}
+	return { "ok": true, "wasPlaying": was_playing, "playing": _was_playing }
 
 
 ## Restarts the editor, which is how a replaced addon is picked up.
@@ -167,7 +167,7 @@ func restart_editor(_args: Dictionary) -> Dictionary:
 				"This editor is headless, and the engine does not hand back the arguments it was "
 				+ "started with, so nothing can bring it back as the editor it is. Start it again "
 				+ "yourself."
-			)
+			),
 		}
 
 	var saving: Dictionary = _save_everything()
@@ -177,7 +177,7 @@ func restart_editor(_args: Dictionary) -> Dictionary:
 	# Deferred so this answer is on its way out before the editor goes.
 	EditorInterface.restart_editor.call_deferred(true)
 
-	return {"ok": true, "restarting": true, "saved": saving["saved"]}
+	return { "ok": true, "restarting": true, "saved": saving["saved"] }
 
 
 ## Saves every open scene, answering a refusal naming what is still unsaved, or the scenes that had
@@ -193,7 +193,7 @@ static func _save_everything() -> Dictionary:
 	EditorInterface.save_all_scenes()
 	var left: PackedStringArray = EditorInterface.get_unsaved_scenes()
 	if left.is_empty():
-		return {"ok": true, "saved": changed}
+		return { "ok": true, "saved": changed }
 	var named: Array[String] = []
 	for scene: String in left:
 		named.append(scene if not scene.is_empty() else "a scene that has never been saved")
@@ -202,15 +202,15 @@ static func _save_everything() -> Dictionary:
 		"error":
 		(
 			(
-				"%s still %s unsaved changes after saving, and ending the editor would lose them. Save "
-				+ "or close %s in the editor first."
+				"%s still %s unsaved changes after saving, and ending the editor would lose them. "
+				+ "Save or close %s in the editor first."
 			)
 			% [
 				", ".join(PackedStringArray(named)),
 				"has" if named.size() == 1 else "have",
-				"it" if named.size() == 1 else "them"
+				"it" if named.size() == 1 else "them",
 			]
-		)
+		),
 	}
 
 
@@ -230,7 +230,7 @@ func quit_editor(_args: Dictionary) -> Dictionary:
 	# Deferred so this answer is on its way out before the editor goes.
 	_leave.call_deferred()
 
-	return {"ok": true, "quitting": true, "saved": saving["saved"]}
+	return { "ok": true, "quitting": true, "saved": saving["saved"] }
 
 
 ## What the editor said as it started each of its servers, and the debug adapter started again when
@@ -258,7 +258,12 @@ func editor_servers(args: Dictionary) -> Dictionary:
 			parent.add_child(adapter)
 			parent.move_child(adapter, at)
 			rebound = true
-	return {"ok": true, "said": said, "rebound": rebound, "saidSince": _servers_said().slice(said.size())}
+	return {
+		"ok": true,
+		"said": said,
+		"rebound": rebound,
+		"saidSince": _servers_said().slice(said.size()),
+	}
 
 
 ## The lines the editor's log panel holds about its language server and debug adapter, in order.

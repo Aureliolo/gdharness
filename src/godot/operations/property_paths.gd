@@ -1,11 +1,9 @@
 @tool
 extends RefCounted
-
 ## Where a property a tool writes lives: on the object given, on a resource built into it, or on an
 ## element of one of its lists that the write has to make first.
 
 const GdhRead = preload("reading.gd")
-
 const HEADINGS: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP
 
 
@@ -95,11 +93,17 @@ static func _unlisted_in(items: Array, called: String, name: String, at: int) ->
 	var end: int = name.find("/", at + 1)
 	var index: String = name.substr(at + 1) if end < 0 else name.substr(at + 1, end - at - 1)
 	if items.is_empty():
-		return "%s holds no elements, so %s names none: give %s a whole list first." % [called, name, head]
+		return (
+			"%s holds no elements, so %s names none: give %s a whole list first."
+			% [called, name, head]
+		)
 	var last: int = items.size() - 1
 	if not index.is_valid_int():
 		return (
-			"%s is a list, so the step after it is the index of one of its elements, from 0 to %d, not %s."
+			(
+				"%s is a list, so the step after it is the index of one of its elements, from 0 to "
+				+ "%d, not %s."
+			)
 			% [called, last, index]
 		)
 	var place: int = index.to_int()
@@ -116,8 +120,8 @@ static func _unlisted_in(items: Array, called: String, name: String, at: int) ->
 	if end < 0:
 		return (
 			(
-				"%s/%d is an element of %s, which a path does not replace alone: give %s a whole list, or "
-				+ "write a property of the element, as %s/%d/<property>."
+				"%s/%d is an element of %s, which a path does not replace alone: give %s a whole "
+				+ "list, or write a property of the element, as %s/%d/<property>."
 			)
 			% [head, place, called, head, head, place]
 		)
@@ -197,12 +201,15 @@ static func grow(target: Object, name: String, called: String) -> String:
 				above if not above.is_empty() else called,
 				count,
 				element.replace("_", " "),
-				"" if count == 1 else "s"
+				"" if count == 1 else "s",
 			]
 		)
 		if index > count:
 			return (
-				"%s, and a new one goes after the last, so %s%d cannot be written yet: write %s%d first."
+				(
+					"%s, and a new one goes after the last, so %s%d cannot be written yet: write "
+					+ "%s%d first."
+				)
 				% [held, prefix, index, prefix, count]
 			)
 		if not adding.is_valid():
@@ -263,7 +270,10 @@ static func held_elsewhere(target: Object, name: String, home: String) -> String
 		var file: String = "" if held == null else held.resource_path.get_slice("::", 0)
 		if held != null and not held.is_built_in():
 			return (
-				"%s.%s is %s, a file of its own, so %s is written there, with resource_edit modify on %s."
+				(
+					"%s.%s is %s, a file of its own, so %s is written there, with resource_edit "
+					+ "modify on %s."
+				)
 				% [class_called(target), head, file, rest, file]
 			)
 		if held != null and not file.is_empty() and not home.is_empty() and file != home:
@@ -287,9 +297,9 @@ static func _built_in_elsewhere(
 			node = " on %s" % from.get_path_to(placed)
 	var text: String = (
 		(
-			"%s.%s is built into %s, so %s is written there, with scene_node set%s in %s, which changes "
-			+ "it wherever that scene is used. To change it here alone, give %s a %s of its own: a "
-			+ 'value with "_type" set to its class and its properties beside it.'
+			"%s.%s is built into %s, so %s is written there, with scene_node set%s in %s, which "
+			+ "changes it wherever that scene is used. To change it here alone, give %s a %s of "
+			+ 'its own: a value with "_type" set to its class and its properties beside it.'
 		)
 		% [class_called(target), head, file, rest, node, file, head, held.get_class()]
 	)

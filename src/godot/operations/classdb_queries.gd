@@ -3,10 +3,8 @@ extends RefCounted
 const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhSerialisation = preload("serialisation.gd")
-
 # How far below the closest name another may score and still be offered beside it.
 const CLOSE_TO_THE_BEST: float = 0.2
-
 # The base classes each category name stands for. Kept to the list the tool's schema offers, which
 # a case holds: the schema offered physics3d and ui, which this refused, and physics answered the 3D
 # bodies alone beside physics2d and physics3d.
@@ -74,7 +72,9 @@ func query_classes(params: Dictionary) -> Dictionary:
 	if not category.is_empty():
 		bases = CATEGORY_BASES.get(category.to_lower(), [])
 		if bases.is_empty():
-			return _log.failure("Unknown category: " + category + ". Valid: " + str(CATEGORY_BASES.keys()))
+			return _log.failure(
+				"Unknown category: " + category + ". Valid: " + str(CATEGORY_BASES.keys())
+			)
 
 	var all_classes: PackedStringArray = ClassDB.get_class_list()
 	all_classes.sort()
@@ -107,7 +107,13 @@ func query_classes(params: Dictionary) -> Dictionary:
 		own.append(_project_entry(name, declared))
 
 	_log.info(
-		"Found " + str(filtered_classes.size()) + " classes (out of " + str(all_classes.size()) + " total)"
+		(
+			"Found "
+			+ str(filtered_classes.size())
+			+ " classes (out of "
+			+ str(all_classes.size())
+			+ " total)"
+		)
 	)
 
 	return {
@@ -127,7 +133,13 @@ func query_class_info(params: Dictionary) -> Dictionary:
 	var include_inherited: bool = GdhRead.as_bool(params.get("include_inherited", false))
 
 	_log.info(
-		"Querying class info for: " + class_name_str + " (include_inherited: " + str(include_inherited) + ")"
+		(
+			"Querying class info for: "
+			+ class_name_str
+			+ " (include_inherited: "
+			+ str(include_inherited)
+			+ ")"
+		)
 	)
 
 	if not ClassDB.class_exists(class_name_str):
@@ -171,7 +183,7 @@ func query_class_info(params: Dictionary) -> Dictionary:
 		"properties": properties,
 		"signals_count": signals.size(),
 		"signals": signals,
-		"enums": enums
+		"enums": enums,
 	}
 	if include_inherited:
 		answer["inherited"] = _inherited_names(class_name_str)
@@ -283,24 +295,28 @@ static func _project_entry(name: String, declared: Dictionary) -> Dictionary:
 
 ## Why [param wanted] has no answer here. A class_name a project script declares is not in ClassDB,
 ## and "Class not found" for one read as though the project had no such class. [param declared] is
-## what the project's scripts declare on disk, class to path, rather than the engine's list, which is
-## the class cache: that lags the scripts, and a class written a moment ago was refused as declared
-## nowhere.
+## what the project's scripts declare on disk, class to path, rather than the engine's list, which
+## is the class cache: that lags the scripts, and a class written a moment ago was refused as
+## declared nowhere.
 func _not_found(wanted: String, declared: Dictionary, answers_own: bool = false) -> Dictionary:
 	if declared.has(wanted):
-		return _log.failure(
-			(
+		return (
+			_log
+			. failure(
 				(
-					"%s is not an engine class: it is the class_name %s declares, and editor_classes reads "
-					+ "the engine's ClassDB only. script_info structure on that script, with "
-					+ "includeInherited, answers what it declares and what it inherits."
+					(
+						"%s is not an engine class: it is the class_name %s declares, and "
+						+ "editor_classes reads the engine's ClassDB only. script_info structure "
+						+ "on that script, with includeInherited, answers what it declares and "
+						+ "what it inherits."
+					)
+					% [wanted, str(_entry_of(wanted, declared).get("path", ""))]
 				)
-				% [wanted, str(_entry_of(wanted, declared).get("path", ""))]
 			)
 		)
-	# The usual miss is a spelling, one letter off a class the engine has or one the project declares.
-	# Ranked as one pool and kept near the best, since a project class a letter off came behind three
-	# engine classes that shared only "Texture" with it.
+	# The usual miss is a spelling, one letter off a class the engine has or one the project
+	# declares. Ranked as one pool and kept near the best, since a project class a letter off came
+	# behind three engine classes that shared only "Texture" with it.
 	var pool: PackedStringArray = ClassDB.get_class_list()
 	pool.append_array(PackedStringArray(declared.keys()))
 	var close: PackedStringArray = GdhRead.nearest(wanted, pool)
@@ -310,8 +326,9 @@ func _not_found(wanted: String, declared: Dictionary, answers_own: bool = false)
 	for name: String in close:
 		if name.to_lower().similarity(wanted.to_lower()) < best - CLOSE_TO_THE_BEST:
 			continue
-		# Similarity counts shared letter pairs, so a word the two names share passes it: NoSuchClass
-		# was offered ClassDB. A spelling is a few letters off, a swap of two among them.
+		# Similarity counts shared letter pairs, so a word the two names share passes it:
+		# NoSuchClass was offered ClassDB. A spelling is a few letters off, a swap of two among
+		# them.
 		if _edits(name.to_lower(), wanted.to_lower()) > maxi(2, floori(wanted.length() / 3.0)):
 			continue
 		if declared.has(name):
@@ -338,15 +355,22 @@ func _not_found(wanted: String, declared: Dictionary, answers_own: bool = false)
 		)
 	if answers_own:
 		return _log.failure(
-			"Class not found: %s.%s Neither the engine nor a project script declares it." % [wanted, offered]
-		)
-	return _log.failure(
-		(
 			(
-				"Class not found: %s.%s editor_classes reads the engine's ClassDB, so a class_name a "
-				+ "project script declares is not in it either; script_info structure reads one."
+				"Class not found: %s.%s Neither the engine nor a project script declares it."
+				% [wanted, offered]
 			)
-			% [wanted, offered]
+		)
+	return (
+		_log
+		. failure(
+			(
+				(
+					"Class not found: %s.%s editor_classes reads the engine's ClassDB, so a "
+					+ "class_name a project script declares is not in it either; script_info "
+					+ "structure reads one."
+				)
+				% [wanted, offered]
+			)
 		)
 	)
 
@@ -358,7 +382,9 @@ static func _edits(from: String, to: String) -> int:
 		var here: PackedInt32Array = PackedInt32Array([row])
 		for column: int in range(1, to.length() + 1):
 			var changed: int = above[column - 1] + (0 if from[row - 1] == to[column - 1] else 1)
-			var _added: bool = here.append(mini(changed, mini(above[column] + 1, here[column - 1] + 1)))
+			var _added: bool = here.append(
+				mini(changed, mini(above[column] + 1, here[column - 1] + 1))
+			)
 		above = here
 	return above[to.length()]
 
@@ -376,39 +402,49 @@ func _member_of(class_name_str: String, member: String) -> Dictionary:
 	while not current.is_empty():
 		for m: Dictionary in _methods_of(current):
 			if m["name"] == member:
-				found.append({"kind": "method", "declared_in": current, "member": m})
+				found.append({ "kind": "method", "declared_in": current, "member": m })
 		for p: Dictionary in _properties_of(current):
 			if p["name"] == member:
-				found.append({"kind": "property", "declared_in": current, "member": p})
+				found.append({ "kind": "property", "declared_in": current, "member": p })
 		for s: Dictionary in _signals_of(current):
 			if s["name"] == member:
-				found.append({"kind": "signal", "declared_in": current, "member": s})
+				found.append({ "kind": "signal", "declared_in": current, "member": s })
 		for e: String in ClassDB.class_get_enum_list(current, true):
 			if e == member:
 				var values: Dictionary = {}
 				for c: String in ClassDB.class_get_enum_constants(current, e, true):
 					values[c] = ClassDB.class_get_integer_constant(current, c)
 				found.append(
-					{"kind": "enum", "declared_in": current, "member": {"name": e, "values": values}}
+					{
+						"kind": "enum",
+						"declared_in": current,
+						"member": { "name": e, "values": values },
+					}
 				)
 		for c: String in ClassDB.class_get_integer_constant_list(current, true):
 			if c == member:
 				var value: int = ClassDB.class_get_integer_constant(current, c)
 				found.append(
-					{"kind": "constant", "declared_in": current, "member": {"name": c, "value": value}}
+					{
+						"kind": "constant",
+						"declared_in": current,
+						"member": { "name": c, "value": value },
+					}
 				)
 		current = ClassDB.get_parent_class(current)
 
 	if found.is_empty():
 		var alike: Array[String] = _members_alike(class_name_str, member)
 		var hint: String = (
-			"" if alike.is_empty() else " Members with names containing it: " + ", ".join(alike) + "."
+			""
+			if alike.is_empty()
+			else " Members with names containing it: " + ", ".join(alike) + "."
 		)
 		return _log.failure(
 			"%s and its ancestors declare no member named %s.%s" % [class_name_str, member, hint]
 		)
 
-	return {"class_name": class_name_str, "member": member, "found": found}
+	return { "class_name": class_name_str, "member": member, "found": found }
 
 
 # The names, across a class and its ancestors, that contain the asked-for one, case-insensitively.
@@ -531,7 +567,7 @@ func _methods_of(class_name_str: String) -> Array[Dictionary]:
 					"type": a.get("type", 0),
 					"type_name": _type_name(a, "Variant"),
 					"class_name": a.get("class_name", ""),
-					"hint_string": a.get("hint_string", "")
+					"hint_string": a.get("hint_string", ""),
 				}
 			)
 		var return_info: Dictionary = m.get("return", {})
@@ -545,13 +581,14 @@ func _methods_of(class_name_str: String) -> Array[Dictionary]:
 					{
 						"type": return_info.get("type", 0),
 						"type_name": _type_name(return_info, "void"),
-						"class_name": return_info.get("class_name", "")
+						"class_name": return_info.get("class_name", ""),
 					},
 					"flags": m.get("flags", 0),
 					"flag_names": _flag_names(GdhRead.as_int(m.get("flags", 0))),
-					# As values, tagged the way every other answer tags one: JSON writes a Vector2i it is
-					# handed as its text, so TileMapLayer.set_cell's default atlas coords read "(-1, -1)".
-					"default_args": _values.serialize_value(m.get("default_args", []))
+					# As values, tagged the way every other answer tags one: JSON writes a Vector2i
+					# it is handed as its text, so TileMapLayer.set_cell's default atlas coords read
+					# "(-1, -1)".
+					"default_args": _values.serialize_value(m.get("default_args", [])),
 				}
 			)
 		)
@@ -579,7 +616,11 @@ static func _type_name(info: Dictionary, nil_name: String) -> String:
 	if type == TYPE_OBJECT and not named.is_empty():
 		return named
 	if type == TYPE_NIL:
-		return "Variant" if GdhRead.as_int(info.get("usage", 0)) & PROPERTY_USAGE_NIL_IS_VARIANT else nil_name
+		return (
+			"Variant"
+			if GdhRead.as_int(info.get("usage", 0)) & PROPERTY_USAGE_NIL_IS_VARIANT
+			else nil_name
+		)
 	return type_string(type)
 
 
@@ -589,7 +630,11 @@ func _properties_of(class_name_str: String) -> Array[Dictionary]:
 	for p: Dictionary in ClassDB.class_get_property_list(class_name_str, true):
 		# A category, group or subgroup is an editor heading rather than a property.
 		var usage: int = GdhRead.as_int(p.get("usage", 0))
-		if usage & PROPERTY_USAGE_CATEGORY or usage & PROPERTY_USAGE_GROUP or usage & PROPERTY_USAGE_SUBGROUP:
+		if (
+			usage & PROPERTY_USAGE_CATEGORY
+			or usage & PROPERTY_USAGE_GROUP
+			or usage & PROPERTY_USAGE_SUBGROUP
+		):
 			continue
 		properties.append(
 			{
@@ -599,7 +644,7 @@ func _properties_of(class_name_str: String) -> Array[Dictionary]:
 				"class_name": p.get("class_name", ""),
 				"hint": p.get("hint", 0),
 				"hint_string": p.get("hint_string", ""),
-				"usage": usage
+				"usage": usage,
 			}
 		)
 
@@ -618,9 +663,9 @@ func _signals_of(class_name_str: String) -> Array[Dictionary]:
 					"name": a.get("name", ""),
 					"type": a.get("type", 0),
 					"type_name": _type_name(a, "Variant"),
-					"class_name": a.get("class_name", "")
+					"class_name": a.get("class_name", ""),
 				}
 			)
-		signals.append({"name": s.get("name", ""), "args": sig_args})
+		signals.append({ "name": s.get("name", ""), "args": sig_args })
 
 	return signals

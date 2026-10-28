@@ -1,11 +1,9 @@
 extends RefCounted
-
 ## Input handed to the running game as if a player had given it: actions, keys, the mouse, and
 ## a whole click on a Control or a 3D node found by path. Typing and choosing from a menu, which
 ## reach the game the way a keyboard does, are in runtime_typing.gd.
 
 const GdhValues = preload("runtime_values.gd")
-
 ## Where a 3D node is drawn, which is what a click aimed at one has to work out first. Asked of the
 ## query module rather than worked out again here, so the place this aims at and the place a rect
 ## reports are the same place by construction rather than by agreement.
@@ -18,21 +16,18 @@ const GdhTargets = preload("runtime_targets.gd")
 const GdhMouse = preload("runtime_mouse.gd")
 const GdhTyping = preload("runtime_typing.gd")
 const GdhSays = preload("runtime_says.gd")
-
 ## Set, to the desktop's name, for a process gdharness started on a desktop of its own and for
 ## everything that process starts. Kept in step with `DESKTOP_VARIABLE` in src/desktop.ts.
 const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
 
 ## Whether this run has had the pointer note in full; the game process is the run.
 static var _pointer_explained: bool = false
-
 ## Whether this run has had the note on a supplied hover in full.
 static var _hover_explained: bool = false
 
 var _host: Node
 var _values: GdhValues
 var _hover: GdhHover = GdhHover.new()
-
 ## Where the last injected pointer event put the pointer, once one has.
 ##
 ## Kept here rather than asked of the viewport: the root viewport answers get_mouse_position
@@ -42,12 +37,10 @@ var _hover: GdhHover = GdhHover.new()
 ## the injected events, which is why that reading measured right and a played game read it wrong.
 var _pointer: Vector2 = Vector2.ZERO
 var _pointer_placed: bool = false
-
-## When the pointer last arrived, and how long it took over the arrival before that, in seconds: what
-## turns a motion's distance into the speed a real one carries.
+## When the pointer last arrived, and how long it took over the arrival before that, in seconds:
+## what turns a motion's distance into the speed a real one carries.
 var _pointer_at_usec: int = 0
 var _arrival_seconds: float = 1.0 / 60.0
-
 ## The buttons a press pushed into a window other than the game's holds, which Input never hears of.
 var _pushed_held: int = 0
 
@@ -61,30 +54,30 @@ func _init(host: Node, values: GdhValues) -> void:
 ## pointer when the game is on one.
 ##
 ## For the root window the engine asks Windows where the pointer is, and GetCursorPos refuses a
-## process on a desktop that is not in use: on one of gdharness's own it answers false and leaves the
-## point unwritten, with access denied in the user's window station and with
+## process on a desktop that is not in use: on one of gdharness's own it answers false and leaves
+## the point unwritten, with access denied in the user's window station and with
 ## ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION in the one gdharness's desktop is in. The engine does
 ## not check, so a game driven there read get_mouse_position() as x 836852416 after a motion to
-## 1310, 314. Nothing here can
-## put a pointer on that desktop: Windows moves one only on the desktop in use, and making this one
-## that would take the screen. What reads the injected event is right, tooltips included, since the
-## engine places a tooltip from the motion that reached the control.
+## 1310, 314. Nothing here can put a pointer on that desktop: Windows moves one only on the desktop
+## in use, and making this one that would take the screen. What reads the injected event is right,
+## tooltips included, since the engine places a tooltip from the motion that reached the control.
 static func _pointer_noted(answer: Dictionary) -> Dictionary:
 	if OS.get_environment(DESKTOP_VARIABLE) == "":
 		return answer
-	# The fact on every answer and the explanation on the first of the run: a session sends dozens of
-	# pointer calls to one game, and the same four hundred characters on each was most of what came
-	# back.
+	# The fact on every answer and the explanation on the first of the run: a session sends dozens
+	# of pointer calls to one game, and the same four hundred characters on each was most of what
+	# came back.
 	answer["pointer_on_hidden_desktop"] = true
 	if not _pointer_explained:
 		_pointer_explained = true
 		answer["pointer_note"] = (
-			"This game is on gdharness's own desktop, where Windows refuses to say where the"
-			+ " pointer is, so get_mouse_position() on the root window, and get_global_mouse_position()"
-			+ " and get_local_mouse_position() on what is drawn there, read a meaningless position"
-			+ " rather than where this put it. What reads the event itself gets this position: the"
-			+ " control under the pointer, its hover and tooltip, and the game's input handlers. Said"
-			+ " once a run; pointer_on_hidden_desktop marks every answer it applies to."
+			"This game is on gdharness's own desktop, where Windows refuses to say where the "
+			+ "pointer is, so get_mouse_position() on the root window, and "
+			+ "get_global_mouse_position() and get_local_mouse_position() on what is drawn there, "
+			+ "read a meaningless position rather than where this put it. What reads the event "
+			+ "itself gets this position: the control under the pointer, its hover and tooltip, "
+			+ "and the game's input handlers. Said once a run; pointer_on_hidden_desktop marks "
+			+ "every answer it applies to."
 		)
 	return answer
 
@@ -98,13 +91,13 @@ static func _hover_noted(answer: Dictionary, supplied: bool) -> Dictionary:
 	if not _hover_explained:
 		_hover_explained = true
 		answer["hover_note"] = (
-			"This window has had no pointer enter from the operating system, and with subwindow"
-			+ " embedding off Godot hovers nothing in a native window until it has, so a Button there"
-			+ " takes no press. The runtime gave the controls under the pointer the hover the engine"
-			+ " would have: their mouse_entered and mouse_exited, and the hover a Button presses on,"
-			+ " and told the window the pointer is in it, so a motion reaches the control under it."
-			+ " Viewport.gui_get_hovered_control() still answers null in this window. Said once a run;"
-			+ " hover_supplied marks every answer it applies to."
+			"This window has had no pointer enter from the operating system, and with subwindow "
+			+ "embedding off Godot hovers nothing in a native window until it has, so a Button "
+			+ "there takes no press. The runtime gave the controls under the pointer the hover the "
+			+ "engine would have: their mouse_entered and mouse_exited, and the hover a Button "
+			+ "presses on, and told the window the pointer is in it, so a motion reaches the "
+			+ "control under it. Viewport.gui_get_hovered_control() still answers null in this "
+			+ "window. Said once a run; hover_supplied marks every answer it applies to."
 		)
 	return answer
 
@@ -189,18 +182,18 @@ func inject_action(params: Dictionary) -> Dictionary:
 	var strength: float = GdhRead.as_float(params.get("strength", 1.0), 1.0)
 
 	if action.is_empty():
-		return {"type": "error", "message": "Action name required"}
+		return { "type": "error", "message": "Action name required" }
 
 	if not InputMap.has_action(action):
-		return {"type": "error", "message": GdhValues.no_action(action)}
+		return { "type": "error", "message": GdhValues.no_action(action) }
 	var holding: Variant = GdhValues.held_for(params)
 	if holding is String:
-		return {"type": "error", "message": holding}
+		return { "type": "error", "message": holding }
 	var frames: int = holding
 
 	var focused: String = GdhValues.focus_path(_host)
 	_say_action(action, whole or held, strength)
-	var shortcuts: Dictionary = {"shortcuts": [], "shortcut_pressed": null}
+	var shortcuts: Dictionary = { "shortcuts": [], "shortcut_pressed": null }
 	if whole or held:
 		shortcuts = await GdhValues.press_shortcuts(_host.get_tree().root, action)
 	var lasted: Variant = null
@@ -243,7 +236,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 	var keycode: int = 0 if keycode_raw is String else GdhRead.as_int(keycode_raw)
 	var holding: Variant = GdhValues.held_for(params)
 	if holding is String:
-		return {"type": "error", "message": holding}
+		return { "type": "error", "message": holding }
 	var frames: int = holding
 
 	var event: InputEventKey = InputEventKey.new()
@@ -252,13 +245,14 @@ func inject_key(params: Dictionary) -> Dictionary:
 	if not named.is_empty():
 		event.keycode = OS.find_keycode_from_string(named)
 		if event.keycode == KEY_NONE:
-			return {"type": "error", "message": GdhValues.unknown_key(named)}
+			return { "type": "error", "message": GdhValues.unknown_key(named) }
 	elif keycode > 0:
 		event.keycode = keycode as Key
 	else:
 		return {
 			"type": "error",
-			"message": 'keycode is required: a key name, such as "Space" or "A", or its Godot keycode.'
+			"message":
+			'keycode is required: a key name, such as "Space" or "A", or its Godot keycode.',
 		}
 
 	# A key event from a real keyboard carries all three, and InputMap consults whichever one
@@ -320,11 +314,11 @@ func inject_key(params: Dictionary) -> Dictionary:
 func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var aimed: Variant = GdhMouse.aim_of(params, _host.get_tree().root)
 	if aimed is String:
-		return {"type": "error", "message": aimed}
+		return { "type": "error", "message": aimed }
 	var aim: Dictionary = aimed
 	var point: Variant = GdhMouse.read_point(params, "x", "y")
 	if point is String:
-		return {"type": "error", "message": point}
+		return { "type": "error", "message": point }
 	var local: Vector2 = point
 	var placed: Dictionary = GdhMouse.carried(aim, local, _host.get_tree().root)
 	var viewport: Viewport = placed["viewport"]
@@ -342,12 +336,12 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var whole: bool = notch or not params.has("pressed")
 	var holding: Variant = GdhValues.held_for(params)
 	if holding is String:
-		return {"type": "error", "message": holding}
+		return { "type": "error", "message": holding }
 	var frames: int = holding
 	if notch and params.has("holdFrames"):
 		return {
 			"type": "error",
-			"message": "A wheel step is pressed and let go at once, so holdFrames cannot hold one."
+			"message": "A wheel step is pressed and let go at once, so holdFrames cannot hold one.",
 		}
 
 	# A button pressed somewhere puts the pointer there: the motion after a held press measures
@@ -376,7 +370,8 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		# press and one that acts on the release each get a frame to do it in.
 		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		_send(viewport, GdhMouse.button_event(position, button, false, false, _held_in(viewport)))
-	# Input hands the events on at the next frame, so the control under the pointer is read after it.
+	# Input hands the events on at the next frame, so the control under the pointer is read after
+	# it.
 	await _host.get_tree().process_frame
 	var hovered_path: Variant = _hovered_path(own)
 
@@ -391,7 +386,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		"actions": GdhValues.actions_of(press),
 		"pressed": held and not whole,
 		"whole": whole,
-		"double": double
+		"double": double,
 	}
 	answer.merge(where)
 	answer.merge(pressing)
@@ -409,11 +404,11 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 func inject_mouse_motion(params: Dictionary) -> Dictionary:
 	var aimed: Variant = GdhMouse.aim_of(params, _host.get_tree().root)
 	if aimed is String:
-		return {"type": "error", "message": aimed}
+		return { "type": "error", "message": aimed }
 	var aim: Dictionary = aimed
 	var point: Variant = GdhMouse.read_point(params, "x", "y")
 	if point is String:
-		return {"type": "error", "message": point}
+		return { "type": "error", "message": point }
 	var local: Vector2 = point
 	var placed: Dictionary = GdhMouse.carried(aim, local, _host.get_tree().root)
 	var viewport: Viewport = placed["viewport"]
@@ -421,7 +416,8 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 	var relative: Vector2 = _arrive(position)
 	if params.has("relativeX") or params.has("relativeY"):
 		relative = Vector2(
-			GdhRead.as_float(params.get("relativeX", 0.0)), GdhRead.as_float(params.get("relativeY", 0.0))
+			GdhRead.as_float(params.get("relativeX", 0.0)),
+			GdhRead.as_float(params.get("relativeY", 0.0))
 		)
 
 	var supplied: bool = _follow_in(viewport, position)
@@ -455,11 +451,11 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 func inject_mouse_drag(params: Dictionary) -> Dictionary:
 	var aimed: Variant = GdhMouse.aim_of(params, _host.get_tree().root)
 	if aimed is String:
-		return {"type": "error", "message": aimed}
+		return { "type": "error", "message": aimed }
 	var aim: Dictionary = aimed
 	var stroke: Variant = GdhMouse.stroke_of(params)
 	if stroke is String:
-		return {"type": "error", "message": stroke}
+		return { "type": "error", "message": stroke }
 	# Carried once, before the press: a hand drags across the screen, not along a node that moves.
 	var named: Array[Vector2] = stroke
 	var points: Array[Vector2] = []
@@ -475,12 +471,14 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 	if own == 0:
 		return {
 			"type": "error",
-			"message": "A wheel step has no held position to drag from: give left, right or middle."
+			"message":
+			"A wheel step has no held position to drag from: give left, right or middle.",
 		}
 	var frames: int = GdhRead.as_int(params.get("frames", 0), 0)
 	if frames < 1 or frames > GdhValues.MOST_HELD:
 		return {
-			"type": "error", "message": "frames is %d, and it takes 1 to %d." % [frames, GdhValues.MOST_HELD]
+			"type": "error",
+			"message": "frames is %d, and it takes 1 to %d." % [frames, GdhValues.MOST_HELD],
 		}
 
 	var lengths: Array[float] = GdhMouse.lengths_of(points)
@@ -504,11 +502,11 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 				"message":
 				(
 					(
-						"%s was freed after the press and %d of %d motions, so the rest of the stroke"
-						+ " and the release went nowhere"
+						"%s was freed after the press and %d of %d motions, so the rest of the "
+						+ "stroke and the release went nowhere"
 					)
 					% [where["window"], sent, frames]
-				)
+				),
 			}
 		if step > frames:
 			break
@@ -556,7 +554,10 @@ func click(params: Dictionary) -> Dictionary:
 	var item: Variant = null
 	if not wanted.is_empty():
 		var picked: Dictionary = GdhTargets.control_saying(
-			_host.get_tree().root, "/root" if node_path.is_empty() else node_path, wanted, params.get("index")
+			_host.get_tree().root,
+			"/root" if node_path.is_empty() else node_path,
+			wanted,
+			params.get("index")
 		)
 		if picked.has("message"):
 			return picked
@@ -564,7 +565,10 @@ func click(params: Dictionary) -> Dictionary:
 		found = picked["found"]
 		item = picked.get("item")
 	if node_path.is_empty():
-		return {"type": "error", "message": "click needs a path, or says to find the control by its words"}
+		return {
+			"type": "error",
+			"message": "click needs a path, or says to find the control by its words",
+		}
 
 	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
@@ -572,23 +576,23 @@ func click(params: Dictionary) -> Dictionary:
 	var node: Node = standing["node"]
 	var named_point: Variant = GdhMouse.point_in(params, node, node_path, item != null)
 	if named_point is String:
-		return {"type": "error", "message": named_point}
+		return { "type": "error", "message": named_point }
 	if node is Node3D:
 		var spatial: Node3D = node
 		return await _click_in_the_world(node_path, spatial, params)
 	if not node is Control:
 		return {
 			"type": "error",
-			"message": "%s is a %s, not a Control or a Node3D" % [node_path, node.get_class()]
+			"message": "%s is a %s, not a Control or a Node3D" % [node_path, node.get_class()],
 		}
 	var control: Control = node
 	var unmoved: String = GdhMouse.takes_no_click(control, node_path, _host.get_tree().paused)
 	if not unmoved.is_empty():
-		return {"type": "error", "message": unmoved}
+		return { "type": "error", "message": unmoved }
 
-	# Words that are part of a rich label are pressed where they are drawn, since its middle can be on
-	# other words, a link among them. Said either way, so a press on the middle is never read as one
-	# on the words.
+	# Words that are part of a rich label are pressed where they are drawn, since its middle can be
+	# on other words, a link among them. Said either way, so a press on the middle is never read as
+	# one on the words.
 	var aim: Vector2 = control.size * 0.5
 	var at_centre: bool = true
 	var item_scrolled: bool = false
@@ -644,7 +648,7 @@ func click(params: Dictionary) -> Dictionary:
 				(
 					"%s was %s while it was being scrolled into view, so nothing was clicked"
 					% [node_path, "freed" if left == "freed" else "taken out of the tree"]
-				)
+				),
 			}
 		local = control.get_global_transform_with_canvas() * aim
 
@@ -670,10 +674,12 @@ func click(params: Dictionary) -> Dictionary:
 	# that silently reached nothing: outside the viewport it is drawn in, outside the one that shows
 	# that on the screen, or clipped away by a ScrollContainer that would not scroll it into view.
 	# Each is said of the viewport or container at fault, with its own rect and the point in it.
-	var aimed: String = "its centre" if named_point == null else "the point %s clicked" % [named_point]
+	var aimed: String = (
+		"its centre" if named_point == null else "the point %s clicked" % [named_point]
+	)
 	var out_there: String = _out_of_reach(control, node_path, local, reached, scrolled, aimed)
 	if not out_there.is_empty():
-		return {"type": "error", "message": out_there}
+		return { "type": "error", "message": out_there }
 	var button: int = GdhMouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
 		return GdhMouse.no_such_button(params.get("button"))
@@ -699,16 +705,17 @@ func click(params: Dictionary) -> Dictionary:
 	if hovered != null:
 		hovered_path = str(hovered.get_path())
 	var landed: bool = hovered == control or (hovered != null and control.is_ancestor_of(hovered))
-	# Why a miss missed, said before the press: the press can free the control and what covers it, and
-	# a click on a pointer spot that rebuilt its room errored reading the freed spot's filter and
-	# answered nothing. The cover is asked before the press restacks windows too: hovered missed a
-	# window over it.
+	# Why a miss missed, said before the press: the press can free the control and what covers it,
+	# and a click on a pointer spot that rebuilt its room errored reading the freed spot's filter
+	# and answered nothing. The cover is asked before the press restacks windows too: hovered missed
+	# a window over it.
 	var why_not_landed: String = ""
-	# A Label and a TextureRect ignore the pointer unless told otherwise, so the click goes to what is
-	# under them, and landed false with that control as hovered said nothing of why.
+	# A Label and a TextureRect ignore the pointer unless told otherwise, so the click goes to what
+	# is under them, and landed false with that control as hovered said nothing of why.
 	if not landed and control.mouse_filter == Control.MOUSE_FILTER_IGNORE:
 		why_not_landed = (
-			"%s's mouse_filter is ignore, so the pointer passes through it to what is under it" % node_path
+			"%s's mouse_filter is ignore, so the pointer passes through it to what is under it"
+			% node_path
 		)
 	elif not landed:
 		var cover: Node = GdhTargets.drawn_over(control)
@@ -763,7 +770,9 @@ func click(params: Dictionary) -> Dictionary:
 		"scrolled_into_view": scrolled,
 	}
 	if on_part:
-		answer["pressed_on"] = "the middle of the part on screen, since no scroll brings its centre into view"
+		answer["pressed_on"] = (
+			"the middle of the part on screen, since no scroll brings its centre into view"
+		)
 	if not why_not_landed.is_empty():
 		answer["why_not_landed"] = why_not_landed
 	if found != null:
@@ -772,7 +781,7 @@ func click(params: Dictionary) -> Dictionary:
 		var now_pressed: Variant = null
 		if is_instance_valid(toggle):
 			now_pressed = toggle.button_pressed
-		answer["pressed"] = {"before": was_pressed, "after": now_pressed}
+		answer["pressed"] = { "before": was_pressed, "after": now_pressed }
 	if toggle != null:
 		answer["pressed_signal"] = fired[0]
 	# Whether a link was pressed apart from what it carries: a bare [url] reports an empty meta,
@@ -784,15 +793,20 @@ func click(params: Dictionary) -> Dictionary:
 	return _pointer_noted(_hover_noted(answer, supplied))
 
 
-## Why a click at [param control]'s centre, or at the point [param aimed] names, would reach nothing,
-## or "" when it would reach it: the point outside the viewport it is drawn in, at [param local];
-## outside the viewport showing that one on the screen, which [param reached] holds with the point
-## there; or clipped away by a ScrollContainer holding it. A refusal names the viewport or container
-## at fault and the point in that one's own space, since naming another printed a point inside the
-## rect it was said to be outside. The note on a game with no window goes only on the viewport that
-## is the window's.
+## Why a click at [param control]'s centre, or at the point [param aimed] names, would reach
+## nothing, or "" when it would reach it: the point outside the viewport it is drawn in, at
+## [param local]; outside the viewport showing that one on the screen, which [param reached] holds
+## with the point there; or clipped away by a ScrollContainer holding it. A refusal names the
+## viewport or container at fault and the point in that one's own space, since naming another
+## printed a point inside the rect it was said to be outside. The note on a game with no window goes
+## only on the viewport that is the window's.
 func _out_of_reach(
-	control: Control, node_path: String, local: Vector2, reached: Dictionary, scrolled: bool, aimed: String
+	control: Control,
+	node_path: String,
+	local: Vector2,
+	reached: Dictionary,
+	scrolled: bool,
+	aimed: String
 ) -> String:
 	var after: String = (
 		". It was scrolled as far as what holds it goes and is still out there" if scrolled else ""
@@ -802,10 +816,20 @@ func _out_of_reach(
 		var point: Vector2 = place[1]
 		if viewport.get_visible_rect().has_point(point):
 			continue
-		var which: String = "" if viewport == _host.get_tree().root else " of %s" % viewport.get_path()
+		var which: String = (
+			"" if viewport == _host.get_tree().root else " of %s" % viewport.get_path()
+		)
 		return (
 			"%s has %s at %s, outside the viewport%s %s, so nothing can click it%s%s"
-			% [node_path, aimed, point, which, viewport.get_visible_rect(), after, _no_window_note(viewport)]
+			% [
+				node_path,
+				aimed,
+				point,
+				which,
+				viewport.get_visible_rect(),
+				after,
+				_no_window_note(viewport),
+			]
 		)
 	var holder: ScrollContainer = GdhScreen.clipped_by(control, local)
 	if holder == null:
@@ -842,7 +866,9 @@ func _no_window_note(viewport: Viewport) -> String:
 ## engine gets one from the system: a whole click, then a second press marked as a double click and
 ## its release. Sent as the marked press alone, it pressed a button once where a player's presses it
 ## twice.
-func _click_button(viewport: Viewport, position: Vector2, button: int, double: bool) -> InputEventMouseButton:
+func _click_button(
+	viewport: Viewport, position: Vector2, button: int, double: bool
+) -> InputEventMouseButton:
 	if double:
 		_press_button(viewport, GdhMouse.button_event(position, button, true, false))
 		await _host.get_tree().process_frame
@@ -881,7 +907,10 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 		return {
 			"type": "error",
 			"message":
-			"%s is not visible%s, so nothing can click it" % [node_path, GdhTargets.why_hidden(item)]
+			(
+				"%s is not visible%s, so nothing can click it"
+				% [node_path, GdhTargets.why_hidden(item)]
+			),
 		}
 
 	var found: Dictionary = GdhQueries.in_frame(item)
@@ -889,12 +918,16 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 		return {
 			"type": "error",
 			"message":
-			"%s is not in a viewport with a current Camera3D, so there is nowhere to click it" % node_path
+			(
+				"%s is not in a viewport with a current Camera3D, so there is nowhere to click it"
+				% node_path
+			),
 		}
 	if not found.has("aim"):
 		return {
 			"type": "error",
-			"message": "%s is behind the camera drawing it, so it is not on screen to click" % node_path
+			"message":
+			"%s is behind the camera drawing it, so it is not on screen to click" % node_path,
 		}
 
 	var viewport: Viewport = item.get_viewport()
@@ -906,7 +939,7 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 			(
 				"%s is drawn at %s, outside the viewport %s, so nothing can click it%s"
 				% [node_path, aim, viewport.get_visible_rect(), _no_window_note(viewport)]
-			)
+			),
 		}
 
 	var out: Array[Dictionary] = GdhScreen.steps_out(viewport, aim)
@@ -920,9 +953,18 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 			"type": "error",
 			"message":
 			(
-				"%s is drawn at %s, which is %s on the screen, outside the viewport %s, so nothing can click it%s"
-				% [node_path, aim, reached_point, arriving.get_visible_rect(), _no_window_note(arriving)]
-			)
+				(
+					"%s is drawn at %s, which is %s on the screen, outside the viewport %s, so "
+					+ "nothing can click it%s"
+				)
+				% [
+					node_path,
+					aim,
+					reached_point,
+					arriving.get_visible_rect(),
+					_no_window_note(arriving),
+				]
+			),
 		}
 	var position: Vector2 = arriving.get_final_transform() * reached_point
 	var button: int = GdhMouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))

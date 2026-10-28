@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## The menu a choice is made from and the item in it, for a choice made by what an item says or by
 ## where it is in the list.
 

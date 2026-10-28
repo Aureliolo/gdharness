@@ -1214,7 +1214,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     );
   }
 
-  // Functions are spaced the way gdformat writes them, two blank lines on each side counting those
+  // Functions are spaced the way gdstyle and gdformat write them, two blank lines on each side counting those
   // already there, and the file still ends with a newline; one placed after _ready goes above the
   // doc comment and the annotation line of the function that follows, not between them and it. The
   // comment indented in _ready's body is the end of that body and stays there.
@@ -5490,9 +5490,9 @@ async function main(): Promise<void> {
   }
 
   const projectDir = createProject(godotPath);
-  // The gate on its own, in seconds, for after a GDScript edit: gdlint and gdformat pass a script
-  // the engine refuses under warnings as errors, and a regression run with an engine loads the
-  // addon under the default warnings, so both said yes to an addon that did not compile.
+  // The gate on its own, in seconds, for after a GDScript edit: the linter and the formatter pass a
+  // script the engine refuses under warnings as errors, and a regression run with an engine loads
+  // the addon under the default warnings, so both said yes to an addon that did not compile.
   if (process.argv.includes('typed')) {
     try {
       testTypedGate(godotPath, projectDir);

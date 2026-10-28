@@ -23,12 +23,15 @@ static func missing_reason(path: String) -> String:
 		if id == ResourceUID.INVALID_ID or not ResourceUID.has_id(id):
 			return (
 				path
-				+ " does not resolve: no file in the project's uid cache has it, so the file has gone or the"
-				+ " project has not been imported yet (project_import refresh_uids imports it)"
+				+ " does not resolve: no file in the project's uid cache has it, so the file has "
+				+ "gone or the project has not been imported yet (project_import refresh_uids "
+				+ "imports it)"
 			)
 		var resolved: String = ResourceUID.get_id_path(id)
 		return (
-			"" if FileAccess.file_exists(resolved) else path + " names " + resolved + ", which does not exist"
+			""
+			if FileAccess.file_exists(resolved)
+			else path + " names " + resolved + ", which does not exist"
 		)
 	return "" if FileAccess.file_exists(path) else path + " does not exist"
 
@@ -41,7 +44,9 @@ func with_nearest_files(said: String, path: String) -> String:
 	# One the refusal names is the file it refuses, as a script given for a scene is. Word by word,
 	# since res://brain.gd is inside res://brain.gdd.
 	var named: Array[String] = []
-	for word: String in said.replace("\n", " ").replace(",", " ").replace(";", " ").split(" ", false):
+	for word: String in said.replace("\n", " ").replace(",", " ").replace(";", " ").split(
+		" ", false
+	):
 		named.append(word.rstrip(".:"))
 	var namesakes: Array[String] = []
 	for file: String in _namesakes(path):
@@ -78,7 +83,9 @@ func with_nearest_files(said: String, path: String) -> String:
 		)
 	if files.size() <= GdhRead.NAMED_CHILDREN:
 		return "%s. The project's .%s files are %s." % [said, extension, ", ".join(files)]
-	return "%s. None of the project's %d .%s files is named like it." % [said, files.size(), extension]
+	return (
+		"%s. None of the project's %d .%s files is named like it." % [said, files.size(), extension]
+	)
 
 
 # The files in [param path]'s folder named as it is with another extension, leaving out the import

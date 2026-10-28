@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## What the server asks about the running tree: its shape, one node, the nodes matching a
 ## question, where one is on screen, a property's value, the metrics. What it changes, a property
 ## written or a method called, is in runtime_changes.gd.
@@ -11,19 +10,15 @@ const GdhSays = preload("runtime_says.gd")
 const GdhScreen = preload("runtime_screen.gd")
 const GdhValues = preload("runtime_values.gd")
 const GdhWords = preload("runtime_words.gd")
-
 ## The most nodes one find answers with, unless asked for fewer: enough for any real query and
 ## far short of the tree dump a query exists to avoid.
 const FIND_LIMIT: int = 100
-
 ## What a find can be narrowed by, which is also what it refuses to answer without. Named once so
 ## the refusal lists the same set the walk reads.
 const FILTERS: PackedStringArray = ["class", "script", "name", "group", "says"]
-
 ## The most lines one read answers with, unless asked for fewer. A screen is a few dozen; a
 ## thousand is a tree somebody pointed this at by mistake.
 const READ_LIMIT: int = 500
-
 ## The most either can be asked for. A limit above it is refused rather than cut to it: the ceiling
 ## was the default for a read, so the remedy its own answer gave, raising the limit, changed nothing
 ## and said nothing, and a caller told to raise a number that stays put concludes the screen moved.
@@ -59,7 +54,7 @@ func get_tree(params: Dictionary) -> Dictionary:
 		for each: Variant in listed:
 			named.append(str(each))
 	else:
-		return {"type": "error", "message": "properties must be a list of property names"}
+		return { "type": "error", "message": "properties must be a list of property names" }
 
 	var reached: Dictionary = GdhValues.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):
@@ -100,19 +95,24 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	var limit: int = GdhRead.as_int(params.get("limit", FIND_LIMIT), FIND_LIMIT)
 	if limit < 1 or limit > LIMIT_CEILING:
 		return {
-			"type": "error", "message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit]
+			"type": "error",
+			"message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit],
 		}
 
 	if not _anything_asked(wanted):
-		return {"type": "error", "message": "find_nodes needs at least one of " + ", ".join(FILTERS)}
+		return {
+			"type": "error", "message": "find_nodes needs at least one of " + ", ".join(FILTERS),
+		}
 	if not wanted["script"].is_empty() and not wanted["script"].begins_with("res://"):
 		wanted["script"] = "res://" + wanted["script"]
 
 	# Split once here rather than for each node the walk passes.
 	var names: Array[String] = GdhSays.split_at_bars(wanted["name"])
 	if not wanted["name"].is_empty() and names.is_empty():
-		var bars_only: String = 'name "%s" is only bars, so it names no node; write the names between them'
-		return {"type": "error", "message": bars_only % wanted["name"]}
+		var bars_only: String = (
+			'name "%s" is only bars, so it names no node; write the names between them'
+		)
+		return { "type": "error", "message": bars_only % wanted["name"] }
 
 	var reached: Dictionary = GdhValues.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):
@@ -164,7 +164,11 @@ func find_nodes(params: Dictionary) -> Dictionary:
 				nearly += 1
 			else:
 				nearly_hidden += 1
-		elif not widened_says.is_empty() and _named(node, names) and _matches_apart_from_name(node, widened):
+		elif (
+			not widened_says.is_empty()
+			and _named(node, names)
+			and _matches_apart_from_name(node, widened)
+		):
 			if include_hidden or readable(node):
 				nearly_said += 1
 			else:
@@ -179,11 +183,13 @@ func find_nodes(params: Dictionary) -> Dictionary:
 		for index: int in range(children.size() - 1, -1, -1):
 			pending.push_front(children[index])
 
-	var answer: Dictionary = {"type": "nodes", "count": found.size(), "truncated": truncated, "nodes": found}
+	var answer: Dictionary = {
+		"type": "nodes", "count": found.size(), "truncated": truncated, "nodes": found,
+	}
 	var notes: Array[String] = []
-	# Each still listed, since a caller may mean one of them, and marked, so one sign drawn as a label
-	# and its outline copies is not read as four signs. The outermost match it copies, since a find
-	# under one of the copies has left the label they all copy outside it.
+	# Each still listed, since a caller may mean one of them, and marked, so one sign drawn as a
+	# label and its outline copies is not read as four signs. The outermost match it copies, since a
+	# find under one of the copies has left the label they all copy outside it.
 	var copies: int = 0
 	for index: int in range(found_nodes.size()):
 		var at: int = -1
@@ -201,8 +207,8 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			. append(
 				(
 					(
-						"%d of the %d matches %s drawn under a match saying the same words, as an outline or a"
-						+ " glow is drawn, and %s it under copyOf: %d distinct"
+						"%d of the %d matches %s drawn under a match saying the same words, as an "
+						+ "outline or a glow is drawn, and %s it under copyOf: %d distinct"
 					)
 					% [
 						copies,
@@ -230,7 +236,10 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			notes
 			. append(
 				(
-					'name is matched as a glob against the whole name; %d %snode %s %s, which "%s"%s would find'
+					(
+						"name is matched as a glob against the whole name; %d %snode %s %s, which "
+						+ '"%s"%s would find'
+					)
 					% [
 						named_near,
 						"" if nearly > 0 else "hidden or out-of-view ",
@@ -248,7 +257,10 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			notes
 			. append(
 				(
-					'says with a wildcard is matched as a glob against a node\'s whole text; "%s"%s would find %d %snode%s'
+					(
+						"says with a wildcard is matched as a glob against a node\'s whole text; "
+						+ '"%s"%s would find %d %snode%s'
+					)
 					% [
 						widened_says,
 						"" if nearly_said > 0 else " with includeHidden true",
@@ -271,13 +283,16 @@ func find_nodes(params: Dictionary) -> Dictionary:
 		)
 	if out_of_view > 0:
 		answer["out_of_view"] = out_of_view
-		notes.append(
-			(
+		(
+			notes
+			. append(
 				(
-					"%d matching node%s drawn outside the viewport or scrolled out of a ScrollContainer"
-					+ " and left out; includeHidden true answers with them too"
+					(
+						"%d matching node%s drawn outside the viewport or scrolled out of a "
+						+ "ScrollContainer and left out; includeHidden true answers with them too"
+					)
+					% [out_of_view, "" if out_of_view == 1 else "s"]
 				)
-				% [out_of_view, "" if out_of_view == 1 else "s"]
 			)
 		)
 	if not notes.is_empty():
@@ -289,11 +304,11 @@ func find_nodes(params: Dictionary) -> Dictionary:
 ##
 ## A CanvasItem's visibility comes down through CanvasItem parents only, and one whose parent is not
 ## a CanvasItem starts again from its canvas: measured on 4.7.2, a Label under a plain Node under a
-## hidden panel, and one under a hidden Node3D, both answer visible in tree, while one straight under
-## the panel does not. Walking every ancestor called those two hidden, so their words were left off
-## a screen that showed them and a wait on them ran out. What a CanvasItem's rule leaves out is its
-## canvas: a hidden layer hides everything drawn on it while each item keeps its own flag, and a
-## hidden window everything in it. A wait on words asks the same, so it reads this too.
+## hidden panel, and one under a hidden Node3D, both answer visible in tree, while one straight
+## under the panel does not. Walking every ancestor called those two hidden, so their words were
+## left off a screen that showed them and a wait on them ran out. What a CanvasItem's rule leaves
+## out is its canvas: a hidden layer hides everything drawn on it while each item keeps its own
+## flag, and a hidden window everything in it. A wait on words asks the same, so it reads this too.
 static func shown(node: Node) -> bool:
 	var item: CanvasItem = node as CanvasItem
 	if item != null:
@@ -355,9 +370,9 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 	if wanted_property.is_empty():
 		return entry
 	entry["property"] = wanted_property
-	# Through a path as well, for the reason [method GdhPaths.walk_to] gives. A step that is not there on
-	# this node reads as not having the property rather than as a refusal, which is the rule this
-	# whole function is written to: a find matches nodes of several classes on purpose.
+	# Through a path as well, for the reason [method GdhPaths.walk_to] gives. A step that is not
+	# there on this node reads as not having the property rather than as a refusal, which is the
+	# rule this whole function is written to: a find matches nodes of several classes on purpose.
 	var reached: Dictionary = GdhPaths.walk_to(node, str(entry["path"]), wanted_property)
 	if reached.has("message"):
 		entry["has_property"] = false
@@ -463,7 +478,8 @@ func read_text(params: Dictionary) -> Dictionary:
 	var limit: int = GdhRead.as_int(params.get("limit", READ_LIMIT), READ_LIMIT)
 	if limit < 1 or limit > LIMIT_CEILING:
 		return {
-			"type": "error", "message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit]
+			"type": "error",
+			"message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit],
 		}
 
 	var reached: Dictionary = GdhValues.node_at(_host.get_tree().root, root_path)
@@ -477,7 +493,7 @@ func read_text(params: Dictionary) -> Dictionary:
 	# and a bare `truncated: true` was looked straight past twice before the limit was suspected.
 	# A number is what sends somebody back.
 	var lines: Array[String] = []
-	var tally: Dictionary[String, int] = {"omitted": 0, "out_of_view": 0, "copies": 0}
+	var tally: Dictionary[String, int] = { "omitted": 0, "out_of_view": 0, "copies": 0 }
 	_read_into(root, include_hidden, limit, lines, tally)
 	var answer: Dictionary = {
 		"type": "text",
@@ -490,28 +506,35 @@ func read_text(params: Dictionary) -> Dictionary:
 	var notes: Array[String] = []
 	if tally["out_of_view"] > 0:
 		answer["out_of_view"] = tally["out_of_view"]
-		notes.append(
-			(
+		(
+			notes
+			. append(
 				(
-					"%d line%s drawn outside the viewport or scrolled out of a ScrollContainer, where the"
-					+ " player cannot read them, left out; includeHidden true answers with them too"
+					(
+						"%d line%s drawn outside the viewport or scrolled out of a "
+						+ "ScrollContainer, where the player cannot read them, left out; "
+						+ "includeHidden true answers with them too"
+					)
+					% [tally["out_of_view"], "" if tally["out_of_view"] == 1 else "s"]
 				)
-				% [tally["out_of_view"], "" if tally["out_of_view"] == 1 else "s"]
 			)
 		)
 	if tally["copies"] > 0:
 		answer["copies"] = tally["copies"]
-		notes.append(
-			(
+		(
+			notes
+			. append(
 				(
-					"%d line%s drawn as a copy under a node saying the same words, as an outline or a glow"
-					+ " is drawn, read once with the words %s"
+					(
+						"%d line%s drawn as a copy under a node saying the same words, as an "
+						+ "outline or a glow is drawn, read once with the words %s"
+					)
+					% [
+						tally["copies"],
+						"" if tally["copies"] == 1 else "s",
+						"it copies" if tally["copies"] == 1 else "they copy",
+					]
 				)
-				% [
-					tally["copies"],
-					"" if tally["copies"] == 1 else "s",
-					"it copies" if tally["copies"] == 1 else "they copy"
-				]
 			)
 		)
 	if not notes.is_empty():
@@ -522,14 +545,14 @@ func read_text(params: Dictionary) -> Dictionary:
 ## Walks [param node] depth first, which is the order the screen is laid out in and the order a
 ## person reads it.
 ##
-## Internal children as well, because the number in a SpinBox is one: the field a player reads it
-## in is a LineEdit the engine builds inside the box and leaves out of `get_children()`, so a
-## screen full of forms answered with every label on it and none of the values in it. The hidden
-## check covers a [Window] for the same walk: a dropdown's popup is a child that is not drawn
-## until it is opened, and reading a closed menu would put every item on the screen.
-## Fills [param into] up to [param most] lines and counts in [param tally] how many further lines the
-## rest of the subtree says, under omitted, and how many it says out of view, under out_of_view, which
-## is what the caller is told rather than left to infer.
+## Internal children as well, because the number in a SpinBox is one: the field a player reads it in
+## is a LineEdit the engine builds inside the box and leaves out of `get_children()`, so a screen
+## full of forms answered with every label on it and none of the values in it. The hidden check
+## covers a [Window] for the same walk: a dropdown's popup is a child that is not drawn until it is
+## opened, and reading a closed menu would put every item on the screen. Fills [param into] up to
+## [param most] lines and counts in [param tally] how many further lines the rest of the subtree
+## says, under omitted, and how many it says out of view, under out_of_view, which is what the
+## caller is told rather than left to infer.
 ##
 ## Asked of each node rather than cut off at the first hidden one, since a hidden panel does not
 ## hide a label reached through a plain Node: see [method shown].
@@ -539,8 +562,8 @@ func _read_into(
 	if include_hidden or shown(node):
 		var said: Array[String] = GdhWords.lines_said_by(node)
 		# A copy drawn under the words it copies, as an outline or a glow is, reads once. Only while
-		# what it copies is itself read, so an original hidden or drawn out of view does not take the
-		# words with it.
+		# what it copies is itself read, so an original hidden or drawn out of view does not take
+		# the words with it.
 		var original: Node = GdhWords.copied_from(node) if not said.is_empty() else null
 		if original != null and (include_hidden or readable(original)):
 			tally["copies"] += said.size()
@@ -563,7 +586,7 @@ func _read_into(
 func get_rect(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	if node_path.is_empty():
-		return {"type": "error", "message": "Node path required"}
+		return { "type": "error", "message": "Node path required" }
 
 	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
@@ -613,14 +636,15 @@ func get_rect(params: Dictionary) -> Dictionary:
 		var spatial: Node3D = node
 		return _in_the_frame(node_path, spatial)
 	return {
-		"type": "error", "message": "%s is a %s, which has no place on screen" % [node_path, node.get_class()]
+		"type": "error",
+		"message": "%s is a %s, which has no place on screen" % [node_path, node.get_class()],
 	}
 
 
 ## The rectangle a 2D node's own geometry takes up in its own coordinates, as the one entry of the
 ## list, which is empty for a node that has none of its own: a sprite's texture, a collision shape's
-## shape, the points of a polygon or a line. A Node2D answered only where it stands, so the extent of
-## a floor or a sprite to aim inside was a read of its shape and some arithmetic.
+## shape, the points of a polygon or a line. A Node2D answered only where it stands, so the extent
+## of a floor or a sprite to aim inside was a read of its shape and some arithmetic.
 static func _drawn_rect(item: Node2D) -> Array[Rect2]:
 	var drawn: Array[Rect2] = []
 	var sprite: Sprite2D = item as Sprite2D
@@ -668,7 +692,8 @@ func _in_the_frame(node_path: String, item: Node3D) -> Dictionary:
 	if found.is_empty():
 		return {
 			"type": "error",
-			"message": "%s is not in a viewport with a current Camera3D, so nothing is drawing it" % node_path
+			"message":
+			"%s is not in a viewport with a current Camera3D, so nothing is drawing it" % node_path,
 		}
 
 	var drawn_in: Viewport = item.get_viewport()
@@ -713,7 +738,9 @@ static func in_frame(item: Node3D) -> Dictionary:
 		return {}
 
 	var origin: Vector3 = item.global_transform.origin
-	var found: Dictionary = {"camera": str(camera.get_path()), "behind": camera.is_position_behind(origin)}
+	var found: Dictionary = {
+		"camera": str(camera.get_path()), "behind": camera.is_position_behind(origin),
+	}
 	var box: AABB = drawn_box(item)
 	var draws: bool = box.size != Vector3.ZERO
 	var middle: Vector3 = box.get_center() if draws else origin
@@ -740,7 +767,7 @@ static func _around(box: AABB, camera: Camera3D) -> Dictionary:
 			return {}
 		var point: Vector2 = camera.unproject_position(corner)
 		seen = Rect2(point, Vector2.ZERO) if index == 0 else seen.expand(point)
-	return {"rect": seen}
+	return { "rect": seen }
 
 
 ## The box everything drawn under [param item] fits in, in world space, or a box with no size when
@@ -770,7 +797,7 @@ func get_property(params: Dictionary) -> Dictionary:
 	var property: String = str(params.get("property", ""))
 
 	if node_path.is_empty() or property.is_empty():
-		return {"type": "error", "message": "Node path and property required"}
+		return { "type": "error", "message": "Node path and property required" }
 
 	var standing: Dictionary = GdhValues.target_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
@@ -786,7 +813,10 @@ func get_property(params: Dictionary) -> Dictionary:
 	# Asked of the holder rather than read and compared to null, because a property the holder does
 	# not have and a property that is null both read as null.
 	if not GdhPaths.can_read(holder, named):
-		return {"type": "error", "message": GdhPaths.nothing_there(holder, named, str(reached["called"]))}
+		return {
+			"type": "error",
+			"message": GdhPaths.nothing_there(holder, named, str(reached["called"])),
+		}
 
 	return {
 		"type": "property",
@@ -828,10 +858,10 @@ func get_metrics(params: Dictionary) -> Dictionary:
 	var frame_time_max: Variant = null
 	var physics_steps_per_second: Variant = null
 	if timed > 0:
-		frame_time = float(total_usec) / timed / 1000000.0
-		frame_time_max = slowest_usec / 1000000.0
+		frame_time = float(total_usec) / timed / 1_000_000.0
+		frame_time_max = slowest_usec / 1_000_000.0
 		if total_usec > 0:
-			physics_steps_per_second = steps * 1000000.0 / total_usec
+			physics_steps_per_second = steps * 1_000_000.0 / total_usec
 	var all: Dictionary = {
 		"fps": Engine.get_frames_per_second(),
 		"frame_time": frame_time,
@@ -854,9 +884,11 @@ func get_metrics(params: Dictionary) -> Dictionary:
 		"object_node_count": Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
 		"object_orphan_node_count": Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT),
 		"render_total_objects": Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME),
-		"render_total_primitives": Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
-		"render_total_draw_calls": Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+		"render_total_primitives":
+		Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
+		"render_total_draw_calls":
 		# The GPU's half of the game's memory, in bytes, which memory_static does not count: a game
+		Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
 		# committing 2.3 GB answered 298 MB there, and the rest could not be asked about.
 		"render_video_mem_used": Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED),
 		"render_texture_mem_used": Performance.get_monitor(Performance.RENDER_TEXTURE_MEM_USED),
@@ -864,7 +896,7 @@ func get_metrics(params: Dictionary) -> Dictionary:
 	}
 
 	if metrics.is_empty():
-		return {"type": "metrics", "data": all}
+		return { "type": "metrics", "data": all }
 
 	# A caller that names metrics gets those and no others, and hears about a name that is
 	# not one rather than getting everything back as if the list had not been sent.
@@ -878,9 +910,10 @@ func get_metrics(params: Dictionary) -> Dictionary:
 	if not unknown.is_empty():
 		return {
 			"type": "error",
-			"message": "Unknown metrics: %s. Available: %s" % [", ".join(unknown), ", ".join(all.keys())]
+			"message":
+			"Unknown metrics: %s. Available: %s" % [", ".join(unknown), ", ".join(all.keys())],
 		}
-	return {"type": "metrics", "data": selected}
+	return { "type": "metrics", "data": selected }
 
 
 func _serialize_node_tree(
@@ -897,7 +930,9 @@ func _serialize_node_tree(
 		# it is wrong, and it is what sends somebody looking for another way to press the button.
 		# `depth` is what keeps the answer a size worth reading.
 		for child: Node in node.get_children(true):
-			children.append(_serialize_node_tree(child, depth + 1, max_depth, include_properties, named))
+			children.append(
+				_serialize_node_tree(child, depth + 1, max_depth, include_properties, named)
+			)
 		result["children"] = children
 
 	return result
@@ -920,7 +955,9 @@ func _named_properties_of(node: Node, path: String, named: Array[String]) -> Dic
 
 
 func _serialize_node(node: Node, include_properties: bool) -> Dictionary:
-	var result: Dictionary = {"name": node.name, "type": node.get_class(), "path": str(node.get_path())}
+	var result: Dictionary = {
+		"name": node.name, "type": node.get_class(), "path": str(node.get_path()),
+	}
 
 	var script: Variant = node.get_script()
 	if script is Script:
@@ -929,8 +966,9 @@ func _serialize_node(node: Node, include_properties: bool) -> Dictionary:
 
 	if include_properties:
 		var properties: Dictionary = {}
-		# A script's own variables as well as what the node stores: a plain `var health` is not stored,
-		# so a tree read of a running game answered every engine property and none of the game's state.
+		# A script's own variables as well as what the node stores: a plain `var health` is not
+		# stored, so a tree read of a running game answered every engine property and none of the
+		# game's state.
 		for prop: Dictionary in node.get_property_list():
 			if prop["usage"] & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_SCRIPT_VARIABLE):
 				var property_name: String = prop["name"]

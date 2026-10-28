@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## The editor addon's reload_script on a script held by a live instance: a reload that does not
 ## compile leaves the copy usable, and says so, and a path spelled in another case reloads the copy
 ## held under the spelling on disk.
@@ -23,11 +22,21 @@ func _initialize() -> void:
 	var tools: GdhClassTools = GdhClassTools.new()
 
 	_write(GOOD + "\n\nfunc broken( -> int:\n\treturn 1\n")
-	var refused: Dictionary = tools.reload_script({"scriptPath": "res://Reload_Tower.gd"})
+	var refused: Dictionary = tools.reload_script({ "scriptPath": "res://Reload_Tower.gd" })
 	if refused.get("script") != TOWER:
-		_fail("a path in another case is reloaded under the spelling on disk: %s" % JSON.stringify(refused))
+		_fail(
+			(
+				"a path in another case is reloaded under the spelling on disk: %s"
+				% JSON.stringify(refused)
+			)
+		)
 	if refused.get("failed") != ERR_PARSE_ERROR or refused.get("restored") != true:
-		_fail("a reload that does not compile is refused and the copy put back: %s" % JSON.stringify(refused))
+		_fail(
+			(
+				"a reload that does not compile is refused and the copy put back: %s"
+				% JSON.stringify(refused)
+			)
+		)
 	# Asked of the script before the instance is called, because has_method still answers yes on a
 	# copy the failed compile broke, and the call is then an error that stops this fixture.
 	if not script.can_instantiate():
@@ -36,7 +45,7 @@ func _initialize() -> void:
 		_fail("and the instance made before it still has its methods")
 
 	_write(GOOD + "\n\nfunc chime() -> int:\n\treturn 2\n")
-	var mended: Dictionary = tools.reload_script({"scriptPath": TOWER})
+	var mended: Dictionary = tools.reload_script({ "scriptPath": TOWER })
 	var methods: Array = mended.get("methods", [])
 	if mended.get("failed") != OK or not methods.has("chime") or mended.has("restored"):
 		_fail("a reload that compiles is taken: %s" % JSON.stringify(mended))
@@ -50,7 +59,7 @@ func _initialize() -> void:
 	# Not checked: gone either way by the time the fixture tears itself down.
 	var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(TOWER))
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 	printerr("\n".join(failures))
