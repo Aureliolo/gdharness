@@ -330,7 +330,9 @@ waits for a slot before its engine starts. A game started with `editor_run start
 editor plays, does not: someone is driving it for as long as it runs.
 
 A wait for a slot is said. A tool call that asked for progress hears it at once, and every 20
-seconds after. `gdharness test` and `gdharness spread` print a line once the wait passes 2 seconds,
+seconds after, and a call that waited a second or more in all is answered with an
+`engine_slot_wait` block: `waitedMs`, and a note naming who held the slots when it first waited.
+`gdharness test` and `gdharness spread` print a line once the wait passes 2 seconds,
 and again every 20 seconds while it lasts, one line however many of its engines are waiting; every
 other command prints it to standard error. The line names the directory and the count, so a gate
 that has gone quiet because the machine's other runs hold every slot says so.

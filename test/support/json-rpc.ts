@@ -46,13 +46,14 @@ export function parseJsonLines(data: string): JsonRpcMessage[] {
  *
  * Without the feedback block the server adds to every two hundred and fiftieth answer, which is
  * about no answer: a refusal it landed on failed an assertion anchored on the refusal's last
- * sentence, at whichever call the suite had reached.
+ * sentence, at whichever call the suite had reached. Without the block saying a call waited for
+ * engine slots too, which comes of whatever else holds the machine's slots at the time.
  */
 export function textOf(response: JsonRpcMessage | null | undefined): string | null {
   const result = response?.result;
   if (!isRecord(result) || !Array.isArray(result['content'])) return null;
   const text = (result['content'] as ToolContentBlock[])
-    .filter((chunk) => !isFeedbackBlock(chunk))
+    .filter((chunk) => !isFeedbackBlock(chunk) && slotWaitOf(chunk) === null)
     .map((chunk) => chunk.text ?? '')
     .join('');
   return text || null;
@@ -60,11 +61,20 @@ export function textOf(response: JsonRpcMessage | null | undefined): string | nu
 
 /** Whether [chunk] is the block asking, now and then, for the tool that is missing. */
 export function isFeedbackBlock(chunk: ToolContentBlock): boolean {
+  return soleKeyOf(chunk, 'gdharness_feedback') !== null;
+}
+
+/** The block saying how long a call waited for engine slots, or null when [chunk] is another. */
+export function slotWaitOf(chunk: ToolContentBlock): unknown {
+  return soleKeyOf(chunk, 'engine_slot_wait');
+}
+
+function soleKeyOf(chunk: ToolContentBlock, key: string): unknown {
   try {
     const parsed: unknown = JSON.parse(chunk.text ?? '');
-    return isRecord(parsed) && Object.keys(parsed).length === 1 && 'gdharness_feedback' in parsed;
+    return isRecord(parsed) && Object.keys(parsed).length === 1 && key in parsed ? parsed[key] : null;
   } catch {
-    return false;
+    return null;
   }
 }
 

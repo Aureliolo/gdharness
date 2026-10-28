@@ -42,6 +42,7 @@ import {
   type CallProgress,
   callProgress,
   callSignal,
+  type SlotWaits,
   stillGoingSaid,
   withCallSignal,
 } from './call-signal.js';
@@ -4560,6 +4561,7 @@ class GodotServer {
             };
       const call = this.callsTaken++;
       this.inFlight.set(call, { tool: spec.name, op: checked.op ?? '', startedAt: Date.now() });
+      const slotWaits: SlotWaits = { ms: 0, said: undefined };
       try {
         const answer = await withCallSignal(
           ctx.mcpReq.signal,
@@ -4569,8 +4571,17 @@ class GodotServer {
             everyMs: CALL_HEARTBEAT_MS,
             said: (elapsedMs) => stillGoingSaid(spec.name, checked.op, elapsedMs),
           },
+          slotWaits,
         );
-        return this.withinTheClientsLimit(spec.name, this.withFeedbackNotice(this.withUpdateNotice(answer)));
+        // A test run whose class rebuild took a minute could not be told from a slow rebuild, since
+        // every step's time holds its wait for a slot and the wait was said only as progress.
+        const waited =
+          slotWaits.said === undefined || slotWaits.ms < 1000
+            ? answer
+            : this.saying(answer, {
+                engine_slot_wait: { waitedMs: slotWaits.ms, note: slotWaits.said(slotWaits.ms) },
+              });
+        return this.withinTheClientsLimit(spec.name, this.withFeedbackNotice(this.withUpdateNotice(waited)));
       } finally {
         this.inFlight.delete(call);
       }
