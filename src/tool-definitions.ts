@@ -649,7 +649,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       maxResults: {
         type: 'integer',
         minimum: 1,
-        description: 'How many matching lines to answer. Default 100.',
+        description:
+          'How many matching lines to answer. Default 100. Past it truncated is true, and the summary still counts the whole search.',
       },
     },
     requires: ['projectPath', 'query'],
