@@ -5582,6 +5582,21 @@ class GodotServer {
             kept.projectPath ?? '',
           );
         }
+        // A kept game's console lived in its keeper, which ends with it. The adapter's buffer holds
+        // nothing of that run, so reading it answered no lines, or an earlier played run's.
+        const last = this.activeProcess;
+        if (
+          tool === 'debug_state' &&
+          op === 'output' &&
+          last !== null &&
+          !last.throughEditor &&
+          last.keeper !== undefined
+        ) {
+          return this.createErrorResponse(
+            'The game this server started has ended, and its debugger, which held its console output, ended with it.',
+            ['editor_output reads what the game printed, with the errors and warnings it reported'],
+          );
+        }
         // The console the adapter buffered outlives the game it came from, so reading it needs
         // no session. A stack, a scope and a step all need one, and one that is stopped.
         if (tool === 'debug_state' && op === 'output') {

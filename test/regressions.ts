@@ -33406,6 +33406,24 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       /The game is running, not held/,
       `and removed, it lets the game run: ${free.said}`,
     );
+
+    // The console lives in the game's debugger. Once the game has ended, the read fell through to
+    // the editor's adapter, which held nothing of this run, and answered no lines as if none had
+    // been printed.
+    const kept = await call('debug_state', { op: 'output' });
+    assert.ok(asArray(get(kept.answer, 'output')).includes('waiting for res://never.tres'), kept.said);
+    const stop = await call('editor_run', { projectPath: project, op: 'stop' });
+    started = false;
+    assert.equal(get(stop.answer, 'stopped'), true, stop.said);
+    const ended = await call('debug_state', { op: 'output' });
+    assert.equal(ended.answer, null, ended.said);
+    assert.match(
+      ended.said,
+      /^The game this server started has ended, and its debugger, which held its console output, ended with it\.[\s\S]*editor_output reads what the game printed/,
+      ended.said,
+    );
+    const printed = await call('editor_output', { projectPath: project, op: 'run' });
+    assert.match(printed.said, /waiting for res:\/\/never\.tres/, printed.said);
   } finally {
     if (started) {
       await server.request(
