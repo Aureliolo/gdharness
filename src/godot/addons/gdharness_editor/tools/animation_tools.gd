@@ -259,9 +259,13 @@ func read_animation_states(args: Dictionary) -> Dictionary:
 	if opened[1] == null:
 		return opened[2]
 	var anim_tree: AnimationTree = opened[1]
-	var player: AnimationPlayer = anim_tree.get_node_or_null(anim_tree.anim_player) as AnimationPlayer
+	var reached: Node = anim_tree.get_node_or_null(anim_tree.anim_player)
+	var player: AnimationPlayer = reached as AnimationPlayer
 	var player_path: String = "" if player == null else scene.path_of(player)
-	return _read_in(scene, GdhAnimationReads.states(anim_tree, state_machine_path, player, player_path))
+	var unplayed: String = GdhAnimationReads.no_player(str(anim_tree.anim_player), reached)
+	return _read_in(
+		scene, GdhAnimationReads.states(anim_tree, state_machine_path, player, player_path, unplayed)
+	)
 
 
 # =============================================================================

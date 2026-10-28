@@ -37,7 +37,7 @@ jobs:
         uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun scripts/install-packages.ts
 
       - name: Build the site
         run: bun run docs

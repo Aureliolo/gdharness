@@ -64,7 +64,13 @@ static func scene_states(scene_path: String, tree_path: String, state_machine_pa
 			player_path = "."
 		var found: Array = _bare(scene_path, player_path, "AnimationPlayer")
 		player = found[0]
-	var answer: Dictionary = states(tree, state_machine_path, player, player_path)
+	var reached: Node = null
+	if player == null and not player_path.is_empty():
+		reached = _bare(scene_path, player_path, "Node")[0]
+	var unplayed: String = no_player(str(tree.anim_player), reached)
+	if reached != null:
+		reached.free()
+	var answer: Dictionary = states(tree, state_machine_path, player, player_path, unplayed)
 	tree.free()
 	if player != null:
 		player.free()
@@ -236,6 +242,20 @@ static func no_machine(tree: AnimationTree, state_machine_path: String) -> Strin
 	return "No state machine at " + state_machine_path
 
 
+## Why no state finds its animation when [param anim_player], an AnimationTree's path to its
+## player, reaches no AnimationPlayer: [param reached] is the node it reaches instead, null for none.
+static func no_player(anim_player: String, reached: Node) -> String:
+	var until: String = "so no state plays anything until scene_node set points anim_player at one."
+	if anim_player.is_empty():
+		return "The AnimationTree has no anim_player, " + until
+	if reached == null:
+		return "The AnimationTree's anim_player %s reaches no node, %s" % [anim_player, until]
+	return (
+		"The AnimationTree's anim_player %s reaches %s, a %s rather than an AnimationPlayer, %s"
+		% [anim_player, reached.name, reached.get_class(), until]
+	)
+
+
 ## Why a state playing [param animation_name] from [param player], at [param player_path] from the
 ## scene root as playerNodePath takes it, plays nothing yet. anim_player is relative to the tree
 ## ("../Anim"), which no argument takes.
@@ -254,9 +274,14 @@ static func missing_animation(player: AnimationPlayer, player_path: String, anim
 
 ## The states and transitions of the state machine at [param state_machine_path] in [param tree].
 ## A state playing an animation says whether [param player], at [param player_path], has it, as
-## add_state answers: a state naming one it lacks plays nothing, and says so only in a log.
+## add_state answers: a state naming one it lacks plays nothing, and says so only in a log. With no
+## player, each says [param unplayed], what [method no_player] made of the tree's path.
 static func states(
-	tree: AnimationTree, state_machine_path: String, player: AnimationPlayer, player_path: String
+	tree: AnimationTree,
+	state_machine_path: String,
+	player: AnimationPlayer,
+	player_path: String,
+	unplayed: String
 ) -> Dictionary:
 	var sm: AnimationNodeStateMachine = state_machine(tree, state_machine_path)
 	if sm == null:
@@ -270,7 +295,9 @@ static func states(
 			entry["animationName"] = str(plays.animation)
 			var found: bool = player != null and player.has_animation(plays.animation)
 			entry["animationFound"] = found
-			if player != null and not found:
+			if player == null:
+				entry["animationMissing"] = unplayed
+			elif not found:
 				entry["animationMissing"] = missing_animation(player, player_path, str(plays.animation))
 		listed.append(entry)
 	var transitions: Array[Dictionary] = []

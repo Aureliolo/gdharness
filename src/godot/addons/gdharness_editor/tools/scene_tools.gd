@@ -15,6 +15,7 @@ const GdhPlacing = preload("scene_placing.gd")
 const GdhPropertyValues = preload("../property_values.gd")
 const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhSceneSharing = preload("scene_sharing.gd")
 const GdhSerialisation = preload("../serialisation.gd")
 const GdhTilesetTools = preload("tileset_tools.gd")
 
@@ -43,7 +44,16 @@ func _kept(scene: GdhSceneFile, saved: Node, node: Node, names: Array) -> String
 	for key: Variant in names:
 		var property: String = str(key)
 		var loaded: Variant = _properties.read_at(copy, property)
-		if not scene.kept(saved, loaded, _properties.read_at(node, property)):
+		var given: Variant = _properties.read_at(node, property)
+		if not scene.kept(saved, loaded, given):
+			# The file holds it, and the copy's own script set it again as the copy loaded, as it will
+			# wherever the scene loads; an editor saves the same.
+			if scene.stores(at, property, given):
+				var on: Dictionary = scene.loads_as.get_or_add(at, {})
+				if GdhHeadlessCheck.untooled(copy.get_script()):
+					scene.loads_untooled[at] = true
+				on[property] = _values.serialize_value(loaded)
+				continue
 			return (
 				(
 					"%s.%s would load from the file as %s: the scene does not keep it, because the property "
@@ -317,6 +327,7 @@ func add_node(args: Dictionary) -> Dictionary:
 	_properties.note_write(answer, new_node)
 	if not adding.is_empty():
 		answer.merge(GdhGroups.read_added(new_node, adding))
+	var id: int = new_node.get_instance_id()
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var unkept: String = _kept(
@@ -329,6 +340,8 @@ func add_node(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
+	_note_put_back(answer, scene, id, new_path)
+	_note_loads_as(answer, scene, new_path)
 	if packed != null:
 		answer["instanceOf"] = instance_path
 	return answer
@@ -519,6 +532,7 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	for property: String in GdhPlacing.placing(node):
 		drawn_at[property] = _properties.read_at(node, property)
 	var held_at: Transform3D = (node as Node3D).transform if node is Node3D else Transform3D.IDENTITY
+	var stored_before: Dictionary = GdhHeadlessCheck.stored(node)
 	# Unowned while it moves: a node taken out of the tree keeps its owner, and adding it under the new
 	# parent warned that the owner was not above it. Node.reparent warns the same way.
 	node.owner = null
@@ -528,6 +542,11 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	GdhPlacing.own(node, root)
 	if GdhRead.as_bool(args.get("keepGlobalTransform", true)):
 		GdhPlacing.keep_in_place(node, old_parent)
+		# Unasked, a headless write takes the move on a node whose script is not a tool for the
+		# script's doing and puts the node back as the file held it.
+		var placed: Array[String] = GdhHeadlessCheck.differing(node, stored_before, {})
+		if not placed.is_empty():
+			scene.asked(node, placed)
 	var also_changed: Dictionary = {}
 	for property: String in drawn_at:
 		var now: Variant = _properties.read_at(node, property)
@@ -644,6 +663,13 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var new_path: String = scene.path_of(node)
 	var answer: Dictionary = {"ok": true, "nodePath": new_path, "properties": held}
 	_properties.note_write(answer, node)
+	var shared: Dictionary = {}
+	for key: Variant in properties:
+		var holders: Array[Dictionary] = GdhSceneSharing.holders(scene, node, str(key))
+		if not holders.is_empty():
+			shared[str(key)] = holders
+	if not shared.is_empty():
+		answer["sharedWith"] = shared
 	if not adding.is_empty() or not removing.is_empty():
 		answer["groups"] = GdhGroups.read(scene, node).get("groups", [])
 	var named: Array[String] = []
@@ -654,6 +680,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var source: String = scene.values_from(node, old_path)
 	var carried: GdhPaths = GdhPaths.new()
 	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
+	var id: int = node.get_instance_id()
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var unkept: String = _kept(scene, saved, node, properties.keys())
@@ -675,10 +702,46 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	if not dropped.is_empty():
 		answer["droppedValues"] = dropped["values"]
 		answer["droppedNodes"] = dropped["nodes"]
+	_note_put_back(answer, scene, id, new_path)
+	_note_loads_as(answer, scene, new_path)
 	_note_left_out(answer, scene.written_pack, new_path, named, source)
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
 	return answer
+
+
+## Puts under loadsAs in [param answer] each value given that the file holds and the script of the
+## node at [param at] changes as the scene loads, as it loads.
+static func _note_loads_as(answer: Dictionary, scene: GdhSceneFile, at: String) -> void:
+	var on: Dictionary = scene.loads_as.get(at, {})
+	if on.is_empty():
+		return
+	answer["loadsAs"] = on
+	var names: Array = on.keys()
+	var pronoun: String = "it" if names.size() == 1 else "them"
+	if scene.loads_untooled.has(at):
+		answer["loadsAsNote"] = (
+			(
+				"The file holds %s as given, which the editor shows. %s's script is not a tool, so in the "
+				+ "game it runs as the scene loads and changes %s to what loadsAs gives."
+			)
+			% [", ".join(names), at, pronoun]
+		)
+	else:
+		answer["loadsAsNote"] = (
+			(
+				"The file holds %s as given. %s's script runs as the scene loads, in the editor and in "
+				+ "the game, and changes %s to what loadsAs gives."
+			)
+			% [", ".join(names), at, pronoun]
+		)
+
+
+## Moves out of alsoChanged in [param answer] what the last write of [param scene] put back on the
+## node with instance id [param id], at [param at], to setByScript.
+static func _note_put_back(answer: Dictionary, scene: GdhSceneFile, id: int, at: String) -> void:
+	var restored: Dictionary = scene.restored_by_write.get(id, {})
+	GdhHeadlessCheck.move_script_set(answer, restored.keys(), at)
 
 
 ## Notes under notStored each of [param named] the file saved from [param pack] does not set on the
