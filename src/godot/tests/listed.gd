@@ -444,7 +444,8 @@ class GdhRunner:
 	func _on_gdunit_event(event: GdUnitEvent) -> void:
 		match event.type():
 			GdUnitEvent.SESSION_START:
-				_test_session = GdhIndexedSession.of(_test_session)
+				if not GdhIndexedSession.indexes_itself(_test_session):
+					_test_session = GdhIndexedSession.of(_test_session)
 			GdUnitEvent.TESTSUITE_BEFORE:
 				suite_running = event.resource_path()
 				orphans_at_suite = orphan_ids()
@@ -576,7 +577,7 @@ class GdhIndexedSession:
 
 	func _init(cases: Array[GdUnitTestCase], reports_in: String) -> void:
 		super(cases, reports_in)
-		for test: GdUnitTestCase in _test_cases:
+		for test: GdUnitTestCase in cases:
 			_by_id[str(test.guid)] = test
 
 	func find_test_by_id(id: GdUnitGUID) -> GdUnitTestCase:
@@ -589,7 +590,20 @@ class GdhIndexedSession:
 	static func of(made: GdUnitTestSession) -> GdUnitTestSession:
 		if made is GdhIndexedSession:
 			return made
-		return GdhIndexedSession.new(made._test_cases, made.report_path)
+		# Read by name, since a gdUnit4 whose session indexes its cases has no such member and a
+		# script naming it would not compile there.
+		var cases: Array[GdUnitTestCase] = []
+		var held: Variant = made.get(&"_test_cases")
+		if held is Array:
+			var listed: Array = held
+			cases.assign(listed)
+		return GdhIndexedSession.new(cases, made.report_path)
+
+	## Whether [param made] already finds a case by its id in a dictionary, as a gdUnit4 session
+	## with [code]test_count()[/code] does: gdUnit4 added both in one change, and took away the
+	## array of cases [method of] reads.
+	static func indexes_itself(made: GdUnitTestSession) -> bool:
+		return made.has_method(&"test_count")
 
 
 ## A session hook of the runner's own, failing the run when the [GdhIndexedSession] is not the
@@ -607,7 +621,7 @@ class GdhSessionCheck:
 		_runner = runner
 
 	func startup(session: GdUnitTestSession) -> GdUnitResult:
-		if session is GdhIndexedSession:
+		if session is GdhIndexedSession or GdhIndexedSession.indexes_itself(session):
 			return GdUnitResult.success()
 		return (
 			GdUnitResult
