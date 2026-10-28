@@ -60157,8 +60157,22 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       textOf(
         await call('scene_node', { op: 'add', scenePath: 'made.tscn', nodeName: 'Boss', nodeType: 'Node' }),
       ),
-      'The root, Node2D, already has a child named Boss.',
+      'The root, Node2D, already has a child named Boss; Boss2 is free there.',
     );
+    // The name offered is free, past a numbered one already taken, and a numbered name counts on.
+    await written('scene_node', { op: 'add', scenePath: 'made.tscn', nodeName: 'Boss2', nodeType: 'Node' });
+    for (const [taken, free] of [
+      ['Boss', 'Boss3'],
+      ['Boss2', 'Boss3'],
+    ] as const) {
+      assert.equal(
+        textOf(
+          await call('scene_node', { op: 'add', scenePath: 'made.tscn', nodeName: taken, nodeType: 'Node' }),
+        ),
+        `The root, Node2D, already has a child named ${taken}; ${free} is free there.`,
+      );
+    }
+    await written('scene_node', { op: 'delete', scenePath: 'made.tscn', nodePath: 'Boss2' });
     // A scene that is not there is refused before anything loads it, so no engine error and
     // backtrace lie beneath the refusal, and the nearest scenes are offered.
     const orc = await call('scene_node', {

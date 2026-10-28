@@ -526,8 +526,25 @@ func unusable_name(parent: Node, child_name: String, moving: Node = null) -> Str
 	if taken != null and taken != moving and taken.get_parent() == parent:
 		# The root by its name, since its path is ".", and ". already has a child" read as a typo.
 		var holder: String = "The root, %s," % parent.name if parent == root else path_of(parent)
-		return "%s already has a child named %s." % [holder, child_name]
+		return (
+			"%s already has a child named %s; %s is free there."
+			% [holder, child_name, _free_name(parent, child_name)]
+		)
 	return ""
+
+
+## The first name after [param taken] that no child of [param parent] has, numbered as Godot numbers
+## a duplicate: Crate2 after Crate, Crate4 after Crate3 when that is taken too. The refusal alone
+## left a caller guessing at a name that might be taken as well.
+static func _free_name(parent: Node, taken: String) -> String:
+	var digits: int = 0
+	while digits < taken.length() and taken[taken.length() - 1 - digits] in "0123456789":
+		digits += 1
+	var base: String = taken.left(taken.length() - digits)
+	var at: int = 2 if digits == 0 else taken.right(digits).to_int() + 1
+	while parent.has_node(NodePath(base + str(at))):
+		at += 1
+	return base + str(at)
 
 
 ## The properties this scene's own file sets on [param node], each with the value the file gives it.
