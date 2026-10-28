@@ -230,7 +230,9 @@ jobs:
     with:
       # renovate: datasource=github-runners depName=macos
       runner: macos-26
-      regression-parts: '["1/3", "2/3", "3/3"]'
+      # Four, as on Windows: dealt evenly in three, each part's regressions came to about 1030 of
+      # the 1200 seconds a part's run is given.
+      regression-parts: '["1/4", "2/4", "3/4", "4/4"]'
       engine-fixtures-with-editor-fixtures: true
 
   # One check per platform, named by platform rather than by runner image, because the name is
