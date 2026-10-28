@@ -49205,6 +49205,12 @@ async function testGdUnitRunner(): Promise<void> {
           undefined,
           'and none failed only through another',
         );
+        // A run stopped before any suite still rebuilt the class list first, and what the rebuild
+        // found is what a caller reads when a class did not resolve. gdUnit4's classes are listed.
+        assert.ok(
+          Number(get(brokenAnswer, 'classes', 'classes')) > 0,
+          `classes holds the rebuild: ${broken}`,
+        );
 
         // #900: a script with an error of its own and a suite that fails only for depending on it.
         // The engine says the same line for each such script, and the answer gives them by path.
