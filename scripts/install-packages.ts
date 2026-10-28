@@ -8,8 +8,8 @@
  * was being unpacked may be only partly there.
  */
 
-import { spawnSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
+import { spawnSyncHidden } from '../src/spawn.js';
 
 const ATTEMPTS = 3;
 const LIMIT_MS = 180_000;
@@ -19,7 +19,7 @@ for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
   if (attempt > 1) {
     rmSync('node_modules', { recursive: true, force: true });
   }
-  const run = spawnSync(process.execPath, ['install', '--frozen-lockfile'], {
+  const run = spawnSyncHidden(process.execPath, ['install', '--frozen-lockfile'], {
     stdio: 'inherit',
     timeout: LIMIT_MS,
     killSignal: 'SIGKILL',
