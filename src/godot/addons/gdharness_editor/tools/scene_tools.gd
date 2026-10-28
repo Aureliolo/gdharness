@@ -12,6 +12,7 @@ const GdhKin = preload("scene_kin.gd")
 const GdhNavigationBake = preload("navigation_bake.gd")
 const GdhPaths = preload("scene_paths.gd")
 const GdhPlacing = preload("scene_placing.gd")
+const GdhPropertyPaths = preload("../property_paths.gd")
 const GdhPropertyValues = preload("../property_values.gd")
 const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
@@ -519,6 +520,7 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	for property: String in GdhPlacing.placing(node):
 		drawn_at[property] = _properties.read_at(node, property)
 	var held_at: Transform3D = (node as Node3D).transform if node is Node3D else Transform3D.IDENTITY
+	var stored_before: Dictionary = GdhHeadlessCheck.stored(node)
 	# Unowned while it moves: a node taken out of the tree keeps its owner, and adding it under the new
 	# parent warned that the owner was not above it. Node.reparent warns the same way.
 	node.owner = null
@@ -528,6 +530,11 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	GdhPlacing.own(node, root)
 	if GdhRead.as_bool(args.get("keepGlobalTransform", true)):
 		GdhPlacing.keep_in_place(node, old_parent)
+		# Unasked, a headless write takes the move on a node whose script is not a tool for the
+		# script's doing and puts the node back as the file held it.
+		var placed: Array[String] = GdhHeadlessCheck.differing(node, stored_before, {})
+		if not placed.is_empty():
+			scene.asked(node, placed)
 	var also_changed: Dictionary = {}
 	for property: String in drawn_at:
 		var now: Variant = _properties.read_at(node, property)
@@ -644,6 +651,13 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var new_path: String = scene.path_of(node)
 	var answer: Dictionary = {"ok": true, "nodePath": new_path, "properties": held}
 	_properties.note_write(answer, node)
+	var shared: Dictionary = {}
+	for key: Variant in properties:
+		var holders: Array[Dictionary] = _sharing(scene, node, str(key))
+		if not holders.is_empty():
+			shared[str(key)] = holders
+	if not shared.is_empty():
+		answer["sharedWith"] = shared
 	if not adding.is_empty() or not removing.is_empty():
 		answer["groups"] = GdhGroups.read(scene, node).get("groups", [])
 	var named: Array[String] = []
@@ -679,6 +693,56 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
 	return answer
+
+
+## Every other place in [param scene] holding a resource that [param key] was written through on
+## [param node], as {node, property}. A resource built into a scene is one object wherever the scene
+## uses it, as a copy made by duplicate shares its original's, so the write changed each of them too.
+func _sharing(scene: GdhSceneFile, node: Node, key: String) -> Array[Dictionary]:
+	var holders: Array[Dictionary] = []
+	var through: Array = GdhPropertyPaths.holder_of(node, key, GdhPropertyPaths.home_of(node))[2]
+	if through.is_empty():
+		return holders
+	var wanted: Dictionary = {}
+	for reached: Resource in through:
+		wanted[reached.get_instance_id()] = true
+	var nodes: Array[Node] = [scene.root]
+	nodes.append_array(scene.root.find_children("*", "", true, false))
+	for at: Node in nodes:
+		for declared: Dictionary in at.get_property_list():
+			var property: String = str(declared.get("name", ""))
+			if property.is_empty() or not (GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
+				continue
+			for found: String in _paths_to(at.get(property), property, wanted, {}):
+				if at != node or not key.begins_with(found + "/"):
+					holders.append({"node": scene.path_of(at), "property": found})
+	return holders
+
+
+## The paths below [param path] at which [param value] holds a resource of [param wanted], by
+## instance id, stepping into lists and into resources built into a scene.
+static func _paths_to(value: Variant, path: String, wanted: Dictionary, seen: Dictionary) -> Array[String]:
+	var paths: Array[String] = []
+	if value is Array:
+		var items: Array = value
+		for index: int in items.size():
+			paths.append_array(_paths_to(items[index], "%s/%d" % [path, index], wanted, seen))
+		return paths
+	if not value is Resource:
+		return paths
+	var held: Resource = value
+	var id: int = held.get_instance_id()
+	if wanted.has(id):
+		paths.append(path)
+	var built_in: bool = held.resource_path.is_empty() or held.resource_path.contains("::")
+	if seen.has(id) or not built_in:
+		return paths
+	seen[id] = true
+	for declared: Dictionary in held.get_property_list():
+		var property: String = str(declared.get("name", ""))
+		if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+			paths.append_array(_paths_to(held.get(property), path + "/" + property, wanted, seen))
+	return paths
 
 
 ## Notes under notStored each of [param named] the file saved from [param pack] does not set on the

@@ -59819,8 +59819,10 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
  * taken out only there; one this scene adds is saved in its file and read back from it. A copy goes
  * right after the original, as the editor's Duplicate puts it. A move keeps the node where it is
  * drawn, worked out through a scaled parent, a Control keeping only its position, a parent that is
- * no CanvasItem and so places nothing, top-level nodes left alone, and in 3D; keepGlobalTransform
- * false leaves the transform as it was. A delete names the nodes of this scene that went with it,
+ * no CanvasItem and so places nothing, top-level nodes left alone, and in 3D, and the file keeps the
+ * move on a node whose script is not a tool, without what that script did as it loaded;
+ * keepGlobalTransform false leaves the transform as it was. A set through a resource built into the
+ * scene names the other places holding it. A delete names the nodes of this scene that went with it,
  * and not those inside its instances.
  */
 async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
@@ -59876,6 +59878,33 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://coin.tscn" id="1_coin"]\n\n' +
       '[node name="Twice" type="Node2D"]\n\n' +
       '[node name="Coin" parent="." groups=["coins"] instance=ExtResource("1_coin")]\n',
+    'drawn.gd': 'extends CanvasItem\n\n\nfunc _init() -> void:\n\tmodulate = Color.RED\n',
+    'spun.gd': 'extends Node3D\n\n\nfunc _init() -> void:\n\tvisible = false\n',
+    'scripted.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://drawn.gd" id="1_drawn"]\n' +
+      '[ext_resource type="Script" path="res://spun.gd" id="2_spun"]\n\n[node name="Scripted" type="Node"]\n\n' +
+      '[node name="Flat" type="Node2D" parent="."]\nposition = Vector2(100, 50)\nscale = Vector2(2, 2)\n\n' +
+      '[node name="Walker" type="Node2D" parent="Flat"]\nposition = Vector2(5, 5)\nscript = ExtResource("1_drawn")\n\n' +
+      '[node name="Card" type="Control" parent="Flat"]\nlayout_mode = 3\noffset_left = 4.0\noffset_top = 4.0\n' +
+      'offset_right = 44.0\noffset_bottom = 44.0\nscript = ExtResource("1_drawn")\n\n' +
+      '[node name="Deep" type="Node3D" parent="."]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 2, 3)\n\n' +
+      '[node name="Grip" type="Node3D" parent="Deep"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)\n' +
+      'script = ExtResource("2_spun")\n',
+    'shared.tscn':
+      '[gd_scene format=3]\n\n[sub_resource type="CircleShape2D" id="Round"]\nradius = 10.0\n\n' +
+      '[sub_resource type="CircleShape2D" id="Own"]\nradius = 5.0\n\n' +
+      '[sub_resource type="CircleShape2D" id="Spare"]\n\n' +
+      '[sub_resource type="Gradient" id="Ramp"]\n\n' +
+      '[sub_resource type="GradientTexture2D" id="WideRamp"]\ngradient = SubResource("Ramp")\n\n' +
+      '[sub_resource type="GradientTexture1D" id="ThinRamp"]\ngradient = SubResource("Ramp")\n\n' +
+      '[node name="Shared" type="Node2D"]\n\n' +
+      '[node name="Body" type="StaticBody2D" parent="."]\n\n' +
+      '[node name="Hit" type="CollisionShape2D" parent="Body"]\nshape = SubResource("Round")\n\n' +
+      '[node name="Zone" type="Area2D" parent="."]\nmetadata/rings = [SubResource("Spare"), SubResource("Round")]\n\n' +
+      '[node name="Edge" type="CollisionShape2D" parent="Zone"]\nshape = SubResource("Round")\n\n' +
+      '[node name="Lone" type="CollisionShape2D" parent="."]\nshape = SubResource("Own")\n\n' +
+      '[node name="Wide" type="Sprite2D" parent="."]\ntexture = SubResource("WideRamp")\n\n' +
+      '[node name="Thin" type="Sprite2D" parent="."]\ntexture = SubResource("ThinRamp")\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -60149,6 +60178,74 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
         },
       },
       `a top-level parent places its children by itself: ${JSON.stringify(finger)}`,
+    );
+    // A headless write puts a node whose script is not a tool back as the file held it wherever the
+    // call did not ask for the change, so these moved in the answer and not in the file.
+    for (const [path, saved] of [
+      [
+        'Flat/Walker',
+        /\[node name="Walker" type="Node2D" parent="\."[^\]]*\]\nposition = Vector2\(110, 60\)\nscale = Vector2\(2, 2\)\nscript/,
+      ],
+      [
+        'Flat/Card',
+        /\[node name="Card" type="Control" parent="\."[^\]]*\]\n(layout_mode = 3\n)?offset_left = 108\.0\noffset_top = 58\.0\noffset_right = 148\.0\noffset_bottom = 98\.0\nscript/,
+      ],
+      [
+        'Deep/Grip',
+        /\[node name="Grip" type="Node3D" parent="\."[^\]]*\]\ntransform = Transform3D\(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 3, 3\)\nscript/,
+      ],
+    ] as const) {
+      const moved = await node({
+        op: 'reparent',
+        scenePath: 'scripted.tscn',
+        nodePath: path,
+        newParentPath: '.',
+      });
+      assert.ok(get(moved, 'alsoChanged') !== undefined, JSON.stringify(moved));
+      assert.match(fileOf('scripted.tscn'), saved, `${path}: ${fileOf('scripted.tscn')}`);
+    }
+    assert.doesNotMatch(fileOf('scripted.tscn'), /modulate|visible/, fileOf('scripted.tscn'));
+
+    const shared = { scenePath: 'shared.tscn' };
+    await node({ ...shared, op: 'duplicate', nodePath: 'Body', newName: 'Body2' });
+    const widened = await node({
+      ...shared,
+      op: 'set',
+      nodePath: 'Body2/Hit',
+      properties: { 'shape/radius': 20 },
+    });
+    assert.deepEqual(
+      get(widened, 'sharedWith'),
+      {
+        'shape/radius': [
+          { node: 'Body/Hit', property: 'shape' },
+          { node: 'Zone', property: 'metadata/rings/1' },
+          { node: 'Zone/Edge', property: 'shape' },
+        ],
+      },
+      `the copy shares its original's shape, and so do Zone's list and Edge: ${JSON.stringify(widened)}`,
+    );
+    assert.equal(
+      [...fileOf('shared.tscn').matchAll(/radius = 20\.0/g)].length,
+      1,
+      `one shape holds the radius for all of them: ${fileOf('shared.tscn')}`,
+    );
+    const own = await node({ ...shared, op: 'set', nodePath: 'Lone', properties: { 'shape/radius': 3 } });
+    assert.deepEqual(
+      [get(own, 'properties'), get(own, 'sharedWith')],
+      [{ 'shape/radius': 3 }, undefined],
+      `a shape no other node holds is shared with nothing: ${JSON.stringify(own)}`,
+    );
+    const ramp = await node({
+      ...shared,
+      op: 'set',
+      nodePath: 'Wide',
+      properties: { 'texture/gradient/interpolation_mode': 1 },
+    });
+    assert.deepEqual(
+      get(ramp, 'sharedWith'),
+      { 'texture/gradient/interpolation_mode': [{ node: 'Thin', property: 'texture/gradient' }] },
+      `a resource held inside another is found there: ${JSON.stringify(ramp)}`,
     );
 
     const gone = await node({ op: 'delete', nodePath: 'Items' });
@@ -61244,7 +61341,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     'crate.gd':
       'extends StaticBody2D\n\n\nfunc _init() -> void:\n\tmodulate = Color(1, 0, 0)\n' +
       '\tvar spare: Node = load("res://parts/bolt.tscn").instantiate()\n\tspare.name = "Spare"\n\tadd_child(spare)\n',
-    'heavy.gd': 'extends StaticBody2D\n',
+    'heavy.gd': 'class_name HeavyCrate\nextends StaticBody2D\n',
     'panel.gd': 'extends Control\n',
     // Hit's shape and Mark's mesh are built into this file, so a scene instancing it cannot write
     // into them.
@@ -61431,12 +61528,21 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       script: 'heavy.gd',
     });
     assert.equal(get(scripted, 'rootNodeName'), 'Heavy', JSON.stringify(scripted));
-    assert.equal(
-      get(scripted, 'script'),
-      'res://heavy.gd',
-      `the answer names the script: ${JSON.stringify(scripted)}`,
+    assert.deepEqual(
+      [get(scripted, 'script'), get(scripted, 'scriptClass')],
+      ['res://heavy.gd', 'HeavyCrate'],
+      `the answer names the script and the class it declares: ${JSON.stringify(scripted)}`,
     );
-    assert.equal(get(made, 'script'), undefined, `and none when none was given: ${JSON.stringify(made)}`);
+    assert.deepEqual(
+      [get(made, 'script'), get(made, 'scriptClass')],
+      ['res://crate.gd', undefined],
+      `and with none given, the one the root carries from the scene it inherits: ${JSON.stringify(made)}`,
+    );
+    assert.equal(
+      get(further, 'script'),
+      'res://crate.gd',
+      `through an inherited scene in between: ${JSON.stringify(further)}`,
+    );
     assert.match(
       fileOf('parts/heavy_crate.tscn'),
       /\[node name="Heavy" instance=ExtResource\("1_base"\)\]\nscript = ExtResource\("2_script"\)\n/,
