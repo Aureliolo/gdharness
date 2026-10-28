@@ -187,6 +187,7 @@ import {
   lspPortChoices,
   removeLeftRecords,
 } from '../src/lsp-bridge.js';
+import { withNearestFiles } from '../src/nearest.js';
 import {
   exportedBuild,
   isSameDirectory,
@@ -53000,6 +53001,29 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       'a Curve file reads in the names a write takes',
     );
     rmSync(join(project, 'ease.tres'));
+    // What else a write changed is answered in those names too, and a point added changes only the
+    // list the file stores them in.
+    writeFileSync(
+      join(project, 'ramp.tres'),
+      '[gd_resource type="Curve" format=3]\n\n[resource]\n_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(0.5, 1), 0.0, 0.0, 0, 0]\npoint_count = 2\n',
+    );
+    const pointAdded = await request('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://ramp.tres',
+      properties: { point_count: 3, 'point_2/position': { x: 1, y: 0.2 } },
+    });
+    assert.deepEqual(
+      [
+        get(parseTextContent(pointAdded), 'alsoChanged'),
+        readFileSync(join(project, 'ramp.tres'), 'utf8').split('[resource]\n')[1],
+      ],
+      [
+        undefined,
+        '_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(0.5, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.2), 0.0, 0.0, 0, 0]\npoint_count = 3\n',
+      ],
+      textOf(pointAdded) ?? JSON.stringify(pointAdded),
+    );
+    rmSync(join(project, 'ramp.tres'));
     // Comparing built-in resources by what they hold meets one that holds itself, and has to end.
     // The check after the save compares the one set with the one the file loads, two objects that
     // each hold themselves, which only a script can make: this one's setter links the ring to
@@ -53531,6 +53555,30 @@ async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
  * `unsafe_call_argument=0` on purpose lost the line to a write of another key. And with no declared
  * type to fit a tagged PackedStringArray to, the tag was written into the file as a dictionary.
  */
+/**
+ * The server's half of the nearest-file offer words it as the engine's does. A misspelt extension has
+ * no file of its own extension to be near, so a file of the same name beside it comes first, unless
+ * the refusal is about that file.
+ */
+function testAMisspeltExtensionIsOfferedTheFileOfThatName(): void {
+  const scripts = ['res://ai/brain.gd', 'res://ai/brawn.gd'];
+  const beside = ['res://ai/brain.gd', 'res://ai/brain.tscn', 'res://ai/brawn.gd'];
+  assert.equal(
+    withNearestFiles('Script file does not exist: res://ai/brain.gdd', 'res://ai/brain.gdd', scripts, beside),
+    'Script file does not exist: res://ai/brain.gdd. The files of that name beside it are res://ai/brain.gd, res://ai/brain.tscn.',
+  );
+  assert.equal(
+    withNearestFiles('res://ai/brain.tscn is not a script', 'res://ai/brain.gd2', scripts, beside),
+    'res://ai/brain.tscn is not a script. The file of that name beside it is res://ai/brain.gd.',
+    'a file the refusal names is not offered back',
+  );
+  assert.equal(
+    withNearestFiles('Script file does not exist: res://ai/brainn.gd', 'res://ai/brainn.gd', scripts, beside),
+    'Script file does not exist: res://ai/brainn.gd. The nearest .gd file is res://ai/brain.gd.',
+    'with none of that name, the nearest of its extension',
+  );
+}
+
 async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
@@ -64342,6 +64390,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowedRunWritesItsMovie,
   testTheEditorIsOfferedWhereItCanAnswer,
   testASettingTakesWhatAPropertyTakes,
+  testAMisspeltExtensionIsOfferedTheFileOfThatName,
   testASettingsWriteKeepsEveryOtherLine,
   testAnElementIsToldWhatItsTypeTakes,
   testAWriteSaysWhatElseItChanged,

@@ -8309,8 +8309,15 @@ class GodotServer {
   private missingScript(projectPath: string, relativePath: string): ToolResponse {
     const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
     const wanted = `res://${relativePath}`;
+    const folder = dirname(relativePath.replaceAll('\\', '/'));
+    const inFolder = join(projectPath, folder);
+    const beside = existsSync(inFolder)
+      ? readdirSync(inFolder, { withFileTypes: true })
+          .filter((entry) => entry.isFile())
+          .map((entry) => `res://${folder === '.' ? '' : `${folder}/`}${entry.name}`)
+      : [];
     return this.createErrorResponse(
-      withNearestFiles(`Script file does not exist: ${wanted}`, wanted, scripts),
+      withNearestFiles(`Script file does not exist: ${wanted}`, wanted, scripts, beside),
     );
   }
 

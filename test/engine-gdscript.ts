@@ -1721,7 +1721,10 @@ function testOperations(godotPath: string, projectDir: string): void {
   const misspeltExtension = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
     resource_path: 'art.pgn',
   });
-  assert.match(misspeltExtension.stderr, /res:\/\/art\.pgn is not on disk, and res:\/\/art\.png is\./);
+  assert.match(
+    misspeltExtension.stderr,
+    /res:\/\/art\.pgn is not on disk\. The file of that name beside it is res:\/\/art\.png\./,
+  );
   const misspeltName = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
     resource_path: 'arts.png',
   });
@@ -3051,6 +3054,23 @@ function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _p
         'get_uid',
         { resource_path: 'res://stagee.tscn' },
         `File does not exist: res://stagee.tscn. ${nearStage}`,
+      ],
+      // A misspelt extension has no file of its own extension to be near.
+      [
+        'get_uid',
+        { resource_path: 'res://stage.tcsn' },
+        'File does not exist: res://stage.tcsn. The file of that name beside it is res://stage.tscn.',
+      ],
+      // Offered although the refusal's own path, res://stage.tscnn, holds its name.
+      [
+        'get_uid',
+        { resource_path: 'res://stage.tscnn' },
+        'File does not exist: res://stage.tscnn. The file of that name beside it is res://stage.tscn.',
+      ],
+      [
+        'read_resource',
+        { resource_path: 'res://stage.tcsn' },
+        'No resource at res://stage.tcsn. The file of that name beside it is res://stage.tscn.',
       ],
       [
         'add_autoload',
