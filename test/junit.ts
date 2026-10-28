@@ -1157,7 +1157,51 @@ function testAnIgnoreThatLeftOutNothingIsNamed(): void {
   );
 }
 
+/**
+ * The report gdUnit4 writes for a case whose call into another script raised, from calc_test.gd:
+ *
+ *     func test_div_by_zero() -> void:
+ *         assert_int(Calc.new().div(1, 0)).is_equal(0)
+ *
+ * with Calc.div dividing by zero on line 11 of calc.gd, and beside it a case raising in the suite.
+ */
+function testAnErrorIsPlacedWhereItWasRaised(): void {
+  const report = parseJUnit(`<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-10-28" name="report_1" tests="2" failures="2" skipped="0" flaky="0" time="0.000">
+\t<testsuite id="0" name="calc_test" package="test" tests="2" failures="2" errors="0" skipped="0" flaky="0" time="0.179">
+\t\t<testcase name="test_div_by_zero" classname="calc_test" time="0.034">
+\t\t\t<error message="ERROR: res://test/calc_test.gd:11" type="ABORT">
+<![CDATA[
+Godot Runtime Error !
+  'Division by zero error in operator '/'.'
+\tat 'div' in res://calc.gd:11
+\tat 'test_div_by_zero' in res://test/calc_test.gd:15
+]]>
+\t\t\t</error>
+\t\t</testcase>
+\t\t<testcase name="test_reads_missing" classname="calc_test" time="0.012">
+\t\t\t<error message="ERROR: res://test/calc_test.gd:20" type="ABORT">
+<![CDATA[
+Godot Runtime Error !
+  'Invalid access to property or key 'missing' on a base object of type 'Dictionary'.'
+\tat 'test_reads_missing' in res://test/calc_test.gd:20
+]]>
+\t\t\t</error>
+\t\t</testcase>
+\t</testsuite>
+</testsuites>`);
+  assert.deepEqual(
+    failedCases(report, '').map((entry) => [entry.name, entry.message]),
+    [
+      ['test_div_by_zero', 'ERROR: res://calc.gd:11'],
+      ['test_reads_missing', 'ERROR: res://test/calc_test.gd:20'],
+    ],
+    'an error is named where it was raised, in the suite or in the script it called',
+  );
+}
+
 testASecondFailedAssertionIsNotAHook();
+testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
 testARunawayCaseIsFoldedAndBounded();
 testAStringAfterAnArrayReadsItsOwnValue();
