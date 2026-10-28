@@ -100,6 +100,9 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	file.close()
 	if not stored:
 		return _log.failure("Failed to write to script file: " + full_script_path)
+	# The editor gives a script it makes a .uid beside it. A headless engine writes none until the
+	# project is imported, so a script made here was missing from every check tracking the sidecars.
+	var uid: String = _uid_beside(full_script_path)
 
 	var written: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
 	var parses: bool = _parses(written)
@@ -110,7 +113,10 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		"absolute_path": ProjectSettings.globalize_path(full_script_path),
 		"template_used": template if not template.is_empty() else "none",
 		"parses": parses,
+		"uid": null,
 	}
+	if not uid.is_empty():
+		answer["uid"] = uid
 	# Read off the file as the engine parsed it rather than off the arguments, which content leaves
 	# out. A script that does not parse tells the engine nothing, and its empty base and name were
 	# answered for a file whose header says otherwise, so those are read off the text instead.
@@ -123,6 +129,22 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	else:
 		answer.merge(_header_written(script_content))
 	return answer
+
+
+## The uid in the .uid file beside [param path], written first when there is none, as the editor
+## writes it for a script it makes; empty when it could not be written. A sidecar already there is
+## the one the engine reads the script's uid from, so it is kept.
+static func _uid_beside(path: String) -> String:
+	var sidecar: String = path + ".uid"
+	if FileAccess.file_exists(sidecar):
+		return FileAccess.get_file_as_string(sidecar).strip_edges()
+	var text: String = ResourceUID.id_to_text(ResourceUID.create_id_for_path(path))
+	var file: FileAccess = FileAccess.open(sidecar, FileAccess.WRITE)
+	if file == null:
+		return ""
+	var stored: bool = file.store_string(text + "\n")
+	file.close()
+	return text if stored else ""
 
 
 ## The refusal for [param path], which is no GDScript file, naming what [param doing] it instead:

@@ -791,6 +791,20 @@ function testOperations(godotPath: string, projectDir: string): void {
   const heroSource = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
   assert.match(heroSource, /^class_name FixtureHero/m, 'the class_name should be written first');
   assert.match(heroSource, /func change_state/, 'the state_machine template should be the one used');
+  // The editor writes a .uid beside a script it makes, and a headless engine writes none until an
+  // import, so a check tracking the sidecars failed on every script made here.
+  const heroUid = get(created, 'uid');
+  assert.match(String(heroUid), /^uid:\/\/[a-z0-9]+$/, 'the answer names the uid it wrote');
+  assert.equal(
+    readFileSync(join(projectDir, 'made', 'hero.gd.uid'), 'utf8'),
+    `${String(heroUid)}\n`,
+    'the sidecar holds the uid the answer names, as the editor writes it',
+  );
+  const leftUid = 'uid://dfde0vm55ws7m';
+  writeFileSync(join(projectDir, 'made', 'returned.gd.uid'), `${leftUid}\n`);
+  const returned = operation('create_script', { script_path: 'made/returned.gd', extends: 'Node' });
+  assert.equal(get(returned, 'uid'), leftUid, 'a sidecar already there is the uid the engine reads');
+  assert.equal(readFileSync(join(projectDir, 'made', 'returned.gd.uid'), 'utf8'), `${leftUid}\n`);
 
   // Every template has to parse in the strictest project there is, which this one is: a
   // template that trips a warning there is a script the tool wrote that the engine refuses.
@@ -2142,13 +2156,22 @@ function testOperations(godotPath: string, projectDir: string): void {
   // here recorded that the resave minted no UID, while the assertion above it took that same
   // operation's `scripts_resaved` count as correct. Both were true about the engine and the pair
   // was still wrong, because nothing asked what a caller reads `scripts_resaved: 1` as meaning.
-  const absent = operation('get_uid', { resource_path: 'made/hero.gd' });
+  // create_script writes the sidecar, so the script here is written as a file edit writes one.
+  writeFileSync(join(projectDir, 'made', 'unimported.gd'), 'extends Node\n');
+  const absent = operation('get_uid', { resource_path: 'made/unimported.gd' });
+  rmSync(join(projectDir, 'made', 'unimported.gd'));
   assert.equal(get(absent, 'exists'), false);
-  assert.equal(get(absent, 'file'), 'res://made/hero.gd');
+  assert.equal(get(absent, 'file'), 'res://made/unimported.gd');
   assert.match(
     String(get(absent, 'message')),
     /refresh_uids/,
     'and it names the op that makes one, since that is the next thing the caller wants',
+  );
+  const minted = operation('get_uid', { resource_path: 'made/hero.gd' });
+  assert.deepEqual(
+    [get(minted, 'exists'), get(minted, 'uid')],
+    [true, heroUid],
+    'the sidecar create_script wrote is the uid the engine reads',
   );
   // Every other kind keeps its UID somewhere else, and refresh_uids makes none of them: a scene in its
   // header and an imported file in its import file. All were answered as having no .uid, with
