@@ -22638,7 +22638,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     );
     assert.match(
       text(get(unfinished, 'note')),
-      /but stops reading a script at its first syntax error, so an error after one shows once it is fixed\./,
+      /but stops reading a script at its first syntax error, so an error after one shows once it is fixed, and so do its warnings, since a script that does not parse is not checked for any\./,
       JSON.stringify(unfinished),
     );
 

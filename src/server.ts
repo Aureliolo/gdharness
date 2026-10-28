@@ -3794,7 +3794,7 @@ function engineChecked(why: string): OperationParams {
   return {
     checkedBy: 'engine',
     languageServer: why,
-    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, but stops reading a script at its first syntax error, so an error after one shows once it is fixed. A second engine reports the warnings, at the levels the project sets, by raising each warning set to warn as an error for that run only, since the engine tells a warning as one only to an editor; each comes at its line without a column, and warnings is null when that engine could not answer. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both with their columns.",
+    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, but stops reading a script at its first syntax error, so an error after one shows once it is fixed, and so do its warnings, since a script that does not parse is not checked for any. A second engine reports the warnings, at the levels the project sets, by raising each warning set to warn as an error for that run only, since the engine tells a warning as one only to an editor; each comes at its line without a column, and warnings is null when that engine could not answer. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both with their columns.",
   };
 }
 
