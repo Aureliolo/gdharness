@@ -1,10 +1,10 @@
 #!/usr/bin/env -S godot --headless --script
 extends SceneTree
 
-# The command line the server runs is `godot --headless --path <project> --script <this>
-# <operation> @file:<params.json> <answer.json>`, and the one JSON object written to the answer
-# file is the answer. Everything an operation does lives in a sibling module; this file is the
-# command table and the wire format.
+# The command line the server runs is
+# `godot --headless --path <project> --script <this> <operation> @file:<params.json> <answer.json>`,
+# and the one JSON object written to the answer file is the answer. Everything an operation does
+# lives in a sibling module; this file is the command table and the wire format.
 #
 # A file rather than a line on stdout, because the project's autoloads run after `_init` and print
 # into the same stream: an autoload printing a dictionary in `_process` was the last JSON line out
@@ -34,17 +34,14 @@ const GdhRead = preload("reading.gd")
 const GdhRenameChecks = preload("rename_checks.gd")
 const GdhResourceFiles = preload("resource_files.gd")
 const GdhScriptCheck = preload("script_check.gd")
-
 ## Printed once the answer is written, after which the engine runs the project's autoloads. Kept in
 ## step with `ANSWERED` in src/headless.ts.
 const ANSWERED: String = "[gdharness] answered"
-
 ## Printed in `_init` by an operation that runs once the project's autoloads are in the tree, and
 ## when it begins there. Kept in step with `WAITING` and `BEGUN` in src/headless.ts, which files
 ## what the autoloads print in between as theirs rather than the operation's.
 const WAITING: String = "[gdharness] waiting for the autoloads"
 const BEGUN: String = "[gdharness] begun"
-
 ## The operations that compile the project's scripts. The engine knows an autoload's name only once
 ## the autoload is in the tree, which is after `_init`, so a script naming one compiled here failed
 ## with "Identifier not found" while the game and the editor ran it. A scene tool, and a read of a
@@ -116,7 +113,9 @@ func _init() -> void:
 	_answer(operation, params, answer_path)
 
 
-func _answer_after_the_autoloads(operation: String, params: Dictionary, answer_path: String) -> void:
+func _answer_after_the_autoloads(
+	operation: String, params: Dictionary, answer_path: String
+) -> void:
 	printerr(BEGUN)
 	_answer(operation, params, answer_path)
 
@@ -131,7 +130,12 @@ func _answer(operation: String, params: Dictionary, answer_path: String) -> void
 	var answer: FileAccess = FileAccess.open(answer_path, FileAccess.WRITE)
 	if answer == null:
 		_log.error(
-			"Could not write the answer to " + answer_path + ": " + error_string(FileAccess.get_open_error())
+			(
+				"Could not write the answer to "
+				+ answer_path
+				+ ": "
+				+ error_string(FileAccess.get_open_error())
+			)
 		)
 		quit(1)
 		return
@@ -168,7 +172,9 @@ func _read_params(argument: String) -> Variant:
 	var json: JSON = JSON.new()
 	if json.parse(params_json) != OK:
 		_log.error("Failed to parse JSON parameters: " + params_json)
-		_log.error("JSON Error: " + json.get_error_message() + " at line " + str(json.get_error_line()))
+		_log.error(
+			"JSON Error: " + json.get_error_message() + " at line " + str(json.get_error_line())
+		)
 		return null
 
 	var params: Variant = json.get_data()
@@ -338,7 +344,7 @@ func _editor_tool(params: Dictionary) -> Dictionary:
 	var path: String = own.resource_path.get_base_dir().path_join("editor_tools.gd")
 	var tools: Script = ResourceLoader.load(path, "Script")
 	if tools == null or not tools.can_instantiate():
-		return {"ok": false, "error": "The editor tools did not load from %s." % path}
+		return { "ok": false, "error": "The editor tools did not load from %s." % path }
 	var answer: Dictionary = tools.call("run", params)
 	return answer
 

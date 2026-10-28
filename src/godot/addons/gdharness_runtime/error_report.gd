@@ -1,5 +1,4 @@
 extends Logger
-
 ## The console of a game the editor plays, errors and prints in the order the engine made them,
 ## written to a file beside the announcement in the lines the engine itself prints.
 ##
@@ -53,7 +52,7 @@ func _log_message(message: String, _error: bool) -> void:
 
 
 # The engine's own signature for a Logger, eight parameters and not this project's to shape.
-# gdlint:ignore = function-arguments-number
+# gdstyle:ignore=quality/max-parameters
 func _log_error(
 	function: String,
 	file: String,

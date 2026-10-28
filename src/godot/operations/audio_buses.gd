@@ -23,7 +23,9 @@ func create_audio_bus(params: Dictionary) -> Dictionary:
 	# Sends are by name, so a second bus with one would leave every send to it meaning either.
 	var existing: int = AudioServer.get_bus_index(bus_name)
 	if existing != -1:
-		return _log.failure("A bus named " + bus_name + " already exists, at index " + str(existing))
+		return _log.failure(
+			"A bus named " + bus_name + " already exists, at index " + str(existing)
+		)
 
 	# Right after the bus it sends to, because a bus can only send to one before it. The engine
 	# inserts there and moves every later bus down one, so the new bus is at that index: taking the
@@ -41,7 +43,7 @@ func create_audio_bus(params: Dictionary) -> Dictionary:
 	var buses: Array[Dictionary] = []
 	for i: int in range(AudioServer.bus_count):
 		buses.append(_bus(i))
-	return {"bus": _bus(new_idx), "buses": buses, "layout": layout}
+	return { "bus": _bus(new_idx), "buses": buses, "layout": layout }
 
 
 func remove_audio_bus(params: Dictionary) -> Dictionary:
@@ -52,7 +54,9 @@ func remove_audio_bus(params: Dictionary) -> Dictionary:
 	if index == -1:
 		return _log.failure("No bus named %s. The buses are %s." % [bus_name, ", ".join(_names())])
 	if index == 0:
-		return _log.failure("%s is the bus every other ends in, so it cannot be removed." % bus_name)
+		return _log.failure(
+			"%s is the bus every other ends in, so it cannot be removed." % bus_name
+		)
 
 	# A bus sending to this one would be left sending to a name nothing has, which the engine reads
 	# as Master; sent on to where this one went instead, the chain it was part of keeps its shape.
@@ -70,9 +74,9 @@ func remove_audio_bus(params: Dictionary) -> Dictionary:
 	var buses: Array[Dictionary] = []
 	for i: int in range(AudioServer.bus_count):
 		buses.append(_bus(i))
-	var answer: Dictionary = {"removed": bus_name, "buses": buses, "layout": layout}
+	var answer: Dictionary = { "removed": bus_name, "buses": buses, "layout": layout }
 	if not resent.is_empty():
-		answer["resent"] = {"buses": resent, "to": onward}
+		answer["resent"] = { "buses": resent, "to": onward }
 	return answer
 
 
@@ -81,15 +85,19 @@ func get_audio_buses(_params: Dictionary) -> Dictionary:
 	for i: int in range(AudioServer.bus_count):
 		buses.append(_bus(i))
 	var layout: String = _layout_path()
-	var answer: Dictionary = {"bus_count": AudioServer.bus_count, "buses": buses, "layout": layout}
+	var answer: Dictionary = {
+		"bus_count": AudioServer.bus_count,
+		"buses": buses,
+		"layout": layout,
+	}
 	# The setting names a path whether or not anything is there, and a project that never changed a
 	# bus has no file: the path alone read as a layout the project keeps.
 	if not FileAccess.file_exists(layout):
 		answer["layout_on_disk"] = false
 		answer["note"] = (
 			(
-				"Nothing is at %s, so these are the engine's default buses; the first change to a bus "
-				+ "writes the layout there."
+				"Nothing is at %s, so these are the engine's default buses; the first change to a "
+				+ "bus writes the layout there."
 			)
 			% layout
 		)
@@ -139,7 +147,10 @@ func set_audio_bus_effect(params: Dictionary) -> Dictionary:
 	if layout.is_empty():
 		return {}
 	var answer: Dictionary = {
-		"bus": _bus(bus_idx), "effect_index": effect_idx, "effect_type": effect.get_class(), "layout": layout
+		"bus": _bus(bus_idx),
+		"effect_index": effect_idx,
+		"effect_type": effect.get_class(),
+		"layout": layout,
 	}
 	if not replaced.is_empty():
 		answer["replaced"] = replaced
@@ -157,7 +168,7 @@ func set_audio_bus_volume(params: Dictionary) -> Dictionary:
 	var layout: String = _save_layout()
 	if layout.is_empty():
 		return {}
-	return {"bus": _bus(bus_idx), "layout": layout}
+	return { "bus": _bus(bus_idx), "layout": layout }
 
 
 ## Renames a bus, and every send to it with it: the engine renames the one bus and leaves a bus that
@@ -177,7 +188,9 @@ func rename_audio_bus(params: Dictionary) -> Dictionary:
 		)
 	var existing: int = AudioServer.get_bus_index(new_name)
 	if existing != -1:
-		return _log.failure("A bus named " + new_name + " already exists, at index " + str(existing))
+		return _log.failure(
+			"A bus named " + new_name + " already exists, at index " + str(existing)
+		)
 	AudioServer.set_bus_name(index, new_name)
 	var resent: Array[String] = []
 	for i: int in range(AudioServer.bus_count):
@@ -189,7 +202,7 @@ func rename_audio_bus(params: Dictionary) -> Dictionary:
 	if layout.is_empty():
 		return {}
 	var answer: Dictionary = {
-		"renamed": {"from": bus_name, "to": new_name}, "bus": _bus(index), "layout": layout
+		"renamed": { "from": bus_name, "to": new_name }, "bus": _bus(index), "layout": layout,
 	}
 	if not resent.is_empty():
 		answer["resent"] = resent
@@ -211,7 +224,10 @@ func set_audio_bus_send(params: Dictionary) -> Dictionary:
 		return _log.failure("No bus named %s. The buses are %s." % [send, ", ".join(_names())])
 	if target == bus_idx:
 		return _log.failure(
-			"%s cannot send to itself; it can send to %s." % [bus_name, ", ".join(_names().slice(0, bus_idx))]
+			(
+				"%s cannot send to itself; it can send to %s."
+				% [bus_name, ", ".join(_names().slice(0, bus_idx))]
+			)
 		)
 	if target > bus_idx:
 		return (
@@ -219,10 +235,17 @@ func set_audio_bus_send(params: Dictionary) -> Dictionary:
 			. failure(
 				(
 					(
-						"%s is bus %d and %s is bus %d: a bus sends only to one before it, which keeps sound from "
-						+ "going round in a loop, so %s can send to %s."
+						"%s is bus %d and %s is bus %d: a bus sends only to one before it, which "
+						+ "keeps sound from going round in a loop, so %s can send to %s."
 					)
-					% [bus_name, bus_idx, send, target, bus_name, ", ".join(_names().slice(0, bus_idx))]
+					% [
+						bus_name,
+						bus_idx,
+						send,
+						target,
+						bus_name,
+						", ".join(_names().slice(0, bus_idx)),
+					]
 				)
 			)
 		)
@@ -231,7 +254,7 @@ func set_audio_bus_send(params: Dictionary) -> Dictionary:
 	var layout: String = _save_layout()
 	if layout.is_empty():
 		return {}
-	return {"bus": _bus(bus_idx), "layout": layout}
+	return { "bus": _bus(bus_idx), "layout": layout }
 
 
 func _names() -> Array[String]:
@@ -270,7 +293,11 @@ func _bus(index: int) -> Dictionary:
 
 
 func _layout_path() -> String:
-	return str(ProjectSettings.get_setting("audio/buses/default_bus_layout", "res://default_bus_layout.tres"))
+	return str(
+		ProjectSettings.get_setting(
+			"audio/buses/default_bus_layout", "res://default_bus_layout.tres"
+		)
+	)
 
 
 # The path the layout was written to, or empty with the reason on stderr.
@@ -285,7 +312,9 @@ func _save_layout() -> String:
 
 # Any effect class the engine has, by its class name or the part after "AudioEffect".
 func _effect_named(effect_type: String) -> AudioEffect:
-	var cls: String = effect_type if effect_type.begins_with("AudioEffect") else "AudioEffect" + effect_type
+	var cls: String = (
+		effect_type if effect_type.begins_with("AudioEffect") else "AudioEffect" + effect_type
+	)
 	if not ClassDB.class_exists(cls) or not ClassDB.is_parent_class(cls, "AudioEffect"):
 		return null
 	if not ClassDB.can_instantiate(cls):

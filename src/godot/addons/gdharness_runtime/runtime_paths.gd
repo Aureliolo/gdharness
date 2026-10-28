@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## Colon paths through what a node holds: "/root/Main" with "_game:run:day" reaches the day off the
 ## run off the game the node keeps. Every op that reads, writes, calls or waits on a game's state
 ## walks the same way, so the walk and what it says when a step is not there live in one place.
@@ -7,7 +6,6 @@ extends RefCounted
 const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhValues = preload("runtime_values.gd")
-
 ## The calls a path makes on a list or a map: those that take no arguments and change nothing.
 ##
 ## Named rather than asked of the engine, because asking about a method a list does not have logs an
@@ -50,8 +48,8 @@ const MAP_CALLS: Array[String] = [
 	"get_typed_value_class_name",
 	"get_typed_value_script",
 ]
-## The calls a path makes on a packed list, which has fewer than a list: measured on 4.7.2, it has no
-## front(), back(), max(), min() or hash().
+## The calls a path makes on a packed list, which has fewer than a list: measured on 4.7.2, it has
+## no front(), back(), max(), min() or hash().
 const PACKED_CALLS: Array[String] = ["size", "is_empty", "duplicate"]
 ## What a packed list of bytes answers beside those, read as another list or as text. It has no
 ## to_byte_array(), which every other packed list has.
@@ -109,7 +107,7 @@ const LIST_READS: Array[String] = [
 	"is_same_typed",
 ]
 const MAP_CHANGES: Array[String] = [
-	"clear", "assign", "sort", "merge", "erase", "get_or_add", "set", "make_read_only"
+	"clear", "assign", "sort", "merge", "erase", "get_or_add", "set", "make_read_only",
 ]
 const MAP_READS: Array[String] = [
 	"merged",
@@ -191,7 +189,8 @@ const VALUE_CALLS: Dictionary = {
 		"max_axis_index",
 		"min_axis_index",
 	],
-	TYPE_VECTOR2I: ["length", "length_squared", "abs", "sign", "aspect", "max_axis_index", "min_axis_index"],
+	TYPE_VECTOR2I:
+	["length", "length_squared", "abs", "sign", "aspect", "max_axis_index", "min_axis_index"],
 	TYPE_VECTOR3:
 	[
 		"length",
@@ -266,14 +265,16 @@ const VALUE_CALLS: Dictionary = {
 		"get_axis",
 	],
 	TYPE_PLANE: ["normalized", "is_finite", "get_center"],
-	TYPE_AABB: ["abs", "is_finite", "get_center", "get_volume", "get_longest_axis", "get_shortest_axis"],
+	TYPE_AABB:
+	["abs", "is_finite", "get_center", "get_volume", "get_longest_axis", "get_shortest_axis"],
 	TYPE_PROJECTION: ["inverse", "determinant"],
 }
 ## The calls an empty list has nothing to answer, which the engine reports as an error when asked.
 const NEEDS_AN_ELEMENT: Array[String] = ["front", "back", "pick_random"]
-
 ## Said after every call a path refuses for doing something rather than reading.
-const READS_ONLY: String = ", and a path, which a wait reads every frame, only calls methods that read"
+const READS_ONLY: String = (
+	", and a path, which a wait reads every frame, only calls methods that read"
+)
 
 
 ## What [param reaching] names something on, which is the node itself until the name has a colon
@@ -315,8 +316,8 @@ static func walk_to(node: Object, node_path: String, reaching: String) -> Dictio
 	for step: int in parts.size() - 1:
 		var named: String = parts[step]
 		if not can_read(holder, named):
-			return {"type": "error", "message": nothing_there(holder, named, called)}
-		chain.append({"holder": holder, "named": named, "called": called})
+			return { "type": "error", "message": nothing_there(holder, named, called) }
+		chain.append({ "holder": holder, "named": named, "called": called })
 		holder = read_under(holder, named)
 		called = "%s:%s" % [called, named]
 		if not can_hold(holder):
@@ -327,9 +328,9 @@ static func walk_to(node: Object, node_path: String, reaching: String) -> Dictio
 				(
 					"%s holds %s, which has nothing to read %s off"
 					% [called, type_string(typeof(holder)), wanted]
-				)
+				),
 			}
-	return {"holder": holder, "name": parts[parts.size() - 1], "called": called, "chain": chain}
+	return { "holder": holder, "name": parts[parts.size() - 1], "called": called, "chain": chain }
 
 
 ## The object [param given] names for a method's argument, as `{"object": ...}`, or as
@@ -347,7 +348,7 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 			(
 				"an object is named by its path, not by the record runtime_inspect answered with:"
 				+ " its id does not survive the trip as a number"
-			)
+			),
 		}
 	var path: String = given
 	var start: Node = node
@@ -358,26 +359,27 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 		start_path = path if colon == -1 else path.substr(0, colon)
 		var standing: Dictionary = GdhValues.node_at(root, start_path)
 		if standing.has("message"):
-			return {"message": str(standing["message"])}
+			return { "message": str(standing["message"]) }
 		start = standing["node"]
 		if colon == -1:
-			return {"object": start}
+			return { "object": start }
 		reaching = path.substr(colon + 1)
 	if reaching.is_empty():
-		return {"message": "%s names nothing past the node" % path}
+		return { "message": "%s names nothing past the node" % path }
 	var reached: Dictionary = walk_to(start, start_path, reaching)
 	if reached.has("message"):
-		return {"message": str(reached["message"])}
+		return { "message": str(reached["message"]) }
 	var holder: Variant = reached["holder"]
 	var name: String = reached["name"]
 	if not can_read(holder, name):
-		return {"message": nothing_there(holder, name, str(reached["called"]))}
+		return { "message": nothing_there(holder, name, str(reached["called"])) }
 	var value: Variant = read_under(holder, name)
 	if not value is Object or not is_instance_valid(value):
 		return {
-			"message": "%s:%s holds %s, not an object" % [reached["called"], name, type_string(typeof(value))]
+			"message":
+			"%s:%s holds %s, not an object" % [reached["called"], name, type_string(typeof(value))],
 		}
-	return {"object": value}
+	return { "object": value }
 
 
 ## Whether a step can be taken into [param value] at all: an object, a list, a map or a value with
@@ -444,8 +446,9 @@ static func value_calls(value: Variant) -> Array:
 	return VALUE_CALLS.get(typeof(value), [])
 
 
-## Whether [param value] is a packed list. Stepped into the way a list is, by index, and a write into
-## one reaches the game's own copy, since packed lists share their storage until one is duplicated.
+## Whether [param value] is a packed list. Stepped into the way a list is, by index, and a write
+## into one reaches the game's own copy, since packed lists share their storage until one is
+## duplicated.
 static func packed(value: Variant) -> bool:
 	return typeof(value) in PACKED
 
@@ -468,7 +471,7 @@ static func nothing_under(holder: Variant, named: String, called: String) -> Str
 ## way GDScript's own does, so reading the last of something does not mean asking how many first.
 static func can_read(holder: Variant, named: String) -> bool:
 	var method: String = method_of(named)
-	var given: Dictionary = arguments_of(named) if not method.is_empty() else {"args": []}
+	var given: Dictionary = arguments_of(named) if not method.is_empty() else { "args": [] }
 	if given.has("message"):
 		return false
 	var args: Array = given["args"]
@@ -507,8 +510,8 @@ static func can_read(holder: Variant, named: String) -> bool:
 ## The key of [param map] a step names, in a list of one, or an empty list when it names none.
 ##
 ## A step is text, and a map is keyed by whatever the game put in it: text, a StringName, or a
-## number, which a map of units by id is. Keyed by 3, "3" is not a key of it, measured on 4.7.2, so a
-## step that reads as a number is tried as one after the two spellings of text.
+## number, which a map of units by id is. Keyed by 3, "3" is not a key of it, measured on 4.7.2, so
+## a step that reads as a number is tried as one after the two spellings of text.
 ##
 ## A map typed by its key is asked only in that type. It checks every key it is asked about and
 ## reports an engine error for one of another type, so a step into a map typed by an enum read the
@@ -611,13 +614,15 @@ static func method_of(named: String) -> String:
 ## whole number as an int. A path names what is read, and an argument that was itself a path or an
 ## object would make a read depend on other state in a way the step does not show.
 static func arguments_of(named: String) -> Dictionary:
-	var inside: String = named.substr(named.find("(") + 1, named.length() - named.find("(") - 2).strip_edges()
+	var inside: String = (
+		named.substr(named.find("(") + 1, named.length() - named.find("(") - 2).strip_edges()
+	)
 	if inside.is_empty():
-		return {"args": []}
+		return { "args": [] }
 	var reader: JSON = JSON.new()
 	var parsed: Variant = reader.data if reader.parse("[%s]" % inside) == OK else null
 	if not parsed is Array:
-		return {"message": _not_literals(named)}
+		return { "message": _not_literals(named) }
 	var args: Array = []
 	for given: Variant in parsed:
 		if given is float:
@@ -629,13 +634,16 @@ static func arguments_of(named: String) -> Dictionary:
 		elif given == null or given is String or given is bool:
 			args.append(given)
 		else:
-			return {"message": _not_literals(named)}
-	return {"args": args}
+			return { "message": _not_literals(named) }
+	return { "args": args }
 
 
 static func _not_literals(named: String) -> String:
 	return (
-		"%s: a path gives a call literal arguments only, words in double quotes, numbers, true, false or null"
+		(
+			"%s: a path gives a call literal arguments only, words in double quotes, numbers, "
+			+ "true, false or null"
+		)
 		% named
 	)
 
@@ -663,8 +671,8 @@ static func _arity(object: Object, method: String) -> Dictionary:
 ## when it may.
 ##
 ## A path is read, and a wait reads it every frame, so a call in one has to be a read. The engine
-## marks its own reading methods const and `queue_free()`, `free()` and `set_name()` not, measured on
-## 4.7.2, though it leaves some reads unmarked as well, `Engine.get_frames_drawn()` and
+## marks its own reading methods const and `queue_free()`, `free()` and `set_name()` not, measured
+## on 4.7.2, though it leaves some reads unmarked as well, `Engine.get_frames_drawn()` and
 ## `get_time_scale()` among them; so the refusal says the mark is missing, not that the method
 ## changes anything, and points at runtime_invoke call, which calls it. A game's methods carry no
 ## such mark, so one declared `-> void` is taken at its word, as doing something and answering
@@ -675,7 +683,9 @@ static func _arity(object: Object, method: String) -> Dictionary:
 ## Given [param given] arguments, a call is the engine's and marked as reading, or it is refused. A
 ## game's method taking arguments is trusted on nothing at all: one answering a value can as well
 ## change what it was asked about, and runtime_invoke call is how one is called on purpose.
-static func call_refused(object: Object, method: String, called_as: String, given: int = 0) -> String:
+static func call_refused(
+	object: Object, method: String, called_as: String, given: int = 0
+) -> String:
 	var arity: Dictionary = _arity(object, method)
 	if arity.is_empty():
 		return with_methods_offered("%s has no method %s" % [called_as, method], object, method)
@@ -729,7 +739,8 @@ static func with_methods_offered(said: String, object: Object, method: String) -
 		var script: Script = attached
 		for entry: Dictionary in script.get_script_method_list():
 			var name: String = str(entry.get("name", ""))
-			# A class called by its name runs only its static functions, so offering the rest leads to a refusal.
+			# A class called by its name runs only its static functions, so offering the rest leads
+			# to a refusal.
 			var flags: int = entry.get("flags", 0)
 			var callable: bool = not object is Script or flags & METHOD_FLAG_STATIC
 			if callable and not name.is_empty() and not own.has(name):
@@ -741,7 +752,10 @@ static func with_methods_offered(said: String, object: Object, method: String) -
 			every.append(name)
 	var close: PackedStringArray = GdhRead.nearest(method, PackedStringArray(every))
 	if not close.is_empty():
-		return "%s; the nearest it has %s %s" % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+		return (
+			"%s; the nearest it has %s %s"
+			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+		)
 	if own.is_empty():
 		return said
 	own.sort()
@@ -808,7 +822,10 @@ static func unwritable_copy(chain: Array[Dictionary]) -> String:
 		var named: String = link["named"]
 		if not method_of(named).is_empty():
 			return (
-				"%s:%s is what a call answered, a copy the game keeps nowhere, so a part of it is not a place to write"
+				(
+					"%s:%s is what a call answered, a copy the game keeps nowhere, so a part of it "
+					+ "is not a place to write"
+				)
 				% [link["called"], named]
 			)
 		if not composite(link["holder"]):
@@ -833,7 +850,13 @@ static func write_back(chain: Array[Dictionary], changed: Variant) -> void:
 ## Only ever called once [method can_read] agrees.
 static func read_under(holder: Variant, named: String) -> Variant:
 	if (
-		(holder is Array or holder is Dictionary or packed(holder) or composite(holder) or textual(holder))
+		(
+			holder is Array
+			or holder is Dictionary
+			or packed(holder)
+			or composite(holder)
+			or textual(holder)
+		)
 		and not method_of(named).is_empty()
 	):
 		return Callable.create(holder, method_of(named)).call()
@@ -876,7 +899,7 @@ static func _index_in(named: String, size: int) -> int:
 ## the whole path, because the step is the typo.
 static func nothing_there(holder: Variant, named: String, called_as: String) -> String:
 	var container_call: String = method_of(named)
-	var given: Dictionary = arguments_of(named) if not container_call.is_empty() else {"args": []}
+	var given: Dictionary = arguments_of(named) if not container_call.is_empty() else { "args": [] }
 	if given.has("message"):
 		return "%s:%s" % [called_as, given["message"]]
 	var given_args: Array = given["args"]
@@ -893,14 +916,21 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 			return container_calls_refused(
 				called_as, "a packed list", container_call, given_count, packed_calls(holder)
 			)
-		return "%s is a packed list of %d, so there is no %s in it" % [called_as, len(holder), named]
+		return (
+			"%s is a packed list of %d, so there is no %s in it" % [called_as, len(holder), named]
+		)
 	if textual(holder):
 		if container_call.is_empty():
 			return (
-				"%s is a string, so a path makes only calls on it, which read it and take no arguments: %s"
+				(
+					"%s is a string, so a path makes only calls on it, which read it and take no "
+					+ "arguments: %s"
+				)
 				% [called_as, "(), ".join(STRING_CALLS) + "()"]
 			)
-		return container_calls_refused(called_as, "a string", container_call, given_count, STRING_CALLS)
+		return container_calls_refused(
+			called_as, "a string", container_call, given_count, STRING_CALLS
+		)
 	if holder is Dictionary:
 		if not container_call.is_empty():
 			return container_calls_refused(called_as, "a map", container_call, given_count)
@@ -948,7 +978,10 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 			)
 		return "%s is %s, so it has no %s; it has %s" % [called_as, sort, named, has]
 	if not holder is Object:
-		return "%s is %s, which has nothing to read %s off" % [called_as, type_string(typeof(holder)), named]
+		return (
+			"%s is %s, which has nothing to read %s off"
+			% [called_as, type_string(typeof(holder)), named]
+		)
 	var object: Object = holder
 	var method: String = method_of(named)
 	if not method.is_empty():
@@ -975,12 +1008,17 @@ static func container_calls_refused(
 	elif sort == "a list":
 		calls = LIST_CALLS
 	if given > 0 and method in calls:
-		return "%s is %s, and a path calls %s() on one with no arguments" % [called_as, sort, method]
+		return (
+			"%s is %s, and a path calls %s() on one with no arguments" % [called_as, sort, method]
+		)
 	var spelled: Array[String] = []
 	for each: String in calls:
 		spelled.append(each + "()")
 	return (
-		"%s is %s, and %s() is not one of the calls a path makes on one, which read it and take no arguments: %s"
+		(
+			"%s is %s, and %s() is not one of the calls a path makes on one, which read it and "
+			+ "take no arguments: %s"
+		)
 		% [called_as, sort, method, ", ".join(spelled)]
 	)
 

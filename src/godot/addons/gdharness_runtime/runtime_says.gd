@@ -1,24 +1,19 @@
 extends RefCounted
-
 ## Whether a node says what a caller asked for in `says`: the one set of rules a find, a click and a
 ## wait all match words by, so the three never disagree about which control a word names.
 
 const GdhWords = preload("runtime_words.gd")
-
 ## Stands in for a bar written as `\|` while `says` is split into its alternatives: a character from
 ## the private use area, which no game's text uses.
 const ESCAPED_BAR: String = ""
-
-## How many splits [method alternatives] keeps. A find asks about two at once, the words it was given
-## and the same words widened, and anything past a handful is a caller that has moved on.
+## How many splits [method alternatives] keeps. A find asks about two at once, the words it was
+## given and the same words widened, and anything past a handful is a caller that has moved on.
 const SPLITS_KEPT: int = 8
 
 ## Each `says` split into alternatives, by what was written; see [method alternatives].
 static var _splits: Dictionary[String, Array] = {}
-
 ## Each `says` as the globs [method matches] tries first, by what was written; see [method _loose].
 static var _globs: Dictionary[String, Array] = {}
-
 ## Every space separator Unicode has besides the plain space, built once; see [method spaced].
 static var _spaces: RegEx = null
 
@@ -37,9 +32,9 @@ static func says(node: Node, wanted: String) -> bool:
 ## screen: twice in one session here, over a button that was.
 ##
 ## Several alternatives separated by `|` match when any one of them does, each by those rules: a
-## wait for the end of a turn is a wait for whichever of "won", "lost" or the next turn's words comes
-## first, and read as one glob with the bars in it, it waited out its whole timeout for words no
-## screen says.
+## wait for the end of a turn is a wait for whichever of "won", "lost" or the next turn's words
+## comes first, and read as one glob with the bars in it, it waited out its whole timeout for words
+## no screen says.
 ##
 ## A space in the words matches any space separator in [param said], which is how they were typed.
 ## Each node's words are spaced only once a looser match says they may be the ones: this runs for
@@ -87,13 +82,13 @@ static func spaced(text: String) -> String:
 		return text
 	if _spaces == null:
 		var separators: String = (
-			String.chr(0x00A0)
+			String.chr(0x00a0)
 			+ String.chr(0x1680)
 			+ String.chr(0x2000)
 			+ "-"
-			+ String.chr(0x200A)
-			+ String.chr(0x202F)
-			+ String.chr(0x205F)
+			+ String.chr(0x200a)
+			+ String.chr(0x202f)
+			+ String.chr(0x205f)
 			+ String.chr(0x3000)
 		)
 		_spaces = RegEx.create_from_string("[%s]" % separators)
@@ -194,13 +189,15 @@ static func point_on_words(label: RichTextLabel, wanted: String) -> Dictionary:
 			start = at
 			length = words.length()
 	if start < 0:
-		return {"unplaced": "the words were matched as a pattern, which names no one place in the text"}
+		return {
+			"unplaced": "the words were matched as a pattern, which names no one place in the text",
+		}
 	if text.strip_edges().length() == length:
 		return {}
 	var line: int = label.get_character_line(start)
 	var shown: Vector2i = label.get_line_range(line)
 	if line < 0 or shown.x > start:
-		return {"unplaced": "the label could not say which line the words are on"}
+		return { "unplaced": "the label could not say which line the words are on" }
 	var on_line: int = mini(length, shown.y - start) if shown.y > start else length
 	var font: Font = label.get_theme_font("normal_font")
 	var font_size: int = label.get_theme_font_size("normal_font_size")
@@ -218,7 +215,7 @@ static func point_on_words(label: RichTextLabel, wanted: String) -> Dictionary:
 	var scrolled: float = label.get_v_scroll_bar().value if label.scroll_active else 0.0
 	var x: float = clampf(left + aligned + before + across * 0.5, left, left + room)
 	var top: float = frame.get_margin(SIDE_TOP) + label.get_line_offset(line) - scrolled
-	return {"point": Vector2(x, top + label.get_line_height(line) * 0.5)}
+	return { "point": Vector2(x, top + label.get_line_height(line) * 0.5) }
 
 
 ## How wide [param font] at [param font_size] draws [param words] on one line.

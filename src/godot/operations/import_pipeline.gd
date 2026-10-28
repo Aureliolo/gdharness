@@ -4,7 +4,6 @@ const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhFileWalk = preload("file_walk.gd")
 const GdhLog = preload("logger.gd")
-
 ## What the engine imports with no tool outside it, for finding what has not been imported yet;
 ## everything imported already is found by its sidecar whatever its extension.
 const IMPORTABLE_EXTENSIONS: Array[String] = [
@@ -47,15 +46,15 @@ const BLENDER_SETTING: String = "filesystem/import/blender/blender_path"
 const BLENDER_ENABLED: String = "filesystem/import/blender/enabled"
 ## The format version each importer writes as `importer_version` where it is above 0, which the
 ## editor reimports anything older than. Read off sidecars 4.7.2 writes: scene and animation_library
-## write 1, and the texture importers write none. A case imports one fresh and compares, so an engine
-## that raises one fails it rather than leaving this behind.
-const IMPORTER_VERSIONS: Dictionary[String, int] = {"scene": 1, "animation_library": 1}
+## write 1, and the texture importers write none. A case imports one fresh and compares, so an
+## engine that raises one fails it rather than leaving this behind.
+const IMPORTER_VERSIONS: Dictionary[String, int] = { "scene": 1, "animation_library": 1 }
 ## The VRAM compression formats a project can ask for, each behind its
 ## `rendering/textures/vram_compression/import_<format>` setting.
 const VRAM_FORMATS: Array[String] = ["s3tc_bptc", "etc2_astc"]
-## Options keyed by OpenType tags, by the importer that holds them. The engine keys them by the tag as
-## an int, which a caller can also name, as "liga" for ligatures.
-const OPENTYPE_OPTIONS: Dictionary[String, Array] = {"font_data_dynamic": ["opentype_features"]}
+## Options keyed by OpenType tags, by the importer that holds them. The engine keys them by the tag
+## as an int, which a caller can also name, as "liga" for ligatures.
+const OPENTYPE_OPTIONS: Dictionary[String, Array] = { "font_data_dynamic": ["opentype_features"] }
 const EDITOR_DIRECTORY: String = "res://.godot/editor"
 const EDITOR_CACHE_PREFIX: String = "filesystem_cache"
 
@@ -83,7 +82,12 @@ func get_import_status(params: Dictionary) -> Dictionary:
 
 	var resources: Array[Dictionary] = []
 	var summary: Dictionary = {
-		"total": 0, "needs_reimport": 0, "failed": 0, "up_to_date": 0, "missing_source": 0, "not_imported": 0
+		"total": 0,
+		"needs_reimport": 0,
+		"failed": 0,
+		"up_to_date": 0,
+		"missing_source": 0,
+		"not_imported": 0,
 	}
 
 	if not resource_path.is_empty():
@@ -91,9 +95,13 @@ func get_import_status(params: Dictionary) -> Dictionary:
 		if not full_path.begins_with("res://"):
 			full_path = "res://" + full_path
 
-		# missing_source is a sidecar whose source has gone; with neither, the path names nothing the
-		# engine ever imported, and answering it as a lost source sent a caller to restore a file.
-		if not FileAccess.file_exists(full_path) and not FileAccess.file_exists(full_path + ".import"):
+		# missing_source is a sidecar whose source has gone; with neither, the path names nothing
+		# the engine ever imported, and answering it as a lost source sent a caller to restore a
+		# file.
+		if (
+			not FileAccess.file_exists(full_path)
+			and not FileAccess.file_exists(full_path + ".import")
+		):
 			return _log.failure(
 				_files.with_nearest_files(
 					"Nothing is at %s, and no import sidecar names it" % full_path, full_path
@@ -103,8 +111,8 @@ func get_import_status(params: Dictionary) -> Dictionary:
 		resources.append(status)
 		_tally(summary, status)
 	else:
-		# Sources by extension, for what has never been imported, and sidecars, for what was imported
-		# from a type the list does not name and for a sidecar whose source is gone.
+		# Sources by extension, for what has never been imported, and sidecars, for what was
+		# imported from a type the list does not name and for a sidecar whose source is gone.
 		var found: Dictionary[String, bool] = {}
 		for res_path: String in _files.find_files_with_extensions("res://", IMPORTABLE_EXTENSIONS):
 			found[res_path] = true
@@ -121,14 +129,14 @@ func get_import_status(params: Dictionary) -> Dictionary:
 
 			_tally(summary, status)
 
-	var answer: Dictionary = {"resources": resources, "summary": summary}
+	var answer: Dictionary = { "resources": resources, "summary": summary }
 	# A total of none reads as a walk that found nothing when the project is full of scripts and
 	# scenes, which the engine loads as they are and never imports.
 	if resource_path.is_empty() and summary["total"] == 0:
 		answer["note"] = (
-			"Nothing in this project is imported: the engine imports images, audio, fonts, models and"
-			+ " the like, found by extension or by a .import sidecar beside them, and loads scripts and"
-			+ " scenes as they are."
+			"Nothing in this project is imported: the engine imports images, audio, fonts, models "
+			+ "and the like, found by extension or by a .import sidecar beside them, and loads "
+			+ "scripts and scenes as they are."
 		)
 	return answer
 
@@ -153,7 +161,11 @@ func get_import_options(params: Dictionary) -> Dictionary:
 		return _log.failure("Failed to parse import file: " + str(err))
 
 	var result: Dictionary = {
-		"resource_path": resource_path, "import_file": import_file_path, "remap": {}, "deps": {}, "params": {}
+		"resource_path": resource_path,
+		"import_file": import_file_path,
+		"remap": {},
+		"deps": {},
+		"params": {},
 	}
 
 	# Through the serialiser, as every other read answers: an engine type written straight into
@@ -221,7 +233,10 @@ func set_import_options(params: Dictionary) -> Dictionary:
 			var held_type: String = type_string(typeof(held))
 			var article: String = "an" if held_type.to_lower()[0] in "aeiou" else "a"
 			refused.append(
-				"%s holds %s %s, and %s is not one" % [name, article, held_type, JSON.stringify(options[key])]
+				(
+					"%s holds %s %s, and %s is not one"
+					% [name, article, held_type, JSON.stringify(options[key])]
+				)
 			)
 			continue
 		fitted_values[name] = value
@@ -252,7 +267,7 @@ func set_import_options(params: Dictionary) -> Dictionary:
 			return _log.failure("Failed to save import file: " + str(err))
 
 	# The reimport that applies them is the server's, through the editor or the engine's import.
-	var answer: Dictionary = {"resource_path": resource_path, "updated_options": updated_keys}
+	var answer: Dictionary = { "resource_path": resource_path, "updated_options": updated_keys }
 	if not changes.is_empty():
 		answer["changed"] = changes
 	if not unchanged_keys.is_empty():
@@ -276,16 +291,18 @@ static func _as_option(given: Variant, held: Variant) -> Variant:
 ## JSON names every key as a string and every number as a float, so a font's opentype_features was
 ## written as {"1818847073": 0.0}. The importer hands that to FontFile.opentype_feature_overrides,
 ## which keys features by their tag as an int, so the call reported success and the font kept its
-## ligatures. A key is an int where the importer keys the option by OpenType tags, or where every key
-## the option holds already is one; a value is an int where every value held is, or for a tag.
+## ligatures. A key is an int where the importer keys the option by OpenType tags, or where every
+## key the option holds already is one; a value is an int where every value held is, or for a tag.
 ## Answers the dictionary under value, or why it cannot be written under refused.
-static func _keyed_as_option(name: String, given: Dictionary, held: Variant, importer: String) -> Dictionary:
+static func _keyed_as_option(
+	name: String, given: Dictionary, held: Variant, importer: String
+) -> Dictionary:
 	var tag_options: Array = OPENTYPE_OPTIONS.get(importer, [])
 	var tagged: bool = name in tag_options
 	var numbered_keys: bool = tagged or _all_ints(held, true)
 	var whole_values: bool = tagged or _all_ints(held, false)
 	if not numbered_keys and not whole_values:
-		return {"value": given}
+		return { "value": given }
 	var keyed: Dictionary = {}
 	for key: Variant in given:
 		var as_key: Variant = key
@@ -293,12 +310,14 @@ static func _keyed_as_option(name: String, given: Dictionary, held: Variant, imp
 			as_key = _int_key(key, tagged)
 			if as_key == null:
 				var wanted: String = (
-					'OpenType tags, by name such as "liga" or as the number TextServer.name_to_tag gives'
+					'OpenType tags, by name such as "liga" or as the number TextServer.name_to_tag '
+					+ "gives"
 					if tagged
 					else "ints"
 				)
 				return {
-					"refused": "%s is keyed by %s, and %s is not one" % [name, wanted, JSON.stringify(key)]
+					"refused":
+					"%s is keyed by %s, and %s is not one" % [name, wanted, JSON.stringify(key)],
 				}
 		var value: Variant = given[key]
 		if whole_values and value is float:
@@ -306,7 +325,7 @@ static func _keyed_as_option(name: String, given: Dictionary, held: Variant, imp
 			if number == floorf(number):
 				value = int(number)
 		keyed[as_key] = value
-	return {"value": keyed}
+	return { "value": keyed }
 
 
 ## [param key] as an int key, or null when it is not one: a whole number, written as a number or as
@@ -367,7 +386,7 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 			"path": resource_path,
 			"status": "missing_source",
 			"import_file_exists": FileAccess.file_exists(import_file_path),
-			"source_exists": false
+			"source_exists": false,
 		}
 
 	var import_file_exists: bool = FileAccess.file_exists(import_file_path)
@@ -381,17 +400,21 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 			"status": "needs_reimport" if never.is_empty() else "not_imported",
 			"reason": "it has not been imported" if never.is_empty() else never,
 			"import_file_exists": false,
-			"source_exists": true
+			"source_exists": true,
 		}
 
 	var status: Dictionary = {
-		"path": resource_path, "status": "up_to_date", "import_file_exists": true, "source_exists": true
+		"path": resource_path,
+		"status": "up_to_date",
+		"import_file_exists": true,
+		"source_exists": true,
 	}
 
-	# The checks are the ones EditorFileSystem::_test_for_reimport makes, in its order, so a resource
-	# reads as needing an import when the editor's next scan would import it. The importer's own two
-	# cannot be asked here, where no importer is loaded, so they are made from what was measured of
-	# the built-in ones; an importer a plugin adds is judged by its files alone.
+	# The checks are the ones EditorFileSystem::_test_for_reimport makes, in its order, so a
+	# resource reads as needing an import when the editor's next scan would import it. The
+	# importer's own two cannot be asked here, where no importer is loaded, so they are made from
+	# what was measured of the built-in ones; an importer a plugin adds is judged by its files
+	# alone.
 	var sidecar: ConfigFile = ConfigFile.new()
 	var stale: Dictionary = (
 		_stale("its import file cannot be read")
@@ -408,7 +431,9 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 # Why [param resource_path] has no import file, with what to do about it where anything can be done.
 func _no_sidecar(resource_path: String) -> String:
 	if not FileAccess.file_exists(resource_path):
-		return GdhFileWalk.new().with_nearest_files(resource_path + " is not on disk", resource_path)
+		return GdhFileWalk.new().with_nearest_files(
+			resource_path + " is not on disk", resource_path
+		)
 	var never: String = _never_imported(resource_path)
 	if not never.is_empty():
 		return resource_path + " has no import options: " + never
@@ -428,10 +453,14 @@ static func never_imported_line(paths: Array[String]) -> String:
 	if paths.size() == 1:
 		return (
 			named
-			+ " has never been imported, so nothing can load it until project_import reimport imports it"
+			+ " has never been imported, so nothing can load it until project_import reimport "
+			+ "imports it"
 		)
 	return (
-		"%d files have never been imported, so nothing can load them until project_import reimport imports them: %s"
+		(
+			"%d files have never been imported, so nothing can load them until project_import "
+			+ "reimport imports them: %s"
+		)
 		% [paths.size(), named]
 	)
 
@@ -450,14 +479,18 @@ func _never_imported(resource_path: String) -> String:
 		return ""
 	if extension in BLENDER_EXTENSIONS:
 		if not ProjectSettings.get_setting(BLENDER_ENABLED, true):
-			return "the project sets " + BLENDER_ENABLED + " to false, so the engine leaves them unimported"
+			return (
+				"the project sets "
+				+ BLENDER_ENABLED
+				+ " to false, so the engine leaves them unimported"
+			)
 		return (
 			"the engine imports ."
 			+ extension
 			+ " files through Blender, which it finds through the editor setting "
 			+ BLENDER_SETTING
-			+ ". An editor with it set imports them on its scan; an import pass with it unset stops at"
-			+ " the first one and imports nothing, and setting "
+			+ ". An editor with it set imports them on its scan; an import pass with it unset "
+			+ "stops at the first one and imports nothing, and setting "
 			+ BLENDER_ENABLED
 			+ " to false has the engine leave them unimported"
 		)
@@ -467,17 +500,20 @@ func _never_imported(resource_path: String) -> String:
 	return (
 		"no importer built into the engine takes ."
 		+ extension
-		+ " files; one added by a plugin or an extension is known only to the editor, whose scan imports them"
+		+ " files; one added by a plugin or an extension is known only to the editor, whose scan "
+		+ "imports them"
 	)
 
 
 static func _stale(reason: String) -> Dictionary:
-	return {"status": "needs_reimport", "reason": reason}
+	return { "status": "needs_reimport", "reason": reason }
 
 
 ## What the editor reads off the sidecar before looking at the import: an answer for a stale or
 ## failed resource, empty otherwise.
-func _sidecar_staleness(resource_path: String, import_file_path: String, sidecar: ConfigFile) -> Dictionary:
+func _sidecar_staleness(
+	resource_path: String, import_file_path: String, sidecar: ConfigFile
+) -> Dictionary:
 	# The editor compares the sidecar with the one it last imported from before reading anything in
 	# it, so an option set without a reimport is imported on its next scan, and not before.
 	var imported_from: String = _imported_sidecar_md5s().get(resource_path, "")
@@ -490,7 +526,8 @@ func _sidecar_staleness(resource_path: String, import_file_path: String, sidecar
 	if valid is bool and not valid:
 		return {
 			"status": "failed",
-			"reason": "its last import failed, and the editor does not try a failed import again on its own",
+			"reason":
+			"its last import failed, and the editor does not try a failed import again on its own",
 		}
 	return {}
 
@@ -509,14 +546,21 @@ static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dic
 	if current > version:
 		return _stale(
 			(
-				"it was imported at version %d of the %s importer, and this engine imports at version %d"
+				(
+					"it was imported at version %d of the %s importer, and this engine imports at "
+					+ "version %d"
+				)
 				% [version, importer, current]
 			)
 		)
 	var lacking: Array[String] = _vram_formats_lacking(sidecar.get_value("remap", "metadata", {}))
 	if not lacking.is_empty():
 		return _stale(
-			"the project now asks for " + ", ".join(lacking) + " textures, and this import did not write them"
+			(
+				"the project now asks for "
+				+ ", ".join(lacking)
+				+ " textures, and this import did not write them"
+			)
 		)
 
 	if not sidecar.has_section_key("remap", "uid"):
@@ -540,8 +584,8 @@ static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dic
 		return _stale("its import file was written for " + source_file)
 
 	# By content, as the editor judges it: the hash of the source the import recorded, against the
-	# file. By time, an installer that rewrote 31 images byte for byte made every one read as changed,
-	# and the editor, which compares the hash, rightly imported none of them.
+	# file. By time, an installer that rewrote 31 images byte for byte made every one read as
+	# changed, and the editor, which compares the hash, rightly imported none of them.
 	var recorded: Dictionary = _recorded_md5s(resource_path)
 	var recorded_source: String = recorded.get("source_md5", "")
 	if recorded_source.is_empty():
@@ -562,11 +606,11 @@ static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dic
 	# file times: a texture a 3D scene uses is reimported compressed after the scene, so its outputs
 	# are always the newer, and 33 correct scenes read as stale when judged that way.
 	#
-	# Followed through the resources the scene depends on, since a post-import script that swaps each
-	# material for a saved one leaves the scene depending on the material and only the material on
-	# the image: 211 correct scenes read as stale when only the scene's own list was read. And not
-	# held against a scene an import script shaped at all, since the script may replace a material
-	# with one using other images entirely, which is the scene it was meant to build.
+	# Followed through the resources the scene depends on, since a post-import script that swaps
+	# each material for a saved one leaves the scene depending on the material and only the material
+	# on the image: 211 correct scenes read as stale when only the scene's own list was read. And
+	# not held against a scene an import script shaped at all, since the script may replace a
+	# material with one using other images entirely, which is the scene it was meant to build.
 	var without: Array[String] = []
 	var images: Array[String] = _images_of(resource_path)
 	if not images.is_empty() and not _shaped_by_a_script(sidecar):
@@ -576,15 +620,17 @@ static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dic
 				without.append(image)
 	if without.is_empty():
 		return {}
-	var built: Dictionary = _stale("it was imported without images it uses, which were not imported yet")
+	var built: Dictionary = _stale(
+		"it was imported without images it uses, which were not imported yet"
+	)
 	built["imported_without"] = without
 	return built
 
 
 ## The VRAM formats the project asks textures to be imported in that an import recorded in
 ## [param metadata] did not write, as the texture importers judge whether their settings still hold.
-## Measured on 4.7.2 for the texture and texture array importers: turning a format on reimports every
-## VRAM texture without it, and turning one off reimports nothing.
+## Measured on 4.7.2 for the texture and texture array importers: turning a format on reimports
+## every VRAM texture without it, and turning one off reimports nothing.
 static func _vram_formats_lacking(metadata: Variant) -> Array[String]:
 	var lacking: Array[String] = []
 	if not metadata is Dictionary:
@@ -596,7 +642,9 @@ static func _vram_formats_lacking(metadata: Variant) -> Array[String]:
 	var formats: Array = written if written is Array else []
 	for format: String in VRAM_FORMATS:
 		var asked: bool = GdhRead.as_bool(
-			ProjectSettings.get_setting("rendering/textures/vram_compression/import_" + format, false)
+			ProjectSettings.get_setting(
+				"rendering/textures/vram_compression/import_" + format, false
+			)
 		)
 		if asked and format not in formats:
 			lacking.append(format)
@@ -684,7 +732,10 @@ static func _editor_cache_path() -> String:
 	if not DirAccess.dir_exists_absolute(EDITOR_DIRECTORY):
 		return ""
 	for name: String in DirAccess.get_files_at(EDITOR_DIRECTORY):
-		if name.begins_with(EDITOR_CACHE_PREFIX) and name.trim_prefix(EDITOR_CACHE_PREFIX).is_valid_int():
+		if (
+			name.begins_with(EDITOR_CACHE_PREFIX)
+			and name.trim_prefix(EDITOR_CACHE_PREFIX).is_valid_int()
+		):
 			newest = maxi(newest, name.trim_prefix(EDITOR_CACHE_PREFIX).to_int())
 	return "" if newest < 0 else EDITOR_DIRECTORY.path_join(EDITOR_CACHE_PREFIX + str(newest))
 
@@ -738,7 +789,7 @@ static func _images_of(scene_path: String) -> Array[String]:
 		"glb":
 			# A 12-byte header, then the first chunk: its length, its type, and for "JSON" the text.
 			var bytes: PackedByteArray = FileAccess.get_file_as_bytes(scene_path)
-			if bytes.size() >= 20 and bytes.decode_u32(16) == 0x4E4F534A:
+			if bytes.size() >= 20 and bytes.decode_u32(16) == 0x4e4f534a:
 				var length: int = bytes.decode_u32(12)
 				text = bytes.slice(20, mini(20 + length, bytes.size())).get_string_from_utf8()
 	if text.is_empty():

@@ -1,13 +1,11 @@
 @tool
 extends EditorPlugin
-
 ## The editor half of gdharness: a client that holds a socket to the server and an executor
 ## that does what the server asks, with a label in the toolbar saying whether the two are
 ## connected.
 
 const GdhBridgeClient = preload("bridge_client.gd")
 const GdhToolExecutor = preload("tool_executor.gd")
-
 ## The tools answered while the editor scans or imports, because none of them saves a file: the
 ## ones a caller waits on a scan with, and the ones that only read or stop a played game.
 const ANSWERED_WHILE_SCANNING: Array[String] = [
@@ -102,7 +100,8 @@ func _on_disconnected() -> void:
 func turned_away(tool_name: String) -> bool:
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	return (
-		not ANSWERED_WHILE_SCANNING.has(tool_name) and (filesystem.is_scanning() or filesystem.is_importing())
+		not ANSWERED_WHILE_SCANNING.has(tool_name)
+		and (filesystem.is_scanning() or filesystem.is_importing())
 	)
 
 

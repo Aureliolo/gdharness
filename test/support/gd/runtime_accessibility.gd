@@ -1,8 +1,7 @@
 extends SceneTree
-
-## What a game tells a screen reader, asked of a headless run: there is no window, so the answer says
-## to start the run with one rather than walking nothing. The ping beside it shows the runtime was
-## answering, so a runtime refusing everything fails.
+## What a game tells a screen reader, asked of a headless run: there is no window, so the answer
+## says to start the run with one rather than walking nothing. The ping beside it shows the runtime
+## was answering, so a runtime refusing everything fails.
 
 const Checked = preload("checked.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
@@ -20,7 +19,9 @@ func _init() -> void:
 	)
 	node = Runtime.new()
 	root.add_child(node)
-	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
+	Checked.done(
+		process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame"
+	)
 
 
 func _run() -> void:
@@ -33,16 +34,19 @@ func _run() -> void:
 		asked.get("type") != "error"
 		or not str(asked.get("message", "")).contains("start the run with headless: false")
 	):
-		failures.append("a headless run is told it has no window to read: %s" % JSON.stringify(asked))
+		failures.append(
+			"a headless run is told it has no window to read: %s" % JSON.stringify(asked)
+		)
 
 	# A client stopped at the deadline says how far its marks got, started at 1000 ms.
 	var reached: Dictionary = {
 		"": "PowerShell had not begun the client",
-		"began 1100\n": "PowerShell began the client after 100 ms and was still loading UI Automation",
+		"began 1100\n":
+		"PowerShell began the client after 100 ms and was still loading UI Automation",
 		"began 1100\nloaded 1600\n":
 		(
-			"PowerShell began the client after 100 ms and loaded UI Automation in 500 ms, and the first"
-			+ " walk of the windows had not ended"
+			"PowerShell began the client after 100 ms and loaded UI Automation in 500 ms, and the "
+			+ "first walk of the windows had not ended"
 		),
 		"began 1100\nloaded 1600\nwalked 1 1700\n":
 		(
@@ -59,8 +63,10 @@ func _run() -> void:
 		var said: String = Accessibility._reached(progress, 1000)
 		if said != reached[progress]:
 			failures.append("marks %s are said as: %s" % [JSON.stringify(progress), said])
-	var took: Dictionary = Accessibility._took("began 1100\nloaded 1600\nwalked 3 1700\n", 1000, 2000)
-	if took != {"start": 100, "load": 500, "walk": 400}:
+	var took: Dictionary = Accessibility._took(
+		"began 1100\nloaded 1600\nwalked 3 1700\n", 1000, 2000
+	)
+	if took != { "start": 100, "load": 500, "walk": 400 }:
 		failures.append("a read's time is split as: %s" % JSON.stringify(took))
 	if not Accessibility._took("began 1100\n", 1000, 2000).is_empty():
 		failures.append("a client that never loaded UI Automation splits nothing")
@@ -78,7 +84,7 @@ func _run() -> void:
 	# Not checked: the directory is gone either way by the time the fixture tears itself down.
 	var _removed: Error = DirAccess.remove_absolute(OS.get_environment("GDHARNESS_RUNTIME_DIR"))
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 	printerr("\n".join(failures))

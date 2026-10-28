@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## The editor's end of the bridge goes where the project says the bridge is, and moves when that
 ## changes.
 ##
@@ -12,12 +11,11 @@ extends SceneTree
 const GdhBridgeClient = preload("res://addons/gdharness_editor/bridge_client.gd")
 const ANNOUNCEMENT: String = "res://.godot/gdharness-bridge.json"
 const PROTOCOL: int = 1
-
 ## Past the client's own look-again interval, with room for a loaded runner.
 const DEADLINE_MSEC: int = 30000
+const LATE: String = "the client never reached the second server in %d ms"
 
 var failures: Array[String] = []
-
 var _client: GdhBridgeClient
 var _first: TCPServer = TCPServer.new()
 var _second: TCPServer = TCPServer.new()
@@ -26,6 +24,22 @@ var _on_second: bool = false
 var _arrivals: int = 0
 var _started: int = 0
 var _moved_at: int = 0
+
+
+func _process(_delta: float) -> bool:
+	if Time.get_ticks_msec() - _started > DEADLINE_MSEC:
+		_stop(LATE % DEADLINE_MSEC)
+		return true
+
+	_take_the_connection()
+	if _peer != null:
+		_peer.poll()
+		_read_arrival()
+
+	if _arrivals < 2:
+		return false
+	_finish(0)
+	return true
 
 
 func _initialize() -> void:
@@ -40,22 +54,6 @@ func _initialize() -> void:
 	# No address, so it works one out for itself, which is the thing being tested.
 	_client.connect_to_server()
 	_started = Time.get_ticks_msec()
-
-
-func _process(_delta: float) -> bool:
-	if Time.get_ticks_msec() - _started > DEADLINE_MSEC:
-		_stop("the client never reached the second server in %d ms" % DEADLINE_MSEC)
-		return true
-
-	_take_the_connection()
-	if _peer != null:
-		_peer.poll()
-		_read_arrival()
-
-	if _arrivals < 2:
-		return false
-	_finish(0)
-	return true
 
 
 ## Whichever server is expecting somebody: the first until the announcement moves, then the
@@ -124,7 +122,7 @@ func _announce(port: int) -> void:
 				"port": port,
 				"pid": OS.get_process_id(),
 				"version": "fixture",
-				"startedAt": Time.get_datetime_string_from_system(true)
+				"startedAt": Time.get_datetime_string_from_system(true),
 			}
 		)
 	)
@@ -154,5 +152,5 @@ func _finish(code: int) -> void:
 		printerr("\n".join(failures))
 		quit(1)
 		return
-	print(JSON.stringify({"ok": true, "arrivals": _arrivals, "moved_at_msec": _moved_at}))
+	print(JSON.stringify({ "ok": true, "arrivals": _arrivals, "moved_at_msec": _moved_at }))
 	quit(code)

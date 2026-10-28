@@ -34,7 +34,9 @@ static func wheel(at: Vector2, up: bool = true) -> InputEventMouseButton:
 
 ## The mouse moved to [param at] by [param moved], holding [param held], a mask of buttons such
 ## as MOUSE_BUTTON_MASK_LEFT for a drag.
-static func motion(at: Vector2, moved: Vector2 = Vector2.ZERO, held: int = 0) -> InputEventMouseMotion:
+static func motion(
+	at: Vector2, moved: Vector2 = Vector2.ZERO, held: int = 0
+) -> InputEventMouseMotion:
 	var made: InputEventMouseMotion = InputEventMouseMotion.new()
 	made.position = at
 	made.global_position = at
@@ -43,8 +45,8 @@ static func motion(at: Vector2, moved: Vector2 = Vector2.ZERO, held: int = 0) ->
 	return made
 
 
-## [param key_pressed] pressed, or released when [param pressed] is false. The key is set as both the
-## keycode and the physical keycode, so a binding to either matches it.
+## [param key_pressed] pressed, or released when [param pressed] is false. The key is set as both
+## the keycode and the physical keycode, so a binding to either matches it.
 static func key(key_pressed: Key, pressed: bool = true) -> InputEventKey:
 	var made: InputEventKey = InputEventKey.new()
 	made.keycode = key_pressed
@@ -72,8 +74,11 @@ static func axis(axis_moved: JoyAxis, value: float, device: int = 0) -> InputEve
 	return made
 
 
-## The action [param action_named] pressed at [param strength], or released when [param pressed] is false.
-static func action(action_named: StringName, pressed: bool = true, strength: float = 1.0) -> InputEventAction:
+## The action [param action_named] pressed at [param strength], or released when [param pressed] is
+## false.
+static func action(
+	action_named: StringName, pressed: bool = true, strength: float = 1.0
+) -> InputEventAction:
 	var made: InputEventAction = InputEventAction.new()
 	made.action = action_named
 	made.pressed = pressed

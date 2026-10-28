@@ -1,8 +1,7 @@
 @tool
 extends "animation_tools.gd"
-
-## The tracks and keys of an animation, beside the players and libraries the script it extends edits,
-## whose helpers it shares.
+## The tracks and keys of an animation, beside the players and libraries the script it extends
+## edits, whose helpers it shares.
 
 
 # =============================================================================
@@ -15,19 +14,19 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 	var given_track: Variant = args.get("track", {})
 
 	if scene_path.strip_edges() == "res://":
-		return {"ok": false, "error": "Missing scenePath"}
+		return { "ok": false, "error": "Missing scenePath" }
 	if animation_name.strip_edges().is_empty():
-		return {"ok": false, "error": "Missing animationName"}
+		return { "ok": false, "error": "Missing animationName" }
 	var track: Dictionary = given_track if given_track is Dictionary else {}
 	if track.is_empty():
-		return {"ok": false, "error": "Missing track"}
-	# The schema leaves keyframes out of what track requires, since remove_track finds a track without
-	# them.
+		return { "ok": false, "error": "Missing track" }
+	# The schema leaves keyframes out of what track requires, since remove_track finds a track
+	# without them.
 	if not track.has("keyframes"):
-		return {"ok": false, "error": "Missing track.keyframes"}
+		return { "ok": false, "error": "Missing track.keyframes" }
 	var keyed: Array = _keyframes(track)
 	if not keyed[0]:
-		return {"ok": false, "error": keyed[1]}
+		return { "ok": false, "error": keyed[1] }
 
 	# Asked of the player, which knows every library: looking only in the default one refused
 	# "moves/walk" as missing.
@@ -48,13 +47,16 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 		target_path = "."
 	var target: Node = _animated(player, target_path)
 	if target == null:
-		return scene.refuse(
-			(
+		return (
+			scene
+			. refuse(
 				(
-					"No node at %s from the player's root node, %s, which is what the track path is read "
-					+ "against."
+					(
+						"No node at %s from the player's root node, %s, which is what the track "
+						+ "path is read against."
+					)
+					% [target_path, str(player.root_node)]
 				)
-				% [target_path, str(player.root_node)]
 			)
 		)
 	var keyframes: Array = keyed[1]
@@ -120,7 +122,12 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 ## animates: two tracks for one path both play, the later overriding the earlier, and a key meant
 ## to extend the motion was split off where reading the animation showed two halves.
 func _add_track(
-	anim: Animation, track: Dictionary, target: Node, target_path: String, keyframes: Array, replacing: bool
+	anim: Animation,
+	track: Dictionary,
+	target: Node,
+	target_path: String,
+	keyframes: Array,
+	replacing: bool
 ) -> Array:
 	var track_type: String = str(track.get("type", ""))
 	var keys: Array = []
@@ -148,7 +155,7 @@ func _add_track(
 				return _not_added("keyframes[%d].args must be a list." % index)
 			var raw: Array = given
 			var arguments: Array = _fitted(target, method_name, _parse_method_args(raw))
-			keys.append({"method": method_name, "args": arguments})
+			keys.append({ "method": method_name, "args": arguments })
 			if misfit.is_empty():
 				misfit = _key_misfit(target, method_name, arguments, index)
 		method_found = target.has_method(method_name)
@@ -156,7 +163,10 @@ func _add_track(
 	else:
 		return _not_added(
 			(
-				"add_track makes property and method tracks, and track.type is %s; remove_track takes any."
+				(
+					"add_track makes property and method tracks, and track.type is %s; "
+					+ "remove_track takes any."
+				)
 				% track_type
 			)
 		)
@@ -178,14 +188,16 @@ func _add_track(
 				return _not_added(
 					(
 						(
-							"Track %d already animates %s and has a key at %s s, which keyframes[%d] would "
-							+ "replace. Nothing was written; replaceKeys true replaces it."
+							"Track %d already animates %s and has a key at %s s, which "
+							+ "keyframes[%d] would replace. Nothing was written; replaceKeys true "
+							+ "replaces it."
 						)
 						% [track_idx, str(path), _seconds(time), index]
 					)
 				)
-			# A method key's value is its call, {"method": ..., "args": [...]}. The time is as asked:
-			# the key's own, read back from a scene's 32-bit times, puts 0.1 at 0.100000001490116.
+			# A method key's value is its call, {"method": ..., "args": [...]}. The time is as
+			# asked: the key's own, read back from a scene's 32-bit times, puts 0.1 at
+			# 0.100000001490116.
 			(
 				replaced
 				. append(
@@ -228,7 +240,9 @@ static func _fitted(target: Node, method: String, arguments: Array) -> Array:
 			declared = GdhRead.as_int(parameter.get("type", TYPE_NIL))
 		if value is float and declared != TYPE_FLOAT:
 			var number: float = value
-			if is_finite(number) and number == floorf(number) and absf(number) < 9007199254740992.0:
+			if (is_finite(number)
+					and number == floorf(number)
+					and absf(number) < 9_007_199_254_740_992.0):
 				value = int(number)
 		fitted.append(value)
 	return fitted
@@ -256,10 +270,16 @@ static func _key_misfit(target: Node, method: String, arguments: Array, index: i
 		else ("1 argument" if arguments.size() == 1 else "%d arguments" % arguments.size())
 	)
 	if arguments.size() < needed:
-		return "keyframes[%d] calls %s with %s, and it needs %d%s" % [index, method, passed, needed, fails]
+		return (
+			"keyframes[%d] calls %s with %s, and it needs %d%s"
+			% [index, method, passed, needed, fails]
+		)
 	if arguments.size() > parameters.size():
 		var most: String = "none" if parameters.is_empty() else "at most %d" % parameters.size()
-		return "keyframes[%d] calls %s with %s, and it takes %s%s" % [index, method, passed, most, fails]
+		return (
+			"keyframes[%d] calls %s with %s, and it takes %s%s"
+			% [index, method, passed, most, fails]
+		)
 	for at: int in arguments.size():
 		var parameter: Dictionary = parameters[at]
 		var taken_type: int = GdhRead.as_int(parameter.get("type", TYPE_NIL))
@@ -276,7 +296,7 @@ static func _key_misfit(target: Node, method: String, arguments: Array, index: i
 					method,
 					str(parameter.get("name", "")),
 					type_string(taken_type),
-					fails
+					fails,
 				]
 			)
 	return ""
@@ -293,22 +313,22 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 	var animation_name: String = str(args.get("animationName", ""))
 	var given_track: Variant = args.get("track", {})
 	if scene_path.strip_edges() == "res://":
-		return {"ok": false, "error": "Missing scenePath"}
+		return { "ok": false, "error": "Missing scenePath" }
 	if animation_name.strip_edges().is_empty():
-		return {"ok": false, "error": "Missing animationName"}
+		return { "ok": false, "error": "Missing animationName" }
 	var track: Dictionary = given_track if given_track is Dictionary else {}
 	if track.is_empty():
-		return {"ok": false, "error": "Missing track"}
+		return { "ok": false, "error": "Missing track" }
 	var track_type: String = str(track.get("type", ""))
 	if not track_type in GdhAnimationReads.TRACK_TYPE_NAMES.values():
-		return {"ok": false, "error": "Unsupported track.type: " + track_type}
+		return { "ok": false, "error": "Unsupported track.type: " + track_type }
 	var node_path: String = str(track.get("nodePath", ""))
 	var property: String = str(track.get("property", ""))
 	var shape: Array = [track_type, node_path, property]
 	var method: String = str(track.get("method", "")) if track_type == "method" else ""
 	var read_times: Variant = _times_of(args.get("times"))
 	if read_times is String:
-		return {"ok": false, "error": read_times}
+		return { "ok": false, "error": read_times }
 	var times: Array = read_times
 
 	var found: Array = _animation_at(scene_path, player_node_path, animation_name)
@@ -335,7 +355,7 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 			% [
 				animation_name,
 				track_type,
-				node_path if property.is_empty() else "%s:%s" % [node_path, property]
+				node_path if property.is_empty() else "%s:%s" % [node_path, property],
 			]
 		)
 		if held.is_empty():
@@ -353,7 +373,9 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 		var timed: Array = _keys_at(anim, calling, times)
 		if timed[1] != "":
 			var on: String = node_path if property.is_empty() else "%s:%s" % [node_path, property]
-			return scene.refuse("%s's %s track on %s %s" % [animation_name, track_type, on, timed[1]])
+			return scene.refuse(
+				"%s's %s track on %s %s" % [animation_name, track_type, on, timed[1]]
+			)
 		calling = timed[0]
 	var keys: int = 0
 	var tracks_removed: int = 0
@@ -383,7 +405,7 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 		if loaded.get_track_count() != left or _key_total(loaded) != keys_left:
 			return "the track would still be in %s when the scene loads." % animation_name
 		return ""
-	var removed: Dictionary = {"type": track_type, "nodePath": node_path}
+	var removed: Dictionary = { "type": track_type, "nodePath": node_path }
 	if not property.is_empty():
 		removed["property"] = property
 	if not method.is_empty():
@@ -432,8 +454,8 @@ static func _times_of(given: Variant) -> Variant:
 
 
 ## Of the keys [param calling] names, as [method _keys_calling] answers them, the ones at
-## [param times], as [[[track, key]...], ""], or with the second the words refusing a time none is at.
-## Removing a key took removing its whole track, so moving one key in time rewrote every other.
+## [param times], as [[[track, key]...], ""], or with the second the words refusing a time none is
+## at. Removing a key took removing its whole track, so moving one key in time rewrote every other.
 static func _keys_at(anim: Animation, calling: Array, times: Array) -> Array:
 	var at: Array = []
 	var held: PackedStringArray = []
@@ -457,7 +479,10 @@ static func _keys_at(anim: Animation, calling: Array, times: Array) -> Array:
 		var _named: bool = named.append(str(given))
 	return [
 		at,
-		"has no key at %s s; its keys are at %s s. Nothing was removed." % [", ".join(named), ", ".join(held)]
+		(
+			"has no key at %s s; its keys are at %s s. Nothing was removed."
+			% [", ".join(named), ", ".join(held)]
+		),
 	]
 
 
@@ -483,7 +508,9 @@ static func _key_total(anim: Animation) -> int:
 static func _track_shape(anim: Animation, index: int) -> Array:
 	var path: NodePath = anim.track_get_path(index)
 	return [
-		GdhAnimationReads.TRACK_TYPE_NAMES.get(anim.track_get_type(index), str(anim.track_get_type(index))),
+		GdhAnimationReads.TRACK_TYPE_NAMES.get(
+			anim.track_get_type(index), str(anim.track_get_type(index))
+		),
 		str(path.get_concatenated_names()),
 		str(path.get_concatenated_subnames()),
 	]
@@ -508,7 +535,8 @@ func _keyframes(track: Dictionary) -> Array:
 		var seconds: float = GdhRead.as_float(time)
 		if times.has(seconds):
 			return [
-				false, "keyframes[%d] and [%d] are both at %s seconds." % [times[seconds], index, seconds]
+				false,
+				"keyframes[%d] and [%d] are both at %s seconds." % [times[seconds], index, seconds],
 			]
 		times[seconds] = index
 	return [true, keyframes]
@@ -530,7 +558,9 @@ func _key_values(target: Node, prop_name: String, keyframes: Array) -> Array:
 			# A subname such as position:x keys one component, which is a number.
 			var component: Variant = _properties.parse(raw, TYPE_FLOAT)
 			if not component is float:
-				return [false, "keyframes[%d].value keys %s, which is a number." % [index, prop_name]]
+				return [
+					false, "keyframes[%d].value keys %s, which is a number." % [index, prop_name],
+				]
 			values.append(component)
 			continue
 		var value: Array = _properties.value_for(target, declared, raw)

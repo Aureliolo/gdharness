@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## What is out of view is not on the screen. Built here and checked against what was built, on the
 ## first frame, since nothing is in the tree until the main loop starts.
 
@@ -18,7 +17,9 @@ func _init() -> void:
 	OS.set_environment("GDHARNESS_RUNTIME_DIR", directory)
 	node = Runtime.new()
 	root.add_child(node)
-	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
+	Checked.done(
+		process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame"
+	)
 
 
 func _run() -> void:
@@ -32,7 +33,7 @@ func _run() -> void:
 	var _took_directory: Error = DirAccess.remove_absolute(directory)
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -74,13 +75,13 @@ func _check_words_out_of_view() -> void:
 	await process_frame
 	await process_frame
 
-	var read: Dictionary = await node._execute_command("read_text", {"root": "/root/Edges"})
+	var read: Dictionary = await node._execute_command("read_text", { "root": "/root/Edges" })
 	if read.get("lines") != ["Close by", "Row one"] or read.get("out_of_view") != 3:
 		_fail("the screen reads what is in view and counts the rest: %s" % str(read))
 	if not str(read.get("note", "")).begins_with("3 lines drawn outside the viewport"):
 		_fail("and says why they were left out: %s" % str(read))
 	var whole: Dictionary = await node._execute_command(
-		"read_text", {"root": "/root/Edges", "include_hidden": true}
+		"read_text", { "root": "/root/Edges", "include_hidden": true }
 	)
 	if (
 		whole.get("lines") != ["Close by", "Far away", "Row one", "Row two", "Row three"]
@@ -89,34 +90,53 @@ func _check_words_out_of_view() -> void:
 		_fail("with hidden ones included every line is there: %s" % str(whole))
 
 	var seen: Dictionary = await node._execute_command(
-		"find_nodes", {"root": "/root/Edges", "class": "Label", "include_hidden": false}
+		"find_nodes", { "root": "/root/Edges", "class": "Label", "include_hidden": false }
 	)
 	if seen.get("count") != 2 or seen.get("out_of_view") != 3:
-		_fail("a find of what the player sees leaves out what is out of view, and counts it: %s" % str(seen))
+		_fail(
+			(
+				"a find of what the player sees leaves out what is out of view, and counts it: %s"
+				% str(seen)
+			)
+		)
 	var every: Dictionary = await node._execute_command(
-		"find_nodes", {"root": "/root/Edges", "class": "Label"}
+		"find_nodes", { "root": "/root/Edges", "class": "Label" }
 	)
 	if every.get("count") != 5 or every.has("out_of_view"):
 		_fail("and a find of the tree finds all five: %s" % str(every))
 
-	var far_rect: Dictionary = await node._execute_command("get_rect", {"path": "/root/Edges/Far"})
-	var near_rect: Dictionary = await node._execute_command("get_rect", {"path": str(near.get_path())})
+	var far_rect: Dictionary = await node._execute_command(
+		"get_rect",
+		{ "path": "/root/Edges/Far" },
+	)
+	var near_rect: Dictionary = await node._execute_command(
+		"get_rect", { "path": str(near.get_path()) }
+	)
 	if far_rect.get("in_view") != false or near_rect.get("in_view") != true:
 		_fail("a rect says whether it is in view: %s, %s" % [str(far_rect), str(near_rect)])
 
 	var waited: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Edges", "says": "Far away", "timeout_ms": 200}
+		"wait_until", { "path": "/root/Edges", "says": "Far away", "timeout_ms": 200 }
 	)
-	if waited.get("met") != false or not str(waited.get("unseen_note", "")).contains("cannot read it"):
+	if (
+		waited.get("met") != false
+		or not str(waited.get("unseen_note", "")).contains("cannot read it")
+	):
 		_fail("a wait for words out of view runs out, and says they are there: %s" % str(waited))
 	var row_wait: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Edges", "says": "Row one", "timeout_ms": 200}
+		"wait_until", { "path": "/root/Edges", "says": "Row one", "timeout_ms": 200 }
 	)
 	if row_wait.get("met") != true or row_wait.has("unseen_note"):
 		_fail("and one for words in view is met: %s" % str(row_wait))
 	var hidden_wait: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Edges", "says": "Row three", "timeout_ms": 200, "include_hidden": true}
+		"wait_until",
+		{ "path": "/root/Edges", "says": "Row three", "timeout_ms": 200, "include_hidden": true }
 	)
 	if hidden_wait.get("met") != true:
-		_fail("and with hidden ones included, one for a row scrolled away is met too: %s" % str(hidden_wait))
+		_fail(
+			(
+				"and with hidden ones included, one for a row scrolled away is met too: %s"
+				% str(hidden_wait)
+			)
+		)
 	holder.free()

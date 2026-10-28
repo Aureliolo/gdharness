@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## Clicks by words on what a control draws as one of a list: a tab, a list entry, a tree row and a
 ## menu bar title. Each is pressed where the control draws it rather than at the control's middle,
 ## which is whichever item happens to sit there, and the answer names the one pressed. Each check
@@ -36,7 +35,7 @@ func _everything() -> void:
 
 	host.queue_free()
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 	printerr("\n".join(failures))
@@ -68,7 +67,7 @@ func _item_of(answer: Dictionary) -> Dictionary:
 ## its bar is scrolled to first, and a disabled one is refused as a disabled button is.
 func _check_tabs_by_their_titles() -> void:
 	var tab_styles: Array[String] = [
-		"tab_selected", "tab_unselected", "tab_hovered", "tab_disabled", "tab_focus"
+		"tab_selected", "tab_unselected", "tab_hovered", "tab_disabled", "tab_focus",
 	]
 	var tabs: TabContainer = TabContainer.new()
 	tabs.name = "Tabs"
@@ -93,7 +92,7 @@ func _check_tabs_by_their_titles() -> void:
 	cover.size = Vector2(bar.size.x * 0.5 + 2, bar.size.y)
 	root.add_child(cover)
 	await process_frame
-	var clicked: Dictionary = await input.click({"says": "Ef"})
+	var clicked: Dictionary = await input.click({ "says": "Ef" })
 	var item: Dictionary = _item_of(clicked)
 	if (
 		tabs.current_tab != 2
@@ -109,12 +108,17 @@ func _check_tabs_by_their_titles() -> void:
 			)
 		)
 	tabs.set_tab_disabled(3, true)
-	var disabled: Dictionary = await input.click({"says": "Gh"})
-	if tabs.current_tab != 2 or not _says(disabled, 'the tab "Gh" of %s is disabled' % bar.get_path()):
+	var disabled: Dictionary = await input.click({ "says": "Gh" })
+	if (
+		tabs.current_tab != 2
+		or not _says(disabled, 'the tab "Gh" of %s is disabled' % bar.get_path())
+	):
 		_fail("a disabled tab is refused: %s" % JSON.stringify(disabled))
 	# A number arrives from JSON as a float, and the refusal quoted 5 back as 5.0.
-	var past: Dictionary = await input.click({"says": "Ef", "index": 5.0})
-	var only: String = 'index 5 picks nothing: the only match on screen saying "Ef" is index 0: 0 %s ("Ef")'
+	var past: Dictionary = await input.click({ "says": "Ef", "index": 5.0 })
+	var only: String = (
+		'index 5 picks nothing: the only match on screen saying "Ef" is index 0: 0 %s ("Ef")'
+	)
 	if tabs.current_tab != 2 or not _says(past, only % bar.get_path()):
 		_fail("an index past the matches is refused as the number given: %s" % JSON.stringify(past))
 	tabs.queue_free()
@@ -131,10 +135,17 @@ func _check_tabs_by_their_titles() -> void:
 	await process_frame
 	if strip.get_tab_idx_at_point(strip.get_tab_rect(11).get_center()) == 11:
 		_fail("the last tab should start off the bar: %s" % strip.get_tab_rect(11))
-	var far: Dictionary = await input.click({"says": "Tab number 11"})
-	if strip.current_tab != 11 or far.get("scrolled_into_view") != true or _item_of(far).get("index") != 11:
+	var far: Dictionary = await input.click({ "says": "Tab number 11" })
+	if (
+		strip.current_tab != 11
+		or far.get("scrolled_into_view") != true
+		or _item_of(far).get("index") != 11
+	):
 		_fail(
-			"a tab off the bar is scrolled to and pressed: %d, %s" % [strip.current_tab, JSON.stringify(far)]
+			(
+				"a tab off the bar is scrolled to and pressed: %d, %s"
+				% [strip.current_tab, JSON.stringify(far)]
+			)
 		)
 	strip.queue_free()
 	await process_frame
@@ -154,14 +165,20 @@ func _check_list_entries_by_their_words() -> void:
 	await process_frame
 	var middle: int = list.get_item_at_position(list.size * 0.5, true)
 	if middle == 0 or list.get_item_at_position(Vector2(4, 22), true) == 7:
-		_fail("the list's middle should be off its first entry and its last out of view: %d" % middle)
-	var near: Dictionary = await input.click({"says": "Ij"})
-	if not list.is_selected(0) or _item_of(near).get("kind") != "item" or _item_of(near).get("index") != 0:
+		_fail(
+			"the list's middle should be off its first entry and its last out of view: %d" % middle
+		)
+	var near: Dictionary = await input.click({ "says": "Ij" })
+	if (
+		not list.is_selected(0)
+		or _item_of(near).get("kind") != "item"
+		or _item_of(near).get("index") != 0
+	):
 		_fail("a list entry is pressed where it is drawn: %s" % JSON.stringify(near))
-	var far: Dictionary = await input.click({"says": "Wx"})
+	var far: Dictionary = await input.click({ "says": "Wx" })
 	if not list.is_selected(7) or far.get("scrolled_into_view") != true:
 		_fail("an entry out of view is scrolled to and pressed: %s" % JSON.stringify(far))
-	var back: Dictionary = await input.click({"says": "Ij"})
+	var back: Dictionary = await input.click({ "says": "Ij" })
 	if not list.is_selected(0) or back.get("scrolled_into_view") != true:
 		_fail("and one scrolled off the top is scrolled back to: %s" % JSON.stringify(back))
 	list.queue_free()
@@ -179,8 +196,12 @@ func _check_tree_rows_by_their_words() -> void:
 	_small(tree, ["panel", "focus", "selected", "selected_focus", "cursor", "cursor_unfocused"])
 	var top: TreeItem = tree.create_item()
 	var rows: Array[TreeItem] = []
-	var firsts: Array[String] = ["Ab", "Cd", "Ef", "Gh", "Ij", "Kl", "Mn", "Op", "Qr", "St", "Uv", "Wx"]
-	var seconds: Array[String] = ["Ba", "Dc", "Fe", "Hg", "Ji", "Lk", "Nm", "Po", "Rq", "Ts", "Vu", "Xw"]
+	var firsts: Array[String] = [
+		"Ab", "Cd", "Ef", "Gh", "Ij", "Kl", "Mn", "Op", "Qr", "St", "Uv", "Wx",
+	]
+	var seconds: Array[String] = [
+		"Ba", "Dc", "Fe", "Hg", "Ji", "Lk", "Nm", "Po", "Rq", "Ts", "Vu", "Xw",
+	]
 	for at: int in firsts.size():
 		var row: TreeItem = tree.create_item(top)
 		row.set_text(0, firsts[at])
@@ -192,7 +213,7 @@ func _check_tree_rows_by_their_words() -> void:
 	var centre: Vector2 = tree.size * 0.5
 	if tree.get_item_at_position(centre) == rows[0] or tree.get_column_at_position(centre) == 0:
 		_fail("the tree's middle should be off the first row's first cell: %s" % centre)
-	var cell: Dictionary = await input.click({"says": "Ab"})
+	var cell: Dictionary = await input.click({ "says": "Ab" })
 	var named: Dictionary = _item_of(cell)
 	if (
 		tree.get_selected() != rows[0]
@@ -204,7 +225,7 @@ func _check_tree_rows_by_their_words() -> void:
 		_fail("a tree row is pressed on the cell saying the words: %s" % JSON.stringify(cell))
 	if tree.get_item_at_position(tree.get_item_area_rect(rows[11]).get_center()) == rows[11]:
 		_fail("the last row should start out of view: %s" % tree.get_item_area_rect(rows[11]))
-	var low: Dictionary = await input.click({"says": "Wx"})
+	var low: Dictionary = await input.click({ "says": "Wx" })
 	if tree.get_selected() != rows[11] or low.get("scrolled_into_view") != true:
 		_fail("a row out of view is scrolled to and pressed: %s" % JSON.stringify(low))
 	tree.queue_free()
@@ -226,12 +247,14 @@ func _check_a_menu_bar_title() -> void:
 	root.add_child(menus)
 	await process_frame
 	await process_frame
-	var clicked: Dictionary = await input.click({"says": "Kp"})
+	var clicked: Dictionary = await input.click({ "says": "Kp" })
 	var opened: Array[bool] = []
 	for menu: int in menus.get_menu_count():
 		opened.append(menus.get_menu_popup(menu).visible)
 	if opened[0] or not opened[1] or opened[2] or _item_of(clicked).get("kind") != "menu":
-		_fail("a menu bar title opens its own menu: %s, %s" % [str(opened), JSON.stringify(clicked)])
+		_fail(
+			"a menu bar title opens its own menu: %s, %s" % [str(opened), JSON.stringify(clicked)]
+		)
 	menus.get_menu_popup(1).hide()
 	menus.queue_free()
 	await process_frame

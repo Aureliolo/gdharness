@@ -1,15 +1,13 @@
 extends SceneTree
-
 ## Drives the value serialisers the headless operations use. They convert Godot values to
 ## JSON-safe dictionaries and back, and they are dispatch chains where a reordered branch
 ## silently changes the answer rather than failing, so the round trip is asserted value by value.
 
 const GdhSerialisation = preload("res://operations/serialisation.gd")
-
 ## The types that are described rather than rebuilt, because nothing can send one back.
 const DESCRIBED: Array[int] = [TYPE_OBJECT, TYPE_CALLABLE, TYPE_SIGNAL]
 ## 2^53, from which on whole numbers share doubles.
-const EXACT: int = 9007199254740992
+const EXACT: int = 9_007_199_254_740_992
 
 var failures: Array[String] = []
 var values: GdhSerialisation = GdhSerialisation.new()
@@ -27,7 +25,7 @@ func _init() -> void:
 	_check_single_floats()
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -48,7 +46,7 @@ func _tag_of(value: Variant) -> String:
 
 func _check_serialize() -> void:
 	var vec2: Variant = values.serialize_value(Vector2(1.5, -2.5))
-	if vec2 != {"x": 1.5, "y": -2.5, "_type": "Vector2"}:
+	if vec2 != { "x": 1.5, "y": -2.5, "_type": "Vector2" }:
 		_fail("Vector2: %s" % JSON.stringify(vec2))
 
 	if _tag_of(values.serialize_value(Vector3(1, 2, 3))) != "Vector3":
@@ -77,7 +75,7 @@ func _check_serialize() -> void:
 		_fail("Transform3D lost its basis: %s" % JSON.stringify(transform))
 
 	# Arrays and dictionaries recurse, so a flattened branch shows up as an untagged member.
-	var nested: Variant = values.serialize_value([Vector2(1, 1), {"inner": Vector3(2, 2, 2)}])
+	var nested: Variant = values.serialize_value([Vector2(1, 1), { "inner": Vector3(2, 2, 2) }])
 	if not nested is Array:
 		_fail("array shape: %s" % JSON.stringify(nested))
 	else:
@@ -115,7 +113,9 @@ func _check_serialize() -> void:
 	var holder: Node = Node.new()
 	var nothing: Variant = holder.callv("find_child", ["nonesuch", true, false])
 	if values.serialize_value(nothing) != null:
-		_fail("a method that answered nothing: %s" % JSON.stringify(values.serialize_value(nothing)))
+		_fail(
+			"a method that answered nothing: %s" % JSON.stringify(values.serialize_value(nothing))
+		)
 	holder.free()
 
 	var doomed: Node = Node.new()
@@ -132,7 +132,7 @@ func _check_serialize() -> void:
 		_fail("passthrough string")
 
 	var no_bytes: Variant = values.serialize_value(PackedByteArray())
-	if no_bytes != {"base64": "", "size": 0, "_type": "PackedByteArray"}:
+	if no_bytes != { "base64": "", "size": 0, "_type": "PackedByteArray" }:
 		_fail("an empty PackedByteArray: %s" % JSON.stringify(no_bytes))
 	elif values.deserialize_value(no_bytes) != PackedByteArray():
 		_fail("an empty PackedByteArray back: %s" % str(values.deserialize_value(no_bytes)))
@@ -148,15 +148,20 @@ func _check_single_floats() -> void:
 	if JSON.stringify(colour) != '{"_type":"Color","a":1.0,"b":0.6,"g":0.4,"r":0.2}':
 		_fail("a colour reads as written: %s" % JSON.stringify(colour))
 	var point: Variant = values.serialize_value(Vector2(0.1, -0.3))
-	if not OS.has_feature("double") and JSON.stringify(point) != '{"_type":"Vector2","x":0.1,"y":-0.3}':
+	if (
+		not OS.has_feature("double")
+		and JSON.stringify(point) != '{"_type":"Vector2","x":0.1,"y":-0.3}'
+	):
 		_fail("a vector reads as written: %s" % JSON.stringify(point))
 	var listed: Variant = values.serialize_value(PackedFloat32Array([0.1, 2.5]))
 	if JSON.stringify(listed) != "[0.1,2.5]":
 		_fail("a 32-bit array reads as written: %s" % JSON.stringify(listed))
 	var widened: float = PackedFloat32Array([0.2])[0]
 	if values.serialize_value(widened) != widened:
-		_fail("a plain float is not shortened: %s" % JSON.stringify(values.serialize_value(widened)))
-	for held: float in [1.0 / 3.0, 16777217.0, 1.0e-30, -123456.789, 3.4e38]:
+		_fail(
+			"a plain float is not shortened: %s" % JSON.stringify(values.serialize_value(widened))
+		)
+	for held: float in [1.0 / 3.0, 16_777_217.0, 1.0e-30, -123456.789, 3.4e38]:
 		var single: float = PackedFloat32Array([held])[0]
 		var said: Variant = values.serialize_value(Color(single, 0, 0))
 		var back: Variant = values.deserialize_value(said)
@@ -166,7 +171,7 @@ func _check_single_floats() -> void:
 
 
 func _check_keys() -> void:
-	var keyed: Dictionary = {1: "one", Vector2(1, 2): Vector2(3, 4)}
+	var keyed: Dictionary = { 1: "one", Vector2(1, 2): Vector2(3, 4) }
 	var wire: String = JSON.stringify(values.serialize_value(keyed))
 	var back: Variant = values.deserialize_value(JSON.parse_string(wire))
 	if not back is Dictionary:
@@ -176,11 +181,11 @@ func _check_keys() -> void:
 	if held.get(1) != "one" or held.get(Vector2(1, 2)) != Vector2(3, 4) or held.size() != 2:
 		_fail("keyed dictionary round trip: sent %s, wire %s, back %s" % [keyed, wire, held])
 
-	var texts: Variant = values.serialize_value({"a": 1, &"b": 2})
+	var texts: Variant = values.serialize_value({ "a": 1, &"b": 2 })
 	if _tag_of(texts) != "":
 		_fail("a dictionary keyed by text should stay plain: %s" % JSON.stringify(texts))
 
-	var malformed: Dictionary = {"_type": "Dictionary", "entries": [[1]]}
+	var malformed: Dictionary = { "_type": "Dictionary", "entries": [[1]] }
 	if values.deserialize_value(malformed) != malformed:
 		_fail("entries that are not pairs should come back as they arrived")
 
@@ -194,22 +199,27 @@ func _check_deserialize() -> void:
 		_fail("Vector2i round trip")
 	if values.deserialize_value(values.serialize_value(Vector3i(6, 7, 8))) != Vector3i(6, 7, 8):
 		_fail("Vector3i round trip")
-	var deep: Dictionary = {"_type": "Vector2", "x": 1, "y": 2, "z": 3}
+	var deep: Dictionary = { "_type": "Vector2", "x": 1, "y": 2, "z": 3 }
 	var deep_back: Variant = values.deserialize_value(deep)
 	if typeof(deep_back) != TYPE_DICTIONARY or deep_back != deep:
 		_fail("a Vector2 carrying a z should come back as it arrived, not as %s" % str(deep_back))
-	var framed: Dictionary = {"_type": "Rect2", "position": {"x": 1, "y": 2}, "size": {"x": 3, "y": 4}}
+	var framed: Dictionary = {
+		"_type": "Rect2", "position": { "x": 1, "y": 2 }, "size": { "x": 3, "y": 4 },
+	}
 	if values.deserialize_value(framed) != Rect2(1, 2, 3, 4):
 		_fail("a Rect2 by its corners: %s" % str(values.deserialize_value(framed)))
-	var counted: Dictionary = {"_type": "Rect2", "x": 1, "y": 2, "width": 3, "height": 4}
+	var counted: Dictionary = { "_type": "Rect2", "x": 1, "y": 2, "width": 3, "height": 4 }
 	if values.deserialize_value(counted) != Rect2(1, 2, 3, 4):
 		_fail("and by its four numbers: %s" % str(values.deserialize_value(counted)))
 	var colour: Color = Color(0.25, 0.5, 0.75, 1)
 	if values.deserialize_value(values.serialize_value(colour)) != colour:
 		_fail("Color round trip")
-	if values.deserialize_value({"_type": "Color", "r": 1, "g": 0, "b": 0}) != Color(1, 0, 0, 1):
+	if values.deserialize_value({ "_type": "Color", "r": 1, "g": 0, "b": 0 }) != Color(1, 0, 0, 1):
 		_fail("a Color without its alpha is opaque")
-	if values.deserialize_value(values.serialize_value(NodePath("Root/Child"))) != NodePath("Root/Child"):
+	if (
+		values.deserialize_value(values.serialize_value(NodePath("Root/Child")))
+		!= NodePath("Root/Child")
+	):
 		_fail("NodePath round trip")
 
 	var rect: Rect2 = Rect2(Vector2(1, 2), Vector2(3, 4))
@@ -217,7 +227,7 @@ func _check_deserialize() -> void:
 		_fail("Rect2 round trip: %s" % str(values.deserialize_value(values.serialize_value(rect))))
 
 	var restored: Array = values.deserialize_value(
-		values.serialize_value([Vector2(1, 1), {"inner": Vector3(2, 2, 2)}])
+		values.serialize_value([Vector2(1, 1), { "inner": Vector3(2, 2, 2) }])
 	)
 	var restored_inner: Dictionary = restored[1]
 	if restored[0] != Vector2(1, 1) or restored_inner["inner"] != Vector3(2, 2, 2):
@@ -229,12 +239,13 @@ func _check_deserialize() -> void:
 		_fail("passthrough int")
 
 	# An untagged dictionary is walked rather than handed back whole.
-	var untagged: Dictionary = values.deserialize_value({"a": {"_type": "Vector2", "x": 9, "y": 9}})
+	var tagged_inside: Dictionary = { "a": { "_type": "Vector2", "x": 9, "y": 9 } }
+	var untagged: Dictionary = values.deserialize_value(tagged_inside)
 	if untagged["a"] != Vector2(9, 9):
 		_fail("untagged dictionary recursion: %s" % str(untagged))
 
 	# An unknown tag comes back as it arrived rather than being guessed at.
-	var unknown: Dictionary = {"_type": "Nonesuch", "x": 1}
+	var unknown: Dictionary = { "_type": "Nonesuch", "x": 1 }
 	if values.deserialize_value(unknown) != unknown:
 		_fail("unknown tag: %s" % str(values.deserialize_value(unknown)))
 
@@ -259,7 +270,9 @@ func _check_every_type() -> void:
 			continue
 		var original: Variant = samples[kind]
 
-		var carried: Variant = JSON.parse_string(JSON.stringify({"v": values.serialize_value(original)}))
+		var carried: Variant = JSON.parse_string(
+			JSON.stringify({ "v": values.serialize_value(original) })
+		)
 		var held: Dictionary = carried
 		var rebuilt: Variant = type_convert(values.deserialize_value(held["v"]), kind)
 		if var_to_str(rebuilt) != var_to_str(original):
@@ -270,16 +283,16 @@ func _check_every_type() -> void:
 						type_string(kind),
 						var_to_str(original),
 						JSON.stringify(held["v"]),
-						var_to_str(rebuilt)
+						var_to_str(rebuilt),
 					]
 				)
 			)
 
 
 ## Infinity and NaN, bare and inside the shapes that carry floats as components. The walk above goes
-## through the engine's own JSON, which reads 1e99999 back as infinity, so it passes on the very wire
-## that loses them: the server reads 1e99999 as Infinity and writes it, and NaN, out as null. So the
-## wire is held to having neither, and then to building back.
+## through the engine's own JSON, which reads 1e99999 back as infinity, so it passes on the very
+## wire that loses them: the server reads 1e99999 as Infinity and writes it, and NaN, out as null.
+## So the wire is held to having neither, and then to building back.
 func _check_non_finite() -> void:
 	var cases: Array = [
 		INF,
@@ -291,7 +304,7 @@ func _check_non_finite() -> void:
 		PackedFloat32Array([1.0, -INF]),
 		PackedFloat64Array([NAN]),
 		[INF, 2.5],
-		{"far": -INF},
+		{ "far": -INF },
 	]
 	for original: Variant in cases:
 		var wire: String = JSON.stringify(values.serialize_value(original))
@@ -302,9 +315,14 @@ func _check_non_finite() -> void:
 			values.deserialize_value(JSON.parse_string(wire)), typeof(original)
 		)
 		if var_to_str(rebuilt) != var_to_str(original):
-			_fail("%s crossed as %s and came back %s" % [var_to_str(original), wire, var_to_str(rebuilt)])
+			_fail(
+				(
+					"%s crossed as %s and came back %s"
+					% [var_to_str(original), wire, var_to_str(rebuilt)]
+				)
+			)
 	# A tag naming no such number is left as it arrived rather than read as 0.
-	var unnamed: Variant = values.deserialize_value({"_type": "float", "value": "lots"})
+	var unnamed: Variant = values.deserialize_value({ "_type": "float", "value": "lots" })
 	if not unnamed is Dictionary:
 		_fail("a float tag naming no number was built into %s" % var_to_str(unnamed))
 
@@ -323,9 +341,9 @@ func _check_exact_ints() -> void:
 		-(1 << 62) - 3,
 		PackedInt64Array([(1 << 62) + 1, 5]),
 		[(1 << 62) + 1],
-		{"seed": EXACT + 1},
+		{ "seed": EXACT + 1 },
 		rid_from_int64((1 << 62) + 9),
-		rid_from_int64(81604378624),
+		rid_from_int64(81_604_378_624),
 	]
 	for original: Variant in cases:
 		var wire: String = JSON.stringify(values.serialize_value(original))
@@ -333,7 +351,12 @@ func _check_exact_ints() -> void:
 			values.deserialize_value(JSON.parse_string(wire)), typeof(original)
 		)
 		if not _same(rebuilt, original):
-			_fail("%s crossed as %s and came back %s" % [var_to_str(original), wire, var_to_str(rebuilt)])
+			_fail(
+				(
+					"%s crossed as %s and came back %s"
+					% [var_to_str(original), wire, var_to_str(rebuilt)]
+				)
+			)
 	# Below the bound a number is still the number it was, not a tag.
 	if values.serialize_value(EXACT - 1) != EXACT - 1:
 		_fail("2^53 - 1 was tagged: %s" % JSON.stringify(values.serialize_value(EXACT - 1)))
@@ -342,19 +365,24 @@ func _check_exact_ints() -> void:
 	var described: Dictionary = JSON.parse_string(JSON.stringify(values.serialize_value(counted)))
 	var id: Variant = values.deserialize_value(described["id"])
 	if not id is int or id != counted.get_instance_id():
-		_fail("a RefCounted's id %d came back %s" % [counted.get_instance_id(), JSON.stringify(described)])
+		_fail(
+			(
+				"a RefCounted's id %d came back %s"
+				% [counted.get_instance_id(), JSON.stringify(described)]
+			)
+		)
 
 	# An RID's id written by hand as a number below the bound builds it too.
-	var by_hand: Variant = values.deserialize_value({"_type": "RID", "id": 81604378624.0})
-	if not _same(by_hand, rid_from_int64(81604378624)):
+	var by_hand: Variant = values.deserialize_value({ "_type": "RID", "id": 81_604_378_624.0 })
+	if not _same(by_hand, rid_from_int64(81_604_378_624)):
 		_fail("an RID tag with a number for its id was built into %s" % var_to_str(by_hand))
 	# A tag that cannot be the number it names is left as it arrived rather than read as another.
 	var refused: Array = [
-		{"_type": "int", "value": "lots"},
-		{"_type": "int", "value": "007"},
-		{"_type": "int", "value": 5},
-		{"_type": "RID", "id": 1.5},
-		{"_type": "RID", "id": float(EXACT) * 4},
+		{ "_type": "int", "value": "lots" },
+		{ "_type": "int", "value": "007" },
+		{ "_type": "int", "value": 5 },
+		{ "_type": "RID", "id": 1.5 },
+		{ "_type": "RID", "id": float(EXACT) * 4 },
 	]
 	for tag: Variant in refused:
 		var built: Variant = values.deserialize_value(tag)
@@ -425,11 +453,13 @@ func _samples() -> Dictionary:
 		TYPE_TRANSFORM3D:
 		Transform3D(Basis(Vector3(1, 2, 3), Vector3(4, 5, 6), Vector3(7, 8, 9)), Vector3(9, 8, 7)),
 		TYPE_PROJECTION:
-		Projection(Vector4(1, 2, 3, 4), Vector4(5, 6, 7, 8), Vector4(9, 1, 2, 3), Vector4(4, 5, 6, 7)),
+		Projection(
+			Vector4(1, 2, 3, 4), Vector4(5, 6, 7, 8), Vector4(9, 1, 2, 3), Vector4(4, 5, 6, 7)
+		),
 		TYPE_COLOR: Color(0.25, 0.5, 0.75, 0.5),
 		TYPE_STRING_NAME: &"walk",
 		TYPE_NODE_PATH: NodePath("Root/Child"),
-		TYPE_DICTIONARY: {"where": Vector2(1, 2)},
+		TYPE_DICTIONARY: { "where": Vector2(1, 2) },
 		TYPE_ARRAY: [Vector2(1, 2), "plain"],
 		TYPE_PACKED_BYTE_ARRAY: PackedByteArray([1, 2, 250]),
 		TYPE_PACKED_INT32_ARRAY: PackedInt32Array([1, -2]),

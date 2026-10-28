@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## A property value can arrive in three shapes and the parser tries them in order: a dictionary
 ## that names its own type, a dictionary shaped like the type the property declares, or a bare
 ## array positional for a vector. The order matters and so do the gaps between them, because a
@@ -20,7 +19,7 @@ func _init() -> void:
 	_check_gaps(tools)
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -33,20 +32,23 @@ func _fail(message: String) -> void:
 
 
 func _check_tagged(tools: GdhPropertyValues) -> void:
-	if tools.parse({"_type": "Vector2", "x": 1, "y": 2}) != Vector2(1, 2):
+	if tools.parse({ "_type": "Vector2", "x": 1, "y": 2 }) != Vector2(1, 2):
 		_fail("tagged Vector2")
-	if tools.parse({"_type": "Vector3", "x": 1, "y": 2, "z": 3}) != Vector3(1, 2, 3):
+	if tools.parse({ "_type": "Vector3", "x": 1, "y": 2, "z": 3 }) != Vector3(1, 2, 3):
 		_fail("tagged Vector3")
-	if tools.parse({"_type": "Vector2i", "x": 4, "y": 5}) != Vector2i(4, 5):
+	if tools.parse({ "_type": "Vector2i", "x": 4, "y": 5 }) != Vector2i(4, 5):
 		_fail("tagged Vector2i")
-	if tools.parse({"_type": "Vector3i", "x": 6, "y": 7, "z": 8}) != Vector3i(6, 7, 8):
+	if tools.parse({ "_type": "Vector3i", "x": 6, "y": 7, "z": 8 }) != Vector3i(6, 7, 8):
 		_fail("tagged Vector3i")
-	if tools.parse({"_type": "Color", "r": 0.25, "g": 0.5, "b": 0.75, "a": 1}) != Color(0.25, 0.5, 0.75, 1):
+	if (
+		tools.parse({ "_type": "Color", "r": 0.25, "g": 0.5, "b": 0.75, "a": 1 })
+		!= Color(0.25, 0.5, 0.75, 1)
+	):
 		_fail("tagged Color")
-	if tools.parse({"_type": "NodePath", "path": "Root/Child"}) != NodePath("Root/Child"):
+	if tools.parse({ "_type": "NodePath", "path": "Root/Child" }) != NodePath("Root/Child"):
 		_fail("tagged NodePath")
 
-	var rect: Variant = tools.parse({"_type": "Rect2", "x": 1, "y": 2, "width": 3, "height": 4})
+	var rect: Variant = tools.parse({ "_type": "Rect2", "x": 1, "y": 2, "width": 3, "height": 4 })
 	if rect != Rect2(1, 2, 3, 4):
 		_fail("tagged Rect2: %s" % str(rect))
 
@@ -55,9 +57,9 @@ func _check_tagged(tools: GdhPropertyValues) -> void:
 		. parse(
 			{
 				"_type": "Transform2D",
-				"x": {"x": 1, "y": 0},
-				"y": {"x": 0, "y": 1},
-				"origin": {"x": 3, "y": 4},
+				"x": { "x": 1, "y": 0 },
+				"y": { "x": 0, "y": 1 },
+				"origin": { "x": 3, "y": 4 },
 			}
 		)
 	)
@@ -71,8 +73,8 @@ func _check_tagged(tools: GdhPropertyValues) -> void:
 		. parse(
 			{
 				"_type": "Transform3D",
-				"basis": {"x": {"x": 1}, "y": {"y": 1}, "z": {"z": 1}},
-				"origin": {"x": 5, "y": 6, "z": 7},
+				"basis": { "x": { "x": 1 }, "y": { "y": 1 }, "z": { "z": 1 } },
+				"origin": { "x": 5, "y": 6, "z": 7 },
 			}
 		)
 	)
@@ -83,17 +85,17 @@ func _check_tagged(tools: GdhPropertyValues) -> void:
 
 
 func _check_shaped(tools: GdhPropertyValues) -> void:
-	if tools.parse({"x": 1, "y": 2}, TYPE_VECTOR2) != Vector2(1, 2):
+	if tools.parse({ "x": 1, "y": 2 }, TYPE_VECTOR2) != Vector2(1, 2):
 		_fail("untagged dictionary against a declared Vector2")
-	if tools.parse({"x": 1, "y": 2, "z": 3}, TYPE_VECTOR3) != Vector3(1, 2, 3):
+	if tools.parse({ "x": 1, "y": 2, "z": 3 }, TYPE_VECTOR3) != Vector3(1, 2, 3):
 		_fail("untagged dictionary against a declared Vector3")
-	if tools.parse({"r": 1, "g": 0, "b": 0}, TYPE_COLOR) != Color(1, 0, 0, 1):
+	if tools.parse({ "r": 1, "g": 0, "b": 0 }, TYPE_COLOR) != Color(1, 0, 0, 1):
 		_fail("untagged dictionary against a declared Color")
-	if tools.parse({"path": "Root"}, TYPE_NODE_PATH) != NodePath("Root"):
+	if tools.parse({ "path": "Root" }, TYPE_NODE_PATH) != NodePath("Root"):
 		_fail("untagged dictionary against a declared NodePath")
 
 	# With no declared type there is nothing to read it as, so it stays a dictionary.
-	var plain: Variant = tools.parse({"x": 1, "y": 2})
+	var plain: Variant = tools.parse({ "x": 1, "y": 2 })
 	if not plain is Dictionary:
 		_fail("untagged dictionary with no declared type should stay a dictionary: %s" % str(plain))
 
@@ -112,7 +114,7 @@ func _check_positional(tools: GdhPropertyValues) -> void:
 		_fail("a too-short array should stay an array: %s" % str(short))
 
 	# A list parses per item, so a tagged member inside it comes back built.
-	var nested: Variant = tools.parse([{"_type": "Vector2", "x": 1, "y": 1}])
+	var nested: Variant = tools.parse([{ "_type": "Vector2", "x": 1, "y": 1 }])
 	var members: Array = []
 	if nested is Array:
 		members = nested
@@ -124,18 +126,23 @@ func _check_positional(tools: GdhPropertyValues) -> void:
 
 func _check_gaps(tools: GdhPropertyValues) -> void:
 	# A Resource with no path means nothing, which is not the same as the tag not matching.
-	var empty_resource: Variant = tools.parse({"_type": "Resource", "path": ""})
+	var empty_resource: Variant = tools.parse({ "_type": "Resource", "path": "" })
 	if empty_resource != null:
 		_fail("a pathless Resource should parse to null, got %s" % str(empty_resource))
 
 	# A tag naming a type it has not got the keys to build falls through to the declared type,
 	# rather than answering with a Transform2D built out of defaults.
-	var incomplete: Variant = tools.parse({"_type": "Transform2D", "x": 1, "y": 2}, TYPE_VECTOR2)
+	var incomplete: Variant = tools.parse({ "_type": "Transform2D", "x": 1, "y": 2 }, TYPE_VECTOR2)
 	if incomplete != Vector2(1, 2):
-		_fail("an incomplete Transform2D should fall through to the declared type, got %s" % str(incomplete))
+		_fail(
+			(
+				"an incomplete Transform2D should fall through to the declared type, got %s"
+				% str(incomplete)
+			)
+		)
 
 	# A tag nobody builds is left alone.
-	var unknown: Variant = tools.parse({"_type": "Nonesuch", "x": 1})
+	var unknown: Variant = tools.parse({ "_type": "Nonesuch", "x": 1 })
 	if not unknown is Dictionary:
 		_fail("an unknown tag should stay a dictionary: %s" % str(unknown))
 

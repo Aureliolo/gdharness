@@ -1,19 +1,17 @@
 extends RefCounted
-
 ## What the running game tells a screen reader: its accessibility tree, as UI Automation reads it.
 ##
 ## The engine builds the tree only when something asks for it, and nothing on gdharness's desktop
 ## does, so a game's NOTIFICATION_ACCESSIBILITY_UPDATE never came and what its controls expose could
 ## not be checked. The engine offers no way to read the tree back, so the question is put the way a
-## screen reader puts it: a UI Automation client started by the game lands on the game's own desktop,
-## its first question makes the engine build the tree, and what it reads is what a screen reader is
-## told, names left empty included.
+## screen reader puts it: a UI Automation client started by the game lands on the game's own
+## desktop, its first question makes the engine build the tree, and what it reads is what a screen
+## reader is told, names left empty included.
 
 const GdhRead = preload("reading.gd")
 const GdhSays = preload("runtime_says.gd")
-
-## How long the client keeps walking the tree for it to settle: the engine answers the first question
-## with its windows alone and fills them in over the next frames.
+## How long the client keeps walking the tree for it to settle: the engine answers the first
+## question with its windows alone and fills them in over the next frames.
 const SETTLE_MS: int = 8000
 ## How long a window with nothing in it is walked before the client stops: a game building its tree
 ## fills the window within a few frames of being asked, and one building none never does.
@@ -33,12 +31,11 @@ const MOST_LEVELS: int = 40
 ## Where an element holds its node's instance id between matching and placing, removed before the
 ## answer goes.
 const NODE_ID: String = "_node_instance"
-
 ## The client, as PowerShell, with $Handles, $Out, $Progress, $SettleMs, $EmptyMs and $MostLevels
-## set before it. Each element answers what UI Automation names its role, its name, its value where it
-## has one, its bounds in the window's pixels, and the actions a screen reader is offered on it. Each
-## stage it reaches is marked in $Progress as it is reached, with the time, so a client stopped at the
-## deadline still says how far it got.
+## set before it. Each element answers what UI Automation names its role, its name, its value where
+## it has one, its bounds in the window's pixels, and the actions a screen reader is offered on it.
+## Each stage it reaches is marked in $Progress as it is reached, with the time, so a client stopped
+## at the deadline still says how far it got.
 const WALK: String = r"""
 $ErrorActionPreference = 'Stop'
 function Answer($value) {
@@ -200,17 +197,17 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 		if _setting() != "always":
 			also = (
 				(
-					' and engineArgs ["--accessibility", "always"], since this project\'s'
-					+ " accessibility/general/accessibility_support is %s and the engine builds the tree"
-					+ " only when asked"
+					' and engineArgs ["--accessibility", "always"], since this project\'s '
+					+ "accessibility/general/accessibility_support is %s and the engine builds the "
+					+ "tree only when asked"
 				)
 				% _setting()
 			)
 		return _refused(
 			(
 				(
-					"A headless run has no window, so a screen reader is told nothing: start the run with"
-					+ " headless: false%s."
+					"A headless run has no window, so a screen reader is told nothing: start the "
+					+ "run with headless: false%s."
 				)
 				% also
 			)
@@ -219,8 +216,8 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 		return _refused(
 			(
 				(
-					"The tree is read through UI Automation, the interface a Windows screen reader uses, and this"
-					+ " game runs on %s, whose screen readers ask it through another"
+					"The tree is read through UI Automation, the interface a Windows screen reader "
+					+ "uses, and this game runs on %s, whose screen readers ask it through another"
 				)
 				% OS.get_name()
 			)
@@ -239,7 +236,10 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var progress: String = out + ".progress"
 	var script: String = (
 		(
-			"$Handles = @(%s)\n$Out = '%s'\n$Progress = '%s'\n$SettleMs = %d\n$EmptyMs = %d\n$MostLevels = %d\n"
+			(
+				"$Handles = @(%s)\n$Out = '%s'\n$Progress = '%s'\n$SettleMs = %d\n$EmptyMs = "
+				+ "%d\n$MostLevels = %d\n"
+			)
 			% [
 				", ".join(handles),
 				out.replace("'", "''"),
@@ -271,9 +271,9 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	if pid <= 0:
 		return _refused("PowerShell could not be started from %s to read the tree" % shell)
 	# Waited out a frame at a time rather than blocking: the client's questions are answered on the
-	# game's main thread, which a blocking wait would hold, and neither side would move.
-	# Two budgets, so a slow start is never charged to the walk: one for PowerShell to begin and load
-	# UI Automation, and once it has, one for the walks.
+	# game's main thread, which a blocking wait would hold, and neither side would move. Two
+	# budgets, so a slow start is never charged to the walk: one for PowerShell to begin and load UI
+	# Automation, and once it has, one for the walks.
 	var began_at: int = Time.get_ticks_msec()
 	var deadline: int = _deadline(began_at, -1, handles.size())
 	var walking: bool = false
@@ -299,7 +299,9 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 
 	var text: String = FileAccess.get_file_as_string(out)
 	var took: Dictionary = _took(
-		FileAccess.get_file_as_string(progress), started_ms, int(Time.get_unix_time_from_system() * 1000.0)
+		FileAccess.get_file_as_string(progress),
+		started_ms,
+		int(Time.get_unix_time_from_system() * 1000.0)
 	)
 	# Not checked: a file that is not there was never written, which the answer below says.
 	var _removed: Error = DirAccess.remove_absolute(out)
@@ -309,7 +311,9 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 		return _refused("UI Automation answered nothing readable: %s" % text.left(500))
 	var answer: Dictionary = read
 	if answer.has("error"):
-		return _refused("UI Automation could not read the game's windows: %s" % str(answer["error"]))
+		return _refused(
+			"UI Automation could not read the game's windows: %s" % str(answer["error"])
+		)
 
 	var windows: Array = answer.get("windows", [])
 	var made_by: Dictionary = {}
@@ -333,25 +337,28 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 			_unmark(window)
 		elements += _count(window)
 		unnamed += _unnamed_text(window)
-	var result: Dictionary = {"windows": windows, "elements": elements}
+	var result: Dictionary = { "windows": windows, "elements": elements }
 	if not took.is_empty():
 		result["tookMsBy"] = took
 	if placing.tooltips > 0:
 		result["tooltip_note"] = (
-			"tooltip is the node's tooltip_text, which the engine puts in the tree, and UI Automation, as"
-			+ " AccessKit fills it in, has no property that carries it (measured on 4.7.2), so a screen"
-			+ " reader on Windows is not told it. Say what a reader needs in accessibility_description."
+			"tooltip is the node's tooltip_text, which the engine puts in the tree, and UI "
+			+ "Automation, as AccessKit fills it in, has no property that carries it (measured on "
+			+ "4.7.2), so a screen reader on Windows is not told it. Say what a reader needs in "
+			+ "accessibility_description."
 		)
 	if placing.asked > 0 and placing.placed == 0:
 		# Nothing at all matched: the element ids are not the engine's element RIDs any more, which
-		# an AccessKit that numbers its elements another way would do, and every node would read null.
+		# an AccessKit that numbers its elements another way would do, and every node would read
+		# null.
 		result["node_note"] = (
-			"No element could be matched to the node that made it: UI Automation's runtime ids did not"
-			+ " carry the engine's element ids, so node and part_of are the windows' alone."
+			"No element could be matched to the node that made it: UI Automation's runtime ids did "
+			+ "not carry the engine's element ids, so node and part_of are the windows' alone."
 		)
 	if answer.has("description_unread"):
 		result["description_note"] = (
-			"Descriptions could not be read, so none is shown: %s" % str(answer["description_unread"])
+			"Descriptions could not be read, so none is shown: %s"
+			% str(answer["description_unread"])
 		)
 	if elements <= windows.size():
 		var setting: String = _setting()
@@ -359,31 +366,35 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 		# the setting and a screen reader can say the tree is built; otherwise an empty window is
 		# most likely a game that builds none.
 		# 1 is a screen reader running, 0 none and -1 a platform that cannot say.
-		var read_aloud: bool = setting == "auto" and DisplayServer.accessibility_screen_reader_active() == 1
+		var read_aloud: bool = (
+			setting == "auto" and DisplayServer.accessibility_screen_reader_active() == 1
+		)
 		if setting != "always" and not read_aloud:
 			return _refused(
 				(
 					(
-						"UI Automation found nothing in the game's windows: the engine builds the tree a screen"
-						+ " reader reads only with accessibility/general/accessibility_support at Always Active,"
-						+ " or at Auto with a screen reader running when it starts, and this project's is %s."
-						+ ' Start the run with engineArgs ["--accessibility", "always"].'
+						"UI Automation found nothing in the game's windows: the engine builds the "
+						+ "tree a screen reader reads only with "
+						+ "accessibility/general/accessibility_support at Always Active, or at "
+						+ "Auto with a screen reader running when it starts, and this project's "
+						+ "is %s. "
+						+ 'Start the run with engineArgs ["--accessibility", "always"].'
 					)
 					% setting
 				)
 			)
 		result["_note"] = (
-			"The windows hold nothing a screen reader is told: Controls are in the tree, and Node2D and"
-			+ " Node3D are not unless the game creates elements for them."
+			"The windows hold nothing a screen reader is told: Controls are in the tree, and "
+			+ "Node2D and Node3D are not unless the game creates elements for them."
 		)
 	elif unnamed > 0:
 		# Seen on a game naming its lines with accessibility_update_set_name: the text was there in
 		# the game and empty to the screen reader.
 		result["_note"] = (
 			(
-				"%d text element(s) on screen have no name, so a screen reader reads them as nothing. Static"
-				+ " text is read from its value, DisplayServer.accessibility_update_set_value, and a name"
-				+ " set on it is not read."
+				"%d text element(s) on screen have no name, so a screen reader reads them as "
+				+ "nothing. Static text is read from its value, "
+				+ "DisplayServer.accessibility_update_set_value, and a name set on it is not read."
 			)
 			% unnamed
 		)
@@ -498,7 +509,9 @@ static func _cut(element: Dictionary, left: Array[int], omitted: Array[int]) -> 
 
 ## The project's accessibility mode, as the command line's --accessibility names them.
 static func _setting() -> String:
-	match GdhRead.as_int(ProjectSettings.get_setting("accessibility/general/accessibility_support", 0), 0):
+	match GdhRead.as_int(
+		ProjectSettings.get_setting("accessibility/general/accessibility_support", 0), 0
+	):
 		1:
 			return "always"
 		2:
@@ -576,7 +589,9 @@ static func _match(element: Dictionary, made_by: Dictionary, placing: GdhPlacing
 ## column of plain containers came out straight under the window. So the node is found where it
 ## must be: below the shown element's node, itself left out of the tree (a node that is shown would
 ## have the part under it), drawn around the part, and, for text, holding its words.
-static func _attribute(element: Dictionary, holder: Node, placing: GdhPlacing, is_window: bool) -> void:
+static func _attribute(
+	element: Dictionary, holder: Node, placing: GdhPlacing, is_window: bool
+) -> void:
 	var children: Array = element.get("children", [])
 	for child: Variant in children:
 		if not child is Dictionary:
@@ -636,7 +651,9 @@ static func _owners_of(element: Dictionary, holder: Node, placing: GdhPlacing) -
 
 ## Where a Control is drawn is read off its screen transform, which for a window that is not
 ## embedded is in that window's own pixels, as the bounds are.
-static func _drawn_around(node: Node, drawn: Rect2, placing: GdhPlacing, found: Array[Node]) -> void:
+static func _drawn_around(
+	node: Node, drawn: Rect2, placing: GdhPlacing, found: Array[Node]
+) -> void:
 	for child: Node in node.get_children(true):
 		# A node that is shown has its parts under it, and so do the nodes below it.
 		if placing.shown.has(child.get_instance_id()):
@@ -678,7 +695,7 @@ static func _text_of(node: Node) -> String:
 static func _made(parts: Array, made_by: Dictionary) -> Node:
 	var halves: Array[int] = []
 	for part: Variant in parts:
-		halves.append(GdhRead.as_int(part, 0) & 0xFFFFFFFF)
+		halves.append(GdhRead.as_int(part, 0) & 0xffffffff)
 	for at: int in [0, 2]:
 		var id: int = (halves[at] << 32) | halves[at + 1]
 		if made_by.has(id):
@@ -686,21 +703,15 @@ static func _made(parts: Array, made_by: Dictionary) -> Node:
 	return null
 
 
-## Counts kept while the elements are placed, and the nodes whose own elements UI Automation shows,
-## by instance id.
-class GdhPlacing:
-	extends RefCounted
-	var asked: int = 0
-	var placed: int = 0
-	var tooltips: int = 0
-	var shown: Dictionary = {}
-
-
 ## Text elements with bounds and no name. The window's announcement element has no bounds and is
 ## left out with them: it is empty until something is announced.
 static func _unnamed_text(element: Dictionary) -> int:
 	var total: int = 0
-	if element.get("role") == "text" and str(element.get("name", "")).is_empty() and element.has("bounds"):
+	if (
+		element.get("role") == "text"
+		and str(element.get("name", "")).is_empty()
+		and element.has("bounds")
+	):
 		total += 1
 	var children: Array = element.get("children", [])
 	for child: Variant in children:
@@ -710,8 +721,8 @@ static func _unnamed_text(element: Dictionary) -> int:
 	return total
 
 
-## When a client started at [param began_at] is stopped, in ticks: [constant START_MS] after it began
-## while UI Automation is loading ([param loaded_at] -1), and once it was seen loaded at
+## When a client started at [param began_at] is stopped, in ticks: [constant START_MS] after it
+## began while UI Automation is loading ([param loaded_at] -1), and once it was seen loaded at
 ## [param loaded_at], [constant SETTLE_MS] for each of [param windows] and [constant WALK_SLACK_MS]
 ## after that.
 static func _deadline(began_at: int, loaded_at: int, windows: int) -> int:
@@ -763,8 +774,8 @@ static func _reached(progress: String, started_ms: int) -> String:
 		)
 	return (
 		(
-			"PowerShell began the client after %d ms and loaded UI Automation in %d ms, and the windows"
-			+ " were walked %d time%s, the last finding %s element%s"
+			"PowerShell began the client after %d ms and loaded UI Automation in %d ms, and the "
+			+ "windows were walked %d time%s, the last finding %s element%s"
 		)
 		% [began, loaded, walks, "" if walks == 1 else "s", last, "" if last == "1" else "s"]
 	)
@@ -789,4 +800,14 @@ static func _took(progress: String, started_ms: int, done_ms: int) -> Dictionary
 
 
 static func _refused(message: String) -> Dictionary:
-	return {"type": "error", "message": message}
+	return { "type": "error", "message": message }
+
+
+## Counts kept while the elements are placed, and the nodes whose own elements UI Automation shows,
+## by instance id.
+class GdhPlacing:
+	extends RefCounted
+	var asked: int = 0
+	var placed: int = 0
+	var tooltips: int = 0
+	var shown: Dictionary = {}

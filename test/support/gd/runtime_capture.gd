@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## The runtime's capture, driven the way the socket drives it. A headless engine has no window
 ## and draws nothing, which is the same state as a minimised one: the viewport texture holds
 ## whatever was drawn last, here nothing at all, and a capture of it used to answer with a
@@ -16,22 +15,33 @@ var host: Node = Node.new()
 
 func _init() -> void:
 	root.add_child(host)
-	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
+	Checked.done(
+		process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame"
+	)
 
 
 func _run() -> void:
 	var capture: CaptureCommands = CaptureCommands.new(host, GdhValues.new())
 
 	var output_path: String = OS.get_temp_dir().path_join("gdharness-capture-fixture.png")
-	_check_refused(await capture.capture_screenshot({"output_path": output_path}), "screenshot", output_path)
-	_check_refused(await capture.capture_viewport({"output_path": output_path}), "viewport", output_path)
+	_check_refused(
+		await capture.capture_screenshot({ "output_path": output_path }), "screenshot", output_path
+	)
+	_check_refused(
+		await capture.capture_viewport({ "output_path": output_path }), "viewport", output_path
+	)
 
 	var without_path: Dictionary = await capture.capture_screenshot({})
 	if (
 		without_path.get("type", "") != "error"
 		or not str(without_path.get("message", "")).contains("output_path")
 	):
-		_fail("a capture with no path should be refused for the path: %s" % JSON.stringify(without_path))
+		_fail(
+			(
+				"a capture with no path should be refused for the path: %s"
+				% JSON.stringify(without_path)
+			)
+		)
 
 	_check_scaling()
 	await _check_what_is_asked(capture, output_path)
@@ -41,7 +51,7 @@ func _run() -> void:
 	_check_where_nodes_are_drawn()
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -53,8 +63,8 @@ func _fail(message: String) -> void:
 	failures.append(message)
 
 
-## What a capture is scaled to. A width alone was ignored unless a height came with it, so asking for
-## a smaller picture sent back the full-size one; one side now keeps the picture's proportions.
+## What a capture is scaled to. A width alone was ignored unless a height came with it, so asking
+## for a smaller picture sent back the full-size one; one side now keeps the picture's proportions.
 func _check_scaling() -> void:
 	var drawn: Vector2i = Vector2i(1920, 1080)
 	var cases: Array[Array] = [
@@ -69,21 +79,29 @@ func _check_scaling() -> void:
 		var height: int = case[1]
 		var scaled: Vector2i = CaptureCommands.scaled_to(drawn, width, height)
 		if scaled != case[2]:
-			_fail("width %d and height %d scale 1920x1080 to %s, not %s" % [width, height, case[2], scaled])
+			_fail(
+				(
+					"width %d and height %d scale 1920x1080 to %s, not %s"
+					% [width, height, case[2], scaled]
+				)
+			)
 
 
 ## Asking that cannot be answered is refused before a frame is waited for, so here, where nothing is
 ## drawn, each comes back as its own refusal rather than as the window being minimised.
 func _check_what_is_asked(capture: CaptureCommands, output_path: String) -> void:
 	var cases: Array[Array] = [
-		[{"region": {"x": 0, "y": 0, "width": 4, "height": 4}, "nodePath": "/root"}, "give one of them"],
-		[{"zoom": 0}, "from 1 to 16, and 0"],
-		[{"zoom": 17}, "from 1 to 16, and 17"],
-		[{"zoom": 2, "width": 100}, "give one or the other"],
-		[{"region": {"x": 0, "y": 0, "width": 0, "height": 4}}, "with an area"],
-		[{"region": "the corner"}, "with an area"],
+		[
+			{ "region": { "x": 0, "y": 0, "width": 4, "height": 4 }, "nodePath": "/root" },
+			"give one of them",
+		],
+		[{ "zoom": 0 }, "from 1 to 16, and 0"],
+		[{ "zoom": 17 }, "from 1 to 16, and 17"],
+		[{ "zoom": 2, "width": 100 }, "give one or the other"],
+		[{ "region": { "x": 0, "y": 0, "width": 0, "height": 4 } }, "with an area"],
+		[{ "region": "the corner" }, "with an area"],
 		# A path naming nothing, which a headless game told only that it has no window.
-		[{"nodePath": "/root/Nowhere"}, "Node not found: /root/Nowhere"],
+		[{ "nodePath": "/root/Nowhere" }, "Node not found: /root/Nowhere"],
 	]
 	for case: Array in cases:
 		var asked: Dictionary = case[0]
@@ -96,7 +114,7 @@ func _check_what_is_asked(capture: CaptureCommands, output_path: String) -> void
 			_fail("%s should be refused for what was asked (%s): %s" % [asked, why, message])
 	# And a path that names a node goes on to the window, which here is the refusal for having none.
 	var found: Dictionary = await capture.capture_screenshot(
-		{"output_path": output_path, "nodePath": str(host.get_path())}
+		{ "output_path": output_path, "nodePath": str(host.get_path()) }
 	)
 	_check_refused(found, "a node that is there", output_path)
 
@@ -107,7 +125,7 @@ func _check_what_is_asked(capture: CaptureCommands, output_path: String) -> void
 	var into_inset: Dictionary = {
 		"output_path": output_path,
 		"viewportPath": str(sub.get_path()),
-		"region": {"x": 0, "y": 0, "width": 4, "height": 4},
+		"region": { "x": 0, "y": 0, "width": 4, "height": 4 },
 	}
 	var inset: Dictionary = await capture.capture_viewport(into_inset)
 	if not str(inset.get("message", "")).contains("this viewport's texture is in its own"):
@@ -121,7 +139,7 @@ func _check_regions() -> void:
 	var values: GdhValues = GdhValues.new()
 	var expected: Rect2 = Rect2(40, 30, 20, 10)
 	var spelled: Array = [
-		{"x": 40, "y": 30, "width": 20, "height": 10},
+		{ "x": 40, "y": 30, "width": 20, "height": 10 },
 		values.serialize(expected),
 		values.serialize(Rect2i(40, 30, 20, 10)),
 	]
@@ -129,7 +147,7 @@ func _check_regions() -> void:
 		var read: Variant = CaptureCommands.region_of(values, given)
 		if read != expected:
 			_fail("%s should be read as %s, not %s" % [JSON.stringify(given), expected, read])
-	if CaptureCommands.region_of(values, {"x": 1, "y": 1, "width": 5, "height": 0}) != null:
+	if CaptureCommands.region_of(values, { "x": 1, "y": 1, "width": 5, "height": 0 }) != null:
 		_fail("a region with no area should be read as none")
 
 	var window: Vector2i = Vector2i(200, 100)
@@ -150,13 +168,15 @@ func _check_regions() -> void:
 			_fail(said % [region, window, drawn, case[2], picture])
 	if CaptureCommands.in_picture(Rect2(300, 300, 10, 10), window, window).has_area():
 		_fail("a region outside the picture should cut to nothing")
-	var back: Dictionary = CaptureCommands.in_window_pixels(Rect2i(20, 15, 10, 5), window, Vector2i(100, 50))
-	if back != {"x": 40.0, "y": 30.0, "width": 20.0, "height": 10.0}:
+	var back: Dictionary = CaptureCommands.in_window_pixels(
+		Rect2i(20, 15, 10, 5), window, Vector2i(100, 50)
+	)
+	if back != { "x": 40.0, "y": 30.0, "width": 20.0, "height": 10.0 }:
 		_fail("picture pixels should be named as the window pixels they cover: %s" % back)
 
 
-## Enlarged by a whole factor with each pixel kept as a square of them: a red pixel beside a blue one
-## stays red up to the seam, with no blend of the two.
+## Enlarged by a whole factor with each pixel kept as a square of them: a red pixel beside a blue
+## one stays red up to the seam, with no blend of the two.
 func _check_cutting() -> void:
 	var image: Image = Image.create(3, 1, false, Image.FORMAT_RGB8)
 	image.set_pixel(0, 0, Color.WHITE)
@@ -176,10 +196,12 @@ func _check_cutting() -> void:
 			_fail("the blue pixel should stay blue from the seam: %s" % blue)
 
 
-## A capture saved as a PNG with a JPEG of the same picture beside it, and an image with transparency
-## as the PNG alone, since a JPEG would flatten it.
+## A capture saved as a PNG with a JPEG of the same picture beside it, and an image with
+## transparency as the PNG alone, since a JPEG would flatten it.
 func _check_saving() -> void:
-	var folder: String = OS.get_temp_dir().path_join("gdharness-capture-saving-%d" % OS.get_process_id())
+	var folder: String = OS.get_temp_dir().path_join(
+		"gdharness-capture-saving-%d" % OS.get_process_id()
+	)
 	Checked.done(DirAccess.make_dir_recursive_absolute(folder), "making %s" % folder)
 	var opaque: Image = Image.create(16, 8, false, Image.FORMAT_RGBA8)
 	opaque.fill(Color(0.2, 0.4, 0.8, 1.0))
@@ -193,7 +215,11 @@ func _check_saving() -> void:
 			_fail("the JPEG at %s should be the same picture, 16x8" % jpeg_path)
 		else:
 			var middle: Color = jpeg.get_pixel(8, 4)
-			if absf(middle.r - 0.2) > 0.05 or absf(middle.g - 0.4) > 0.05 or absf(middle.b - 0.8) > 0.05:
+			if (
+				absf(middle.r - 0.2) > 0.05
+				or absf(middle.g - 0.4) > 0.05
+				or absf(middle.b - 0.8) > 0.05
+			):
 				_fail("and show what the PNG shows: %s" % middle)
 	if not FileAccess.file_exists(folder.path_join("opaque.png")):
 		_fail("the PNG is saved beside it: %s" % JSON.stringify(answer))
@@ -213,7 +239,8 @@ func _check_saving() -> void:
 	Checked.done(DirAccess.remove_absolute(folder), "removing %s" % folder)
 
 
-## Where a node is drawn, as runtime_inspect rect answers it, and a refusal for a node with no extent.
+## Where a node is drawn, as runtime_inspect rect answers it, and a refusal for a node with no
+## extent.
 func _check_where_nodes_are_drawn() -> void:
 	var panel: Control = Control.new()
 	panel.position = Vector2(40, 30)
@@ -243,7 +270,12 @@ func _check_where_nodes_are_drawn() -> void:
 
 func _check_refused(answer: Dictionary, what: String, output_path: String) -> void:
 	if answer.get("type", "") != "error":
-		_fail("a %s of a window nothing is drawn to should be refused: %s" % [what, JSON.stringify(answer)])
+		_fail(
+			(
+				"a %s of a window nothing is drawn to should be refused: %s"
+				% [what, JSON.stringify(answer)]
+			)
+		)
 		return
 	# This runs headless, so the refusal is the one for a game with no window at all; the one for a
 	# minimised window needs a window to minimise, which only a windowed run has.

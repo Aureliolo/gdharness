@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## Every shipped script, and every fixture the runner copied to res://fixtures, parsed under the
 ## project's warning settings, where an untyped declaration is an error. A script that will not
 ## parse prints the reason to stderr, which is what the runner reads; this only reports which
@@ -22,7 +21,7 @@ func _init() -> void:
 			failures.append(path)
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true, "checked": scripts.size()}))
+		print(JSON.stringify({ "ok": true, "checked": scripts.size() }))
 		quit(0)
 		return
 

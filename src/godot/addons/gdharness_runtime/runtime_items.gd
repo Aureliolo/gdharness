@@ -1,8 +1,7 @@
 extends RefCounted
-
 ## Where a control drawing a list draws one of its items, for a click by words: a tab, a list entry,
-## a tree row or a menu bar title. Each is drawn by the control rather than held as a node, so a click
-## on the control's path presses its middle, which is whichever item happens to sit there.
+## a tree row or a menu bar title. Each is drawn by the control rather than held as a node, so a
+## click on the control's path presses its middle, which is whichever item happens to sit there.
 
 const GdhSays = preload("runtime_says.gd")
 const GdhValues = preload("runtime_values.gd")
@@ -27,12 +26,16 @@ static func item_rect(control: Control, item: Variant, wanted: String) -> Rect2:
 	var list: ItemList = control as ItemList
 	if list != null:
 		var entry: int = item
-		var scrolled: Vector2 = Vector2(list.get_h_scroll_bar().value, list.get_v_scroll_bar().value)
+		var scrolled: Vector2 = Vector2(
+			list.get_h_scroll_bar().value, list.get_v_scroll_bar().value
+		)
 		var placed: Rect2 = list.get_item_rect(entry, false)
 		placed.position -= scrolled
 		var reached: bool = bounds.has_point(placed.get_center())
 		return (
-			placed if reached and list.get_item_at_position(placed.get_center(), true) == entry else Rect2()
+			placed
+			if reached and list.get_item_at_position(placed.get_center(), true) == entry
+			else Rect2()
 		)
 	var tree: Tree = control as Tree
 	if tree != null:
@@ -63,9 +66,9 @@ static func tree_column(tree: Tree, row: TreeItem, wanted: String) -> int:
 ## numbers its items, and what it says.
 static func item_named(control: Control, item: Variant, says: String) -> Dictionary:
 	if control is Tree:
-		return {"kind": "row", "says": says}
+		return { "kind": "row", "says": says }
 	var kind: String = "tab" if control is TabBar else ("menu" if control is MenuBar else "item")
-	return {"kind": kind, "index": item, "says": says}
+	return { "kind": kind, "index": item, "says": says }
 
 
 ## Where in [param control] to press for [param item], the one of its items a click by
@@ -75,10 +78,17 @@ static func item_named(control: Control, item: Variant, says: String) -> Diction
 ## a tab or an entry into view before pressing it. A disabled item is refused as a disabled button
 ## is. A tree row is pressed on the cell saying the words, whose column goes into [param found].
 static func in_view(
-	scene: SceneTree, control: Control, node_path: String, item: Variant, wanted: String, found: Dictionary
+	scene: SceneTree,
+	control: Control,
+	node_path: String,
+	item: Variant,
+	wanted: String,
+	found: Dictionary
 ) -> Dictionary:
 	var named: Dictionary = found.get("item", {})
-	var naming: String = 'the %s "%s" of %s' % [named.get("kind", "item"), named.get("says", ""), node_path]
+	var naming: String = (
+		'the %s "%s" of %s' % [named.get("kind", "item"), named.get("says", ""), node_path]
+	)
 	var index: int = item if item is int else -1
 	var bar: TabBar = control as TabBar
 	var list: ItemList = control as ItemList
@@ -88,7 +98,9 @@ static func in_view(
 		or (list != null and list.is_item_disabled(index))
 		or (menus != null and menus.is_menu_disabled(index))
 	):
-		return {"type": "error", "message": "%s is disabled, so clicking it presses nothing" % naming}
+		return {
+			"type": "error", "message": "%s is disabled, so clicking it presses nothing" % naming,
+		}
 	var placed: Rect2 = item_rect(control, item, wanted)
 	var scrolled: bool = false
 	if placed.size == Vector2.ZERO:
@@ -101,14 +113,18 @@ static func in_view(
 				return {
 					"type": "error",
 					"message":
-					"%s went while it was being scrolled into view, so nothing was clicked" % naming
+					(
+						"%s went while it was being scrolled into view, so nothing was clicked"
+						% naming
+					),
 				}
 			placed = item_rect(control, item, wanted)
 	if placed.size == Vector2.ZERO:
 		var tried: String = " even scrolled to" if scrolled else ""
 		return {
 			"type": "error",
-			"message": "%s is drawn nowhere a pointer reaches%s, so nothing was clicked" % [naming, tried]
+			"message":
+			"%s is drawn nowhere a pointer reaches%s, so nothing was clicked" % [naming, tried],
 		}
 	var tree: Tree = control as Tree
 	if tree != null:
@@ -116,7 +132,7 @@ static func in_view(
 		var column: int = tree_column(tree, row, wanted)
 		if column != -1:
 			named["column"] = column
-	return {"point": placed.get_center(), "scrolled": scrolled}
+	return { "point": placed.get_center(), "scrolled": scrolled }
 
 
 ## Where [param menus] draws the title of [param menu], worked out as the engine works it out,

@@ -40,14 +40,17 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		# failed this check and lost points, while Godot's own guidance is to keep a scene's files
 		# together by feature, so the check failed projects for following the engine's advice.
 
-		checks["structure"] = {"name": "Project Structure", "passed": details.is_empty(), "details": details}
+		checks["structure"] = {
+			"name": "Project Structure", "passed": details.is_empty(), "details": details,
+		}
 
 	# 2. Resource Check
 	if "resources" in check_categories:
 		var details: Array[String] = []
 
-		# Every format the engine imports, the list the import status reads: five of them were checked
-		# here, so a project of glTF models, fonts and WebP textures had nothing to reimport.
+		# Every format the engine imports, the list the import status reads: five of them were
+		# checked here, so a project of glTF models, fonts and WebP textures had nothing to
+		# reimport.
 		var resources: Array[String] = _files.find_files_with_extensions(
 			"res://", GdhImportPipeline.IMPORTABLE_EXTENSIONS
 		)
@@ -68,7 +71,7 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			"details": details,
 			# What the check read: files the engine imports. A .tres is a resource and was counted
 			# under this name as none, beside a project holding one.
-			"importable_files": resources.size()
+			"importable_files": resources.size(),
 		}
 
 	# 3. Scripts Check
@@ -106,7 +109,7 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			"name": "Scripts",
 			"passed": details.is_empty(),
 			"details": details,
-			"total_scripts": script_files.size()
+			"total_scripts": script_files.size(),
 		}
 		if compiled.has("checked"):
 			scripts["compiled"] = GdhRead.as_int(compiled["checked"])
@@ -123,14 +126,18 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		for entry: Dictionary in GdhInputActions.new(_log).undefined_in_scripts():
 			details.append(GdhInputActions.undefined_line(entry))
 			deductions += 5
-		checks["references"] = {"name": "References", "passed": details.is_empty(), "details": details}
+		checks["references"] = {
+			"name": "References", "passed": details.is_empty(), "details": details,
+		}
 
 	# 4. Scenes Check
 	if "scenes" in check_categories:
 		var details: Array[String] = []
 
 		# Binary scenes too, which a project may save instead and which counted as none.
-		var scene_files: Array[String] = _files.find_files_with_extensions("res://", ["tscn", "scn"])
+		var scene_files: Array[String] = _files.find_files_with_extensions(
+			"res://", ["tscn", "scn"]
+		)
 		if scene_files.size() == 0:
 			details.append("No scene files found in project")
 			deductions += 5
@@ -142,7 +149,7 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			"name": "Scenes",
 			"passed": details.is_empty(),
 			"details": details,
-			"total_scenes": scene_files.size()
+			"total_scenes": scene_files.size(),
 		}
 
 	# 5. Configuration Check
@@ -162,7 +169,9 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			details.append("No project name set")
 			deductions += 2
 
-		checks["config"] = {"name": "Configuration", "passed": details.is_empty(), "details": details}
+		checks["config"] = {
+			"name": "Configuration", "passed": details.is_empty(), "details": details,
+		}
 
 	var score: int = maxi(0, 100 - deductions)
 
@@ -193,7 +202,11 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		var check: Dictionary = checks[category]
 		var found: Array[String] = check["details"]
 		for detail: String in found:
-			issues.append({"check": category, "detail": detail})
+			issues.append({ "check": category, "detail": detail })
 	return {
-		"score": score, "grade": grade, "checks": checks, "issues": issues, "recommendations": recommendations
+		"score": score,
+		"grade": grade,
+		"checks": checks,
+		"issues": issues,
+		"recommendations": recommendations,
 	}

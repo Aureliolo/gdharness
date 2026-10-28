@@ -22,7 +22,7 @@ func list_plugins(_params: Dictionary) -> Dictionary:
 			"addons_directory_exists": false,
 			"enabled_count": 0,
 			"disabled_count": 0,
-			"message": "No addons directory found in the project"
+			"message": "No addons directory found in the project",
 		}
 
 	var enabled_paths: Array[String] = _enabled_paths()
@@ -34,7 +34,7 @@ func list_plugins(_params: Dictionary) -> Dictionary:
 		var plugin_cfg_path: String = folder.path_join("plugin.cfg")
 		var name: String = folder.trim_prefix(addons_path)
 		var enabled: bool = plugin_cfg_path in enabled_paths
-		var plugin_info: Dictionary = {"name": name, "path": folder, "enabled": enabled}
+		var plugin_info: Dictionary = { "name": name, "path": folder, "enabled": enabled }
 
 		var plugin_config: ConfigFile = ConfigFile.new()
 		if plugin_config.load(plugin_cfg_path) == OK:
@@ -52,7 +52,7 @@ func list_plugins(_params: Dictionary) -> Dictionary:
 		"plugins": plugins,
 		"addons_directory_exists": true,
 		"enabled_count": enabled_count,
-		"disabled_count": plugins.size() - enabled_count
+		"disabled_count": plugins.size() - enabled_count,
 	}
 	# Enabled in the project with no plugin.cfg where the entry points: the editor reports each one
 	# as an error at every start and loads nothing for it.
@@ -99,7 +99,9 @@ func enable_plugin(params: Dictionary) -> Dictionary:
 
 	if plugin_cfg_path in enabled_paths:
 		return {
-			"plugin_name": plugin_name, "action": "already_enabled", "message": "Plugin is already enabled"
+			"plugin_name": plugin_name,
+			"action": "already_enabled",
+			"message": "Plugin is already enabled",
 		}
 
 	enabled_paths.append(plugin_cfg_path)
@@ -108,7 +110,9 @@ func enable_plugin(params: Dictionary) -> Dictionary:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
 	var answer: Dictionary = {
-		"plugin_name": plugin_name, "action": "enabled", "enabled_plugins": _names_of(enabled_paths)
+		"plugin_name": plugin_name,
+		"action": "enabled",
+		"enabled_plugins": _names_of(enabled_paths),
 	}
 	var unloadable: String = _why_not_loaded(plugin_cfg_path)
 	if not unloadable.is_empty():
@@ -116,9 +120,9 @@ func enable_plugin(params: Dictionary) -> Dictionary:
 	return answer
 
 
-# What the editor finds wrong with the plugin at [param plugin_cfg_path] when it loads it, the checks
-# EditorNode::set_addon_plugin_enabled makes, or "" when it would load. Written all the same, since
-# the script can be put right before the editor next starts.
+# What the editor finds wrong with the plugin at [param plugin_cfg_path] when it loads it, the
+# checks EditorNode::set_addon_plugin_enabled makes, or "" when it would load. Written all the same,
+# since the script can be put right before the editor next starts.
 static func _why_not_loaded(plugin_cfg_path: String) -> String:
 	var config: ConfigFile = ConfigFile.new()
 	if config.load(plugin_cfg_path) != OK:
@@ -134,11 +138,16 @@ static func _why_not_loaded(plugin_cfg_path: String) -> String:
 	# Loaded only to learn whether the editor could; what the engine says of a script that does not
 	# parse is about a file the answer does not describe.
 	printerr(GdhLog.ASIDE)
-	var script: Script = ResourceLoader.load(script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+	var script: Script = ResourceLoader.load(
+		script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE
+	)
 	printerr(GdhLog.RESUMED)
 	if script == null or script.get_instance_base_type() == &"":
 		return (
-			"%s does not compile, so the editor disables the plugin again at its next start." % script_path
+			(
+				"%s does not compile, so the editor disables the plugin again at its next start."
+				% script_path
+			)
 			+ " script_diagnostics names the error."
 		)
 	if not ClassDB.is_parent_class(script.get_instance_base_type(), "EditorPlugin"):
@@ -161,7 +170,7 @@ func disable_plugin(params: Dictionary) -> Dictionary:
 		return {
 			"plugin_name": plugin_name,
 			"action": "already_disabled",
-			"message": "Plugin is not currently enabled"
+			"message": "Plugin is not currently enabled",
 		}
 
 	enabled_paths.erase(plugin_cfg_path)
@@ -169,7 +178,11 @@ func disable_plugin(params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
-	return {"plugin_name": plugin_name, "action": "disabled", "enabled_plugins": _names_of(enabled_paths)}
+	return {
+		"plugin_name": plugin_name,
+		"action": "disabled",
+		"enabled_plugins": _names_of(enabled_paths),
+	}
 
 
 # Every entry in [editor_plugins], as the plugin.cfg path the editor stores. Paths rather than
@@ -180,13 +193,17 @@ func disable_plugin(params: Dictionary) -> Dictionary:
 # hand-edited file can carry.
 func _enabled_paths() -> Array[String]:
 	var paths: Array[String] = []
-	var enabled_value: Variant = ProjectSettings.get_setting("editor_plugins/enabled", PackedStringArray())
+	var enabled_value: Variant = ProjectSettings.get_setting(
+		"editor_plugins/enabled", PackedStringArray()
+	)
 	if enabled_value is PackedStringArray:
 		var packed: PackedStringArray = enabled_value
 		paths.assign(packed)
 	elif enabled_value is String:
 		var listed: String = enabled_value
-		for m: RegExMatch in GdhPatterns.compiled("res://[^\"',)]+?plugin\\.cfg").search_all(listed):
+		for m: RegExMatch in GdhPatterns.compiled("res://[^\"',)]+?plugin\\.cfg").search_all(
+			listed
+		):
 			paths.append(m.get_string())
 	return paths
 
@@ -197,7 +214,9 @@ static func _names_of(paths: Array[String]) -> Array[String]:
 	var names: Array[String] = []
 	for path: String in paths:
 		var inside: bool = path.begins_with("res://addons/") and path.ends_with("/plugin.cfg")
-		names.append(path.trim_prefix("res://addons/").trim_suffix("/plugin.cfg") if inside else path)
+		names.append(
+			path.trim_prefix("res://addons/").trim_suffix("/plugin.cfg") if inside else path
+		)
 	return names
 
 
@@ -215,6 +234,7 @@ func _save_enabled_paths(paths: Array[String]) -> Error:
 	# Kept in an Array[String] and converted here, because appending to a packed array answers with
 	# whether it worked and a project holding return_value_discarded at error level will not compile
 	# a script that drops that answer. The conversion is what matters: an Array[String] handed to
-	# set_setting is written as Array[String]([...]), which the editor does not read as a plugin list.
+	# set_setting is written as Array[String]([...]), which the editor does not read as a plugin
+	# list.
 	ProjectSettings.set_setting("editor_plugins/enabled", PackedStringArray(paths))
 	return GdhProjectFile.save(["editor_plugins/enabled"])

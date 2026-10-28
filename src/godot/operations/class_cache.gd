@@ -9,7 +9,6 @@ const GdhPatterns = preload("patterns.gd")
 const GdhRead = preload("reading.gd")
 const GdhFileWalk = preload("file_walk.gd")
 const GdhLog = preload("logger.gd")
-
 const CACHE_PATH: String = "res://.godot/global_script_class_cache.cfg"
 
 var _log: GdhLog
@@ -30,9 +29,9 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 		var entry: Dictionary = _entry_for(path, skipped)
 		if not entry.is_empty():
 			entries.append(entry)
-	# Another language's classes are kept while their files are there. Only GDScript is read here and
-	# the list is written whole, so a C# project's global classes were dropped from it and answered as
-	# removed, and nothing started next could resolve them.
+	# Another language's classes are kept while their files are there. Only GDScript is read here
+	# and the list is written whole, so a C# project's global classes were dropped from it and
+	# answered as removed, and nothing started next could resolve them.
 	var carried: Array[String] = []
 	for entry: Variant in cached:
 		if not entry is Dictionary:
@@ -43,7 +42,9 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 			entries.append(listed)
 			carried.append(str(listed.get("class", "")))
 	# By name as text: StringName's own order is by identity, not by spelling.
-	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return str(a["class"]) < str(b["class"]))
+	entries.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool: return str(a["class"]) < str(b["class"])
+	)
 
 	var after: Dictionary = _entries_by_class(entries)
 	var config: ConfigFile = ConfigFile.new()
@@ -52,7 +53,9 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 		ProjectSettings.globalize_path(CACHE_PATH.get_base_dir())
 	)
 	if made != OK and made != ERR_ALREADY_EXISTS:
-		return _log.failure("Could not make " + CACHE_PATH.get_base_dir() + ": " + error_string(made))
+		return _log.failure(
+			"Could not make " + CACHE_PATH.get_base_dir() + ": " + error_string(made)
+		)
 	var err: Error = config.save(CACHE_PATH)
 	if err != OK:
 		return _log.failure("Failed to write " + CACHE_PATH + ": " + error_string(err))
@@ -139,7 +142,7 @@ func _base_of(path: String, header: Dictionary, skipped: Array[Dictionary]) -> V
 			return ""
 		var reached: String = opened + ":" + ".".join(PackedStringArray(names))
 		if reached in visited:
-			skipped.append({"path": path, "reason": "extends itself through " + parent_path})
+			skipped.append({ "path": path, "reason": "extends itself through " + parent_path })
 			return null
 		visited.append(reached)
 		var lines: PackedStringArray = FileAccess.get_file_as_string(opened).split("\n")
@@ -162,7 +165,7 @@ static func _extends_parts(text: String) -> Dictionary:
 	if rest.begins_with('"') or rest.begins_with("'"):
 		var closing: int = rest.find(rest[0], 1)
 		if closing == -1:
-			return {"path": "", "names": [] as Array[String]}
+			return { "path": "", "names": [] as Array[String] }
 		path = rest.substr(1, closing - 1)
 		rest = rest.substr(closing + 1)
 	var names: Array[String] = []
@@ -179,7 +182,7 @@ static func _extends_parts(text: String) -> Dictionary:
 			break
 		names.append(found.get_string(1))
 		rest = rest.substr(found.get_end())
-	return {"path": path, "names": names}
+	return { "path": path, "names": names }
 
 
 # The file the engine's class scan reads for an `extends` path. It opens the path as written, and
@@ -203,7 +206,7 @@ func _inner_class(lines: PackedStringArray, names: Array[String]) -> Dictionary:
 	var found: Dictionary = {}
 	for name: String in names:
 		var at: int = -1
-		found = {"found": true}
+		found = { "found": true }
 		for index: int in range(start, end):
 			var text: String = lines[index].strip_edges()
 			if text.is_empty() or text.begins_with("#") or _indent(lines[index]) != depth:
@@ -255,7 +258,9 @@ func _header_of(path: String) -> Dictionary:
 # which is where the body begins.
 func _header_in(lines: PackedStringArray) -> Dictionary:
 	var header: Dictionary = {}
-	var annotation: RegEx = GdhPatterns.compiled('^@([a-z_]+)(?:\\(\\s*(?:"([^"]*)")?[^)]*\\))?\\s*')
+	var annotation: RegEx = GdhPatterns.compiled(
+		'^@([a-z_]+)(?:\\(\\s*(?:"([^"]*)")?[^)]*\\))?\\s*'
+	)
 	var extends_line: RegEx = GdhPatterns.compiled("^extends\\s+(.*)$")
 	var same_line: RegEx = GdhPatterns.compiled("^\\s+extends\\s+(.*)$")
 	for line: String in lines:

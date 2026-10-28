@@ -5,13 +5,14 @@ const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhPatterns = preload("patterns.gd")
 const GdhScriptCheck = preload("script_check.gd")
-
-const MODIFICATION_TYPES: Array[String] = ["add_constant", "add_variable", "add_signal", "add_function"]
+const MODIFICATION_TYPES: Array[String] = [
+	"add_constant", "add_variable", "add_signal", "add_function",
+]
 ## The class each template's code is written for, and the base a script made from it extends
 ## when given none: the resource template's code is a Resource's, and on the default of Node it
 ## does not parse.
 const TEMPLATE_BASES: Dictionary = {
-	"singleton": "Node", "state_machine": "Node", "component": "Node", "resource": "Resource"
+	"singleton": "Node", "state_machine": "Node", "component": "Node", "resource": "Resource",
 }
 const BLANKS_AROUND_FUNCTIONS: int = 2
 
@@ -35,7 +36,8 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	_log.info("Creating GDScript: " + script_path)
 
 	# Content is the whole file, so a header written above it would be a second one: a content that
-	# starts with its own `extends` did not parse, and one without it was not the file that was sent.
+	# starts with its own `extends` did not parse, and one without it was not the file that was
+	# sent.
 	if not content.is_empty():
 		var alongside: Array[String] = []
 		for name: String in ["class_name", "extends", "template"]:
@@ -64,8 +66,8 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 			"Script file already exists: " + full_script_path + ". script_edit modify adds to it."
 		)
 
-	# Content is left to the parse below: two scripts that name each other are written one at a time,
-	# and the first does not compile until the second exists.
+	# Content is left to the parse below: two scripts that name each other are written one at a
+	# time, and the first does not compile until the second exists.
 	if content.is_empty():
 		var header: String = _header_refusal(cls_name_param, extends_class)
 		if header.is_empty() and not template.is_empty():
@@ -79,7 +81,9 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		_log.debug("Creating directory: " + script_dir)
 		var error: Error = dir.make_dir_recursive(script_dir.substr(6))
 		if error != OK:
-			return _log.failure("Failed to create directory: " + script_dir + ", error: " + str(error))
+			return _log.failure(
+				"Failed to create directory: " + script_dir + ", error: " + str(error)
+			)
 
 	var script_content: String = content
 	if content.is_empty():
@@ -104,7 +108,9 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	# project is imported, so a script made here was missing from every check tracking the sidecars.
 	var uid: String = _uid_beside(full_script_path)
 
-	var written: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+	var written: Script = ResourceLoader.load(
+		full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE
+	)
 	var parses: bool = _parses(written)
 	var answer: Dictionary = {
 		"success": true,
@@ -162,7 +168,7 @@ static func _not_gdscript(path: String, doing: String) -> String:
 ## extends extends RefCounted, and one with no class_name answers null for it, as an absent name
 ## does everywhere else rather than as a name that is empty.
 static func _header_written(text: String) -> Dictionary:
-	var header: Dictionary = {"extends": "RefCounted", "class_name": null}
+	var header: Dictionary = { "extends": "RefCounted", "class_name": null }
 	for line: String in text.split("\n"):
 		# An inner class's extends is indented, and is not the script's.
 		if line.begins_with(" ") or line.begins_with("\t"):
@@ -208,15 +214,18 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 
 	var lines: Array[String] = []
 	lines.assign(original_content.split("\n"))
-	# Loaded only to learn whether it parsed as it was. What the engine says of that file carries its
-	# old line numbers, and beside the errors of the file written it named lines that had moved.
+	# Loaded only to learn whether it parsed as it was. What the engine says of that file carries
+	# its old line numbers, and beside the errors of the file written it named lines that had moved.
 	printerr(GdhLog.ASIDE)
-	var before: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+	var before: Script = ResourceLoader.load(
+		full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE
+	)
 	printerr(GdhLog.RESUMED)
 	var parsed_before: bool = _parses(before)
 
-	# All of them checked before any is made, so a call is made whole or not at all: one skipped for a
-	# missing name used to leave the rest written and the answer saying success over an empty list.
+	# All of them checked before any is made, so a call is made whole or not at all: one skipped for
+	# a missing name used to leave the rest written and the answer saying success over an empty
+	# list.
 	var declared: Dictionary = _declared(lines)
 	var problems: Array[String] = _modification_problems(modifications, declared)
 	if not problems.is_empty():
@@ -247,14 +256,22 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 				at = _add_function(lines, fields, placed)
 		if at == -1:
 			return _log.failure(
-				"Nothing was changed: " + mod_type + " " + str(fields.get("name")) + " could not be placed"
+				(
+					"Nothing was changed: "
+					+ mod_type
+					+ " "
+					+ str(fields.get("name"))
+					+ " could not be placed"
+				)
 			)
-		placed.append({"type": mod_type, "name": str(fields.get("name")), "index": at})
+		placed.append({ "type": mod_type, "name": str(fields.get("name")), "index": at })
 
 	var modifications_applied: Array[Dictionary] = []
 	for entry: Dictionary in placed:
 		var index: int = entry["index"]
-		modifications_applied.append({"type": entry["type"], "name": entry["name"], "line": index + 1})
+		modifications_applied.append(
+			{ "type": entry["type"], "name": entry["name"], "line": index + 1 }
+		)
 
 	file = FileAccess.open(full_script_path, FileAccess.WRITE)
 	if not file:
@@ -267,7 +284,9 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 
 	var caught: GdhScriptCheck.GdhCaught = GdhScriptCheck.GdhCaught.new()
 	OS.add_logger(caught)
-	var made: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+	var made: Script = ResourceLoader.load(
+		full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE
+	)
 	OS.remove_logger(caught)
 	var parses: bool = _parses(made)
 	# The names checked above are the script's own, and a member the base class declares, or a body
@@ -281,7 +300,10 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 			file.close()
 		if not restored:
 			return _log.failure(
-				"%s would not parse with these additions, and could not be put back as it was" % script_path
+				(
+					"%s would not parse with these additions, and could not be put back as it was"
+					% script_path
+				)
 			)
 		return _log.failure(
 			(
@@ -319,12 +341,15 @@ static func _header_refusal(named: String, base: String) -> String:
 	var declared: Dictionary = _declared_classes()
 	if not named.is_empty():
 		if ClassDB.class_exists(named):
-			return "class_name %s is the name of an engine class, which a script cannot take." % named
+			return (
+				"class_name %s is the name of an engine class, which a script cannot take." % named
+			)
 		if declared.has(named):
 			return (
 				(
-					"class_name %s is taken: %s declares it, and a second script of that name does not "
-					+ "compile. Give this one another class_name, or script_edit rename the first."
+					"class_name %s is taken: %s declares it, and a second script of that name does "
+					+ "not compile. Give this one another class_name, or script_edit rename the "
+					+ "first."
 				)
 				% [named, declared[named]]
 			)
@@ -333,7 +358,8 @@ static func _header_refusal(named: String, base: String) -> String:
 	if ClassDB.class_exists(base) or declared.has(base):
 		return ""
 	var said: String = (
-		"extends names %s, which is neither an engine class nor a class_name this project declares" % base
+		"extends names %s, which is neither an engine class nor a class_name this project declares"
+		% base
 	)
 	var close: PackedStringArray = GdhRead.nearest(base, PackedStringArray(declared.keys()))
 	if close.is_empty():
@@ -390,7 +416,9 @@ static func _declared_classes() -> Dictionary:
 			declared[str(entry.get("class", ""))] = path
 	for path: String in GdhFileWalk.new().find_files("res://", ".gd"):
 		for line: String in FileAccess.get_file_as_string(path).split("\n"):
-			var found: RegExMatch = GdhPatterns.declared_class(GdhPatterns.without_annotations(line))
+			var found: RegExMatch = GdhPatterns.declared_class(
+				GdhPatterns.without_annotations(line)
+			)
 			if found != null and not declared.has(found.get_string(1)):
 				declared[found.get_string(1)] = path
 	return declared
@@ -425,20 +453,31 @@ static func _modification_problems(modifications: Array, declared: Dictionary) -
 				)
 			)
 		if mod_type == "add_constant" and str(fields.get("defaultValue", "")).is_empty():
-			problems.append(which + " is a constant with no defaultValue, and a constant needs a value")
+			problems.append(
+				which + " is a constant with no defaultValue, and a constant needs a value"
+			)
 		if (
 			not str(fields.get("exportHint", "")).is_empty()
 			and fields.has("isExport")
 			and not GdhRead.as_bool(fields["isExport"])
 		):
-			problems.append(
-				which + " has an exportHint and isExport false, and a hint is written only on an export"
+			(
+				problems
+				. append(
+					(
+						which
+						+ " has an exportHint and isExport false, and a hint is written only on an "
+						+ "export"
+					)
+				)
 			)
 		if mod_name.is_empty():
 			problems.append(which + " has no name")
 			continue
 		if not mod_name.is_valid_unicode_identifier():
-			problems.append(which + " is named '" + mod_name + "', which GDScript does not accept as a name")
+			problems.append(
+				which + " is named '" + mod_name + "', which GDScript does not accept as a name"
+			)
 			continue
 		if declared.has(mod_name):
 			var existing: Dictionary = declared[mod_name]
@@ -449,7 +488,9 @@ static func _modification_problems(modifications: Array, declared: Dictionary) -
 				)
 			)
 		elif added.has(mod_name):
-			problems.append("%s adds %s, which modification %d adds too" % [which, mod_name, added[mod_name]])
+			problems.append(
+				"%s adds %s, which modification %d adds too" % [which, mod_name, added[mod_name]]
+			)
 		else:
 			added[mod_name] = index + 1
 	return problems
@@ -477,11 +518,12 @@ static func _declared(lines: Array[String]) -> Dictionary:
 			continue
 		var matched: RegExMatch = declaration.search(GdhPatterns.without_annotations(raw))
 		if matched != null and not found.has(matched.get_string(2)):
-			found[matched.get_string(2)] = {"kind": matched.get_string(1), "line": i + 1}
+			found[matched.get_string(2)] = { "kind": matched.get_string(1), "line": i + 1 }
 	return found
 
 
-# Inserts [param new_lines] at [param at] and moves every placed line at or below it down by as many.
+# Inserts [param new_lines] at [param at] and moves every placed line at or below it down by as
+# many.
 static func _insert(
 	lines: Array[String], at: int, new_lines: Array[String], placed: Array[Dictionary]
 ) -> bool:
@@ -552,7 +594,8 @@ func _add_constant(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	return after + block.find(const_line) if _insert(lines, after, block, placed) else -1
 
 
-# Inserts the declaration and answers with its zero-based index, or -1 for one that could not be placed.
+# Inserts the declaration and answers with its zero-based index, or -1 for one that could not be
+# placed.
 func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictionary]) -> int:
 	var var_name: String = str(mod.get("name", ""))
 	var var_type: String = str(mod.get("varType", ""))
@@ -639,7 +682,7 @@ func _add_signal(lines: Array[String], mod: Dictionary, placed: Array[Dictionary
 # Answers with the zero-based index of the `func` line, below the blank lines that separate it.
 #
 # Two blank lines on each side, counting those already there, because that is the spacing GDScript's
-# style guide gives functions and the one gdformat writes and gdlint checks: one blank line passed
+# style guide gives functions and the one gdstyle and gdformat write: one blank line passed
 # the engine and failed every project gating on either. A function last in the file ends it with a
 # newline, which the file is written with only when its last line is empty.
 func _add_function(lines: Array[String], mod: Dictionary, placed: Array[Dictionary]) -> int:
@@ -803,9 +846,9 @@ func _line_after_function(lines: Array[String], prefix: String) -> int:
 
 
 # The first line belonging to the declaration on [param at]: the comments and the lines holding only
-# annotations directly above it, at its indentation. A function placed on [param at] itself takes the
-# next function's doc comment, which then documents the wrong one, and its `@rpc` line, which then
-# annotates it. A comment indented further is the end of the body above, and stays with it.
+# annotations directly above it, at its indentation. A function placed on [param at] itself takes
+# the next function's doc comment, which then documents the wrong one, and its `@rpc` line, which
+# then annotates it. A comment indented further is the end of the body above, and stays with it.
 static func _start_of_declaration(lines: Array[String], at: int) -> int:
 	var indent: String = _indentation(lines[at])
 	var start: int = at
@@ -835,6 +878,8 @@ func _ready() -> void:
 \tpass
 """
 		"state_machine":
+			# The made script's first line, which is under the limit in the file it is written to.
+			# gdstyle:ignore=format/max-line-length
 			return """## A finite state machine: one state at a time, entered and left through change_state.
 
 signal state_changed(old_state: String, new_state: String)
@@ -886,6 +931,7 @@ func _call_state(state_name: String, method: String, args: Array) -> void:
 \t\tstate.callv(method, args)
 """
 		"component":
+			# gdstyle:ignore=format/max-line-length
 			return """## A component: a child node that adds one behaviour to its parent, switched off with disable().
 
 @export var enabled: bool = true
@@ -916,6 +962,7 @@ func disable() -> void:
 \tset_physics_process(false)
 """
 		"resource":
+			# gdstyle:ignore=format/max-line-length
 			return """## Data kept in a .tres file, which resource_edit create makes and the game loads.
 
 @export var id: String = ""

@@ -1,12 +1,10 @@
 extends RefCounted
-
 ## A picture of the running game, as a PNG written where the server asked for it.
 
 const GdhRead = preload("reading.gd")
 const GdhValues = preload("runtime_values.gd")
 const GdhQueries = preload("runtime_queries.gd")
 const GdhScreen = preload("runtime_screen.gd")
-
 ## How far zoom enlarges at most. Sixteen makes a 3-pixel ring 48 pixels across, past any need to
 ## see it, and a 200-pixel region 3200, past the size anybody reads a picture at.
 const ZOOM_MOST: int = 16
@@ -37,7 +35,7 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 		return standing
 	var node: Node = standing["node"]
 	if not node is Viewport:
-		return {"type": "error", "message": "Node is not a Viewport: " + viewport_path}
+		return { "type": "error", "message": "Node is not a Viewport: " + viewport_path }
 	var viewport: Viewport = node
 	# The root's own state is refused in _capture. Another window of the game's that is hidden or
 	# minimised holds no frame, and asking it for its image makes the engine log the empty read into
@@ -50,8 +48,8 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 				"message":
 				(
 					(
-						"The Window at %s is hidden, so nothing is drawn to it. Show it (its visible "
-						+ "property) and ask again."
+						"The Window at %s is hidden, so nothing is drawn to it. Show it (its "
+						+ "visible property) and ask again."
 					)
 					% viewport_path
 				),
@@ -62,8 +60,8 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 				"message":
 				(
 					(
-						"Nothing is being drawn to the Window at %s, which is minimised. Restore it and "
-						+ "ask again."
+						"Nothing is being drawn to the Window at %s, which is minimised. Restore "
+						+ "it and ask again."
 					)
 					% viewport_path
 				),
@@ -113,7 +111,9 @@ func _lay_native_windows(image: Image) -> void:
 		if drawn == null or drawn.is_empty():
 			continue
 		drawn.convert(image.get_format())
-		image.blend_rect(drawn, Rect2i(Vector2i.ZERO, drawn.get_size()), window.position - root.position)
+		image.blend_rect(
+			drawn, Rect2i(Vector2i.ZERO, drawn.get_size()), window.position - root.position
+		)
 
 
 ## The size a capture drawn at [param drawn] is scaled to, from the width and height asked for, 0
@@ -148,26 +148,29 @@ func _cut_asked(params: Dictionary, in_window: bool) -> Dictionary:
 	if (region_given != null or not node_path.is_empty()) and not in_window:
 		return _refused(
 			(
-				"region and nodePath are in the window's pixels, and this viewport's texture is in its "
-				+ "own: capture the screen with them, or this viewport whole"
+				"region and nodePath are in the window's pixels, and this viewport's texture is in "
+				+ "its own: capture the screen with them, or this viewport whole"
 			)
 		)
 	if zoom < 1 or zoom > ZOOM_MOST:
-		return _refused("zoom is a whole factor from 1 to %d, and %d was asked for" % [ZOOM_MOST, zoom])
+		return _refused(
+			"zoom is a whole factor from 1 to %d, and %d was asked for" % [ZOOM_MOST, zoom]
+		)
 	if zoom > 1 and sized:
 		return _refused(
 			(
-				"zoom enlarges by a whole factor and keeps every pixel square, and width and height "
-				+ "scale to a size; give one or the other"
+				"zoom enlarges by a whole factor and keeps every pixel square, and width and "
+				+ "height scale to a size; give one or the other"
 			)
 		)
-	var asked: Dictionary = {"zoom": zoom}
+	var asked: Dictionary = { "zoom": zoom }
 	if region_given != null:
 		var region: Variant = region_of(_values, region_given)
 		if region == null:
 			var shape: String = (
-				"region is a rectangle in window pixels with an area: x, y, width and height, or the "
-				+ "window rectangle runtime_inspect rect answers, passed back as it came. %s is neither"
+				"region is a rectangle in window pixels with an area: x, y, width and height, or "
+				+ "the window rectangle runtime_inspect rect answers, passed back as it came. %s "
+				+ "is neither"
 			)
 			return _refused(shape % JSON.stringify(region_given))
 		asked["region"] = region
@@ -182,7 +185,7 @@ func _cut_asked(params: Dictionary, in_window: bool) -> Dictionary:
 
 
 static func _refused(message: String) -> Dictionary:
-	return {"type": "error", "message": message}
+	return { "type": "error", "message": message }
 
 
 ## The rectangle [param given] names: the four numbers x, y, width and height, or a rectangle as the
@@ -210,8 +213,8 @@ static func region_of(values: GdhValues, given: Variant) -> Variant:
 
 
 ## Where [param node] is drawn, in window pixels, as runtime_inspect rect answers it: a Control's
-## rectangle, what a 3D node's geometry covers, or what a 2D node that knows its own rectangle draws.
-## A refusal's message when it has no extent on screen.
+## rectangle, what a 3D node's geometry covers, or what a 2D node that knows its own rectangle
+## draws. A refusal's message when it has no extent on screen.
 static func drawn_rect_of(node: Node) -> Variant:
 	if node is Control:
 		var control: Control = node
@@ -223,13 +226,18 @@ static func drawn_rect_of(node: Node) -> Variant:
 		var spatial: Node3D = node
 		var found: Dictionary = GdhQueries.in_frame(spatial)
 		if not found.has("rect"):
-			return "%s is not drawn by any current camera, so it covers nothing on screen" % node.get_path()
+			return (
+				"%s is not drawn by any current camera, so it covers nothing on screen"
+				% node.get_path()
+			)
 		var covered: Rect2 = found["rect"]
 		return GdhScreen.rect_in_window(spatial.get_viewport(), covered)
 	if node is Node2D and node.has_method("get_rect"):
 		var item: Node2D = node
 		var own: Rect2 = item.call("get_rect")
-		return GdhScreen.rect_in_window(item.get_viewport(), item.get_global_transform_with_canvas() * own)
+		return GdhScreen.rect_in_window(
+			item.get_viewport(), item.get_global_transform_with_canvas() * own
+		)
 	var no_extent: String = (
 		"%s is a %s, which has a position on screen and no extent; give region around the point "
 		+ "runtime_inspect rect answers for it"
@@ -238,9 +246,10 @@ static func drawn_rect_of(node: Node) -> Variant:
 
 
 ## [param region], in window pixels, as pixels of a picture drawn at [param drawn] in a window
-## [param window] pixels across: the same rectangle when the two match, scaled when the project draws
-## at its own size and stretches that to the window. Widened to whole pixels, so an edge falling
-## inside a pixel keeps that pixel, and cut to the picture. Without area when none of it is in it.
+## [param window] pixels across: the same rectangle when the two match, scaled when the project
+## draws at its own size and stretches that to the window. Widened to whole pixels, so an edge
+## falling inside a pixel keeps that pixel, and cut to the picture. Without area when none of it is
+## in it.
 static func in_picture(region: Rect2, window: Vector2i, drawn: Vector2i) -> Rect2i:
 	return widened(region, window, drawn).intersection(Rect2i(Vector2i.ZERO, drawn))
 
@@ -257,14 +266,15 @@ static func widened(region: Rect2, window: Vector2i, drawn: Vector2i) -> Rect2i:
 
 
 ## [param picture], pixels of a picture drawn at [param drawn], as the window pixels it covers in a
-## window [param window] pixels across: what an answer names, since the region was asked for in them.
+## window [param window] pixels across: what an answer names, since the region was asked for in
+## them.
 static func in_window_pixels(picture: Rect2i, window: Vector2i, drawn: Vector2i) -> Dictionary:
 	var scale: Vector2 = Vector2.ONE
 	if drawn.x > 0 and drawn.y > 0 and window.x > 0 and window.y > 0:
 		scale = Vector2(window) / Vector2(drawn)
 	var start: Vector2 = Vector2(picture.position) * scale
 	var size: Vector2 = Vector2(picture.size) * scale
-	return {"x": start.x, "y": start.y, "width": size.x, "height": size.y}
+	return { "x": start.x, "y": start.y, "width": size.x, "height": size.y }
 
 
 ## [param image] cut to [param picture] and enlarged [param zoom] times, each pixel made a square of
@@ -281,7 +291,7 @@ static func cut(image: Image, picture: Rect2i, zoom: int) -> Image:
 func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false) -> Dictionary:
 	var requested_path: String = str(params.get("output_path", ""))
 	if requested_path.is_empty():
-		return {"type": "error", "message": "output_path required"}
+		return { "type": "error", "message": "output_path required" }
 	var asked: Dictionary = _cut_asked(params, with_windows)
 	if asked.has("message"):
 		return asked
@@ -296,8 +306,8 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 			"type": "error",
 			"message":
 			(
-				"This game runs headless, so it has no window and draws nothing to capture. Start it "
-				+ "with a window (editor_run start with headless false) to capture it."
+				"This game runs headless, so it has no window and draws nothing to capture. Start "
+				+ "it with a window (editor_run start with headless false) to capture it."
 			),
 		}
 	if not _host.get_tree().root.can_draw():
@@ -320,11 +330,11 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 
 	var viewport_texture: ViewportTexture = viewport.get_texture()
 	if viewport_texture == null:
-		return {"type": "error", "message": "No viewport texture available"}
+		return { "type": "error", "message": "No viewport texture available" }
 
 	var image: Image = viewport_texture.get_image()
 	if image == null:
-		return {"type": "error", "message": "Failed to capture viewport image"}
+		return { "type": "error", "message": "Failed to capture viewport image" }
 	if with_windows:
 		_lay_native_windows(image)
 
@@ -341,10 +351,12 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 			var why: String = placed
 			return _refused(why)
 		region = placed
-		# A hidden node's rectangle is still a place, and what is drawn there is whatever is behind it.
+		# A hidden node's rectangle is still a place, and what is drawn there is whatever is behind
+		# it.
 		if not GdhQueries.shown(node):
 			described["note"] = (
-				"%s is hidden, so this is what is drawn where it would be rather than the node" % node_path
+				"%s is hidden, so this is what is drawn where it would be rather than the node"
+				% node_path
 			)
 	if region != null:
 		var asked_region: Rect2 = region
@@ -355,7 +367,10 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 		if not picture.has_area():
 			return _refused(
 				(
-					"The region at %s, %s pixels across, is outside the window, which is %dx%d pixels"
+					(
+						"The region at %s, %s pixels across, is outside the window, which is %dx%d "
+						+ "pixels"
+					)
 					% [asked_region.position, asked_region.size, window.x, window.y]
 				)
 			)
@@ -363,10 +378,11 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 		described["region"] = in_window_pixels(picture, window, picture_size)
 		if picture != whole:
 			described["clipped"] = true
-		# The project draws at its own size and stretches that to the window, so the picture's pixels
-		# are not the window's: said, because a caller sizing a region by window pixels gets fewer.
+		# The project draws at its own size and stretches that to the window, so the picture's
+		# pixels are not the window's: said, because a caller sizing a region by window pixels gets
+		# fewer.
 		if picture_size != window:
-			described["drawnAt"] = {"width": picture_size.x, "height": picture_size.y}
+			described["drawnAt"] = { "width": picture_size.x, "height": picture_size.y }
 
 	var zoom: int = asked["zoom"]
 	if zoom > 1:
@@ -384,12 +400,15 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 	if screenshot_path.begins_with("user://") or screenshot_path.begins_with("res://"):
 		screenshot_path = ProjectSettings.globalize_path(screenshot_path)
 	# The server makes the folder for each capture and takes it away when it stops waiting for one,
-	# and a server replaced since the capture was asked for took it with it. Saving into a folder that
-	# is gone raises an engine error, which counts against a game that did nothing wrong.
+	# and a server replaced since the capture was asked for took it with it. Saving into a folder
+	# that is gone raises an engine error, which counts against a game that did nothing wrong.
 	if not DirAccess.dir_exists_absolute(screenshot_path.get_base_dir()):
 		return _refused(
 			(
-				"The folder to save the capture in, %s, is gone: the server that asked for it stopped waiting"
+				(
+					"The folder to save the capture in, %s, is gone: the server that asked for it "
+					+ "stopped waiting"
+				)
 				% screenshot_path.get_base_dir()
 			)
 		)
@@ -405,13 +424,16 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 static func saved(image: Image, png_path: String) -> Dictionary:
 	var save_error: Error = image.save_png(png_path)
 	if save_error != OK:
-		return {"type": "error", "message": "Failed to save screenshot as PNG: " + str(save_error)}
+		return {
+			"type": "error",
+			"message": "Failed to save screenshot as PNG: " + str(save_error),
+		}
 	var answer: Dictionary = {
 		"type": "screenshot_file",
 		"format": "png",
 		"width": image.get_width(),
 		"height": image.get_height(),
-		"path": png_path
+		"path": png_path,
 	}
 	if image.detect_alpha() == Image.ALPHA_NONE:
 		var jpeg_path: String = png_path.get_basename() + ".jpg"

@@ -1,6 +1,5 @@
 @tool
 extends Node
-
 ## The editor's end of the bridge: one WebSocket to the gdharness server, reconnected on its
 ## own when it drops, carrying tool requests in and their results out.
 
@@ -9,7 +8,6 @@ signal disconnected
 signal tool_requested(request_id: String, tool_name: String, args: Dictionary)
 
 const GdhRead = preload("reading.gd")
-
 const DEFAULT_URL: String = "ws://127.0.0.1:6505/godot"
 ## Written beside the addon by the install, so it names the version this copy came from.
 const VERSION_MARKER: String = "res://addons/gdharness_editor/.gdharness-version"
@@ -24,7 +22,6 @@ const EDITORS_RECORDED: String = "res://.godot/gdharness-editors"
 const EDITORS_RECORDED_PROTOCOL: int = 1
 const RECONNECT_DELAY: float = 3.0
 const MAX_RECONNECT_DELAY: float = 30.0
-
 ## What a server closes with when the editor that said hello belongs to another project. Kept in
 ## step with `OTHER_PROJECT_CLOSE_CODE` in src/godot-bridge.ts.
 const ELSEWHERE_CLOSE_CODE: int = 4001
@@ -32,7 +29,6 @@ const ELSEWHERE_CLOSE_CODE: int = 4001
 ## rather than an editor: dialling in again changes nothing for the rest of the run. Kept in step
 ## with `ONE_SHOT_CLOSE_CODE` in src/godot-bridge.ts.
 const ONE_SHOT_CLOSE_CODE: int = 4002
-
 ## Where Godot keeps the three ports an editor serves. None of them is per editor: the settings
 ## file is one for every editor of this engine version on the machine, so two open at once want the
 ## same three and the second one binds nothing. Read here and never written, for the reason
@@ -58,7 +54,6 @@ const OPENED_BY_A_SERVER: String = "GDHARNESS_OPENED_BY_A_SERVER"
 ## tells the two apart when both are announced at once. Kept in step with `EDITOR_PID_VARIABLE`
 ## in the runtime autoload.
 const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
-
 ## How long one attempt is given before the address is called a bad one.
 ##
 ## A socket pointed at a port nothing holds gives up by itself, in thirty seconds on Windows. One
@@ -67,7 +62,6 @@ const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
 ## timeout of its own in 4.7. A leftover announcement can be either, and a port that has been
 ## reused by some other program is the second.
 const CONNECT_TIMEOUT: float = 10.0
-
 ## How often the announcement is read again while connected, so a newer server is moved to
 ## rather than waited for. A harness reconnect leaves the server it replaced running and holding
 ## the old port, and an editor with no reason to look elsewhere stayed on it for the session.
@@ -75,13 +69,11 @@ const FOLLOW_INTERVAL: float = 5.0
 
 var socket: WebSocketPeer = WebSocketPeer.new()
 var server_url: String = DEFAULT_URL
-
 ## What this copy was when it loaded, which is what the editor is running until it is restarted.
 ## See [method _loaded_version] for why it is held rather than read when it is wanted.
 var version_at_load: String = ""
 ## The digest of the editor addon code this copy loaded, held for the same reason.
 var digest_at_load: String = ""
-
 var _is_connected: bool = false
 var _reconnect_timer: Timer
 var _current_reconnect_delay: float = RECONNECT_DELAY
@@ -89,27 +81,23 @@ var _current_reconnect_delay: float = RECONNECT_DELAY
 var _should_reconnect: bool = false
 var _project_path: String
 var _initialized: bool = false
-
 ## Whether the address came from a caller rather than from the project, in which case it is not
 ## this node's to change.
 var _named_by_caller: bool = false
 var _since_looked: float = 0.0
-
 ## The announced address that did not answer, so the fallback gets a turn. Cleared the moment
 ## anything connects or the project names a different one.
 var _refused_url: String = ""
 var _tried_announced: bool = false
-
 ## The address this editor has already been told is another project's, so a reconnect loop says it
 ## once rather than every few seconds for the rest of the session.
 var _told_about_url: String = ""
 var _connecting_for: float = 0.0
-
 ## Whether this editor was started by another editor, which is Godot's own restart and the project
 ## manager opening a project: the new editor is the old one's child and has its environment, with
 ## the variable this addon sets as it loads still naming the old one. Its arguments are gone, since
-## the engine consumes `--lsp-port`, `--dap-port` and `--log-file` and hands none of them back, so the
-## ports and the marker a server put in that environment describe the editor before this one.
+## the engine consumes `--lsp-port`, `--dap-port` and `--log-file` and hands none of them back, so
+## the ports and the marker a server put in that environment describe the editor before this one.
 var _started_by_an_editor: bool = false
 
 
@@ -138,45 +126,6 @@ func _exit_tree() -> void:
 	var record: String = _ports_record()
 	if FileAccess.file_exists(record):
 		var _removed: Error = DirAccess.remove_absolute(record)
-
-
-## The file saying which ports this editor serves, named by its process id, so `gdharness lsp` can
-## find its language server when a server moved it off the default. One for each process rather
-## than one for the project, because a gate's `--import` loads this addon too, and its plugin is
-## shown none of the options that would say so; the reader tells the two apart by command line.
-## Kept in step with `editorRecordsIn` in src/lsp-bridge.ts.
-static func _ports_record() -> String:
-	return ProjectSettings.globalize_path(EDITORS_RECORDED).path_join("%d.json" % OS.get_process_id())
-
-
-func _record_ports() -> void:
-	if not Engine.is_editor_hint():
-		return
-	var made: Error = DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(EDITORS_RECORDED))
-	if made != OK and made != ERR_ALREADY_EXISTS:
-		return
-	var file: FileAccess = FileAccess.open(_ports_record(), FileAccess.WRITE)
-	if file == null:
-		return
-	var written: bool = (
-		file
-		. store_string(
-			(
-				JSON
-				. stringify(
-					{
-						"protocol": EDITORS_RECORDED_PROTOCOL,
-						"pid": OS.get_process_id(),
-						"lsp_port": _serves(LSP_ASKED, LSP_SETTING),
-						"dap_port": _serves(DAP_ASKED, DAP_SETTING),
-						"written_at_ms": int(Time.get_unix_time_from_system() * 1000.0),
-					}
-				)
-			)
-		)
-	)
-	if not written:
-		push_warning("gdharness: could not write " + _ports_record())
 
 
 func _process(_delta: float) -> void:
@@ -218,6 +167,49 @@ func _process(_delta: float) -> void:
 		WebSocketPeer.STATE_CLOSED:
 			if _is_connected:
 				_handle_disconnect()
+
+
+## The file saying which ports this editor serves, named by its process id, so `gdharness lsp` can
+## find its language server when a server moved it off the default. One for each process rather
+## than one for the project, because a gate's `--import` loads this addon too, and its plugin is
+## shown none of the options that would say so; the reader tells the two apart by command line.
+## Kept in step with `editorRecordsIn` in src/lsp-bridge.ts.
+static func _ports_record() -> String:
+	return ProjectSettings.globalize_path(EDITORS_RECORDED).path_join(
+		"%d.json" % OS.get_process_id()
+	)
+
+
+func _record_ports() -> void:
+	if not Engine.is_editor_hint():
+		return
+	var made: Error = DirAccess.make_dir_recursive_absolute(
+		ProjectSettings.globalize_path(EDITORS_RECORDED)
+	)
+	if made != OK and made != ERR_ALREADY_EXISTS:
+		return
+	var file: FileAccess = FileAccess.open(_ports_record(), FileAccess.WRITE)
+	if file == null:
+		return
+	var written: bool = (
+		file
+		. store_string(
+			(
+				JSON
+				. stringify(
+					{
+						"protocol": EDITORS_RECORDED_PROTOCOL,
+						"pid": OS.get_process_id(),
+						"lsp_port": _serves(LSP_ASKED, LSP_SETTING),
+						"dap_port": _serves(DAP_ASKED, DAP_SETTING),
+						"written_at_ms": int(Time.get_unix_time_from_system() * 1000.0),
+					}
+				)
+			)
+		)
+	)
+	if not written:
+		push_warning("gdharness: could not write " + _ports_record())
 
 
 ## Moves to the server the project now names, when that is not the one this is talking to.
@@ -371,7 +363,7 @@ func _handle_connect() -> void:
 			# as itself: the engine hands back none of the arguments it was given, so the arguments
 			# have to come from whoever wrote them. See `restart_editor` in play_tools.gd.
 			"opened_by_a_server": _opened_by_a_server() and not _started_by_an_editor,
-			"started_by_an_editor": _started_by_an_editor
+			"started_by_an_editor": _started_by_an_editor,
 		}
 	)
 
@@ -556,7 +548,7 @@ func _handle_message(json_string: String) -> void:
 
 	match message.get("type", ""):
 		"ping":
-			_send_message({"type": "pong"})
+			_send_message({ "type": "pong" })
 
 		"tool_invoke":
 			var request_id: String = message.get("id", "")
@@ -577,13 +569,16 @@ func send_busy(request_id: String, tool_name: String) -> void:
 			"id": request_id,
 			"success": false,
 			"busy": true,
-			"error": "The editor is scanning or importing its files, so %s was not run." % tool_name,
+			"error":
+			"The editor is scanning or importing its files, so %s was not run." % tool_name,
 		}
 	)
 
 
-func send_tool_result(request_id: String, success: bool, result: Variant = null, error: String = "") -> void:
-	var response: Dictionary = {"type": "tool_result", "id": request_id, "success": success}
+func send_tool_result(
+	request_id: String, success: bool, result: Variant = null, error: String = ""
+) -> void:
+	var response: Dictionary = { "type": "tool_result", "id": request_id, "success": success }
 
 	if success:
 		response["result"] = result

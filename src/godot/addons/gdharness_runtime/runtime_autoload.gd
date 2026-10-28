@@ -1,5 +1,4 @@
 extends Node
-
 ## The runtime autoload: a TCP server inside the running game that the gdharness server asks
 ## about the scene tree, drives with input, and captures. This file is the server and the
 ## command table; what each command does lives in a sibling module.
@@ -13,10 +12,8 @@ extends Node
 const GdhErrorReport = preload("error_report.gd")
 const GdhFrames = preload("runtime_frames.gd")
 const GdhRead = preload("reading.gd")
-
 ## Where the modules are loaded from. Kept in step with the markers below.
 const ADDON_DIR: String = "res://addons/gdharness_runtime/"
-
 ## The modules that answer commands, loaded at the first command one answers rather than preloaded.
 ## A preload compiles as this script parses, and the modules are twelve thousand lines: compiling
 ## them took most of a second of every debug start, in games nobody asks anything, a bench's quiet
@@ -31,7 +28,6 @@ const CAPTURE: String = "runtime_capture.gd"
 const WAITS: String = "runtime_waits.gd"
 const ACCESSIBILITY: String = "runtime_accessibility.gd"
 const VALUES: String = "runtime_values.gd"
-
 ## Every module command, by the name a request uses, as the module and the method that answers it.
 const MODULE_COMMANDS: Dictionary = {
 	"get_tree": [QUERIES, "get_tree"],
@@ -63,18 +59,15 @@ const MODULE_COMMANDS: Dictionary = {
 	"watch_recorded": [WAITS, "recorded"],
 	"wait_until": [WAITS, "wait_until"],
 }
-
 ## The size the engine gives a headless game's root viewport. Kept in step with
 ## `HEADLESS_VIEWPORT` in runtime_targets.gd, which this script does not load as it starts.
 const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
-
 const PROTOCOL: int = 3
 const DEFAULT_BIND_ADDRESS: String = "127.0.0.1"
 const BIND_ADDRESS_SETTING: String = "gdharness/runtime/bind_address"
 ## 0 asks the operating system for a free port, which is the default and what the server
 ## expects. A fixed port is for a client that cannot read the announcement.
 const PORT_SETTING: String = "gdharness/runtime/port"
-
 ## The debugger messages that confirm a profile's totals arrived: the game sends the first after
 ## them, and the debugger answers with the second once it has read that far. Kept in step with
 ## `PROFILE_SENT` and `PROFILE_RECEIVED` in src/script-profile.ts and the editor addon's
@@ -82,68 +75,53 @@ const PORT_SETTING: String = "gdharness/runtime/port"
 const PROFILE_CAPTURE: String = "gdharness"
 const PROFILE_SENT: String = "gdharness:profile_sent"
 const PROFILE_RECEIVED: String = "gdharness:profile_received"
-
 ## The longest a quitting game waits for that answer from a debugger that may not give one, such as
 ## an editor without the gdharness addon, which holds every profiled exit this long.
 const PROFILE_CONFIRM_MS: int = 3000
-
 ## The longest it waits for a debugger gdharness gave it, which answers once it has read that far:
 ## long enough for one far behind, and an end for one that has hung.
 const PROFILE_ANSWERED_MS: int = 60000
-
 ## How many times the empty function is called to measure what the profiler costs per call: enough
 ## that the clock's microsecond steps are lost in the sum, and a few milliseconds of one frame.
 const PROFILER_PROBE_CALLS: int = 10000
-
 ## How many calls of `EngineDebugger.line_poll` read the debugger's messages once: it reads them
 ## on every 2048th call and only counts the others.
 const POLLS_PER_READ: int = 2048
-
 ## The most frames a close waits for its answer to leave: a client that stopped reading would
 ## otherwise hold the close for ever, and the server is past caring about the answer by then.
 const CLOSE_AFTER_FRAMES: int = 30
-
 ## Set in a game's environment by whatever starts it to be profiled from its start: the server for
 ## a run it spawns, the editor for a play. Kept in step with `PROFILE_FROM_START` in the server.
 const PROFILE_FROM_START: String = "GDHARNESS_PROFILE_FROM_START"
-
 ## How long such a game waits for its debugger to switch the profiler on before carrying on.
 const PROFILER_WAIT_MS: int = 5000
-
 ## How the engine is told to run a script instead of the game: `godot -s thing.gd`.
 const SCRIPT_FLAGS: PackedStringArray = ["-s", "--script"]
-
 ## Serve a script run anyway, for somebody driving a `-s` script rather than a game.
 const SCRIPT_RUNS_SETTING: String = "gdharness/runtime/serve_script_runs"
-
 ## The `res://` folders of scenes that are not the game, such as a bench: a run started on one is
 ## not served. Kept in step with `QUIET_SCENES_SETTING` in src/setup.ts.
 const QUIET_SCENES_SETTING: String = "gdharness/runtime/quiet_scenes_under"
-
 ## What every user argument `gdharness spread` hands its engines starts with. Kept in step with
 ## the constants of GdhShare in addons/gdharness_tests/share.gd.
 const SPREAD_ARGUMENTS: String = "--gdh-share"
-
 ## What the engine takes a bare argument for as the scene to run, by its extension.
 const SCENE_EXTENSIONS: PackedStringArray = ["tscn", "scn", "escn", "res", "tres"]
-
 ## The variable the editor addon puts into its own environment, which every game the editor plays
 ## inherits: it says which editor played this game, so a server can tell the editor's game from
 ## another of the same project that some other server started. Kept in step with
 ## `EDITOR_PID_VARIABLE` in the editor addon's bridge client.
 const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
-
 ## The directory the keeper holding this run reads, once the game has exited, to learn whether it
 ## set a restart with OS.set_restart_on_exit. The engine starts the process it restarts into after
-## the tree has gone, and from outside that looks like a worker the game started in its last moments,
-## so only the game can say which it was. Kept in step with `EXIT_NOTES_VARIABLE` in src/keeper.ts.
+## the tree has gone, and from outside that looks like a worker the game started in its last
+## moments, so only the game can say which it was. Kept in step with `EXIT_NOTES_VARIABLE` in
+## src/keeper.ts.
 const EXIT_NOTES_VARIABLE: String = "GDHARNESS_EXIT_NOTES"
-
 ## The file the engine's error reports go to, beside the announcement and named the same way,
 ## which is where the server reads them for a run the editor plays. Kept in step with
 ## `errorReportPath` in src/runtime-client.ts.
 const ERROR_REPORT_NAME: String = "runtime-%d.log"
-
 ## Written beside this addon by setup and upgrade. Kept in step with `VERSION_MARKER` and
 ## `DIGEST_MARKER` in src/setup.ts.
 const VERSION_MARKER: String = "res://addons/gdharness_runtime/.gdharness-version"
@@ -163,7 +141,6 @@ var _frames: GdhFrames = GdhFrames.new()
 ## rather than by reference, and a module referenced only by the Callable answering one command
 ## would be freed once it answered.
 var _modules: Dictionary = {}
-
 var _server: TCPServer
 var _clients: Array[StreamPeerTCP] = []
 ## Bytes received from each client that do not yet end in a newline, keyed by the peer.
@@ -205,6 +182,98 @@ func _init() -> void:
 		"close_game": _close_game,
 	}
 	_wait_for_the_profiler()
+
+
+func _ready() -> void:
+	name = "GdharnessRuntime"
+	# The TCP control loop runs in _process. With the default PROCESS_MODE_INHERIT it stops
+	# while the tree is paused, so the runtime silently goes unreachable and the game cannot
+	# even be un-paused over the socket. A debug server has to stay responsive while the game
+	# is frozen, to inspect, capture, inject or resume it.
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	_size_a_windowless_game()
+	var watched: int = get_tree().root.tree_exiting.connect(_send_the_profile)
+	if watched != OK:
+		push_error("gdharness could not watch for the game quitting: %d" % watched)
+	if not OS.get_environment(EXIT_NOTES_VARIABLE).is_empty():
+		var noted: int = get_tree().root.tree_exited.connect(_note_the_exit)
+		if noted != OK:
+			push_error("gdharness could not watch for the game's tree ending: %d" % noted)
+	_report_errors()
+	_start_server()
+
+
+func _exit_tree() -> void:
+	if _errors != null:
+		OS.remove_logger(_errors)
+		_errors.close()
+		_errors = null
+	_cleanup()
+
+
+func _process(_delta: float) -> void:
+	if not _enabled or _server == null:
+		return
+	_frames.note_frame(Time.get_ticks_usec())
+	_calibrate_the_profiler()
+
+	# Every connection waiting rather than one a frame: the engine queues eight a game has not taken
+	# and refuses the rest, so calls sent together would be refused as if the game were not up.
+	while _server.is_connection_available():
+		var client: StreamPeerTCP = _server.take_connection()
+		if client == null:
+			break
+		_clients.append(client)
+		_send_welcome(client)
+		# Out before the request that came with it is read: a request can hold the game in a
+		# breakpoint before the frame's drain, and the server, never welcomed, took a game held
+		# inside its call for one that had not taken it. A client gone already is dropped below.
+		var _welcomed: bool = _drain(client)
+
+	var gone: Array[StreamPeerTCP] = []
+	for client: StreamPeerTCP in _clients:
+		# A poll that fails is a client that has already gone, which the status check below is
+		# about to find; the answer is read so it is not dropped, not because it adds anything.
+		var polled: Error = client.poll()
+		if polled != OK or client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+			gone.append(client)
+			continue
+		var available: int = client.get_available_bytes()
+		if available > 0:
+			var received: Array = client.get_data(available)
+			var bytes: PackedByteArray = received[1]
+			_receive(client, bytes)
+		if not _drain(client):
+			gone.append(client)
+
+	for client: StreamPeerTCP in gone:
+		_clients.erase(client)
+		# Dictionary.erase answers with whether the key was there, and underscore-prefixed locals
+		# are how GDScript says an answer is deliberately unwanted: a client that had nothing
+		# pending or owed is as forgotten as one that had both.
+		var _had_pending: bool = _pending.erase(client)
+		var _had_outgoing: bool = _outgoing.erase(client)
+
+	# After the answer to the close has gone out: the close request reaches this node too, which
+	# then drops its clients and whatever they were still owed.
+	if _close_asked:
+		_close_frames += 1
+		if _close_frames >= CLOSE_AFTER_FRAMES or _outgoing.values().all(_is_empty):
+			_close_asked = false
+			_deliver_close()
+
+
+## Down with the window only when the close is taken. A game that asks before quitting turns
+## auto_accept_quit off and decides for itself, and one whose player answered No went on running
+## with no runtime and no announcement, so every later call said no game was running. A quit it
+## does take ends the tree, which [method _exit_tree] cleans up after.
+##
+## One line for every notification, and the last this node runs in a frame, after [method _process]:
+## a pause that stops in this addon is let go to a breakpoint here and stepped once into the game's
+## own script, rather than stepped through the frame a line at a time.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST and _takes_the_close():
+		_cleanup()
 
 
 ## The script of the module in [param file], compiled at the first call that needs it.
@@ -280,9 +349,10 @@ static func _window_dimension(axis: String, fallback: int) -> int:
 
 ## Holds the game's start until the profiler is on, when whatever started the game asked for a
 ## profile from its start. The debugger switches the profiler on with a message the game reads only
-## on a poll, which comes every [constant POLLS_PER_READ] lines of script, so the main scene's _ready
-## could run first: a game played on a macOS runner counted 25 calls of a function called 26 times,
-## the first of them from _ready. Run at the autoload's construction, before the main scene loads.
+## on a poll, which comes every [constant POLLS_PER_READ] lines of script, so the main scene's
+## _ready could run first: a game played on a macOS runner counted 25 calls of a function called 26
+## times, the first of them from _ready. Run at the autoload's construction, before the main scene
+## loads.
 func _wait_for_the_profiler() -> void:
 	if OS.get_environment(PROFILE_FROM_START).is_empty():
 		return
@@ -298,8 +368,8 @@ func _wait_for_the_profiler() -> void:
 			push_warning(
 				(
 					(
-						"gdharness: this game was started to be profiled from its start, and the profiler"
-						+ " was not on %d ms later, so what ran before it is not counted"
+						"gdharness: this game was started to be profiled from its start, and the "
+						+ "profiler was not on %d ms later, so what ran before it is not counted"
 					)
 					% PROFILER_WAIT_MS
 				)
@@ -318,42 +388,18 @@ func serving() -> bool:
 	return _enabled and _server != null and _server.is_listening()
 
 
-func _ready() -> void:
-	name = "GdharnessRuntime"
-	# The TCP control loop runs in _process. With the default PROCESS_MODE_INHERIT it stops
-	# while the tree is paused, so the runtime silently goes unreachable and the game cannot
-	# even be un-paused over the socket. A debug server has to stay responsive while the game
-	# is frozen, to inspect, capture, inject or resume it.
-	process_mode = Node.PROCESS_MODE_ALWAYS
-	_size_a_windowless_game()
-	var watched: int = get_tree().root.tree_exiting.connect(_send_the_profile)
-	if watched != OK:
-		push_error("gdharness could not watch for the game quitting: %d" % watched)
-	if not OS.get_environment(EXIT_NOTES_VARIABLE).is_empty():
-		var noted: int = get_tree().root.tree_exited.connect(_note_the_exit)
-		if noted != OK:
-			push_error("gdharness could not watch for the game's tree ending: %d" % noted)
-	_report_errors()
-	_start_server()
-
-
 ## Says whether this game restarts as it exits, once the whole tree has gone, so a game's own
 ## _exit_tree and every autoload's have had their say.
 func _note_the_exit() -> void:
-	var path: String = OS.get_environment(EXIT_NOTES_VARIABLE).path_join("exit-%d.json" % OS.get_process_id())
+	var path: String = OS.get_environment(EXIT_NOTES_VARIABLE).path_join(
+		"exit-%d.json" % OS.get_process_id()
+	)
 	var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
 		return
-	var _written: bool = file.store_string(JSON.stringify({"restart": OS.is_restart_on_exit_set()}))
+	var state: String = JSON.stringify({ "restart": OS.is_restart_on_exit_set() })
+	var _written: bool = file.store_string(state)
 	file.close()
-
-
-func _exit_tree() -> void:
-	if _errors != null:
-		OS.remove_logger(_errors)
-		_errors.close()
-		_errors = null
-	_cleanup()
 
 
 ## A profiled run's totals, sent as the game quits.
@@ -381,13 +427,16 @@ func _exit_tree() -> void:
 ## The debugger is asked once before the profiler goes off as well, so the totals go into an empty
 ## queue. They name each function no frame did, one message apiece, and with the names of a large
 ## first frame still queued for a debugger behind on its reading, they did not fit and the engine
-## dropped them. One that does not answer that is not asked again, as it would not answer the second.
+## dropped them. One that does not answer that is not asked again, as it would not answer the
+## second.
 func _send_the_profile() -> void:
 	if not (EngineDebugger.is_active() and EngineDebugger.is_profiling("servers")):
 		return
 	if not EngineDebugger.has_capture(PROFILE_CAPTURE):
 		EngineDebugger.register_message_capture(PROFILE_CAPTURE, _on_debugger_message)
-	var answers: bool = _profiled_from_start or OS.get_environment(EDITOR_PID_VARIABLE).is_valid_int()
+	var answers: bool = (
+		_profiled_from_start or OS.get_environment(EDITOR_PID_VARIABLE).is_valid_int()
+	)
 	var waits: int = PROFILE_ANSWERED_MS if answers else PROFILE_CONFIRM_MS
 	var drained: bool = _debugger_answered(waits)
 	EngineDebugger.profiler_enable("servers", false)
@@ -397,8 +446,8 @@ func _send_the_profile() -> void:
 		print(
 			(
 				(
-					"[gdharness] the debugger did not confirm the profiler's totals within %d ms, so the"
-					+ " profile may be the frames that arrived without them"
+					"[gdharness] the debugger did not confirm the profiler's totals within %d ms, "
+					+ "so the profile may be the frames that arrived without them"
 				)
 				% waits
 			)
@@ -423,9 +472,9 @@ func _debugger_answered(waits: int) -> bool:
 ## summed. Nothing of the game's own runs, which quitting the tree would have done.
 func _send_profile_now(_params: Dictionary) -> Dictionary:
 	if not (EngineDebugger.is_active() and EngineDebugger.is_profiling("servers")):
-		return {"sent": false}
+		return { "sent": false }
 	_send_the_profile()
-	return {"sent": true, "confirmed": _profile_received}
+	return { "sent": true, "confirmed": _profile_received }
 
 
 ## What the script profiler costs per call in this game, measured once each time it is switched on.
@@ -479,58 +528,6 @@ func _report_errors() -> void:
 	OS.add_logger(_errors)
 
 
-func _process(_delta: float) -> void:
-	if not _enabled or _server == null:
-		return
-	_frames.note_frame(Time.get_ticks_usec())
-	_calibrate_the_profiler()
-
-	# Every connection waiting rather than one a frame: the engine queues eight a game has not
-	# taken and refuses the rest, so calls sent together would be refused as if the game were not up.
-	while _server.is_connection_available():
-		var client: StreamPeerTCP = _server.take_connection()
-		if client == null:
-			break
-		_clients.append(client)
-		_send_welcome(client)
-		# Out before the request that came with it is read: a request can hold the game in a
-		# breakpoint before the frame's drain, and the server, never welcomed, took a game held
-		# inside its call for one that had not taken it. A client gone already is dropped below.
-		var _welcomed: bool = _drain(client)
-
-	var gone: Array[StreamPeerTCP] = []
-	for client: StreamPeerTCP in _clients:
-		# A poll that fails is a client that has already gone, which the status check below is
-		# about to find; the answer is read so it is not dropped, not because it adds anything.
-		var polled: Error = client.poll()
-		if polled != OK or client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
-			gone.append(client)
-			continue
-		var available: int = client.get_available_bytes()
-		if available > 0:
-			var received: Array = client.get_data(available)
-			var bytes: PackedByteArray = received[1]
-			_receive(client, bytes)
-		if not _drain(client):
-			gone.append(client)
-
-	for client: StreamPeerTCP in gone:
-		_clients.erase(client)
-		# Dictionary.erase answers with whether the key was there, and underscore-prefixed locals
-		# are how GDScript says an answer is deliberately unwanted: a client that had nothing
-		# pending or owed is as forgotten as one that had both.
-		var _had_pending: bool = _pending.erase(client)
-		var _had_outgoing: bool = _outgoing.erase(client)
-
-	# After the answer to the close has gone out: the close request reaches this node too, which then
-	# drops its clients and whatever they were still owed.
-	if _close_asked:
-		_close_frames += 1
-		if _close_frames >= CLOSE_AFTER_FRAMES or _outgoing.values().all(_is_empty):
-			_close_asked = false
-			_deliver_close()
-
-
 ## Hands the socket as much of what it is owed as it will take, and says whether it is still worth
 ## talking to. Reading comes first in the frame, so a client that asked and left is noticed here
 ## rather than blocking on a write that can never finish.
@@ -575,7 +572,10 @@ func _start_server() -> void:
 	# own path: a gate that starts sixteen engines at once announces sixteen games that are not
 	# games, and a client asking the runtime anything while they run can be answered by whichever
 	# of them replies first. Measured on two projects before it was written here.
-	if _script_run() and not GdhRead.as_bool(ProjectSettings.get_setting(SCRIPT_RUNS_SETTING, false)):
+	if (
+		_script_run()
+		and not GdhRead.as_bool(ProjectSettings.get_setting(SCRIPT_RUNS_SETTING, false))
+	):
 		_enabled = false
 		return
 
@@ -596,14 +596,19 @@ func _start_server() -> void:
 
 	_server = TCPServer.new()
 	# listen() defaults bind_address to "*", which exposes the game to the whole network.
-	var bind_address: String = str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
+	var bind_address: String = str(
+		ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS)
+	)
 	var wanted_port: int = GdhRead.as_int(ProjectSettings.get_setting(PORT_SETTING, 0))
 	var error: Error = _server.listen(wanted_port, bind_address)
 	if error != OK:
 		# A warning, not an error: callers treat any ERROR line on stderr as a failed
 		# operation, and a game without a runtime server is a handled condition.
 		push_warning(
-			"[gdharness] runtime port %d is unavailable (%s), running without a server" % [wanted_port, error]
+			(
+				"[gdharness] runtime port %d is unavailable (%s), running without a server"
+				% [wanted_port, error]
+			)
 		)
 		_enabled = false
 		return
@@ -611,7 +616,8 @@ func _start_server() -> void:
 	_port = _server.get_local_port()
 	_announce(bind_address)
 	var listening: String = (
-		"[gdharness] runtime listening on %s:%d, announced at %s" % [bind_address, _port, _announcement]
+		"[gdharness] runtime listening on %s:%d, announced at %s"
+		% [bind_address, _port, _announcement]
 	)
 	# The line the server tells the two streams apart by: it takes the prints before it from the
 	# debug adapter and everything from it on from the file, which has it first. After the
@@ -622,8 +628,8 @@ func _start_server() -> void:
 		print(listening)
 
 
-## The scene [param given] names for the engine to run, as a `res://` path, when it lies under one of
-## [param prefixes]; otherwise empty. The engine takes any bare argument ending in a scene's
+## The scene [param given] names for the engine to run, as a `res://` path, when it lies under one
+## of [param prefixes]; otherwise empty. The engine takes any bare argument ending in a scene's
 ## extension for the scene, relative to the project or absolute, so each is read as it would.
 static func quiet_scene_in(given: PackedStringArray, prefixes: Variant) -> String:
 	# A PackedStringArray as project.godot writes one, or an Array of strings as a hand might.
@@ -636,7 +642,10 @@ static func quiet_scene_in(given: PackedStringArray, prefixes: Variant) -> Strin
 			if prefix is String:
 				var _kept: bool = folders.append(str(prefix))
 	for argument: String in given:
-		if argument.begins_with("-") or not SCENE_EXTENSIONS.has(argument.get_extension().to_lower()):
+		if (
+			argument.begins_with("-")
+			or not SCENE_EXTENSIONS.has(argument.get_extension().to_lower())
+		):
 			continue
 		var scene: String = ProjectSettings.localize_path(argument)
 		for folder: String in folders:
@@ -679,7 +688,10 @@ func _announce(bind_address: String) -> void:
 	var made: Error = DirAccess.make_dir_recursive_absolute(directory)
 	if made != OK and made != ERR_ALREADY_EXISTS:
 		push_warning(
-			"[gdharness] cannot create %s (%s); the server will not find this game" % [directory, made]
+			(
+				"[gdharness] cannot create %s (%s); the server will not find this game"
+				% [directory, made]
+			)
 		)
 		return
 	var path: String = directory.path_join("runtime-%d.json" % OS.get_process_id())
@@ -734,7 +746,7 @@ func _identity(bind_address: String) -> Dictionary:
 		"project":
 		{
 			"name": str(ProjectSettings.get_setting("application/config/name", "")),
-			"path": ProjectSettings.globalize_path("res://").rstrip("/")
+			"path": ProjectSettings.globalize_path("res://").rstrip("/"),
 		},
 		"godot": Engine.get_version_info().get("string", ""),
 		# Where user:// is for this run, which only the engine can say: it follows the project's
@@ -807,7 +819,7 @@ func _execute_command(command: String, params: Dictionary) -> Dictionary:
 	if not handler.is_valid():
 		return {
 			"type": "error",
-			"message": "Unknown command: %s. Commands: %s" % [command, ", ".join(_command_names())]
+			"message": "Unknown command: %s. Commands: %s" % [command, ", ".join(_command_names())],
 		}
 	# Only a waits module already loaded can have a trace running to record the call in.
 	var waits: Object = _modules.get(WAITS)
@@ -818,7 +830,7 @@ func _execute_command(command: String, params: Dictionary) -> Dictionary:
 
 
 func _ping(_params: Dictionary) -> Dictionary:
-	return {"type": "pong", "timestamp": Time.get_unix_time_from_system()}
+	return { "type": "pong", "timestamp": Time.get_unix_time_from_system() }
 
 
 ## The game asked to close, as a player's close asks it: answered at once and delivered once the
@@ -827,12 +839,12 @@ func _ping(_params: Dictionary) -> Dictionary:
 func _close_game(_params: Dictionary) -> Dictionary:
 	_close_asked = true
 	_close_frames = 0
-	return {"type": "closing", "acceptsQuit": get_tree().auto_accept_quit}
+	return { "type": "closing", "acceptsQuit": get_tree().auto_accept_quit }
 
 
 ## What a player's close does: the close request reaches every node, and then the root window says
-## it was asked to close, which the tree answers by quitting when it accepts quits. So the game's own
-## close runs, a crash guard's included, where a stop that ended the process ran none of it.
+## it was asked to close, which the tree answers by quitting when it accepts quits. So the game's
+## own close runs, a crash guard's included, where a stop that ended the process ran none of it.
 func _deliver_close() -> void:
 	var root: Window = get_tree().root
 	root.propagate_notification(NOTIFICATION_WM_CLOSE_REQUEST)
@@ -859,20 +871,7 @@ func _send_response(client: StreamPeerTCP, data: Dictionary) -> void:
 
 ## A request that could not be read far enough to find its id is answered with a null one.
 func _send_error(client: StreamPeerTCP, request_id: Variant, message: String) -> void:
-	_send_response(client, {"type": "error", "message": message, "id": request_id})
-
-
-## Down with the window only when the close is taken. A game that asks before quitting turns
-## auto_accept_quit off and decides for itself, and one whose player answered No went on running
-## with no runtime and no announcement, so every later call said no game was running. A quit it
-## does take ends the tree, which [method _exit_tree] cleans up after.
-##
-## One line for every notification, and the last this node runs in a frame, after [method _process]:
-## a pause that stops in this addon is let go to a breakpoint here and stepped once into the game's
-## own script, rather than stepped through the frame a line at a time.
-func _notification(what: int) -> void:
-	if what == NOTIFICATION_WM_CLOSE_REQUEST and _takes_the_close():
-		_cleanup()
+	_send_response(client, { "type": "error", "message": message, "id": request_id })
 
 
 func _takes_the_close() -> bool:
@@ -896,6 +895,9 @@ func _cleanup() -> void:
 		var removed: Error = DirAccess.remove_absolute(_announcement)
 		if removed != OK:
 			push_warning(
-				"[gdharness] cannot remove %s; the server will find a game that is gone" % _announcement
+				(
+					"[gdharness] cannot remove %s; the server will find a game that is gone"
+					% _announcement
+				)
 			)
 		_announcement = ""

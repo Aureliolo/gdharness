@@ -1,5 +1,4 @@
 extends Node
-
 ## gdUnit4 suites run inside a played scene, which the engine's script profiler sees and a script
 ## run with `-s` never does. `editor_run start` given `suites` plays this scene with
 ## [constant RUNNER] naming the runner `gdharness test` uses, where the server ships it, followed by
@@ -20,8 +19,9 @@ func _ready() -> void:
 		push_error(
 			(
 				(
-					"gdharness suites: no runner at '%s'. This scene is played by editor_run start with suites,"
-					+ " which names the runner after %s; it does nothing played any other way."
+					"gdharness suites: no runner at '%s'. This scene is played by editor_run start "
+					+ "with suites, which names the runner after %s; it does nothing played any "
+					+ "other way."
 				)
 				% [path, RUNNER]
 			)

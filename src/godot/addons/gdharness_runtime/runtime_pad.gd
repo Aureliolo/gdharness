@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## What reaches the running game the way a controller reaches it: a button pressed and a stick or
 ## trigger moved, as the events a pad sends.
 ##
@@ -10,8 +9,8 @@ extends RefCounted
 
 const GdhRead = preload("reading.gd")
 const GdhValues = preload("runtime_values.gd")
-
-## Controller buttons by the names Godot gives them, for a caller naming one rather than numbering it.
+## Controller buttons by the names Godot gives them, for a caller naming one rather than numbering
+## it.
 const JOY_BUTTONS: Dictionary[String, int] = {
 	"a": JOY_BUTTON_A,
 	"b": JOY_BUTTON_B,
@@ -35,7 +34,6 @@ const JOY_BUTTONS: Dictionary[String, int] = {
 	"paddle4": JOY_BUTTON_PADDLE4,
 	"touchpad": JOY_BUTTON_TOUCHPAD,
 }
-
 ## Stick and trigger axes by the names Godot gives them.
 const JOY_AXES: Dictionary[String, int] = {
 	"left_x": JOY_AXIS_LEFT_X,
@@ -53,19 +51,21 @@ func _init(host: Node) -> void:
 	_host = host
 
 
-## Presses a controller button, and lets go of it again unless asked to hold it, as a key press does:
-## a button left down is a press that never ends, and everything reading it goes on seeing it.
+## Presses a controller button, and lets go of it again unless asked to hold it, as a key press
+## does: a button left down is a press that never ends, and everything reading it goes on seeing it.
 func inject_joypad_button(params: Dictionary) -> Dictionary:
 	var given: Variant = params.get("button", null)
 	var button: int = _named_or_numbered(given, JOY_BUTTONS, JOY_BUTTON_MAX)
 	if button < 0:
-		return {"type": "error", "message": _not_one_of("button", given, JOY_BUTTONS, JOY_BUTTON_MAX)}
+		return {
+			"type": "error", "message": _not_one_of("button", given, JOY_BUTTONS, JOY_BUTTON_MAX),
+		}
 	var device: int = GdhRead.as_int(params.get("device", 0), 0)
 	var held: bool = GdhRead.as_bool(params.get("pressed", true), true)
 	var whole: bool = not params.has("pressed")
 	var holding: Variant = GdhValues.held_for(params)
 	if holding is String:
-		return {"type": "error", "message": holding}
+		return { "type": "error", "message": holding }
 	var frames: int = holding
 
 	var focused: String = GdhValues.focus_path(_host)
@@ -73,8 +73,8 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 	Input.parse_input_event(event)
 	var lasted: Variant = null
 	if whole:
-		# A frame between the halves at least, as a key has, so a game that acts on the press and one
-		# that acts on the release each get a frame to do it in.
+		# A frame between the halves at least, as a key has, so a game that acts on the press and
+		# one that acts on the release each get a frame to do it in.
 		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		Input.parse_input_event(_button(button, device, false))
 	# The engine hands a parsed event on at the next frame, so the focus is read after one.
@@ -101,13 +101,17 @@ func inject_joypad_motion(params: Dictionary) -> Dictionary:
 	var given: Variant = params.get("axis", null)
 	var axis: int = _named_or_numbered(given, JOY_AXES, JOY_AXIS_MAX)
 	if axis < 0:
-		return {"type": "error", "message": _not_one_of("axis", given, JOY_AXES, JOY_AXIS_MAX)}
+		return { "type": "error", "message": _not_one_of("axis", given, JOY_AXES, JOY_AXIS_MAX) }
 	if not params.has("value"):
-		return {"type": "error", "message": "joypad_motion needs value, where the axis is, -1 to 1"}
+		return {
+			"type": "error",
+			"message": "joypad_motion needs value, where the axis is, -1 to 1",
+		}
 	var value: float = GdhRead.as_float(params.get("value"), 0.0)
 	if value < -1.0 or value > 1.0:
 		return {
-			"type": "error", "message": "value %s is outside -1 to 1, the whole travel of an axis" % value
+			"type": "error",
+			"message": "value %s is outside -1 to 1, the whole travel of an axis" % value,
 		}
 	var device: int = GdhRead.as_int(params.get("device", 0), 0)
 

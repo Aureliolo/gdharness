@@ -13,55 +13,6 @@ var _dependencies: GdhDependencies = null
 var _reading: String = ""
 
 
-## What one class body declares, the script's own or an inner class's.
-class GdhMembers:
-	var declared_class_name: Variant = null
-	var extends_name: String = "RefCounted"
-	var signals: Array[Dictionary] = []
-	var variables: Array[Dictionary] = []
-	var functions: Array[Dictionary] = []
-	var constants: Array[Dictionary] = []
-	var enums: Array[Dictionary] = []
-	var inner_classes: Array[Dictionary] = []
-	## The `##` comment the class is documented with, empty when it has none.
-	var doc: String = ""
-	## The index of the last line the body holds.
-	var last: int = -1
-	## An inner class's name and the line its `class` is on.
-	var inner_name: String = ""
-	var line: int = 0
-
-	## The inner class as its entry under inner_classes, in the fields a script's own are in.
-	func as_inner() -> Dictionary:
-		return {
-			"name": inner_name,
-			"line": line,
-			"extends": extends_name,
-			"signals": signals,
-			"variables": variables,
-			"functions": functions,
-			"constants": constants,
-			"enums": enums,
-			"inner_classes": inner_classes,
-		}
-
-	## Whether a member is declared yet, past which a `##` block no longer documents the class.
-	func declares_members() -> bool:
-		return not (
-			signals.is_empty()
-			and variables.is_empty()
-			and functions.is_empty()
-			and constants.is_empty()
-			and enums.is_empty()
-			and inner_classes.is_empty()
-		)
-
-	## [param lines] as the class's documentation, when it has none yet.
-	func take_doc(lines: Array[String]) -> void:
-		if doc.is_empty() and not lines.is_empty():
-			doc = "\n".join(PackedStringArray(lines))
-
-
 func _init(p_log: GdhLog) -> void:
 	_log = p_log
 
@@ -116,7 +67,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		var declaring: String = str(declared_by[used])
 		if declaring == full_script_path:
 			continue
-		classes_used.append({"name": used, "path": declaring})
+		classes_used.append({ "name": used, "path": declaring })
 		if not declaring in dependencies:
 			dependencies.append(declaring)
 
@@ -133,7 +84,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	var autoloads_used: Array[Dictionary] = []
 	for used: String in GdhDependencies.classes_used_in(content, global_autoloads):
 		if str(global_autoloads[used]) != full_script_path:
-			autoloads_used.append({"name": used, "path": str(global_autoloads[used])})
+			autoloads_used.append({ "name": used, "path": str(global_autoloads[used]) })
 
 	var answer: Dictionary = {
 		"path": script_path,
@@ -149,7 +100,8 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		"dependencies": dependencies,
 		"classes_used": classes_used,
 		"autoloads_used": autoloads_used,
-		"line_count": lines.size() - 1 if content.is_empty() or content.ends_with("\n") else lines.size()
+		"line_count":
+		lines.size() - 1 if content.is_empty() or content.ends_with("\n") else lines.size(),
 	}
 	if not own.doc.is_empty():
 		answer["class_doc"] = own.doc
@@ -335,7 +287,9 @@ func _inner_class(
 			body_margin = indent
 		break
 	var body: GdhMembers = (
-		GdhMembers.new() if body_margin.is_empty() else _members(lines, at + 1, body_margin, dependencies)
+		GdhMembers.new()
+		if body_margin.is_empty()
+		else _members(lines, at + 1, body_margin, dependencies)
 	)
 	if body_margin.is_empty():
 		body.last = at
@@ -352,7 +306,10 @@ static func _not_a_script(path: String) -> String:
 	var said: String = "%s is not a GDScript file, and script_info reads .gd files only" % path
 	match path.get_extension().to_lower():
 		"tscn", "scn":
-			return said + ": scene_tree reads a scene's nodes, and with properties the script each carries."
+			return (
+				said
+				+ ": scene_tree reads a scene's nodes, and with properties the script each carries."
+			)
 		"tres", "res":
 			return said + ": resource_edit read reads a resource."
 	return said + "."
@@ -397,7 +354,7 @@ func _native_ancestor(base: String, from_path: String) -> String:
 		if path in seen:
 			return ""
 		seen.append(path)
-		var above: Dictionary = get_gdscript_info({"script_path": path})
+		var above: Dictionary = get_gdscript_info({ "script_path": path })
 		if above.is_empty():
 			return ""
 		current = str(above.get("extends", ""))
@@ -422,7 +379,7 @@ func _add_inherited(answer: Dictionary, seen: Array[String]) -> void:
 		if base_path.is_empty() or base_path in seen:
 			break
 		seen.append(base_path)
-		var above: Dictionary = get_gdscript_info({"script_path": base_path})
+		var above: Dictionary = get_gdscript_info({ "script_path": base_path })
 		# A read that failed answers with an empty dictionary rather than with a flag, so that is
 		# what is asked. `_script_named` has already checked the file is there, which leaves only
 		# an open that fails, and the chain stops without recording a file nothing was read from.
@@ -479,12 +436,14 @@ func _parse_signal(line: String, line_num: int) -> Dictionary:
 		# comma answered with two.
 		var paren_end: int = _closing_paren(signal_text, paren_start)
 		if paren_end > paren_start:
-			for p: String in _arguments_in(signal_text.substr(paren_start + 1, paren_end - paren_start - 1)):
+			for p: String in _arguments_in(
+				signal_text.substr(paren_start + 1, paren_end - paren_start - 1)
+			):
 				params.append(_parse_param(p))
 	else:
 		signal_name = signal_text
 
-	return {"name": signal_name, "params": params, "line": line_num}
+	return { "name": signal_name, "params": params, "line": line_num }
 
 
 func _parse_constant(line: String, line_num: int) -> Dictionary:
@@ -507,7 +466,7 @@ func _parse_constant(line: String, line_num: int) -> Dictionary:
 	else:
 		name = const_text
 
-	var constant: Dictionary = {"name": name, "value": value, "type": type_hint, "line": line_num}
+	var constant: Dictionary = { "name": name, "value": value, "type": type_hint, "line": line_num }
 	# A constant has its value's type whether or not it is written with :=.
 	if type_hint.is_empty():
 		_infer(constant, value)
@@ -588,7 +547,7 @@ func _parse_enum(line: String, line_num: int) -> Dictionary:
 	else:
 		enum_name = enum_text
 
-	return {"name": enum_name, "values": values, "line": line_num}
+	return { "name": enum_name, "values": values, "line": line_num }
 
 
 func _parse_variable(line: String, line_num: int) -> Dictionary:
@@ -609,7 +568,7 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 
 	var var_pos: int = line.find("var ")
 	if var_pos == -1:
-		return {"name": "", "line": line_num}
+		return { "name": "", "line": line_num }
 
 	var var_text: String = line.substr(var_pos + 4).strip_edges()
 	# A colon closing the line opens the variable's setter and getter, and was read as the end of
@@ -652,10 +611,12 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 		"is_onready": is_onready,
 		# One per class rather than per instance, which a caller reading a counter needs to know.
 		"is_static": GdhPatterns.without_annotations(line).begins_with("static "),
-		"line": line_num
+		"line": line_num,
 	}
 	# Only := types a variable by its value; one written with = alone holds any type.
-	var walrus: bool = "=" in var_text and var_text.split("=", true, 1)[0].strip_edges().ends_with(":")
+	var walrus: bool = (
+		"=" in var_text and var_text.split("=", true, 1)[0].strip_edges().ends_with(":")
+	)
 	if walrus and type_hint.is_empty():
 		_infer(variable, default_value)
 	return variable
@@ -701,7 +662,7 @@ func _parse_function(line: String, line_num: int, annotated: String = "") -> Dic
 		# Said rather than left to be inferred: an abstract method has no body, so a caller that
 		# saw only the declaration would otherwise take it for one whose body it failed to read.
 		"is_abstract": "abstract" in GdhPatterns.annotations_on(annotated),
-		"line": line_num
+		"line": line_num,
 	}
 
 
@@ -849,7 +810,7 @@ func _parse_param(param_text: String) -> Dictionary:
 	var stated_default: Variant = null
 	if "=" in param_text:
 		stated_default = default_value
-	return {"name": name, "type": type_hint, "default": stated_default, "is_rest": is_rest}
+	return { "name": name, "type": type_hint, "default": stated_default, "is_rest": is_rest }
 
 
 func _collect_dependencies(line: String, into: Array[String]) -> void:
@@ -877,3 +838,63 @@ func _extract_dependencies(line: String) -> Array[String]:
 		deps.append(m.get_string(1))
 
 	return deps
+
+
+## What one class body declares, the script's own or an inner class's.
+class GdhMembers:
+	var declared_class_name: Variant = null
+
+	var extends_name: String = "RefCounted"
+
+	var signals: Array[Dictionary] = []
+
+	var variables: Array[Dictionary] = []
+
+	var functions: Array[Dictionary] = []
+
+	var constants: Array[Dictionary] = []
+
+	var enums: Array[Dictionary] = []
+
+	var inner_classes: Array[Dictionary] = []
+
+	## The `##` comment the class is documented with, empty when it has none.
+	var doc: String = ""
+
+	## The index of the last line the body holds.
+	var last: int = -1
+
+	## An inner class's name and the line its `class` is on.
+	var inner_name: String = ""
+
+	var line: int = 0
+
+	## The inner class as its entry under inner_classes, in the fields a script's own are in.
+	func as_inner() -> Dictionary:
+		return {
+			"name": inner_name,
+			"line": line,
+			"extends": extends_name,
+			"signals": signals,
+			"variables": variables,
+			"functions": functions,
+			"constants": constants,
+			"enums": enums,
+			"inner_classes": inner_classes,
+		}
+
+	## Whether a member is declared yet, past which a `##` block no longer documents the class.
+	func declares_members() -> bool:
+		return not (
+			signals.is_empty()
+			and variables.is_empty()
+			and functions.is_empty()
+			and constants.is_empty()
+			and enums.is_empty()
+			and inner_classes.is_empty()
+		)
+
+	## [param lines] as the class's documentation, when it has none yet.
+	func take_doc(lines: Array[String]) -> void:
+		if doc.is_empty() and not lines.is_empty():
+			doc = "\n".join(PackedStringArray(lines))

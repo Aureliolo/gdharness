@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## The editor's end of the bridge, over two connections: it keeps asking for a server that is not
 ## listening yet, and it says the same version both times.
 ##
@@ -15,19 +14,17 @@ extends SceneTree
 
 const GdhBridgeClient = preload("res://addons/gdharness_editor/bridge_client.gd")
 const MARKER: String = "res://addons/gdharness_editor/.gdharness-version"
-
 ## Past the point where the socket gives up, which is what the client has to survive. Measured
 ## on Windows: a peer pointed at a port nothing listens on sits in CONNECTING for thirty seconds
 ## before it reaches CLOSED, and until it does there is no defect to catch. The editor that
 ## started this was thirty-five seconds ahead of its server.
 const SILENCE_MSEC: int = 33000
 const DEADLINE_MSEC: int = 120000
-
+const LATE: String = "the client never reached the bridge in %d ms"
 const WAS: String = "1.2.3"
 const NOW: String = "9.9.9"
 
 var failures: Array[String] = []
-
 var _client: GdhBridgeClient
 var _server: TCPServer = TCPServer.new()
 var _peer: WebSocketPeer = null
@@ -37,6 +34,26 @@ var _listening: bool = false
 var _connected: bool = false
 var _arrivals: int = 0
 var _reached_at: int = 0
+
+
+func _process(_delta: float) -> bool:
+	var waited: int = Time.get_ticks_msec() - _started
+	if waited > DEADLINE_MSEC:
+		_stop(LATE % DEADLINE_MSEC)
+		return true
+
+	if not _listening and waited >= SILENCE_MSEC and not _open_the_door():
+		return true
+	_take_the_connection()
+	if _peer != null:
+		_peer.poll()
+		_read_arrival()
+
+	if _arrivals < 2:
+		return false
+
+	_finish(0)
+	return true
 
 
 func _initialize() -> void:
@@ -52,26 +69,6 @@ func _initialize() -> void:
 		_fail("the fixture could not listen for the client connecting")
 	_client.connect_to_server("ws://127.0.0.1:%d/godot" % _port)
 	_started = Time.get_ticks_msec()
-
-
-func _process(_delta: float) -> bool:
-	var waited: int = Time.get_ticks_msec() - _started
-	if waited > DEADLINE_MSEC:
-		_stop("the client never reached the bridge in %d ms" % DEADLINE_MSEC)
-		return true
-
-	if not _listening and waited >= SILENCE_MSEC and not _open_the_door():
-		return true
-	_take_the_connection()
-	if _peer != null:
-		_peer.poll()
-		_read_arrival()
-
-	if _arrivals < 2:
-		return false
-
-	_finish(0)
-	return true
 
 
 ## Starts listening, once the client has had long enough to be refused and give up. Answers
@@ -176,7 +173,12 @@ func _finish(code: int) -> void:
 		return
 	print(
 		JSON.stringify(
-			{"ok": true, "waited_msec": _reached_at, "silence_msec": SILENCE_MSEC, "arrivals": _arrivals}
+			{
+				"ok": true,
+				"waited_msec": _reached_at,
+				"silence_msec": SILENCE_MSEC,
+				"arrivals": _arrivals,
+			}
 		)
 	)
 	quit(code)

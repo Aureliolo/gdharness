@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## What a node says to a player, read the way it is drawn: the parsed words of rich text, as much of
 ## a line as is typed out so far, the translation rather than its key, a mask over a secret, and the
 ## items of the controls that draw a list.
@@ -21,9 +20,9 @@ extends RefCounted
 ## for each of them on every look a wait takes.
 static func said_by(node: Node) -> String:
 	var own: String = drawn_by(node)
-	# A control showing a picture rather than words is named for a player who cannot see it, and that
-	# name is the one the words a caller asks by are meant for: the rail's "Out" tab is a square with
-	# an icon on it, and a click on "Out" found only the words around it.
+	# A control showing a picture rather than words is named for a player who cannot see it, and
+	# that name is the one the words a caller asks by are meant for: the rail's "Out" tab is a
+	# square with an icon on it, and a click on "Out" found only the words around it.
 	if own.is_empty() and node is Control and not node is Label and not draws_a_list(node):
 		var control: Control = node
 		return control.atr(control.accessibility_name).strip_edges()
@@ -141,7 +140,9 @@ static func masked(field: LineEdit) -> String:
 ## Whether [param node] draws a list of items rather than holding words in a `text`; see
 ## [method items_of].
 static func draws_a_list(node: Node) -> bool:
-	return node is TabBar or node is MenuBar or node is ItemList or node is PopupMenu or node is Tree
+	return (
+		node is TabBar or node is MenuBar or node is ItemList or node is PopupMenu or node is Tree
+	)
 
 
 ## The words of the enabled buttons under [param from], quoted, each once and in the order they are
@@ -154,7 +155,9 @@ static func pressable_words(from: Node, open: Callable, most: int) -> String:
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
 		var button: BaseButton = node as BaseButton
-		var words: String = "" if button == null or button.disabled else said_by(button).strip_edges()
+		var words: String = (
+			"" if button == null or button.disabled else said_by(button).strip_edges()
+		)
 		var quoted: String = '"%s"' % words
 		if not words.is_empty() and not offered.has(quoted) and open.call(button):
 			if offered.size() == most:
@@ -175,7 +178,7 @@ static func _keep(line: String, into: Array[String]) -> void:
 static func _keep_item(line: String, item: Variant, into: Array[Dictionary]) -> void:
 	var trimmed: String = line.strip_edges()
 	if not trimmed.is_empty():
-		into.append({"says": trimmed, "item": item})
+		into.append({ "says": trimmed, "item": item })
 
 
 ## [param words] as [param node] draws them, which for a game with translations is the translation

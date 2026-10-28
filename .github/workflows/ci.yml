@@ -40,10 +40,10 @@ jobs:
       - name: Check formatting
         run: bun run format:check
 
-  # The GDScript is what runs inside a user's engine, so it gets the same treatment as the
-  # TypeScript in front of it.
-  gdscript:
-    name: gdscript
+  # The workflows are linted by actionlint and zizmor for what they do; this is for what every
+  # YAML file here is as YAML, the syft and yamllint configs included.
+  yaml:
+    name: yaml
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -86,7 +86,7 @@ jobs:
 
       # --locked refuses a uv.lock that no longer matches pyproject.toml instead of re-resolving,
       # and the interpreter is the one pyproject.toml pins.
-      - name: Install gdtoolkit
+      - name: Install yamllint
         env:
           # The interpreter uv downloads and verifies, never one the runner image happens to have.
           UV_MANAGED_PYTHON: '1'
@@ -95,23 +95,13 @@ jobs:
           uv sync --locked
           echo "${GITHUB_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
 
-      # Bun only runs the package scripts, so the directories gdformat and gdlint cover are
-      # written once, in package.json, and are the same here as on a developer's machine.
-      - name: Install Bun
-        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
-
-      - name: Check formatting
-        run: bun run format:gd:check
-
       - name: Lint
-        if: '!cancelled()'
-        run: bun run lint:gd
+        run: yamllint --strict .
 
-  # The workflows are linted by actionlint and zizmor for what they do; this is for what every
-  # YAML file here is as YAML, the syft and yamllint configs included. yamllint is Python, so
-  # it is installed the way gdtoolkit is above.
-  yaml:
-    name: yaml
+  # The GDScript is what runs inside a user's engine, so it gets the same treatment as the
+  # TypeScript in front of it.
+  gdscript:
+    name: gdscript
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -121,31 +111,22 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install uv
-        env:
-          # renovate: datasource=github-release-attachments depName=astral-sh/uv versioning=semver
-          UV_TAG: 0.13.5
-          UV_SHA256: f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
-        run: |
-          set -euo pipefail
-          archive="${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu.tar.gz"
-          curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors \
-            --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "${archive}" \
-            "https://github.com/astral-sh/uv/releases/download/${UV_TAG}/uv-x86_64-unknown-linux-gnu.tar.gz"
-          echo "${UV_SHA256}  ${archive}" | sha256sum --check --strict
-          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
-          echo "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu" >> "${GITHUB_PATH}"
+      # Bun first, since the installer is a script it runs: it refuses any gdstyle but the pinned
+      # release whose archive matches its digest, and puts it on PATH. Bun also runs the gates, so
+      # the scripts they cover are listed once, in scripts/gdstyle.ts, and are the same here as on
+      # a developer's machine.
+      - name: Install Bun
+        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
-      - name: Install yamllint
-        env:
-          UV_MANAGED_PYTHON: '1'
-        run: |
-          set -euo pipefail
-          uv sync --locked
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
+      - name: Install gdstyle
+        run: bun scripts/install-gdstyle.ts
+
+      - name: Check formatting
+        run: bun run format:gd:check
 
       - name: Lint
-        run: yamllint --strict .
+        if: '!cancelled()'
+        run: bun run lint:gd
 
   # Whether the engine legs have anything to test. A release pull request changes the version in
   # package.json and server.json and nothing else; its tree is main's with those two lines, and

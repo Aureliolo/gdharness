@@ -1,6 +1,5 @@
 @tool
 extends RefCounted
-
 ## How a scene or resource a tool saves keeps naming files by uid, as the editor's saves do.
 
 ## The files a headless save named by path alone because the uid cache holds no uid for them,
@@ -84,12 +83,17 @@ static func note_by_path(named: String) -> void:
 
 ## The uid attribute a reference to [param named] is written with, as ' uid="uid://..."', or "".
 ##
-## Only a uid the uid cache gives that path, which is what the loader resolves it by. A uid the cache
-## does not know (a file made with no editor since the last scan) is answered with a warning on every
-## load, and one it gives another file (a scene copied whole keeps its original's) loads that file.
+## Only a uid the uid cache gives that path, which is what the loader resolves it by. A uid the
+## cache does not know (a file made with no editor since the last scan) is answered with a warning
+## on every load, and one it gives another file (a scene copied whole keeps its original's) loads
+## that file.
 static func uid_attribute(named: String) -> String:
 	var id: int = ResourceLoader.get_resource_uid(named)
-	if id == ResourceUID.INVALID_ID or not ResourceUID.has_id(id) or ResourceUID.get_id_path(id) != named:
+	if (
+		id == ResourceUID.INVALID_ID
+		or not ResourceUID.has_id(id)
+		or ResourceUID.get_id_path(id) != named
+	):
 		return ""
 	return ' uid="%s"' % ResourceUID.id_to_text(id)
 
@@ -100,7 +104,9 @@ static func uid_in(file_path: String) -> int:
 		return ResourceUID.INVALID_ID
 	var file: FileAccess = FileAccess.open(file_path, FileAccess.READ)
 	if file != null:
-		var header: RegExMatch = RegEx.create_from_string('uid="(uid://[a-z0-9]+)"').search(file.get_line())
+		var header: RegExMatch = RegEx.create_from_string('uid="(uid://[a-z0-9]+)"').search(
+			file.get_line()
+		)
 		file.close()
 		if header != null:
 			return ResourceUID.text_to_id(header.get_string(1))

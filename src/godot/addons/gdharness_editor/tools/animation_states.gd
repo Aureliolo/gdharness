@@ -1,6 +1,5 @@
 @tool
 extends "animation_tools.gd"
-
 ## The states and transitions of an AnimationTree's state machines, beside the players and tracks
 ## the script it extends edits, whose helpers it shares.
 
@@ -16,9 +15,9 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 	var state_name: String = str(args.get("stateName", ""))
 	var animation_name: String = str(args.get("animationName", ""))
 	if state_name.is_empty():
-		return {"ok": false, "error": "Missing stateName"}
+		return { "ok": false, "error": "Missing stateName" }
 	if animation_name.is_empty():
-		return {"ok": false, "error": "Missing animationName"}
+		return { "ok": false, "error": "Missing animationName" }
 	var machine: Array = _machine_at(args)
 	if machine[1] == null:
 		return machine[3]
@@ -59,7 +58,9 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 	# Written all the same, as the editor writes one: a state machine is often laid out before its
 	# animations are made, and refusing it stopped a tree being built in that order.
 	if player == null:
-		answer["animationMissing"] = GdhAnimationReads.no_player(str(anim_tree.anim_player), reached)
+		answer["animationMissing"] = GdhAnimationReads.no_player(
+			str(anim_tree.anim_player), reached
+		)
 	elif not found:
 		answer["animationMissing"] = GdhAnimationReads.missing_animation(
 			player, scene.path_of(player), animation_name
@@ -76,14 +77,14 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 	var to_state: String = str(args.get("toState", ""))
 	var transition_type: String = str(args.get("transitionType", "immediate"))
 	var advance_condition: String = str(args.get("advanceCondition", ""))
-	# Auto where it is the only mode that does what was asked: a condition is checked only on an auto
-	# transition, and a machine leaves Start only through one. Written as the default enabled, both
-	# did nothing, and the machine sat in Start with its conditions true.
+	# Auto where it is the only mode that does what was asked: a condition is checked only on an
+	# auto transition, and a machine leaves Start only through one. Written as the default enabled,
+	# both did nothing, and the machine sat in Start with its conditions true.
 	var auto: bool = not advance_condition.is_empty() or from_state == "Start"
 	var advance_mode: String = str(args.get("advanceMode", "auto" if auto else "enabled"))
 
 	if from_state.is_empty() or to_state.is_empty():
-		return {"ok": false, "error": "Missing fromState or toState"}
+		return { "ok": false, "error": "Missing fromState or toState" }
 	var advances: Dictionary = {
 		"auto": AnimationNodeStateMachineTransition.ADVANCE_MODE_AUTO,
 		"enabled": AnimationNodeStateMachineTransition.ADVANCE_MODE_ENABLED,
@@ -92,7 +93,7 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 	if not advances.has(advance_mode):
 		return {
 			"ok": false,
-			"error": "Unsupported advanceMode: %s; it is auto, enabled or disabled" % advance_mode
+			"error": "Unsupported advanceMode: %s; it is auto, enabled or disabled" % advance_mode,
 		}
 	if not advance_condition.is_empty() and advance_mode != "auto":
 		return {
@@ -100,11 +101,12 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 			"error":
 			(
 				(
-					"advanceCondition %s would never advance a transition whose advanceMode is %s: the engine"
-					+ " checks a condition only on an auto one. Leave advanceMode out, or give auto"
+					"advanceCondition %s would never advance a transition whose advanceMode is %s: "
+					+ "the engine checks a condition only on an auto one. Leave advanceMode out, "
+					+ "or give auto"
 				)
 				% [advance_condition, advance_mode]
-			)
+			),
 		}
 	var modes: Dictionary = {
 		"sync": AnimationNodeStateMachineTransition.SWITCH_MODE_SYNC,
@@ -112,7 +114,7 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 		"immediate": AnimationNodeStateMachineTransition.SWITCH_MODE_IMMEDIATE,
 	}
 	if not modes.has(transition_type):
-		return {"ok": false, "error": "Unsupported transitionType: " + transition_type}
+		return { "ok": false, "error": "Unsupported transitionType: " + transition_type }
 	var transition: AnimationNodeStateMachineTransition = AnimationNodeStateMachineTransition.new()
 	transition.switch_mode = (
 		GdhRead.as_int(modes[transition_type]) as AnimationNodeStateMachineTransition.SwitchMode
@@ -140,14 +142,16 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 		scene,
 		Callable(),
 		files,
-		{"ok": true, "from": from_state, "to": to_state, "advanceMode": advance_mode}
+		{ "ok": true, "from": from_state, "to": to_state, "advanceMode": advance_mode }
 	)
 
 
 ## Why [param sm] cannot take a transition from [param from_state] to [param to_state], or "".
 ## Each is a condition add_transition fails on with only a line in the editor's log, and the
 ## transition was answered as made.
-func _transition_problem(sm: AnimationNodeStateMachine, from_state: String, to_state: String) -> String:
+func _transition_problem(
+	sm: AnimationNodeStateMachine, from_state: String, to_state: String
+) -> String:
 	for state: String in [from_state, to_state]:
 		if not sm.has_node(StringName(state)):
 			return _no_state(sm, state)
@@ -172,7 +176,8 @@ static func _no_state(sm: AnimationNodeStateMachine, state_name: String) -> Stri
 	var close: PackedStringArray = GdhRead.nearest(state_name, states)
 	if not close.is_empty():
 		return (
-			"%s; the nearest it has %s %s." % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+			"%s; the nearest it has %s %s."
+			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
 		)
 	return "%s; its states are %s." % [said, ", ".join(states)]
 
@@ -183,9 +188,9 @@ func _machine_at(args: Dictionary) -> Array:
 	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
 	var anim_tree_path: String = str(args.get("animTreePath", ""))
 	if scene_path.strip_edges() == "res://":
-		return [null, null, {}, {"ok": false, "error": "Missing scenePath"}]
+		return [null, null, {}, { "ok": false, "error": "Missing scenePath" }]
 	if anim_tree_path.is_empty():
-		return [null, null, {}, {"ok": false, "error": "Missing animTreePath"}]
+		return [null, null, {}, { "ok": false, "error": "Missing animTreePath" }]
 	var opened: Array = _open_at(scene_path, anim_tree_path, "AnimationTree")
 	var scene: GdhSceneFile = opened[0]
 	if opened[1] == null:
@@ -206,14 +211,16 @@ func _machine_at(args: Dictionary) -> Array:
 func remove_animation_state(args: Dictionary) -> Dictionary:
 	var state_name: String = str(args.get("stateName", ""))
 	if state_name.is_empty():
-		return {"ok": false, "error": "Missing stateName"}
+		return { "ok": false, "error": "Missing stateName" }
 	var found: Array = _machine_at(args)
 	if found[1] == null:
 		return found[3]
 	var scene: GdhSceneFile = found[0]
 	var sm: AnimationNodeStateMachine = found[1]
 	if state_name in ["Start", "End"]:
-		return scene.refuse("%s is part of every state machine, so it cannot be removed." % state_name)
+		return scene.refuse(
+			"%s is part of every state machine, so it cannot be removed." % state_name
+		)
 	if not sm.has_node(StringName(state_name)):
 		return scene.refuse(_no_state(sm, state_name))
 	var dropped: Array = []
@@ -221,7 +228,7 @@ func remove_animation_state(args: Dictionary) -> Dictionary:
 		var from: String = str(sm.get_transition_from(index))
 		var to: String = str(sm.get_transition_to(index))
 		if state_name in [from, to]:
-			dropped.append({"from": from, "to": to})
+			dropped.append({ "from": from, "to": to })
 	sm.remove_node(StringName(state_name))
 	if sm.has_node(StringName(state_name)):
 		return scene.refuse("The state machine did not let go of %s." % state_name)
@@ -231,9 +238,8 @@ func remove_animation_state(args: Dictionary) -> Dictionary:
 				"The state machine kept a transition of %s after the state went." % state_name
 			)
 	var files: Dictionary = found[2]
-	return _finish(
-		scene, Callable(), files, {"ok": true, "removed": state_name, "transitionsRemoved": dropped}
-	)
+	var answer: Dictionary = { "ok": true, "removed": state_name, "transitionsRemoved": dropped }
+	return _finish(scene, Callable(), files, answer)
 
 
 ## Takes out the transition from one state to another.
@@ -241,7 +247,7 @@ func disconnect_animation_states(args: Dictionary) -> Dictionary:
 	var from_state: String = str(args.get("fromState", ""))
 	var to_state: String = str(args.get("toState", ""))
 	if from_state.is_empty() or to_state.is_empty():
-		return {"ok": false, "error": "Missing fromState or toState"}
+		return { "ok": false, "error": "Missing fromState or toState" }
 	var found: Array = _machine_at(args)
 	if found[1] == null:
 		return found[3]
@@ -258,9 +264,13 @@ func disconnect_animation_states(args: Dictionary) -> Dictionary:
 		var said: String = "There is no transition from %s to %s" % [from_state, to_state]
 		if leaving.is_empty():
 			return scene.refuse("%s; none leaves %s." % [said, from_state])
-		return scene.refuse("%s; the ones leaving %s go to %s." % [said, from_state, ", ".join(leaving)])
+		return scene.refuse(
+			"%s; the ones leaving %s go to %s." % [said, from_state, ", ".join(leaving)]
+		)
 	sm.remove_transition(StringName(from_state), StringName(to_state))
 	if sm.has_transition(StringName(from_state), StringName(to_state)):
 		return scene.refuse("The state machine did not let go of the transition.")
 	var files: Dictionary = found[2]
-	return _finish(scene, Callable(), files, {"ok": true, "removed": {"from": from_state, "to": to_state}})
+	return _finish(
+		scene, Callable(), files, { "ok": true, "removed": { "from": from_state, "to": to_state } }
+	)

@@ -1,6 +1,5 @@
 @tool
 extends Node
-
 ## The engine's script profiler on a game the editor plays, summed here for the server.
 ##
 ## The editor is that game's debugger, so the profiler is switched on through the editor's own
@@ -11,7 +10,6 @@ extends Node
 ## expose to scripts: found by its class in the editor's tree and connected to by name.
 
 const GdhRead = preload("../reading.gd")
-
 ## The most functions a frame may carry when the server does not say. The engine names a function
 ## once, as it first appears, and the game's debugger queue drops those messages past its size, so
 ## the server keeps this below the queue the project sets; this is that for the engine's default.
@@ -26,37 +24,10 @@ const PROFILE_RECEIVED: String = "gdharness:profile_received"
 ## Kept in step with the runtime addon's runtime_autoload.gd.
 const PROFILE_FROM_START: String = "GDHARNESS_PROFILE_FROM_START"
 
-
-## The editor's debugger sessions, numbered as the editor numbers its debugger tabs.
-class GdhSessions:
-	extends EditorDebuggerPlugin
-
-	signal session_started(session_id: int)
-
-	func _setup_session(session_id: int) -> void:
-		var session: EditorDebuggerSession = get_session(session_id)
-		# int rather than Error: Signal.connect answers with a plain int.
-		var joined: int = session.started.connect(func() -> void: session_started.emit(session_id))
-		if joined != OK:
-			push_error("gdharness could not watch debugger session %d start: %d" % [session_id, joined])
-
-	func _has_capture(capture: String) -> bool:
-		return capture == PROFILE_CAPTURE
-
-	## Answers a quitting game that its profile's totals arrived, which it waits for before it exits.
-	## The editor reads a session's messages in order, so the totals sent before this have been read.
-	func _capture(message: String, _data: Array, session_id: int) -> bool:
-		if message != PROFILE_SENT:
-			return false
-		get_session(session_id).send_message(PROFILE_RECEIVED, [])
-		return true
-
-
 var _editor_plugin: EditorPlugin = null
 var _sessions: GdhSessions = null
 ## The debugger tabs connected to, by instance id, so none is connected twice.
 var _hooked: Dictionary[int, bool] = {}
-
 ## A play asked to be profiled before its session started.
 var _armed: bool = false
 var _session: int = -1
@@ -73,6 +44,12 @@ var _names: Dictionary[int, String] = {}
 var _totals: Dictionary[String, PackedFloat64Array] = {}
 
 
+func _exit_tree() -> void:
+	if _editor_plugin != null and _sessions != null:
+		_editor_plugin.remove_debugger_plugin(_sessions)
+	_sessions = null
+
+
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
 	_sessions = GdhSessions.new()
@@ -80,12 +57,6 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 	if joined != OK:
 		push_error("gdharness could not watch debugger sessions start: %d" % joined)
 	plugin.add_debugger_plugin(_sessions)
-
-
-func _exit_tree() -> void:
-	if _editor_plugin != null and _sessions != null:
-		_editor_plugin.remove_debugger_plugin(_sessions)
-	_sessions = null
 
 
 ## Switches the profiler on for the game being played, or with [code]arm[/code] for the next one
@@ -98,8 +69,9 @@ func profile_start(args: Dictionary) -> Dictionary:
 			"error":
 			(
 				(
-					"This editor's debugger has no %s node to read the profiler from, which is where Godot"
-					+ " 4.7 keeps it: a Godot that moved it has to be met by a gdharness that knows where."
+					"This editor's debugger has no %s node to read the profiler from, which is "
+					+ "where Godot 4.7 keeps it: a Godot that moved it has to be met by a "
+					+ "gdharness that knows where."
 				)
 				% DEBUGGER_CLASS
 			),
@@ -113,12 +85,12 @@ func profile_start(args: Dictionary) -> Dictionary:
 		# runtime addon to hold its start until the profiler is on, which the session's start
 		# switches on with a message the game reads only on a later poll.
 		OS.set_environment(PROFILE_FROM_START, "1")
-		return {"ok": true, "started": false, "armed": true, "session": -1}
+		return { "ok": true, "started": false, "armed": true, "session": -1 }
 	var active: int = _active_session()
 	if active < 0:
-		return {"ok": true, "started": false, "armed": false, "session": -1}
+		return { "ok": true, "started": false, "armed": false, "session": -1 }
 	_switch_on(active)
-	return {"ok": true, "started": true, "armed": false, "session": active}
+	return { "ok": true, "started": true, "armed": false, "session": active }
 
 
 ## What has been summed, for the server to put into an answer.
@@ -256,3 +228,31 @@ func _add(data: Array, into: Dictionary[String, PackedFloat64Array]) -> int:
 		into[signature] = sum
 		carried += 1
 	return carried
+
+
+## The editor's debugger sessions, numbered as the editor numbers its debugger tabs.
+class GdhSessions:
+	extends EditorDebuggerPlugin
+
+	signal session_started(session_id: int)
+
+	func _setup_session(session_id: int) -> void:
+		var session: EditorDebuggerSession = get_session(session_id)
+		# int rather than Error: Signal.connect answers with a plain int.
+		var joined: int = session.started.connect(func() -> void: session_started.emit(session_id))
+		if joined != OK:
+			push_error(
+				"gdharness could not watch debugger session %d start: %d" % [session_id, joined]
+			)
+
+	func _has_capture(capture: String) -> bool:
+		return capture == PROFILE_CAPTURE
+
+	## Answers a quitting game that its profile's totals arrived, which it waits for before it
+	## exits. The editor reads a session's messages in order, so the totals sent before this have
+	## been read.
+	func _capture(message: String, _data: Array, session_id: int) -> bool:
+		if message != PROFILE_SENT:
+			return false
+		get_session(session_id).send_message(PROFILE_RECEIVED, [])
+		return true

@@ -1,6 +1,5 @@
 @tool
 extends RefCounted
-
 ## The groups a node of a scene is in. A scene's own file puts a node in a group and can take it
 ## out of one it put it in; a group the scene that makes the node puts it in, the one it is
 ## instanced from or one this scene inherits, can be changed only there, as the editor's group dock
@@ -15,20 +14,20 @@ static func read(scene: GdhSceneFile, node: Node) -> Dictionary:
 	var all: Array = _sorted(node.get_groups())
 	if all.is_empty():
 		return {}
-	var answer: Dictionary = {"groups": all}
+	var answer: Dictionary = { "groups": all }
 	var here: Array = _sorted(scene.groups_at(scene.path_of(node)))
 	if here.size() != all.size():
 		answer["groupsHere"] = here
 	return answer
 
 
-## The groups of [param node], just added to this scene and put in [param adding] there, in the shape
-## [method read] answers: this scene's file does not hold the node until it is saved.
+## The groups of [param node], just added to this scene and put in [param adding] there, in the
+## shape [method read] answers: this scene's file does not hold the node until it is saved.
 static func read_added(node: Node, adding: Array) -> Dictionary:
 	var all: Array = _sorted(node.get_groups())
 	if all.is_empty():
 		return {}
-	var answer: Dictionary = {"groups": all}
+	var answer: Dictionary = { "groups": all }
 	var here: Array = []
 	for group: String in _sorted(adding):
 		if not here.has(group):
@@ -65,19 +64,27 @@ static func change(scene: GdhSceneFile, node: Node, adding: Array, removing: Arr
 			var held: Array = _sorted(node.get_groups())
 			return (
 				"%s is in no group %s; %s."
-				% [node.name, name, "it is in " + ", ".join(held) if not held.is_empty() else "it is in none"]
+				% [
+					node.name,
+					name,
+					"it is in " + ", ".join(held) if not held.is_empty() else "it is in none",
+				]
 			)
 		if not here.has(name):
 			var from: String = scene.values_from(node, at)
 			if from.is_empty():
 				return (
-					"%s is in %s, which no scene file puts it in: something puts it there as it is made, such as its script."
+					(
+						"%s is in %s, which no scene file puts it in: something puts it there as "
+						+ "it is made, such as its script."
+					)
 					% [node.name, name]
 				)
 			return (
 				(
-					"%s is in %s because %s puts it there, and no scene using that one can take it out: "
-					+ "remove the group in %s, which takes it out in every scene using that one."
+					"%s is in %s because %s puts it there, and no scene using that one can take it "
+					+ "out: remove the group in %s, which takes it out in every scene using that "
+					+ "one."
 				)
 				% [node.name, name, from, from]
 			)

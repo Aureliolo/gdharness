@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## The runtime addon carries its own copy of the value serialisers, separate from the ones in
 ## the operations script and with a different key order, and the same round trip is asserted
 ## against it.
@@ -13,7 +12,7 @@ func _init() -> void:
 	_check(GdhValues.new())
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -34,7 +33,7 @@ func _tag_of(value: Variant) -> String:
 
 func _check(values: GdhValues) -> void:
 	var vec2: Variant = values.serialize(Vector2(1.5, -2.5))
-	if vec2 != {"_type": "Vector2", "x": 1.5, "y": -2.5}:
+	if vec2 != { "_type": "Vector2", "x": 1.5, "y": -2.5 }:
 		_fail("Vector2: %s" % JSON.stringify(vec2))
 	if values.deserialize(vec2) != Vector2(1.5, -2.5):
 		_fail("Vector2 round trip: %s" % str(values.deserialize(vec2)))
@@ -62,7 +61,7 @@ func _check(values: GdhValues) -> void:
 	elif _tag_of(transform["origin"]) != "Vector2":
 		_fail("Transform2D origin: %s" % JSON.stringify(transform))
 
-	var nested: Variant = values.serialize([Vector2(1, 1), {"inner": Vector3(2, 2, 2)}])
+	var nested: Variant = values.serialize([Vector2(1, 1), { "inner": Vector3(2, 2, 2) }])
 	var members: Array = []
 	if nested is Array:
 		members = nested
@@ -113,11 +112,11 @@ func _check(values: GdhValues) -> void:
 	if values.deserialize(7) != 7:
 		_fail("deserialize passthrough int")
 
-	var untagged: Dictionary = values.deserialize({"a": {"_type": "Vector2", "x": 9, "y": 9}})
+	var untagged: Dictionary = values.deserialize({ "a": { "_type": "Vector2", "x": 9, "y": 9 } })
 	if untagged["a"] != Vector2(9, 9):
 		_fail("untagged dictionary recursion: %s" % str(untagged))
 
-	var unknown: Dictionary = {"_type": "Nonesuch", "x": 1}
+	var unknown: Dictionary = { "_type": "Nonesuch", "x": 1 }
 	if values.deserialize(unknown) != unknown:
 		_fail("unknown tag: %s" % str(values.deserialize(unknown)))
 
@@ -134,9 +133,12 @@ func _check(values: GdhValues) -> void:
 	# output holds one, which is what holds the quiet half.
 	if values.fitted("five", TYPE_INT) != "five":
 		_fail(
-			"a word where an int is wanted comes back as the word: %s" % str(values.fitted("five", TYPE_INT))
+			(
+				"a word where an int is wanted comes back as the word: %s"
+				% str(values.fitted("five", TYPE_INT))
+			)
 		)
 	if values.fitted("plain", TYPE_STRING) != "plain":
 		_fail("_as_type leaves a string alone: %s" % str(values.fitted("plain", TYPE_STRING)))
-	if values.fitted({"_type": "Vector2", "x": 1, "y": 2}, TYPE_NIL) != Vector2(1, 2):
+	if values.fitted({ "_type": "Vector2", "x": 1, "y": 2 }, TYPE_NIL) != Vector2(1, 2):
 		_fail("_as_type with no declared type still deserialises")

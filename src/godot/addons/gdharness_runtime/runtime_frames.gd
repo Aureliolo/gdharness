@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## How long the game's last frames took, timed from the runtime's first frame. Apart from the
 ## queries that report it, because those are loaded at the first request and the frames before it
 ## count too.
@@ -15,7 +14,8 @@ var _last_frame_usec: int = 0
 var _last_physics_frames: int = 0
 
 
-## Called by the autoload once a frame, whatever else it does that frame, with the time it was called.
+## Called by the autoload once a frame, whatever else it does that frame, with the time it was
+## called.
 ##
 ## The engine's own monitors do not follow the frame: TIME_PROCESS and the frame rate are set once a
 ## second, the first to the slowest process step of that second, so a game whose frames took 16.7ms

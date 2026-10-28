@@ -14,7 +14,8 @@ const READS_AN_ACTION: String = (
 const ADDS_AN_ACTION: String = "\\badd_action\\("
 ## An argument that is a name written in the call and nothing else, a String or a StringName.
 const NAME_ARGUMENT: String = "^&?(?:\"([^\"\\\\]*)\"|'([^'\\\\]*)')$"
-## The device an event matches every device with, InputMap's ALL_DEVICES, which GDScript is not given.
+## The device an event matches every device with, InputMap's ALL_DEVICES, which GDScript is not
+## given.
 const ALL_DEVICES: int = -1
 const MOUSE_NAMES: String = (
 	"1 left, 2 right, 3 middle, 4 and 5 the wheel up and down, 6 and 7 the wheel left and right,"
@@ -23,7 +24,6 @@ const MOUSE_NAMES: String = (
 const AXIS_NAMES: String = (
 	"0 and 1 the left stick across and down, 2 and 3 the right stick," + " 4 and 5 the triggers"
 )
-
 # The key names a caller may write, and what the engine calls them.
 const KEY_NAMES: Dictionary = {
 	"A": KEY_A,
@@ -155,7 +155,7 @@ func undefined_in_scripts() -> Array[Dictionary]:
 	for name: String in names:
 		if ProjectSettings.has_setting("input/" + name) or added.has(name):
 			continue
-		undefined.append({"action": name, "read_at": read[name]})
+		undefined.append({ "action": name, "read_at": read[name] })
 	return undefined
 
 
@@ -198,7 +198,8 @@ static func _names_given(code: String, from: int) -> Array[String]:
 	return names
 
 
-## Whether [param at] in [param code] is inside a string literal, where a call is text rather than one.
+## Whether [param at] in [param code] is inside a string literal, where a call is text rather than
+## one.
 static func _in_a_string(code: String, at: int) -> bool:
 	var quote: String = ""
 	for index: int in range(at):
@@ -223,7 +224,9 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	var action_name: String = str(params.get("action_name", ""))
 	var events: Array = params.get("events", [])
 	var setting: String = "input/" + action_name
-	var held: Variant = ProjectSettings.get_setting(setting) if ProjectSettings.has_setting(setting) else null
+	var held: Variant = (
+		ProjectSettings.get_setting(setting) if ProjectSettings.has_setting(setting) else null
+	)
 	var old: Dictionary = held if held is Dictionary else {}
 	var old_deadzone: float = GdhRead.as_float(old.get("deadzone", 0.5), 0.5)
 	# A rebind that names no deadzone keeps the one the action has, which a caller adding a key did
@@ -242,8 +245,9 @@ func add_input_action(params: Dictionary) -> Dictionary:
 				. failure(
 					(
 						(
-							"%s is not an action name the engine's Input Map takes: a name cannot hold / : = \\ "
-							+ "or a double quote, or a control character. jump, move_left or ui_menu are names it takes."
+							"%s is not an action name the engine's Input Map takes: a name cannot "
+							+ "hold / : = \\ or a double quote, or a control character. jump, "
+							+ "move_left or ui_menu are names it takes."
 						)
 						% JSON.stringify(action_name)
 					)
@@ -307,7 +311,7 @@ func add_input_action(params: Dictionary) -> Dictionary:
 ## [param event] in the form add_input_action answers its events with, and as the engine names it
 ## under text, which also covers a kind of event that form has no fields for.
 static func _shaped(event: InputEvent) -> Dictionary:
-	var shaped: Dictionary = {"class_name": event.get_class(), "text": event.as_text()}
+	var shaped: Dictionary = { "class_name": event.get_class(), "text": event.as_text() }
 	if event.device != ALL_DEVICES:
 		shaped["device"] = event.device
 	if event is InputEventKey:
@@ -365,7 +369,7 @@ func list_input_actions(_params: Dictionary) -> Dictionary:
 				}
 			)
 		)
-	return {"actions": actions, "count": actions.size()}
+	return { "actions": actions, "count": actions.size() }
 
 
 # Remove an input action the project defines, which add_input_action had no way back from.
@@ -383,30 +387,37 @@ func remove_input_action(params: Dictionary) -> Dictionary:
 		# At the engine's binding the file holds no line for it, and the refusal for a rebound one
 		# spoke of a binding the project had never changed.
 		if ProjectSettings.get_setting(setting) == engine_binding:
-			return _log.failure(
-				(
+			return (
+				_log
+				. failure(
 					(
-						"%s is one of the engine's own actions, and project.godot does not rebind it, so "
-						+ "there is nothing to remove: the engine's binding holds. Rebind it with "
-						+ "add_input_action."
+						(
+							"%s is one of the engine's own actions, and project.godot does not "
+							+ "rebind it, so there is nothing to remove: the engine's binding "
+							+ "holds. Rebind it with add_input_action."
+						)
+						% action_name
 					)
-					% action_name
 				)
 			)
-		return _log.failure(
-			(
+		return (
+			_log
+			. failure(
 				(
-					"%s is one of the engine's own actions, so it cannot be removed. project_settings "
-					+ "unset %s puts the engine's binding back, and add_input_action rebinds it."
+					(
+						"%s is one of the engine's own actions, so it cannot be removed. "
+						+ "project_settings unset %s puts the engine's binding back, and "
+						+ "add_input_action rebinds it."
+					)
+					% [action_name, setting]
 				)
-				% [action_name, setting]
 			)
 		)
 	ProjectSettings.set_setting(setting, null)
 	var err: Error = GdhProjectFile.save([setting])
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
-	return {"action_name": action_name, "removed": true}
+	return { "action_name": action_name, "removed": true }
 
 
 # The value project.godot stores for one input action.
@@ -459,13 +470,13 @@ func build_input_action(deadzone: float, events: Array) -> Dictionary:
 		var bound: InputEvent = built.back()
 		bound.device = ALL_DEVICES
 
-	return {"deadzone": deadzone, "events": built}
+	return { "deadzone": deadzone, "events": built }
 
 
 # The keycode for a key name as the tool spells it, or KEY_NONE for a name the table lacks.
-## The refusal for [param key_name], which names no key: the names nearest it, then every name taken,
-## since a name the caller has to guess at is the same guess again.
-## The event [param fields] describe, as [method build_input_action] takes it, or why it is no event.
+## The refusal for [param key_name], which names no key: the names nearest it, then every name
+## taken, since a name the caller has to guess at is the same guess again. The event [param fields]
+## describe, as [method build_input_action] takes it, or why it is no event.
 func _event_config(fields: Dictionary) -> Variant:
 	var event_type: String = str(fields.get("type", ""))
 	match event_type:
@@ -476,7 +487,7 @@ func _event_config(fields: Dictionary) -> Variant:
 			var key_value: int = _keycode_value(keycode)
 			if key_value == KEY_NONE:
 				return _unknown_key(keycode)
-			var event_config: Dictionary = {"class_name": "InputEventKey"}
+			var event_config: Dictionary = { "class_name": "InputEventKey" }
 			var physical: bool = GdhRead.as_bool(fields.get("physical", false))
 			event_config["physical_keycode" if physical else "keycode"] = key_value
 			for modifier: String in ["ctrl", "alt", "shift"]:
@@ -489,46 +500,55 @@ func _event_config(fields: Dictionary) -> Variant:
 			)
 			if mouse is String:
 				return "A mouse_button event " + str(mouse)
-			return {"class_name": "InputEventMouseButton", "button_index": mouse}
+			return { "class_name": "InputEventMouseButton", "button_index": mouse }
 		"joypad_button":
-			var pad: Variant = _whole_in(fields, "button", 0, JOY_BUTTON_MAX - 1, "0 is A, 1 B, 2 X, 3 Y")
+			var pad: Variant = _whole_in(
+				fields, "button", 0, JOY_BUTTON_MAX - 1, "0 is A, 1 B, 2 X, 3 Y"
+			)
 			if pad is String:
 				return "A joypad_button event " + str(pad)
-			return {"class_name": "InputEventJoypadButton", "button_index": pad}
+			return { "class_name": "InputEventJoypadButton", "button_index": pad }
 		"joypad_axis":
 			var axis: Variant = _whole_in(fields, "axis", 0, JOY_AXIS_MAX - 1, AXIS_NAMES)
 			if axis is String:
 				return "A joypad_axis event " + str(axis)
-			# The direction is half the binding: left on a stick and right on it are two actions, and the
-			# editor binds only a whole push one way, so a guessed direction or part of one is a binding
-			# nobody asked for.
+			# The direction is half the binding: left on a stick and right on it are two actions,
+			# and the editor binds only a whole push one way, so a guessed direction or part of one
+			# is a binding nobody asked for.
 			var direction: Variant = fields.get("axisValue")
 			var numeric: bool = direction is int or direction is float
 			if not numeric or absf(GdhRead.as_float(direction)) != 1.0:
 				return (
-					"A joypad_axis event needs axisValue, -1 or 1, the way the axis is pushed: %s was given."
+					(
+						"A joypad_axis event needs axisValue, -1 or 1, the way the axis is pushed: "
+						+ "%s was given."
+					)
 					% _shown(direction)
 				)
 			return {
 				"class_name": "InputEventJoypadMotion",
 				"axis": axis,
-				"axis_value": GdhRead.as_float(direction)
+				"axis_value": GdhRead.as_float(direction),
 			}
 	var known: String = "key, mouse_button, joypad_button, joypad_axis"
 	return "Unknown event type: " + event_type + ". One of " + known + "."
 
 
 ## The whole number [param fields] holds under [param key], from [param least] to [param most], or
-## the rest of a refusal saying what it takes and what [param named] each number is. A field left out
-## was given a default, a left click for a mouse event and axis 0 for a stick, and written as bound.
-static func _whole_in(fields: Dictionary, key: String, least: int, most: int, named: String) -> Variant:
+## the rest of a refusal saying what it takes and what [param named] each number is. A field left
+## out was given a default, a left click for a mouse event and axis 0 for a stick, and written as
+## bound.
+static func _whole_in(
+	fields: Dictionary, key: String, least: int, most: int, named: String
+) -> Variant:
 	var held: Variant = fields.get(key)
 	if held is int or held is float:
 		var number: float = GdhRead.as_float(held)
 		if number == floorf(number) and number >= least and number <= most:
 			return int(number)
 	return (
-		"needs %s, a whole number from %d to %d (%s): %s was given." % [key, least, most, named, _shown(held)]
+		"needs %s, a whole number from %d to %d (%s): %s was given."
+		% [key, least, most, named, _shown(held)]
 	)
 
 
@@ -556,7 +576,10 @@ static func _unknown_key(key_name: String) -> String:
 		said += " The nearest key name is %s." % nearest[0]
 	elif not nearest.is_empty():
 		said += " The nearest key names are %s." % ", ".join(nearest)
-	return said + " A key is named by its letter, its digit, F1 to F12, or one of: %s." % ", ".join(named)
+	return (
+		said
+		+ " A key is named by its letter, its digit, F1 to F12, or one of: %s." % ", ".join(named)
+	)
 
 
 func _keycode_value(key_name: String) -> int:

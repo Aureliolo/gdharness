@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## Where a point in some viewport is on the game's own screen, for a click to be sent there and for
 ## an answer to say where something is drawn.
 
@@ -28,24 +27,28 @@ static func reach(viewport: Viewport, point: Vector2) -> Dictionary:
 ## viewport's space, and the embedded [Window] or the [SubViewportContainer] in it that shows the
 ## step before, null for the first. What [method reach] answers is the last of them.
 static func steps_out(viewport: Viewport, point: Vector2) -> Array[Dictionary]:
-	var out: Array[Dictionary] = [{"viewport": viewport, "point": point, "through": null}]
+	var out: Array[Dictionary] = [{ "viewport": viewport, "point": point, "through": null }]
 	while true:
 		var window: Window = viewport as Window
-		var host: Viewport = embedder_of(window) if window != null and window.is_embedded() else null
+		var host: Viewport = (
+			embedder_of(window) if window != null and window.is_embedded() else null
+		)
 		if host != null:
 			# A window's canvas is drawn into its embedder through its own final transform, which is
-			# where a content scale goes: one at 4 drew a button at four times the point it was clicked
-			# at, and the click missed it.
+			# where a content scale goes: one at 4 drew a button at four times the point it was
+			# clicked at, and the click missed it.
 			point = Vector2(window.position) + window.get_final_transform() * point
 			viewport = host
-			out.append({"viewport": viewport, "point": point, "through": window})
+			out.append({ "viewport": viewport, "point": point, "through": window })
 			continue
 		var shown_by: SubViewportContainer = viewport.get_parent() as SubViewportContainer
 		if viewport is SubViewport and shown_by != null:
-			var scaled: Vector2 = point * float(shown_by.stretch_shrink) if shown_by.stretch else point
+			var scaled: Vector2 = (
+				point * float(shown_by.stretch_shrink) if shown_by.stretch else point
+			)
 			point = shown_by.get_global_transform_with_canvas() * scaled
 			viewport = shown_by.get_viewport()
-			out.append({"viewport": viewport, "point": point, "through": shown_by})
+			out.append({ "viewport": viewport, "point": point, "through": shown_by })
 			continue
 		break
 	return out
@@ -101,7 +104,9 @@ static func shown_part(control: Control) -> Variant:
 	while walking != null and not (walking is Viewport):
 		var holder: ScrollContainer = walking as ScrollContainer
 		if holder != null:
-			clips.append(holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size))
+			clips.append(
+				holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
+			)
 		walking = walking.get_parent()
 	for clip: Rect2 in clips:
 		if not part.intersects(clip, true):
@@ -125,7 +130,9 @@ static func clipped_by(control: Control, centre: Vector2) -> ScrollContainer:
 		# Carried into the same space the centre is in, which is the canvas rather than the
 		# container's own: the two are only the same while nothing above it is transformed.
 		if holder != null:
-			var seen: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
+			var seen: Rect2 = (
+				holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
+			)
 			if not seen.has_point(centre):
 				return holder
 		walking = walking.get_parent()
@@ -139,8 +146,8 @@ static func clipped_by(control: Control, centre: Vector2) -> ScrollContainer:
 ## next layout pass rather than inside the call, and the next one out works out where the control is
 ## from where it is drawn, so asked in the same frame it scrolled to where the control had been.
 ## Moved means a scroll value changed: a container asked to show what it already shows moves
-## nothing, and answering true for it said the view had moved when it had not. Only the containers in
-## the control's own viewport: one holding a dialog scrolls the page behind it, not the dialog.
+## nothing, and answering true for it said the view had moved when it had not. Only the containers
+## in the control's own viewport: one holding a dialog scrolls the page behind it, not the dialog.
 static func scroll_into_view(control: Control, tree: SceneTree) -> bool:
 	var moved: bool = false
 	var walking: Variant = control.get_parent()
@@ -179,17 +186,17 @@ static func through_the_interface(out: Array[Dictionary], hover: GdhHover) -> Di
 			var window: Window = through
 			var point: Vector2 = step["point"]
 			if not Rect2(window.position, window.size).has_point(point):
-				return {"landed": false, "hovered": _path_or_null(hovered)}
+				return { "landed": false, "hovered": _path_or_null(hovered) }
 			continue
 		if through is SubViewportContainer:
 			if hovered != through:
-				return {"landed": false, "hovered": _path_or_null(hovered)}
+				return { "landed": false, "hovered": _path_or_null(hovered) }
 			continue
 		if hovered != null and not _passes_on(hovered):
-			return {"landed": false, "hovered": str(hovered.get_path())}
+			return { "landed": false, "hovered": str(hovered.get_path()) }
 		if hovered != null and first_under == null:
 			first_under = str(hovered.get_path())
-	return {"landed": true, "hovered": first_under}
+	return { "landed": true, "hovered": first_under }
 
 
 ## Whether a pointer over [param control] goes on past the interface: a control that lets it pass

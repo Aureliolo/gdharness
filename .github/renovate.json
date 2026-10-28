@@ -72,6 +72,14 @@
       ]
     },
     {
+      "description": "A release fetched as a binary for each platform: gdstyle. The digests of its archives sit under it and are rewritten by hand when the raise fails, as the installer says.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^scripts/.+\\.ts$/"],
+      "matchStrings": [
+        "// renovate: datasource=(?<datasource>github-releases) depName=(?<depName>\\S+)\\n\\s*export const [A-Z_]+_VERSION = '(?<currentValue>[^']+)';"
+      ]
+    },
+    {
       "description": "The runner images inside a job matrix, which the github-actions manager reads from runs-on: but not from a matrix.",
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/"],

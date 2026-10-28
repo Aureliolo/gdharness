@@ -124,7 +124,8 @@ static func json_or_null(text: String) -> Variant:
 ## [param said], the refusal for [param node_path] found nowhere in a scene whose root is called
 ## [param root_name], with how paths are read when the path starts with that name and the root has
 ## no child called that. Paths go from the root, so its own name there names a child of it, and a
-## caller who read the root as Main in a tree wrote Main/Body and was told only that nothing is there.
+## caller who read the root as Main in a tree wrote Main/Body and was told only that nothing is
+## there.
 static func from_the_root(said: String, node_path: String, root_name: String) -> String:
 	var first: String = node_path.get_slice("/", 0)
 	if root_name.is_empty() or first != root_name:
@@ -141,7 +142,11 @@ static func from_the_root(said: String, node_path: String, root_name: String) ->
 ## is empty; the name below it that is missing; and [param children], the names that node has, as
 ## after a node was moved or renamed. Names up to [constant NAMED_CHILDREN] of them.
 static func missing_below(
-	said: String, root_name: String, reached: PackedStringArray, missing: String, children: PackedStringArray
+	said: String,
+	root_name: String,
+	reached: PackedStringArray,
+	missing: String,
+	children: PackedStringArray
 ) -> String:
 	var shown: String = ", ".join(children.slice(0, NAMED_CHILDREN))
 	if children.size() > NAMED_CHILDREN:
@@ -167,9 +172,18 @@ static func not_of_kind(
 ) -> String:
 	var told: String = said + ("" if said.ends_with(".") else ".")
 	if not found.is_empty():
-		told += ' The node at "%s" is %s, not %s.' % [node_path, with_article(found), with_article(kind)]
+		told += (
+			' The node at "%s" is %s, not %s.'
+			% [node_path, with_article(found), with_article(kind)]
+		)
 	if holders.is_empty():
-		return told + " The scene holds no %s; scene_node add with nodeType %s puts one in it." % [kind, kind]
+		return (
+			told
+			+ (
+				" The scene holds no %s; scene_node add with nodeType %s puts one in it."
+				% [kind, kind]
+			)
+		)
 	var quoted: PackedStringArray = []
 	for holder: String in holders.slice(0, NAMED_CHILDREN):
 		var _quoted: bool = quoted.append('"%s"' % holder)
@@ -209,7 +223,10 @@ static func offered(said: String, word: String, names: Array) -> String:
 	var close: PackedStringArray = nearest(word, every)
 	if close.is_empty():
 		return "%s; it has %s" % [said, ", ".join(every)]
-	return "%s; the nearest it has %s %s" % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+	return (
+		"%s; the nearest it has %s %s"
+		% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+	)
 
 
 ## [param said], the refusal for [param property], which [param target] does not declare, with the
@@ -233,14 +250,20 @@ static func near_property(said: String, target: Object, property: String) -> Str
 			scripted.append(str(declared.get("name", "")))
 	var close: PackedStringArray = nearest(property, PackedStringArray(names))
 	if not close.is_empty():
-		return "%s; the nearest it has %s %s" % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
-	# With a script that declares nothing readable, as one that does not compile, the name is likelier
-	# the script's than the class's, so the class's list would point the wrong way.
+		return (
+			"%s; the nearest it has %s %s"
+			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+		)
+	# With a script that declares nothing readable, as one that does not compile, the name is
+	# likelier the script's than the class's, so the class's list would point the wrong way.
 	if scripted.is_empty() and target.get_script() != null:
 		return said
 	if scripted.is_empty():
 		return (
-			"%s; editor_classes info with className %s and includeInherited true lists the ones it has"
+			(
+				"%s; editor_classes info with className %s and includeInherited true lists the "
+				+ "ones it has"
+			)
 			% [said, target.get_class()]
 		)
 	scripted.sort()
@@ -264,11 +287,13 @@ static func _list_called(target: Object, count: Dictionary, property: String) ->
 		fields = _fields_at(fresh, first)
 		if not fresh is RefCounted:
 			fresh.free()
-	var each: String = "each one's fields" if fields.is_empty() else "each one's %s" % ", ".join(fields)
+	var each: String = (
+		"each one's fields" if fields.is_empty() else "each one's %s" % ", ".join(fields)
+	)
 	return (
 		(
-			"it keeps its %s as %s, how many there are, and %s under %s for the first, %s for the second and so on: "
-			+ "give %s before the fields of the entries it makes"
+			"it keeps its %s as %s, how many there are, and %s under %s for the first, %s for the "
+			+ "second and so on: give %s before the fields of the entries it makes"
 		)
 		% [parts[0].to_lower(), counted, each, first, parts[1] + "1/", counted]
 	)

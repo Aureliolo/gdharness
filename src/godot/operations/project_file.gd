@@ -1,16 +1,15 @@
 extends RefCounted
-
 ## project.godot written through the engine's own save, in the order the file already held.
 ##
 ## The engine writes each section's keys in the order it registered them, and an engine running a
 ## script registers them in another order than the editor does, so a one-setting change moved lines
-## nobody touched across several sections and a commit of it read as a rewrite. The save is still the
-## engine's, for what only it gets right: the header and the text of each value the call changed.
-## The order is taken from the file as it was, and so is every line of a key the call did not change,
-## because the engine writes its settings as it holds them rather than as the file had them. It
-## leaves out each key at its default, so a project holding `unsafe_call_argument=0` on purpose lost
-## the line to a change of another key. It writes a dictionary with its keys sorted, so gdUnit4's
-## session hooks, which run in the order listed, changed order. And it writes what a
+## nobody touched across several sections and a commit of it read as a rewrite. The save is still
+## the engine's, for what only it gets right: the header and the text of each value the call
+## changed. The order is taken from the file as it was, and so is every line of a key the call did
+## not change, because the engine writes its settings as it holds them rather than as the file had
+## them. It leaves out each key at its default, so a project holding `unsafe_call_argument=0` on
+## purpose lost the line to a change of another key. It writes a dictionary with its keys sorted, so
+## gdUnit4's session hooks, which run in the order listed, changed order. And it writes what a
 ## `project_settings_override` file laid over the project, so a player's window mode in the user
 ## directory became the game's default.
 
@@ -42,8 +41,8 @@ static func save(changed: PackedStringArray) -> Error:
 ## [param before] with the lines of the settings in [param changed] as [param written] has them: one
 ## the engine wrote goes in its place, or where the engine put it relative to its neighbours when it
 ## is new, and one the engine left out leaves the file. Every other line is [param before]'s, in its
-## place, and a key the engine wrote that the file did not hold and the call did not change stays out.
-## The header is [param written]'s.
+## place, and a key the engine wrote that the file did not hold and the call did not change stays
+## out. The header is [param written]'s.
 static func in_order_of(before: String, written: String, changed: PackedStringArray) -> String:
 	var old: Dictionary = _parsed(before)
 	var fresh: Dictionary = _parsed(written)
@@ -113,8 +112,8 @@ static func in_order_of(before: String, written: String, changed: PackedStringAr
 			fresh_keys[name].append(str(entry["key"]))
 
 	# The blank lines closing a section belong to its place in the file rather than to the section,
-	# so the last one keeps the ending the engine gave the file wherever it moved from. A section put
-	# back sits between two others, which the engine parts with a blank line.
+	# so the last one keeps the ending the engine gave the file wherever it moved from. A section
+	# put back sits between two others, which the engine parts with a blank line.
 	var names: Array[String] = _merged(old_names, fresh_names)
 	var tails: Array[String] = []
 	for section: Dictionary in fresh_sections:
@@ -181,7 +180,8 @@ static func _merged(held: Array[String], wanted: Array[String]) -> Array[String]
 
 
 ## [param text] as a preamble (the header and anything before the first section) and its sections,
-## each with its header line and the blank lines after it, its entries, and the blank lines closing it.
+## each with its header line and the blank lines after it, its entries, and the blank lines closing
+## it.
 static func _parsed(text: String) -> Dictionary:
 	var preamble: String = ""
 	var sections: Array[Dictionary] = []
@@ -193,7 +193,7 @@ static func _parsed(text: String) -> Dictionary:
 			if not current.is_empty():
 				_close(current, body)
 				sections.append(current)
-			current = {"name": stripped.substr(1, stripped.length() - 2), "head": line}
+			current = { "name": stripped.substr(1, stripped.length() - 2), "head": line }
 			body = []
 		elif current.is_empty():
 			preamble += line
@@ -204,7 +204,7 @@ static func _parsed(text: String) -> Dictionary:
 	if not current.is_empty():
 		_close(current, body)
 		sections.append(current)
-	return {"preamble": preamble, "sections": sections}
+	return { "preamble": preamble, "sections": sections }
 
 
 ## Fills in [param section]'s entries and closing blank lines from the lines after its head. A blank
@@ -218,7 +218,7 @@ static func _close(section: Dictionary, body: Array[String]) -> void:
 	for line: String in body:
 		var stripped: String = line.strip_edges()
 		if entries.is_empty() or not (stripped.is_empty() or stripped.begins_with(";")):
-			entries.append({"key": _key_of(line), "text": line})
+			entries.append({ "key": _key_of(line), "text": line })
 		else:
 			var last: Dictionary = entries[entries.size() - 1]
 			last["text"] = str(last["text"]) + line

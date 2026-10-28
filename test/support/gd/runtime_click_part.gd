@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## A click on a control only part of which is on screen. A button taller than the list showing it
 ## has its centre out of sight at every scroll, and was refused as one nothing could click, while
 ## a player presses the part they see. One placed where no scroll reaches is checked beside it,
@@ -35,7 +34,7 @@ func _everything() -> void:
 
 	host.queue_free()
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 	printerr("\n".join(failures))
@@ -63,7 +62,9 @@ func _button(named: String, at: Vector2, parent: Node) -> Button:
 	made.position = at
 	made.size = Vector2(10, 10)
 	parent.add_child(made)
-	Checked.done(made.pressed.connect(_count.bind(named)) as Error, "counting presses of %s" % named)
+	Checked.done(
+		made.pressed.connect(_count.bind(named)) as Error, "counting presses of %s" % named
+	)
 	return made
 
 
@@ -85,7 +86,7 @@ func _check_a_control_taller_than_its_scroll() -> void:
 	tall.custom_minimum_size = Vector2(10, 60)
 	await process_frame
 
-	var clicked: Dictionary = await input.click({"path": "/root/Tall/Column/Tall"})
+	var clicked: Dictionary = await input.click({ "path": "/root/Tall/Column/Tall" })
 	var shown: Rect2 = scroll.get_global_rect().intersection(tall.get_global_rect())
 	var said_at: Dictionary = clicked.get("position", {})
 	var x: float = said_at.get("x", -1.0)
@@ -127,7 +128,7 @@ func _check_a_list_with_nothing_to_scroll() -> void:
 	half.size = Vector2(10, 20)
 	await process_frame
 
-	var halved: Dictionary = await input.click({"path": "/root/Fixed/Plain/Half"})
+	var halved: Dictionary = await input.click({ "path": "/root/Fixed/Plain/Half" })
 	var inside: Rect2 = fixed.get_global_rect().intersection(half.get_global_rect())
 	var said_at: Dictionary = halved.get("position", {})
 	var x: float = said_at.get("x", -1.0)
@@ -140,7 +141,7 @@ func _check_a_list_with_nothing_to_scroll() -> void:
 			)
 		)
 
-	var under: Dictionary = await input.click({"path": "/root/Fixed/Plain/Under"})
+	var under: Dictionary = await input.click({ "path": "/root/Fixed/Plain/Under" })
 	var message: String = str(under.get("message", ""))
 	if (
 		under.get("type") != "error"

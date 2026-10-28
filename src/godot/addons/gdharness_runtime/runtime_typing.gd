@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## What reaches the running game the way a keyboard reaches it: text typed into the field that has
 ## the focus, and an item chosen out of a menu the way a keyboard chooses one.
 
@@ -8,7 +7,6 @@ const GdhRead = preload("reading.gd")
 const GdhTargets = preload("runtime_targets.gd")
 const GdhValues = preload("runtime_values.gd")
 const GdhWords = preload("runtime_words.gd")
-
 ## The two characters a field reads as keys rather than as text.
 const NEWLINE: int = 10
 const TAB: int = 9
@@ -43,13 +41,15 @@ func inject_text(params: Dictionary) -> Dictionary:
 	var text: String = str(params.get("text", ""))
 	var over: bool = GdhRead.as_bool(params.get("replace", false))
 	if text.is_empty() and not over:
-		return {"type": "error", "message": "text needs something to type, or replace to empty a field"}
+		return {
+			"type": "error", "message": "text needs something to type, or replace to empty a field",
+		}
 
 	var viewport: Viewport = _host.get_tree().root
 	var focused: Control = focus_owner(viewport)
 	var shut: String = _shut_to_typing(focused)
 	if not shut.is_empty():
-		return {"type": "error", "message": shut}
+		return { "type": "error", "message": shut }
 
 	# Where it goes, which is the one thing a caller cannot see from here, read before the keys: a
 	# name field that swaps its panel out on Enter has left the tree by the time the keys are done,
@@ -87,9 +87,10 @@ func inject_text(params: Dictionary) -> Dictionary:
 	if into != null and before.is_empty():
 		answer["note"] = (
 			(
-				"%s has the focus and is no LineEdit or TextEdit, so each character reached it as a key"
-				+ " press and went on to the game's input unless it kept it, and a focused button takes a"
-				+ " space or Enter as a press of it. Click a field first to type into one."
+				"%s has the focus and is no LineEdit or TextEdit, so each character reached it as "
+				+ "a key press and went on to the game's input unless it kept it, and a focused "
+				+ "button takes a space or Enter as a press of it. Click a field first to type "
+				+ "into one."
 			)
 			% into
 		)
@@ -102,10 +103,10 @@ func inject_text(params: Dictionary) -> Dictionary:
 static func field_before(focused: Control) -> Dictionary:
 	var field: LineEdit = focused as LineEdit
 	if field != null:
-		return {"text": field.text, "editing": field.is_editing()}
+		return { "text": field.text, "editing": field.is_editing() }
 	var box: TextEdit = focused as TextEdit
 	if box != null:
-		return {"text": box.text, "editing": true}
+		return { "text": box.text, "editing": true }
 	return {}
 
 
@@ -216,7 +217,9 @@ static func _shut_to_typing(focused: Control) -> String:
 	var field: LineEdit = focused as LineEdit
 	var box: TextEdit = focused as TextEdit
 	if (field != null and not field.editable) or (box != null and not box.editable):
-		return "%s has the focus and is read-only, so nothing typed lands in it." % focused.get_path()
+		return (
+			"%s has the focus and is read-only, so nothing typed lands in it." % focused.get_path()
+		)
 	if field == null or field.is_editing():
 		return ""
 	return (
@@ -281,7 +284,7 @@ static func _typed(glyph: int) -> InputEventKey:
 func choose(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	if node_path.is_empty():
-		return {"type": "error", "message": "Node path required"}
+		return { "type": "error", "message": "Node path required" }
 	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
@@ -295,7 +298,7 @@ func choose(params: Dictionary) -> Dictionary:
 			(
 				"%s is a %s, which is neither a PopupMenu nor something holding one"
 				% [node_path, node.get_class()]
-			)
+			),
 		}
 
 	if not params.has("index") and str(params.get("text", "")).is_empty():
@@ -305,27 +308,33 @@ func choose(params: Dictionary) -> Dictionary:
 			(
 				"%s needs the item named, by text or index. It holds: %s"
 				% [node_path, ", ".join(GdhMenus.items_of(menu))]
-			)
+			),
 		}
 
-	# A button a player cannot use is refused, as a click refuses one: the engine opens the menu of a
-	# disabled or hidden OptionButton when asked to, measured on 4.7.2, and the pick then changed a
-	# selection no player could have changed.
+	# A button a player cannot use is refused, as a click refuses one: the engine opens the menu of
+	# a disabled or hidden OptionButton when asked to, measured on 4.7.2, and the pick then changed
+	# a selection no player could have changed.
 	var holder: BaseButton = node as BaseButton
 	if holder != null and holder.disabled:
-		return {"type": "error", "message": "%s is disabled, so its menu cannot be opened" % node_path}
+		return {
+			"type": "error", "message": "%s is disabled, so its menu cannot be opened" % node_path,
+		}
 	if holder != null and not holder.is_visible_in_tree():
 		return {
 			"type": "error",
 			"message":
-			"%s is not visible%s, so its menu cannot be opened" % [node_path, GdhTargets.why_hidden(holder)]
+			(
+				"%s is not visible%s, so its menu cannot be opened"
+				% [node_path, GdhTargets.why_hidden(holder)]
+			),
 		}
 
 	# Shown first, because a menu nobody has opened has no focus to move and the press would go to
 	# whatever is behind it, and before the item is looked for, because opening is when a game fills
 	# a menu: one rebuilt on about_to_popup was read as it stood before, measured on 4.7.2, and the
-	# index found in the old items chose another item of the new ones. An OptionButton opens its own;
-	# a bare PopupMenu is popped where it already sits, which leaves a menu already open where it is.
+	# index found in the old items chose another item of the new ones. An OptionButton opens its
+	# own; a bare PopupMenu is popped where it already sits, which leaves a menu already open where
+	# it is.
 	var opened: bool = GdhMenus.open_the_menu(node, menu)
 	await _host.get_tree().process_frame
 
@@ -339,15 +348,23 @@ func choose(params: Dictionary) -> Dictionary:
 			"type": "error",
 			"message":
 			(
-				"%s has %d items that say %s, so nothing was chosen: %s. Name one by its whole text or by index"
-				% [node_path, found.size(), JSON.stringify(str(params.get("text", ""))), ", ".join(tied)]
-			)
+				(
+					"%s has %d items that say %s, so nothing was chosen: %s. Name one by its whole "
+					+ "text or by index"
+				)
+				% [
+					node_path,
+					found.size(),
+					JSON.stringify(str(params.get("text", ""))),
+					", ".join(tied),
+				]
+			),
 		}
 	var index: int = found[0] if found.size() == 1 else -1
 	var refused: String = _not_a_choice(node_path, menu, index)
 	if not refused.is_empty():
 		await _shut(menu, opened)
-		return {"type": "error", "message": refused}
+		return { "type": "error", "message": refused }
 
 	# Read before the press, because the press can take the menu away: a game that rebuilds its
 	# settings screen on item_selected frees the button and its menu inside the pick, and reading
@@ -385,11 +402,11 @@ func choose(params: Dictionary) -> Dictionary:
 			"message":
 			(
 				(
-					"%s item %d, %s, had the focus and ui_accept was pressed, and the menu did not take it,"
-					+ " so nothing was chosen"
+					"%s item %d, %s, had the focus and ui_accept was pressed, and the menu did not "
+					+ "take it, so nothing was chosen"
 				)
 				% [node_path, index, answer["text"]]
-			)
+			),
 		}
 
 	answer["control_afterwards"] = GdhValues.afterwards(node)

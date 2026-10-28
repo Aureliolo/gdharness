@@ -1,6 +1,5 @@
 @tool
 extends Node
-
 ## The editor's view of the files on disk: scans, the reimports asked for, where each stands, and
 ## files moved under it.
 
@@ -8,20 +7,17 @@ const GdhRead = preload("../reading.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 
 var _editor_plugin: EditorPlugin = null
-
 ## How many scans the editor has completed, counted off `sources_changed`, which it emits at the end
 ## of every scan once the reimport the scan found is done: the one moment a scan is over. Neither
 ## flag it offers says so. A threaded scan stops reporting itself when its thread finishes, and its
 ## import runs a frame or more later when the thread is joined; an editor in the background took
 ## long enough over that frame that a rescan answered before the import of 211 changed scenes began.
 var _scans_completed: int = 0
-
 ## When the last scan completed, on the engine's clock, or -1 before the first. The editor writes
 ## the class cache a frame after it stops reporting a scan, measured on 4.7.2, so a game started
 ## in between reads a file being rewritten; how long ago the scan ended is what tells a caller
 ## whether that write can still be coming.
 var _scan_finished_at_msec: int = -1
-
 ## How many reimports asked for through [method reimport_files] have finished. Counted here rather
 ## than off `resources_reimported`, which a scan's own import emits as well.
 var _reimports_completed: int = 0
@@ -53,7 +49,7 @@ func _scan_completed(_sources_exist: bool) -> void:
 ## another scan.
 func rescan_filesystem(args: Dictionary) -> Dictionary:
 	if not _editor_plugin:
-		return {"ok": false, "error": "Editor plugin unavailable"}
+		return { "ok": false, "error": "Editor plugin unavailable" }
 
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	# Not over a scan or an import the editor is already running: a scan asked for then starts a
@@ -62,13 +58,13 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 	var busy: bool = filesystem.is_scanning() or filesystem.is_importing()
 	var started: bool = false
 	var completed_before: int = _scans_completed
-	var uids: Dictionary = {"reread": [], "duplicated": []}
+	var uids: Dictionary = { "reread": [], "duplicated": [] }
 	if not GdhRead.as_bool(args.get("statusOnly", false)) and not busy:
 		uids = _reread_changed_uids(filesystem)
-		# Files the caller has just written, moved or deleted, read again one by one. The scan finds a
-		# script that appeared and leaves the global class of one that has gone in the editor's list,
-		# which it then writes back into the class cache at a path that is not there; reading the gone
-		# path again is what drops it.
+		# Files the caller has just written, moved or deleted, read again one by one. The scan finds
+		# a script that appeared and leaves the global class of one that has gone in the editor's
+		# list, which it then writes back into the class cache at a path that is not there; reading
+		# the gone path again is what drops it.
 		var named: Variant = args.get("updateFiles", [])
 		if named is Array:
 			var paths: Array = named
@@ -137,14 +133,14 @@ func _reread_changed_uids(filesystem: EditorFileSystem) -> Dictionary:
 		reread.append(path)
 	reread.sort()
 	duplicated.sort()
-	return {"reread": reread, "duplicated": duplicated}
+	return { "reread": reread, "duplicated": duplicated }
 
 
 ## Every `.uid` under [param directory], skipping what the editor skips: hidden directories, any
 ## holding a `.gdignore`, and any below the project's own that holds a `project.godot` of its own,
-## which the editor passes over as another project. A nested project's UIDs are never in the editor's
-## table, so without that last one its files would be read again on every rescan, and one holding a
-## copy of an outer file's `.uid` named as a duplicate on disk.
+## which the editor passes over as another project. A nested project's UIDs are never in the
+## editor's table, so without that last one its files would be read again on every rescan, and one
+## holding a copy of an outer file's `.uid` named as a duplicate on disk.
 func _uid_files(directory: String, found: Array[String]) -> void:
 	var listing: DirAccess = DirAccess.open(directory)
 	if listing == null or FileAccess.file_exists(directory.path_join(".gdignore")):
@@ -166,12 +162,13 @@ func _uid_files(directory: String, found: Array[String]) -> void:
 ## Apart from `rescan_filesystem` because asking must not start or count anything.
 func scan_status(_args: Dictionary) -> Dictionary:
 	if not _editor_plugin:
-		return {"ok": false, "error": "Editor plugin unavailable"}
+		return { "ok": false, "error": "Editor plugin unavailable" }
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
-	# The scenes open in tabs, the one shown and the ones holding unsaved edits: a scene edit on disk
-	# meets what the editor holds of it, and nothing said which scenes those were. A tab of a scene
-	# never saved has no path, and a new project's editor opens with an empty one, so it is left out
-	# of the open; one with edits is kept among the unsaved, as the edits a close would lose.
+	# The scenes open in tabs, the one shown and the ones holding unsaved edits: a scene edit on
+	# disk meets what the editor holds of it, and nothing said which scenes those were. A tab of a
+	# scene never saved has no path, and a new project's editor opens with an empty one, so it is
+	# left out of the open; one with edits is kept among the unsaved, as the edits a close would
+	# lose.
 	var shown: Node = EditorInterface.get_edited_scene_root()
 	var open: Array[String] = []
 	open.assign(Array(EditorInterface.get_open_scenes()).filter(_has_path))
@@ -204,14 +201,14 @@ func _has_path(path: String) -> bool:
 ## while the editor scans or imports, since `reimport_files` refuses to run inside an import.
 func reimport_files(args: Dictionary) -> Dictionary:
 	if not _editor_plugin:
-		return {"ok": false, "error": "Editor plugin unavailable"}
+		return { "ok": false, "error": "Editor plugin unavailable" }
 	var paths: Array[String] = []
 	var given: Variant = args.get("paths", [])
 	if given is Array:
 		for path: Variant in given:
 			paths.append(str(path))
 	if paths.is_empty():
-		return {"ok": false, "error": "reimport_files needs paths"}
+		return { "ok": false, "error": "reimport_files needs paths" }
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	var busy: bool = filesystem.is_scanning() or filesystem.is_importing()
 	if not busy:
@@ -282,7 +279,12 @@ func files_moved(args: Dictionary) -> Dictionary:
 			reloaded.append(scene)
 	reloaded.sort()
 	unsaved.sort()
-	return {"ok": true, "retargetedTabs": retargeted, "reloadedScenes": reloaded, "unsavedScenes": unsaved}
+	return {
+		"ok": true,
+		"retargetedTabs": retargeted,
+		"reloadedScenes": reloaded,
+		"unsavedScenes": unsaved,
+	}
 
 
 func _reimport(paths: PackedStringArray) -> void:
