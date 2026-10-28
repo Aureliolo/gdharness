@@ -21,7 +21,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
-import { availableParallelism, tmpdir } from 'node:os';
+import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -45,6 +45,7 @@ import {
 } from '../src/boot-note.js';
 import { breakpointNotePath, readBreakpointNote, writeBreakpointNote } from '../src/breakpoint-note.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
+import { toolHome } from '../src/cache-home.js';
 import { callProgress, stillGoingSaid, withCallSignal } from '../src/call-signal.js';
 import {
   type Contradicted,
@@ -45073,6 +45074,30 @@ const look = setInterval(() => {
  * boot check through the engine it holds. Both are held behind a slot this process took, and must
  * still be waiting when it is given back.
  */
+// A pinned engine kept in the temporary folder was swept from under every session exporting it.
+function testPinnedToolsInstallOutsideTheTemporaryFolder(): void {
+  const cache = join(sep, 'cache');
+  const local = join(sep, 'local');
+  const runner = join(sep, 'runner');
+  const cases: [string, NodeJS.ProcessEnv, string][] = [
+    ['the cache home', { XDG_CACHE_HOME: cache, LOCALAPPDATA: local, TEMP: runner }, cache],
+    ["the runner's own folder on CI", { RUNNER_TEMP: runner, XDG_CACHE_HOME: cache }, runner],
+    ['an empty runner folder counted unset', { RUNNER_TEMP: '', XDG_CACHE_HOME: cache }, cache],
+  ];
+  for (const [said, env, root] of cases) {
+    const expected = root === runner ? join(runner, 'godot-x') : join(root, 'gdharness', 'tools', 'godot-x');
+    assert.equal(toolHome('godot-x', env), expected, said);
+  }
+  const fallback = toolHome('godot-x', { XDG_CACHE_HOME: '', LOCALAPPDATA: local });
+  assert.equal(
+    fallback,
+    process.platform === 'win32'
+      ? join(local, 'gdharness', 'tools', 'godot-x')
+      : join(homedir(), '.cache', 'gdharness', 'tools', 'godot-x'),
+    'an empty cache home falls back',
+  );
+}
+
 async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
   const machine = (env: NodeJS.ProcessEnv, platform: NodeJS.Platform, processors = 32) => ({
     env,
@@ -66117,6 +66142,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheLspCommandFindsTheEditorsPort,
   testEveryLongCallIsHeardFrom,
   testEveryEngineWaitsForAMachineSlot,
+  testPinnedToolsInstallOutsideTheTemporaryFolder,
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testTheTestCommandRunsAndJudgesAProject,

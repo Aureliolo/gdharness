@@ -47,6 +47,7 @@ import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
+import { cacheHome } from './cache-home.js';
 import { callProgress, callSignal, callSlotWaits } from './call-signal.js';
 import { EngineUsageError } from './engine-launch.js';
 import { startTimesOf } from './process-children.js';
@@ -97,11 +98,7 @@ export function machineSlots(
 ): SlotsChosen {
   const { env } = machine;
   const named = nonEmpty(env[SLOTS_VARIABLE]);
-  // The cache home in the same order on every platform, so a machine that sets XDG_CACHE_HOME on
-  // Windows too has one answer whichever tool works it out.
-  const xdg = nonEmpty(env['XDG_CACHE_HOME']);
-  const local = machine.platform === 'win32' ? nonEmpty(env['LOCALAPPDATA']) : undefined;
-  const cache = join(xdg ?? local ?? join(machine.home, '.cache'), 'gdharness');
+  const cache = cacheHome(env, machine.platform, machine.home);
   const directory =
     asked.directory ?? (named === undefined ? join(cache, 'slots') : resolve(machine.cwd, named));
   const counted = nonEmpty(env[SLOT_COUNT_VARIABLE]);

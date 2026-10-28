@@ -17,10 +17,10 @@
 
 import { createHash } from 'node:crypto';
 import { appendFileSync, chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { inflateRawSync } from 'node:zlib';
 
+import { toolHome } from '../src/cache-home.js';
 import { isWithinRoot } from '../src/paths.js';
 import { runSyncHidden } from '../src/spawn.js';
 
@@ -279,7 +279,7 @@ async function main(): Promise<void> {
     throw new Error(`No pinned Godot for platform ${process.platform}.`);
   }
 
-  const root = join(process.env['RUNNER_TEMP'] ?? tmpdir(), `godot-${tag}`);
+  const root = toolHome(`godot-${tag}`);
   rmSync(root, { recursive: true, force: true });
   mkdirSync(root, { recursive: true });
 

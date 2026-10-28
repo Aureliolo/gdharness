@@ -13,8 +13,8 @@
 
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { toolHome } from '../src/cache-home.js';
 import { download, extract } from './install-godot.js';
 
 const REPOSITORY = 'godot-gdunit-labs/gdUnit4';
@@ -24,7 +24,7 @@ const COMMIT = '0127a55f4543dfc24746f6e5c7ba6f94105d51f2';
 const DIGEST = '58a391b0c85cbbcf7aeb09b718c8173793d45ab511950cd65eec0183aabf0e50';
 
 async function main(): Promise<void> {
-  const root = join(process.env['RUNNER_TEMP'] ?? tmpdir(), `gdunit4-${COMMIT}`);
+  const root = toolHome(`gdunit4-${COMMIT}`);
   rmSync(root, { recursive: true, force: true });
   mkdirSync(root, { recursive: true });
 

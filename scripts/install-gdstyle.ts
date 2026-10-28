@@ -12,9 +12,9 @@
 
 import { createHash } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import { toolHome } from '../src/cache-home.js';
 import { download, extract } from './install-godot.js';
 
 const REPOSITORY = 'atelico/gdstyle';
@@ -42,7 +42,7 @@ const ASSETS: Record<string, { asset: string; digest: string }> = {
 
 /** Where the pinned gdstyle is installed on this machine. */
 export function gdstylePath(): string {
-  const root = join(process.env['RUNNER_TEMP'] ?? tmpdir(), `gdstyle-${GDSTYLE_VERSION}`);
+  const root = toolHome(`gdstyle-${GDSTYLE_VERSION}`);
   return join(root, process.platform === 'win32' ? 'gdstyle.exe' : 'gdstyle');
 }
 
