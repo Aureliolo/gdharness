@@ -280,6 +280,7 @@ func add_input_action(params: Dictionary) -> Dictionary:
 		"deadzone": deadzone,
 		"events": events_config,
 		"was_new": not ProjectSettings.has_setting(setting),
+		"saved": true,
 	}
 	if not answer["was_new"]:
 		var old_events: Array[Dictionary] = []

@@ -7,6 +7,52 @@ const GdhProjectFile = preload("project_file.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhSettingReads = preload("setting_reads.gd")
 const GdhShapes = preload("value_shapes.gd")
+## The words GDScript reserves, which no script could reach an autoload by.
+const GDSCRIPT_KEYWORDS: Array[String] = [
+	"and",
+	"as",
+	"assert",
+	"await",
+	"break",
+	"breakpoint",
+	"class",
+	"class_name",
+	"const",
+	"continue",
+	"elif",
+	"else",
+	"enum",
+	"extends",
+	"false",
+	"for",
+	"func",
+	"if",
+	"in",
+	"INF",
+	"is",
+	"match",
+	"NAN",
+	"namespace",
+	"not",
+	"null",
+	"or",
+	"pass",
+	"PI",
+	"preload",
+	"return",
+	"self",
+	"signal",
+	"static",
+	"super",
+	"TAU",
+	"trait",
+	"true",
+	"var",
+	"void",
+	"when",
+	"while",
+	"yield",
+]
 
 var _log: GdhLog
 var _values: GdhSerialisation = GdhSerialisation.new()
@@ -133,6 +179,23 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	var err: Error = GdhProjectFile.save([setting_path])
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
+	# An override still replaces what was written wherever its feature is, and a write of the base
+	# value read as if it reached every build.
+	var overrides: Dictionary = GdhSettingReads.overrides_of(setting_path, _values)
+	if not overrides.is_empty():
+		answer["overrides"] = overrides
+		var parts: Array[String] = []
+		for feature: Variant in overrides:
+			parts.append(
+				(
+					"one with the feature %s reads %s from %s.%s"
+					% [feature, JSON.stringify(overrides[feature]), setting_path, feature]
+				)
+			)
+		answer["overridesNote"] = (
+			"Not every build reads what was written: %s. Set or unset an override to change what its builds read."
+			% "; ".join(parts)
+		)
 	return answer
 
 
@@ -321,6 +384,10 @@ func add_autoload(params: Dictionary) -> Dictionary:
 			)
 		)
 
+	var clash: String = _autoload_name_refusal(name)
+	if not clash.is_empty():
+		return _log.failure(clash)
+
 	if not path.begins_with("res://"):
 		path = "res://" + path
 
@@ -362,6 +429,32 @@ func add_autoload(params: Dictionary) -> Dictionary:
 		"action": "updated" if was_updated else "added",
 		"saved": true,
 	}
+
+
+## Why [param name] cannot name an autoload, or empty when it can. The editor's Autoload tab refuses
+## the same names: an autoload named after an engine class or a built-in type takes that name in
+## every script, so an autoload called Input made every Input.is_action_pressed call the autoload.
+static func _autoload_name_refusal(name: String) -> String:
+	var reason: String = ""
+	if not name.is_valid_ascii_identifier():
+		reason = "it is not an identifier, which a script could name"
+	elif name in GDSCRIPT_KEYWORDS:
+		reason = "it is a GDScript keyword"
+	elif ClassDB.class_exists(name):
+		reason = (
+			"it is the engine class %s, and every script naming %s would reach the autoload instead"
+			% [name, name]
+		)
+	else:
+		for type: int in TYPE_MAX:
+			if type_string(type) == name:
+				reason = "it is the built-in type %s" % name
+	if reason.is_empty():
+		return ""
+	return (
+		"%s cannot name an autoload: %s. Nothing was written; the editor's Autoload tab refuses it too."
+		% [JSON.stringify(name), reason]
+	)
 
 
 # Remove an autoload singleton

@@ -1581,6 +1581,26 @@ function testOperations(godotPath: string, projectDir: string): void {
     JSON.stringify(nothing),
   );
   assert.equal(readFileSync(projectFile, 'utf8'), unsaid, 'and an unset of a line not there writes nothing');
+  // A write of the base value with an override beside it says which builds still read the override,
+  // and one with none says nothing of overrides.
+  const unoverridden = operation('set_project_setting', {
+    setting: 'display/window/size/viewport_width',
+    value: 700,
+  });
+  operation('set_project_setting', { setting: 'display/window/size/viewport_width.mobile', value: 320 });
+  const overridden = operation('set_project_setting', {
+    setting: 'display/window/size/viewport_width',
+    value: 800,
+  });
+  assert.deepEqual(
+    [get(unoverridden, 'overrides'), get(overridden, 'overrides'), get(overridden, 'overridesNote')],
+    [
+      undefined,
+      { mobile: 320 },
+      'Not every build reads what was written: one with the feature mobile reads 320 from display/window/size/viewport_width.mobile. Set or unset an override to change what its builds read.',
+    ],
+    JSON.stringify([unoverridden, overridden]),
+  );
   writeFileSync(projectFile, beforeNew);
 
   // Autoloads are written into project.godot by hand, so the round trip is the only proof.
@@ -1617,6 +1637,30 @@ function testOperations(godotPath: string, projectDir: string): void {
   });
   assert.equal(disabled.answer, null, 'an autoload cannot be added disabled, since it would load anyway');
   assert.match(disabled.stderr, /global: false keeps its name out of the global scope/, disabled.stderr);
+  // A name every script would then reach the autoload by instead of what it names now: an autoload
+  // called Input turned each Input.is_action_pressed into a call on the autoload.
+  const beforeClash = readFileSync(projectFile, 'utf8');
+  const clashes = [
+    ['Input', 'it is the engine class Input, and every script naming Input would reach the autoload instead'],
+    ['Vector2', 'it is the built-in type Vector2'],
+    ['match', 'it is a GDScript keyword'],
+    ['2nd', 'it is not an identifier, which a script could name'],
+  ].map(([name, reason]) => {
+    const refused = runRefusedOperation(godotPath, projectDir, 'add_autoload', {
+      name,
+      path: 'made/hero.gd',
+    });
+    return [
+      refused.answer,
+      refused.stderr.includes(`"${name}" cannot name an autoload: ${reason}. Nothing was written`),
+    ];
+  });
+  assert.deepEqual(
+    clashes,
+    clashes.map(() => [null, true]),
+    `each name is refused with its reason: ${JSON.stringify(clashes)}`,
+  );
+  assert.equal(readFileSync(projectFile, 'utf8'), beforeClash, 'and nothing was written for any of them');
   assert.equal(get(operation('remove_autoload', { name: 'Hero' }), 'removed'), true);
   assert.equal(
     readFileSync(projectFile, 'utf8'),
@@ -2309,8 +2353,13 @@ function testOperations(godotPath: string, projectDir: string): void {
     deadzone: 0.2,
   });
   assert.deepEqual(
-    [get(rebound, 'was_new'), get(rebound, 'old_deadzone'), get(rebound, 'events_count')],
-    [false, 0.5, 1],
+    [
+      get(rebound, 'was_new'),
+      get(rebound, 'old_deadzone'),
+      get(rebound, 'events_count'),
+      get(rebound, 'saved'),
+    ],
+    [false, 0.5, 1, true],
     JSON.stringify(rebound),
   );
   const oldEvents = asArray(get(rebound, 'old_events'));
