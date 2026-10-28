@@ -60516,6 +60516,16 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       'states/Gone/node = SubResource("Plays_gone")\nstates/Gone/position = Vector2(300, 100)\n\n' +
       '[node name="Player" type="AnimationPlayer"]\n\n[node name="Tree" type="AnimationTree" parent="."]\n' +
       'tree_root = SubResource("StateMachine_1")\nanim_player = NodePath("..")\n',
+    // Trees whose anim_player reaches nothing, and a node that is no player.
+    'astray.tscn':
+      '[gd_scene format=3]\n\n[sub_resource type="AnimationNodeAnimation" id="Plays_idle"]\nanimation = &"idle"\n\n' +
+      '[sub_resource type="AnimationNodeStateMachine" id="StateMachine_1"]\n' +
+      'states/Lost/node = SubResource("Plays_idle")\nstates/Lost/position = Vector2(300, 100)\n\n' +
+      '[node name="Root" type="Node2D"]\n\n[node name="Body" type="Node2D" parent="."]\n\n' +
+      '[node name="Astray" type="AnimationTree" parent="."]\ntree_root = SubResource("StateMachine_1")\n' +
+      'anim_player = NodePath("../Missing")\n\n' +
+      '[node name="Aside" type="AnimationTree" parent="."]\ntree_root = SubResource("StateMachine_1")\n' +
+      'anim_player = NodePath("../Body")\n',
     'warned.gd': 'extends Node2D\n',
     'warned.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" uid="uid://kwuaqmq5q26f" path="res://warned.gd" id="1_warned"]\n\n' +
@@ -60984,7 +60994,9 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       stateName: 'Lone',
       animationName: 'moves/idle',
     });
-    assert.deepEqual([get(lone, 'animationFound'), get(lone, 'animationMissing')], [false, undefined]);
+    const playerless =
+      'The AnimationTree has no anim_player, so no state plays anything until scene_node set points anim_player at one.';
+    assert.deepEqual([get(lone, 'animationFound'), get(lone, 'animationMissing')], [false, playerless]);
 
     // A state whose animation the player lacks is written, as the editor writes one, and says so.
     const early = await written({
@@ -61027,9 +61039,26 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     const loneRead = parseTextContent(await call({ op: 'read_states', animTreePath: 'Bare' }));
     assert.deepEqual(
       [get(stateOf(loneRead, 'Lone'), 'animationFound'), get(stateOf(loneRead, 'Lone'), 'animationMissing')],
-      [false, undefined],
-      `a tree with no player has nothing to look in: ${JSON.stringify(loneRead)}`,
+      [false, playerless],
+      `a tree with no player says so: ${JSON.stringify(loneRead)}`,
     );
+    const until = 'so no state plays anything until scene_node set points anim_player at one.';
+    for (const [tree, said] of [
+      ['Astray', `The AnimationTree's anim_player ../Missing reaches no node, ${until}`],
+      [
+        'Aside',
+        `The AnimationTree's anim_player ../Body reaches Body, a Node2D rather than an AnimationPlayer, ${until}`,
+      ],
+    ] as const) {
+      const astray = parseTextContent(
+        await call({ op: 'read_states', scenePath: 'astray.tscn', animTreePath: tree }),
+      );
+      assert.deepEqual(
+        [get(stateOf(astray, 'Lost'), 'animationFound'), get(stateOf(astray, 'Lost'), 'animationMissing')],
+        [false, said],
+        JSON.stringify(astray),
+      );
+    }
     const treed = parseTextContent(
       await call({ op: 'read_states', scenePath: 'treed.tscn', animTreePath: 'Rig/Tree' }),
     );

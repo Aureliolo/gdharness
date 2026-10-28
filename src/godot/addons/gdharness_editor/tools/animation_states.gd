@@ -29,7 +29,8 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 	# are in use in every state machine.
 	if sm.has_node(StringName(state_name)):
 		return scene.refuse("The state machine already has a state named %s." % state_name)
-	var player: AnimationPlayer = anim_tree.get_node_or_null(anim_tree.anim_player) as AnimationPlayer
+	var reached: Node = anim_tree.get_node_or_null(anim_tree.anim_player)
+	var player: AnimationPlayer = reached as AnimationPlayer
 	var found: bool = player != null and player.has_animation(StringName(animation_name))
 
 	var anim_node: AnimationNodeAnimation = AnimationNodeAnimation.new()
@@ -57,7 +58,9 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 	}
 	# Written all the same, as the editor writes one: a state machine is often laid out before its
 	# animations are made, and refusing it stopped a tree being built in that order.
-	if player != null and not found:
+	if player == null:
+		answer["animationMissing"] = GdhAnimationReads.no_player(str(anim_tree.anim_player), reached)
+	elif not found:
 		answer["animationMissing"] = GdhAnimationReads.missing_animation(
 			player, scene.path_of(player), animation_name
 		)
