@@ -26475,6 +26475,61 @@ async function testAHeldScratchDirectoryGoesOnceLetGo(): Promise<void> {
 }
 
 /**
+ * The class cache is read once a moment in which another process holds it shut has passed.
+ *
+ * The editor rewrites the cache at the end of every scan, and on the Windows editor leg a
+ * script_edit read it during that write, was refused with EBUSY, and ended in a crash report. Held
+ * for real, as the scratch directory case holds a file: on Windows a process with it open and
+ * shared with nobody, elsewhere its permissions taken away and given back by another process,
+ * since this read blocks the thread a timer of its own would need. A plain read during the hold has
+ * to be refused, or the case has shown nothing about the wait.
+ */
+async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
+  if (process.platform !== 'win32' && process.getuid?.() === 0) {
+    console.log('held class cache regression skipped (root reads what it likes)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-held-cache-'));
+  mkdirSync(join(project, '.godot'));
+  const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+  writeFileSync(
+    cache,
+    'list=[{\n"base": &"Node",\n"class": &"Held",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://held.gd"\n}]\n',
+  );
+  let holder: ChildProcess | null = null;
+  try {
+    holder =
+      process.platform === 'win32'
+        ? spawnHidden(
+            'powershell',
+            [
+              '-NoProfile',
+              '-Command',
+              `$f = [System.IO.File]::Open('${cache}', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('holding'); Start-Sleep -Milliseconds 400; $f.Close()`,
+            ],
+            { stdio: ['ignore', 'pipe', 'ignore'] },
+          )
+        : spawnHidden('sh', ['-c', `chmod 000 '${cache}'; echo holding; sleep 0.4; chmod 644 '${cache}'`], {
+            stdio: ['ignore', 'pipe', 'ignore'],
+          });
+    const holding = holder;
+    await new Promise<void>((resolve, reject) => {
+      holding.stdout?.once('data', () => {
+        resolve();
+      });
+      holding.once('exit', () => {
+        reject(new Error('the process meant to hold the cache exited before it held it'));
+      });
+    });
+    assert.throws(() => readFileSync(cache, 'utf8'), 'a plain read is refused while the cache is held');
+    assert.deepEqual([...(cachedClasses(project) ?? [])], [['Held', 'res://held.gd']]);
+  } finally {
+    await endGame(holder);
+    sweep(project);
+  }
+}
+
+/**
  * A scratch directory whose process is gone is swept by the next server, and nothing else is.
  *
  * Every try a process makes ends with it, and servers are ended by being killed, so a directory held
@@ -65860,6 +65915,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testAHeldScratchDirectoryGoesOnceLetGo,
+  testAClassCacheHeldShutIsReadOnceLetGo,
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,

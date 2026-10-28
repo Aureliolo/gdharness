@@ -13,6 +13,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { codeOf, shapeOf } from './gdscript-source.js';
+import { readWhole } from './whole-file.js';
 
 /**
  * What a `class_name` line looks like, including the annotations that may share it.
@@ -210,12 +211,11 @@ export function scriptsDeclaring(projectPath: string, classes: readonly string[]
 
 /** The classes the cache lists, with the path each is recorded at, or null when there is none. */
 export function cachedClasses(projectPath: string): Map<string, string> | null {
-  const cache = join(projectPath, '.godot', 'global_script_class_cache.cfg');
-  if (!existsSync(cache)) {
+  const text = readWhole(join(projectPath, '.godot', 'global_script_class_cache.cfg'));
+  if (text === null) {
     return null;
   }
   const listed = new Map<string, string>();
-  const text = readFileSync(cache, 'utf8');
   for (const entry of text.matchAll(/"class":\s*&"([^"]+)"[\s\S]*?"path":\s*"([^"]+)"/g)) {
     listed.set(entry[1] ?? '', entry[2] ?? '');
   }

@@ -8,14 +8,43 @@
  * step.
  */
 
-import { renameSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 
 /** How long a write waits out a reader holding the file, and how long it sleeps between tries. */
 const HELD_FILE_MS = 1000;
 const HELD_FILE_RETRY_MS = 10;
 
-/** The codes Windows answers a rename with while another process has the file open. */
+/**
+ * The codes Windows answers a rename, a removal or an open with while another process holds the
+ * file in a way that shuts the call out.
+ */
 const HELD_BY_A_READER = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/**
+ * The text of [param path], waiting out a moment in which another process holds it shut, or null
+ * when there is no such file.
+ *
+ * The editor rewrites the class cache at the end of every scan, and on Windows an open landing on
+ * that write is refused with EBUSY: a script_edit read the cache as the editor's scan of the edit
+ * wrote it, and the call ended in a crash report.
+ */
+export function readWhole(path: string): string | null {
+  const until = Date.now() + HELD_FILE_MS;
+  for (;;) {
+    try {
+      return readFileSync(path, 'utf8');
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      if (code === 'ENOENT') {
+        return null;
+      }
+      if (!HELD_BY_A_READER.has(code) || Date.now() >= until) {
+        throw error;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_FILE_RETRY_MS);
+    }
+  }
+}
 
 /**
  * Writes [param text] to [param path] whole, and answers whether it did; a write that did not leaves
