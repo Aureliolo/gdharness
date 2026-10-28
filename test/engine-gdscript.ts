@@ -4075,6 +4075,34 @@ function testEveryUseIsFound(godotPath: string): void {
     );
     assert.deepEqual(structure('herald.gd'), [[], []], 'and not one named only in words');
     assert.deepEqual(structure('enemy.gd'), [[], []], 'nor a script for its own name');
+    // A base named by its path, a constant handed to load, and an inner class's base are loaded
+    // as surely as a path written in the call; a constant only printed, or one held in a variable,
+    // is not loaded by name.
+    writeFileSync(
+      join(dir, 'based.gd'),
+      [
+        'extends "res://herald.gd"',
+        '',
+        'const PIECE := "res://spawner.gd"',
+        'const SHOWN := "res://nowhere.gd"',
+        '',
+        '',
+        'class Part extends "enemy.gd":',
+        '\tpass',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar piece: Script = load(PIECE)',
+        '\tprint(piece, SHOWN)',
+        '',
+      ].join('\n'),
+    );
+    assert.deepEqual(
+      get(operation('get_script_info', { script_path: 'based.gd' }), 'dependencies'),
+      ['res://herald.gd', 'enemy.gd', 'res://spawner.gd'],
+      'the base, the inner base and the constant loaded',
+    );
+    rmSync(join(dir, 'based.gd'));
 
     // Five deep and a shortcut to the middle: at depth three the middle is first reached two down,
     // where its list stops short, and then again one down, where it does not.

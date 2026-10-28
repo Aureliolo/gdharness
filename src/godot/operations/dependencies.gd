@@ -160,7 +160,7 @@ func missing_references() -> Array[Dictionary]:
 func _loaded_and_missing(script: String) -> Array[String]:
 	var loaded: Array[String] = []
 	var named: Dictionary = {}
-	for code: String in _code_by_line(FileAccess.get_file_as_string(script)):
+	for code: String in code_by_line(FileAccess.get_file_as_string(script)):
 		if not code.contains("load("):
 			for literal: String in _string_literals(code):
 				named[_resolved(literal, script)] = true
@@ -493,14 +493,14 @@ static func _code_of(line: String) -> String:
 # [param content] with each line's comment taken off and its strings kept, which is where the paths
 # a script loads are written.
 static func _code_lines(content: String) -> String:
-	return "\n".join(_code_by_line(content))
+	return "\n".join(code_by_line(content))
 
 
 ## Each line of [param content] as code: its comment off, and the text of a string running across
 ## lines left out. Read as code, a test suite template's example
 ## `load("res://folder/my_class.gd")` was a call of a file that does not exist, which made the
 ## project invalid.
-static func _code_by_line(content: String) -> Array[String]:
+static func code_by_line(content: String) -> Array[String]:
 	var lines: Array[String] = []
 	var in_string: bool = false
 	for line: String in content.split("\n"):
