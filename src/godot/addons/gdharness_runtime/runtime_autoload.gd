@@ -26,6 +26,7 @@ const CHANGES: String = "runtime_changes.gd"
 const INPUT: String = "runtime_input.gd"
 const TYPING: String = "runtime_typing.gd"
 const PAD: String = "runtime_pad.gd"
+const TOUCH: String = "runtime_touch.gd"
 const CAPTURE: String = "runtime_capture.gd"
 const WAITS: String = "runtime_waits.gd"
 const ACCESSIBILITY: String = "runtime_accessibility.gd"
@@ -52,6 +53,8 @@ const MODULE_COMMANDS: Dictionary = {
 	"inject_mouse_drag": [INPUT, "inject_mouse_drag"],
 	"inject_joypad_button": [PAD, "inject_joypad_button"],
 	"inject_joypad_motion": [PAD, "inject_joypad_motion"],
+	"inject_touch": [TOUCH, "inject_touch"],
+	"inject_touch_drag": [TOUCH, "inject_touch_drag"],
 	"click": [INPUT, "click"],
 	"choose": [TYPING, "choose"],
 	"wait_frames": [WAITS, "wait_frames"],
@@ -218,7 +221,7 @@ func _module(file: String) -> Object:
 	match file:
 		QUERIES:
 			made = script.new(self, values, _frames)
-		TYPING, PAD, ACCESSIBILITY:
+		TYPING, PAD, TOUCH, ACCESSIBILITY:
 			made = script.new(self)
 		_:
 			made = script.new(self, values)

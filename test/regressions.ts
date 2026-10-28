@@ -17254,6 +17254,282 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
 }
 
 /**
+ * A touch reaches the game as InputEventScreenTouch and InputEventScreenDrag, and the engine makes
+ * its mouse events from the first finger down.
+ *
+ * Reported from a game that switches its prompts and focus on a finger: input code tells one from a
+ * mouse by the event's class, or by mouse events carrying InputEvent.DEVICE_ID_EMULATION, and a
+ * mouse_click is neither. The game records every touch, drag and mouse button it reads, and a
+ * control in a moved and scaled holder records the touch it is given in its own space. A second
+ * finger goes down while the first is held, which the engine makes no mouse events from.
+ */
+async function testATouchReachesTheGameAsAFinger(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('touch regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-touch-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-touch-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Touch"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[display]\n\nwindow/size/viewport_width=640\nwindow/size/viewport_height=360\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Control',
+        '',
+        'var touches: Array = []',
+        'var drags: Array = []',
+        'var buttons: Array = []',
+        'var motions: Array = []',
+        '',
+        '',
+        'func _input(event: InputEvent) -> void:',
+        '\tvar touch: InputEventScreenTouch = event as InputEventScreenTouch',
+        '\tif touch != null:',
+        '\t\ttouches.append([touch.index, touch.position.x, touch.position.y, touch.pressed])',
+        '\tvar drag: InputEventScreenDrag = event as InputEventScreenDrag',
+        '\tif drag != null:',
+        '\t\tdrags.append([drag.index, drag.position.x, drag.position.y, drag.relative.x, drag.relative.y])',
+        '\tvar button: InputEventMouseButton = event as InputEventMouseButton',
+        '\tif button != null:',
+        '\t\tvar emulated: bool = button.device == InputEvent.DEVICE_ID_EMULATION',
+        '\t\tbuttons.append([emulated, button.pressed, button.position.x, button.position.y])',
+        '\tvar motion: InputEventMouseMotion = event as InputEventMouseMotion',
+        '\tif motion != null and motion.device == InputEvent.DEVICE_ID_EMULATION:',
+        '\t\tmotions.append([motion.position.x, motion.position.y])',
+        '',
+        '',
+        'func record() -> Dictionary:',
+        '\tvar said: Dictionary = {"touches": touches, "drags": drags, "buttons": buttons, "motions": motions}',
+        '\ttouches = []',
+        '\tdrags = []',
+        '\tbuttons = []',
+        '\tmotions = []',
+        '\treturn said',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'pad.gd'),
+      [
+        'extends Control',
+        '',
+        'var touches: Array = []',
+        '',
+        '',
+        'func _gui_input(event: InputEvent) -> void:',
+        '\tvar touch: InputEventScreenTouch = event as InputEventScreenTouch',
+        '\tif touch != null:',
+        '\t\ttouches.append([touch.index, touch.position.x, touch.position.y, touch.pressed])',
+        '',
+        '',
+        'func record() -> Array:',
+        '\treturn touches',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=3 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n' +
+        '[ext_resource type="Script" path="res://pad.gd" id="2"]\n\n' +
+        '[node name="Main" type="Control"]\noffset_right = 640.0\noffset_bottom = 360.0\nmouse_filter = 2\nscript = ExtResource("1")\n\n' +
+        '[node name="Holder" type="Control" parent="."]\noffset_left = 20.0\noffset_top = 10.0\noffset_right = 20.0\noffset_bottom = 10.0\nscale = Vector2(0.5, 0.5)\nmouse_filter = 2\n\n' +
+        '[node name="Pad" type="Control" parent="Holder"]\noffset_right = 200.0\noffset_bottom = 100.0\nscript = ExtResource("2")\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return parseTextContent(response) ?? textOf(response);
+    };
+    type Seen = { touches: unknown[]; drags: number[][]; buttons: unknown[]; motions: unknown[] };
+    const record = async (): Promise<Seen> =>
+      get(
+        await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'record' }),
+        'result',
+      ) as Seen;
+    const touch = async (args: Record<string, unknown>): Promise<unknown> =>
+      call('runtime_input', { op: 'touch', ...args });
+    const started = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+
+    const tapped = await touch({ x: 100, y: 50 });
+    const tappedShown = JSON.stringify(tapped);
+    assert.equal(get(tapped, 'input_type'), 'touch', tappedShown);
+    assert.equal(get(tapped, 'index'), 0, tappedShown);
+    assert.deepEqual(get(tapped, 'position'), [100, 50], tappedShown);
+    assert.equal(get(tapped, 'whole'), true, tappedShown);
+    assert.equal(get(tapped, 'pressed'), false, `lifted again: ${tappedShown}`);
+    assert.equal(get(tapped, 'emulates_mouse'), true, tappedShown);
+    const tap = await record();
+    assert.deepEqual(
+      tap.touches,
+      [
+        [0, 100, 50, true],
+        [0, 100, 50, false],
+      ],
+      `a finger down and up: ${JSON.stringify(tap)}`,
+    );
+    assert.deepEqual(
+      tap.buttons,
+      [
+        [true, true, 100, 50],
+        [true, false, 100, 50],
+      ],
+      `and the mouse events the engine made from it, as emulated: ${JSON.stringify(tap)}`,
+    );
+
+    const first = await touch({ x: 200, y: 100, pressed: true });
+    assert.equal(get(first, 'emulates_mouse'), true, JSON.stringify(first));
+    assert.equal(get(first, 'pressed'), true, JSON.stringify(first));
+    const second = await touch({ x: 300, y: 120, index: 1, pressed: true });
+    assert.equal(get(second, 'index'), 1, JSON.stringify(second));
+    assert.equal(
+      get(second, 'emulates_mouse'),
+      false,
+      `the first finger is the mouse: ${JSON.stringify(second)}`,
+    );
+    const secondUp = await touch({ x: 300, y: 120, index: 1, pressed: false });
+    assert.equal(get(secondUp, 'emulates_mouse'), false, JSON.stringify(secondUp));
+    const firstUp = await touch({ x: 200, y: 100, pressed: false });
+    assert.equal(get(firstUp, 'emulates_mouse'), true, JSON.stringify(firstUp));
+    const fingers = await record();
+    assert.deepEqual(
+      fingers.touches,
+      [
+        [0, 200, 100, true],
+        [1, 300, 120, true],
+        [1, 300, 120, false],
+        [0, 200, 100, false],
+      ],
+      JSON.stringify(fingers),
+    );
+    assert.deepEqual(
+      fingers.buttons,
+      [
+        [true, true, 200, 100],
+        [true, false, 200, 100],
+      ],
+      `the second finger made no mouse events: ${JSON.stringify(fingers)}`,
+    );
+
+    const dragged = await call('runtime_input', {
+      op: 'touch_drag',
+      x: 50,
+      y: 50,
+      toX: 130,
+      toY: 90,
+      frames: 4,
+    });
+    const draggedShown = JSON.stringify(dragged);
+    assert.equal(get(dragged, 'input_type'), 'touch_drag', draggedShown);
+    assert.deepEqual(get(dragged, 'from'), [50, 50], draggedShown);
+    assert.deepEqual(get(dragged, 'to'), [130, 90], draggedShown);
+    assert.equal(get(dragged, 'motions'), 4, draggedShown);
+    assert.deepEqual(get(dragged, 'relative_total'), [80, 40], draggedShown);
+    assert.equal(get(dragged, 'emulates_mouse'), true, draggedShown);
+    const drag = await record();
+    const dragShown = JSON.stringify(drag);
+    assert.deepEqual(
+      drag.touches,
+      [
+        [0, 50, 50, true],
+        [0, 130, 90, false],
+      ],
+      dragShown,
+    );
+    assert.deepEqual(
+      drag.drags,
+      [
+        [0, 70, 60, 20, 10],
+        [0, 90, 70, 20, 10],
+        [0, 110, 80, 20, 10],
+        [0, 130, 90, 20, 10],
+      ],
+      `one drag a frame along the stroke: ${dragShown}`,
+    );
+    assert.deepEqual(
+      drag.motions.at(-1),
+      [130, 90],
+      `the emulated pointer followed the finger: ${dragShown}`,
+    );
+
+    const pad = '/root/Main/Holder/Pad';
+    const aimed = await touch({ nodePath: pad, x: 60, y: 40 });
+    const aimedShown = JSON.stringify(aimed);
+    assert.equal(get(aimed, 'path'), pad, aimedShown);
+    assert.deepEqual(get(aimed, 'position'), [50, 30], `in the window's pixels: ${aimedShown}`);
+    // The pad was also given the earlier touches that landed on it; these are the aimed one's.
+    const padTouches = get(
+      await call('runtime_invoke', { op: 'call', nodePath: pad, method: 'record' }),
+      'result',
+    ) as unknown[];
+    assert.deepEqual(
+      padTouches.slice(-2),
+      [
+        [0, 60, 40, true],
+        [0, 60, 40, false],
+      ],
+      'the control was given the touch in its own space',
+    );
+    assert.deepEqual(
+      (await record()).touches,
+      [
+        [0, 50, 30, true],
+        [0, 50, 30, false],
+      ],
+      'and the game the same touch in window pixels',
+    );
+
+    for (const [index, said] of [
+      [-1, 'was -1'],
+      [1.5, 'was 1.5'],
+    ] as const) {
+      const refused = textOf(
+        await server.request(
+          'tools/call',
+          { name: 'runtime_input', arguments: { op: 'touch', x: 10, y: 10, index } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.match(
+        refused ?? '',
+        new RegExp(`index is the finger, a whole number from 0, and ${said}`),
+        refused ?? 'no text',
+      );
+    }
+    assert.deepEqual((await record()).touches, [], 'a refused finger touched nothing');
+    await stopItsRun(server);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A headless game lays out at the size the project opens its window at, and says it has no window
  * when a click or a capture needs one.
  *
@@ -64957,6 +65233,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClickInAWindowNothingEnteredPresses,
   testAClickThatFreesWhatItMissedAnswers,
   testAPointerAimsInsideANamedNode,
+  testATouchReachesTheGameAsAFinger,
   testAHeadlessGameSaysItHasNoWindow,
   testTheKeeperAnswersAStop,
   testTheKeeperAnswersItsDebuggersQuestions,
