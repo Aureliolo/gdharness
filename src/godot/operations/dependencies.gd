@@ -580,21 +580,72 @@ func _analyze_resource(
 	path: String, current_depth: int, walk: GdhDependencyWalk
 ) -> Array[Dictionary]:
 	var deps: Array[Dictionary] = []
-
 	if current_depth >= walk.max_depth:
 		return deps
 
-	# Reused only when it was walked with as much depth left as now. A resource first reached deep
-	# in the walk has a list cut short at the limit, and handing that to a nearer reach answered
-	# with a chain that stopped where nothing stopped it.
-	var remaining: int = walk.max_depth - current_depth
-	if walk.visited.has(path):
-		var cached: Dictionary = walk.visited[path]
-		if GdhRead.as_int(cached["remaining"]) == remaining:
-			var cached_deps: Array[Dictionary] = cached["deps"]
-			return cached_deps
-
 	walk.path_stack.append(path)
+	var cut: bool = false
+	for named: Dictionary in _references(path, walk):
+		var dep_info: Dictionary = named.duplicate()
+		cut = _depend(dep_info, current_depth, walk) or cut
+		deps.append(dep_info)
+	walk.path_stack.pop_back()
+
+	var remaining: int = walk.max_depth - current_depth
+	var shown: Dictionary = walk.shown.get(path, {})
+	if shown.is_empty() or remaining > GdhRead.as_int(shown["remaining"]):
+		walk.shown[path] = { "remaining": remaining, "cut": cut }
+	return deps
+
+
+# Walks [param dep_info], one entry of what the file at [param current_depth] names, and answers
+# whether the depth cut short what it shows. Its dependencies are listed at its first entry, which
+# every later one says is above it: listed in full under every file loading it, a game of a
+# hundred scripts typed by class_name answered half a megabyte at depth six and nothing at all
+# unlimited, the tree growing about sixfold a level. A list the depth cut short is listed again
+# where more depth is left, since pointing a nearer reach at it answered a chain that stopped
+# where nothing stopped it. A list is recorded once walked, so what a later entry points at is
+# always above it.
+func _depend(dep_info: Dictionary, current_depth: int, walk: GdhDependencyWalk) -> bool:
+	var dep_path: String = dep_info["path"]
+	# Marked where the reference closing the cycle is. Marked inside the file reached again, the
+	# tree answered that file as a dependency of itself.
+	if dep_path in walk.path_stack:
+		var cycle: Array[String] = walk.path_stack.slice(walk.path_stack.find(dep_path))
+		cycle.append(dep_path)
+		if not cycle in walk.circular_references:
+			walk.circular_references.append(cycle)
+		dep_info["circular"] = true
+		return false
+	if not dep_info["exists"]:
+		return false
+	var named: int = _references(dep_path, walk).size()
+	if named == 0:
+		return false
+	if current_depth + 1 >= walk.max_depth:
+		# A file the depth stopped at read the same as one naming nothing, and a missing file past
+		# it went unsaid.
+		dep_info["beyond_depth"] = named
+		return true
+	var shown: Dictionary = walk.shown.get(dep_path, {})
+	if not shown.is_empty():
+		var shown_cut: bool = shown["cut"]
+		var remaining: int = walk.max_depth - current_depth - 1
+		if not shown_cut or remaining <= GdhRead.as_int(shown["remaining"]):
+			dep_info["dependencies_listed_above"] = true
+			return shown_cut
+	dep_info["dependencies"] = _analyze_resource(dep_path, current_depth + 1, walk)
+	var walked: Dictionary = walk.shown[dep_path]
+	return walked["cut"]
+
+
+## What [param path] names, each file once, as the entries the tree lists it by; read once a walk.
+func _references(path: String, walk: GdhDependencyWalk) -> Array[Dictionary]:
+	if walk.references.has(path):
+		var known: Array[Dictionary] = walk.references[path]
+		return known
+	var deps: Array[Dictionary] = []
+	walk.references[path] = deps
 
 	var file: FileAccess = FileAccess.open(path, FileAccess.READ)
 	if file:
@@ -621,7 +672,7 @@ func _analyze_resource(
 				# as no res:// path, a script's load of one went unsaid while the game printed
 				# "Unrecognized UID" at that line.
 				if dep_path.begins_with("uid://"):
-					_depend(deps, path, dep_path, {}, current_depth, walk)
+					_name(deps, path, dep_path, {})
 					continue
 				if not dep_path.begins_with("res://"):
 					continue
@@ -640,7 +691,7 @@ func _analyze_resource(
 				var named_by: Dictionary = { "stale_path": written } if dep_path != written else {}
 				if unknown.has(dep_path):
 					named_by["unknown_uid"] = unknown[dep_path]
-				_depend(deps, path, dep_path, named_by, current_depth, walk)
+				_name(deps, path, dep_path, named_by)
 
 		# A script uses another by its class_name as surely as by a preload, and only the reverse
 		# walk looked for that: asked what a script depends on, the answer left out the script it
@@ -649,30 +700,18 @@ func _analyze_resource(
 		if path.get_extension() == "gd":
 			var classes: Dictionary = classes_declared()
 			for used: String in classes_used_in(content, classes):
-				_depend(deps, path, str(classes[used]), { "by_class": used }, current_depth, walk)
+				_name(deps, path, str(classes[used]), { "by_class": used })
 			var autoloads: Dictionary = autoloads_declared()
 			for used: String in classes_used_in(content, autoloads):
-				_depend(
-					deps, path, str(autoloads[used]), { "by_autoload": used }, current_depth, walk
-				)
-
-	walk.path_stack.pop_back()
-	walk.visited[path] = { "deps": deps, "remaining": remaining }
+				_name(deps, path, str(autoloads[used]), { "by_autoload": used })
 	return deps
 
 
-# Adds [param dep_path] to [param deps], what [param path] depends on, walked as far as the depth
-# left allows, once however many times it is named. [param named_by] is the class or autoload name
-# it was named by, as by_class or by_autoload, and the path written when the engine loads another,
-# as stale_path; empty for a path that is the file.
-func _depend(
-	deps: Array[Dictionary],
-	path: String,
-	dep_path: String,
-	named_by: Dictionary,
-	current_depth: int,
-	walk: GdhDependencyWalk
-) -> void:
+# Adds [param dep_path] to [param deps], what [param path] depends on, once however many times it
+# is named. [param named_by] is the class or autoload name it was named by, as by_class or
+# by_autoload, and the path written when the engine loads another, as stale_path; empty for a path
+# that is the file.
+func _name(deps: Array[Dictionary], path: String, dep_path: String, named_by: Dictionary) -> void:
 	if dep_path == path:
 		return
 	for existing: Dictionary in deps:
@@ -685,27 +724,6 @@ func _depend(
 		"exists": not dep_path.begins_with("uid://") and FileAccess.file_exists(dep_path),
 	}
 	dep_info.merge(named_by)
-	# Marked where the reference closing the cycle is. Marked inside the file reached again, the
-	# tree answered that file as a dependency of itself.
-	if dep_path in walk.path_stack:
-		var cycle: Array[String] = walk.path_stack.slice(walk.path_stack.find(dep_path))
-		cycle.append(dep_path)
-		if not cycle in walk.circular_references:
-			walk.circular_references.append(cycle)
-		dep_info["circular"] = true
-		deps.append(dep_info)
-		return
-	if dep_info["exists"] and current_depth + 1 < walk.max_depth:
-		var sub_deps: Array[Dictionary] = _analyze_resource(dep_path, current_depth + 1, walk)
-		if sub_deps.size() > 0:
-			dep_info["dependencies"] = sub_deps
-	elif dep_info["exists"] and walk.counts_beyond:
-		# A file the depth stopped at read the same as one naming nothing, and a missing file past
-		# it went unsaid.
-		var beyond: GdhDependencyWalk = GdhDependencyWalk.new(1, walk.include_built_in, [], false)
-		var named: int = _analyze_resource(dep_path, 0, beyond).size()
-		if named > 0:
-			dep_info["beyond_depth"] = named
 	deps.append(dep_info)
 
 
@@ -912,23 +930,18 @@ class GdhDependencyWalk:
 
 	var include_built_in: bool
 
-	var visited: Dictionary = {}
+	## What each file read names, by its path.
+	var references: Dictionary = {}
+
+	## For each file whose dependencies the tree lists, the depth left where they are listed and
+	## whether the depth cut that list short.
+	var shown: Dictionary = {}
 
 	var path_stack: Array[String] = []
 
 	var circular_references: Array
 
-	## Whether a file the depth stops at is read for how many files it names, which the walk doing
-	## that reading does not do again for those.
-	var counts_beyond: bool
-
-	func _init(
-		p_max_depth: int,
-		p_include_built_in: bool,
-		p_circular_references: Array,
-		p_counts_beyond: bool = true
-	) -> void:
+	func _init(p_max_depth: int, p_include_built_in: bool, p_circular_references: Array) -> void:
 		max_depth = p_max_depth
 		include_built_in = p_include_built_in
 		circular_references = p_circular_references
-		counts_beyond = p_counts_beyond

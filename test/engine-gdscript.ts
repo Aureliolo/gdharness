@@ -4106,13 +4106,57 @@ function testEveryUseIsFound(godotPath: string): void {
       [['res://sub/chain_d.gd', ['res://sub/chain_e.gd']]],
       `one down, the middle has its whole list: ${JSON.stringify(walked)}`,
     );
-    // Reached through b and directly, c, d and e each sit in the tree twice and are four files.
+    // Reached through b and directly, c lists what it loads under b, where it is first reached, and
+    // the second entry says so.
     const whole = operation('get_dependencies', { resource_path: 'sub/chain_a.gd' });
     assert.deepEqual(
       [get(whole, 'summary', 'total_dependencies'), get(whole, 'summary', 'total_references')],
-      [4, 7],
-      `four files, seven entries: ${JSON.stringify(get(whole, 'dependencies'))}`,
+      [4, 5],
+      `four files, five entries: ${JSON.stringify(get(whole, 'dependencies'))}`,
     );
+    assert.deepEqual(
+      asArray(get(whole, 'dependencies', 'res://sub/chain_a.gd')),
+      [
+        {
+          path: 'res://sub/chain_b.gd',
+          exists: true,
+          dependencies: [
+            {
+              path: 'res://sub/chain_c.gd',
+              exists: true,
+              dependencies: [
+                {
+                  path: 'res://sub/chain_d.gd',
+                  exists: true,
+                  dependencies: [{ path: 'res://sub/chain_e.gd', exists: true }],
+                },
+              ],
+            },
+          ],
+        },
+        { path: 'res://sub/chain_c.gd', exists: true, dependencies_listed_above: true },
+      ],
+      'c is listed once',
+    );
+    // Each rung loads the next two, so the routes to the top double every two rungs while the
+    // references grow by two a rung. Listed under every route, the tree for thirty rungs did not
+    // finish.
+    const rungs = 30;
+    mkdirSync(join(dir, 'ladder'));
+    for (let rung = 0; rung < rungs; rung++) {
+      const next = [rung + 1, rung + 2].filter((one) => one < rungs);
+      writeFileSync(
+        join(dir, 'ladder', `rung_${rung}.gd`),
+        `extends Node\n\n${next.map((one) => `const R${one} = preload("res://ladder/rung_${one}.gd")\n`).join('')}`,
+      );
+    }
+    const ladder = operation('get_dependencies', { resource_path: 'ladder/rung_0.gd' });
+    assert.deepEqual(
+      [get(ladder, 'summary', 'total_dependencies'), get(ladder, 'summary', 'total_references')],
+      [rungs - 1, 2 * rungs - 3],
+      `every rung once, each reference once: ${JSON.stringify(get(ladder, 'summary'))}`,
+    );
+    rmSync(join(dir, 'ladder'), { recursive: true });
     // At depth three, d is reached through b and c at the limit and says it names one more file,
     // while e at the limit names none and says nothing.
     const throughB = asArray(
