@@ -456,7 +456,7 @@ import {
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
 import { pixelPng, solidPng } from './support/png.js';
 import { listenOnAReservedPort, reservePort, ServerProcess, stopServersOf } from './support/server.js';
-import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
+import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } from './support/shards.js';
 import { leftInSlots } from './support/slots.js';
 import {
   endEnginesLeft,
@@ -36176,6 +36176,17 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         await onClass('res://nowhere.gd', 'best', [[1]]),
         /No script is at res:\/\/nowhere\.gd to call a static function of\./,
       );
+      // Written while the game runs, so nothing loads it before the call does. ok compiles on its
+      // own, so only the failed compile explains a refusal of it.
+      writeFileSync(
+        join(project, 'broken.gd'),
+        'extends RefCounted\n\n\nstatic func ok() -> int:\n\treturn 1\n\n\n' +
+          'static func bad() -> void:\n\tvar count: int = "many"\n\tprint(count)\n',
+      );
+      assert.match(
+        await onClass('res://broken.gd', 'ok', []),
+        /^res:\/\/broken\.gd did not compile, so none of its functions can be called; script_diagnostics on it gives the error and its line\.$/,
+      );
 
       const cleared = await invoke('take_off', [null]);
       assert.equal(cleared.result, true, `null still reaches an object parameter as null: ${cleared.said}`);
@@ -65729,21 +65740,33 @@ function testEveryFixtureIsCalled(): void {
  */
 function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
   const names = TESTS.map((test) => test.name);
-  const stale = Object.keys(REGRESSION_SECONDS).filter((name) => !names.includes(name));
-  assert.deepEqual(stale, [], 'every weighted name is a regression in TESTS');
-  const heaviest = Math.max(...Object.values(REGRESSION_SECONDS));
-  const weight = (name: string): number => REGRESSION_SECONDS[name] ?? UNMEASURED_SECONDS;
-  for (const parts of [1, 2, 3, 4]) {
-    const split = Array.from({ length: parts }, (_unused, at) => regressionPart(names, at + 1, parts));
-    const covered = split.flat();
-    assert.equal(covered.length, names.length, `${parts} parts hold each regression once`);
-    assert.deepEqual([...covered].sort(), [...names].sort(), `${parts} parts hold every regression`);
-    const loads = split.map((part) => part.reduce((total, name) => total + weight(name), 0));
-    assert.ok(
-      Math.max(...loads) - Math.min(...loads) <= heaviest,
-      `${parts} parts within the heaviest regression of each other: ${loads.join(', ')}`,
-    );
+  for (const [platform, seconds] of Object.entries(REGRESSION_SECONDS)) {
+    const stale = Object.keys(seconds).filter((name) => !names.includes(name));
+    assert.deepEqual(stale, [], `every name weighted for ${platform} is a regression in TESTS`);
+    const heaviest = Math.max(...Object.values(seconds));
+    const weight = (name: string): number => seconds[name] ?? UNMEASURED_SECONDS;
+    for (const parts of [1, 2, 3, 4, 5]) {
+      const split = Array.from({ length: parts }, (_unused, at) =>
+        regressionPart(names, at + 1, parts, seconds),
+      );
+      const covered = split.flat();
+      assert.equal(covered.length, names.length, `${platform}: ${parts} parts hold each regression once`);
+      assert.deepEqual(
+        [...covered].sort(),
+        [...names].sort(),
+        `${platform}: ${parts} parts hold every regression`,
+      );
+      const loads = split.map((part) => part.reduce((total, name) => total + weight(name), 0));
+      assert.ok(
+        Math.max(...loads) - Math.min(...loads) <= heaviest,
+        `${platform}: ${parts} parts within the heaviest regression of each other: ${loads.join(', ')}`,
+      );
+    }
   }
+  // Each platform is split by its own figures, and one CI does not run by the slowest's.
+  assert.equal(secondsOn('linux'), REGRESSION_SECONDS.linux);
+  assert.equal(secondsOn('win32'), REGRESSION_SECONDS.win32);
+  assert.equal(secondsOn('freebsd'), REGRESSION_SECONDS.darwin);
   // Two of 20 and two of 1 into two parts: the heavy pair is split, where every other one put
   // both 20s together. Each part keeps the list's own order.
   const weights = { a: 20, b: 1, c: 20, d: 1 };
@@ -66298,7 +66321,7 @@ async function main(): Promise<void> {
             named.map((test) => test.name),
             Number(part[1]),
             Number(part[2]),
-            REGRESSION_SECONDS,
+            secondsOn(),
           ),
         );
   const chosen = inPart === null ? named : named.filter((test) => inPart.has(test.name));

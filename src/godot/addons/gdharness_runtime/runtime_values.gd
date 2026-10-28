@@ -395,6 +395,19 @@ static func class_at(root: Node, path: String) -> Dictionary:
 			"type": "error",
 			"message": "No script is at %s to call a static function of." % script_path,
 		}
+	# A script that did not compile loads all the same, with no methods, and the call answered that
+	# it had no such method, which reads as a misspelt name. An abstract script can be instantiated
+	# as far as this asks, so it is not taken for one.
+	var compiled: Script = loaded as Script
+	if not compiled.can_instantiate():
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s did not compile, so none of its functions can be called; script_diagnostics on "
+				+ "it gives the error and its line."
+			) % script_path,
+		}
 	return { "object": loaded, "node": root }
 
 

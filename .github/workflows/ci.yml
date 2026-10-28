@@ -211,9 +211,9 @@ jobs:
     with:
       # renovate: datasource=github-runners depName=macos
       runner: macos-26
-      # Four, as on Windows: dealt evenly in three, each part's regressions came to about 1030 of
-      # the 1200 seconds a part's run is given.
-      regression-parts: '["1/4", "2/4", "3/4", "4/4"]'
+      # Five: macOS runs the write regressions slowest, and by its own figures four parts carry
+      # about 1050 of the 1200 seconds a part's run is given, five about 840.
+      regression-parts: '["1/5", "2/5", "3/5", "4/5", "5/5"]'
       engine-fixtures-with-editor-fixtures: true
 
   # One check per platform, named by platform rather than by runner image, because the name is

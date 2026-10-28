@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
+  appendFileSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -3960,6 +3961,39 @@ function testAFamilyOfSettingsAnswersWithItsTypes(godotPath: string, projectDir:
   // start with this" is a fact about the project rather than a fault in the call.
   const none = runOperation(godotPath, projectDir, 'get_project_setting', { prefix: 'nothing/starts/here/' });
   assert.equal(asNumber(get(none, 'count')), 0);
+
+  // A typed array or dictionary is answered with what it holds, as project.godot writes it.
+  const typed = createProject(godotPath);
+  try {
+    appendFileSync(
+      join(typed, 'project.godot'),
+      [
+        '',
+        '[kinds]',
+        '',
+        'flags=Dictionary[String, bool]({"a": true})',
+        'names=Array[String](["x"])',
+        'loose=Dictionary[StringName, Variant]({})',
+        'plain={}',
+        '',
+      ].join('\n'),
+    );
+    const kinds = asArray(
+      get(runOperation(godotPath, typed, 'get_project_setting', { prefix: 'kinds/' }), 'settings'),
+    );
+    assert.deepEqual(
+      kinds.map((entry) => [get(entry, 'setting'), get(entry, 'type')]),
+      [
+        ['kinds/flags', 'Dictionary[String, bool]'],
+        ['kinds/loose', 'Dictionary[StringName, Variant]'],
+        ['kinds/names', 'Array[String]'],
+        ['kinds/plain', 'Dictionary'],
+      ],
+      JSON.stringify(kinds),
+    );
+  } finally {
+    sweep(typed);
+  }
 }
 
 /**
