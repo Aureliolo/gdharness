@@ -122,6 +122,7 @@ import {
   machineSlots,
   ownStart,
   START_TOLERANCE_MS,
+  slotWaitedSaid,
   slotWaitSaid,
   UNWRITTEN_MS,
   WAITING_FOLDER,
@@ -448,6 +449,7 @@ import {
   isRecord,
   type JsonRpcMessage,
   parseTextContent,
+  slotWaitOf,
   textOf,
 } from './support/json-rpc.js';
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
@@ -25814,6 +25816,17 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
       writeFileSync(join(project, 'thing.gd'), 'extends Node\n');
       const added = await call({ op: 'add_autoload', name: 'Thing', path: 'res://thing.gd' });
       assert.deepEqual(asArray(get(added, 'editorAdopted') ?? []), ['autoload/Thing'], JSON.stringify(added));
+      assert.deepEqual([get(added, 'action'), get(added, 'old_path')], ['added', undefined]);
+      // Added again under the same name, the entry is replaced as the editor's Add replaces it, and the
+      // script that no longer loads is named.
+      writeFileSync(join(project, 'other_thing.gd'), 'extends Node\n');
+      const replaced = await call({ op: 'add_autoload', name: 'Thing', path: 'res://other_thing.gd' });
+      assert.deepEqual(
+        [get(replaced, 'action'), get(replaced, 'path'), get(replaced, 'old_path')],
+        ['updated', 'res://other_thing.gd', 'res://thing.gd'],
+        JSON.stringify(replaced),
+      );
+      sent.splice(0);
       const removed = await call({ op: 'remove_autoload', name: 'Thing' });
       assert.deepEqual(
         asArray(get(removed, 'editorAdopted') ?? []),
@@ -26458,6 +26471,61 @@ async function testAHeldScratchDirectoryGoesOnceLetGo(): Promise<void> {
     }
     await endGame(holder);
     sweep(parent);
+  }
+}
+
+/**
+ * The class cache is read once a moment in which another process holds it shut has passed.
+ *
+ * The editor rewrites the cache at the end of every scan, and on the Windows editor leg a
+ * script_edit read it during that write, was refused with EBUSY, and ended in a crash report. Held
+ * for real, as the scratch directory case holds a file: on Windows a process with it open and
+ * shared with nobody, elsewhere its permissions taken away and given back by another process,
+ * since this read blocks the thread a timer of its own would need. A plain read during the hold has
+ * to be refused, or the case has shown nothing about the wait.
+ */
+async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
+  if (process.platform !== 'win32' && process.getuid?.() === 0) {
+    console.log('held class cache regression skipped (root reads what it likes)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-held-cache-'));
+  mkdirSync(join(project, '.godot'));
+  const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+  writeFileSync(
+    cache,
+    'list=[{\n"base": &"Node",\n"class": &"Held",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://held.gd"\n}]\n',
+  );
+  let holder: ChildProcess | null = null;
+  try {
+    holder =
+      process.platform === 'win32'
+        ? spawnHidden(
+            'powershell',
+            [
+              '-NoProfile',
+              '-Command',
+              `$f = [System.IO.File]::Open('${cache}', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('holding'); Start-Sleep -Milliseconds 400; $f.Close()`,
+            ],
+            { stdio: ['ignore', 'pipe', 'ignore'] },
+          )
+        : spawnHidden('sh', ['-c', `chmod 000 '${cache}'; echo holding; sleep 0.4; chmod 644 '${cache}'`], {
+            stdio: ['ignore', 'pipe', 'ignore'],
+          });
+    const holding = holder;
+    await new Promise<void>((resolve, reject) => {
+      holding.stdout?.once('data', () => {
+        resolve();
+      });
+      holding.once('exit', () => {
+        reject(new Error('the process meant to hold the cache exited before it held it'));
+      });
+    });
+    assert.throws(() => readFileSync(cache, 'utf8'), 'a plain read is refused while the cache is held');
+    assert.deepEqual([...(cachedClasses(project) ?? [])], [['Held', 'res://held.gd']]);
+  } finally {
+    await endGame(holder);
+    sweep(project);
   }
 }
 
@@ -45064,6 +45132,21 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
     slotWaitSaid(500, 3, 'slots', [unnamed, { pid: 3, started: 1, by: 'gdharness setup' }, gate]),
     'Waiting for an engine: all 3 engine slots on this machine (slots) are in use: 1 by pid 2, 1 by gdharness setup (pid 3) and 1 by gdharness test of /games/one (pid 1). The engine starts when one is given back.',
   );
+  // What the answer says once the wait is over, in the same shapes.
+  assert.deepEqual(
+    [
+      slotWaitedSaid(61_600, 6, 'slots', []),
+      slotWaitedSaid(61_600, 6, 'slots', [gate, gate, unnamed, gate, unnamed, unnamed]),
+      slotWaitedSaid(1_200, 3, 'slots', [unnamed, { pid: 3, started: 1, by: 'gdharness setup' }, gate]),
+      slotWaitedSaid(1_200, 1, 'slots', [gate]),
+    ],
+    [
+      'This call waited 62 s for an engine slot in all. When it first waited, all 6 engine slots on this machine (slots) were in use, by a gate or another tool.',
+      'This call waited 62 s for an engine slot in all. When it first waited, all 6 engine slots on this machine (slots) were in use: 3 by gdharness test of /games/one (pid 1) and 3 by pid 2.',
+      'This call waited 1 s for an engine slot in all. When it first waited, all 3 engine slots on this machine (slots) were in use: 1 by pid 2, 1 by gdharness setup (pid 3) and 1 by gdharness test of /games/one (pid 1).',
+      'This call waited 1 s for an engine slot in all. When it first waited, the one engine slot on this machine (slots) was in use, by gdharness test of /games/one (pid 1).',
+    ],
+  );
   // A wait reports from its own start and so does the run after it, and the client is sent numbers
   // that rise all the same.
   const sent: number[] = [];
@@ -45217,7 +45300,15 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
         resolveEnd(code);
       });
     });
-    await delay(3000);
+    // Looked for rather than waited out: on a machine busy with other engines the command took more
+    // than three seconds to start and reach its wait.
+    for (
+      let looked = 0;
+      looked < 600 && classes.exitCode === null && leftInSlots(slots).length < 2;
+      looked += 1
+    ) {
+      await delay(100);
+    }
     assert.deepEqual(
       [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, leftInSlots(slots)],
       [null, process.pid, ['0.lock', `${WAITING_FOLDER}/${String(classes.pid)}-1.json`]],
@@ -45266,7 +45357,13 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
         },
         ENGINE_CALL_TIMEOUT_MS,
       );
-      await delay(3000);
+      const progressed = (): boolean =>
+        server.notifications.some((message) => message.method === 'notifications/progress');
+      for (let looked = 0; looked < 600 && !progressed(); looked += 1) {
+        await delay(100);
+      }
+      // A second past its first word, which is as long as a wait lasts before its answer reports it.
+      await delay(1000);
       assert.equal(holderOf(readFileSync(ours, 'utf8'))?.pid, process.pid, 'the boot check waits too');
       // A client that asked for progress is told why nothing has started, rather than left silent.
       const told = server.notifications
@@ -45282,9 +45379,33 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       rmSync(ours);
       assert.ok(await heldBy(server.child.pid, 30_000), 'then its engine runs in the slot given back');
       assert.match(lastTaker() ?? '', /^a gdharness server/, 'naming itself in the lock');
-      const checked = JSON.parse(textOf(await checking) ?? '{}') as unknown;
+      const answered = await checking;
+      const checked = JSON.parse(textOf(answered) ?? '{}') as unknown;
       assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
       assert.deepEqual(leftInSlots(slots), [], 'and the server gives it back once the run is read');
+      // The answer says it too, since a caller reading only the answer saw a slow step and no reason.
+      const waits = asArray(get(answered, 'result', 'content'))
+        .map((block) => slotWaitOf(block as { type: string; text?: string }))
+        .filter((block) => block !== null);
+      assert.equal(waits.length, 1, JSON.stringify(answered));
+      assert.ok(asNumber(get(waits[0], 'waitedMs')) >= 1000, JSON.stringify(waits));
+      assert.equal(
+        get(waits[0], 'note'),
+        `This call waited ${String(Math.round(asNumber(get(waits[0], 'waitedMs')) / 1000))} s for an engine slot in all. When it first waited, the one engine slot on this machine (${slots}) was in use, by the suite (pid ${String(process.pid)}).`,
+      );
+      const free = await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'check', projectPath: project } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      assert.equal(get(JSON.parse(textOf(free) ?? '{}'), 'booted'), true, JSON.stringify(free));
+      assert.deepEqual(
+        asArray(get(free, 'result', 'content'))
+          .map((block) => slotWaitOf(block as { type: string; text?: string }))
+          .filter((block) => block !== null),
+        [],
+        `a call that found a slot free says nothing of slots: ${JSON.stringify(free)}`,
+      );
     } finally {
       await server.stop();
     }
@@ -57722,8 +57843,11 @@ async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
     assert.match(await ask('Told', 'Speaker'), /Speaker is already an autoload in project\.godot/);
     assert.match(
       await ask('Told', 'TOLD_SCRIPT'),
-      /TOLD_SCRIPT is already an identifier at res:\/\/user\.gd:3/,
+      /TOLD_SCRIPT is already used in code at res:\/\/user\.gd:3/,
     );
+    // `var typed: Told = Told.new()` uses it twice on one line, which is one place to look.
+    const onto = await ask('Loud', 'Told', {}, 'loud.gd');
+    assert.equal(onto.match(/Told is already used in code at res:\/\/user\.gd:7(?!\d)/g)?.length, 1, onto);
     assert.match(await ask('Told', 'Node', { Node: { as: ['a native class'] } }), /Node is a native class/);
     assert.match(await ask('Told', 'func'), /func is not a name GDScript accepts/);
     assert.match(await ask('Told', 'Told'), /already called Told/);
@@ -65805,6 +65929,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testAHeldScratchDirectoryGoesOnceLetGo,
+  testAClassCacheHeldShutIsReadOnceLetGo,
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,
