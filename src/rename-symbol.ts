@@ -137,18 +137,19 @@ export function onDiskSpelling(path: string): string {
 
 /** Up to [param most] places [param name] is already an identifier in code, other than after a dot. */
 function usedAsIdentifier(scripts: ReadonlyMap<string, Script>, name: string, most: number): string[] {
-  const found: string[] = [];
+  // One entry a line, since a line such as `var grunt: Foe = Foe.new()` holds the name twice.
+  const found = new Set<string>();
   for (const script of scripts.values()) {
     for (const occurrence of script.occurrences(name)) {
       if (occurrence.kind === 'code' && !occurrence.afterDot) {
-        found.push(`${script.path}:${script.lines.positionOf(occurrence.offset).line + 1}`);
-        if (found.length >= most) {
-          return found;
+        found.add(`${script.path}:${script.lines.positionOf(occurrence.offset).line + 1}`);
+        if (found.size >= most) {
+          return [...found];
         }
       }
     }
   }
-  return found;
+  return [...found];
 }
 
 /** The autoload names project.godot registers, which are global names as much as a class is. */
@@ -222,7 +223,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       conflicts.push(`${newName} is already an autoload in project.godot`);
     }
     for (const place of usedAsIdentifier(scripts, newName, 10)) {
-      conflicts.push(`${newName} is already an identifier at ${place}`);
+      conflicts.push(`${newName} is already used in code at ${place}`);
     }
     const taken = (await services.namesTaken([newName], null))[newName];
     if (taken !== undefined && taken.as.length > 0) {

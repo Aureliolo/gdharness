@@ -57777,8 +57777,11 @@ async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
     assert.match(await ask('Told', 'Speaker'), /Speaker is already an autoload in project\.godot/);
     assert.match(
       await ask('Told', 'TOLD_SCRIPT'),
-      /TOLD_SCRIPT is already an identifier at res:\/\/user\.gd:3/,
+      /TOLD_SCRIPT is already used in code at res:\/\/user\.gd:3/,
     );
+    // `var typed: Told = Told.new()` uses it twice on one line, which is one place to look.
+    const onto = await ask('Loud', 'Told', {}, 'loud.gd');
+    assert.equal(onto.match(/Told is already used in code at res:\/\/user\.gd:7(?!\d)/g)?.length, 1, onto);
     assert.match(await ask('Told', 'Node', { Node: { as: ['a native class'] } }), /Node is a native class/);
     assert.match(await ask('Told', 'func'), /func is not a name GDScript accepts/);
     assert.match(await ask('Told', 'Told'), /already called Told/);
