@@ -25816,6 +25816,17 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
       writeFileSync(join(project, 'thing.gd'), 'extends Node\n');
       const added = await call({ op: 'add_autoload', name: 'Thing', path: 'res://thing.gd' });
       assert.deepEqual(asArray(get(added, 'editorAdopted') ?? []), ['autoload/Thing'], JSON.stringify(added));
+      assert.deepEqual([get(added, 'action'), get(added, 'old_path')], ['added', undefined]);
+      // Added again under the same name, the entry is replaced as the editor's Add replaces it, and the
+      // script that no longer loads is named.
+      writeFileSync(join(project, 'other_thing.gd'), 'extends Node\n');
+      const replaced = await call({ op: 'add_autoload', name: 'Thing', path: 'res://other_thing.gd' });
+      assert.deepEqual(
+        [get(replaced, 'action'), get(replaced, 'path'), get(replaced, 'old_path')],
+        ['updated', 'res://other_thing.gd', 'res://thing.gd'],
+        JSON.stringify(replaced),
+      );
+      sent.splice(0);
       const removed = await call({ op: 'remove_autoload', name: 'Thing' });
       assert.deepEqual(
         asArray(get(removed, 'editorAdopted') ?? []),

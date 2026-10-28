@@ -387,8 +387,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	var global: bool = GdhRead.as_bool(params.get("global", true), true)
 
 	# There is no disabled autoload in Godot 4: every entry in the list is loaded under the root at
-	# every start. `enabled: false` used to write the entry without its asterisk and answer that it
-	# was disabled, and the autoload ran all the same.
+	# every start. An entry without its asterisk is one whose name is not global, and it still runs.
 	if not GdhRead.as_bool(params.get("enabled", true), true):
 		return (
 			_log
@@ -433,12 +432,15 @@ func add_autoload(params: Dictionary) -> Dictionary:
 			"action": "unchanged",
 			"saved": false,
 		}
+	# The editor's Add replaces an entry of the same name too; said here, since the replaced script
+	# is no longer loaded and nothing else in the answer names it.
+	var held: String = str(ProjectSettings.get_setting(setting)) if was_updated else ""
 	ProjectSettings.set_setting(setting, entry)
 	var err: Error = GdhProjectFile.save([setting])
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
-	return {
+	var answer: Dictionary = {
 		"name": name,
 		"path": path,
 		"enabled": true,
@@ -446,6 +448,9 @@ func add_autoload(params: Dictionary) -> Dictionary:
 		"action": "updated" if was_updated else "added",
 		"saved": true,
 	}
+	if was_updated:
+		answer["old_path"] = held.trim_prefix("*")
+	return answer
 
 
 ## Why [param name] cannot name an autoload, or empty when it can. The editor's Autoload tab refuses

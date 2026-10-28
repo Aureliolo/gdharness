@@ -478,7 +478,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'The value to write, fitted to the type the setting is registered as, the way scene_node set fits a property. Engine types may be written as their fields, {"x": 1, "y": 2}, or tagged, {"_type": "Vector2", "x": 1, "y": 2}, and infinity as {"_type": "float", "value": "inf"}, the form a read answers with; one carrying a field its type has not is refused naming it, and a colour may also be its html code, "#ff8000". "" writes an empty string. A setting the engine does not declare is written as given, a whole number as an int and a plain list as an Array, so a packed array is tagged with its type, {"_type": "PackedStringArray", "value": ["res://a/"]}; a tag that cannot be read as its type is refused rather than written as a dictionary. When a setting in its section is named like an undeclared one, note names the nearest, as it may be a misspelt one. Every line of project.godot for another setting stays as it was, one holding a default value included.',
       },
-      name: { type: 'string', ops: ['add_autoload', 'remove_autoload'], description: 'Autoload name.' },
+      name: {
+        type: 'string',
+        ops: ['add_autoload', 'remove_autoload'],
+        description:
+          "Autoload name. add_autoload on a name already registered replaces its entry, as the editor's Add does, and answers action updated with old_path, the path it held, which no longer loads.",
+      },
       path: {
         type: 'string',
         ops: ['add_autoload'],
