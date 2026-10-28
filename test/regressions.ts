@@ -59256,9 +59256,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       scenePath: 'hero.tscn',
       rootNodeType: 'Hero',
     });
+    // Named as a read names the node, since the file holds a Node2D carrying the script and no Hero
+    // node.
     assert.deepEqual(
-      [get(hero, 'rootNodeType'), get(hero, 'rootNodeName')],
-      ['Hero', 'Hero'],
+      [get(hero, 'rootNodeType'), get(hero, 'scriptClass'), get(hero, 'rootNodeName')],
+      ['Node2D', 'Hero', 'Hero'],
       JSON.stringify(hero),
     );
     assert.deepEqual(sets('hero.tscn', '[node name="Hero" type="Node2D"'), ['script = ExtResource']);
@@ -59273,7 +59275,6 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       nodeName: 'Boss',
       nodeType: 'Hero',
     });
-    assert.equal(get(boss, 'nodeType'), 'Hero', JSON.stringify(boss));
     assert.deepEqual(sets('made.tscn', '[node name="Boss" type="Node2D"'), ['script = ExtResource']);
     const bossRead = parseTextContent(
       await call('scene_node', { op: 'get', scenePath: 'made.tscn', nodePath: 'Boss' }),
@@ -59282,6 +59283,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       [get(bossRead, 'nodeType'), get(bossRead, 'scriptClass')],
       ['Node2D', 'Hero'],
       `a read names the engine class and the class the script declares: ${JSON.stringify(bossRead)}`,
+    );
+    assert.deepEqual(
+      [get(boss, 'nodeType'), get(boss, 'scriptClass')],
+      [get(bossRead, 'nodeType'), get(bossRead, 'scriptClass')],
+      `the add names the node as the read does: ${JSON.stringify(boss)}`,
     );
     // The root by its name: its path is ".", and ". already has a child" read as a typo.
     assert.equal(

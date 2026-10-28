@@ -922,7 +922,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['create'],
         description:
-          'create: the root node class, an engine class or a class_name a project script declares, which the root is made as with that script attached. Default Node.',
+          'create: the root node class, an engine class or a class_name a project script declares, which the root is made as with that script attached. Default Node. The answer names the root as scene_node get does: rootNodeType its engine class, with scriptClass for a class_name.',
       },
       rootNodeName: {
         type: 'string',
@@ -1003,7 +1003,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['add'],
         description:
-          'add: the node class, such as "CharacterBody2D", or a class_name a project script declares, which the node is made as with that script attached. Give this or instancePath. The answer\'s nodeType is the class of the node made, for an instance the class of its scene\'s root.',
+          'add: the node class, such as "CharacterBody2D", or a class_name a project script declares, which the node is made as with that script attached. Give this or instancePath. The answer names the node made as get does: nodeType its engine class, for an instance the class of its scene\'s root, with scriptClass when its script declares a class_name.',
       },
       instancePath: {
         type: 'string',
