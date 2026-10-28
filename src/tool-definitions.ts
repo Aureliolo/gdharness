@@ -470,7 +470,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['get'],
         description:
-          'get: answer with every setting whose name starts with this, and the type the engine registers for each, instead of one setting by name. "debug/gdscript/warnings/" answers the whole family. The type matters: a family of levels can hold a setting that is a bool, and writing a level over it looks like it worked.',
+          'get: answer with every setting whose name starts with this, and the type the engine registers for each, a typed array or dictionary with what it holds as project.godot writes it (Dictionary[String, bool]), instead of one setting by name. "debug/gdscript/warnings/" answers the whole family. The type matters: a family of levels can hold a setting that is a bool, and writing a level over it looks like it worked.',
       },
       value: {
         blank: true,

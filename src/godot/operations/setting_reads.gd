@@ -62,7 +62,7 @@ static func under(prefix: String, values: GdhSerialisation) -> Dictionary:
 		var value: Variant = ProjectSettings.get_setting(name)
 		var described: Dictionary = {
 			"setting": name,
-			"type": type_string(kind),
+			"type": type_named(kind, value),
 			"value": values.serialize_value(value),
 		}
 		# As a single get says it, so a family read can be told apart into what the project sets and
@@ -79,6 +79,47 @@ static func under(prefix: String, values: GdhSerialisation) -> Dictionary:
 		func(a: Dictionary, b: Dictionary) -> bool: return a["setting"] < b["setting"]
 	)
 	return { "prefix": prefix, "count": found.size(), "settings": found }
+
+
+## The type [param kind] names, with what [param value] holds when it is a typed array or
+## dictionary, as project.godot writes it: a `Dictionary[String, bool]` was answered as Dictionary,
+## which hides what its keys and values must be.
+static func type_named(kind: int, value: Variant) -> String:
+	if kind == TYPE_ARRAY and value is Array:
+		var list: Array = value
+		if list.is_typed():
+			var element: String = _held(
+				list.get_typed_builtin(), list.get_typed_class_name(), list.get_typed_script()
+			)
+			return "Array[%s]" % element
+	elif kind == TYPE_DICTIONARY and value is Dictionary:
+		var table: Dictionary = value
+		if table.is_typed():
+			var key: String = _held(
+				table.get_typed_key_builtin(),
+				table.get_typed_key_class_name(),
+				table.get_typed_key_script()
+			)
+			var held: String = _held(
+				table.get_typed_value_builtin(),
+				table.get_typed_value_class_name(),
+				table.get_typed_value_script()
+			)
+			return "Dictionary[%s, %s]" % [key, held]
+	return type_string(kind)
+
+
+## One side of a typed collection: a built-in type, a class, or a script by its class_name.
+static func _held(builtin: int, named: StringName, script: Variant) -> String:
+	if builtin == TYPE_NIL:
+		return "Variant"
+	if builtin != TYPE_OBJECT:
+		return type_string(builtin)
+	if script is Script:
+		var declared: Script = script
+		if not declared.get_global_name().is_empty():
+			return declared.get_global_name()
+	return str(named)
 
 
 ## The setting [param setting_path] overrides for builds with one feature, as
