@@ -2146,7 +2146,12 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(plugins, 'enabled_count'), 0);
 
   const beforePlugin = readFileSync(projectFile, 'utf8');
-  assert.equal(get(operation('enable_plugin', { plugin_name: 'gdharness_editor' }), 'action'), 'enabled');
+  const enabledOne = operation('enable_plugin', { plugin_name: 'gdharness_editor' });
+  assert.deepEqual(
+    [get(enabledOne, 'action'), get(enabledOne, 'note')],
+    ['enabled', undefined],
+    `a plugin the editor loads is enabled with nothing to say: ${JSON.stringify(enabledOne)}`,
+  );
   const withPlugin = readFileSync(projectFile, 'utf8');
   assert.match(
     withPlugin,
@@ -2204,6 +2209,55 @@ function testOperations(godotPath: string, projectDir: string): void {
     assert.equal(readFileSync(projectFile, 'utf8'), beforePlugin, 'and both come out again');
   } finally {
     rmSync(join(projectDir, 'addons', 'pack'), { recursive: true, force: true });
+  }
+
+  // A plugin the editor will not load is still enabled, since its script can be put right before
+  // the editor starts, and the answer says what the editor will find.
+  const unloadable: Array<[string, string, string]> = [
+    [
+      'broken',
+      '@tool\nextends EditorPlugin\n\n\nfunc _enter_tree() -> void\n\tpass\n',
+      'res://addons/broken/plugin.gd does not compile, so the editor disables the plugin again at its next start. script_diagnostics names the error.',
+    ],
+    [
+      'untooled',
+      'extends EditorPlugin\n',
+      'res://addons/untooled/plugin.gd is not a @tool script, so the editor loads nothing for it.',
+    ],
+    [
+      'unplugged',
+      '@tool\nextends Node\n',
+      'res://addons/unplugged/plugin.gd does not extend EditorPlugin, so the editor loads nothing for it.',
+    ],
+    [
+      'scriptless',
+      '',
+      'res://addons/scriptless/plugin.gd does not exist, so the editor will not enable the plugin.',
+    ],
+  ];
+  try {
+    for (const [name, source, note] of unloadable) {
+      mkdirSync(join(projectDir, 'addons', name), { recursive: true });
+      writeFileSync(
+        join(projectDir, 'addons', name, 'plugin.cfg'),
+        `[plugin]\n\nname="${name}"\nscript="plugin.gd"\n`,
+      );
+      if (source !== '') {
+        writeFileSync(join(projectDir, 'addons', name, 'plugin.gd'), source);
+      }
+      const answer = operation('enable_plugin', { plugin_name: name });
+      assert.deepEqual(
+        [get(answer, 'action'), get(answer, 'note')],
+        ['enabled', note],
+        `${name} is enabled and the answer says why the editor will not load it: ${JSON.stringify(answer)}`,
+      );
+      operation('disable_plugin', { plugin_name: name });
+    }
+    assert.equal(readFileSync(projectFile, 'utf8'), beforePlugin, 'and each comes out again');
+  } finally {
+    for (const [name] of unloadable) {
+      rmSync(join(projectDir, 'addons', name), { recursive: true, force: true });
+    }
   }
 
   // Input actions, which are stored as an engine expression rather than as JSON.
@@ -4098,6 +4152,12 @@ function testASettingSaysWhatReplacesIt(godotPath: string): void {
       ],
       JSON.stringify(again),
     );
+    // A new override is not a misspelt setting, so it is written with no nearest names offered.
+    const back = runOperation(godotPath, dir, 'set_project_setting', {
+      setting: 'application/config/description.windows',
+      value: 'on windows again',
+    });
+    assert.deepEqual([get(back, 'saved'), get(back, 'note')], [true, undefined], JSON.stringify(back));
   } finally {
     sweep(dir);
   }

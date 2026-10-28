@@ -53649,6 +53649,12 @@ async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
     assert.equal(get(kept.answer, 'removed'), true, `a line holding a default can be unset: ${kept.said}`);
     assert.ok(!file().includes('unused_variable'), `which takes it out: ${file()}`);
     assert.ok(file().includes(`[rendering]\n\n${filter}`), `and leaves the other: ${file()}`);
+    const misspelt = await settings({ op: 'unset', setting: 'debug/gdscript/warnings/unused_variabel' });
+    assert.equal(
+      get(misspelt.answer, 'note'),
+      'project.godot does not set debug/gdscript/warnings/unused_variabel, so there was nothing to take out. Nor does the engine declare it; the nearest settings are debug/gdscript/warnings/unused_variable, debug/gdscript/warnings/unused_private_class_variable, debug/gdscript/warnings/unassigned_variable.',
+      `a misspelt unset is offered the name it likely meant: ${misspelt.said}`,
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
