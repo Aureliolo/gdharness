@@ -4,7 +4,5 @@
   // raw transfer reserves a 6 GiB buffer per CPU core it parses on; Linux never commits those
   // pages, Windows does, and on a 32-core machine the reservation fails outright.
   "entry": ["src/cli.ts", "scripts/*.ts", "test/*.ts"],
-  "project": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
-  // gdlint and gdformat come from .venv: neither is a dependency anything here could install.
-  "ignoreBinaries": ["gdlint", "gdformat"]
+  "project": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
 }

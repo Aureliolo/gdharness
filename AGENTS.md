@@ -2,24 +2,26 @@
 
 ## Commands
 
-| Command                                                          | What it does                                                                                                                                                    |
-| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bun run build`                                                  | Bundles into `build/` without typechecking. `ci`, `test:metadata`, `test:packaging` and `test:node-runtime` run it first; `test:ci` and the regressions do not. |
-| `bun run typecheck`                                              | `tsc --noEmit`.                                                                                                                                                 |
-| `bun run ci`                                                     | Build, typecheck, `format:check`, `lint` and `test:ci`, in that order.                                                                                          |
-| `bun run lint`                                                   | Biome, types, dead code and markdownlint.                                                                                                                       |
-| `bun run format:check`                                           | Biome and Prettier.                                                                                                                                             |
-| `uv run bun run lint:gd`, `uv run bun run format:gd:check`       | The pinned gdlint and gdformat from `.venv`, on `src/godot` and `test/support/gd`.                                                                              |
-| `uv run yamllint --strict .`                                     | The `yaml` job.                                                                                                                                                 |
-| `bun run format`, `bun run lint:fix`, `uv run bun run format:gd` | Write the fixes.                                                                                                                                                |
-| `bun run test:typed`                                             | Shipped scripts and fixtures, warnings as errors; Godot.                                                                                                        |
-| `bun test/regressions.ts [name ...]`                             | Every regression; names select tests, loosely matched.                                                                                                          |
-| `bun run test:ci`                                                | The eleven fast files, regressions included.                                                                                                                    |
-| `test:integration`, `test:metadata`, `test:packaging`            | The other four files the `build-and-test` job runs. `test:packaging` refuses on Windows.                                                                        |
-| `bun run test:engine`, `bun run test:editor`                     | The engine and editor legs; need a real Godot.                                                                                                                  |
+| Command                                                   | What it does                                                                                                                                                    |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun run build`                                           | Bundles into `build/` without typechecking. `ci`, `test:metadata`, `test:packaging` and `test:node-runtime` run it first; `test:ci` and the regressions do not. |
+| `bun run typecheck`                                       | `tsc --noEmit`.                                                                                                                                                 |
+| `bun run ci`                                              | Build, typecheck, `format:check`, `lint` and `test:ci`, in that order.                                                                                          |
+| `bun run lint`                                            | Biome, types, dead code and markdownlint.                                                                                                                       |
+| `bun run format:check`                                    | Biome and Prettier.                                                                                                                                             |
+| `bun run lint:gd`, `bun run format:gd:check`              | The pinned gdstyle with the lane's `gdstyle.toml`, on every script under `src/godot` and `test/support/gd`.                                                     |
+| `uv run yamllint --strict .`                              | The `yaml` job.                                                                                                                                                 |
+| `bun run format`, `bun run lint:fix`, `bun run format:gd` | Write the fixes.                                                                                                                                                |
+| `bun run test:typed`                                      | Shipped scripts and fixtures, warnings as errors; Godot.                                                                                                        |
+| `bun test/regressions.ts [name ...]`                      | Every regression; names select tests, loosely matched.                                                                                                          |
+| `bun run test:ci`                                         | The eleven fast files, regressions included.                                                                                                                    |
+| `test:integration`, `test:metadata`, `test:packaging`     | The other four files the `build-and-test` job runs. `test:packaging` refuses on Windows.                                                                        |
+| `bun run test:engine`, `bun run test:editor`              | The engine and editor legs; need a real Godot.                                                                                                                  |
 
-Set up with `bun install` and `uv sync --locked`; the second puts the pinned gdtoolkit and yamllint
-in `.venv`, which `uv run` uses in preference to any copy on `PATH`.
+Set up with `bun install`, `bun scripts/install-gdstyle.ts` and `uv sync --locked`. The second puts
+the pinned gdstyle in the temp directory, where the GDScript gates look for it, and the third puts
+the pinned yamllint in `.venv`, which `uv run` uses in preference to any copy on `PATH`.
+`gdstyle.toml` is the lane's, copied byte for byte: a change to it is made in the lane first.
 
 Build before running a suite, because the suites start servers from the bundle. Engine-backed cases
 need `GODOT_PATH`, and the gdUnit fixture needs `GDUNIT4_PATH`; without them those cases skip and say
@@ -32,7 +34,7 @@ The server speaks the 2026-07-28 protocol only, as Claude Code does: `ServerProc
 `server/discover` and puts the envelope on every request. A 2025 `initialize` is answered with the
 unsupported-protocol-version error naming 2026-07-28, which smoke checks.
 
-Run `test:typed` after any GDScript change. gdlint and gdformat pass a script the engine refuses with
+Run `test:typed` after any GDScript change. gdstyle passes a script the engine refuses with
 warnings as errors, and the regressions load the addons under the default warnings, so a local run
 with the engine passed a runtime addon that failed to compile on the Linux engine leg. The fixtures
 in `test/support/gd` compile under those settings too: one tried in a scratch project with default

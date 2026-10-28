@@ -1,0 +1,47 @@
+# The lane's GDScript style, read by the lane's lint step through gdstyle's check and its
+# formatter's diff, with every finding failing the gate (`--max-warnings 0`). The same file in every
+# game and in the shared kit, so a script reads alike wherever it is; a change is made in the lane's
+# skeleton first and taken by every repository at once. The step hands gdstyle every script of the
+# repository's own by name, so its `exclude` decides nothing here. Aurelio, 2026-10-28, choosing
+# gdstyle over gdtoolkit for lint and format alike.
+
+# Matches ruff, so Python and GDScript wrap at the same column; a tab counts four, as the editor
+# shows it.
+max_line_length = 100
+
+# gdstyle's default is 5; six is the lane's, and it counts a static function's too.
+max_parameters = 6
+
+# The style guide's own line: a number under a million reads without separators (Steam app ids,
+# seeds, sample rates).
+large_number_threshold = 1_000_000
+
+[rules]
+# Measured over every game on 2026-10-28: tests stepping frames and sequential awaits written so.
+"quality/await-in-loop" = "off"
+# Tests and builders make objects in a loop by design.
+"quality/allocation-in-loop" = "off"
+# Every finding was a false positive: the rule ignores the receiver (`hand[0].upgraded = upgraded`).
+"quality/no-self-assign" = "off"
+# A folder prefix joined with names reads as the same path loaded twice.
+"quality/duplicated-load" = "off"
+# gdstyle 0.5.0 flags an `elif` after a branch that returns only on some paths (`if a:` holding
+# `if b: return 1`), where obeying it changes what the function does: every one of one game's
+# eight findings was this kind.
+"quality/no-else-return" = "off"
+# A function's size is held by the lane's `complexity` check (a ceiling of 10) and a script's by its
+# `code-size`; a second budget counted another way would argue with them.
+"quality/max-function-length" = "off"
+"quality/max-local-variables" = "off"
+"quality/max-nesting-depth" = "off"
+"quality/max-returns" = "off"
+"quality/max-branches" = "off"
+# The same for a class: its size is its script's, which `code-size` holds. Counted another way they
+# would split the shared kit's static helpers and settings pages for nothing (measured 2026-10-28:
+# 53 classes past 15 variables and 22 past 20 public methods in the kit, 32 more in the games).
+"quality/max-class-variables" = "off"
+"quality/max-public-methods" = "off"
+"quality/max-inner-classes" = "off"
+# A script's lines counted with its comments, which `code-size` leaves out on purpose: a cap on all
+# of them is a budget on the comments saying why, and shortening one splits no code.
+"quality/max-file-length" = "off"

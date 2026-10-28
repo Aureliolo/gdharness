@@ -47,16 +47,18 @@ all TypeScript, so one type checker covers everything Bun runs.
 
 |              | TypeScript                                                                                                                                                                    | GDScript                                                                                                                                                              | YAML                                                                       | Markdown                               |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------- |
-| Formatter    | Biome                                                                                                                                                                         | gdformat, the fixtures included                                                                                                                                       | Prettier                                                                   | Prettier, prose wrap preserved         |
-| Linter       | Biome, oxlint type-aware                                                                                                                                                      | gdlint, nothing disabled                                                                                                                                              | yamllint `--strict`; actionlint and zizmor at `pedantic` for the workflows | markdownlint, every rule, lines at 100 |
+| Formatter    | Biome                                                                                                                                                                         | gdstyle, the fixtures included                                                                                                                                        | Prettier                                                                   | Prettier, prose wrap preserved         |
+| Linter       | Biome, oxlint type-aware                                                                                                                                                      | gdstyle, every finding failing, with the lane's `gdstyle.toml`                                                                                                        | yamllint `--strict`; actionlint and zizmor at `pedantic` for the workflows | markdownlint, every rule, lines at 100 |
 | Type checker | `tsc`, `@tsconfig/strictest`, over `src`, `test` and `scripts` alike                                                                                                          | the engine: `test:engine` parses every shipped script and fixture with all 43 GDScript warnings as errors, addons included, and proves the gate bites by planting one | -                                                                          | -                                      |
 | Dead code    | knip: every file, export and dependency is reached from an entry point                                                                                                        | -                                                                                                                                                                     | -                                                                          | -                                      |
 | Fuzzing      | fast-check properties in `test/fuzz.ts` over every reader of bytes nobody here wrote: the Content-Length framing, `project.godot`, paths inside a project, the engine archive | -                                                                                                                                                                     | -                                                                          | -                                      |
 
 Rules are **written out rather than inherited from a preset**, so the file says what it enforces:
-see `.oxlintrc.json`, `.gdlintrc`, `.yamllint.yaml` and `.markdownlint-cli2.jsonc`. Nothing is
+see `.oxlintrc.json`, `gdstyle.toml`, `.yamllint.yaml` and `.markdownlint-cli2.jsonc`. Nothing is
 turned off quietly. A rule that fires on good code is an argument about the rule, and the
-argument goes next to the suppression along with what it would cost to adopt.
+argument goes next to the suppression along with what it would cost to adopt. `gdstyle.toml` is
+shared with the owner's game projects and copied byte for byte, so a change to it is made there
+first.
 
 **Every job CI runs is a required status check.** A job that can be red while something merges is
 not a gate, and we have been bitten by exactly that. The engine legs run in parts on separate
@@ -66,8 +68,8 @@ in which case the parts are skipped. A `scope` that fails fails those checks wit
 
 **Nothing from outside the repository runs unverified.** Every file CI downloads is refused
 unless it matches a digest written in this repository: the Bun that runs every job
-(`.github/actions/install-bun`), uv and the interpreter, gdtoolkit and yamllint under it
-(`ci.yml`, `uv.lock`), actionlint (`workflows.yml`), the engine
+(`.github/actions/install-bun`), uv and the interpreter, and yamllint under it (`ci.yml`,
+`uv.lock`), gdstyle (`scripts/install-gdstyle.ts`), actionlint (`workflows.yml`), the engine
 (`scripts/install-godot.ts`) and the gdUnit4 the runner fixture drives
 (`scripts/install-gdunit4.ts`). npm packages carry theirs in `bun.lock`, actions are pinned by
 commit, and zizmor runs from a container image whose digest is fixed by the action's commit. A
@@ -75,9 +77,9 @@ tool that arrives without a digest arrives with one in the same change.
 
 **Every pin is watched by Renovate, digest included.** `.github/renovate.json` is the whole of
 it: the `bun` and `github-actions` managers cover `package.json`, `bun.lock` and every `uses:`;
-the `uv` manager covers gdtoolkit and yamllint in `pyproject.toml` and `uv.lock`, hashes
-included; and three regex managers read the `# renovate:` line above any other pin, so a new one
-is watched the moment it is annotated.
+the `uv` manager covers yamllint in `pyproject.toml` and `uv.lock`, hashes included; and the
+regex managers read the `renovate:` comment above any other pin, so a new one is watched the
+moment it is annotated.
 Renovate opens two pull requests a week and no others. Monday's carries every raise, majors and
 vulnerability fixes included. Tuesday's regenerates `bun.lock` and `uv.lock`, which is where the
 transitive dependencies move, and it is its own pull request because it changes nothing this
@@ -92,7 +94,8 @@ actually changed before taking it.
 git clone https://github.com/Aureliolo/gdharness.git
 cd gdharness
 bun install
-uv sync --locked           # gdtoolkit and yamllint, into .venv
+bun scripts/install-gdstyle.ts
+uv sync --locked           # yamllint, into .venv
 bun run build
 ```
 
@@ -104,8 +107,8 @@ bun run test:integration   # the bridge against a mock editor and a mock runtime
 bun run test:metadata
 bun run format             # Biome for the code, Prettier for the prose and YAML; writes
 bun run lint               # Biome, then oxlint with its type-aware rules, then knip, then markdownlint
-uv run bun run lint:gd     # gdlint, from .venv
-uv run bun run format:gd   # gdformat, writes
+bun run lint:gd            # gdstyle's linter
+bun run format:gd          # gdstyle's formatter, writes
 uv run yamllint --strict .
 bun run docs               # the public site, into site/; refuses a page nothing links to
 bun run watch              # TypeScript watch mode
