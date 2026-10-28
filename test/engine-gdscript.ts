@@ -4075,6 +4075,34 @@ function testEveryUseIsFound(godotPath: string): void {
     );
     assert.deepEqual(structure('herald.gd'), [[], []], 'and not one named only in words');
     assert.deepEqual(structure('enemy.gd'), [[], []], 'nor a script for its own name');
+    // A base named by its path, a constant handed to load, and an inner class's base are loaded
+    // as surely as a path written in the call; a constant only printed, or one held in a variable,
+    // is not loaded by name.
+    writeFileSync(
+      join(dir, 'based.gd'),
+      [
+        'extends "res://herald.gd"',
+        '',
+        'const PIECE := "res://spawner.gd"',
+        'const SHOWN := "res://nowhere.gd"',
+        '',
+        '',
+        'class Part extends "enemy.gd":',
+        '\tpass',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar piece: Script = load(PIECE)',
+        '\tprint(piece, SHOWN)',
+        '',
+      ].join('\n'),
+    );
+    assert.deepEqual(
+      get(operation('get_script_info', { script_path: 'based.gd' }), 'dependencies'),
+      ['res://herald.gd', 'enemy.gd', 'res://spawner.gd'],
+      'the base, the inner base and the constant loaded',
+    );
+    rmSync(join(dir, 'based.gd'));
 
     // Five deep and a shortcut to the middle: at depth three the middle is first reached two down,
     // where its list stops short, and then again one down, where it does not.
@@ -4106,13 +4134,57 @@ function testEveryUseIsFound(godotPath: string): void {
       [['res://sub/chain_d.gd', ['res://sub/chain_e.gd']]],
       `one down, the middle has its whole list: ${JSON.stringify(walked)}`,
     );
-    // Reached through b and directly, c, d and e each sit in the tree twice and are four files.
+    // Reached through b and directly, c lists what it loads under b, where it is first reached, and
+    // the second entry says so.
     const whole = operation('get_dependencies', { resource_path: 'sub/chain_a.gd' });
     assert.deepEqual(
       [get(whole, 'summary', 'total_dependencies'), get(whole, 'summary', 'total_references')],
-      [4, 7],
-      `four files, seven entries: ${JSON.stringify(get(whole, 'dependencies'))}`,
+      [4, 5],
+      `four files, five entries: ${JSON.stringify(get(whole, 'dependencies'))}`,
     );
+    assert.deepEqual(
+      asArray(get(whole, 'dependencies', 'res://sub/chain_a.gd')),
+      [
+        {
+          path: 'res://sub/chain_b.gd',
+          exists: true,
+          dependencies: [
+            {
+              path: 'res://sub/chain_c.gd',
+              exists: true,
+              dependencies: [
+                {
+                  path: 'res://sub/chain_d.gd',
+                  exists: true,
+                  dependencies: [{ path: 'res://sub/chain_e.gd', exists: true }],
+                },
+              ],
+            },
+          ],
+        },
+        { path: 'res://sub/chain_c.gd', exists: true, dependencies_listed_above: true },
+      ],
+      'c is listed once',
+    );
+    // Each rung loads the next two, so the routes to the top double every two rungs while the
+    // references grow by two a rung. Listed under every route, the tree for thirty rungs did not
+    // finish.
+    const rungs = 30;
+    mkdirSync(join(dir, 'ladder'));
+    for (let rung = 0; rung < rungs; rung++) {
+      const next = [rung + 1, rung + 2].filter((one) => one < rungs);
+      writeFileSync(
+        join(dir, 'ladder', `rung_${rung}.gd`),
+        `extends Node\n\n${next.map((one) => `const R${one} = preload("res://ladder/rung_${one}.gd")\n`).join('')}`,
+      );
+    }
+    const ladder = operation('get_dependencies', { resource_path: 'ladder/rung_0.gd' });
+    assert.deepEqual(
+      [get(ladder, 'summary', 'total_dependencies'), get(ladder, 'summary', 'total_references')],
+      [rungs - 1, 2 * rungs - 3],
+      `every rung once, each reference once: ${JSON.stringify(get(ladder, 'summary'))}`,
+    );
+    rmSync(join(dir, 'ladder'), { recursive: true });
     // At depth three, d is reached through b and c at the limit and says it names one more file,
     // while e at the limit names none and says nothing.
     const throughB = asArray(
@@ -4418,22 +4490,67 @@ function testAFamilySaysWhatTheProjectSets(godotPath: string): void {
 }
 
 /**
- * Validation reads at most a hundred scripts, and says so with the count it read and the count there
- * are. It counted the one past the limit before stopping and answered 101.
+ * Validation reads every script for TODO and FIXME comments, as health does, and a load written in
+ * a string that runs across lines is text, not a missing file.
+ *
+ * Cut at a hundred, the count sat beside a compile check of every script and read as how many
+ * compiled. A test suite template's example `load("res://folder/my_class.gd")` made a game's
+ * validation fail.
  */
-function testValidationSaysHowMuchItRead(godotPath: string): void {
+function testValidationReadsEveryScript(godotPath: string): void {
   const dir = createProject(godotPath);
+  const noted = (validated: unknown): unknown =>
+    get(
+      asArray(get(validated, 'warnings')).find((warning) => get(warning, 'check') === 'scripts'),
+      'message',
+    );
   try {
+    const before = /^\d+/.exec(asString(noted(runOperation(godotPath, dir, 'validate_project', {}))))?.[0];
     mkdirSync(join(dir, 'many'));
-    // Past the limit by these alone: validation passes over installed addons, so the fixture's own
-    // scripts count for nothing.
     for (let index = 0; index < 110; index++) {
-      writeFileSync(join(dir, 'many', `s${index}.gd`), 'extends Node\n');
+      writeFileSync(join(dir, 'many', `s${index}.gd`), 'extends Node\n\n# TODO: one each\n');
     }
+    writeFileSync(
+      join(dir, 'many', 'template.gd'),
+      [
+        'extends Node',
+        '',
+        'const SHOWN := """',
+        '\tvar my_script := load("res://folder/shown_only.gd")',
+        '"""',
+        "const ALSO := '''",
+        '\tload("res://folder/also_shown.gd")',
+        "'''",
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tprint(SHOWN, ALSO, load("res://folder/really_missing.gd"))',
+        '',
+      ].join('\n'),
+    );
     const validated = runOperation(godotPath, dir, 'validate_project', {});
     const total = asNumber(get(validated, 'scripts_total'));
-    assert.ok(total > 100, `the project should hold more than the limit: ${total}`);
-    assert.equal(get(validated, 'scripts_checked'), 100, JSON.stringify(validated));
+    assert.ok(total > 111, `the fixture's scripts and these: ${total}`);
+    assert.equal(get(validated, 'scripts_checked'), total, JSON.stringify(validated));
+    assert.equal(noted(validated), `${Number(before) + 110} script issues found`, JSON.stringify(validated));
+    const missing = asArray(get(validated, 'issues'))
+      .filter((issue) => get(issue, 'check') === 'references')
+      .map((issue) => asString(get(issue, 'message')));
+    assert.deepEqual(
+      missing.map((message) => /res:\/\/folder\/\w+\.gd/.exec(message)?.[0]),
+      ['res://folder/really_missing.gd'],
+      `only the load in code: ${JSON.stringify(missing)}`,
+    );
+    // The dependency walk reads the same code, and names the same one file.
+    assert.deepEqual(
+      get(
+        runOperation(godotPath, dir, 'get_dependencies', { resource_path: 'many/template.gd' }),
+        'dependencies',
+        'res://many/template.gd',
+      ),
+      [{ path: 'res://folder/really_missing.gd', exists: false }],
+      'nor does the walk depend on the text',
+    );
   } finally {
     sweep(dir);
   }
@@ -5548,7 +5665,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
     testTheImporterIsAskedFirst(godotPath);
   },
   validationCounts: (godotPath) => {
-    testValidationSaysHowMuchItRead(godotPath);
+    testValidationReadsEveryScript(godotPath);
   },
   connectionsReached: (godotPath) => {
     testAConnectionNamesWhatItReaches(godotPath);

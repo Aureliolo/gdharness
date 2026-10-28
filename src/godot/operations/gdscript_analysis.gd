@@ -56,6 +56,25 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	# its first function would otherwise be judged against the default.
 	_mark_virtuals(functions, extends_name, full_script_path)
 
+	# The engine loads a base named by its path and a constant handed to load or preload as surely
+	# as a path written in the call, and both were left out while project_dependencies named them: a
+	# script extending "frame.gd" did not depend on it, nor one calling load(TYPE_CASE).
+	for written: String in _based_on_paths(extends_name, own.inner_classes):
+		if not written in dependencies:
+			dependencies.append(written)
+	var held: Dictionary = {}
+	for constant: Dictionary in own.constants:
+		held[str(constant.get("name", ""))] = _unquoted(str(constant.get("value", "")))
+	for code: String in GdhDependencies.code_by_line(content):
+		for loading: RegExMatch in (
+			GdhPatterns
+			. compiled("(?<![\\w.])(?:preload|load)\\s*\\(\\s*([A-Za-z_]\\w*)\\s*\\)")
+			. search_all(code)
+		):
+			var written: String = str(held.get(loading.get_string(1), ""))
+			if not written.is_empty() and not written in dependencies:
+				dependencies.append(written)
+
 	# A script typed by its class_name is depended on as surely as one preloaded, and the answer
 	# listed only the preloads: a `var stats: Stats` left stats.gd out, while project_dependencies
 	# named it. The same reading as that tool's, so the two agree.
@@ -131,7 +150,7 @@ func _members(
 		# Inside a string the raw line is counted, because a `#` in it is text and taking it for a
 		# comment would cut off the quotes that close the string.
 		if in_multiline_string:
-			if _triple_quotes(raw) % 2 == 1:
+			if GdhPatterns.triple_quotes(raw) % 2 == 1:
 				in_multiline_string = false
 			continue
 		# A `##` block documents what it sits directly above: the class when that is its class_name
@@ -165,7 +184,7 @@ func _members(
 		# it opened on. Toggling on any count lost `const HELP := """Usage"""`, and everything after
 		# it up to the next triple quote, with the state inverted from there to the end of the file.
 		# The line that opens one is still read: it can be the declaration the string belongs to.
-		if _triple_quotes(stripped) % 2 == 1:
+		if GdhPatterns.triple_quotes(stripped) % 2 == 1:
 			in_multiline_string = true
 
 		# Only a line at this body's own margin declares one of its members. Deeper, it is a
@@ -207,7 +226,7 @@ func _members(
 			while i + 1 < lines.size():
 				i += 1
 				stripped += "\n" + lines[i]
-				if _triple_quotes(lines[i]) % 2 == 1:
+				if GdhPatterns.triple_quotes(lines[i]) % 2 == 1:
 					break
 			in_multiline_string = false
 			header = GdhPatterns.without_annotations(stripped)
@@ -821,13 +840,31 @@ func _collect_dependencies(line: String, into: Array[String]) -> void:
 			into.append(dep)
 
 
-# How many triple quotes of either kind [param line] holds.
+## The paths a script and its inner classes extend by, as written: [param extends_name] the
+## script's own extends, and [param inner_classes] its inner classes as answered.
+static func _based_on_paths(extends_name: String, inner_classes: Array) -> Array[String]:
+	var paths: Array[String] = []
+	var written: String = _unquoted(extends_name)
+	if not written.is_empty():
+		paths.append(written)
+	for inner: Dictionary in inner_classes:
+		var deeper: Array = inner.get("inner_classes", [])
+		for path: String in _based_on_paths(str(inner.get("extends", "")), deeper):
+			if not path in paths:
+				paths.append(path)
+	return paths
+
+
+## The text of [param literal], a string literal as written; empty for anything else.
+static func _unquoted(literal: String) -> String:
+	var text: String = literal.strip_edges()
+	if text.length() >= 2 and text[0] in ["\"", "'"] and text[-1] == text[0]:
+		return text.substr(1, text.length() - 2)
+	return ""
+
+
 static func _declares_variable(header: String) -> bool:
 	return header.begins_with("var ") or header.begins_with("static var ")
-
-
-static func _triple_quotes(line: String) -> int:
-	return line.count('"""') + line.count("'''")
 
 
 func _extract_dependencies(line: String) -> Array[String]:

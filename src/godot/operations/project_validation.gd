@@ -196,9 +196,9 @@ func validate_project(params: Dictionary) -> Dictionary:
 	var scripts_checked: int = 0
 	var script_issues: Array[Dictionary] = []
 
-	# A hundred scripts is enough to say whether the project is tidy without a large one
-	# turning validation into a full read of its source tree.
-	for script_path: String in script_files.slice(0, 100):
+	# Every script, as health reads them: cut at the first hundred in walk order, the count sat
+	# beside a compile check of all 803 scripts of a game and read as how many were compiled.
+	for script_path: String in script_files:
 		scripts_checked += 1
 		var file: FileAccess = FileAccess.open(script_path, FileAccess.READ)
 		if file:
@@ -292,7 +292,6 @@ func validate_project(params: Dictionary) -> Dictionary:
 		"warnings": warnings,
 		"checks_performed": checks_performed,
 		"scripts_checked": scripts_checked,
-		# Said beside the count, so a project of four hundred scripts is not read as checked whole.
 		"scripts_total": script_files.size(),
 		"issue_count": issues.size(),
 		"warning_count": warnings.size(),
