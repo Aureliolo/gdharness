@@ -249,6 +249,16 @@ func _members(
 				i += 1
 				stripped = (stripped + " " + GdhPatterns.without_comment(lines[i])).strip_edges()
 			header = GdhPatterns.without_annotations(stripped)
+		# A value that opens a triple-quoted string ends where the string does, and read from its
+		# first line alone it was the opening quotes and the text up to the line break.
+		if in_multiline_string and (header.begins_with("const ") or _declares_variable(header)):
+			while i + 1 < lines.size():
+				i += 1
+				stripped += "\n" + lines[i]
+				if _triple_quotes(lines[i]) % 2 == 1:
+					break
+			in_multiline_string = false
+			header = GdhPatterns.without_annotations(stripped)
 		var declaration: RegExMatch = GdhPatterns.declared_class(header)
 		var entry: Dictionary = {}
 		if declaration != null:
@@ -273,7 +283,7 @@ func _members(
 		elif header.begins_with("enum "):
 			entry = _parse_enum(header, at + 1)
 			own.enums.append(entry)
-		elif header.begins_with("var ") or header.begins_with("static var "):
+		elif _declares_variable(header):
 			# The whole line here, not the header: which annotations a variable carries is the
 			# answer rather than noise in front of it, and `@export_range(0, 1)` is the hint.
 			entry = _parse_variable(stripped, at + 1)
@@ -602,6 +612,10 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 		return {"name": "", "line": line_num}
 
 	var var_text: String = line.substr(var_pos + 4).strip_edges()
+	# A colon closing the line opens the variable's setter and getter, and was read as the end of
+	# its default: `= Kind.ROUND:`.
+	if var_text.ends_with(":"):
+		var_text = var_text.left(-1).strip_edges()
 	var name: String = ""
 	var type_hint: String = ""
 	var default_value: String = ""
@@ -847,6 +861,10 @@ func _collect_dependencies(line: String, into: Array[String]) -> void:
 
 
 # How many triple quotes of either kind [param line] holds.
+static func _declares_variable(header: String) -> bool:
+	return header.begins_with("var ") or header.begins_with("static var ")
+
+
 static func _triple_quotes(line: String) -> int:
 	return line.count('"""') + line.count("'''")
 

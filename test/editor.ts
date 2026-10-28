@@ -2590,8 +2590,15 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
     asArray(get(machine, 'states'), 'states').find((state) => get(state, 'stateName') === name);
   assert.deepEqual(
     named('walk'),
-    // This tree has no player, so there is nothing to find the animation in or name as missing.
-    { stateName: 'walk', type: 'AnimationNodeAnimation', animationName: 'step', animationFound: false },
+    // This tree has no player, so the state says that rather than which animation is missing.
+    {
+      stateName: 'walk',
+      type: 'AnimationNodeAnimation',
+      animationName: 'step',
+      animationFound: false,
+      animationMissing:
+        'The AnimationTree has no anim_player, so no state plays anything until scene_node set points anim_player at one.',
+    },
     JSON.stringify(machine),
   );
   assert.equal(

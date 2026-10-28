@@ -246,6 +246,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 	var failed: String = _save_checked(resource, res_path, properties.keys(), null)
 	if not failed.is_empty():
 		return {"ok": false, "error": failed}
+	_note_put_back(answer, resource, res_path)
 	if not properties.is_empty():
 		answer["properties"] = _held(resource, properties.keys())
 	return answer
@@ -302,8 +303,22 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	var failed: String = _save_checked(resource, res_path, properties.keys(), previous)
 	if not failed.is_empty():
 		return {"ok": false, "error": failed}
+	_note_put_back(answer, resource, res_path)
 	answer["properties"] = _held(resource, properties.keys())
 	return answer
+
+
+## Moves to setByScript each property alsoChanged in [param answer] gave a value [param resource] no
+## longer holds once saved at [param path]: the save put it back as its script's doing.
+func _note_put_back(answer: Dictionary, resource: Resource, path: String) -> void:
+	var noted: Dictionary = answer.get("alsoChanged", {})
+	var restored: Array = []
+	for key: Variant in noted:
+		var now: Variant = _values.serialize_value(_properties.read_at(resource, str(key)))
+		var entry: Dictionary = noted[key]
+		if JSON.stringify(now) != JSON.stringify(entry.get("now")):
+			restored.append(key)
+	GdhHeadlessCheck.move_script_set(answer, restored, path)
 
 
 ## Why [param resource], saved at [param path], cannot hold what [param names] were given, or "": a

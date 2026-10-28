@@ -517,6 +517,18 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 			scripted[str(declared.get("name", ""))] = true
 	var serialiser: GdhSerialisation = GdhSerialisation.new()
 	var properties: Dictionary = {}
+	# A headless engine runs a script that is not a tool as the file loads, so what its _init and
+	# setters gave other properties read as values the file sets; the file's own lines say which it
+	# does. The editor runs no such script.
+	var untooled: bool = script != null and not script.is_tool() and not Engine.is_editor_hint()
+	var from_file: bool = (
+		untooled and file.ends_with(".tres") and not GdhShapes.STORED_APART.has(loaded.get_class())
+	)
+	var set_in_file: Dictionary = (
+		_names_set_in(FileAccess.get_file_as_string(file), res_path.trim_prefix(file).trim_prefix("::"))
+		if from_file
+		else {}
+	)
 	# A Curve's points are read off one with none, since the engine has no default for point_0.
 	var fresh: Object = (
 		ClassDB.instantiate(loaded.get_class()) if GdhShapes.STORED_APART.has(loaded.get_class()) else null
@@ -538,6 +550,8 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 			)
 			if GdhSame.same(value, default):
 				continue
+			if from_file and not set_in_file.has(property):
+				continue
 		properties[property] = serialiser.serialize_value(value)
 	var answer: Dictionary = {
 		"ok": true, "resourcePath": res_path, "resourceType": loaded.get_class(), "properties": properties
@@ -550,6 +564,26 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 		if not declared_class.is_empty():
 			answer["scriptClass"] = declared_class
 	return answer
+
+
+## The names the [code][resource][/code] section of [param text], a .tres file, sets, or those of the
+## embedded resource with the id [param id] when one is given, as a set.
+static func _names_set_in(text: String, id: String) -> Dictionary:
+	var names: Dictionary = {}
+	var inside: bool = false
+	var key: RegEx = RegEx.create_from_string("^([^\\s=\\[][^=]*?) = ")
+	for line: String in text.split("\n"):
+		if line.begins_with("["):
+			inside = (
+				line.begins_with("[resource]")
+				if id.is_empty()
+				else line.begins_with("[sub_resource") and line.contains('id="%s"' % id)
+			)
+			continue
+		var found: RegExMatch = key.search(line) if inside else null
+		if found != null:
+			names[found.get_string(1)] = true
+	return names
 
 
 ## The resource [param file] keeps under [param id], found in [param value] or anything it holds.

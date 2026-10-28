@@ -7802,6 +7802,10 @@ class GodotServer {
                 savesNote,
                 ...scanned,
                 ...windowSaid,
+                classes: withAddonClassesCounted(
+                  classes.payload,
+                  cachedClasses(project.value.path) ?? new Map(),
+                ),
               },
               null,
               2,

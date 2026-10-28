@@ -126,8 +126,13 @@ static func inherit(scene_path: String, base_path: String, root_name: String, sc
 		"rootNodeType": root_type,
 		"rootNodeName": name
 	}
-	if script != null:
-		answer["script"] = script.resource_path
+	var properties: Dictionary = base["properties"]
+	var carried: Variant = script if script != null else properties.get("script")
+	if carried is Script:
+		var carried_script: Script = carried
+		answer["script"] = carried_script.resource_path
+		if not str(carried_script.get_global_name()).is_empty():
+			answer["scriptClass"] = str(carried_script.get_global_name())
 	return answer
 
 

@@ -100,6 +100,9 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	file.close()
 	if not stored:
 		return _log.failure("Failed to write to script file: " + full_script_path)
+	# The editor gives a script it makes a .uid beside it. A headless engine writes none until the
+	# project is imported, so a script made here was missing from every check tracking the sidecars.
+	var uid: String = _uid_beside(full_script_path)
 
 	var written: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
 	var parses: bool = _parses(written)
@@ -110,7 +113,10 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		"absolute_path": ProjectSettings.globalize_path(full_script_path),
 		"template_used": template if not template.is_empty() else "none",
 		"parses": parses,
+		"uid": null,
 	}
+	if not uid.is_empty():
+		answer["uid"] = uid
 	# Read off the file as the engine parsed it rather than off the arguments, which content leaves
 	# out. A script that does not parse tells the engine nothing, and its empty base and name were
 	# answered for a file whose header says otherwise, so those are read off the text instead.
@@ -123,6 +129,22 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	else:
 		answer.merge(_header_written(script_content))
 	return answer
+
+
+## The uid in the .uid file beside [param path], written first when there is none, as the editor
+## writes it for a script it makes; empty when it could not be written. A sidecar already there is
+## the one the engine reads the script's uid from, so it is kept.
+static func _uid_beside(path: String) -> String:
+	var sidecar: String = path + ".uid"
+	if FileAccess.file_exists(sidecar):
+		return FileAccess.get_file_as_string(sidecar).strip_edges()
+	var text: String = ResourceUID.id_to_text(ResourceUID.create_id_for_path(path))
+	var file: FileAccess = FileAccess.open(sidecar, FileAccess.WRITE)
+	if file == null:
+		return ""
+	var stored: bool = file.store_string(text + "\n")
+	file.close()
+	return text if stored else ""
 
 
 ## The refusal for [param path], which is no GDScript file, naming what [param doing] it instead:
@@ -640,9 +662,24 @@ func _add_function(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 
 	# The body's statements relative to the function, whether or not the caller indented them for
 	# it: a body written with its tab already on came out two levels in. A blank line stays empty,
-	# since an indent alone on it is trailing whitespace to every formatter.
-	for bl: String in body.dedent().split("\n"):
-		func_lines.append("" if bl.strip_edges().is_empty() else "\t" + bl)
+	# since an indent alone on it is trailing whitespace to every formatter. Each level is the
+	# file's own unit, because the engine refuses a file indented with spaces in one place and tabs
+	# in another, so a tab put into a script indented with spaces stopped it parsing.
+	var unit: String = _indent_unit(lines)
+	var body_lines: Array[String] = []
+	body_lines.assign(body.dedent().strip_edges(false, true).split("\n"))
+	var given_unit: String = _indent_unit(body_lines)
+	for bl: String in body_lines:
+		if bl.strip_edges().is_empty():
+			func_lines.append("")
+			continue
+		var stripped: String = bl.lstrip(" \t")
+		var leading: String = bl.substr(0, bl.length() - stripped.length())
+		var levels: int = floori(float(leading.length()) / given_unit.length())
+		if leading != given_unit.repeat(levels):
+			func_lines.append(unit + bl)
+			continue
+		func_lines.append(unit.repeat(levels + 1) + stripped)
 
 	var below: int = _blank_run(lines, insert_line, 1)
 	if insert_line + below < lines.size():
@@ -652,6 +689,21 @@ func _add_function(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 		func_lines.append("")
 
 	return declared_at if _insert(lines, insert_line, func_lines, placed) else -1
+
+
+## One level of indentation in [param lines]: what the first line indented below an unindented
+## line ending a block opens with, or a tab, the engine's default, when no line is.
+static func _indent_unit(lines: Array[String]) -> String:
+	var opener: bool = false
+	for line: String in lines:
+		var stripped: String = line.strip_edges()
+		if stripped.is_empty() or stripped.begins_with("#"):
+			continue
+		var leading: String = line.substr(0, line.length() - line.lstrip(" \t").length())
+		if opener and not leading.is_empty():
+			return leading
+		opener = leading.is_empty() and stripped.ends_with(":")
+	return "\t"
 
 
 # How many blank lines run from [param from] on in the direction of [param step], 1 or -1.

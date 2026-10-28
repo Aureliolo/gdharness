@@ -384,7 +384,12 @@ function caseOf(suite: XmlElement, element: XmlElement): TestCase {
       .filter((child) => child.name === kind)
       .map((child) => {
         const detail = child.text.trim();
-        return { kind, message: child.attributes['message'] ?? null, detail: detail === '' ? null : detail };
+        const message = child.attributes['message'] ?? null;
+        return {
+          kind,
+          message: kind === 'error' ? raisedAt(message, detail) : message,
+          detail: detail === '' ? null : detail,
+        };
       });
   const reports = [...of('failure'), ...of('error'), ...of('skipped')];
   const status: CaseStatus = reports.some((report) => report.kind === 'error')
@@ -403,6 +408,25 @@ function caseOf(suite: XmlElement, element: XmlElement): TestCase {
     detail: reports[0]?.detail ?? null,
     reports,
   };
+}
+
+/**
+ * [param message] placed at the frame that raised the error, the first `at` line of [param detail].
+ * gdUnit4 names an error by the suite's path and the raising frame's line, so an error inside a
+ * script the case called was put on an unrelated line of the suite: a division by zero at line 11
+ * of calc.gd, called from line 15 of calc_test.gd, read `ERROR: res://test/calc_test.gd:11`.
+ * Measured with gdUnit4 6.2.2.
+ */
+function raisedAt(message: string | null, detail: string): string | null {
+  if (message === null) {
+    return null;
+  }
+  const named = /^ERROR: \S+:\d+(?=\s|$)/.exec(message);
+  const raised = /^\s*at '[^']*' in (\S+):(\d+)\s*$/m.exec(detail);
+  if (named === null || raised === null) {
+    return message;
+  }
+  return `ERROR: ${raised[1] ?? ''}:${raised[2] ?? ''}${message.slice(named[0].length)}`;
 }
 
 /** Whether [param entry] failed an assertion, which a case that then hit an error also did. */

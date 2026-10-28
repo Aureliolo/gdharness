@@ -791,6 +791,20 @@ function testOperations(godotPath: string, projectDir: string): void {
   const heroSource = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
   assert.match(heroSource, /^class_name FixtureHero/m, 'the class_name should be written first');
   assert.match(heroSource, /func change_state/, 'the state_machine template should be the one used');
+  // The editor writes a .uid beside a script it makes, and a headless engine writes none until an
+  // import, so a check tracking the sidecars failed on every script made here.
+  const heroUid = get(created, 'uid');
+  assert.match(String(heroUid), /^uid:\/\/[a-z0-9]+$/, 'the answer names the uid it wrote');
+  assert.equal(
+    readFileSync(join(projectDir, 'made', 'hero.gd.uid'), 'utf8'),
+    `${String(heroUid)}\n`,
+    'the sidecar holds the uid the answer names, as the editor writes it',
+  );
+  const leftUid = 'uid://dfde0vm55ws7m';
+  writeFileSync(join(projectDir, 'made', 'returned.gd.uid'), `${leftUid}\n`);
+  const returned = operation('create_script', { script_path: 'made/returned.gd', extends: 'Node' });
+  assert.equal(get(returned, 'uid'), leftUid, 'a sidecar already there is the uid the engine reads');
+  assert.equal(readFileSync(join(projectDir, 'made', 'returned.gd.uid'), 'utf8'), `${leftUid}\n`);
 
   // Every template has to parse in the strictest project there is, which this one is: a
   // template that trips a warning there is a script the tool wrote that the engine refuses.
@@ -1581,6 +1595,26 @@ function testOperations(godotPath: string, projectDir: string): void {
     JSON.stringify(nothing),
   );
   assert.equal(readFileSync(projectFile, 'utf8'), unsaid, 'and an unset of a line not there writes nothing');
+  // A write of the base value with an override beside it says which builds still read the override,
+  // and one with none says nothing of overrides.
+  const unoverridden = operation('set_project_setting', {
+    setting: 'display/window/size/viewport_width',
+    value: 700,
+  });
+  operation('set_project_setting', { setting: 'display/window/size/viewport_width.mobile', value: 320 });
+  const overridden = operation('set_project_setting', {
+    setting: 'display/window/size/viewport_width',
+    value: 800,
+  });
+  assert.deepEqual(
+    [get(unoverridden, 'overrides'), get(overridden, 'overrides'), get(overridden, 'overridesNote')],
+    [
+      undefined,
+      { mobile: 320 },
+      'Not every build reads what was written: one with the feature mobile reads 320 from display/window/size/viewport_width.mobile. Set or unset an override to change what its builds read.',
+    ],
+    JSON.stringify([unoverridden, overridden]),
+  );
   writeFileSync(projectFile, beforeNew);
 
   // Autoloads are written into project.godot by hand, so the round trip is the only proof.
@@ -1617,6 +1651,30 @@ function testOperations(godotPath: string, projectDir: string): void {
   });
   assert.equal(disabled.answer, null, 'an autoload cannot be added disabled, since it would load anyway');
   assert.match(disabled.stderr, /global: false keeps its name out of the global scope/, disabled.stderr);
+  // A name every script would then reach the autoload by instead of what it names now: an autoload
+  // called Input turned each Input.is_action_pressed into a call on the autoload.
+  const beforeClash = readFileSync(projectFile, 'utf8');
+  const clashes = [
+    ['Input', 'it is the engine class Input, and every script naming Input would reach the autoload instead'],
+    ['Vector2', 'it is the built-in type Vector2'],
+    ['match', 'it is a GDScript keyword'],
+    ['2nd', 'it is not an identifier, which a script could name'],
+  ].map(([name, reason]) => {
+    const refused = runRefusedOperation(godotPath, projectDir, 'add_autoload', {
+      name,
+      path: 'made/hero.gd',
+    });
+    return [
+      refused.answer,
+      refused.stderr.includes(`"${name}" cannot name an autoload: ${reason}. Nothing was written`),
+    ];
+  });
+  assert.deepEqual(
+    clashes,
+    clashes.map(() => [null, true]),
+    `each name is refused with its reason: ${JSON.stringify(clashes)}`,
+  );
+  assert.equal(readFileSync(projectFile, 'utf8'), beforeClash, 'and nothing was written for any of them');
   assert.equal(get(operation('remove_autoload', { name: 'Hero' }), 'removed'), true);
   assert.equal(
     readFileSync(projectFile, 'utf8'),
@@ -2098,13 +2156,22 @@ function testOperations(godotPath: string, projectDir: string): void {
   // here recorded that the resave minted no UID, while the assertion above it took that same
   // operation's `scripts_resaved` count as correct. Both were true about the engine and the pair
   // was still wrong, because nothing asked what a caller reads `scripts_resaved: 1` as meaning.
-  const absent = operation('get_uid', { resource_path: 'made/hero.gd' });
+  // create_script writes the sidecar, so the script here is written as a file edit writes one.
+  writeFileSync(join(projectDir, 'made', 'unimported.gd'), 'extends Node\n');
+  const absent = operation('get_uid', { resource_path: 'made/unimported.gd' });
+  rmSync(join(projectDir, 'made', 'unimported.gd'));
   assert.equal(get(absent, 'exists'), false);
-  assert.equal(get(absent, 'file'), 'res://made/hero.gd');
+  assert.equal(get(absent, 'file'), 'res://made/unimported.gd');
   assert.match(
     String(get(absent, 'message')),
     /refresh_uids/,
     'and it names the op that makes one, since that is the next thing the caller wants',
+  );
+  const minted = operation('get_uid', { resource_path: 'made/hero.gd' });
+  assert.deepEqual(
+    [get(minted, 'exists'), get(minted, 'uid')],
+    [true, heroUid],
+    'the sidecar create_script wrote is the uid the engine reads',
   );
   // Every other kind keeps its UID somewhere else, and refresh_uids makes none of them: a scene in its
   // header and an imported file in its import file. All were answered as having no .uid, with
@@ -2309,8 +2376,13 @@ function testOperations(godotPath: string, projectDir: string): void {
     deadzone: 0.2,
   });
   assert.deepEqual(
-    [get(rebound, 'was_new'), get(rebound, 'old_deadzone'), get(rebound, 'events_count')],
-    [false, 0.5, 1],
+    [
+      get(rebound, 'was_new'),
+      get(rebound, 'old_deadzone'),
+      get(rebound, 'events_count'),
+      get(rebound, 'saved'),
+    ],
+    [false, 0.5, 1, true],
     JSON.stringify(rebound),
   );
   const oldEvents = asArray(get(rebound, 'old_events'));
@@ -4737,6 +4809,45 @@ async function testAScriptNamingAnAutoloadCompiles(godotPath: string): Promise<v
       readFileSync(join(dir, 'made.gd'), 'utf8'),
       /\nfunc greet\(\) -> void:\n\tprint\(Thing\.hello\(\)\)\n\n\nfunc twice\(\) -> void:\n\tvar n: int = Thing\.hello\(\)\n\n\tprint\(n, n\)\n$/,
       readFileSync(join(dir, 'made.gd'), 'utf8'),
+    );
+    // Each level of a body takes the file's own unit, whichever the caller nested it with: the
+    // engine refuses a script indented with spaces in one place and tabs in another.
+    const nested = await runThroughTheServersOwnPath(
+      engine,
+      'modify_script',
+      {
+        scriptPath: 'made.gd',
+        modifications: [{ type: 'add_function', name: 'guarded', body: 'if Thing:\n  print(Thing)' }],
+      },
+      dir,
+    );
+    writeFileSync(
+      join(dir, 'spaced.gd'),
+      'extends Node\n\n\nfunc hurt() -> void:\n    if Thing:\n        pass\n',
+    );
+    const spaced = await runThroughTheServersOwnPath(
+      engine,
+      'modify_script',
+      {
+        scriptPath: 'spaced.gd',
+        modifications: [{ type: 'add_function', name: 'heal', body: 'if Thing:\n\tprint(Thing)\n' }],
+      },
+      dir,
+    );
+    assert.deepEqual(
+      [nested, spaced].map((made) => (made.ok ? get(made.payload, 'parses') : made.message)),
+      [true, true],
+      JSON.stringify([nested, spaced]),
+    );
+    assert.match(
+      readFileSync(join(dir, 'made.gd'), 'utf8'),
+      /\nfunc guarded\(\) -> void:\n\tif Thing:\n\t\tprint\(Thing\)\n$/,
+      readFileSync(join(dir, 'made.gd'), 'utf8'),
+    );
+    assert.match(
+      readFileSync(join(dir, 'spaced.gd'), 'utf8'),
+      /\nfunc heal\(\) -> void:\n {4}if Thing:\n {8}print\(Thing\)\n$/,
+      readFileSync(join(dir, 'spaced.gd'), 'utf8'),
     );
     const structure = await runThroughTheServersOwnPath(
       engine,
