@@ -187,6 +187,7 @@ import {
   lspPortChoices,
   removeLeftRecords,
 } from '../src/lsp-bridge.js';
+import { withNearestFiles } from '../src/nearest.js';
 import {
   exportedBuild,
   isSameDirectory,
@@ -7743,7 +7744,7 @@ async function testArgumentsOfTheWrongTypeAreRefused(): Promise<void> {
     );
     assert.match(
       await call('scene_tree', { projectPath: '/p', scenePath: 'a.tscn', depth: '3' }),
-      /depth as number, not a string/,
+      /depth as integer, not a string/,
       'a number given a string should be refused',
     );
 
@@ -8113,6 +8114,11 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       ['runtime_inspect', { op: 'text', limit: 5001 }, 'limit from 1 to 5000, not 5001'],
       ['runtime_wait', { op: 'frames', frames: 601 }, 'frames from 1 to 600, not 601'],
       ['runtime_input', { op: 'action', action: 'jump', strength: 1.5 }, 'strength from 0 to 1, not 1.5'],
+      // Read as absent, a depth of 0 walked every level and a limit of -1 answered every line.
+      ['project_dependencies', { resourcePath: 'res://a.gd', depth: 0 }, 'depth of 1 or more, not 0'],
+      ['project_search', { query: 'extends', maxResults: -1 }, 'maxResults of 1 or more, not -1'],
+      ['scene_tree', { scenePath: 'a.tscn', depth: -1 }, 'depth of 0 or more, not -1'],
+      ['scene_tree', { scenePath: 'a.tscn', depth: 1.5 }, 'depth as integer, not 1.5'],
     ];
     for (const [tool, args, said] of outside) {
       const answer = await call(tool, args);
@@ -8994,6 +9000,35 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     });
     assert.equal(plain.summary.files_with_matches, 1, 'a project with nothing kept out is still searched');
     assert.equal(plain.not_searched, undefined, 'and says nothing was kept out');
+    // A folder the whole-project search steps over, named as the place to search, is searched as
+    // asked, and the note says why the whole search leaves it out; what it holds that the walk steps
+    // over, the reference project's installed addon, stays out.
+    const inside = (place: string[]): ReturnType<typeof searchProject> =>
+      searchProject(sandbox, {
+        query: 'findable',
+        within: join(sandbox, ...place),
+        regex: false,
+        caseSensitive: false,
+        maxResults: 100,
+      });
+    const ignoredNamed = inside(['export']);
+    assert.deepEqual(
+      [ignoredNamed.results.map((entry) => entry.file), ignoredNamed.note],
+      [
+        ['res://export/shipped.gd'],
+        'res://export/ is searched because path names it; a search of the whole project steps over it, since it holds a .gdignore.',
+      ],
+      JSON.stringify(ignoredNamed),
+    );
+    assert.deepEqual(
+      [inside(['.tools', 'godot']).note, inside(['addons', 'gdharness_editor', 'tooling.gd']).note],
+      [
+        'res://.tools/ is searched because path names it; a search of the whole project steps over it, since its name starts with a dot.',
+        'res://addons/gdharness_editor/ is searched because path names it; a search of the whole project steps over it, since gdharness installed it.',
+      ],
+      'a place inside one, a file among them, is told the same',
+    );
+    assert.equal(inside(['scripts']).note, undefined, 'and a place the whole search reads is told nothing');
     assert.equal(projectStructure(sandbox).scripts, 2, 'the count should agree with the search');
     assert.deepEqual(
       projectTexts(sandbox)
@@ -24235,6 +24270,24 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         4,
         `while total still counts everything found, so neither number has to be derived: ${JSON.stringify(used)}`,
       );
+      // The extensions as project_search reads them: ".GD" searched no file and answered no use.
+      const dotted = await call('project_dependencies', {
+        projectPath: project,
+        direction: 'reverse',
+        resourcePath: 'res://shape.gd',
+        fileTypes: ['.GD'],
+      });
+      const plainGd = await call('project_dependencies', {
+        projectPath: project,
+        direction: 'reverse',
+        resourcePath: 'res://shape.gd',
+        fileTypes: ['gd'],
+      });
+      assert.deepEqual(
+        [get(dotted, 'summary', 'by_kind'), get(dotted, 'summary')],
+        [{ extends: 2, doc: 1, comment: 1 }, get(plainGd, 'summary')],
+        `a dotted, capitalised extension reads the scripts gd does: ${JSON.stringify(dotted)}`,
+      );
 
       const written = await call('script_edit', {
         projectPath: project,
@@ -24342,6 +24395,82 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         cachedClasses(project)?.get('Listed'),
         'res://made/listed.gd',
         'because the class list on disk now holds it',
+      );
+      // A class declared on disk since the list was written: a script extending it, and an addition
+      // naming it, read against the old list as scripts that do not parse. The list is rebuilt
+      // first, and the answer names what it lacked.
+      writeFileSync(join(project, 'made', 'based.gd'), 'class_name Based\nextends Node2D\n');
+      const child = await call('script_edit', {
+        projectPath: project,
+        op: 'create',
+        scriptPath: 'res://made/child.gd',
+        className: 'Child',
+        extends: 'Based',
+      });
+      assert.deepEqual(
+        [get(child, 'parses'), get(child, 'registered'), get(child, 'classesRebuiltFirst')],
+        [true, true, ['Based']],
+        JSON.stringify(child),
+      );
+      writeFileSync(join(project, 'made', 'kept.gd'), 'class_name Kept\nextends RefCounted\n');
+      const naming = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://marker.gd',
+        modifications: [{ type: 'add_variable', name: 'held', varType: 'Kept', defaultValue: 'null' }],
+      });
+      assert.deepEqual(
+        [get(naming, 'parses'), get(naming, 'classesRebuiltFirst')],
+        [true, ['Kept']],
+        JSON.stringify(naming),
+      );
+
+      // An export hint can only mean an export, so given alone it still writes one.
+      const hinted = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://marker.gd',
+        modifications: [
+          {
+            type: 'add_variable',
+            name: 'ranged',
+            varType: 'int',
+            defaultValue: '1',
+            exportHint: 'range(0, 10)',
+          },
+        ],
+      });
+      assert.equal(get(hinted, 'parses'), true, JSON.stringify(hinted));
+      assert.ok(
+        readFileSync(join(project, 'marker.gd'), 'utf8')
+          .split('\n')
+          .includes('@export_range(0, 10) var ranged: int = 1'),
+        readFileSync(join(project, 'marker.gd'), 'utf8'),
+      );
+      const contradicted = await server.request(
+        'tools/call',
+        {
+          name: 'script_edit',
+          arguments: {
+            projectPath: project,
+            op: 'modify',
+            scriptPath: 'res://marker.gd',
+            modifications: [
+              {
+                type: 'add_variable',
+                name: 'unranged',
+                varType: 'int',
+                exportHint: 'range(0, 10)',
+                isExport: false,
+              },
+            ],
+          },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      assert.match(
+        textOf(contradicted) ?? '',
+        /^Nothing was changed: modification 1 has an exportHint and isExport false, and a hint is written only on an export/,
       );
 
       // A file that is not GDScript is refused with what does write it.
@@ -32610,6 +32739,90 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
  * nothing. The game here stops on a breakpoint set with no editor connected before it started, and
  * then spins forever the way that game did, and is broken into, read, stepped and let go.
  */
+async function testAStartHeldBeforeItsRuntimeSaysWhere(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('held-before-the-runtime regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-held-boot-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-held-boot-rt-'));
+  // Boot is loaded before the runtime, so a breakpoint in its _ready holds the game before the
+  // runtime can announce, and the start's wait has only the debugger to learn the hold from.
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="HeldBoot"\n' +
+      'run/main_scene="res://main.tscn"\n\n[autoload]\n\nBoot="*res://boot.gd"\n' +
+      'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'boot.gd'),
+    'extends Node\n\nvar started_at: int = 0\n\n\nfunc _ready() -> void:\n\tstarted_at = 1\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    const set = await server.request(
+      'tools/call',
+      {
+        name: 'debug_breakpoint',
+        arguments: { projectPath: project, op: 'set', scriptPath: 'boot.gd', line: 7 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    assert.deepEqual(get(parseTextContent(set), 'held'), [{ scriptPath: 'res://boot.gd', lines: [7] }]);
+    const began = Date.now();
+    const start = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 30_000 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    const took = Date.now() - began;
+    started = get(start, 'started') === true;
+    assert.equal(started, true, JSON.stringify(start));
+    assert.deepEqual(
+      [get(start, 'runtime', 'listening'), get(start, 'runtime', 'heldAt', 'reason')],
+      [false, 'breakpoint'],
+      `the start says the game is held, not still booting: ${JSON.stringify(start)}`,
+    );
+    assert.match(
+      text(get(start, 'runtime', 'heldAt', 'description')),
+      /^held by its debugger at res:\/\/boot\.gd:7 in _ready \(Breakpoint\)$/,
+      JSON.stringify(start),
+    );
+    assert.match(text(get(start, 'runtime', 'note')), /the game stopped before its runtime came up/);
+    assert.ok(
+      took < 20_000,
+      `the start answered once the game was held, not after its 30000ms wait: ${took}ms`,
+    );
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 async function testAGameThisServerStartedIsDebugged(): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
@@ -39437,6 +39650,30 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
           await call('project_search', { projectPath: ours, query: 'extends', path: 'res://nowhere' }),
           "There is nothing at res://nowhere to search. The project's folders are scripts.",
         );
+        // A query spanning two lines matches nothing a line-by-line search reads, and a limit of no
+        // lines or part of one was taken as no limit and as the line after it.
+        assert.equal(
+          await call('project_search', { projectPath: ours, query: 'extends Node\n# ours' }),
+          'query holds a line break, and project_search matches one line at a time: search for one of its lines.',
+        );
+        assert.deepEqual(
+          [
+            await call('project_search', { projectPath: ours, query: 'extends', maxResults: 0 }),
+            await call('project_search', { projectPath: ours, query: 'extends', maxResults: 1.5 }),
+          ],
+          [
+            'project_search takes maxResults of 1 or more, not 0.',
+            'project_search takes maxResults as integer, not 1.5.',
+          ],
+        );
+        const one = JSON.parse(
+          await call('project_search', { projectPath: ours, query: 'extends', maxResults: 1 }),
+        ) as SearchResult;
+        assert.deepEqual(
+          [one.summary.total_matches, one.summary.truncated],
+          [1, true],
+          'a limit of one answers one line, and says there were more',
+        );
 
         // The search with no fileTypes, through the server: every text file, project.godot included.
         const searched = await call('project_search', { projectPath: theirs, query: 'config_version' });
@@ -39546,6 +39783,20 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
     'a long timeout waits thirty seconds of silence',
   );
   assert.equal(timedOutVerdict(600_000, 30_000).hung, true);
+  // Killed before the engine printed anything, under a limit an engine may not start in, it was
+  // perhaps still starting; given thirty seconds and still saying nothing, it had stopped.
+  const unstarted = timedOutVerdict(1, 3, null, false);
+  assert.deepEqual(
+    unstarted,
+    {
+      verdict:
+        'timed out after 1 ms before the engine printed anything, so it may still have been starting: timeoutMs counts milliseconds, and the default is 600000',
+      hung: false,
+    },
+    JSON.stringify(unstarted),
+  );
+  assert.equal(timedOutVerdict(30_000, 30_000, null, false).hung, true, 'silent at the boundary is hung');
+  assert.equal(timedOutVerdict(29_999, 29_999, null, false).hung, false, 'and just under it may be starting');
 
   // A run repeating one script error to the kill is named for it, whatever else it printed before.
   const log = new GameLog();
@@ -39667,12 +39918,12 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       ].join('\n'),
     );
     await withStdioServer(async (_call, request) => {
-      const run = async (path: string): Promise<unknown> => {
+      const run = async (path: string, timeoutMs = 12_000): Promise<unknown> => {
         const response = await request(
           'tools/call',
           {
             name: 'project_test',
-            arguments: { projectPath: projectDir, path, timeoutMs: 12_000, printed: 'passed' },
+            arguments: { projectPath: projectDir, path, timeoutMs, printed: 'passed' },
           },
           ENGINE_CALL_TIMEOUT_MS,
         );
@@ -39729,6 +39980,18 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       assert.ok(
         passedLines.length > 10 && passedLines.every((line) => /passed/i.test(line)),
         `a run cut off before its report answers with the lines asked for: ${JSON.stringify(passedLines.slice(0, 3))}`,
+      );
+      // A limit no engine starts in kills the run before it prints a line, which is not a hang.
+      const unstarted = await run('res://steady', 1);
+      assert.deepEqual(
+        [get(unstarted, 'timedOut'), get(unstarted, 'hung')],
+        [true, false],
+        JSON.stringify(unstarted),
+      );
+      assert.match(
+        String(get(unstarted, 'verdict')),
+        /^timed out after 1 ms before the engine printed anything, so it may still have been starting: timeoutMs counts milliseconds/,
+        JSON.stringify(unstarted),
       );
       const stuck = await run('res://stuck');
       assert.equal(get(stuck, 'hung'), true, `a run silent at the kill is hung: ${JSON.stringify(stuck)}`);
@@ -40521,6 +40784,11 @@ async function testSuitesPlayInASceneTheProfilerSees(): Promise<void> {
         [
           { op: 'start', projectPath: project, suites: ['tests/gone_test.gd'] },
           /^Nothing at res:\/\/tests\/gone_test\.gd/,
+        ],
+        // project_test's path takes one case after a script, and the suites scene plays whole suites.
+        [
+          { op: 'start', projectPath: project, suites: ['tests/heavy/heavy_test.gd:test_churns'] },
+          /^suites plays whole suites, and tests\/heavy\/heavy_test\.gd:test_churns names one case: name the file, tests\/heavy\/heavy_test\.gd, to play every case in it, or run the case alone with project_test, whose path takes tests\/heavy\/heavy_test\.gd:test_churns\.$/m,
         ],
         [
           { op: 'start', projectPath: bare, suites: 'tests' },
@@ -45458,6 +45726,29 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
     assert.doesNotMatch(everything.said, /are not run/, 'without the flag, every suite runs');
     assert.doesNotMatch(everything.said, /Dealt out case by case/, 'nothing took long enough to split');
+    // The same result is kept beside the suite times, with the deal it printed and when each engine
+    // started, so a passing run in a gate that keeps none of its output can be read afterwards.
+    const lastRunFile = join(state, 'last-run.json');
+    assert.deepEqual(
+      JSON.parse(readFileSync(lastRunFile, 'utf8')),
+      passedResult,
+      'the last run is kept as written',
+    );
+    const dealtLine = /^\d+ test functions in 2 suites over \d+ engines?.*\.$/m.exec(everything.said)?.[0];
+    assert.deepEqual(passedResult.dealing, [dealtLine], everything.said);
+    assert.ok(
+      passedResult.enginesAsked >= 1 &&
+        passedResult.slotsFree === new Set(passedResult.engines.map((one) => one.lane)).size &&
+        passedResult.engines.every(
+          (one) => one.startedAfter > 0 && one.startedAfter + one.seconds <= passedResult.seconds,
+        ),
+      `each engine says its lane and when it started, inside the run: ${JSON.stringify(passedResult)}`,
+    );
+    assert.deepEqual(
+      [...new Set(passedResult.engines.flatMap((one) => one.suites))].sort(),
+      ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
+      'and the suites each was handed',
+    );
 
     // A benchmark written as a suite reports by printing, which a passing run otherwise throws away.
     writeTree(project, {
@@ -45466,6 +45757,11 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     });
     const quiet = test('tests/says_test.gd');
     assert.equal(quiet.status, 0, quiet.said);
+    assert.deepEqual(
+      (JSON.parse(readFileSync(lastRunFile, 'utf8')) as RunResult).suites.map((suite) => suite.path),
+      ['res://tests/says_test.gd'],
+      'a run given no --result keeps its result there too',
+    );
     assert.match(quiet.said, /^Passed: 1 case in 1 suite across 1 engine, /m, quiet.said);
     assert.ok(!quiet.said.includes('frames per second: 4f2a'), quiet.said);
     // The failed runs above keep their logs, so what this one leaves is read against them.
@@ -52705,6 +53001,29 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       'a Curve file reads in the names a write takes',
     );
     rmSync(join(project, 'ease.tres'));
+    // What else a write changed is answered in those names too, and a point added changes only the
+    // list the file stores them in.
+    writeFileSync(
+      join(project, 'ramp.tres'),
+      '[gd_resource type="Curve" format=3]\n\n[resource]\n_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(0.5, 1), 0.0, 0.0, 0, 0]\npoint_count = 2\n',
+    );
+    const pointAdded = await request('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://ramp.tres',
+      properties: { point_count: 3, 'point_2/position': { x: 1, y: 0.2 } },
+    });
+    assert.deepEqual(
+      [
+        get(parseTextContent(pointAdded), 'alsoChanged'),
+        readFileSync(join(project, 'ramp.tres'), 'utf8').split('[resource]\n')[1],
+      ],
+      [
+        undefined,
+        '_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(0.5, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.2), 0.0, 0.0, 0, 0]\npoint_count = 3\n',
+      ],
+      textOf(pointAdded) ?? JSON.stringify(pointAdded),
+    );
+    rmSync(join(project, 'ramp.tres'));
     // Comparing built-in resources by what they hold meets one that holds itself, and has to end.
     // The check after the save compares the one set with the one the file loads, two objects that
     // each hold themselves, which only a script can make: this one's setter links the ring to
@@ -53039,6 +53358,37 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
         [2, 0, true],
         one.text,
       );
+      // A case after a script in path, as gdharness test takes one, runs that case alone: given
+      // relative to the project, and from two suites, one of them beside tests naming another.
+      const inPath = await run({ path: 'test/math_test.gd:test_halves' });
+      assert.deepEqual(
+        [get(inPath.answer, 'tests'), get(inPath.answer, 'failures'), get(inPath.answer, 'passed')],
+        [1, 0, true],
+        inPath.text,
+      );
+      const inPaths = await run({
+        path: ['res://test/math_test.gd:test_doubles', 'res://test/more/math_extra_test.gd:test_adds'],
+        tests: ['math_test:test_halves'],
+      });
+      assert.deepEqual(
+        [get(inPaths.answer, 'tests'), get(inPaths.answer, 'failures'), failedIn(inPaths.answer)],
+        [3, 1, ['res://test/math_test.gd:test_doubles']],
+        inPaths.text,
+      );
+      // Beside a whole suite or a directory it is refused, since only the cases named would run.
+      const mixed = await run({ path: ['res://test/math_test.gd:test_halves', 'res://test/more'] });
+      assert.match(
+        mixed.text,
+        /^path names a case, res:\/\/test\/math_test\.gd:test_halves, beside res:\/\/test\/more, and a run with cases named runs only those: run the cases on their own, and the rest in a run of its own\.$/m,
+        mixed.text,
+      );
+      // A case the suite does not declare is refused as one named under tests is.
+      const missed = await run({ path: 'res://test/math_test.gd:test_dobles' });
+      assert.match(
+        missed.text,
+        /^No suite under res:\/\/test\/math_test\.gd has a case res:\/\/test\/math_test\.gd:test_dobles\. The nearest are math_test:test_doubles, /m,
+        missed.text,
+      );
       // A name no suite declares is refused before an engine starts, with the nearest names.
       const misspelt = await run({ tests: ['test_dobles'] });
       assert.match(
@@ -53205,6 +53555,30 @@ async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
  * `unsafe_call_argument=0` on purpose lost the line to a write of another key. And with no declared
  * type to fit a tagged PackedStringArray to, the tag was written into the file as a dictionary.
  */
+/**
+ * The server's half of the nearest-file offer words it as the engine's does. A misspelt extension has
+ * no file of its own extension to be near, so a file of the same name beside it comes first, unless
+ * the refusal is about that file.
+ */
+function testAMisspeltExtensionIsOfferedTheFileOfThatName(): void {
+  const scripts = ['res://ai/brain.gd', 'res://ai/brawn.gd'];
+  const beside = ['res://ai/brain.gd', 'res://ai/brain.tscn', 'res://ai/brawn.gd'];
+  assert.equal(
+    withNearestFiles('Script file does not exist: res://ai/brain.gdd', 'res://ai/brain.gdd', scripts, beside),
+    'Script file does not exist: res://ai/brain.gdd. The files of that name beside it are res://ai/brain.gd, res://ai/brain.tscn.',
+  );
+  assert.equal(
+    withNearestFiles('res://ai/brain.tscn is not a script', 'res://ai/brain.gd2', scripts, beside),
+    'res://ai/brain.tscn is not a script. The file of that name beside it is res://ai/brain.gd.',
+    'a file the refusal names is not offered back',
+  );
+  assert.equal(
+    withNearestFiles('Script file does not exist: res://ai/brainn.gd', 'res://ai/brainn.gd', scripts, beside),
+    'Script file does not exist: res://ai/brainn.gd. The nearest .gd file is res://ai/brain.gd.',
+    'with none of that name, the nearest of its extension',
+  );
+}
+
 async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
@@ -53323,6 +53697,12 @@ async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
     assert.equal(get(kept.answer, 'removed'), true, `a line holding a default can be unset: ${kept.said}`);
     assert.ok(!file().includes('unused_variable'), `which takes it out: ${file()}`);
     assert.ok(file().includes(`[rendering]\n\n${filter}`), `and leaves the other: ${file()}`);
+    const misspelt = await settings({ op: 'unset', setting: 'debug/gdscript/warnings/unused_variabel' });
+    assert.equal(
+      get(misspelt.answer, 'note'),
+      'project.godot does not set debug/gdscript/warnings/unused_variabel, so there was nothing to take out. Nor does the engine declare it; the nearest settings are debug/gdscript/warnings/unused_variable, debug/gdscript/warnings/unused_private_class_variable, debug/gdscript/warnings/unassigned_variable.',
+      `a misspelt unset is offered the name it likely meant: ${misspelt.said}`,
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
@@ -58059,6 +58439,26 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       Object.keys(asObject(get(tail, 'properties'))).length + Number(get(tail, 'defaultsLeftOut')),
       'the count is what was left out',
     );
+    // Given alone, includeDefaults can mean only the properties with their defaults: read without
+    // them, it answered the bare tree. Beside includeProperties false, it is a contradiction.
+    assert.deepEqual(
+      get(
+        parseTextContent(await call('scene_tree', { scenePath: 'world.tscn', includeDefaults: true })),
+        'tree',
+      ),
+      everything,
+      'includeDefaults alone answers what it does with includeProperties',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_tree', {
+          scenePath: 'world.tscn',
+          includeProperties: false,
+          includeDefaults: true,
+        }),
+      ),
+      'includeDefaults lists the defaults among the properties, and includeProperties false lists none: leave includeProperties out, or set it true.',
+    );
     assert.equal(get(at(everything, 'Loud'), 'properties', 'speed'), 9);
     // Which of those values this file sets, said on the nodes another file makes and on no other:
     // the values alone read the same whether this scene changed them or the instanced one gave them.
@@ -58610,7 +59010,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
         'child_entered_tree',
         'hide',
         undefined,
-        `child_entered_tree passes 1 argument, and hide takes none${fails} Connected with unbinds 1, the last argument the signal passes is left out.`,
+        `child_entered_tree passes 1 argument, and hide takes none${fails} Connect it with unbinds 1 to leave out the last argument the signal passes.`,
       ],
       [
         'child_entered_tree',
@@ -58644,8 +59044,22 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     });
     assert.equal(
       get(overBound, 'misfit'),
-      `visibility_changed passes 1 argument, and hide takes none${fails}`,
+      `visibility_changed passes no arguments and the connection binds 1, so hide is called with 1 argument, and takes none${fails}`,
       JSON.stringify(overBound),
+    );
+    const boundWrong = await written('scene_signal', {
+      op: 'connect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'tree_entered',
+      targetNodePath: 'Taker',
+      methodName: 'take_node',
+      binds: [1],
+    });
+    assert.equal(
+      get(boundWrong, 'misfit'),
+      `the connection binds argument 1 as int, and take_node takes it as node: Node2D${fails}`,
+      JSON.stringify(boundWrong),
     );
     const unwritten = await wire('died', 'not_yet_written');
     assert.deepEqual(
@@ -58757,14 +59171,19 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       [
         undefined,
         1,
-        `child_entered_tree passes 1 argument, and queue_free takes none${fails} Connected with unbinds 1, the last argument the signal passes is left out.`,
+        `child_entered_tree passes 1 argument, and queue_free takes none${fails} Connect it with unbinds 1 to leave out the last argument the signal passes.`,
       ],
       JSON.stringify(unbound),
     );
     const rebound = await rewire('child_entered_tree', 'queue_free', { unbinds: 1, binds: [3] });
     assert.deepEqual(
-      [get(rebound, 'unbinds'), get(rebound, 'binds'), get(rebound, 'unbindsBefore')],
-      [1, [3], 0],
+      [get(rebound, 'unbinds'), get(rebound, 'binds'), get(rebound, 'unbindsBefore'), get(rebound, 'misfit')],
+      [
+        1,
+        [3],
+        0,
+        `child_entered_tree passes 1 argument and the connection unbinds 1 and binds 1, so queue_free is called with 1 argument, and takes none${fails}`,
+      ],
       JSON.stringify(rebound),
     );
     assert.equal(
@@ -58884,6 +59303,54 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       [['persist', 'inherited'], false, [7]],
       JSON.stringify(nested),
     );
+    // One an instanced scene makes on its own root sits on a node the scene holding it owns, so the
+    // ends alone read it as editable there. Seen from an instance and from a scene inheriting it,
+    // beside a connection the holding scene makes itself.
+    writeFileSync(
+      join(project, 'ring.tscn'),
+      '[gd_scene format=3]\n\n[node name="Ring" type="Node2D"]\n\n' +
+        '[connection signal="visibility_changed" from="." to="." method="queue_free"]\n',
+    );
+    writeFileSync(
+      join(project, 'rings.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://ring.tscn" id="1_ring"]\n\n' +
+        '[node name="Rings" type="Node2D"]\n\n[node name="Ring" parent="." instance=ExtResource("1_ring")]\n\n' +
+        '[connection signal="visibility_changed" from="Ring" to="." method="hide"]\n',
+    );
+    writeFileSync(
+      join(project, 'big_ring.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://ring.tscn" id="1_ring"]\n\n' +
+        '[node name="BigRing" instance=ExtResource("1_ring")]\n',
+    );
+    const ringed = (listed: Parameters<typeof parseTextContent>[0]): unknown[] =>
+      asArray(get(parseTextContent(listed), 'connections')).map((one) => [
+        get(one, 'sourceNodePath'),
+        get(one, 'methodName'),
+        get(one, 'editable'),
+        get(one, 'madeIn'),
+      ]);
+    assert.deepEqual(ringed(await call('scene_signal', { op: 'list', scenePath: 'rings.tscn' })), [
+      ['Ring', 'queue_free', false, 'res://ring.tscn'],
+      ['Ring', 'hide', true, undefined],
+    ]);
+    assert.deepEqual(ringed(await call('scene_signal', { op: 'list', scenePath: 'big_ring.tscn' })), [
+      ['.', 'queue_free', false, 'res://ring.tscn'],
+    ]);
+    const ringBefore = fileOf('ring.tscn');
+    assert.equal(
+      textOf(
+        await call('scene_signal', {
+          op: 'disconnect',
+          scenePath: 'rings.tscn',
+          sourceNodePath: 'Ring',
+          signalName: 'visibility_changed',
+          targetNodePath: 'Ring',
+          methodName: 'queue_free',
+        }),
+      ),
+      'The connection from Ring.visibility_changed to Ring.queue_free is made by res://ring.tscn, and this scene saves nothing about it: disconnect it there, which changes every scene using it.',
+    );
+    assert.equal(fileOf('ring.tscn'), ringBefore, 'and the scene that makes it is left alone');
 
     const scripted = await written('scene_create', {
       op: 'create',
@@ -58910,9 +59377,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       scenePath: 'hero.tscn',
       rootNodeType: 'Hero',
     });
+    // Named as a read names the node, since the file holds a Node2D carrying the script and no Hero
+    // node.
     assert.deepEqual(
-      [get(hero, 'rootNodeType'), get(hero, 'rootNodeName')],
-      ['Hero', 'Hero'],
+      [get(hero, 'rootNodeType'), get(hero, 'scriptClass'), get(hero, 'rootNodeName')],
+      ['Node2D', 'Hero', 'Hero'],
       JSON.stringify(hero),
     );
     assert.deepEqual(sets('hero.tscn', '[node name="Hero" type="Node2D"'), ['script = ExtResource']);
@@ -58927,7 +59396,6 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       nodeName: 'Boss',
       nodeType: 'Hero',
     });
-    assert.equal(get(boss, 'nodeType'), 'Hero', JSON.stringify(boss));
     assert.deepEqual(sets('made.tscn', '[node name="Boss" type="Node2D"'), ['script = ExtResource']);
     const bossRead = parseTextContent(
       await call('scene_node', { op: 'get', scenePath: 'made.tscn', nodePath: 'Boss' }),
@@ -58936,6 +59404,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       [get(bossRead, 'nodeType'), get(bossRead, 'scriptClass')],
       ['Node2D', 'Hero'],
       `a read names the engine class and the class the script declares: ${JSON.stringify(bossRead)}`,
+    );
+    assert.deepEqual(
+      [get(boss, 'nodeType'), get(boss, 'scriptClass')],
+      [get(bossRead, 'nodeType'), get(bossRead, 'scriptClass')],
+      `the add names the node as the read does: ${JSON.stringify(boss)}`,
     );
     // The root by its name: its path is ".", and ". already has a child" read as a typo.
     assert.equal(
@@ -63917,6 +64390,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowedRunWritesItsMovie,
   testTheEditorIsOfferedWhereItCanAnswer,
   testASettingTakesWhatAPropertyTakes,
+  testAMisspeltExtensionIsOfferedTheFileOfThatName,
   testASettingsWriteKeepsEveryOtherLine,
   testAnElementIsToldWhatItsTypeTakes,
   testAWriteSaysWhatElseItChanged,
@@ -64048,6 +64522,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheRendererIsChosenAndItsMemoryRead,
   testWhatTheGameTellsAScreenReaderIsRead,
   testARefusalIsSaidOnce,
+  testAStartHeldBeforeItsRuntimeSaysWhere,
   testAGameThisServerStartedIsDebugged,
   testAGameHeldInACallHasTheCall,
   testInputThatReachesNothingSaysWhatWould,

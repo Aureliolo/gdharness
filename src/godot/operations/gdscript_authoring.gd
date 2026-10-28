@@ -404,6 +404,14 @@ static func _modification_problems(modifications: Array, declared: Dictionary) -
 			)
 		if mod_type == "add_constant" and str(fields.get("defaultValue", "")).is_empty():
 			problems.append(which + " is a constant with no defaultValue, and a constant needs a value")
+		if (
+			not str(fields.get("exportHint", "")).is_empty()
+			and fields.has("isExport")
+			and not GdhRead.as_bool(fields["isExport"])
+		):
+			problems.append(
+				which + " has an exportHint and isExport false, and a hint is written only on an export"
+			)
 		if mod_name.is_empty():
 			problems.append(which + " has no name")
 			continue
@@ -527,8 +535,9 @@ func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	var var_name: String = str(mod.get("name", ""))
 	var var_type: String = str(mod.get("varType", ""))
 	var default_value: String = str(mod.get("defaultValue", ""))
-	var is_export: bool = GdhRead.as_bool(mod.get("isExport", false))
 	var export_hint: String = str(mod.get("exportHint", ""))
+	# A hint can only mean an export, so a hint given alone writes one.
+	var is_export: bool = GdhRead.as_bool(mod.get("isExport", not export_hint.is_empty()))
 	var is_onready: bool = GdhRead.as_bool(mod.get("isOnready", false))
 
 	var var_line: String = ""

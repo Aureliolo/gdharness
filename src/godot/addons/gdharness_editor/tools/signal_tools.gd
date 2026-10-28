@@ -10,6 +10,9 @@ const GdhSerialisation = preload("../serialisation.gd")
 
 ## What every emission meets when a connection cannot call its method.
 const FAILS: String = ", so every emission fails to call it."
+## The engine's CONNECT_INHERITED, which GDScript is not given: on a connection an instanced or
+## inherited scene makes, as a scene holding one loads it.
+const CONNECT_INHERITED: int = 32
 ## The names Object.ConnectFlags gives each bit. The number alone left a reader guessing that 2 is
 ## the persistence every connection in a saved scene carries.
 const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
@@ -18,9 +21,7 @@ const CONNECT_FLAG_NAMES: Dictionary[int, String] = {
 	Object.CONNECT_ONE_SHOT: "one_shot",
 	Object.CONNECT_REFERENCE_COUNTED: "reference_counted",
 	Object.CONNECT_APPEND_SOURCE_OBJECT: "append_source_object",
-	# The engine's CONNECT_INHERITED, which GDScript is not given: on a connection an instanced scene
-	# makes inside itself, as a scene holding one loads it.
-	32: "inherited",
+	CONNECT_INHERITED: "inherited",
 }
 ## The flags a caller may give: the engine's own CONNECT_INHERITED marks a connection an instanced
 ## scene makes, and is never one a scene makes for itself.
@@ -295,7 +296,9 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 			break
 	if flags & Object.CONNECT_APPEND_SOURCE_OBJECT:
 		passed.append({"name": "source", "type": TYPE_OBJECT, "class_name": source.get_class()})
-	passed = passed.slice(0, maxi(passed.size() - callable.get_unbound_arguments_count(), 0))
+	var emitted: int = passed.size()
+	var unbound: int = callable.get_unbound_arguments_count()
+	passed = passed.slice(0, maxi(emitted - unbound, 0))
 	var from_signal: int = passed.size()
 	for bound: Variant in callable.get_bound_arguments():
 		var bound_class: String = ""
@@ -303,43 +306,58 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 			var object: Object = bound
 			bound_class = object.get_class()
 		passed.append({"name": "bound", "type": typeof(bound), "class_name": bound_class})
+	var binds: int = passed.size() - from_signal
+
+	# What the method is called with, said in the parts that make it: an answer counting the bound
+	# arguments among the signal's said the signal passed more than it declares.
+	var called: String = "%s passes %s" % [signal_name, _count(emitted)]
+	if unbound > 0 or binds > 0:
+		var changed: Array[String] = []
+		if unbound > 0:
+			changed.append("unbinds %d" % unbound)
+		if binds > 0:
+			changed.append("binds %d" % binds)
+		called += (
+			" and the connection %s, so %s is called with %s, and"
+			% [" and ".join(PackedStringArray(changed)), method, _count(passed.size())]
+		)
+	else:
+		called += ", and " + method
 
 	var parameters: Array = taken.get("args", [])
 	var defaults: Array = taken.get("default_args", [])
 	var needed: int = parameters.size() - defaults.size()
 	if passed.size() < needed:
-		return "%s passes %s, and %s needs %d%s" % [signal_name, _count(passed.size()), method, needed, FAILS]
+		return "%s needs %d%s" % [called, needed, FAILS]
 	if passed.size() > parameters.size():
 		var most: String = "none" if parameters.is_empty() else "at most %d" % parameters.size()
 		# Said with the misfit, since unbinds is what a connection to a method wanting less is for, and
-		# only when the extra arguments are the signal's: a bound one is not dropped by unbinding.
+		# only when the extra arguments are the signal's: a scene's connection unbinds the arguments
+		# the signal passes before it adds the bound ones, so a bound one is never dropped.
 		var extra: int = passed.size() - parameters.size()
 		var remedy: String = (
 			(
-				" Connected with unbinds %d, the last %s the signal passes %s left out."
-				% [
-					extra + callable.get_unbound_arguments_count(),
-					"argument" if extra == 1 else "%d arguments" % extra,
-					"is" if extra == 1 else "are",
-				]
+				" Connect it with unbinds %d to leave out the last %s the signal passes."
+				% [extra + unbound, "argument" if extra == 1 else "%d arguments" % extra]
 			)
 			if extra <= from_signal
 			else ""
 		)
-		return (
-			"%s passes %s, and %s takes %s%s%s"
-			% [signal_name, _count(passed.size()), method, most, FAILS, remedy]
-		)
+		return "%s takes %s%s%s" % [called, most, FAILS, remedy]
 	for at: int in passed.size():
 		var given: Dictionary = passed[at]
 		var parameter: Dictionary = parameters[at]
 		if not _unrelated(given, parameter):
 			continue
+		var whose: String = (
+			"%s passes argument %d" % [signal_name, at + 1]
+			if at < from_signal
+			else "the connection binds argument %d" % (at + 1)
+		)
 		return (
-			"%s passes argument %d as %s, and %s takes it as %s: %s%s"
+			"%s as %s, and %s takes it as %s: %s%s"
 			% [
-				signal_name,
-				at + 1,
+				whose,
 				_type_named(given),
 				method,
 				str(parameter.get("name", "")),
@@ -378,6 +396,25 @@ static func _type_named(declared: Dictionary) -> String:
 	if type == TYPE_OBJECT and not named.is_empty():
 		return named
 	return type_string(type)
+
+
+## The scene that makes the connection [param source] holds with [param flags], as a path, or "" for
+## one this scene makes. The engine marks such a connection inherited as the scene holding it loads:
+## from an instance, the scene instanced, and from the root of an inherited scene, the one it
+## inherits.
+static func _made_in(scene: GdhSceneFile, source: Node, flags: int) -> String:
+	if not flags & CONNECT_INHERITED:
+		return ""
+	if source != scene.root and not source.scene_file_path.is_empty():
+		return source.scene_file_path
+	var holder: Node = source if source == scene.root else source.owner
+	while holder != null and holder != scene.root and holder.scene_file_path.is_empty():
+		holder = holder.owner
+	if holder != null and holder != scene.root:
+		return holder.scene_file_path
+	var packed: PackedScene = load(scene.path) as PackedScene
+	var base: SceneState = packed.get_state().get_base_scene_state() if packed != null else null
+	return base.get_path() if base != null else "a scene this one inherits"
 
 
 static func _count(arguments: int) -> String:
@@ -426,6 +463,21 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 			(
 				"%s has no connection from %s.%s to %s.%s."
 				% [scene_path, said_from, signal_name, said_to, method_name]
+			)
+		)
+	var made_in: String = _made_in(scene, source, GdhRead.as_int(held["flags"]))
+	if not made_in.is_empty():
+		var named_from: String = str(source.name) if source == scene.root else from
+		var named_to: String = str(target.name) if target == scene.root else to
+		var made_by: String = (
+			"The connection from %s.%s to %s.%s is made by %s"
+			% [named_from, signal_name, named_to, method_name, made_in]
+		)
+		return scene.refuse(
+			(
+				made_by
+				+ ", and this scene saves nothing about it: disconnect it there, which changes every"
+				+ " scene using it."
 			)
 		)
 	var callable: Callable = held["callable"]
@@ -498,6 +550,9 @@ func list_connections(args: Dictionary) -> Dictionary:
 				if target_obj is Node:
 					target_path = str(root.get_path_to(target_obj as Node))
 					editable = editable and scene.foreign(target_obj as Node).is_empty()
+				# A connection an instanced scene makes on its own root sits on a node this scene owns,
+				# so the ends alone read it as one this scene could change.
+				var made_in: String = _made_in(scene, node, flags)
 				var listed: Dictionary = {
 					"sourceNodePath": path,
 					"signalName": signal_name,
@@ -505,11 +560,11 @@ func list_connections(args: Dictionary) -> Dictionary:
 					"methodName": str(callable.get_method()),
 					"flags": flags,
 					"flagNames": flag_names(flags),
-					# False for a connection an instanced scene makes inside itself, which only that
-					# scene can change.
-					"editable": editable,
+					"editable": editable and made_in.is_empty(),
 					"methodFound": target_obj != null and target_obj.has_method(callable.get_method()),
 				}
+				if not made_in.is_empty():
+					listed["madeIn"] = made_in
 				var bound: Dictionary = {
 					"binds": callable.get_bound_arguments(),
 					"unbinds": callable.get_unbound_arguments_count(),

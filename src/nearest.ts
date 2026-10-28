@@ -27,9 +27,27 @@ const LISTED_FILES = 12;
 /**
  * [param said], the refusal for [param wanted], a res:// path nothing is at, with those of
  * [param files] (res:// paths of its extension) named nearest it, or every one when there are few
- * and none is near. The wording is `GdhFileWalk.with_nearest_files`'s.
+ * and none is near. Those of [param beside] (res:// paths of the files in its folder) named as it is
+ * with another extension come first, since a misspelt extension has no file of its own extension to
+ * be near. The wording is `GdhFileWalk.with_nearest_files`'s.
  */
-export function withNearestFiles(said: string, wanted: string, files: readonly string[]): string {
+export function withNearestFiles(
+  said: string,
+  wanted: string,
+  files: readonly string[],
+  beside: readonly string[],
+): string {
+  const stem = (path: string): string => (path.split('/').pop() ?? path).replace(/\.[^.]*$/, '');
+  // One the refusal names is the file it refuses, as a script given for a scene is. Word by word,
+  // since res://brain.gd is inside res://brain.gdd.
+  const named = said.split(/[\s,;]+/).map((word) => word.replace(/[.:]+$/, ''));
+  const namesakes = beside
+    .filter((file) => file !== wanted && stem(file) === stem(wanted) && !named.includes(file))
+    .sort();
+  if (namesakes.length > 0) {
+    const alone = namesakes.length === 1;
+    return `${said}. The ${alone ? 'file' : 'files'} of that name beside it ${alone ? 'is' : 'are'} ${namesakes.join(', ')}.`;
+  }
   const extension = /\.([^./]+)$/.exec(wanted)?.[1];
   if (extension === undefined) {
     return said;
@@ -37,7 +55,6 @@ export function withNearestFiles(said: string, wanted: string, files: readonly s
   if (files.length === 0) {
     return `${said}. The project holds no .${extension} file.`;
   }
-  const stem = (path: string): string => (path.split('/').pop() ?? path).replace(/\.[^.]*$/, '');
   const close = nearest(
     stem(wanted),
     files.map((file) => stem(file)),

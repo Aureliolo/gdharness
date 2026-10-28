@@ -11,6 +11,7 @@ extends RefCounted
 ## initialisers run, and a resource with a script is made with it.
 
 const GdhRead = preload("reading.gd")
+const GdhFileWalk = preload("file_walk.gd")
 const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhShapes = preload("value_shapes.gd")
@@ -487,7 +488,7 @@ static func _stored(type: String, given: Dictionary, include_defaults: bool) -> 
 static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	var file: String = res_path.get_slice("::", 0)
 	if not FileAccess.file_exists(file):
-		return {"ok": false, "error": "No resource at " + file}
+		return {"ok": false, "error": GdhFileWalk.new().with_nearest_files("No resource at " + file, file)}
 	var whole: Resource = ResourceLoader.load(file, "", ResourceLoader.CACHE_MODE_IGNORE)
 	if whole == null:
 		return {"ok": false, "error": "%s did not load as a resource." % file}

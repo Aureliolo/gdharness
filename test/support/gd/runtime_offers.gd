@@ -62,6 +62,32 @@ func _check_keys_a_field_keeps(input: GdhInputCommands, typing: GdhTyping) -> vo
 		_fail("a field no longer edited takes nothing and says nothing: %s" % JSON.stringify(again))
 	field.queue_free()
 
+	# A key that frees the focused field with its panel, as Escape closing a dialog does, answered {}:
+	# the field read before the key was handed on freed.
+	var panel: PanelContainer = PanelContainer.new()
+	var named: LineEdit = LineEdit.new()
+	panel.add_child(named)
+	root.add_child(panel)
+	named.grab_focus()
+	named.edit()
+	var path: String = str(named.get_path())
+	var close: Callable = func(event: InputEvent) -> void:
+		var key: InputEventKey = event as InputEventKey
+		if key != null and key.pressed and key.keycode == KEY_ESCAPE:
+			panel.queue_free()
+	Checked.done(named.gui_input.connect(close) as Error, "closing the panel on Escape")
+	await process_frame
+	var closed: Dictionary = await input.inject_key({"keycode": "Escape"})
+	if (
+		closed.get("type") != "input_injected"
+		or closed.get("focused") != path
+		or not closed.has("focused_after")
+		or closed["focused_after"] != null
+		or closed.has("typed_into")
+		or is_instance_valid(panel)
+	):
+		_fail("a key that frees the focused field answers as any key does: %s" % JSON.stringify(closed))
+
 	var button: Button = Button.new()
 	button.text = "Play"
 	root.add_child(button)

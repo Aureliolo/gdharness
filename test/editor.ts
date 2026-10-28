@@ -3696,10 +3696,10 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     projectPath: project,
     scenePath: 'res://clapped.tscn',
     rootNodeType: 'Clapper',
-  })) as { rootNodeType?: unknown; rootNodeName?: unknown };
+  })) as { rootNodeType?: unknown; scriptClass?: unknown; rootNodeName?: unknown };
   assert.deepEqual(
-    [clapped.rootNodeType, clapped.rootNodeName],
-    ['Clapper', 'Clapper'],
+    [clapped.rootNodeType, clapped.scriptClass, clapped.rootNodeName],
+    ['Node', 'Clapper', 'Clapper'],
     JSON.stringify(clapped),
   );
   assert.match(
@@ -3718,8 +3718,8 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     op: 'add',
     nodeName: 'Second',
     nodeType: 'Clapper',
-  })) as { nodeType?: unknown };
-  assert.equal(added.nodeType, 'Clapper', JSON.stringify(added));
+  })) as { nodeType?: unknown; scriptClass?: unknown };
+  assert.deepEqual([added.nodeType, added.scriptClass], ['Node', 'Clapper'], JSON.stringify(added));
   assert.match(nodeBody(fileText(project, 'clapped.tscn'), 'Second'), /script = ExtResource/);
   assert.match(
     await refusal('scene_create', {

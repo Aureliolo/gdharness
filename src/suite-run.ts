@@ -137,16 +137,43 @@ export interface RunResult {
   }[];
   readonly engines: readonly {
     readonly index: number;
+    /** The slot's lane it was dealt to; the engines of one lane run one after another. */
+    readonly lane: number;
+    /** When it started, in seconds after the command did, once it had a slot. */
+    readonly startedAfter: number;
     readonly seconds: number;
     /** What the deal expected it to take, from the times kept. */
     readonly dealt: number;
     readonly passed: boolean;
     readonly windowed: boolean;
+    /** The suites it was handed, a suite dealt by its cases or rows once for each engine holding part. */
+    readonly suites: readonly string[];
     /** Where its whole output is kept, or null once a passing run has removed it. */
     readonly log: string | null;
   }[];
   /** The directory every engine's output is kept under, or null when the run removed it. */
   readonly logs: string | null;
+  /** The engines asked for, before the room on the machine and the slots held the run to fewer. */
+  readonly enginesAsked: number;
+  /** How many of the slots its lanes take were free as it began; fewer than the lanes is a shared run. */
+  readonly slotsFree: number;
+  /** What the run printed of its deal: the engines, what it split, and what held it. */
+  readonly dealing: readonly string[];
+}
+
+/**
+ * The file beside the kept suite times that every run writes its result to, whatever --result says,
+ * so a run in a gate that keeps none of a passing step's output can still be read afterwards.
+ */
+const LAST_RUN_FILE = 'last-run.json';
+
+/** Where a run's result goes, and what it said of its deal. */
+interface ResultTargets {
+  readonly resultFile: string | null;
+  readonly lastRunFile: string;
+  readonly dealing: readonly string[];
+  readonly engines: number;
+  readonly slotsFree: number;
 }
 
 /** How many of the slowest suites the run names at its end. */
@@ -361,6 +388,8 @@ interface EngineRan {
   readonly printed: RunPrinted;
   readonly verdict: EngineVerdict;
   readonly log: string;
+  /** When it started, in milliseconds since the epoch, once it had a slot. */
+  readonly began: number;
   readonly seconds: number;
   /** Whether this is the engine run again alone after one ran out of memory. */
   readonly again: boolean;
@@ -432,6 +461,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
   const state = join(home, '.godot', 'gdharness');
   const timesFile = join(state, 'suite-times.json');
   const passedFile = join(state, 'suite-passed.json');
+  const lastRunFile = join(state, LAST_RUN_FILE);
   let suites = selectedSuites(scripts, options);
   const uncollected = uncollectedSaid(scripts.uncollectedUnder(searchedRoots(options)));
   // Whole, whatever the selection asked of them: the cases an engine is to leave out are the rest.
@@ -485,7 +515,12 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       const imported = await importProject(launch);
       if (imported !== null) {
         logs.keep();
-        writeEarlyResult(options.resultFile, startedAt, [`the import failed: ${imported}`], logs.shown);
+        writeEarlyResult(
+          { resultFile: options.resultFile, lastRunFile, engines: options.engines },
+          startedAt,
+          [`the import failed: ${imported}`],
+          logs.shown,
+        );
         console.log(`The import failed, so no suite ran: ${imported}`);
         return 1;
       }
@@ -514,7 +549,12 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       if (suites.length === 0) {
         console.log('Nothing has changed since every suite last passed.');
         rmSync(runDirectory, { recursive: true, force: true });
-        writeEarlyResult(options.resultFile, startedAt, uncollected, null);
+        writeEarlyResult(
+          { resultFile: options.resultFile, lastRunFile, engines: options.engines },
+          startedAt,
+          uncollected,
+          null,
+        );
         if (uncollected.length === 0) {
           return 0;
         }
@@ -565,13 +605,20 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         : options.order === 'reversed'
           ? ', in reverse order of path'
           : `, shuffled by ${String(options.order)}`;
-    console.log(
+    // What the run said of its deal is kept with its outcome, since a gate keeps a passing step's
+    // output nowhere and a slow pass could not be told from an uneven deal afterwards.
+    const dealing: string[] = [];
+    const say = (line: string): void => {
+      dealing.push(line);
+      console.log(line);
+    };
+    say(
       `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.`,
     );
     const windowedAnyway = headlessInAWindow(plans, units);
     if (windowedAnyway.length > 0) {
       const one = windowedAnyway.length === 1;
-      console.log(
+      say(
         `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since an ordered run is one engine and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
       );
     }
@@ -579,7 +626,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       (path) => units.filter((unit) => unit.suite === path && unit.row === undefined).length > 1,
     );
     if (plans.length > 1 && split.length > 0) {
-      console.log(
+      say(
         `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${past} last time: ${named(split)}.`,
       );
     }
@@ -589,7 +636,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       ),
     ];
     if (plans.length > 1 && byRows.length > 0) {
-      console.log(
+      say(
         `Dealt out row by row, since ${byRows.length === 1 ? 'it' : 'each'} took more than ${past} last time: ${named(byRows)}.`,
       );
     }
@@ -602,7 +649,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     // By the engines there was room for rather than those used: kept whole, it may need only one.
     if (options.order === null && room.engines > 1 && keptWhole.length > 0) {
       const one = keptWhole.length === 1;
-      console.log(
+      say(
         `Kept whole in one engine, since ${one ? 'it declares' : 'each declares'} GDHARNESS_TOGETHER: ${named(keptWhole)}.`,
       );
     }
@@ -621,7 +668,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     }
     const shared = options.order === null && lanes.length > 1 && taken.length < lanes.length;
     if (shared) {
-      console.log(sharesSaid(taken.length, lanes.length));
+      say(sharesSaid(taken.length, lanes.length));
     }
     let ran = shared
       ? await runShares(launch, units, declared, lanes.length, taken, times)
@@ -629,7 +676,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
           .flat()
           .sort((a, b) => a.index - b.index);
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
-      console.log('An engine ran out of memory, so every engine that failed runs again, one at a time.');
+      say('An engine ran out of memory, so every engine that failed runs again, one at a time.');
       const again: EngineRan[] = [];
       for (const engine of ran) {
         again.push(
@@ -663,7 +710,13 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       startedAt,
       logs,
       options.printOutput,
-      options.resultFile,
+      {
+        resultFile: options.resultFile,
+        lastRunFile,
+        dealing,
+        engines: options.engines,
+        slotsFree: taken.length,
+      },
     );
   } finally {
     process.off('SIGINT', interrupted);
@@ -979,6 +1032,7 @@ async function runEngine(
     printed,
     verdict: written === null ? judged : { ...judged, passed: false, faults: [...judged.faults, written] },
     log,
+    began,
     seconds: (Date.now() - began) / 1000,
     again: again !== '',
   };
@@ -1015,7 +1069,7 @@ function report(
   startedAt: number,
   logs: RunLogs,
   printOutput: boolean,
-  resultFile: string | null,
+  targets: ResultTargets,
 ): number {
   // Ahead of the verdict, so the last lines are still how the run went.
   if (printOutput) {
@@ -1114,29 +1168,33 @@ function report(
   } else {
     logs.keep();
   }
-  if (resultFile !== null) {
-    writeJson(resultFile, {
-      passed,
-      seconds: took,
-      problems: [
-        ...failed.flatMap((engine) =>
-          engine.verdict.faults.map((fault) => `engine ${String(engine.index)}: ${fault}`),
-        ),
-        ...across,
-        ...uncollected,
-      ],
-      suites: closed,
-      engines: ran.map((engine) => ({
-        index: engine.index,
-        seconds: engine.seconds,
-        dealt: engine.plan.cost,
-        passed: engine.verdict.passed,
-        windowed: engine.plan.windowed,
-        log: passed ? null : logs.named(engine.log),
-      })),
-      logs: passed ? null : logs.shown,
-    } satisfies RunResult);
-  }
+  writeResult(targets, {
+    passed,
+    seconds: took,
+    problems: [
+      ...failed.flatMap((engine) =>
+        engine.verdict.faults.map((fault) => `engine ${String(engine.index)}: ${fault}`),
+      ),
+      ...across,
+      ...uncollected,
+    ],
+    suites: closed,
+    engines: ran.map((engine) => ({
+      index: engine.index,
+      lane: engine.plan.lane,
+      startedAfter: (engine.began - startedAt) / 1000,
+      seconds: engine.seconds,
+      dealt: engine.plan.cost,
+      passed: engine.verdict.passed,
+      windowed: engine.plan.windowed,
+      suites: engine.plan.suites.map((suite) => suite.path),
+      log: passed ? null : logs.named(engine.log),
+    })),
+    logs: passed ? null : logs.shown,
+    enginesAsked: targets.engines,
+    slotsFree: targets.slotsFree,
+    dealing: targets.dealing,
+  });
   if (passed) {
     console.log(`Passed: ${totals}`);
     return 0;
@@ -1154,20 +1212,29 @@ function report(
 
 /** Writes a result for a run that started no engine to [param file], when the run was asked for one. */
 function writeEarlyResult(
-  file: string | null,
+  targets: Pick<ResultTargets, 'resultFile' | 'lastRunFile' | 'engines'>,
   startedAt: number,
   problems: readonly string[],
   logs: string | null,
 ): void {
-  if (file !== null) {
-    writeJson(file, {
-      passed: problems.length === 0,
-      seconds: (Date.now() - startedAt) / 1000,
-      problems,
-      suites: [],
-      engines: [],
-      logs,
-    } satisfies RunResult);
+  writeResult(targets, {
+    passed: problems.length === 0,
+    seconds: (Date.now() - startedAt) / 1000,
+    problems,
+    suites: [],
+    engines: [],
+    logs,
+    enginesAsked: targets.engines,
+    slotsFree: 0,
+    dealing: [],
+  });
+}
+
+/** Writes [param result] to the last run's file, and to --result's when it was given. */
+function writeResult(targets: Pick<ResultTargets, 'resultFile' | 'lastRunFile'>, result: RunResult): void {
+  writeJson(targets.lastRunFile, result);
+  if (targets.resultFile !== null) {
+    writeJson(targets.resultFile, result);
   }
 }
 

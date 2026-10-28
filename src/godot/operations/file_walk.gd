@@ -35,8 +35,24 @@ static func missing_reason(path: String) -> String:
 
 ## [param said], the refusal for [param path], a res:// path nothing is at, with the files of its
 ## extension whose names are nearest its own, or every one when there are few and none is near, so
-## the caller has a path to send instead.
+## the caller has a path to send instead. Files of the same name beside it come first, since a
+## misspelt extension has no file of its own extension to be near.
 func with_nearest_files(said: String, path: String) -> String:
+	# One the refusal names is the file it refuses, as a script given for a scene is. Word by word,
+	# since res://brain.gd is inside res://brain.gdd.
+	var named: Array[String] = []
+	for word: String in said.replace("\n", " ").replace(",", " ").replace(";", " ").split(" ", false):
+		named.append(word.rstrip(".:"))
+	var namesakes: Array[String] = []
+	for file: String in _namesakes(path):
+		if not file in named:
+			namesakes.append(file)
+	if not namesakes.is_empty():
+		var alone: bool = namesakes.size() == 1
+		return (
+			"%s. The %s of that name beside it %s %s."
+			% [said, "file" if alone else "files", "is" if alone else "are", ", ".join(namesakes)]
+		)
 	var extension: String = path.get_extension()
 	if extension.is_empty():
 		return said
@@ -63,6 +79,22 @@ func with_nearest_files(said: String, path: String) -> String:
 	if files.size() <= GdhRead.NAMED_CHILDREN:
 		return "%s. The project's .%s files are %s." % [said, extension, ", ".join(files)]
 	return "%s. None of the project's %d .%s files is named like it." % [said, files.size(), extension]
+
+
+# The files in [param path]'s folder named as it is with another extension, leaving out the import
+# and uid files the engine keeps beside a file, which are named after the whole file name.
+static func _namesakes(path: String) -> Array[String]:
+	var found: Array[String] = []
+	var folder: String = path.get_base_dir()
+	if not DirAccess.dir_exists_absolute(folder):
+		return found
+	var stem: String = path.get_file().get_basename()
+	var files: PackedStringArray = DirAccess.get_files_at(folder)
+	files.sort()
+	for file: String in files:
+		if file.get_basename() == stem and file != path.get_file():
+			found.append(folder.path_join(file))
+	return found
 
 
 # A directory the engine steps over, marker file and all.

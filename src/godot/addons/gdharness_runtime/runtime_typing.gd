@@ -112,11 +112,15 @@ static func field_before(focused: Control) -> Dictionary:
 ## Whether [param focused], read as [param before], stopped being edited, as a [LineEdit] does when
 ## it is submitted: it keeps the focus and drops every key after, so a caller reading only the focus
 ## typed next into nothing.
-static func ended_editing(focused: Control, before: Dictionary) -> bool:
+##
+## [param focused] is a Variant because the key can free it, as Escape closing the panel a field is
+## on does, and a parameter typed Control refuses a freed object before the check here can run.
+static func ended_editing(focused: Variant, before: Dictionary) -> bool:
 	var was: bool = before.get("editing", false)
 	if not was or not is_instance_valid(focused):
 		return false
-	var field: LineEdit = focused as LineEdit
+	var held: Object = focused
+	var field: LineEdit = held as LineEdit
 	return field != null and not field.is_editing()
 
 
@@ -124,15 +128,18 @@ static func ended_editing(focused: Control, before: Dictionary) -> bool:
 ## typed_into and holds where its text changed, and editing_ended where it stopped being edited. A
 ## field being edited takes a printable key as typing and keeps it from the game's _unhandled_input,
 ## so Space into a name field pressed no jump, and an answer naming only the focus did not say why.
-static func field_noted(said: Dictionary, focused: Control, before: Dictionary) -> Dictionary:
+## A Variant for the reason [method ended_editing] gives.
+static func field_noted(said: Dictionary, focused: Variant, before: Dictionary) -> Dictionary:
 	if before.is_empty() or not is_instance_valid(focused):
 		return said
-	var field: LineEdit = focused as LineEdit
-	var now: String = field.text if field != null else (focused as TextEdit).text
+	var held: Object = focused
+	var control: Control = held as Control
+	var field: LineEdit = control as LineEdit
+	var now: String = field.text if field != null else (control as TextEdit).text
 	if now != before["text"]:
-		said["typed_into"] = str(focused.get_path())
-		said["holds"] = _what_it_holds(focused)
-	if ended_editing(focused, before):
+		said["typed_into"] = str(control.get_path())
+		said["holds"] = _what_it_holds(control)
+	if ended_editing(control, before):
 		said["editing_ended"] = true
 	return said
 

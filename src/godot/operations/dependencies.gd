@@ -428,7 +428,10 @@ func _declared_class_name(path: String) -> String:
 func _usage_files(kinds: Array) -> Array[String]:
 	var found: Array[String] = []
 	for kind: Variant in kinds:
-		match str(kind):
+		# As project_search reads an extension: ".tscn" searched no file, and the answer said
+		# nothing used a script its scene attaches.
+		var named: String = str(kind).trim_prefix(".").to_lower()
+		match named:
 			"godot":
 				found.append("res://project.godot")
 			"cfg":
@@ -436,7 +439,7 @@ func _usage_files(kinds: Array) -> Array[String]:
 				if FileAccess.file_exists("res://export_presets.cfg"):
 					found.append("res://export_presets.cfg")
 			_:
-				found.append_array(_files.find_files("res://", "." + str(kind)))
+				found.append_array(_files.find_files("res://", "." + named))
 	return found
 
 

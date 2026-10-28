@@ -383,19 +383,16 @@ func _readable(value: Variant, relative_to: Node) -> Variant:
 	return _values.serialize_value(value)
 
 
-## What [param target] stores, by name, but its script and the properties in [param leave]. A list
-## or a map is copied, since a setter can change the one it holds in place.
+## What [param target] stores, by name, but its script and the properties in [param leave], in the
+## names a read answers with: a Curve's points as point_0/position and the rest rather than the _data
+## list every point write changes. A list or a map is copied, since a setter can change the one it
+## holds in place.
 func _stored(target: Object, leave: Dictionary) -> Dictionary:
 	var held: Dictionary = {}
-	for entry: Dictionary in target.get_property_list():
+	for entry: Dictionary in GdhShapes.read_properties(target):
 		var name: String = str(entry["name"])
 		var usage: int = GdhRead.as_int(entry["usage"])
-		if (
-			usage & PROPERTY_USAGE_STORAGE == 0
-			or usage & HEADINGS != 0
-			or name == "script"
-			or leave.has(name)
-		):
+		if usage & HEADINGS != 0 or name == "script" or leave.has(name):
 			continue
 		var value: Variant = target.get(name)
 		if value is Array:

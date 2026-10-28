@@ -107,7 +107,45 @@ func enable_plugin(params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
-	return {"plugin_name": plugin_name, "action": "enabled", "enabled_plugins": _names_of(enabled_paths)}
+	var answer: Dictionary = {
+		"plugin_name": plugin_name, "action": "enabled", "enabled_plugins": _names_of(enabled_paths)
+	}
+	var unloadable: String = _why_not_loaded(plugin_cfg_path)
+	if not unloadable.is_empty():
+		answer["note"] = unloadable
+	return answer
+
+
+# What the editor finds wrong with the plugin at [param plugin_cfg_path] when it loads it, the checks
+# EditorNode::set_addon_plugin_enabled makes, or "" when it would load. Written all the same, since
+# the script can be put right before the editor next starts.
+static func _why_not_loaded(plugin_cfg_path: String) -> String:
+	var config: ConfigFile = ConfigFile.new()
+	if config.load(plugin_cfg_path) != OK:
+		return "The editor cannot read %s, so it will not enable the plugin." % plugin_cfg_path
+	if not config.has_section_key("plugin", "script"):
+		return "%s has no script field, so the editor will not enable the plugin." % plugin_cfg_path
+	var script_name: String = str(config.get_value("plugin", "script"))
+	if script_name.is_empty():
+		return ""
+	var script_path: String = plugin_cfg_path.get_base_dir().path_join(script_name)
+	if not FileAccess.file_exists(script_path):
+		return "%s does not exist, so the editor will not enable the plugin." % script_path
+	# Loaded only to learn whether the editor could; what the engine says of a script that does not
+	# parse is about a file the answer does not describe.
+	printerr(GdhLog.ASIDE)
+	var script: Script = ResourceLoader.load(script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+	printerr(GdhLog.RESUMED)
+	if script == null or script.get_instance_base_type() == &"":
+		return (
+			"%s does not compile, so the editor disables the plugin again at its next start." % script_path
+			+ " script_diagnostics names the error."
+		)
+	if not ClassDB.is_parent_class(script.get_instance_base_type(), "EditorPlugin"):
+		return "%s does not extend EditorPlugin, so the editor loads nothing for it." % script_path
+	if not script.is_tool():
+		return "%s is not a @tool script, so the editor loads nothing for it." % script_path
+	return ""
 
 
 # Disable a plugin
