@@ -24747,6 +24747,19 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         // No value and an empty string, which a default read as text told apart only by its quotes.
         '@export var tint: Color',
         'var label: String = ""',
+        // A setter opens with the colon that ends the line, after the value and with none.
+        'var mode: Mode = Mode.FAST:',
+        '\tset(value):',
+        '\t\tmode = value',
+        'var count: int:',
+        '\tget:',
+        '\t\treturn 2',
+        // A value running on: the declarations after it are still read.
+        '@export_multiline var note: String = """first',
+        'second # not a comment"""',
+        'var after: int = 3',
+        "const HELP := '''usage:",
+        "  run'''",
         '',
         '',
         'func greet(who: String, times: int = 1) -> void:',
@@ -25045,8 +25058,21 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
           ['table', '{ "a": 1, "b": 2, }'],
           ['tint', null],
           ['label', '""'],
+          ['mode', 'Mode.FAST'],
+          ['count', null],
+          ['note', '"""first\nsecond # not a comment"""'],
+          ['after', '3'],
         ],
         `a comment beside an opening brace is not part of the value, and no value is null: ${JSON.stringify(wrapped)}`,
+      );
+      assert.deepEqual(
+        asArray(get(wrapped, 'constants')).map((each) => [
+          get(each, 'name'),
+          get(each, 'value'),
+          get(each, 'type'),
+        ]),
+        [['HELP', "'''usage:\n  run'''", 'String']],
+        `a constant's value runs on as a variable's does: ${JSON.stringify(wrapped)}`,
       );
       assert.deepEqual(
         asArray(get(asArray(get(wrapped, 'functions'))[0], 'params')).map((each) => [
