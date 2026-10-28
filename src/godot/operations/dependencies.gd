@@ -160,22 +160,7 @@ func missing_references() -> Array[Dictionary]:
 func _loaded_and_missing(script: String) -> Array[String]:
 	var loaded: Array[String] = []
 	var named: Dictionary = {}
-	# A string running across lines is text, and read as code its lines were calls: a test suite
-	# template showing `load("res://folder/my_class.gd")` as an example made the project invalid.
-	var in_string: bool = false
-	for line: String in FileAccess.get_file_as_string(script).split("\n"):
-		if in_string:
-			if GdhPatterns.triple_quotes(line) % 2 == 1:
-				in_string = false
-			continue
-		var code: String = GdhPatterns.without_comment(line)
-		if GdhPatterns.triple_quotes(code) % 2 == 1:
-			in_string = true
-			var opened: int = code.find('"""')
-			var apostrophes: int = code.find("'''")
-			if opened < 0 or (apostrophes >= 0 and apostrophes < opened):
-				opened = apostrophes
-			code = code.substr(0, opened)
+	for code: String in _code_by_line(FileAccess.get_file_as_string(script)):
 		if not code.contains("load("):
 			for literal: String in _string_literals(code):
 				named[_resolved(literal, script)] = true
@@ -508,10 +493,32 @@ static func _code_of(line: String) -> String:
 # [param content] with each line's comment taken off and its strings kept, which is where the paths
 # a script loads are written.
 static func _code_lines(content: String) -> String:
-	var kept: Array[String] = []
+	return "\n".join(_code_by_line(content))
+
+
+## Each line of [param content] as code: its comment off, and the text of a string running across
+## lines left out. Read as code, a test suite template's example
+## `load("res://folder/my_class.gd")` was a call of a file that does not exist, which made the
+## project invalid.
+static func _code_by_line(content: String) -> Array[String]:
+	var lines: Array[String] = []
+	var in_string: bool = false
 	for line: String in content.split("\n"):
-		kept.append(GdhPatterns.without_comment(line))
-	return "\n".join(kept)
+		if in_string:
+			if GdhPatterns.triple_quotes(line) % 2 == 1:
+				in_string = false
+			lines.append("")
+			continue
+		var code: String = GdhPatterns.without_comment(line)
+		if GdhPatterns.triple_quotes(code) % 2 == 1:
+			in_string = true
+			var opened: int = code.find('"""')
+			var apostrophes: int = code.find("'''")
+			if opened < 0 or (apostrophes >= 0 and apostrophes < opened):
+				opened = apostrophes
+			code = code.substr(0, opened)
+		lines.append(code)
+	return lines
 
 
 # The comment on [param line], strings emptied first so a # inside one does not start it.

@@ -673,7 +673,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'integer',
         minimum: 1,
         description:
-          'forward: how many levels to follow, 1 being what the file loads itself. Default unlimited.',
+          "forward: how many levels to follow, 1 being what the file loads itself. Default unlimited, which follows every class_name use too and in a project whose scripts name each other's classes reaches most of it: a game of a hundred scripts with large addons answered 488 files in about a megabyte from its main scene. A depth of 2 or 3 keeps the answer to what is near.",
       },
       includeBuiltin: {
         type: 'boolean',

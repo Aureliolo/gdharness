@@ -4513,6 +4513,16 @@ function testValidationReadsEveryScript(godotPath: string): void {
       ['res://folder/really_missing.gd'],
       `only the load in code: ${JSON.stringify(missing)}`,
     );
+    // The dependency walk reads the same code, and names the same one file.
+    assert.deepEqual(
+      get(
+        runOperation(godotPath, dir, 'get_dependencies', { resource_path: 'many/template.gd' }),
+        'dependencies',
+        'res://many/template.gd',
+      ),
+      [{ path: 'res://folder/really_missing.gd', exists: false }],
+      'nor does the walk depend on the text',
+    );
   } finally {
     sweep(dir);
   }
