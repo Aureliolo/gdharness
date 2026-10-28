@@ -55121,6 +55121,136 @@ async function testARescanWaitsForItsScanToComplete(): Promise<void> {
 }
 
 /**
+ * An idle editor slow to say so is not a scan, and the scan a rescan starts is looked at.
+ *
+ * Seen on CI: a check the server had already given up on held an idle editor's main thread for close
+ * to a minute, and the rescan behind it waited thirty seconds for scan_status to come back idle. That
+ * was its whole budget, so the scan it then started, over in under a second, was never looked at,
+ * and the answer said the editor was still scanning. The fixture editor first answers its first
+ * scan_status, idle, after longer than the whole wait, and scans for a moment once asked, which
+ * needs the slow answer kept off the budget; then answers the start of the scan after the wait has
+ * run out, with the scan already over, which needs the scan looked at once however late it is.
+ */
+async function testARescanCountsNoSlowAnswerAsScanning(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slow-answer-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    const WAIT_MS = 2000;
+    const SLOW_MS = 2400;
+    // Which answer is slow, armed for one rescan at a time: editor_status asks scan_status too, while
+    // the fixture waits for the editor to be known.
+    let slow: 'scan_status' | 'start' | null = null;
+    let scanningMs = 0;
+    let completed = 5;
+    let scan: { at: number; forMs: number } | null = null;
+    const state = (): { scanning: boolean; importing: boolean; scansCompleted: number } => {
+      if (scan !== null && Date.now() - scan.at >= scan.forMs) {
+        completed += 1;
+        scan = null;
+      }
+      return { scanning: scan !== null, importing: false, scansCompleted: completed };
+    };
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      let result: Record<string, unknown> = { ok: true, classes: [] };
+      let after = 0;
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        const before = completed;
+        scan = { at: Date.now(), forMs: scanningMs };
+        result = { ok: true, started: true, scansCompletedBefore: before, ...state() };
+        if (slow === 'start') {
+          slow = null;
+          after = SLOW_MS;
+        }
+      } else if (tool === 'rescan_filesystem' || tool === 'scan_status') {
+        result = { ok: true, ...state() };
+        if (tool === 'scan_status' && slow === 'scan_status') {
+          slow = null;
+          after = SLOW_MS;
+        }
+      }
+      setTimeout(() => {
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+      }, after);
+    });
+    socket.send(JSON.stringify(greeting(project)));
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const rescan = async (): Promise<{ said: string; answer: unknown }> => {
+      const response = await server.request('tools/call', {
+        name: 'editor_rescan',
+        arguments: { projectPath: project, timeoutMs: WAIT_MS },
+      });
+      return { said: textOf(response) ?? JSON.stringify(response), answer: parseTextContent(response) };
+    };
+
+    slow = 'scan_status';
+    scanningMs = 300;
+    const late = await rescan();
+    assert.equal(slow, null, `the rescan asked the slow scan_status: ${late.said}`);
+    assert.deepEqual(
+      [
+        get(late.answer, 'ok'),
+        get(late.answer, 'stillWorking'),
+        get(late.answer, 'waitedForEditorScanMs'),
+        completed,
+      ],
+      [true, false, undefined, 6],
+      `the scan it started is waited for to its end, and no scan was waited out before it: ${late.said}`,
+    );
+    assert.ok(Number(get(late.answer, 'waitedForEditorAnswerMs')) >= SLOW_MS - 100, late.said);
+    assert.match(
+      text(get(late.answer, 'note')),
+      /^The editor took 2\.\d seconds to say it was idle, busy on the thread that answers with an earlier request, and that time was added to the wait rather than taken from it\.$/,
+      late.said,
+    );
+
+    slow = 'start';
+    scanningMs = 0;
+    const lateStart = await rescan();
+    assert.equal(slow, null, `the rescan's start was the slow answer: ${lateStart.said}`);
+    assert.deepEqual(
+      [
+        get(lateStart.answer, 'ok'),
+        get(lateStart.answer, 'stillWorking'),
+        get(lateStart.answer, 'waitedForEditorAnswerMs'),
+      ],
+      [true, false, undefined],
+      `a scan whose start answered after the wait is looked at once and found over: ${lateStart.said}`,
+    );
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A game is not started against a class cache the editor is about to rewrite.
  *
  * Downstream, a formatter rewrote a few scripts, the editor scanned them, and a start a few seconds
@@ -55950,6 +56080,7 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
     let holds = ['KitManifest'];
     let manifestBehind = true;
     let loaderBroken = false;
+    let behindRefused = false;
     const reloadsAskedFor: string[] = [];
     const behindAskedOf: string[][] = [];
     socket.on('message', (raw: Buffer) => {
@@ -56007,6 +56138,17 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
         }
       } else {
         result = { ok: true, classes: holds };
+      }
+      if (tool === 'scripts_behind' && behindRefused) {
+        socket.send(
+          JSON.stringify({
+            type: 'tool_result',
+            id: message['id'],
+            success: false,
+            error: 'a stand-in refusal',
+          }),
+        );
+        return;
       }
       socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
     });
@@ -56077,6 +56219,20 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
       [true, undefined],
       byName.said,
     );
+
+    // An editor that will not say what it holds behind is said to, rather than read as holding
+    // nothing: the refusal left the problem with no word on the scripts the loader is built on.
+    loaderBroken = true;
+    behindRefused = true;
+    reloadsAskedFor.length = 0;
+    const unasked = await rescan({ reloadScript: 'res://kit/loader.gd' });
+    assert.deepEqual(reloadsAskedFor, ['res://kit/loader.gd'], unasked.said);
+    assert.match(
+      text(get(unasked.answer, 'reloadProblem')),
+      / Whether the editor holds the scripts it is compiled against behind their files could not be checked: the editor would not say: a stand-in refusal\.$/,
+      unasked.said,
+    );
+    assert.equal(get(unasked.answer, 'ok'), false, unasked.said);
   } finally {
     editor?.terminate();
     await server.stop();
@@ -56175,6 +56331,7 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
       });
       socket.once('error', reject);
     });
+    let behindRefused = false;
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (!isRecord(message) || message['type'] !== 'tool_invoke') {
@@ -56182,6 +56339,17 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
       }
       const tool = String(message['tool']);
       const args = isRecord(message['args']) ? message['args'] : {};
+      if (tool === 'scripts_behind' && behindRefused) {
+        socket.send(
+          JSON.stringify({
+            type: 'tool_result',
+            id: message['id'],
+            success: false,
+            error: 'a stand-in refusal',
+          }),
+        );
+        return;
+      }
       const result =
         tool === 'scripts_behind'
           ? {
@@ -56217,6 +56385,16 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
     );
     // The list the second rebuild started with held KitMenu, so nothing is its engine's own.
     assert.equal(get(withEditor.answer, 'staleInThisEngine'), undefined, withEditor.said);
+
+    // An editor that will not say what it holds behind is said not to have, rather than answered
+    // as holding nothing: a check that timed out read the same as a clean project.
+    behindRefused = true;
+    const unasked = await refresh();
+    assert.deepEqual(
+      [get(unasked.answer, 'heldBehindInEditor'), get(unasked.answer, 'heldBehindUnchecked')],
+      [undefined, 'the editor would not say: a stand-in refusal'],
+      unasked.said,
+    );
   } finally {
     editor?.terminate();
     await server.stop();
@@ -65239,6 +65417,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanWaitsOutTheEditorsImport,
   testARescanWaitsForTheEditorToSettle,
   testARescanWaitsForItsScanToComplete,
+  testARescanCountsNoSlowAnswerAsScanning,
   testALaunchIsOutsideTheServersTree,
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
